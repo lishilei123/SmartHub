@@ -1,0 +1,48 @@
+export type AssetType = string
+export type SourceType = 'upload'
+export type VersionStatus = 'pending' | 'syncing' | 'ready' | 'failed' | 'deleted'
+export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export interface KnowledgeConfig {
+  encoding: 'utf-8'
+  parserVersion: string
+  preprocessVersion: string
+  chunkTargetSize: number
+  chunkMaxSize: number
+  chunkOverlap: number
+  headingDepth: number
+  embeddingMode: 'remote_api' | 'local'
+  embeddingBaseUrl: string
+  embeddingApiKey: string
+  embeddingModel: string
+  embeddingDimensions: number
+  embeddingBatchSize: number
+  embeddingTimeoutMs: number
+  embeddingRetries: number
+  keywordRecall: number
+  vectorRecall: number
+  finalResults: number
+  relevanceThreshold: number
+  hybridSearch: boolean
+  rerankerEnabled: boolean
+  rerankerModel: string
+}
+
+export interface Project { id: string; name: string; createdAt: string }
+export interface KnowledgeBase { id: string; projectId: string; name: string; createdAt: string; activeIndexVersionId: string | null; activeConfigVersionId: string }
+export interface KnowledgeDirectory { id: string; knowledgeBaseId: string; name: string; parentId: string | null; createdAt: string; updatedAt: string }
+export interface ConfigVersion { id: string; knowledgeBaseId: string; version: number; config: KnowledgeConfig; createdAt: string; compatibilityFingerprint: string; requiresRebuild: boolean }
+export interface Asset { id: string; knowledgeBaseId: string; displayName: string; logicalPath: string; assetType: AssetType; sourceType: SourceType; sourceKey: string; activeVersionId: string | null; createdAt: string; updatedAt: string }
+export interface AssetVersion { id: string; assetId: string; number: number; content: string; contentHash: string; status: VersionStatus; configVersionId: string; createdAt: string; readyAt?: string; error?: string; storagePath?: string; snapshotPath?: string; chunks: Chunk[] }
+export interface Chunk { id: string; chunkKey: string; assetVersionId: string; ordinal: number; headingPath: string[]; content: string; contentHash: string; startLine: number; endLine: number; startChar: number; endChar: number; embedding: number[]; reused: boolean }
+export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: Chunk[]; createdAt: string; activatedAt?: string }
+export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
+
+export interface DatabaseState { projects: Project[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[] }
+
+export const defaultConfig: KnowledgeConfig = {
+  encoding: 'utf-8',
+  parserVersion: 'markdown-v1', preprocessVersion: 'normalize-v1', chunkTargetSize: 600, chunkMaxSize: 900, chunkOverlap: 80, headingDepth: 4,
+  embeddingMode: 'local', embeddingBaseUrl: '', embeddingApiKey: '', embeddingModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', embeddingDimensions: 384, embeddingBatchSize: 32, embeddingTimeoutMs: 30000, embeddingRetries: 2,
+  keywordRecall: 40, vectorRecall: 40, finalResults: 8, relevanceThreshold: 0.05, hybridSearch: true, rerankerEnabled: true, rerankerModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+}

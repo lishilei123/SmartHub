@@ -72,6 +72,13 @@ export type KnowledgeDocument = {
   title: string
   intro: string
   sections: string[]
+  content?: string
+  assetType?: string
+  sourceType?: string
+  assetVersionId?: string
+  versions?: { id: string; number: number; status: string; createdAt: string }[]
+  status?: string
+  logicalPath?: string
 }
 
 export const knowledgeDirectories: KnowledgeDirectory[] = [
@@ -103,9 +110,22 @@ export type SettingsDraft = {
   relevanceThreshold: number
   hybridSearch: boolean
   rerankerEnabled: boolean
+  rerankerModel: string
   repositoryUrl: string
   defaultBranch: string
   auditEnabled: boolean
+  parserVersion: string
+  preprocessVersion: string
+  chunkMaxSize: string
+  headingDepth: string
+  embeddingMode: string
+  embeddingBaseUrl: string
+  embeddingApiKey: string
+  embeddingModel: string
+  embeddingDimensions: string
+  embeddingBatchSize: string
+  embeddingTimeoutMs: string
+  embeddingRetries: string
 }
 
 export const initialSettings: SettingsDraft = {
@@ -121,7 +141,20 @@ export const initialSettings: SettingsDraft = {
   relevanceThreshold: 0.62,
   hybridSearch: true,
   rerankerEnabled: true,
+  rerankerModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
   repositoryUrl: 'https://git.example.com/smarthub.git',
   defaultBranch: 'main',
   auditEnabled: true,
+  parserVersion: 'markdown-v1',
+  preprocessVersion: 'normalize-v1',
+  chunkMaxSize: '900',
+  headingDepth: '4',
+  embeddingMode: 'local',
+  embeddingBaseUrl: '',
+  embeddingApiKey: '',
+  embeddingModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+  embeddingDimensions: '384',
+  embeddingBatchSize: '32',
+  embeddingTimeoutMs: '30000',
+  embeddingRetries: '2',
 }

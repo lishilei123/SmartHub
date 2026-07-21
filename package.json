@@ -4,20 +4,37 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "concurrently --kill-others --names API,WEB \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:web": "vite",
+    "dev:api": "tsx watch server/http/server.ts",
+    "start:api": "tsx server/http/server.ts",
+    "test": "tsx --test tests/**/*.test.ts",
+    "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@huggingface/transformers": "3.8.1",
     "@vitejs/plugin-react": "latest",
+    "jszip": "^3.10.1",
     "lucide-react": "latest",
-    "vite": "latest",
+    "mdast-util-to-string": "^4.0.0",
+    "pg": "^8.22.0",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.0",
+    "unist-util-visit": "^5.1.0",
+    "vite": "latest"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "concurrently": "9.2.4",
+    "tsx": "^4.23.1",
     "typescript": "latest"
   }
 }
