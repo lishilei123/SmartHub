@@ -57,10 +57,16 @@ export const requirementsByVersion: Record<Version, Requirement[]> = {
   ],
 }
 
+export type KnowledgeDirectory = {
+  id: string
+  name: string
+  parentId: string | null
+}
+
 export type KnowledgeDocument = {
   id: string
   name: string
-  path: string
+  parentId: string | null
   version: string
   updated: string
   title: string
@@ -68,12 +74,20 @@ export type KnowledgeDocument = {
   sections: string[]
 }
 
+export const knowledgeDirectories: KnowledgeDirectory[] = [
+  { id: 'directory-requirements', name: '需求文档', parentId: null },
+  { id: 'directory-designs', name: '技术方案', parentId: null },
+  { id: 'directory-payment-service', name: '支付服务', parentId: 'directory-designs' },
+  { id: 'directory-engineering', name: '研发规范', parentId: null },
+  { id: 'directory-testing', name: '测试规范', parentId: null },
+]
+
 export const knowledgeDocuments: KnowledgeDocument[] = [
-  { id: 'payment-prd', name: '支付模块重构需求.md', path: '需求文档 / 支付模块重构需求.md', version: 'V2.3', updated: '2 分钟前', title: '支付模块重构需求', intro: '本次重构旨在统一支付、退款及回调处理链路，降低渠道接入成本，并提升异常场景下的数据一致性。', sections: ['项目背景', '业务目标', '功能范围', '退款处理规则', '验收标准'] },
-  { id: 'points-prd', name: '会员积分体系升级.md', path: '需求文档 / 会员积分体系升级.md', version: 'V1.6', updated: '昨天', title: '会员积分体系升级', intro: '升级积分获取、冻结、过期和抵扣规则，为不同会员等级提供差异化权益。', sections: ['需求背景', '积分生命周期', '等级权益', '异常处理', '验收标准'] },
-  { id: 'payment-design', name: '支付服务技术方案.md', path: '技术方案 / 支付服务 / 支付服务技术方案.md', version: 'V1.8', updated: '昨天', title: '支付服务技术方案', intro: '支付服务采用统一网关适配多渠道，通过事件驱动机制完成订单状态同步与最终一致性保障。', sections: ['整体架构', '模块设计', '数据模型', '接口定义', '容灾方案'] },
-  { id: 'error-code', name: '接口错误码规范.md', path: '研发规范 / 接口错误码规范.md', version: 'V4.2', updated: '刚刚', title: '接口错误码规范', intro: '统一平台接口错误码组成、分类、返回结构及日志记录方式。', sections: ['编码规则', '错误分类', '响应结构', '使用示例', '检查清单'] },
-  { id: 'quality-gate', name: '质量门禁规范.md', path: '测试规范 / 质量门禁规范.md', version: 'V3.1', updated: '5 天前', title: '质量门禁规范', intro: '定义各测试阶段的准入、准出条件以及阻断发布的质量指标。', sections: ['适用范围', '准入条件', '准出条件', '风险豁免', '审计要求'] },
+  { id: 'payment-prd', name: '支付模块重构需求.md', parentId: 'directory-requirements', version: 'V2.3', updated: '2 分钟前', title: '支付模块重构需求', intro: '本次重构旨在统一支付、退款及回调处理链路，降低渠道接入成本，并提升异常场景下的数据一致性。', sections: ['项目背景', '业务目标', '功能范围', '退款处理规则', '验收标准'] },
+  { id: 'points-prd', name: '会员积分体系升级.md', parentId: 'directory-requirements', version: 'V1.6', updated: '昨天', title: '会员积分体系升级', intro: '升级积分获取、冻结、过期和抵扣规则，为不同会员等级提供差异化权益。', sections: ['需求背景', '积分生命周期', '等级权益', '异常处理', '验收标准'] },
+  { id: 'payment-design', name: '支付服务技术方案.md', parentId: 'directory-payment-service', version: 'V1.8', updated: '昨天', title: '支付服务技术方案', intro: '支付服务采用统一网关适配多渠道，通过事件驱动机制完成订单状态同步与最终一致性保障。', sections: ['整体架构', '模块设计', '数据模型', '接口定义', '容灾方案'] },
+  { id: 'error-code', name: '接口错误码规范.md', parentId: 'directory-engineering', version: 'V4.2', updated: '刚刚', title: '接口错误码规范', intro: '统一平台接口错误码组成、分类、返回结构及日志记录方式。', sections: ['编码规则', '错误分类', '响应结构', '使用示例', '检查清单'] },
+  { id: 'quality-gate', name: '质量门禁规范.md', parentId: 'directory-testing', version: 'V3.1', updated: '5 天前', title: '质量门禁规范', intro: '定义各测试阶段的准入、准出条件以及阻断发布的质量指标。', sections: ['适用范围', '准入条件', '准出条件', '风险豁免', '审计要求'] },
 ]
 
 export type SettingsDraft = {

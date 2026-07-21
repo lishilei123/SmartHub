@@ -2,13 +2,13 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, ty
 import {
   Activity, AlertTriangle, Bell, BookOpen, Bot, BrainCircuit, Check, CheckCircle2, ChevronDown,
   ChevronRight, CircleHelp, Clock3, Code2, Columns2, Database, Download, FileCode2, FileText,
-  FolderOpen, GitBranch, LayoutDashboard, Library, ListChecks, MessageSquareText, MoreHorizontal,
-  PanelLeftClose, PanelLeftOpen, Play, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles,
-  TestTube2, Upload, Users, XCircle, Zap,
+  FolderOpen, FolderPlus, GitBranch, LayoutDashboard, Library, ListChecks, MessageSquareText, MoreHorizontal,
+  PanelLeftClose, PanelLeftOpen, Pencil, Play, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles,
+  TestTube2, Trash2, Upload, Users, XCircle, Zap,
 } from 'lucide-react'
 import {
-  initialSettings, knowledgeDocuments, requirementsByVersion, type KnowledgeDocument, type Requirement,
-  type SettingsDraft, type Version,
+  initialSettings, knowledgeDirectories, knowledgeDocuments, requirementsByVersion, type KnowledgeDirectory,
+  type KnowledgeDocument, type Requirement, type SettingsDraft, type Version,
 } from './prototype-data'
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
@@ -70,6 +70,8 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toast, setToast] = useState<{ id: number; message: string } | null>(null)
   const [requirementLists, setRequirementLists] = useState<Record<Version, Requirement[]>>(requirementsByVersion)
+  const [knowledgeDirectoryList, setKnowledgeDirectoryList] = useState<KnowledgeDirectory[]>(knowledgeDirectories)
+  const [knowledgeDocumentList, setKnowledgeDocumentList] = useState<KnowledgeDocument[]>(knowledgeDocuments)
   const [requirementCreateOpen, setRequirementCreateOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const [audit, setAudit] = useState<string[]>(['已打开当前会话的 SmartHub 本地原型'])
@@ -120,11 +122,11 @@ function App() {
     const requirements = requirementLists[version]
       .filter(item => `${item.title} ${item.intro}`.toLowerCase().includes(query))
       .map(item => ({ label: item.title, detail: '需求分析', page: 'requirements' as PageKey }))
-    const documents = knowledgeDocuments
+    const documents = knowledgeDocumentList
       .filter(item => `${item.name} ${item.intro}`.toLowerCase().includes(query))
       .map(item => ({ label: item.name, detail: '知识库文档', page: 'documents' as PageKey }))
     return [...requirements, ...documents].slice(0, 6)
-  }, [globalQuery, requirementLists, version])
+  }, [globalQuery, knowledgeDocumentList, requirementLists, version])
   const meta = pageMeta[page]
 
   return <div className={`app-shell ${sidebarCollapsed ? 'shell-collapsed' : ''}`}>
@@ -153,7 +155,7 @@ function App() {
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div>{page === 'requirements' && <div className="head-actions"><button className="btn ghost" onClick={() => setActivityOpen(true)}><Clock3 size={16} />操作记录</button><button className="btn primary" onClick={() => setRequirementCreateOpen(true)}><Plus size={17} />新建需求分析</button></div>}</div>
         {page === 'dashboard' && <Dashboard navigate={setPage} version={version} />}
         {page === 'requirements' && <Requirements version={version} requirements={requirementLists[version]} createOpen={requirementCreateOpen} setCreateOpen={setRequirementCreateOpen} onCreate={addRequirement} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
-        {page === 'documents' && <Documents notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
+        {page === 'documents' && <Documents directories={knowledgeDirectoryList} documents={knowledgeDocumentList} setDirectories={setKnowledgeDirectoryList} setDocuments={setKnowledgeDocumentList} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'design' && <StaticNotice title="测试设计" text="测试设计页面仍展示示例资产；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'execution' && <StaticNotice title="测试执行" text="测试执行页面仍展示示例执行数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'reports' && <StaticNotice title="报告与诊断" text="报告页面仍展示示例质量数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
@@ -272,8 +274,9 @@ function RequirementTab({ tab, requirement }: { tab: 'overview' | 'source' | 'di
   return <><div className="analysis-grid"><div className="analysis-card"><span>结构化需求</span><strong>{requirement.sections.length * 9}</strong><small>本地识别项</small></div><div className="analysis-card warning"><span>待确认问题</span><strong>{requirement.findings.length}</strong><small>需人工确认</small></div><div className="analysis-card danger"><span>潜在风险</span><strong>{requirement.findings.filter(item => item.tone !== 'blue').length}</strong><small>来自示例结果</small></div><div className="analysis-card success-card"><span>测试点建议</span><strong>{requirement.sections.length * 12}</strong><small>本地估算</small></div></div><div className="findings"><h3>重点分析结论</h3>{requirement.findings.length ? requirement.findings.map(finding => <div className="finding" key={finding.title}><div className={`finding-icon ${finding.tone}`}><AlertTriangle size={18} /></div><div><b>{finding.title}</b><p>{finding.text}</p></div><Badge tone={finding.tone}>{finding.tag}</Badge></div>) : <p className="empty-state">运行本地模拟分析后可查看示例结论。</p>}</div></>
 }
 
-function Documents({ notify, addAudit }: { notify: Notify; addAudit: (entry: string) => void }) {
-  const [selectedId, setSelectedId] = useState(knowledgeDocuments[0].id)
+function Documents({ directories, documents, setDirectories, setDocuments, notify, addAudit }: { directories: KnowledgeDirectory[]; documents: KnowledgeDocument[]; setDirectories: Dispatch<SetStateAction<KnowledgeDirectory[]>>; setDocuments: Dispatch<SetStateAction<KnowledgeDocument[]>>; notify: Notify; addAudit: (entry: string) => void }) {
+  const [selectedId, setSelectedId] = useState(documents[0]?.id ?? '')
+  const [selectedDirectoryId, setSelectedDirectoryId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [treeCollapsed, setTreeCollapsed] = useState(false)
   const [outlineCollapsed, setOutlineCollapsed] = useState(false)
@@ -284,12 +287,173 @@ function Documents({ notify, addAudit }: { notify: Notify; addAudit: (entry: str
   const [moreOpen, setMoreOpen] = useState(false)
   const [syncState, setSyncState] = useState<JobStatus>('idle')
   const [uploadState, setUploadState] = useState<JobStatus>('idle')
+  const [expandedDirectoryIds, setExpandedDirectoryIds] = useState<Set<string>>(() => new Set(directories.map(directory => directory.id)))
+  const [directoryActionId, setDirectoryActionId] = useState<string | null>(null)
+  const [directoryEditor, setDirectoryEditor] = useState<{ mode: 'create'; parentId: string | null } | { mode: 'rename'; directoryId: string } | null>(null)
+  const [directoryName, setDirectoryName] = useState('')
+  const [directoryNameError, setDirectoryNameError] = useState('')
+  const [deleteDirectoryId, setDeleteDirectoryId] = useState<string | null>(null)
+  const [moveTargetId, setMoveTargetId] = useState('')
   const timers = useRef<number[]>([])
   useEffect(() => () => timers.current.forEach(timer => window.clearTimeout(timer)), [])
+  useEffect(() => {
+    if (!documents.some(document => document.id === selectedId)) {
+      setSelectedId(documents[0]?.id ?? '')
+      setActiveSection(0)
+    }
+  }, [documents, selectedId])
+  useEffect(() => {
+    if (selectedDirectoryId && !directories.some(directory => directory.id === selectedDirectoryId)) setSelectedDirectoryId(null)
+  }, [directories, selectedDirectoryId])
 
-  const documents = knowledgeDocuments.filter(item => `${item.name} ${item.intro}`.toLowerCase().includes(query.toLowerCase()))
-  const file = knowledgeDocuments.find(item => item.id === selectedId) ?? knowledgeDocuments[0]
-  const source = makeSource(file)
+  const directoryById = useMemo(() => new Map(directories.map(directory => [directory.id, directory])), [directories])
+  const directoriesByParent = useMemo(() => {
+    const result = new Map<string | null, KnowledgeDirectory[]>()
+    directories.forEach(directory => result.set(directory.parentId, [...(result.get(directory.parentId) ?? []), directory]))
+    return result
+  }, [directories])
+  const documentsByParent = useMemo(() => {
+    const result = new Map<string | null, KnowledgeDocument[]>()
+    documents.forEach(document => result.set(document.parentId, [...(result.get(document.parentId) ?? []), document]))
+    return result
+  }, [documents])
+  const documentCountByDirectory = useMemo(() => {
+    const result = new Map<string, number>()
+    const count = (directoryId: string): number => {
+      const total = (documentsByParent.get(directoryId) ?? []).length + (directoriesByParent.get(directoryId) ?? []).reduce((sum, child) => sum + count(child.id), 0)
+      result.set(directoryId, total)
+      return total
+    }
+    directories.filter(directory => directory.parentId === null).forEach(directory => count(directory.id))
+    return result
+  }, [directories, directoriesByParent, documentsByParent])
+  const queryText = query.trim().toLowerCase()
+  const matchingDocumentIds = useMemo(() => new Set(documents.filter(document => `${document.name} ${document.intro}`.toLowerCase().includes(queryText)).map(document => document.id)), [documents, queryText])
+  const visibleDirectoryIds = useMemo(() => {
+    if (!queryText) return new Set(directories.map(directory => directory.id))
+    const result = new Set<string>()
+    documents.filter(document => matchingDocumentIds.has(document.id)).forEach(document => {
+      let currentId = document.parentId
+      while (currentId) {
+        result.add(currentId)
+        currentId = directoryById.get(currentId)?.parentId ?? null
+      }
+    })
+    return result
+  }, [directories, directoryById, documents, matchingDocumentIds, queryText])
+  const deleteTarget = deleteDirectoryId ? directoryById.get(deleteDirectoryId) : undefined
+  const deleteDirectoryIds = useMemo(() => {
+    const result = new Set<string>()
+    const collect = (directoryId: string) => {
+      result.add(directoryId)
+      ;(directoriesByParent.get(directoryId) ?? []).forEach(child => collect(child.id))
+    }
+    if (deleteDirectoryId) collect(deleteDirectoryId)
+    return result
+  }, [deleteDirectoryId, directoriesByParent])
+  const moveCandidates = useMemo(() => directories.filter(directory => !deleteDirectoryIds.has(directory.id)), [deleteDirectoryIds, directories])
+  const file = documents.find(document => document.id === selectedId)
+  const source = file ? makeSource(file) : ''
+
+  const getDirectoryBreadcrumb = (directoryId: string) => {
+    const names: string[] = []
+    const visited = new Set<string>()
+    let currentId: string | null = directoryId
+    while (currentId && !visited.has(currentId)) {
+      visited.add(currentId)
+      const directory = directoryById.get(currentId)
+      if (!directory) break
+      names.unshift(directory.name)
+      currentId = directory.parentId
+    }
+    return ['SmartHub 知识库', ...names].join(' / ')
+  }
+  const getBreadcrumb = (document: KnowledgeDocument) => `${getDirectoryBreadcrumb(document.parentId ?? '').replace(/ \/ $/, '')} / ${document.name}`
+  const isExpanded = (directoryId: string) => queryText ? visibleDirectoryIds.has(directoryId) : expandedDirectoryIds.has(directoryId)
+  const toggleDirectory = (directoryId: string) => setExpandedDirectoryIds(current => {
+    const next = new Set(current)
+    if (next.has(directoryId)) next.delete(directoryId)
+    else next.add(directoryId)
+    return next
+  })
+  const closeEditor = () => { setDirectoryEditor(null); setDirectoryName(''); setDirectoryNameError('') }
+  const openCreate = (parentId: string | null) => {
+    setDirectoryActionId(null)
+    setDirectoryEditor({ mode: 'create', parentId })
+    setDirectoryName('')
+    setDirectoryNameError('')
+  }
+  const openRename = (directory: KnowledgeDirectory) => {
+    setDirectoryActionId(null)
+    setDirectoryEditor({ mode: 'rename', directoryId: directory.id })
+    setDirectoryName(directory.name)
+    setDirectoryNameError('')
+  }
+  const saveDirectory = () => {
+    if (!directoryEditor) return
+    const value = directoryName.trim()
+    const editedDirectory = directoryEditor.mode === 'rename' ? directoryById.get(directoryEditor.directoryId) : undefined
+    const parentId = (directoryEditor.mode === 'create' ? directoryEditor.parentId : editedDirectory?.parentId) ?? null
+    if (!value) { setDirectoryNameError('请输入目录名称。'); return }
+    if (directories.some(directory => directory.parentId === parentId && directory.id !== editedDirectory?.id && directory.name.trim().toLocaleLowerCase() === value.toLocaleLowerCase())) {
+      setDirectoryNameError('同一目录下已存在相同名称。')
+      return
+    }
+    if (directoryEditor.mode === 'create') {
+      const created: KnowledgeDirectory = { id: `directory-local-${Date.now()}`, name: value, parentId }
+      setDirectories(current => [...current, created])
+      setExpandedDirectoryIds(current => new Set([...current, created.id, ...(parentId ? [parentId] : [])]))
+      setSelectedDirectoryId(created.id)
+      addAudit(`创建本地目录：${value}`)
+      notify('已创建本地目录；刷新页面后不会保留。')
+    } else if (editedDirectory) {
+      setDirectories(current => current.map(directory => directory.id === editedDirectory.id ? { ...directory, name: value } : directory))
+      setSelectedDirectoryId(editedDirectory.id)
+      addAudit(`重命名本地目录：${editedDirectory.name} → ${value}`)
+      notify('目录名称已在当前会话更新；刷新页面后不会保留。')
+    }
+    closeEditor()
+  }
+  const openDelete = (directory: KnowledgeDirectory) => {
+    setDirectoryActionId(null)
+    setDeleteDirectoryId(directory.id)
+    setMoveTargetId(directory.parentId ?? '')
+  }
+  const closeDelete = () => { setDeleteDirectoryId(null); setMoveTargetId('') }
+  const deleteEverything = () => {
+    if (!deleteTarget) return
+    const remainingDocuments = documents.filter(document => !document.parentId || !deleteDirectoryIds.has(document.parentId))
+    setDirectories(current => current.filter(directory => !deleteDirectoryIds.has(directory.id)))
+    setDocuments(current => current.filter(document => !document.parentId || !deleteDirectoryIds.has(document.parentId)))
+    setExpandedDirectoryIds(current => new Set([...current].filter(id => !deleteDirectoryIds.has(id))))
+    if (selectedDirectoryId && deleteDirectoryIds.has(selectedDirectoryId)) setSelectedDirectoryId(null)
+    if (!remainingDocuments.some(document => document.id === selectedId)) {
+      setSelectedId(remainingDocuments[0]?.id ?? '')
+      setActiveSection(0)
+    }
+    addAudit(`删除本地目录及内容：${deleteTarget.name}`)
+    notify('目录及其全部内容已从当前会话删除；刷新页面后会恢复。')
+    closeDelete()
+  }
+  const moveContents = () => {
+    if (!deleteTarget) return
+    const parentId = moveTargetId || null
+    const movedDirectories = directories.filter(directory => directory.parentId === deleteTarget.id).length
+    const movedDocuments = documents.filter(document => document.parentId === deleteTarget.id).length
+    const destination = parentId ? directoryById.get(parentId)?.name ?? '目标目录' : '知识库根目录'
+    setDirectories(current => current.filter(directory => directory.id !== deleteTarget.id).map(directory => directory.parentId === deleteTarget.id ? { ...directory, parentId } : directory))
+    setDocuments(current => current.map(document => document.parentId === deleteTarget.id ? { ...document, parentId } : document))
+    setExpandedDirectoryIds(current => {
+      const next = new Set(current)
+      next.delete(deleteTarget.id)
+      if (parentId) next.add(parentId)
+      return next
+    })
+    if (selectedDirectoryId === deleteTarget.id) setSelectedDirectoryId(null)
+    addAudit(`移动“${deleteTarget.name}”的 ${movedDirectories} 个子目录和 ${movedDocuments} 份文档至“${destination}”`)
+    notify('目录内容已移动并删除原目录；刷新页面后会恢复。')
+    closeDelete()
+  }
   const simulate = (kind: 'sync' | 'upload') => {
     const setState = kind === 'sync' ? setSyncState : setUploadState
     const current = kind === 'sync' ? syncState : uploadState
@@ -303,21 +467,46 @@ function Documents({ notify, addAudit }: { notify: Notify; addAudit: (entry: str
     }, 1000)
     timers.current.push(timer)
   }
-  const selectFile = (id: string) => { setSelectedId(id); setActiveSection(0) }
+  const selectFile = (id: string) => { setSelectedId(id); setActiveSection(0); setSelectedDirectoryId(null) }
   const jumpToSection = (index: number) => {
     setActiveSection(index)
     document.getElementById(`document-section-${index}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
+  const renderDirectory = (directory: KnowledgeDirectory, depth: number): ReactNode => {
+    if (queryText && !visibleDirectoryIds.has(directory.id)) return null
+    const childDirectories = directoriesByParent.get(directory.id) ?? []
+    const childDocuments = (documentsByParent.get(directory.id) ?? []).filter(document => !queryText || matchingDocumentIds.has(document.id))
+    const hasChildren = childDirectories.length + (documentsByParent.get(directory.id) ?? []).length > 0
+    const expanded = isExpanded(directory.id)
+    return <div className="tree-directory" key={directory.id}>
+      <div className={`tree-folder ${selectedDirectoryId === directory.id ? 'selected' : ''}`} style={{ paddingLeft: `${8 + depth * 17}px` }}>
+        {hasChildren ? <button className="tree-expand" onClick={() => toggleDirectory(directory.id)} aria-label={expanded ? `收起${directory.name}` : `展开${directory.name}`} aria-expanded={expanded}>{expanded ? <ChevronDown /> : <ChevronRight />}</button> : <span className="tree-expand-placeholder" />}
+        <button className="tree-folder-name" onClick={() => setSelectedDirectoryId(directory.id)}><FolderOpen /><span>{directory.name}</span></button>
+        <small>{documentCountByDirectory.get(directory.id) ?? 0}</small>
+        <button className="icon-btn tree-action" aria-label={`${directory.name}更多操作`} onClick={() => setDirectoryActionId(current => current === directory.id ? null : directory.id)}><MoreHorizontal /></button>
+        {directoryActionId === directory.id && <div className="tree-menu" role="menu"><button role="menuitem" onClick={() => openCreate(directory.id)}><FolderPlus />新建子目录</button><button role="menuitem" onClick={() => openRename(directory)}><Pencil />重命名</button><button className="danger" role="menuitem" onClick={() => openDelete(directory)}><Trash2 />删除目录</button></div>}
+      </div>
+      {expanded && <div className="tree-children">{childDirectories.map(child => renderDirectory(child, depth + 1))}{childDocuments.map(document => <button className={`tree-file ${selectedId === document.id ? 'active' : ''}`} key={document.id} style={{ paddingLeft: `${47 + depth * 17}px` }} onClick={() => selectFile(document.id)}><FileText /><span>{document.name}</span></button>)}</div>}
+    </div>
+  }
+  const rootDirectories = directoriesByParent.get(null) ?? []
+  const rootDocuments = (documentsByParent.get(null) ?? []).filter(document => !queryText || matchingDocumentIds.has(document.id))
+  const editorTarget = directoryEditor?.mode === 'rename' ? directoryById.get(directoryEditor.directoryId) : undefined
+  const editorParentId = directoryEditor?.mode === 'create' ? directoryEditor.parentId : editorTarget?.parentId
+  const editorParentName = editorParentId ? directoryById.get(editorParentId)?.name : '知识库根目录'
+  const deletedDocumentCount = documents.filter(document => document.parentId && deleteDirectoryIds.has(document.parentId)).length
 
   return <section className="card knowledge-page"><div className="knowledge-toolbar"><div className="mini-search wide"><Search size={16} /><input aria-label="搜索知识库" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索文件名称或文档内容" /></div><Badge tone={syncState === 'running' ? 'orange' : 'green'}>{syncState === 'running' ? <RefreshCw size={12} /> : <CheckCircle2 size={12} />}{syncState === 'running' ? '本地同步中' : syncState === 'completed' ? '本地模拟已完成' : '知识库示例数据'}</Badge><button className="btn ghost" disabled={syncState === 'running'} onClick={() => simulate('sync')}><GitBranch size={16} />{syncState === 'running' ? '同步模拟中' : '立即同步'}</button><button className="btn primary" disabled={uploadState === 'running'} onClick={() => simulate('upload')}><Upload size={16} />{uploadState === 'running' ? '上传模拟中' : '上传文档'}</button></div>
-    <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-title"><span>文件目录</span><button className="icon-btn" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div><div className="tree-root"><ChevronDown /><FolderOpen /><b>SmartHub 知识库</b><small>{knowledgeDocuments.length}</small></div>{documents.length ? documents.map(item => <button className={`tree-file ${selectedId === item.id ? 'active' : ''}`} key={item.id} onClick={() => selectFile(item.id)}><FileText /><span>{item.name}</span></button>) : <p className="empty-state">没有匹配的文档。</p>}</aside>
-      <article className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span>{file.path}</span></div><div className="preview-actions"><Badge tone="green">只读原型</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => setMoreOpen(true)}><MoreHorizontal /></button></div></div>
-        {viewMode === 'preview' ? <DocumentContent file={file} activeSection={activeSection} onOpenImage={() => setImageOpen(true)} /> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} activeSection={activeSection} onOpenImage={() => setImageOpen(true)} compact /></section></div>}
-        {viewMode === 'preview' && <nav className="document-outline" aria-label="本文目录"><b>本文目录</b>{file.sections.map((section, index) => <button key={section} className={activeSection === index ? 'active' : ''} onClick={() => jumpToSection(index)}>{index + 1}. {section}</button>)}</nav>}
+    <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-root"><FolderOpen /><b>SmartHub 知识库</b><small>{documents.length}</small><button className="icon-btn tree-root-action" onClick={() => openCreate(null)} aria-label="在知识库根目录新建目录"><FolderPlus /></button><button className="icon-btn tree-collapse" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{queryText && !matchingDocumentIds.size ? <p className="empty-state">没有匹配的文档。</p> : <div className="tree-content">{rootDirectories.map(directory => renderDirectory(directory, 0))}{rootDocuments.map(document => <button className={`tree-file ${selectedId === document.id ? 'active' : ''}`} key={document.id} style={{ paddingLeft: '30px' }} onClick={() => selectFile(document.id)}><FileText /><span>{document.name}</span></button>)}</div>}</aside>
+      <article className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions"><Badge tone="green">只读原型</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => setMoreOpen(true)}><MoreHorizontal /></button></div>}</div>
+        {file ? viewMode === 'preview' ? <DocumentContent file={file} activeSection={activeSection} onOpenImage={() => setImageOpen(true)} /> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} activeSection={activeSection} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>可以新建目录、移动现有目录，或刷新页面恢复示例文档。</p></div>}
+        {file && viewMode === 'preview' && <nav className="document-outline" aria-label="本文目录"><b>本文目录</b>{file.sections.map((section, index) => <button key={section} className={activeSection === index ? 'active' : ''} onClick={() => jumpToSection(index)}>{index + 1}. {section}</button>)}</nav>}
       </article></div>
     {imageOpen && <ImageLightbox onClose={() => setImageOpen(false)} />}
-    {historyOpen && <Modal title="文档版本历史（本地示例）" onClose={() => setHistoryOpen(false)}><div className="history-list"><div><b>{file.version}</b><span>当前展示版本 · {file.updated}</span></div><div><b>上一版本</b><span>本地示例记录，不可恢复或覆盖当前文档。</span></div></div></Modal>}
+    {historyOpen && file && <Modal title="文档版本历史（本地示例）" onClose={() => setHistoryOpen(false)}><div className="history-list"><div><b>{file.version}</b><span>当前展示版本 · {file.updated}</span></div><div><b>上一版本</b><span>本地示例记录，不可恢复或覆盖当前文档。</span></div></div></Modal>}
     {moreOpen && <Modal title="文档操作说明" onClose={() => setMoreOpen(false)}><div className="modal-form"><p>当前文档处于只读原型模式。编辑、正式保存、发布和远程同步均需要后端与权限服务支持。</p><button className="btn primary" onClick={() => setMoreOpen(false)}>我知道了</button></div></Modal>}
+    {directoryEditor && <Modal title={directoryEditor.mode === 'create' ? '新建目录' : '重命名目录'} onClose={closeEditor}><div className="modal-form"><p>{directoryEditor.mode === 'create' ? `将在“${editorParentName}”中创建目录。` : '目录名称更新后，相关文档面包屑会立即同步。'} 所有改动仅保留在当前会话。</p><label>目录名称<input value={directoryName} onChange={event => { setDirectoryName(event.target.value); setDirectoryNameError('') }} autoFocus placeholder="例如：接口规范" /></label>{directoryNameError && <small className="field-error">{directoryNameError}</small>}<div className="modal-actions"><button className="btn ghost" onClick={closeEditor}>取消</button><button className="btn primary" onClick={saveDirectory}>{directoryEditor.mode === 'create' ? '创建目录' : '保存名称'}</button></div></div></Modal>}
+    {deleteTarget && <Modal title={`删除目录：${deleteTarget.name}`} onClose={closeDelete}><div className="modal-form"><p>此目录包含 {deleteDirectoryIds.size - 1} 个子目录和 {deletedDocumentCount} 份文档。请选择如何处理目录内容，操作仅影响当前会话。</p><div className="delete-summary"><span><FolderOpen />目录树</span><b>{deleteDirectoryIds.size} 个目录</b><span><FileText />文档</span><b>{deletedDocumentCount} 份</b></div><div className="move-directory"><label>移动内容至<select value={moveTargetId} onChange={event => setMoveTargetId(event.target.value)}><option value="">知识库根目录</option>{moveCandidates.map(directory => <option key={directory.id} value={directory.id}>{getDirectoryBreadcrumb(directory.id)}</option>)}</select></label><button className="btn primary" onClick={moveContents}>移动内容并删除目录</button></div><div className="modal-actions delete-modal-actions"><button className="btn ghost" onClick={closeDelete}>取消</button><button className="btn danger" onClick={deleteEverything}><Trash2 />全部删除</button></div></div></Modal>}
   </section>
 }
 
