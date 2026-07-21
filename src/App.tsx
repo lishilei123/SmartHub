@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import {
   Activity, AlertTriangle, Archive, Bell, BookOpen, Bot, BrainCircuit,
   Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3,
-  Code2, FileCode2, FileText, Gauge, GitBranch, LayoutDashboard, Library,
+  Code2, FileCode2, FileText, Folder, FolderOpen, Gauge, GitBranch, LayoutDashboard, Library,
   ListChecks, MessageSquareText, MoreHorizontal, Play, Plus, Search, Settings,
   ShieldCheck, Sparkles, TestTube2, Upload, Users, XCircle, Zap,
 } from 'lucide-react'
@@ -37,7 +37,7 @@ function Progress({ value, tone = 'blue' }: { value: number; tone?: string }) {
 
 function App() {
   const [page, setPage] = useState<PageKey>('dashboard')
-  const [project, setProject] = useState('电商中台 · V3.6')
+  const [version, setVersion] = useState('V3.6')
   const [toast, setToast] = useState('')
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200) }
   const meta = pageMeta[page]
@@ -45,15 +45,15 @@ function App() {
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Zap size={19} fill="currentColor" /></div><div><b>SmartHub</b><span>AI TESTING PLATFORM</span></div></div>
-      <button className="project-picker" onClick={() => setProject(project.includes('电商') ? '智慧办公 · V2.1' : '电商中台 · V3.6')}>
-        <span className="project-logo">商</span><span><small>当前项目</small><strong>{project}</strong></span><ChevronDown size={15} />
+      <button className="project-picker" onClick={() => setVersion(version === 'V3.6' ? 'V3.5' : 'V3.6')}>
+        <span className="project-logo">V</span><span><small>当前版本</small><strong>SmartHub · {version}</strong></span><ChevronDown size={15} />
       </button>
       <nav>
-        <p className="nav-label">项目空间</p>
+        <p className="nav-label nav-scope"><span>项目空间</span><em>按版本隔离</em></p>
         {menu.map(item => <button key={item.key} className={page === item.key ? 'active' : ''} onClick={() => setPage(item.key)}>
           <item.icon size={18} /><span>{item.label}</span>{item.hint && <em>{item.hint}</em>}
         </button>)}
-        <p className="nav-label second">平台管理</p>
+        <p className="nav-label second nav-scope"><span>平台管理</span><em>全局</em></p>
         <button className={page === 'documents' ? 'active' : ''} onClick={() => setPage('documents')}><Library size={18} /><span>知识库</span></button>
         <button className={page === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}><Settings size={18} /><span>系统管理</span></button>
       </nav>
@@ -122,7 +122,57 @@ function Requirements({ notify }: { notify: (s:string)=>void }) {
 }
 function Finding({icon:Icon,tone,title,text,tag}:any){return <div className="finding"><div className={`finding-icon ${tone}`}><Icon size={18}/></div><div><b>{title}</b><p>{text}</p></div><Badge tone={tone}>{tag}</Badge></div>}
 
-function Documents({ notify }: { notify:(s:string)=>void }) { const rows=[['支付模块重构需求.md','需求文档','已同步','V2.3','2 分钟前'],['支付服务技术方案.md','技术方案','已同步','V1.8','昨天'],['接口错误码规范.md','知识库','同步中','V4.2','刚刚'],['退款页面原型.zip','HTML 原型','待解析','V1.0','3 天前'],['质量门禁规范.md','知识库','已同步','V3.1','5 天前']]; return <section className="card list-page"><div className="list-toolbar"><div className="mini-search wide"><Search size={16}/><input placeholder="搜索文档名称、内容或标签"/></div><select><option>全部类型</option></select><select><option>全部状态</option></select><button className="btn ghost"><GitBranch size={16}/>知识库同步</button><button className="btn primary" onClick={()=>notify('上传入口已打开（原型）')}><Upload size={16}/>上传文档</button></div><div className="folder-strip"><button className="active"><Archive size={17}/>全部文档 <span>128</span></button><button><FileText size={17}/>需求文档 <span>34</span></button><button><Code2 size={17}/>技术方案 <span>26</span></button><button><BookOpen size={17}/>知识库 <span>68</span></button></div><table><thead><tr><th>文档名称</th><th>类型</th><th>同步状态</th><th>当前版本</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{rows.map((r,i)=><tr key={r[0]}><td><div className="file-name"><div className={i===3?'zip':'md'}>{i===3?'ZIP':'MD'}</div><span><b>{r[0]}</b><small>{i===3?'包含 16 个页面与本地资源':'项目知识库 / 核心业务'}</small></span></div></td><td><Badge>{r[1]}</Badge></td><td><Badge tone={r[2]==='已同步'?'green':r[2]==='同步中'?'blue':'orange'}>{r[2]}</Badge></td><td>{r[3]}</td><td>{r[4]}</td><td><button className="icon-btn"><MoreHorizontal/></button></td></tr>)}</tbody></table></section> }
+function Documents({ notify }: { notify:(s:string)=>void }) {
+  const files = [
+    { name: '支付模块重构需求.md', path: '需求文档 / 支付模块重构需求.md', version: 'V2.3', updated: '2 分钟前', title: '支付模块重构需求', intro: '本次重构旨在统一支付、退款及回调处理链路，降低渠道接入成本，并提升异常场景下的数据一致性。', sections: ['项目背景', '业务目标', '功能范围', '退款处理规则', '验收标准'] },
+    { name: '会员积分体系升级.md', path: '需求文档 / 会员积分体系升级.md', version: 'V1.6', updated: '昨天', title: '会员积分体系升级', intro: '升级积分获取、冻结、过期和抵扣规则，为不同会员等级提供差异化权益。', sections: ['需求背景', '积分生命周期', '等级权益', '异常处理', '验收标准'] },
+    { name: '支付服务技术方案.md', path: '技术方案 / 支付服务 / 支付服务技术方案.md', version: 'V1.8', updated: '昨天', title: '支付服务技术方案', intro: '支付服务采用统一网关适配多渠道，通过事件驱动机制完成订单状态同步与最终一致性保障。', sections: ['整体架构', '模块设计', '数据模型', '接口定义', '容灾方案'] },
+    { name: '接口错误码规范.md', path: '研发规范 / 接口错误码规范.md', version: 'V4.2', updated: '刚刚', title: '接口错误码规范', intro: '统一平台接口错误码组成、分类、返回结构及日志记录方式。', sections: ['编码规则', '错误分类', '响应结构', '使用示例', '检查清单'] },
+    { name: '质量门禁规范.md', path: '测试规范 / 质量门禁规范.md', version: 'V3.1', updated: '5 天前', title: '质量门禁规范', intro: '定义各测试阶段的准入、准出条件以及阻断发布的质量指标。', sections: ['适用范围', '准入条件', '准出条件', '风险豁免', '审计要求'] },
+  ]
+  const [selected, setSelected] = useState(0)
+  const file = files[selected]
+  return <section className="card knowledge-page">
+    <div className="knowledge-toolbar">
+      <div className="mini-search wide"><Search size={16}/><input placeholder="搜索文件名称或文档内容"/></div>
+      <Badge tone="green"><CheckCircle2 size={12}/>知识库已同步</Badge>
+      <button className="btn ghost" onClick={()=>notify('已发起知识库同步')}><GitBranch size={16}/>立即同步</button>
+      <button className="btn primary" onClick={()=>notify('上传入口已打开（原型）')}><Upload size={16}/>上传文档</button>
+    </div>
+    <div className="knowledge-layout">
+      <aside className="file-tree">
+        <div className="tree-title"><span>文件目录</span><button className="icon-btn"><MoreHorizontal/></button></div>
+        <div className="tree-root"><ChevronDown/><FolderOpen/><b>SmartHub 知识库</b><small>128</small></div>
+        <div className="tree-folder"><ChevronDown/><FolderOpen/><span>需求文档</span><small>34</small></div>
+        {files.slice(0,2).map((f,i)=><button className={`tree-file ${selected===i?'active':''}`} key={f.name} onClick={()=>setSelected(i)}><FileText/><span>{f.name}</span></button>)}
+        <div className="tree-folder"><ChevronDown/><FolderOpen/><span>技术方案</span><small>26</small></div>
+        <div className="tree-folder nested"><ChevronDown/><FolderOpen/><span>支付服务</span></div>
+        <button className={`tree-file deep ${selected===2?'active':''}`} onClick={()=>setSelected(2)}><FileText/><span>{files[2].name}</span></button>
+        <div className="tree-folder"><ChevronDown/><FolderOpen/><span>研发规范</span><small>31</small></div>
+        <button className={`tree-file ${selected===3?'active':''}`} onClick={()=>setSelected(3)}><FileText/><span>{files[3].name}</span></button>
+        <div className="tree-folder"><ChevronDown/><FolderOpen/><span>测试规范</span><small>37</small></div>
+        <button className={`tree-file ${selected===4?'active':''}`} onClick={()=>setSelected(4)}><FileText/><span>{files[4].name}</span></button>
+        <div className="tree-folder muted"><ChevronRight/><Folder/><span>历史归档</span><small>16</small></div>
+      </aside>
+      <article className="document-preview">
+        <div className="preview-head"><div className="breadcrumb"><Library size={14}/><span>{file.path}</span></div><div className="preview-actions"><Badge tone="green">已同步</Badge><button className="btn ghost"><Code2/>源码</button><button className="btn ghost"><Clock3/>版本历史</button><button className="icon-btn"><MoreHorizontal/></button></div></div>
+        <div className="markdown-view">
+          <div className="document-meta"><Badge tone="blue">Markdown</Badge><span>版本 {file.version}</span><span>更新于 {file.updated}</span><span>1,286 字</span></div>
+          <h1>{file.title}</h1>
+          <p>{file.intro}</p>
+          <div className="md-callout"><CircleHelp size={18}/><div><b>文档说明</b><span>该文档已发布至正式知识库，AI 分析引用内容均可追溯到当前版本。</span></div></div>
+          <h2>1. {file.sections[0]}</h2><p>随着业务规模持续增长，原有流程在扩展性、异常恢复和统一治理方面逐渐暴露出不足。本次调整将围绕核心链路完成能力升级。</p>
+          <h2>2. {file.sections[1]}</h2>
+          <ul><li>统一核心流程及状态流转规则，减少重复实现。</li><li>完善异常、超时和重试场景，确保数据最终一致。</li><li>所有关键结论保留来源引用并支持版本追溯。</li></ul>
+          <h2>3. {file.sections[2]}</h2>
+          <table className="md-table"><thead><tr><th>能力模块</th><th>主要内容</th><th>优先级</th></tr></thead><tbody><tr><td>核心流程</td><td>主流程、状态流转与结果通知</td><td><Badge tone="red">P0</Badge></td></tr><tr><td>异常治理</td><td>超时、重试、幂等与补偿机制</td><td><Badge tone="orange">P1</Badge></td></tr></tbody></table>
+          <h2>4. {file.sections[3]}</h2><p>所有写入操作必须携带唯一业务标识。重复请求返回首次处理结果，不得重复改变业务状态。</p>
+        </div>
+        <nav className="document-outline"><b>本文目录</b>{file.sections.map((s,i)=><a key={s} className={i===0?'active':''}>{i+1}. {s}</a>)}</nav>
+      </article>
+    </div>
+  </section>
+}
 
 function Design({notify}:{notify:(s:string)=>void}) { return <div className="design-layout"><section className="card trace-tree"><h3>需求追踪树</h3><div className="tree-item root"><ChevronDown/><FileText/>支付模块重构 <Badge tone="blue">86%</Badge></div><div className="tree-item l1 active"><ChevronDown/><ListChecks/>退款流程 <span>12</span></div>{['正常退款','部分退款','重复退款','超时与重试'].map((x,i)=><div className="tree-item l2" key={x}><span className={`dot d${i}`}/>{x}<small>{[4,3,2,3][i]}</small></div>)}<div className="tree-item l1"><ChevronRight/><ListChecks/>支付回调 <span>8</span></div><div className="tree-item l1"><ChevronRight/><ListChecks/>对账与补偿 <span>6</span></div></section><section className="card case-board"><div className="card-head"><div><h3>退款流程 · 测试点</h3><p>12 个测试点，覆盖率 83%</p></div><button className="btn primary" onClick={()=>notify('已生成 6 条测试用例草稿')}><Sparkles/>AI 生成用例</button></div><div className="coverage"><span>场景覆盖</span>{['主流程 100%','异常 75%','边界 66%','权限 50%'].map((x,i)=><Badge key={x} tone={['green','blue','orange','red'][i]}>{x}</Badge>)}</div>{['全额退款成功，原路退回','部分退款金额边界校验','重复退款请求幂等处理','退款超时后的状态补偿','无权限用户发起退款'].map((x,i)=><div className="case-row" key={x}><input type="checkbox" defaultChecked={i<3}/><span><b>{x}</b><small>TP-{String(i+1).padStart(3,'0')} · {i<2?'P0':'P1'} · AI 生成</small></span><Badge tone={i===2?'orange':i===4?'red':'green'}>{i===2?'待审核':i===4?'有风险':'已通过'}</Badge><button className="icon-btn"><MoreHorizontal/></button></div>)}</section><aside className="card coverage-card"><h3>覆盖矩阵</h3><div className="donut"><div><strong>83%</strong><span>总覆盖率</span></div></div><div className="legend"><p><i className="green"/>已覆盖 <b>24</b></p><p><i className="orange"/>部分覆盖 <b>5</b></p><p><i className="gray"/>未覆盖 <b>3</b></p></div><button className="btn ghost full">查看完整矩阵</button></aside></div> }
 
