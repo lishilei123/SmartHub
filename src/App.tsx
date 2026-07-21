@@ -2,8 +2,8 @@ import { useState, type ReactNode } from 'react'
 import {
   Activity, AlertTriangle, Archive, Bell, BookOpen, Bot, BrainCircuit,
   Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3,
-  Code2, FileCode2, FileText, Folder, FolderOpen, Gauge, GitBranch, LayoutDashboard, Library,
-  ListChecks, MessageSquareText, MoreHorizontal, Play, Plus, Search, Settings,
+  Code2, Columns2, FileCode2, FileText, Folder, FolderOpen, Gauge, GitBranch, LayoutDashboard, Library,
+  ListChecks, MessageSquareText, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Play, Plus, Search, Settings,
   ShieldCheck, Sparkles, TestTube2, Upload, Users, XCircle, Zap,
 } from 'lucide-react'
 
@@ -38,13 +38,14 @@ function Progress({ value, tone = 'blue' }: { value: number; tone?: string }) {
 function App() {
   const [page, setPage] = useState<PageKey>('dashboard')
   const [version, setVersion] = useState('V3.6')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toast, setToast] = useState('')
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2200) }
   const meta = pageMeta[page]
 
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><Zap size={19} fill="currentColor" /></div><div><b>SmartHub</b><span>AI TESTING PLATFORM</span></div></div>
+  return <div className={`app-shell ${sidebarCollapsed ? 'shell-collapsed' : ''}`}>
+    <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+      <div className="brand"><div className="brand-mark"><Zap size={19} fill="currentColor" /></div><div><b>SmartHub</b><span>AI TESTING PLATFORM</span></div><button className="sidebar-toggle" title={sidebarCollapsed?'展开导航':'收起导航'} onClick={()=>setSidebarCollapsed(!sidebarCollapsed)}>{sidebarCollapsed?<PanelLeftOpen/>:<PanelLeftClose/>}</button></div>
       <button className="project-picker" onClick={() => setVersion(version === 'V3.6' ? 'V3.5' : 'V3.6')}>
         <span className="project-logo">V</span><span><small>当前版本</small><strong>SmartHub · {version}</strong></span><ChevronDown size={15} />
       </button>
@@ -66,7 +67,7 @@ function App() {
         <div className="top-actions"><button title="AI 助手"><Sparkles size={18} /></button><button className="notification" title="通知"><Bell size={18} /><i /></button><div className="avatar">LS</div><div className="user"><b>李磊</b><span>测试负责人</span></div><ChevronDown size={14} /></div>
       </header>
       <section className="content">
-        <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div><div className="head-actions"><button className="btn ghost"><Clock3 size={16} />操作记录</button><button className="btn primary" onClick={() => notify(page === 'requirements' ? '已创建需求分析任务' : '已创建新任务')}><Plus size={17} />{page === 'requirements' ? '新建需求分析' : '新建任务'}</button></div></div>
+        <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div>{page !== 'documents' && <div className="head-actions"><button className="btn ghost"><Clock3 size={16} />操作记录</button><button className="btn primary" onClick={() => notify(page === 'requirements' ? '已创建需求分析任务' : '已创建新任务')}><Plus size={17} />{page === 'requirements' ? '新建需求分析' : '新建任务'}</button></div>}</div>
         {page === 'dashboard' && <Dashboard navigate={setPage} notify={notify} />}
         {page === 'requirements' && <Requirements notify={notify} />}
         {page === 'documents' && <Documents notify={notify} />}
@@ -117,8 +118,9 @@ function PlanRow({ name, progress, rate, env, owner, status }: any) { return <tr
 
 function Requirements({ notify }: { notify: (s:string)=>void }) {
   const [selected, setSelected] = useState(0)
+  const [directoryCollapsed, setDirectoryCollapsed] = useState(false)
   const docs = ['支付模块重构需求', '会员积分体系升级', '订单导出体验优化', '优惠券叠加规则调整']
-  return <div className="split-layout"><section className="card side-list"><div className="filter-row"><div className="mini-search"><Search size={15}/><input placeholder="搜索需求" /></div><button className="icon-btn"><Plus/></button></div>{docs.map((d,i)=><button key={d} className={`doc-row ${selected===i?'selected':''}`} onClick={()=>setSelected(i)}><FileText size={18}/><span><b>{d}</b><small>REQ-2026-0{21+i} · {i===0?'分析中':'待分析'}</small></span>{i===0&&<i/>}</button>)}</section><section className="card requirement-main"><div className="document-title"><div><Badge tone="blue">需求 V2.3</Badge><h2>{docs[selected]}</h2><p>更新于 2026-07-20 · 张倩 · Markdown + 3 个附件</p></div><button className="btn primary" onClick={()=>notify('AI 分析任务已启动')}><Sparkles size={17}/>一键 AI 分析</button></div><div className="analysis-progress"><div className="spinner"><BrainCircuit size={22}/></div><div><b>AI 正在分析需求</b><span>正在结合知识库识别边界条件与潜在冲突...</span><Progress value={68}/></div><strong>68%</strong></div><div className="tabs"><button className="active">分析概览</button><button>原始文档</button><button>版本差异</button><button>功能树</button><button>证据引用</button></div><div className="analysis-grid"><div className="analysis-card"><span>结构化需求</span><strong>36</strong><small>已识别需求项</small></div><div className="analysis-card warning"><span>待确认问题</span><strong>7</strong><small>3 个高优先级</small></div><div className="analysis-card danger"><span>潜在风险</span><strong>5</strong><small>涉及支付与数据</small></div><div className="analysis-card success-card"><span>测试点建议</span><strong>84</strong><small>覆盖 7 类场景</small></div></div><div className="findings"><h3>重点分析结论</h3><Finding icon={AlertTriangle} tone="red" title="退款并发规则描述不完整" text="需求未明确同一订单多次退款请求的幂等处理与金额上限。" tag="需要确认"/><Finding icon={ShieldCheck} tone="orange" title="权限边界存在潜在缺口" text="财务角色与客服角色对退款详情的字段可见范围未定义。" tag="高风险"/><Finding icon={BookOpen} tone="blue" title="关联到历史业务规则" text="知识库中“支付网关规范 V4.2”要求所有退款请求携带唯一幂等键。" tag="有依据"/></div></section><aside className="ai-panel card"><div className="ai-head"><div className="ai-avatar"><Sparkles size={17}/></div><span><b>需求 AI 助手</b><small>基于当前需求上下文</small></span><MoreHorizontal size={18}/></div><div className="chat-empty"><div><Bot size={29}/></div><h3>有什么想进一步了解？</h3><p>我会基于当前需求和知识库回答，并标注引用来源。</p><button>帮我补充验收标准</button><button>列出所有异常场景</button><button>解释第 3 条风险</button></div><div className="chat-input"><textarea placeholder="针对当前需求提问..."/><button><Sparkles size={17}/></button></div></aside></div>
+  return <div className={`split-layout ${directoryCollapsed?'directory-collapsed':''}`}><section className={`card side-list ${directoryCollapsed?'collapsed':''}`}><div className="filter-row"><div className="mini-search"><Search size={15}/><input placeholder="搜索需求" /></div><button className="icon-btn directory-toggle" onClick={()=>setDirectoryCollapsed(!directoryCollapsed)}>{directoryCollapsed?<PanelLeftOpen/>:<PanelLeftClose/>}</button><button className="icon-btn"><Plus/></button></div>{docs.map((d,i)=><button key={d} className={`doc-row ${selected===i?'selected':''}`} onClick={()=>setSelected(i)}><FileText size={18}/><span><b>{d}</b><small>REQ-2026-0{21+i} · {i===0?'分析中':'待分析'}</small></span>{i===0&&<i/>}</button>)}</section><section className="card requirement-main"><div className="document-title"><div><Badge tone="blue">需求 V2.3</Badge><h2>{docs[selected]}</h2><p>更新于 2026-07-20 · 张倩 · Markdown + 3 个附件</p></div><button className="btn primary" onClick={()=>notify('AI 分析任务已启动')}><Sparkles size={17}/>一键 AI 分析</button></div><div className="analysis-progress"><div className="spinner"><BrainCircuit size={22}/></div><div><b>AI 正在分析需求</b><span>正在结合知识库识别边界条件与潜在冲突...</span><Progress value={68}/></div><strong>68%</strong></div><div className="tabs"><button className="active">分析概览</button><button>原始文档</button><button>版本差异</button><button>功能树</button><button>证据引用</button></div><div className="analysis-grid"><div className="analysis-card"><span>结构化需求</span><strong>36</strong><small>已识别需求项</small></div><div className="analysis-card warning"><span>待确认问题</span><strong>7</strong><small>3 个高优先级</small></div><div className="analysis-card danger"><span>潜在风险</span><strong>5</strong><small>涉及支付与数据</small></div><div className="analysis-card success-card"><span>测试点建议</span><strong>84</strong><small>覆盖 7 类场景</small></div></div><div className="findings"><h3>重点分析结论</h3><Finding icon={AlertTriangle} tone="red" title="退款并发规则描述不完整" text="需求未明确同一订单多次退款请求的幂等处理与金额上限。" tag="需要确认"/><Finding icon={ShieldCheck} tone="orange" title="权限边界存在潜在缺口" text="财务角色与客服角色对退款详情的字段可见范围未定义。" tag="高风险"/><Finding icon={BookOpen} tone="blue" title="关联到历史业务规则" text="知识库中“支付网关规范 V4.2”要求所有退款请求携带唯一幂等键。" tag="有依据"/></div></section><aside className="ai-panel card"><div className="ai-head"><div className="ai-avatar"><Sparkles size={17}/></div><span><b>需求 AI 助手</b><small>基于当前需求上下文</small></span><MoreHorizontal size={18}/></div><div className="chat-empty"><div><Bot size={29}/></div><h3>有什么想进一步了解？</h3><p>我会基于当前需求和知识库回答，并标注引用来源。</p><button>帮我补充验收标准</button><button>列出所有异常场景</button><button>解释第 3 条风险</button></div><div className="chat-input"><textarea placeholder="针对当前需求提问..."/><button><Sparkles size={17}/></button></div></aside></div>
 }
 function Finding({icon:Icon,tone,title,text,tag}:any){return <div className="finding"><div className={`finding-icon ${tone}`}><Icon size={18}/></div><div><b>{title}</b><p>{text}</p></div><Badge tone={tone}>{tag}</Badge></div>}
 
@@ -131,7 +133,12 @@ function Documents({ notify }: { notify:(s:string)=>void }) {
     { name: '质量门禁规范.md', path: '测试规范 / 质量门禁规范.md', version: 'V3.1', updated: '5 天前', title: '质量门禁规范', intro: '定义各测试阶段的准入、准出条件以及阻断发布的质量指标。', sections: ['适用范围', '准入条件', '准出条件', '风险豁免', '审计要求'] },
   ]
   const [selected, setSelected] = useState(0)
+  const [treeCollapsed, setTreeCollapsed] = useState(false)
+  const [outlineCollapsed, setOutlineCollapsed] = useState(false)
+  const [viewMode, setViewMode] = useState<'preview'|'source'|'split'>('preview')
+  const [imageOpen, setImageOpen] = useState(false)
   const file = files[selected]
+  const source = `# ${file.title}\n\n${file.intro}\n\n> 文档说明：该文档已发布至正式知识库，AI 分析引用内容均可追溯到当前版本。\n\n## 1. ${file.sections[0]}\n\n随着业务规模持续增长，原有流程在扩展性、异常恢复和统一治理方面逐渐暴露出不足。本次调整将围绕核心链路完成能力升级。\n\n![统一支付与退款处理流程](assets/payment-flow.svg)\n\n## 2. ${file.sections[1]}\n\n- 统一核心流程及状态流转规则，减少重复实现。\n- 完善异常、超时和重试场景，确保数据最终一致。\n- 所有关键结论保留来源引用并支持版本追溯。\n\n## 3. ${file.sections[2]}\n\n| 能力模块 | 主要内容 | 优先级 |\n| --- | --- | --- |\n| 核心流程 | 主流程、状态流转与结果通知 | P0 |\n| 异常治理 | 超时、重试、幂等与补偿机制 | P1 |\n\n## 4. ${file.sections[3]}\n\n所有写入操作必须携带唯一业务标识。重复请求返回首次处理结果，不得重复改变业务状态。`
   return <section className="card knowledge-page">
     <div className="knowledge-toolbar">
       <div className="mini-search wide"><Search size={16}/><input placeholder="搜索文件名称或文档内容"/></div>
@@ -139,12 +146,14 @@ function Documents({ notify }: { notify:(s:string)=>void }) {
       <button className="btn ghost" onClick={()=>notify('已发起知识库同步')}><GitBranch size={16}/>立即同步</button>
       <button className="btn primary" onClick={()=>notify('上传入口已打开（原型）')}><Upload size={16}/>上传文档</button>
     </div>
-    <div className="knowledge-layout">
-      <aside className="file-tree">
-        <div className="tree-title"><span>文件目录</span><button className="icon-btn"><MoreHorizontal/></button></div>
+    <div className={`knowledge-layout ${treeCollapsed?'tree-collapsed':''}`}>
+      <aside className={`file-tree ${treeCollapsed?'collapsed':''}`}>
+        <div className="tree-title"><span>文件目录</span><button className="icon-btn" title={treeCollapsed?'展开文件树':'收起文件树'} onClick={()=>setTreeCollapsed(!treeCollapsed)}>{treeCollapsed?<PanelLeftOpen/>:<PanelLeftClose/>}</button></div>
         <div className="tree-root"><ChevronDown/><FolderOpen/><b>SmartHub 知识库</b><small>128</small></div>
         <div className="tree-folder"><ChevronDown/><FolderOpen/><span>需求文档</span><small>34</small></div>
         {files.slice(0,2).map((f,i)=><button className={`tree-file ${selected===i?'active':''}`} key={f.name} onClick={()=>setSelected(i)}><FileText/><span>{f.name}</span></button>)}
+        <div className="tree-folder nested"><ChevronDown/><FolderOpen/><span>assets</span><small>3</small></div>
+        <div className="tree-file deep asset-file"><FileCode2/><span>payment-flow.svg</span></div>
         <div className="tree-folder"><ChevronDown/><FolderOpen/><span>技术方案</span><small>26</small></div>
         <div className="tree-folder nested"><ChevronDown/><FolderOpen/><span>支付服务</span></div>
         <button className={`tree-file deep ${selected===2?'active':''}`} onClick={()=>setSelected(2)}><FileText/><span>{files[2].name}</span></button>
@@ -154,23 +163,25 @@ function Documents({ notify }: { notify:(s:string)=>void }) {
         <button className={`tree-file ${selected===4?'active':''}`} onClick={()=>setSelected(4)}><FileText/><span>{files[4].name}</span></button>
         <div className="tree-folder muted"><ChevronRight/><Folder/><span>历史归档</span><small>16</small></div>
       </aside>
-      <article className="document-preview">
-        <div className="preview-head"><div className="breadcrumb"><Library size={14}/><span>{file.path}</span></div><div className="preview-actions"><Badge tone="green">已同步</Badge><button className="btn ghost"><Code2/>源码</button><button className="btn ghost"><Clock3/>版本历史</button><button className="icon-btn"><MoreHorizontal/></button></div></div>
-        <div className="markdown-view">
+      <article className={`document-preview ${outlineCollapsed?'outline-collapsed':''}`}>
+        <div className="preview-head"><div className="breadcrumb"><Library size={14}/><span>{file.path}</span></div><div className="preview-actions"><Badge tone="green">已同步</Badge><div className="view-switch"><button className={viewMode==='preview'?'active':''} onClick={()=>setViewMode('preview')}><BookOpen/>预览</button><button className={viewMode==='source'?'active':''} onClick={()=>setViewMode('source')}><Code2/>源码</button><button className={viewMode==='split'?'active':''} onClick={()=>setViewMode('split')}><Columns2/>分屏</button></div><button className="btn ghost"><Clock3/>版本历史</button><button className="icon-btn" title={outlineCollapsed?'显示本文目录':'隐藏本文目录'} onClick={()=>setOutlineCollapsed(!outlineCollapsed)}>{outlineCollapsed?<PanelLeftOpen/>:<PanelLeftClose/>}</button><button className="icon-btn"><MoreHorizontal/></button></div></div>
+        {viewMode === 'preview' ? <div className="markdown-view">
           <div className="document-meta"><Badge tone="blue">Markdown</Badge><span>版本 {file.version}</span><span>更新于 {file.updated}</span><span>1,286 字</span></div>
           <h1>{file.title}</h1>
           <p>{file.intro}</p>
           <div className="md-callout"><CircleHelp size={18}/><div><b>文档说明</b><span>该文档已发布至正式知识库，AI 分析引用内容均可追溯到当前版本。</span></div></div>
           <h2>1. {file.sections[0]}</h2><p>随着业务规模持续增长，原有流程在扩展性、异常恢复和统一治理方面逐渐暴露出不足。本次调整将围绕核心链路完成能力升级。</p>
+          <figure className="md-image" onClick={()=>setImageOpen(true)}><img src="/assets/payment-flow.svg" alt="统一支付与退款处理流程"/><figcaption><span>图 1：统一支付与退款处理流程</span><em>点击查看原图</em></figcaption></figure>
           <h2>2. {file.sections[1]}</h2>
           <ul><li>统一核心流程及状态流转规则，减少重复实现。</li><li>完善异常、超时和重试场景，确保数据最终一致。</li><li>所有关键结论保留来源引用并支持版本追溯。</li></ul>
           <h2>3. {file.sections[2]}</h2>
           <table className="md-table"><thead><tr><th>能力模块</th><th>主要内容</th><th>优先级</th></tr></thead><tbody><tr><td>核心流程</td><td>主流程、状态流转与结果通知</td><td><Badge tone="red">P0</Badge></td></tr><tr><td>异常治理</td><td>超时、重试、幂等与补偿机制</td><td><Badge tone="orange">P1</Badge></td></tr></tbody></table>
           <h2>4. {file.sections[3]}</h2><p>所有写入操作必须携带唯一业务标识。重复请求返回首次处理结果，不得重复改变业务状态。</p>
-        </div>
-        <nav className="document-outline"><b>本文目录</b>{file.sections.map((s,i)=><a key={s} className={i===0?'active':''}>{i+1}. {s}</a>)}</nav>
+        </div> : viewMode === 'source' ? <div className="source-view"><div className="source-gutter">{source.split('\n').map((_,i)=><span key={i}>{i+1}</span>)}</div><pre><code>{source}</code></pre></div> : <div className="split-view"><section className="split-pane source-pane"><header><Code2/>Markdown 源码</header><div className="source-view"><div className="source-gutter">{source.split('\n').map((_,i)=><span key={i}>{i+1}</span>)}</div><pre><code>{source}</code></pre></div></section><section className="split-pane rendered-pane"><header><BookOpen/>渲染预览</header><div className="split-markdown"><div className="document-meta"><Badge tone="blue">Markdown</Badge><span>版本 {file.version}</span></div><h1>{file.title}</h1><p>{file.intro}</p><div className="md-callout"><CircleHelp size={18}/><div><b>文档说明</b><span>该文档已发布至正式知识库。</span></div></div><h2>1. {file.sections[0]}</h2><p>随着业务规模持续增长，原有流程在扩展性、异常恢复和统一治理方面逐渐暴露出不足。</p><figure className="md-image" onClick={()=>setImageOpen(true)}><img src="/assets/payment-flow.svg" alt="统一支付与退款处理流程"/><figcaption><span>图 1：统一支付与退款处理流程</span><em>点击查看原图</em></figcaption></figure><h2>2. {file.sections[1]}</h2><ul><li>统一核心流程及状态流转规则。</li><li>完善异常、超时和重试场景。</li><li>保留来源引用并支持版本追溯。</li></ul><h2>3. {file.sections[2]}</h2><table className="md-table"><tbody><tr><td>核心流程</td><td>状态流转与结果通知</td></tr><tr><td>异常治理</td><td>超时、重试与补偿机制</td></tr></tbody></table></div></section></div>}
+        {viewMode === 'preview' && <nav className="document-outline"><b>本文目录</b>{file.sections.map((s,i)=><a key={s} className={i===0?'active':''}>{i+1}. {s}</a>)}</nav>}
       </article>
     </div>
+    {imageOpen && <div className="image-lightbox" onClick={()=>setImageOpen(false)}><button aria-label="关闭原图"><XCircle/></button><div onClick={e=>e.stopPropagation()}><img src="/assets/payment-flow.svg" alt="统一支付与退款处理流程原图"/><p>统一支付与退款处理流程 · assets/payment-flow.svg</p></div></div>}
   </section>
 }
 

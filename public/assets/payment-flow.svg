@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f7f8ff"/><stop offset="1" stop-color="#eef1ff"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#5865d8" flood-opacity=".12"/></filter>
+  </defs>
+  <rect width="1200" height="620" rx="24" fill="url(#bg)"/>
+  <text x="60" y="70" font-family="Arial,sans-serif" font-size="28" font-weight="700" fill="#273248">统一支付与退款处理流程</text>
+  <text x="60" y="104" font-family="Arial,sans-serif" font-size="15" fill="#7d879a">Payment &amp; Refund Processing Flow · V2.3</text>
+  <g filter="url(#shadow)" font-family="Arial,sans-serif">
+    <g transform="translate(65 220)"><rect width="190" height="120" rx="16" fill="white"/><circle cx="42" cy="42" r="18" fill="#eef0ff"/><text x="42" y="48" text-anchor="middle" font-size="19" fill="#5965e9">1</text><text x="28" y="84" font-size="18" font-weight="700" fill="#303a4b">业务请求</text><text x="28" y="105" font-size="13" fill="#8a94a6">订单 / 退款申请</text></g>
+    <g transform="translate(335 220)"><rect width="190" height="120" rx="16" fill="white"/><circle cx="42" cy="42" r="18" fill="#e9f8f2"/><text x="42" y="48" text-anchor="middle" font-size="19" fill="#20a071">2</text><text x="28" y="84" font-size="18" font-weight="700" fill="#303a4b">幂等校验</text><text x="28" y="105" font-size="13" fill="#8a94a6">唯一业务标识</text></g>
+    <g transform="translate(605 220)"><rect width="190" height="120" rx="16" fill="white"/><circle cx="42" cy="42" r="18" fill="#fff3e6"/><text x="42" y="48" text-anchor="middle" font-size="19" fill="#df8c39">3</text><text x="28" y="84" font-size="18" font-weight="700" fill="#303a4b">渠道处理</text><text x="28" y="105" font-size="13" fill="#8a94a6">支付网关适配</text></g>
+    <g transform="translate(875 220)"><rect width="190" height="120" rx="16" fill="white"/><circle cx="42" cy="42" r="18" fill="#fcecef"/><text x="42" y="48" text-anchor="middle" font-size="19" fill="#dc5365">4</text><text x="28" y="84" font-size="18" font-weight="700" fill="#303a4b">结果通知</text><text x="28" y="105" font-size="13" fill="#8a94a6">状态同步 / 回调</text></g>
+  </g>
+  <g stroke="#9aa4eb" stroke-width="3" fill="none"><path d="M255 280h68"/><path d="m313 271 10 9-10 9"/><path d="M525 280h68"/><path d="m583 271 10 9-10 9"/><path d="M795 280h68"/><path d="m853 271 10 9-10 9"/></g>
+  <rect x="335" y="407" width="460" height="92" rx="14" fill="#fff" stroke="#dfe3fb"/><circle cx="380" cy="453" r="20" fill="#eef0ff"/><path d="M370 453h20m-10-10v20" stroke="#5965e9" stroke-width="3"/><text x="418" y="447" font-family="Arial,sans-serif" font-size="17" font-weight="700" fill="#303a4b">异常补偿与重试</text><text x="418" y="472" font-family="Arial,sans-serif" font-size="13" fill="#7e899b">超时任务进入补偿队列，确保状态最终一致</text>
+  <path d="M700 340v44c0 14-12 23-25 23H565" stroke="#9aa4eb" stroke-width="3" stroke-dasharray="7 7" fill="none"/>
+  <text x="60" y="568" font-family="Arial,sans-serif" font-size="13" fill="#9aa3b2">SmartHub Knowledge Base · assets/payment-flow.svg</text>
+</svg>
