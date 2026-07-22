@@ -3,6 +3,20 @@ export type SourceType = 'upload'
 export type VersionStatus = 'pending' | 'syncing' | 'ready' | 'failed' | 'deleted'
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
+export interface EmbeddingSourceModel {
+  name: string
+  dimensions: number
+}
+
+export interface EmbeddingSource {
+  id: string
+  name: string
+  type: 'remote_api' | 'local'
+  baseUrl: string
+  apiKey: string
+  models: EmbeddingSourceModel[]
+}
+
 export interface KnowledgeConfig {
   encoding: 'utf-8'
   parserVersion: string
@@ -11,6 +25,8 @@ export interface KnowledgeConfig {
   chunkMaxSize: number
   chunkOverlap: number
   headingDepth: number
+  embeddingSourceId: string
+  embeddingSources: EmbeddingSource[]
   embeddingMode: 'remote_api' | 'local'
   embeddingBaseUrl: string
   embeddingApiKey: string
@@ -25,6 +41,7 @@ export interface KnowledgeConfig {
   relevanceThreshold: number
   hybridSearch: boolean
   rerankerEnabled: boolean
+  rerankerSourceId: string
   rerankerModel: string
 }
 
@@ -43,6 +60,8 @@ export interface DatabaseState { projects: Project[]; knowledgeBases: KnowledgeB
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',
   parserVersion: 'markdown-v2', preprocessVersion: 'normalize-v1', chunkTargetSize: 400, chunkMaxSize: 480, chunkOverlap: 50, headingDepth: 4,
+  embeddingSourceId: 'local-default',
+  embeddingSources: [{ id: 'local-default', name: '本地模型', type: 'local', baseUrl: '', apiKey: '', models: [{ name: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', dimensions: 384 }] }],
   embeddingMode: 'local', embeddingBaseUrl: '', embeddingApiKey: '', embeddingModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', embeddingDimensions: 384, embeddingBatchSize: 32, embeddingTimeoutMs: 30000, embeddingRetries: 2,
-  keywordRecall: 40, vectorRecall: 40, finalResults: 8, relevanceThreshold: 0.05, hybridSearch: true, rerankerEnabled: true, rerankerModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+  keywordRecall: 40, vectorRecall: 40, finalResults: 8, relevanceThreshold: 0.05, hybridSearch: true, rerankerEnabled: true, rerankerSourceId: 'local-default', rerankerModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
 }

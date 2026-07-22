@@ -97,6 +97,15 @@ export const knowledgeDocuments: KnowledgeDocument[] = [
   { id: 'quality-gate', name: '质量门禁规范.md', parentId: 'directory-testing', version: 'V3.1', updated: '5 天前', title: '质量门禁规范', intro: '定义各测试阶段的准入、准出条件以及阻断发布的质量指标。', sections: ['适用范围', '准入条件', '准出条件', '风险豁免', '审计要求'] },
 ]
 
+export type EmbeddingSourceDraft = {
+  id: string
+  name: string
+  type: 'remote_api' | 'local'
+  baseUrl: string
+  apiKey: string
+  models: { name: string; dimensions: number }[]
+}
+
 export type SettingsDraft = {
   mainModel: string
   temperature: number
@@ -110,6 +119,7 @@ export type SettingsDraft = {
   relevanceThreshold: number
   hybridSearch: boolean
   rerankerEnabled: boolean
+  rerankerSourceId: string
   rerankerModel: string
   repositoryUrl: string
   defaultBranch: string
@@ -118,6 +128,8 @@ export type SettingsDraft = {
   preprocessVersion: string
   chunkMaxSize: string
   headingDepth: string
+  embeddingSourceId: string
+  embeddingSources: EmbeddingSourceDraft[]
   embeddingMode: string
   embeddingBaseUrl: string
   embeddingApiKey: string
@@ -141,6 +153,7 @@ export const initialSettings: SettingsDraft = {
   relevanceThreshold: 0.62,
   hybridSearch: true,
   rerankerEnabled: true,
+  rerankerSourceId: 'local-default',
   rerankerModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
   repositoryUrl: 'https://git.example.com/smarthub.git',
   defaultBranch: 'main',
@@ -149,6 +162,8 @@ export const initialSettings: SettingsDraft = {
   preprocessVersion: 'normalize-v1',
   chunkMaxSize: '480',
   headingDepth: '4',
+  embeddingSourceId: 'local-default',
+  embeddingSources: [{ id: 'local-default', name: '本地模型', type: 'local', baseUrl: '', apiKey: '', models: [{ name: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', dimensions: 384 }] }],
   embeddingMode: 'local',
   embeddingBaseUrl: '',
   embeddingApiKey: '',

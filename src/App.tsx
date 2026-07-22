@@ -8,15 +8,16 @@ import {
 } from 'lucide-react'
 import {
   initialSettings, requirementsByVersion, type KnowledgeDirectory, type KnowledgeDocument, type Requirement,
-  type SettingsDraft, type Version,
+  type EmbeddingSourceDraft, type SettingsDraft, type Version,
 } from './prototype-data'
-import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, ensureKnowledgeBase, loadConfig, loadKnowledgeAssets, loadLocalModelStatus, loadTasks, rebuildIndex, renameKnowledgeDirectory, saveConfig, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTasks, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
+import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, ensureKnowledgeBase, loadConfig, loadKnowledgeAssets, loadLocalModelStatuses, loadTasks, rebuildIndex, renameKnowledgeDirectory, saveConfig, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTasks, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
-type Notify = (message: string) => void
+type NotifyTone = 'success' | 'error' | 'warning'
+type Notify = (message: string, tone?: NotifyTone) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
 type SearchLocation = { assetId: string; startLine: number; endLine: number; nonce: number }
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
@@ -82,7 +83,7 @@ function App() {
   const [page, setPage] = useState<PageKey>(restorePage)
   const [version, setVersion] = useState<Version>('V3.6')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [toast, setToast] = useState<{ id: number; message: string } | null>(null)
+  const [toast, setToast] = useState<{ id: number; message: string; tone: NotifyTone } | null>(null)
   const [requirementLists, setRequirementLists] = useState<Record<Version, Requirement[]>>(requirementsByVersion)
   const [knowledgeDirectoryList, setKnowledgeDirectoryList] = useState<KnowledgeDirectory[]>([])
   const [knowledgeDocumentList, setKnowledgeDocumentList] = useState<KnowledgeDocument[]>([])
@@ -93,9 +94,9 @@ function App() {
   const [knowledgeApiState, setKnowledgeApiState] = useState<'connecting' | 'ready' | 'offline'>('connecting')
   const toastTimer = useRef<number | undefined>(undefined)
 
-  const notify: Notify = message => {
+  const notify: Notify = (message, tone = 'success') => {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
-    const next = { id: Date.now(), message }
+    const next = { id: Date.now(), message, tone }
     setToast(next)
     toastTimer.current = window.setTimeout(() => setToast(current => current?.id === next.id ? null : current), 2600)
   }
@@ -166,7 +167,7 @@ function App() {
       <button className="sidebar-foot" onClick={() => notify('帮助与反馈为静态原型说明：当前数据仅保留在本次会话中。')}><CircleHelp size={17} /><span>帮助与反馈</span><span className="version">v0.1</span></button>
     </aside>
     <main>
-      <section className={`content ${page === 'documents' ? 'documents-content' : ''}`}>
+      <section className={`content ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div>{page === 'requirements' && <div className="head-actions"><button className="btn ghost" onClick={() => setActivityOpen(true)}><Clock3 size={16} />操作记录</button><button className="btn primary" onClick={() => setRequirementCreateOpen(true)}><Plus size={17} />新建需求分析</button></div>}</div>
         {page === 'dashboard' && <Dashboard navigate={setPage} version={version} />}
         {page === 'requirements' && <Requirements version={version} requirements={requirementLists[version]} createOpen={requirementCreateOpen} setCreateOpen={setRequirementCreateOpen} onCreate={addRequirement} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
@@ -177,7 +178,7 @@ function App() {
         {page === 'settings' && <SystemSettings knowledgeBaseId={knowledgeBaseId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
       </section>
     </main>
-    {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast.message}</div>}
+    {toast && <div className={`toast ${toast.tone}`} role={toast.tone === 'error' ? 'alert' : 'status'}>{toast.tone === 'error' ? <XCircle size={18} /> : toast.tone === 'warning' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}{toast.message}</div>}
     {activityOpen && <Modal title="本次会话操作记录" onClose={() => setActivityOpen(false)}><div className="activity-modal"><p>记录只保留在当前浏览器会话中。</p>{audit.map((entry, index) => <div key={`${entry}-${index}`}><Clock3 size={15} /><span>{entry}</span></div>)}</div></Modal>}
   </div>
 }
@@ -735,38 +736,45 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
   const [draft, setDraft] = useState<SettingsDraft>(initialSettings)
   const [configVersion, setConfigVersion] = useState<number | null>(null)
   const [requiresRebuild, setRequiresRebuild] = useState(false)
+  const editorScrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => { if (!knowledgeBaseId) return; void loadConfig(knowledgeBaseId).then(value => {
     const config = value.config
-    const mapped: SettingsDraft = { ...initialSettings, parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkSize: `${config.chunkTargetSize} tokens`, chunkMaxSize: String(config.chunkMaxSize), chunkOverlap: `${config.chunkOverlap} tokens`, headingDepth: String(config.headingDepth), embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingApiKey: config.embeddingApiKey, embeddingModel: config.embeddingModel, embeddingDimensions: String(config.embeddingDimensions), embeddingBatchSize: String(config.embeddingBatchSize), embeddingTimeoutMs: String(config.embeddingTimeoutMs), embeddingRetries: String(config.embeddingRetries), vectorRecall: String(config.vectorRecall), keywordRecall: String(config.keywordRecall), finalResults: String(config.finalResults), relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerModel: config.rerankerModel }
+    const mapped: SettingsDraft = { ...initialSettings, parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkSize: `${config.chunkTargetSize} tokens`, chunkMaxSize: String(config.chunkMaxSize), chunkOverlap: `${config.chunkOverlap} tokens`, headingDepth: String(config.headingDepth), embeddingSourceId: config.embeddingSourceId, embeddingSources: config.embeddingSources, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingApiKey: config.embeddingApiKey, embeddingModel: config.embeddingModel, embeddingDimensions: String(config.embeddingDimensions), embeddingBatchSize: String(config.embeddingBatchSize), embeddingTimeoutMs: String(config.embeddingTimeoutMs), embeddingRetries: String(config.embeddingRetries), vectorRecall: String(config.vectorRecall), keywordRecall: String(config.keywordRecall), finalResults: String(config.finalResults), relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId ?? config.embeddingSourceId, rerankerModel: config.rerankerModel }
     setSaved(mapped); setDraft(mapped); setConfigVersion(value.version); setRequiresRebuild(value.requiresRebuild)
   }).catch(() => notify('知识库配置 API 未连接。')) }, [knowledgeBaseId])
   const current = items[selected]
   const CurrentIcon = current.icon
   const dirty = JSON.stringify(saved) !== JSON.stringify(draft)
+  useEffect(() => { editorScrollRef.current?.scrollTo({ top: 0 }) }, [selected])
   useEffect(() => { const warn = (event: BeforeUnloadEvent) => { if (!dirty) return; event.preventDefault(); event.returnValue = '' }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn) }, [dirty])
   const update = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => setDraft(currentDraft => ({ ...currentDraft, [key]: value }))
   const save = async () => {
     if (selected === 2 && knowledgeBaseId) {
+      if (draft.embeddingModel && Number(draft.embeddingDimensions) <= 0) { notify('请先运行本地模型，或测试远程模型，以自动检测向量维度。'); return }
+      const rerankerSource = draft.embeddingSources.find(source => source.id === draft.rerankerSourceId)
+      const rerankerModel = rerankerSource?.models.find(model => model.name === draft.rerankerModel)
+      if (draft.rerankerEnabled && (!rerankerSource || !rerankerModel)) { notify('请为 Reranker 选择有效的模型来源和模型。'); return }
+      if (draft.rerankerEnabled && rerankerModel!.dimensions <= 0) { notify('请先运行或检测所选 Reranker 模型的向量维度。'); return }
       try {
-        const result = await saveConfig(knowledgeBaseId, { parserVersion: draft.parserVersion, preprocessVersion: draft.preprocessVersion, chunkTargetSize: Number.parseInt(draft.chunkSize), chunkMaxSize: Number(draft.chunkMaxSize), chunkOverlap: Number.parseInt(draft.chunkOverlap), headingDepth: Number(draft.headingDepth), embeddingMode: draft.embeddingMode, embeddingBaseUrl: draft.embeddingBaseUrl, embeddingApiKey: draft.embeddingApiKey, embeddingModel: draft.embeddingModel, embeddingDimensions: Number(draft.embeddingDimensions), embeddingBatchSize: Number(draft.embeddingBatchSize), embeddingTimeoutMs: Number(draft.embeddingTimeoutMs), embeddingRetries: Number(draft.embeddingRetries), vectorRecall: Number(draft.vectorRecall), keywordRecall: Number(draft.keywordRecall), finalResults: Number(draft.finalResults), relevanceThreshold: draft.relevanceThreshold, hybridSearch: draft.hybridSearch, rerankerEnabled: draft.rerankerEnabled, rerankerModel: draft.rerankerModel })
+        const result = await saveConfig(knowledgeBaseId, { parserVersion: draft.parserVersion, preprocessVersion: draft.preprocessVersion, chunkTargetSize: Number.parseInt(draft.chunkSize), chunkMaxSize: Number(draft.chunkMaxSize), chunkOverlap: Number.parseInt(draft.chunkOverlap), headingDepth: Number(draft.headingDepth), embeddingSourceId: draft.embeddingSourceId, embeddingSources: draft.embeddingSources, embeddingMode: draft.embeddingMode, embeddingBaseUrl: draft.embeddingBaseUrl, embeddingApiKey: draft.embeddingApiKey, embeddingModel: draft.embeddingModel, embeddingDimensions: Number(draft.embeddingDimensions), embeddingBatchSize: Number(draft.embeddingBatchSize), embeddingTimeoutMs: Number(draft.embeddingTimeoutMs), embeddingRetries: Number(draft.embeddingRetries), vectorRecall: Number(draft.vectorRecall), keywordRecall: Number(draft.keywordRecall), finalResults: Number(draft.finalResults), relevanceThreshold: draft.relevanceThreshold, hybridSearch: draft.hybridSearch, rerankerEnabled: draft.rerankerEnabled, rerankerSourceId: draft.rerankerSourceId, rerankerModel: draft.rerankerModel })
         setSaved(draft); setConfigVersion(result.configVersion.version); setRequiresRebuild(result.configVersion.requiresRebuild); addAudit(`保存知识库配置 V${result.configVersion.version}`); notify(result.impact === 'index_rebuild' ? '配置已保存；兼容性变更需要确认重建索引。' : result.impact === 'query' ? '检索配置已保存，无需重建索引。' : '知识库配置已保存。'); return
       } catch (error) { notify(error instanceof Error ? error.message : '配置保存失败'); return }
     }
     setSaved(draft); addAudit(`保存系统设置草稿：${current.name}`); notify('配置已保存在当前会话。')
   }
   return <div className={`settings-layout ${collapsed ? 'directory-collapsed' : ''}`}><aside className={`card settings-directory ${collapsed ? 'collapsed' : ''}`}><div className="settings-dir-head"><b>配置目录</b><button className="icon-btn" title={collapsed ? '展开配置目录' : '收起配置目录'} aria-label={collapsed ? '展开配置目录' : '收起配置目录'} onClick={() => setCollapsed(value => !value)}>{collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{['AI 能力', '资源与集成', '安全与治理'].map(group => <div className="settings-group" key={group}><p>{group}</p>{items.map((item, index) => item.group === group && <button key={item.name} className={selected === index ? 'active' : ''} onClick={() => setSelected(index)}><item.icon /><span><b>{item.name}</b><small>{item.desc}</small></span><ChevronRight /></button>)}</div>)}</aside>
-    <section className="card settings-editor"><div className="settings-editor-head"><div className="setting-symbol"><CurrentIcon /></div><div><h2>{current.name}</h2><p>{current.desc}{selected === 2 && configVersion ? ` · 配置 V${configVersion}` : ''}</p></div><Badge tone={dirty ? 'orange' : requiresRebuild && selected === 2 ? 'orange' : 'green'}>{dirty ? '有未保存更改' : requiresRebuild && selected === 2 ? '待重建' : '已保存'}</Badge><button className="btn primary" disabled={!dirty} onClick={() => void save()}><Check />保存配置</button></div>
+    <section className="card settings-editor"><div className="settings-editor-head"><div className="setting-symbol"><CurrentIcon /></div><div><h2>{current.name}</h2><p>{current.desc}{selected === 2 && configVersion ? ` · 配置 V${configVersion}` : ''}</p></div><Badge tone={dirty ? 'orange' : requiresRebuild && selected === 2 ? 'orange' : 'green'}>{dirty ? '有未保存更改' : requiresRebuild && selected === 2 ? '待重建' : '已保存'}</Badge><button className="btn primary" disabled={!dirty} onClick={() => void save()}><Check />保存配置</button></div><div className="settings-editor-scroll" ref={editorScrollRef}>
       {selected === 0 && <ModelRoutingSettings draft={draft} update={update} />}
       {selected === 1 && <StaticSettings title="Prompt 模板" text="模板与 Agent 权限当前显示为本地示例；保存按钮可保存会话内草稿设置。" />}
       {selected === 2 && <div className="settings-form">
-        <FormSection title="向量模型" desc="远程 API 与本地模型运行配置"><EmbeddingModelPrototype knowledgeBaseId={knowledgeBaseId} draft={draft} update={update} notify={notify} /></FormSection>
+        <FormSection title="模型来源与运行时" desc="集中管理多个来源和模型，再选择知识库实际使用的来源与模型"><EmbeddingModelPrototype knowledgeBaseId={knowledgeBaseId} draft={draft} update={update} notify={notify} /></FormSection>
         <FormSection title="Markdown 切分" desc="按模型 tokenizer 计数；修改后需要重建索引"><FormRow label="目标 Chunk 大小" help="默认 400 tokens，达到目标后优先在 Markdown 结构边界切分"><select value={draft.chunkSize} onChange={event => { const value = event.target.value; const target = Number.parseInt(value); update('chunkSize', value); if (target > Number(draft.chunkMaxSize)) update('chunkMaxSize', String(target === 600 ? 800 : target)) }}><option>300 tokens</option><option>400 tokens</option><option>600 tokens</option><option>800 tokens</option></select></FormRow><FormRow label="最大 Chunk 大小" help="普通文本不会超过该值；代码块和表格优先保持完整"><select value={draft.chunkMaxSize} onChange={event => { const value = event.target.value; update('chunkMaxSize', value); if (Number.parseInt(draft.chunkSize) > Number(value)) update('chunkSize', `${Math.min(Number(value), 400)} tokens`) }}><option>400</option><option>480</option><option>800</option><option>1200</option></select></FormRow><FormRow label="Chunk 重叠" help="仅在同一标题内切出相邻块时保留尾部上下文"><select value={draft.chunkOverlap} onChange={event => update('chunkOverlap', event.target.value)}><option>0 tokens</option><option>50 tokens</option><option>80 tokens</option><option>120 tokens</option></select></FormRow></FormSection>
         <FormSection title="检索与索引" desc="调整检索参数并管理向量索引"><RetrievalIndexConfig knowledgeBaseId={knowledgeBaseId} requiresRebuild={requiresRebuild} onRebuilt={() => setRequiresRebuild(false)} draft={draft} update={update} notify={notify} /></FormSection>
       </div>}
       {selected === 3 && <div className="settings-form"><FormSection title="代码仓库" desc="当前仅保存本地草稿，不会连接仓库"><FormRow label="仓库地址" help="刷新页面后恢复示例地址"><input value={draft.repositoryUrl} onChange={event => update('repositoryUrl', event.target.value)} /></FormRow><FormRow label="默认分支" help="用于示例基线比较"><input value={draft.defaultBranch} onChange={event => update('defaultBranch', event.target.value)} /></FormRow></FormSection></div>}
       {selected === 4 && <StaticSettings title="访问控制" text="成员、角色和审批流程尚未接入服务端；当前页面仅展示本地原型说明。" />}
       {selected === 5 && <div className="settings-form"><FormSection title="数据安全" desc="安全策略可在本次会话中作为草稿保存"><SwitchRow title="启用完整审计" desc="记录当前会话中的本地模拟操作" checked={draft.auditEnabled} onChange={value => update('auditEnabled', value)} /></FormSection></div>}
-    </section></div>
+    </div></section></div>
 }
 
 function StaticSettings({ title, text }: { title: string; text: string }) { return <div className="settings-form"><FormSection title={title} desc={text}><p className="readonly-notice">此项没有后端支撑，因此不伪造成功、连接或持久化状态。</p></FormSection></div> }
@@ -779,58 +787,162 @@ function FormSection({ title, desc, children }: { title: string; desc?: string; 
 function FormRow({ label, help, children }: { label: string; help: string; children: ReactNode }) { return <label className="form-row"><span><b>{label}</b><small>{help}</small></span><div>{children}</div></label> }
 function SwitchRow({ title, desc, checked, onChange }: { title: string; desc: string; checked: boolean; onChange: (value: boolean) => void }) { return <div className="form-row"><span><b>{title}</b><small>{desc}</small></span><label className="switch"><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} aria-label={title} /><i /></label></div> }
 
+type SourceEditorDraft = { name: string; baseUrl: string; apiKey: string; modelName: string }
+const localModelRecommendations = [
+  { name: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', title: '多语言通用 · 推荐', detail: '中英文知识库 · 384 维' },
+  { name: 'Xenova/multilingual-e5-small', title: '多语言检索', detail: '面向语义检索 · 384 维' },
+  { name: 'Xenova/all-MiniLM-L6-v2', title: '英文轻量模型', detail: '体积较小、速度快 · 384 维' },
+] as const
+
 function EmbeddingModelPrototype({ knowledgeBaseId, draft, update, notify }: { knowledgeBaseId: string; draft: SettingsDraft; update: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void; notify: Notify }) {
-  const [testing, setTesting] = useState(false)
-  const [runtime, setRuntime] = useState<LocalModelStatus | null>(null)
-  const [runtimeBusy, setRuntimeBusy] = useState(false)
-  const remote = draft.embeddingMode === 'remote_api'
+  const [testingModel, setTestingModel] = useState('')
+  const [runtimeStatuses, setRuntimeStatuses] = useState<LocalModelStatus[]>([])
+  const [runtimeBusy, setRuntimeBusy] = useState('')
+  const [sourceEditor, setSourceEditor] = useState<SourceEditorDraft | null>(null)
+  const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({})
+  const [recommendationSourceId, setRecommendationSourceId] = useState('')
+  const selectedSource = draft.embeddingSources.find(source => source.id === draft.embeddingSourceId) ?? draft.embeddingSources[0]
+
   useEffect(() => {
-    if (remote) return
+    if (!draft.embeddingSources.some(source => source.type === 'local')) return
     let active = true
-    const refresh = () => loadLocalModelStatus().then(status => { if (active) setRuntime(status) }).catch(() => undefined)
+    const refresh = () => loadLocalModelStatuses().then(statuses => { if (active) setRuntimeStatuses(statuses) }).catch(() => undefined)
     void refresh()
     const timer = window.setInterval(refresh, 1000)
     return () => { active = false; window.clearInterval(timer) }
-  }, [remote])
+  }, [draft.embeddingSources])
+
   useEffect(() => {
-    if (runtime?.phase === 'running' && runtime.model === draft.embeddingModel && runtime.dimensions && draft.embeddingDimensions !== String(runtime.dimensions)) update('embeddingDimensions', String(runtime.dimensions))
-  }, [draft.embeddingDimensions, draft.embeddingModel, runtime, update])
-  const testConnection = async () => {
-    if (!draft.embeddingBaseUrl || !draft.embeddingModel) { notify('请先填写 Base URL 和模型名称。'); return }
-    setTesting(true)
-    try {
-      const result = await testEmbeddingConfig(knowledgeBaseId, { embeddingMode: 'remote_api', embeddingBaseUrl: draft.embeddingBaseUrl, embeddingApiKey: draft.embeddingApiKey, embeddingModel: draft.embeddingModel, embeddingDimensions: Number(draft.embeddingDimensions), embeddingBatchSize: Number(draft.embeddingBatchSize), embeddingTimeoutMs: Number(draft.embeddingTimeoutMs), embeddingRetries: Number(draft.embeddingRetries) })
-      notify(`Embedding 连接验证成功：${result.model} · ${result.dimensions} 维。`)
-    } catch (error) { notify(error instanceof Error ? error.message : 'Embedding 连接验证失败。') }
-    finally { setTesting(false) }
+    let changed = false
+    const sources = draft.embeddingSources.map(source => source.type !== 'local' ? source : { ...source, models: source.models.map(model => {
+      const dimensions = runtimeStatuses.find(status => status.model === model.name && status.phase === 'running')?.dimensions
+      if (!dimensions || dimensions === model.dimensions) return model
+      changed = true; return { ...model, dimensions }
+    }) })
+    if (changed) update('embeddingSources', sources)
+    const status = runtimeStatuses.find(item => item.model === draft.embeddingModel && item.phase === 'running')
+    if (status?.dimensions && draft.embeddingDimensions !== String(status.dimensions)) update('embeddingDimensions', String(status.dimensions))
+  }, [draft.embeddingDimensions, draft.embeddingModel, draft.embeddingSourceId, draft.embeddingSources, runtimeStatuses, update])
+
+  const applySelection = (source: EmbeddingSourceDraft, model = source.models[0]) => {
+    if (!model) return
+    update('embeddingSourceId', source.id)
+    update('embeddingMode', source.type)
+    update('embeddingBaseUrl', source.baseUrl)
+    update('embeddingApiKey', source.apiKey)
+    update('embeddingModel', model.name)
+    update('embeddingDimensions', String(model.dimensions))
   }
-  const operateLocalModel = async () => {
-    if (!draft.embeddingModel) { notify('请先填写模型名称。'); return }
-    setRuntimeBusy(true)
+  const updateSources = (sources: EmbeddingSourceDraft[]) => update('embeddingSources', sources)
+  const replaceSource = (next: EmbeddingSourceDraft) => updateSources(draft.embeddingSources.map(source => source.id === next.id ? next : source))
+
+  const addSource = () => {
+    if (!sourceEditor) return
+    const name = sourceEditor.name.trim(); const modelName = sourceEditor.modelName.trim()
+    if (!name || !modelName) { notify('请填写来源名称和模型名称。'); return }
+    if (!/^https?:\/\//i.test(sourceEditor.baseUrl)) { notify('远程来源 Base URL 必须使用 http:// 或 https://。'); return }
+    const source: EmbeddingSourceDraft = { id: crypto.randomUUID(), name, type: 'remote_api', baseUrl: sourceEditor.baseUrl.trim(), apiKey: sourceEditor.apiKey, models: [{ name: modelName, dimensions: 0 }] }
+    updateSources([...draft.embeddingSources, source]); applySelection(source); setSourceEditor(null)
+  }
+
+  const addModel = (source: EmbeddingSourceDraft) => {
+    const name = (modelDrafts[source.id] ?? '').trim()
+    if (!name) { notify('请填写模型名称。'); return }
+    if (source.models.some(model => model.name === name)) { notify('该来源中已存在同名模型。'); return }
+    replaceSource({ ...source, models: [...source.models, { name, dimensions: 0 }] })
+    setModelDrafts(current => ({ ...current, [source.id]: '' }))
+    setRecommendationSourceId('')
+  }
+
+  const removeModel = async (source: EmbeddingSourceDraft, modelName: string) => {
+    if (source.type === 'remote_api' && source.models.length === 1) { notify('远程来源至少需要保留一个模型；如不再使用，可以删除整个远程来源。'); return }
+    const runtime = source.type === 'local' ? runtimeStatuses.find(status => status.model === modelName) : undefined
+    if (runtime && runtime.phase !== 'idle') {
+      setRuntimeBusy(modelName)
+      try {
+        const status = await stopLocalModel(modelName)
+        setRuntimeStatuses(current => [...current.filter(item => item.model !== modelName), status])
+      } catch (error) { notify(error instanceof Error ? error.message : '停止本地模型失败，暂未删除。'); return }
+      finally { setRuntimeBusy('') }
+    }
+    const next = { ...source, models: source.models.filter(model => model.name !== modelName) }
+    const sources = draft.embeddingSources.map(item => item.id === source.id ? next : item)
+    const fallback = (next.models.length ? next : sources.find(item => item.models.length > 0))
+    updateSources(sources)
+    if (draft.embeddingSourceId === source.id && draft.embeddingModel === modelName) {
+      if (fallback) applySelection(fallback)
+      else { update('embeddingSourceId', source.id); update('embeddingMode', 'local'); update('embeddingBaseUrl', ''); update('embeddingApiKey', ''); update('embeddingModel', ''); update('embeddingDimensions', '0') }
+    }
+    if (draft.rerankerSourceId === source.id && draft.rerankerModel === modelName) {
+      if (fallback) { update('rerankerSourceId', fallback.id); update('rerankerModel', fallback.models[0].name) }
+      else { update('rerankerEnabled', false); update('rerankerSourceId', source.id); update('rerankerModel', '') }
+    }
+    notify(`已删除${source.type === 'local' ? '本地' : '远程'}模型 ${modelName}${fallback ? '，相关选择已自动更新。' : '；当前没有可用模型，请重新添加或配置远程来源。'}`)
+  }
+
+  const removeSource = (sourceId: string) => {
+    if (draft.embeddingSources.find(source => source.id === sourceId)?.type === 'local') { notify('本地模型为系统内置来源，不能删除。'); return }
+    if (draft.embeddingSources.length === 1) { notify('至少保留一个模型来源。'); return }
+    const remaining = draft.embeddingSources.filter(source => source.id !== sourceId)
+    updateSources(remaining)
+    if (draft.embeddingSourceId === sourceId) applySelection(remaining[0])
+    if (draft.rerankerSourceId === sourceId) { update('rerankerSourceId', remaining[0].id); update('rerankerModel', remaining[0].models[0].name) }
+  }
+
+  const testConnection = async (source: EmbeddingSourceDraft, model: EmbeddingSourceDraft['models'][number]) => {
+    setTestingModel(`${source.id}:${model.name}`)
     try {
-      const sameModelRunning = runtime?.phase === 'running' && runtime.model === draft.embeddingModel
-      const status = sameModelRunning ? await stopLocalModel() : await startLocalModel(draft.embeddingModel)
-      setRuntime(status)
-      notify(sameModelRunning ? '本地模型已停止。' : '已由 SmartHub 开始拉取并加载模型。')
+      const result = await testEmbeddingConfig(knowledgeBaseId, { embeddingSourceId: source.id, embeddingSources: draft.embeddingSources, embeddingMode: 'remote_api', embeddingBaseUrl: source.baseUrl, embeddingApiKey: source.apiKey, embeddingModel: model.name, embeddingDimensions: model.dimensions, embeddingBatchSize: Number(draft.embeddingBatchSize), embeddingTimeoutMs: Number(draft.embeddingTimeoutMs), embeddingRetries: Number(draft.embeddingRetries) })
+      updateSources(draft.embeddingSources.map(item => item.id !== source.id ? item : { ...item, models: item.models.map(candidate => candidate.name === model.name ? { ...candidate, dimensions: result.dimensions } : candidate) }))
+      if (draft.embeddingSourceId === source.id && draft.embeddingModel === model.name) update('embeddingDimensions', String(result.dimensions))
+      notify(`连接验证成功：${source.name} / ${result.model} · ${result.dimensions} 维。`)
+    } catch (error) { notify(error instanceof Error ? error.message : 'Embedding 连接验证失败。', 'error') }
+    finally { setTestingModel('') }
+  }
+
+  const operateLocalModel = async (model: string, running: boolean) => {
+    setRuntimeBusy(model)
+    try {
+      const status = running ? await stopLocalModel(model) : await startLocalModel(model)
+      setRuntimeStatuses(current => [...current.filter(item => item.model !== model), status])
+      notify(running ? `已停止本地模型 ${model}。` : `已开始拉取并加载 ${model}；其他模型继续运行。`)
     } catch (error) { notify(error instanceof Error ? error.message : '本地模型操作失败。') }
-    finally { setRuntimeBusy(false) }
+    finally { setRuntimeBusy('') }
   }
-  const runtimeTitle = runtime?.phase === 'running' ? '本地模型已运行' : runtime?.phase === 'downloading' ? '正在下载模型' : runtime?.phase === 'loading' ? '正在加载模型' : runtime?.phase === 'stopping' ? '正在停止模型' : runtime?.phase === 'failed' ? '本地模型启动失败' : '本地模型尚未启动'
-  const runtimeWorking = runtime?.phase === 'downloading' || runtime?.phase === 'loading' || runtime?.phase === 'stopping'
-  const sameModelRunning = runtime?.phase === 'running' && runtime.model === draft.embeddingModel
-  const runtimeDetail = runtime?.error ?? `${runtime?.model || draft.embeddingModel || '请先填写模型名称'} · 系统目录 ${runtime?.cacheDirectory ?? 'data/models/cache'}${runtime?.dimensions ? ` · ${runtime.dimensions} 维` : ''}`
-  return <div className="vector-config">
-    <div className="model-mode"><button className={remote ? 'active' : ''} onClick={() => update('embeddingMode', 'remote_api')}><Database />远程 API</button><button className={!remote ? 'active' : ''} onClick={() => update('embeddingMode', 'local')}><Download />本地模型</button></div>
-    {remote ? <div className="model-panel">
-      <label><span>Base URL</span><input value={draft.embeddingBaseUrl} onChange={event => update('embeddingBaseUrl', event.target.value)} placeholder="https://api.example.com/v1" /></label>
-      <label><span>API Key</span><input type="password" value={draft.embeddingApiKey} onChange={event => update('embeddingApiKey', event.target.value)} placeholder="请输入 API Key" /></label>
-      <label><span>模型名称</span><input value={draft.embeddingModel} onChange={event => { update('embeddingModel', event.target.value); if (draft.rerankerEnabled) update('rerankerModel', event.target.value) }} placeholder="例如 text-embedding-3-small" /></label>
-      <div className="connection-test"><button className="btn ghost" disabled={testing || !draft.embeddingModel} onClick={testConnection}><Activity />{testing ? '测试中' : '测试连接'}</button></div>
-    </div> : <div className="model-panel">
-      <label><span>模型名称</span><input value={draft.embeddingModel} onChange={event => { update('embeddingModel', event.target.value); if (draft.rerankerEnabled) update('rerankerModel', event.target.value) }} placeholder="例如 Xenova/paraphrase-multilingual-MiniLM-L12-v2" /></label>
-      <div className="local-runtime"><div className={`runtime-icon ${runtimeWorking ? 'pulling' : runtime?.phase === 'running' ? 'running' : ''}`}><Download /></div><span><b>{runtimeTitle}</b><small title={runtimeDetail}>{runtimeDetail}</small>{runtimeWorking && <Progress value={runtime?.progress ?? 0} tone="orange" />}</span><button className={`btn ${sameModelRunning ? 'danger' : 'primary'}`} disabled={!draft.embeddingModel || runtimeBusy || runtimeWorking} onClick={() => void operateLocalModel()}>{sameModelRunning ? <><XCircle />停止</> : <><Download />{runtime?.phase === 'running' ? '切换并启动' : '拉取并启动'}</>}</button></div>
-    </div>}
+
+  const phaseLabel = (phase?: LocalModelStatus['phase']) => phase === 'running' ? '运行中' : phase === 'downloading' ? '下载中' : phase === 'loading' ? '加载中' : phase === 'stopping' ? '停止中' : phase === 'failed' ? '启动失败' : '未运行'
+  const phaseTone = (phase?: LocalModelStatus['phase']) => phase === 'running' ? 'green' : phase === 'failed' ? 'red' : phase && phase !== 'idle' ? 'orange' : 'gray'
+
+  return <div className="model-resource-config">
+    <div className="model-source-toolbar"><div><b>模型来源</b><small>本地模型始终可用；这里可以继续添加远程 API 来源</small></div><button className="btn primary" onClick={() => setSourceEditor({ name: '', baseUrl: '', apiKey: '', modelName: '' })}><Plus />添加远程来源</button></div>
+    <div className="model-source-list">{draft.embeddingSources.map(source => <section className={`model-source-card ${source.id === draft.embeddingSourceId ? 'selected' : ''} ${recommendationSourceId === source.id ? 'recommendations-open' : ''}`} key={source.id}>
+      <header><div className={`source-kind ${source.type}`} >{source.type === 'local' ? <Download /> : <Database />}</div><span><b>{source.name}</b><small title={source.type === 'remote_api' ? source.baseUrl : undefined}>{source.type === 'local' ? '系统内置 · 可同时运行多个模型' : source.baseUrl}</small></span><Badge tone={source.type === 'local' ? 'green' : 'purple'}>{source.type === 'local' ? '本地' : '远程 API'} · {source.models.length} 个</Badge>{source.type === 'remote_api' && <button className="icon-btn" title="删除来源" aria-label={`删除来源 ${source.name}`} onClick={() => removeSource(source.id)}><Trash2 /></button>}</header>
+      <div className="source-model-list"><div className="source-model-table-head"><span>模型</span><span>向量维度</span><span>状态</span><span>操作</span></div>{source.models.map(model => {
+        const runtime = source.type === 'local' ? runtimeStatuses.find(status => status.model === model.name) : undefined
+        const working = runtime?.phase === 'downloading' || runtime?.phase === 'loading' || runtime?.phase === 'stopping'
+        const running = runtime?.phase === 'running'
+        const testKey = `${source.id}:${model.name}`
+        const detectedDimensions = runtime?.dimensions ?? model.dimensions
+        const dimensionReady = detectedDimensions > 0
+        const statusLabel = source.type === 'remote_api' ? model.dimensions > 0 ? '已检测' : '待检测' : runtime?.fallbackUsed && running ? '镜像运行' : phaseLabel(runtime?.phase)
+        return <div className={`source-model-row ${working ? 'working' : ''}`} key={model.name}><div className="model-identity"><div className={`model-state-dot ${runtime?.phase ?? (source.type === 'remote_api' && model.dimensions > 0 ? 'configured' : 'idle')}`} /><span><b title={model.name}>{model.name}</b><small>{source.type === 'local' ? '本地模型' : 'API 模型'}{runtime?.maxTokens ? ` · 最大 ${runtime.maxTokens} tokens` : ''}</small></span></div><div className={`model-dimension ${dimensionReady ? 'ready' : 'pending'} ${runtime?.error ? 'failed' : ''}`}><b>{dimensionReady ? `${detectedDimensions} 维` : '自动检测'}</b><small title={runtime?.error}>{runtime?.error ?? (dimensionReady ? '已识别' : source.type === 'local' ? '运行后识别' : '检测后识别')}</small></div><Badge tone={source.type === 'remote_api' ? model.dimensions > 0 ? 'blue' : 'orange' : phaseTone(runtime?.phase)}>{statusLabel}</Badge><div className="model-row-actions">{source.type === 'local' ? <button className={`btn ${running ? 'danger' : 'ghost'}`} disabled={runtimeBusy === model.name || working} onClick={() => void operateLocalModel(model.name, running)}>{running ? <><XCircle />停止</> : <><Play />运行</>}</button> : <button className="btn ghost" disabled={Boolean(testingModel)} onClick={() => void testConnection(source, model)}><Activity />{testingModel === testKey ? '检测中' : model.dimensions > 0 ? '重检' : '检测'}</button>}<button className="icon-btn model-remove" title="移除模型" aria-label={`移除模型 ${model.name}`} onClick={() => void removeModel(source, model.name)}><Trash2 /></button></div>{working && <div className="model-row-progress"><Progress value={runtime?.progress ?? 0} tone="orange" /><small>{runtime?.progress ?? 0}%</small></div>}</div>
+      })}{source.models.length === 1 && <button type="button" className="source-model-add-slot" onClick={() => document.getElementById(`model-input-${source.id}`)?.focus()}><Plus /><span><b>继续添加模型</b><small>同一来源可以配置多个模型</small></span></button>}{source.models.length === 0 && <div className="source-model-empty"><Download /><span><b>暂无{source.type === 'local' ? '本地' : '远程'}模型</b><small>可以从下方输入模型名称并添加。</small></span></div>}</div>
+      <div className="add-source-model">{source.type === 'local' ? <div className="model-recommendation-combobox" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setRecommendationSourceId('') }}><input id={`model-input-${source.id}`} value={modelDrafts[source.id] ?? ''} onFocus={() => setRecommendationSourceId(source.id)} onChange={event => { setModelDrafts(current => ({ ...current, [source.id]: event.target.value })); setRecommendationSourceId(source.id) }} placeholder="选择推荐模型或输入 Hugging Face 模型名" aria-label="本地模型名称" autoComplete="off" /><button className="recommendation-trigger" type="button" title="选择推荐模型" aria-label="选择推荐模型" aria-expanded={recommendationSourceId === source.id} onClick={() => setRecommendationSourceId(current => current === source.id ? '' : source.id)}><Sparkles /><ChevronDown /></button>{recommendationSourceId === source.id && <div className="model-recommendation-menu" role="listbox"><header><span><Sparkles />推荐模型</span><small>也可以直接输入其他模型名称</small></header>{localModelRecommendations.filter(item => { const query = (modelDrafts[source.id] ?? '').trim().toLocaleLowerCase(); return !query || item.name.toLocaleLowerCase().includes(query) || item.title.toLocaleLowerCase().includes(query) }).map(item => { const added = source.models.some(model => model.name === item.name); return <button type="button" role="option" aria-selected={modelDrafts[source.id] === item.name} disabled={added} key={item.name} onClick={() => { setModelDrafts(current => ({ ...current, [source.id]: item.name })); setRecommendationSourceId('') }}><span><b>{item.title}</b><small>{item.name}</small></span><em>{added ? '已添加' : item.detail}</em></button>})}{localModelRecommendations.every(item => { const query = (modelDrafts[source.id] ?? '').trim().toLocaleLowerCase(); return query && !item.name.toLocaleLowerCase().includes(query) && !item.title.toLocaleLowerCase().includes(query) }) && <p>没有匹配的推荐项，可直接使用当前输入的自定义模型。</p>}</div>}</div> : <input id={`model-input-${source.id}`} value={modelDrafts[source.id] ?? ''} onChange={event => setModelDrafts(current => ({ ...current, [source.id]: event.target.value }))} placeholder="API 模型名称" />}<span className="auto-dimension"><Activity />维度自动检测</span><button className="btn ghost" onClick={() => addModel(source)}><Plus />添加模型</button></div>
+    </section>)}</div>
+    <div className="active-model-picker"><div className="picker-title"><CheckCircle2 /><span><b>知识库生效模型</b><small>先选择来源，再选择该来源下用于向量化和检索的模型</small></span></div><label><span>使用来源</span><select value={selectedSource?.id ?? ''} onChange={event => { const source = draft.embeddingSources.find(item => item.id === event.target.value); if (source) applySelection(source) }}>{draft.embeddingSources.map(source => <option key={source.id} value={source.id}>{source.name} · {source.type === 'local' ? '本地' : '远程'}</option>)}</select></label><label><span>使用模型</span><select value={draft.embeddingModel} disabled={!selectedSource?.models.length} onChange={event => { const model = selectedSource?.models.find(item => item.name === event.target.value); if (selectedSource && model) applySelection(selectedSource, model) }}>{!selectedSource?.models.length && <option value="">暂无模型</option>}{selectedSource?.models.map(model => <option key={model.name} value={model.name}>{model.name} · {model.dimensions > 0 ? `${model.dimensions} 维` : '自动检测'}</option>)}</select></label></div>
+    {selectedSource && <div className={`active-model-summary ${draft.embeddingModel ? '' : 'empty'}`}><Zap /><span><b>{draft.embeddingModel ? `当前选择：${selectedSource.name} / ${draft.embeddingModel}` : '当前没有生效模型'}</b><small>{draft.embeddingModel ? selectedSource.type === 'local' ? '保存后，任务会使用对应的本地运行实例；未运行时将自动启动。' : `请求将发送到 ${selectedSource.baseUrl}` : '可以保存空模型列表；添加本地模型或选择远程模型后即可恢复向量能力。'}</small></span></div>}
+    {sourceEditor && <Modal title="添加远程模型来源" onClose={() => setSourceEditor(null)}><div className="modal-form"><p>支持 OpenAI 兼容 Embeddings API 和 Ollama 原生 API。Ollama 可直接填写 <code>http://localhost:11434/api/embed</code>。</p><label>来源名称<input value={sourceEditor.name} onChange={event => setSourceEditor(current => current ? { ...current, name: event.target.value } : current)} placeholder="例如：本机 Ollama" /></label><label>Base URL<input value={sourceEditor.baseUrl} onChange={event => setSourceEditor(current => current ? { ...current, baseUrl: event.target.value } : current)} placeholder="https://api.example.com/v1 或 http://localhost:11434/api/embed" /></label><label>API Key（可选）<input type="password" value={sourceEditor.apiKey} onChange={event => setSourceEditor(current => current ? { ...current, apiKey: event.target.value } : current)} placeholder="Ollama 本地接口可留空" /></label><label>首个模型<input value={sourceEditor.modelName} onChange={event => setSourceEditor(current => current ? { ...current, modelName: event.target.value } : current)} placeholder="例如：bge-m3" /></label><div className="auto-detect-note"><Activity /><span><b>向量维度：自动检测</b><small>添加后点击“检测”，系统将请求一次 Embedding 并记录实际维度。</small></span></div><div className="modal-actions"><button className="btn ghost" onClick={() => setSourceEditor(null)}>取消</button><button className="btn primary" onClick={addSource}><Plus />添加并选择</button></div></div></Modal>}
   </div>
+}
+
+function RerankerModelDropdown({ source, value, onChange }: { source: EmbeddingSourceDraft | undefined; value: string; onChange: (model: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const selected = source?.models.find(model => model.name === value)
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const models = source?.models.filter(model => !normalizedQuery || model.name.toLocaleLowerCase().includes(normalizedQuery)) ?? []
+  useEffect(() => { setOpen(false); setQuery('') }, [source?.id])
+  return <div className={`reranker-model-dropdown ${open ? 'open' : ''}`} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false) }}><button type="button" className="reranker-model-trigger" disabled={!source} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)}><span><b title={selected?.name}>{selected?.name ?? '请选择 Reranker 模型'}</b><small>{selected ? `${source?.type === 'local' ? '本地模型' : '远程 API'} · ${selected.dimensions > 0 ? `${selected.dimensions} 维` : '维度待检测'}` : '当前来源暂无可选模型'}</small></span>{selected && <Badge tone={selected.dimensions > 0 ? 'green' : 'orange'}>{selected.dimensions > 0 ? '可用' : '待检测'}</Badge>}<ChevronDown /></button>{open && <div className="reranker-model-menu"><div className="reranker-model-search"><Search /><input value={query} autoFocus onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setOpen(false) }} placeholder="搜索模型名称" aria-label="搜索 Reranker 模型" /></div><div className="reranker-model-menu-list" role="listbox">{models.map(model => { const active = model.name === value; return <button type="button" role="option" aria-selected={active} className={active ? 'active' : ''} key={model.name} onClick={() => { onChange(model.name); setOpen(false); setQuery('') }}><span className="reranker-menu-check">{active && <Check />}</span><span><b title={model.name}>{model.name}</b><small>{source?.type === 'local' ? '本地模型' : '远程 API'} · {model.dimensions > 0 ? `${model.dimensions} 维` : '维度待检测'}</small></span><Badge tone={model.dimensions > 0 ? 'green' : 'orange'}>{model.dimensions > 0 ? '可用' : '待检测'}</Badge></button>})}{models.length === 0 && <p>没有匹配的模型</p>}</div><footer>共 {source?.models.length ?? 0} 个模型{normalizedQuery ? ` · 匹配 ${models.length} 个` : ''}</footer></div>}</div>
 }
 
 function RetrievalIndexConfig({ knowledgeBaseId, requiresRebuild, onRebuilt, draft, update, notify }: { knowledgeBaseId: string; requiresRebuild: boolean; onRebuilt: () => void; draft: SettingsDraft; update: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void; notify: Notify }) {
@@ -848,9 +960,17 @@ function RetrievalIndexConfig({ knowledgeBaseId, requiresRebuild, onRebuilt, dra
     catch (error) { setRebuild('failed'); notify(error instanceof Error ? error.message : '索引重建失败，旧索引继续生效。') }
   }
   const cancelRebuild = async () => { if (!rebuildTaskId) return; await cancelTask(rebuildTaskId); setRebuild('cancelled'); setRebuildProgress(0); notify('已取消索引重建；旧活动索引继续生效。') }
+  const rerankerSource = draft.embeddingSources.find(source => source.id === draft.rerankerSourceId)
+  const rerankerModel = rerankerSource?.models.find(model => model.name === draft.rerankerModel)
+  const toggleReranker = (enabled: boolean) => {
+    update('rerankerEnabled', enabled)
+    if (!enabled || (rerankerSource && rerankerModel)) return
+    const fallback = draft.embeddingSources.find(source => source.id === draft.embeddingSourceId) ?? draft.embeddingSources[0]
+    if (fallback) { update('rerankerSourceId', fallback.id); update('rerankerModel', fallback.models[0]?.name ?? '') }
+  }
   return <div className="retrieval-config">
     <div className="retrieval-block"><div className="block-title"><div><b>混合检索</b><small>保存后用于后续真实检索，不需要重建索引</small></div><label className="switch"><input type="checkbox" checked={draft.hybridSearch} onChange={event => update('hybridSearch', event.target.checked)} aria-label="启用混合检索" /><i /></label></div><div className="parameter-grid"><label><span>向量召回数量</span><select value={draft.vectorRecall} onChange={event => update('vectorRecall', event.target.value)}><option>30</option><option>40</option><option>50</option></select></label><label><span>关键词召回数量</span><select value={draft.keywordRecall} onChange={event => update('keywordRecall', event.target.value)}><option>30</option><option>40</option><option>50</option></select></label><label><span>最终返回数量</span><select value={draft.finalResults} onChange={event => update('finalResults', event.target.value)}><option>5</option><option>8</option><option>10</option></select></label><label><span>最低相关度</span><div className="threshold"><input type="range" min="0" max="100" value={Math.round(draft.relevanceThreshold * 100)} onChange={event => update('relevanceThreshold', Number(event.target.value) / 100)} /><b>{draft.relevanceThreshold.toFixed(2)}</b></div></label></div></div>
-    <div className="retrieval-block"><div className="block-title"><div><b>Reranker 结果重排</b><small>使用上方向量模型区域已经选择的模型</small></div><label className="switch"><input type="checkbox" checked={draft.rerankerEnabled} onChange={event => update('rerankerEnabled', event.target.checked)} aria-label="启用 Reranker" /><i /></label></div>{draft.rerankerEnabled && <div className="reranker-fields"><label><span>Reranker 模型</span><select value={draft.rerankerModel} onChange={event => update('rerankerModel', event.target.value)}><option value="">{draft.embeddingModel ? '请选择上方模型' : '请先在上方选择模型'}</option>{draft.embeddingModel && <option value={draft.embeddingModel}>{draft.embeddingModel}</option>}</select></label></div>}</div>
+    <div className="retrieval-block reranker-block"><div className="block-title"><div><b>Reranker 结果重排</b><small>可独立选择模型来源和模型，不受 Embedding 生效模型限制</small></div><label className="switch"><input type="checkbox" checked={draft.rerankerEnabled} onChange={event => toggleReranker(event.target.checked)} aria-label="启用 Reranker" /><i /></label></div>{draft.rerankerEnabled && <div className="reranker-config-body"><div className="reranker-source-field"><div className="reranker-field-label"><i>1</i><span><b>选择模型来源</b><small>本地模型或已配置的远程 API</small></span></div><select value={rerankerSource?.id ?? ''} onChange={event => { const source = draft.embeddingSources.find(item => item.id === event.target.value); if (source) { update('rerankerSourceId', source.id); update('rerankerModel', source.models[0]?.name ?? '') } }}>{draft.embeddingSources.map(source => <option key={source.id} value={source.id}>{source.name} · {source.type === 'local' ? '本地' : '远程 API'}</option>)}</select></div><div className="reranker-model-field"><div className="reranker-field-label"><i>2</i><span><b>选择 Reranker 模型</b><small>支持搜索；模型较多时在下拉列表内滚动</small></span></div><RerankerModelDropdown source={rerankerSource} value={draft.rerankerModel} onChange={model => update('rerankerModel', model)} /></div><div className={`reranker-selection-summary ${rerankerModel?.dimensions ? 'ready' : 'pending'}`}><Activity /><span><b>{rerankerModel?.dimensions ? 'Reranker 已就绪' : 'Reranker 尚未就绪'}</b><small>{rerankerSource?.name ?? '未选择来源'} / {rerankerModel?.name ?? '未选择模型'}{rerankerModel?.dimensions ? ` · ${rerankerModel.dimensions} 维` : ' · 请先运行或检测模型'}</small></span><Badge tone={rerankerModel?.dimensions ? 'green' : 'orange'}>{rerankerModel?.dimensions ? '配置有效' : '需要处理'}</Badge></div></div>}</div>
     <div className="index-rebuild"><div className="index-status"><div className={`index-icon ${rebuild === 'running' ? 'running' : rebuild === 'completed' ? 'done' : ''}`}><Database /></div><div><b>活动索引</b><Badge tone={rebuild === 'running' || requiresRebuild ? 'orange' : 'green'}>{rebuild === 'running' ? '正在构建候选索引' : requiresRebuild ? '配置待重建' : rebuild === 'completed' ? '已切换新索引' : '当前索引可用'}</Badge><small>{rebuild === 'running' ? '重建期间旧活动索引继续提供检索' : '索引绑定固定配置快照与资产版本范围'}</small></div></div>{rebuild === 'running' && <div className="rebuild-progress"><div><span>正在处理资产与 Chunk</span><b>{rebuildProgress}%</b></div><Progress value={rebuildProgress} /></div>}{rebuild === 'cancelled' && <div className="rebuild-notice"><AlertTriangle /><span><b>重建已取消</b><small>旧活动索引未发生变化。</small></span></div>}{rebuild === 'failed' && <div className="rebuild-notice"><AlertTriangle /><span><b>重建失败</b><small>旧活动索引继续有效，可在任务列表查看错误。</small></span></div>}{rebuild === 'completed' && <div className="rebuild-done"><CheckCircle2 /><span><b>重建完成</b><small>候选索引已校验并原子切换。</small></span></div>}<div className="index-actions">{rebuild === 'running' && <button className="btn danger" onClick={() => void cancelRebuild()}><XCircle />取消</button>}<button className="btn primary" disabled={rebuild === 'running' || !requiresRebuild} onClick={() => void startRebuild()}><RefreshCw className={rebuild === 'running' ? 'rotating' : ''} />{requiresRebuild ? '确认重建索引' : '无需重建'}</button></div></div>
   </div>
 }

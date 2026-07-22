@@ -46,9 +46,10 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const method = request.method ?? 'GET'; const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (method === 'OPTIONS') return send(response, 204, null)
   if (method === 'GET' && url.pathname === '/api/health') return send(response, 200, { status: 'ok' })
+  if (method === 'GET' && url.pathname === '/api/local-models') return send(response, 200, localModelRuntime.statuses())
   if (method === 'GET' && url.pathname === '/api/local-model/status') return send(response, 200, localModelRuntime.status())
   if (method === 'POST' && url.pathname === '/api/local-model/start') { const body = await json(request); return send(response, 202, localModelRuntime.start(String(body.model ?? ''))) }
-  if (method === 'POST' && url.pathname === '/api/local-model/stop') return send(response, 200, await localModelRuntime.stop())
+  if (method === 'POST' && url.pathname === '/api/local-model/stop') { const body = await json(request); return send(response, 200, await localModelRuntime.stop(String(body.model ?? ''))) }
   if (method === 'POST' && url.pathname === '/api/default-knowledge-base') return send(response, 200, await service.ensureDefaultKnowledgeBase('SmartHub'))
   if (method === 'DELETE' && url.pathname === '/api/maintenance/empty-knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-empty-smarthub-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupEmptyDefaultKnowledgeBases('SmartHub')) }
   if (method === 'DELETE' && url.pathname === '/api/maintenance/knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-all-other-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupKnowledgeBasesExcept(String(body.keepKnowledgeBaseId ?? ''))) }

@@ -2,9 +2,10 @@ import { parseMarkdownOutline } from './markdown-outline'
 import type { KnowledgeDirectory, KnowledgeDocument } from './prototype-data'
 
 const base = 'http://127.0.0.1:8787/api'
-export type ApiConfig = { id: string; version: number; requiresRebuild: boolean; config: { parserVersion: string; preprocessVersion: string; chunkTargetSize: number; chunkMaxSize: number; chunkOverlap: number; headingDepth: number; embeddingMode: 'remote_api' | 'local'; embeddingBaseUrl: string; embeddingApiKey: string; embeddingModel: string; embeddingDimensions: number; embeddingBatchSize: number; embeddingTimeoutMs: number; embeddingRetries: number; keywordRecall: number; vectorRecall: number; finalResults: number; relevanceThreshold: number; hybridSearch: boolean; rerankerEnabled: boolean; rerankerModel: string } }
+export type EmbeddingSource = { id: string; name: string; type: 'remote_api' | 'local'; baseUrl: string; apiKey: string; models: { name: string; dimensions: number }[] }
+export type ApiConfig = { id: string; version: number; requiresRebuild: boolean; config: { parserVersion: string; preprocessVersion: string; chunkTargetSize: number; chunkMaxSize: number; chunkOverlap: number; headingDepth: number; embeddingSourceId: string; embeddingSources: EmbeddingSource[]; embeddingMode: 'remote_api' | 'local'; embeddingBaseUrl: string; embeddingApiKey: string; embeddingModel: string; embeddingDimensions: number; embeddingBatchSize: number; embeddingTimeoutMs: number; embeddingRetries: number; keywordRecall: number; vectorRecall: number; finalResults: number; relevanceThreshold: number; hybridSearch: boolean; rerankerEnabled: boolean; rerankerSourceId: string; rerankerModel: string } }
 export type ApiTask = { id: string; type: string; status: string; step: string; progress: number; attempts: number; createdAt: string; error?: string; metrics?: Record<string, number> }
-export type LocalModelStatus = { phase: 'idle' | 'downloading' | 'loading' | 'running' | 'stopping' | 'failed'; model: string; progress: number; cacheDirectory: string; file?: string; dimensions?: number; error?: string; updatedAt: string }
+export type LocalModelStatus = { phase: 'idle' | 'downloading' | 'loading' | 'running' | 'stopping' | 'failed'; model: string; progress: number; cacheDirectory: string; file?: string; dimensions?: number; maxTokens?: number; modelHub?: string; fallbackUsed?: boolean; error?: string; updatedAt: string }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${base}${path}`, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })
@@ -82,8 +83,9 @@ export type ApiSearchResult = { score: number; retrievalMode: string; excerpt: s
 export type ApiSearchMeta = { mode: string; requestedMode?: string; degraded?: boolean; degradedReason?: string; minimumRelevance: number; keywordCandidates: number; vectorCandidates: number; mergedCandidates: number; eligibleCandidates: number; returned: number; rerankerEnabled: boolean; rerankerDegraded?: boolean }
 export const searchKnowledge = (kbId: string, query: string) => request<{ status: string; retrieval?: ApiSearchMeta; results: ApiSearchResult[] }>(`/knowledge-bases/${kbId}/search`, { method: 'POST', body: JSON.stringify({ query }) })
 export const loadLocalModelStatus = () => request<LocalModelStatus>('/local-model/status')
+export const loadLocalModelStatuses = () => request<LocalModelStatus[]>('/local-models')
 export const startLocalModel = (model: string) => request<LocalModelStatus>('/local-model/start', { method: 'POST', body: JSON.stringify({ model }) })
-export const stopLocalModel = () => request<LocalModelStatus>('/local-model/stop', { method: 'POST', body: '{}' })
+export const stopLocalModel = (model: string) => request<LocalModelStatus>('/local-model/stop', { method: 'POST', body: JSON.stringify({ model }) })
 export const testEmbeddingConfig = (kbId: string, config: Record<string, unknown>) => request<{ ok: true; model: string; dimensions: number }>(`/knowledge-bases/${kbId}/embedding/test`, { method: 'POST', body: JSON.stringify(config) })
 export const createKnowledgeDirectory = (kbId: string, name: string, parentId: string | null) => request<ApiDirectory>(`/knowledge-bases/${kbId}/directories`, { method: 'POST', body: JSON.stringify({ name, parentId }) })
 export const renameKnowledgeDirectory = (directoryId: string, name: string) => request<ApiDirectory>(`/directories/${directoryId}`, { method: 'PUT', body: JSON.stringify({ name }) })

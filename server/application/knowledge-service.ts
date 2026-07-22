@@ -1,5 +1,5 @@
 import { extname, isAbsolute } from 'node:path'
-import { defaultConfig, type AssetType, type AssetVersion, type Chunk, type DatabaseState, type KnowledgeConfig, type SourceType, type SyncTask } from '../domain/types.js'
+import { defaultConfig, type AssetType, type AssetVersion, type Chunk, type DatabaseState, type EmbeddingSource, type KnowledgeConfig, type SourceType, type SyncTask } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { RawDocumentStore } from '../infrastructure/raw-document-store.js'
 import type { LocalModelRuntime } from '../infrastructure/local-model-runtime.js'
@@ -13,7 +13,7 @@ type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
 const compatibilityFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkTargetSize: config.chunkTargetSize, chunkMaxSize: config.chunkMaxSize, chunkOverlap: config.chunkOverlap, headingDepth: config.headingDepth, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingModel: config.embeddingModel, embeddingDimensions: config.embeddingDimensions }))
-const queryFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ keywordRecall: config.keywordRecall, vectorRecall: config.vectorRecall, finalResults: config.finalResults, relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerModel: config.rerankerModel }))
+const queryFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ keywordRecall: config.keywordRecall, vectorRecall: config.vectorRecall, finalResults: config.finalResults, relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId, rerankerModel: config.rerankerModel, rerankerSource: config.embeddingSources.find(source => source.id === config.rerankerSourceId) }))
 
 export class KnowledgeService {
   constructor(readonly store: StateStore, private readonly rawDocuments?: RawDocumentStore, private readonly localModels?: LocalModelRuntime, private readonly remoteEmbeddings = new RemoteEmbeddingClient()) {}
@@ -21,7 +21,12 @@ export class KnowledgeService {
     await this.store.load()
     await this.store.transaction(state => {
       state.directories ??= []
-      state.configs.forEach(item => { const legacyHashModel = !item.config.embeddingModel || item.config.embeddingModel === 'hash-embedding-v1'; item.config = { ...defaultConfig, ...item.config, embeddingMode: item.config.embeddingMode ?? 'local', ...(legacyHashModel ? { embeddingModel: defaultConfig.embeddingModel, embeddingDimensions: defaultConfig.embeddingDimensions, rerankerModel: defaultConfig.rerankerModel } : {}) } })
+      state.configs.forEach(item => {
+        const legacyHashModel = !item.config.embeddingModel || item.config.embeddingModel === 'hash-embedding-v1'
+        const savedSources = Array.isArray(item.config.embeddingSources) ? item.config.embeddingSources : []
+        const migrated = { ...defaultConfig, ...item.config, embeddingMode: item.config.embeddingMode ?? 'local', ...(legacyHashModel ? { embeddingModel: defaultConfig.embeddingModel, embeddingDimensions: defaultConfig.embeddingDimensions, rerankerModel: defaultConfig.rerankerModel } : {}) }
+        item.config = normalizeEmbeddingSources(migrated, savedSources)
+      })
       state.versions.forEach(version => version.chunks.forEach(chunk => { chunk.tokenCount ??= defaultTokenCodec.count(chunk.content) }))
       state.assets.forEach(asset => ensureDirectoryPath(state, asset.knowledgeBaseId, asset.logicalPath.replaceAll('\\', '/').split('/').slice(0, -1)))
     })
@@ -124,7 +129,7 @@ export class KnowledgeService {
     return this.store.transaction(async state => {
       const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
       const current = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
-      const config = { ...current.config, ...patch }
+      const config = normalizeEmbeddingSources({ ...current.config, ...patch })
       validateConfig(config)
       if (JSON.stringify(config) === JSON.stringify(current.config)) return { changed: false, configVersion: current, impact: 'none' }
       const compatible = compatibilityFingerprint(config) === current.compatibilityFingerprint
@@ -137,11 +142,12 @@ export class KnowledgeService {
 
   async testEmbeddingConfig(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
     const saved = await this.config(knowledgeBaseId)
-    const config = { ...saved.config, ...patch }
-    validateConfig(config)
-    const vectors = await this.embedTexts(config, ['SmartHub 知识库连接测试'])
-    const vector = required(vectors[0], 'Embedding Provider 未返回测试向量')
-    return { ok: true, model: config.embeddingModel, dimensions: vector.length }
+    const config = normalizeEmbeddingSources({ ...saved.config, ...patch })
+    validateEmbeddingProbe(config)
+    if (config.embeddingMode === 'remote_api') return { ok: true as const, model: config.embeddingModel, dimensions: await this.remoteEmbeddings.detectDimensions(config) }
+    if (!this.localModels) throw new Error('本地模型运行时不可用，无法自动检测维度')
+    const status = await this.localModels.ensureRunning(config.embeddingModel)
+    return { ok: true as const, model: config.embeddingModel, dimensions: required(status.dimensions, '本地模型未返回向量维度') }
   }
 
   async directories(knowledgeBaseId: string) {
@@ -209,6 +215,7 @@ export class KnowledgeService {
     return this.store.transaction(async state => {
       const kb = required(state.knowledgeBases.find(item => item.id === input.knowledgeBaseId), '知识库不存在')
       const savedConfigVersion = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
+      if (!savedConfigVersion.config.embeddingModel.trim()) throw new Error('知识库当前没有可用模型，请先添加本地模型或选择远程模型')
       const activeIndex = state.indexes.find(item => item.id === kb.activeIndexVersionId)
       const configVersion = savedConfigVersion.requiresRebuild && activeIndex ? required(state.configs.find(item => item.id === activeIndex.configVersionId), '活动索引配置不存在') : savedConfigVersion
       ensureDirectoryPath(state, input.knowledgeBaseId, input.logicalPath.replaceAll('\\', '/').split('/').slice(0, -1))
@@ -444,6 +451,8 @@ export class KnowledgeService {
   async queueRebuild(knowledgeBaseId: string) {
     return this.store.transaction(state => {
       const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+      const config = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
+      if (!config.config.embeddingModel.trim()) throw new Error('知识库当前没有可用模型，无法重建索引')
       const existing = state.tasks.find(item => item.knowledgeBaseId === knowledgeBaseId && item.type === 'rebuild' && ['queued', 'running'].includes(item.status))
       if (existing) return existing
       const task = { id: id('task'), knowledgeBaseId, type: 'rebuild' as const, trigger: 'manual' as const, status: 'queued' as const, step: 'waiting', progress: 0, attempts: 1, input: { oldIndexId: kb.activeIndexVersionId }, configVersionId: kb.activeConfigVersionId, createdAt: now() }
@@ -516,12 +525,14 @@ export class KnowledgeService {
   }
 
   private async tokenizer(config: KnowledgeConfig): Promise<TokenCodec> {
+    if (!config.embeddingModel.trim()) throw new Error('知识库当前没有可用模型')
     if (config.embeddingMode === 'remote_api') return this.remoteEmbeddings.tokenCodec(config.embeddingModel)
     return (this.localModels ? await this.localModels.tokenCodec(config.embeddingModel) : null) ?? defaultTokenCodec
   }
 
   private async embedTexts(config: KnowledgeConfig, texts: string[], model = config.embeddingModel) {
     if (!texts.length) return []
+    if (!model.trim()) throw new Error('知识库当前没有可用模型')
     if (config.embeddingMode === 'remote_api') return this.remoteEmbeddings.embed(config, texts, model)
     if (this.localModels) {
       await this.localModels.ensureRunning(model)
@@ -552,7 +563,8 @@ export class KnowledgeService {
   }
 
   private async rerank(config: KnowledgeConfig, query: string, candidates: RankedCandidate[]) {
-    const vectors = await this.embedTexts(config, [query, ...candidates.map(item => item.candidate.content)], config.rerankerModel)
+    const rerankerConfig = modelRouteConfig(config, config.rerankerSourceId, config.rerankerModel)
+    const vectors = await this.embedTexts(rerankerConfig, [query, ...candidates.map(item => item.candidate.content)])
     const queryVector = required(vectors[0], 'Reranker 未返回查询向量')
     return candidates.map((item, index) => {
       const semanticScore = (cosine(queryVector, required(vectors[index + 1], 'Reranker 未返回完整候选向量')) + 1) / 2
@@ -593,12 +605,15 @@ function mergeCandidates(keyword: StoredChunkCandidate[], vector: StoredChunkCan
 function withLatestQueryConfig(indexConfig: KnowledgeConfig, latestConfig: KnowledgeConfig): KnowledgeConfig {
   return {
     ...indexConfig,
+    ...(!latestConfig.embeddingModel ? { embeddingSourceId: latestConfig.embeddingSourceId, embeddingMode: latestConfig.embeddingMode, embeddingBaseUrl: latestConfig.embeddingBaseUrl, embeddingApiKey: latestConfig.embeddingApiKey, embeddingModel: '', embeddingDimensions: 0 } : {}),
     keywordRecall: latestConfig.keywordRecall,
     vectorRecall: latestConfig.vectorRecall,
     finalResults: latestConfig.finalResults,
     relevanceThreshold: latestConfig.relevanceThreshold,
     hybridSearch: latestConfig.hybridSearch,
     rerankerEnabled: latestConfig.rerankerEnabled,
+    embeddingSources: latestConfig.embeddingSources,
+    rerankerSourceId: latestConfig.rerankerSourceId,
     rerankerModel: latestConfig.rerankerModel,
   }
 }
@@ -652,8 +667,65 @@ function validateConfig(config: KnowledgeConfig) {
   if (config.chunkTargetSize <= 0 || config.chunkMaxSize < config.chunkTargetSize) throw new Error('Chunk 最大大小不得小于目标大小')
   if (config.chunkOverlap < 0 || config.chunkOverlap >= config.chunkTargetSize) throw new Error('Chunk 重叠必须小于目标大小')
   if (config.headingDepth < 1 || config.headingDepth > 6) throw new Error('标题层级必须为 1～6')
-  if (config.embeddingDimensions <= 0 || config.embeddingBatchSize <= 0 || config.embeddingTimeoutMs <= 0 || config.embeddingRetries < 0) throw new Error('Embedding 参数不合法')
+  if (config.embeddingModel && config.embeddingDimensions <= 0) throw new Error('请先运行本地模型或测试远程模型，以自动检测向量维度')
+  if (!config.embeddingModel && config.embeddingDimensions !== 0) throw new Error('未选择模型时向量维度必须为 0')
+  if (config.embeddingBatchSize <= 0 || config.embeddingTimeoutMs <= 0 || config.embeddingRetries < 0) throw new Error('Embedding 参数不合法')
+  if (!config.embeddingSources.length) throw new Error('至少需要配置一个模型来源')
+  if (new Set(config.embeddingSources.map(source => source.id)).size !== config.embeddingSources.length) throw new Error('模型来源标识不能重复')
+  const selectedSource = config.embeddingSources.find(source => source.id === config.embeddingSourceId)
+  if (!selectedSource) throw new Error('请选择有效的模型来源')
+  if (selectedSource.type !== config.embeddingMode) throw new Error('所选来源与当前模型模式不一致')
+  for (const source of config.embeddingSources) {
+    if (!source.id.trim() || !source.name.trim()) throw new Error('模型来源名称不能为空')
+    if (source.type === 'remote_api' && !/^https?:\/\//i.test(source.baseUrl)) throw new Error(`远程来源 ${source.name} 的 Base URL 必须使用 http:// 或 https://`)
+    if (source.type === 'remote_api' && !source.models.length) throw new Error(`远程来源 ${source.name} 至少需要一个模型`)
+    if (source.models.some(model => !model.name.trim() || model.dimensions < 0)) throw new Error(`模型来源 ${source.name} 包含无效模型`)
+  }
   if (config.embeddingMode === 'remote_api' && !/^https?:\/\//i.test(config.embeddingBaseUrl)) throw new Error('远程 Embedding Base URL 必须使用 http:// 或 https://')
   if (config.keywordRecall <= 0 || config.vectorRecall <= 0 || config.finalResults <= 0 || config.relevanceThreshold < 0 || config.relevanceThreshold > 1) throw new Error('检索参数不合法')
-  if (config.rerankerEnabled && !config.rerankerModel) throw new Error('启用 Reranker 后必须选择模型')
+  if (config.rerankerEnabled) modelRouteConfig(config, config.rerankerSourceId, config.rerankerModel)
+}
+
+function validateEmbeddingProbe(config: KnowledgeConfig) {
+  if (!config.embeddingModel.trim()) throw new Error('模型名称不能为空')
+  if (config.embeddingBatchSize <= 0 || config.embeddingTimeoutMs <= 0 || config.embeddingRetries < 0) throw new Error('Embedding 请求参数不合法')
+  if (config.embeddingMode === 'remote_api' && !/^https?:\/\//i.test(config.embeddingBaseUrl)) throw new Error('远程 Embedding Base URL 必须使用 http:// 或 https://')
+}
+
+function normalizeEmbeddingSources(config: KnowledgeConfig, sourceOverride?: EmbeddingSource[]): KnowledgeConfig {
+  const provided = sourceOverride ?? config.embeddingSources
+  const fallbackId = config.embeddingSourceId?.trim() || `${config.embeddingMode}-default`
+  const sources = provided.length ? structuredClone(provided) : [{ id: fallbackId, name: config.embeddingMode === 'local' ? '本地模型' : '默认远程来源', type: config.embeddingMode, baseUrl: config.embeddingBaseUrl, apiKey: config.embeddingApiKey, models: [{ name: config.embeddingModel, dimensions: config.embeddingDimensions }] }]
+  sources.filter(source => source.type === 'local' && source.name === 'SmartHub 本地运行时').forEach(source => { source.name = '本地模型' })
+  if (!sources.some(source => source.type === 'local')) {
+    const template = structuredClone(required(defaultConfig.embeddingSources.find(source => source.type === 'local'), '系统内置本地模型来源缺失'))
+    while (sources.some(source => source.id === template.id)) template.id = `${template.id}-builtin`
+    sources.unshift(template)
+  }
+  let selected = sources.find(source => source.id === config.embeddingSourceId && source.type === config.embeddingMode)
+  if (!selected) selected = sources.find(source => source.type === config.embeddingMode)
+  if (!selected) {
+    const id = `${config.embeddingMode}-compat-${sources.length + 1}`
+    selected = { id, name: config.embeddingMode === 'local' ? '本地模型' : '远程兼容来源', type: config.embeddingMode, baseUrl: config.embeddingBaseUrl, apiKey: config.embeddingApiKey, models: [{ name: config.embeddingModel, dimensions: config.embeddingDimensions }] }
+    sources.push(selected)
+  }
+  if (config.embeddingModel) {
+    const selectedModel = selected.models.find(model => model.name === config.embeddingModel)
+    if (selectedModel) selectedModel.dimensions = config.embeddingDimensions
+    else selected.models.push({ name: config.embeddingModel, dimensions: config.embeddingDimensions })
+  }
+  let rerankerSource = sources.find(source => source.id === config.rerankerSourceId)
+  if (!rerankerSource) rerankerSource = sources.find(source => source.models.some(model => model.name === config.rerankerModel)) ?? selected
+  if (config.rerankerModel && !rerankerSource.models.some(model => model.name === config.rerankerModel)) rerankerSource.models.push({ name: config.rerankerModel, dimensions: config.embeddingDimensions })
+  return { ...config, embeddingSourceId: selected.id, embeddingSources: sources, rerankerSourceId: rerankerSource.id }
+}
+
+function modelRouteConfig(config: KnowledgeConfig, sourceId: string, modelName: string): KnowledgeConfig {
+  if (!modelName.trim()) throw new Error('启用 Reranker 后必须选择模型')
+  const source = config.embeddingSources.find(item => item.id === sourceId)
+  if (!source) throw new Error('Reranker 模型来源不存在')
+  const model = source.models.find(item => item.name === modelName)
+  if (!model) throw new Error(`Reranker 来源 ${source.name} 中不存在模型 ${modelName}`)
+  if (model.dimensions <= 0) throw new Error(`请先检测 Reranker 模型 ${modelName} 的向量维度`)
+  return { ...config, embeddingSourceId: source.id, embeddingMode: source.type, embeddingBaseUrl: source.baseUrl, embeddingApiKey: source.apiKey, embeddingModel: model.name, embeddingDimensions: model.dimensions }
 }
