@@ -8,13 +8,14 @@ const emptyState = (): DatabaseState => ({ projects: [], knowledgeBases: [], dir
 export interface StateStore {
   load(): Promise<void>
   read(): DatabaseState
+  snapshot(): Promise<DatabaseState>
   transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
   searchChunks?(input: ChunkSearchInput): Promise<StoredChunkCandidate[]>
   close?(): Promise<void>
 }
 
 export interface ChunkSearchInput {
-  versionIds: string[]
+  indexVersionId: string
   mode: 'keyword' | 'vector'
   query: string
   queryVector?: number[]
@@ -43,21 +44,26 @@ export class JsonStore implements StateStore {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   read() { return structuredClone(this.state) }
+  async snapshot() { return this.read() }
   async transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T> {
     let result!: T
+    let failure: unknown
     this.queue = this.queue.then(async () => {
-      const draft = structuredClone(this.state)
-      result = await operation(draft)
-      this.state = draft
-      if (this.file) {
-        await mkdir(dirname(this.file), { recursive: true })
-        const temporary = `${this.file}.${randomUUID()}.tmp`
-        await writeFile(temporary, JSON.stringify(this.state, null, 2), 'utf8')
-        await copyFile(temporary, this.file)
-        await unlink(temporary)
-      }
+      try {
+        const draft = structuredClone(this.state)
+        result = await operation(draft)
+        this.state = draft
+        if (this.file) {
+          await mkdir(dirname(this.file), { recursive: true })
+          const temporary = `${this.file}.${randomUUID()}.tmp`
+          await writeFile(temporary, JSON.stringify(this.state, null, 2), 'utf8')
+          await copyFile(temporary, this.file)
+          await unlink(temporary)
+        }
+      } catch (error) { failure = error }
     })
     await this.queue
+    if (failure) throw failure
     return result
   }
 }

@@ -1,5 +1,5 @@
 import { Pool, type PoolClient } from 'pg'
-import type { DatabaseState } from '../domain/types.js'
+import type { Chunk, DatabaseState, IndexVersion } from '../domain/types.js'
 import type { ChunkSearchInput, StateStore, StoredChunkCandidate } from './store.js'
 
 const emptyState = (): DatabaseState => ({ projects: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [] })
@@ -21,13 +21,26 @@ export class PostgresStore implements StateStore {
 
   read() { return structuredClone(this.state) }
 
+  async snapshot() {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const state = await loadState(client)
+      await client.query('COMMIT')
+      this.state = state
+      return structuredClone(state)
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
   async close() { await this.pool.end() }
 
   async searchChunks(input: ChunkSearchInput): Promise<StoredChunkCandidate[]> {
-    if (!input.versionIds.length) return []
     const dimensions = positiveInteger(input.dimensions, '向量维度')
     const limit = positiveInteger(input.limit, '召回数量')
-    const filters = [input.versionIds, input.mode === 'vector' ? encodeVector(input.queryVector ?? []) : input.query, input.assetType ?? null, input.sourceType ?? null, input.logicalPath ?? null, limit]
+    const filters = [input.indexVersionId, input.mode === 'vector' ? encodeVector(input.queryVector ?? []) : input.query, input.assetType ?? null, input.sourceType ?? null, input.logicalPath ?? null, limit]
     const score = input.mode === 'vector'
       ? `(1 + (1 - (c.embedding::vector(${dimensions}) <=> $2::vector(${dimensions})))) / 2`
       : `(CASE WHEN c.content ILIKE '%' || $2 || '%' THEN 0.7 ELSE 0 END) + similarity(c.content, $2) * 0.3`
@@ -43,10 +56,10 @@ export class PostgresStore implements StateStore {
         a.id AS asset_id, a.display_name, a.asset_type, a.source_type, a.logical_path,
         v.id AS version_id, v.version AS version_number,
         c.id AS chunk_id, c.chunk_key, c.content, c.data AS chunk_data
-      FROM smarthub.asset_chunks c
+      FROM smarthub.index_chunks c
       JOIN smarthub.asset_versions v ON v.id = c.asset_version_id
       JOIN smarthub.knowledge_assets a ON a.id = v.asset_id
-      WHERE v.id = ANY($1::text[])
+      WHERE c.index_version_id = $1
         AND c.embedding_dimensions = ${dimensions}
         AND ($3::text IS NULL OR a.asset_type = $3)
         AND ($4::text IS NULL OR a.source_type = $4)
@@ -75,22 +88,25 @@ export class PostgresStore implements StateStore {
 
   async transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T> {
     let result!: T
+    let failure: unknown
     this.queue = this.queue.then(async () => {
-      const draft = structuredClone(this.state)
-      result = await operation(draft)
       const client = await this.pool.connect()
       try {
         await client.query('BEGIN')
         await client.query("SELECT pg_advisory_xact_lock(hashtext('smarthub_state'))")
-        await persistState(client, draft)
+        const before = await loadState(client)
+        const draft = structuredClone(before)
+        result = await operation(draft)
+        await persistChanges(client, before, draft)
         await client.query('COMMIT')
         this.state = draft
       } catch (error) {
+        failure = error
         await client.query('ROLLBACK')
-        throw error
       } finally { client.release() }
     })
     await this.queue
+    if (failure) throw failure
     return result
   }
 }
@@ -107,10 +123,13 @@ async function migrate(client: PoolClient) {
     CREATE TABLE IF NOT EXISTS smarthub.asset_versions (id text PRIMARY KEY, asset_id text NOT NULL REFERENCES smarthub.knowledge_assets(id), version integer NOT NULL, content_hash char(64) NOT NULL, status text NOT NULL, config_version_id text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (asset_id, version));
     CREATE TABLE IF NOT EXISTS smarthub.asset_chunks (id text PRIMARY KEY, asset_version_id text NOT NULL REFERENCES smarthub.asset_versions(id) ON DELETE CASCADE, chunk_key text NOT NULL, ordinal integer NOT NULL, content text NOT NULL, content_hash char(64) NOT NULL, embedding vector NOT NULL, embedding_dimensions integer NOT NULL, data jsonb NOT NULL, UNIQUE (asset_version_id, chunk_key));
     CREATE TABLE IF NOT EXISTS smarthub.index_versions (id text PRIMARY KEY, knowledge_base_id text NOT NULL REFERENCES smarthub.knowledge_bases(id), version integer NOT NULL, status text NOT NULL, config_version_id text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (knowledge_base_id, version));
+    CREATE TABLE IF NOT EXISTS smarthub.index_chunks (index_version_id text NOT NULL REFERENCES smarthub.index_versions(id) ON DELETE CASCADE, id text NOT NULL, asset_version_id text NOT NULL REFERENCES smarthub.asset_versions(id), chunk_key text NOT NULL, ordinal integer NOT NULL, content text NOT NULL, content_hash char(64) NOT NULL, embedding vector NOT NULL, embedding_dimensions integer NOT NULL, data jsonb NOT NULL, PRIMARY KEY (index_version_id, id));
     CREATE TABLE IF NOT EXISTS smarthub.sync_tasks (id text PRIMARY KEY, knowledge_base_id text NOT NULL REFERENCES smarthub.knowledge_bases(id), type text NOT NULL, status text NOT NULL, step text NOT NULL, progress integer NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
     CREATE INDEX IF NOT EXISTS knowledge_assets_kb_path_idx ON smarthub.knowledge_assets (knowledge_base_id, logical_path);
     CREATE INDEX IF NOT EXISTS asset_chunks_version_idx ON smarthub.asset_chunks (asset_version_id);
     CREATE INDEX IF NOT EXISTS asset_chunks_content_trgm_idx ON smarthub.asset_chunks USING gin (content gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS index_chunks_index_version_idx ON smarthub.index_chunks (index_version_id);
+    CREATE INDEX IF NOT EXISTS index_chunks_content_trgm_idx ON smarthub.index_chunks USING gin (content gin_trgm_ops);
     CREATE INDEX IF NOT EXISTS sync_tasks_kb_created_idx ON smarthub.sync_tasks (knowledge_base_id, created_at DESC);
   `)
   await client.query(`
@@ -124,42 +143,92 @@ async function migrate(client: PoolClient) {
     END $$;
     UPDATE smarthub.asset_chunks SET embedding_dimensions = vector_dims(embedding) WHERE embedding_dimensions IS NULL;
     ALTER TABLE smarthub.asset_chunks ALTER COLUMN embedding_dimensions SET NOT NULL;
-    DO $$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'asset_chunks_embedding_dimensions_check' AND conrelid = 'smarthub.asset_chunks'::regclass) THEN
-        ALTER TABLE smarthub.asset_chunks ADD CONSTRAINT asset_chunks_embedding_dimensions_check CHECK (embedding_dimensions = vector_dims(embedding));
-      END IF;
-    END $$;
     CREATE INDEX IF NOT EXISTS asset_chunks_embedding_384_hnsw_idx ON smarthub.asset_chunks USING hnsw ((embedding::vector(384)) vector_cosine_ops) WHERE embedding_dimensions = 384;
+    CREATE INDEX IF NOT EXISTS index_chunks_embedding_384_hnsw_idx ON smarthub.index_chunks USING hnsw ((embedding::vector(384)) vector_cosine_ops) WHERE embedding_dimensions = 384;
+    INSERT INTO smarthub.index_chunks (index_version_id, id, asset_version_id, chunk_key, ordinal, content, content_hash, embedding, embedding_dimensions, data)
+    SELECT i.id, c.id, c.asset_version_id, c.chunk_key, c.ordinal, c.content, c.content_hash, c.embedding, c.embedding_dimensions, c.data
+    FROM smarthub.index_versions i
+    JOIN smarthub.asset_chunks c ON c.asset_version_id IN (SELECT jsonb_array_elements_text(i.data->'assetVersionIds'))
+    ON CONFLICT (index_version_id, id) DO NOTHING;
   `)
 }
 
-async function loadState(client: PoolClient): Promise<DatabaseState> {
+type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>
+
+async function loadState(client: Queryable): Promise<DatabaseState> {
   const tables = ['projects', 'knowledge_bases', 'knowledge_directories', 'config_versions', 'knowledge_assets', 'asset_versions', 'index_versions', 'sync_tasks'] as const
   const rows = []
   for (const table of tables) rows.push(await client.query<{ data: DatabaseState[keyof DatabaseState][number] }>(`SELECT data FROM smarthub.${table} ORDER BY created_at, id`))
-  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions: rows[5].rows.map(row => row.data) as DatabaseState['versions'], indexes: rows[6].rows.map(row => row.data) as DatabaseState['indexes'], tasks: rows[7].rows.map(row => row.data) as DatabaseState['tasks'] }
+  const versions = rows[5].rows.map(row => ({ ...row.data, chunks: [] })) as DatabaseState['versions']
+  const chunks = await client.query<{ asset_version_id: string; embedding: string; data: Chunk }>('SELECT asset_version_id, embedding::text AS embedding, data FROM smarthub.asset_chunks ORDER BY asset_version_id, ordinal, id')
+  for (const row of chunks.rows) versions.find(version => version.id === row.asset_version_id)?.chunks.push({ ...row.data, embedding: decodeVector(row.embedding) })
+  const indexes = rows[6].rows.map(row => ({ ...row.data, indexedChunks: [] })) as DatabaseState['indexes']
+  const indexChunks = await client.query<{ index_version_id: string; embedding: string; data: Chunk }>('SELECT index_version_id, embedding::text AS embedding, data FROM smarthub.index_chunks ORDER BY index_version_id, ordinal, id')
+  for (const row of indexChunks.rows) indexes.find(index => index.id === row.index_version_id)?.indexedChunks?.push({ ...row.data, embedding: decodeVector(row.embedding) })
+  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks: rows[7].rows.map(row => row.data) as DatabaseState['tasks'] }
 }
 
-async function persistState(client: PoolClient, state: DatabaseState) {
-  await client.query('TRUNCATE smarthub.asset_chunks, smarthub.sync_tasks, smarthub.index_versions, smarthub.asset_versions, smarthub.knowledge_assets, smarthub.config_versions, smarthub.knowledge_directories, smarthub.knowledge_bases, smarthub.projects CASCADE')
-  for (const item of state.projects) await client.query('INSERT INTO smarthub.projects VALUES ($1,$2,$3,$4::jsonb)', [item.id, item.name, item.createdAt, JSON.stringify(item)])
-  for (const item of state.knowledgeBases) await client.query('INSERT INTO smarthub.knowledge_bases VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [item.id, item.projectId, item.name, item.activeIndexVersionId, item.activeConfigVersionId, item.createdAt, JSON.stringify(item)])
-  for (const item of orderDirectories(state.directories)) await client.query('INSERT INTO smarthub.knowledge_directories VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [item.id, item.knowledgeBaseId, item.parentId, item.name, item.createdAt, item.updatedAt, JSON.stringify(item)])
-  for (const item of state.configs) await client.query('INSERT INTO smarthub.config_versions VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [item.id, item.knowledgeBaseId, item.version, item.requiresRebuild, item.createdAt, JSON.stringify(item)])
-  for (const item of state.assets) await client.query('INSERT INTO smarthub.knowledge_assets VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)', [item.id, item.knowledgeBaseId, item.logicalPath, item.displayName, item.assetType, item.sourceType, item.activeVersionId, item.createdAt, item.updatedAt, JSON.stringify(item)])
-  for (const item of state.versions) {
-    await client.query('INSERT INTO smarthub.asset_versions VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [item.id, item.assetId, item.number, item.contentHash, item.status, item.configVersionId, item.createdAt, JSON.stringify(item)])
-    for (const chunk of item.chunks) await client.query('INSERT INTO smarthub.asset_chunks (id, asset_version_id, chunk_key, ordinal, content, content_hash, embedding, embedding_dimensions, data) VALUES ($1,$2,$3,$4,$5,$6,$7::vector,$8,$9::jsonb)', [chunk.id, item.id, chunk.chunkKey, chunk.ordinal, chunk.content, chunk.contentHash, encodeVector(chunk.embedding), chunk.embedding.length, JSON.stringify(chunk)])
+async function persistChanges(client: PoolClient, before: DatabaseState, state: DatabaseState) {
+  await deleteMissing(client, 'sync_tasks', before.tasks, state.tasks)
+  await deleteMissing(client, 'index_versions', before.indexes, state.indexes)
+  await deleteMissing(client, 'asset_versions', before.versions, state.versions)
+  await deleteMissing(client, 'knowledge_assets', before.assets, state.assets)
+  await deleteMissing(client, 'config_versions', before.configs, state.configs)
+  await deleteMissing(client, 'knowledge_directories', before.directories, state.directories)
+  await deleteMissing(client, 'knowledge_bases', before.knowledgeBases, state.knowledgeBases)
+  await deleteMissing(client, 'projects', before.projects, state.projects)
+
+  for (const item of changed(before.projects, state.projects)) await client.query('INSERT INTO smarthub.projects VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.name, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.knowledgeBases, state.knowledgeBases)) await client.query('INSERT INTO smarthub.knowledge_bases VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET project_id=EXCLUDED.project_id, name=EXCLUDED.name, active_index_version_id=EXCLUDED.active_index_version_id, active_config_version_id=EXCLUDED.active_config_version_id, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.projectId, item.name, item.activeIndexVersionId, item.activeConfigVersionId, item.createdAt, JSON.stringify(item)])
+  for (const item of orderDirectories(changed(before.directories, state.directories))) await client.query('INSERT INTO smarthub.knowledge_directories VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET knowledge_base_id=EXCLUDED.knowledge_base_id, parent_id=EXCLUDED.parent_id, name=EXCLUDED.name, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.parentId, item.name, item.createdAt, item.updatedAt, JSON.stringify(item)])
+  for (const item of changed(before.configs, state.configs)) await client.query('INSERT INTO smarthub.config_versions VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET requires_rebuild=EXCLUDED.requires_rebuild, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.version, item.requiresRebuild, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.assets, state.assets)) await client.query('INSERT INTO smarthub.knowledge_assets VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO UPDATE SET logical_path=EXCLUDED.logical_path, display_name=EXCLUDED.display_name, asset_type=EXCLUDED.asset_type, source_type=EXCLUDED.source_type, active_version_id=EXCLUDED.active_version_id, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.logicalPath, item.displayName, item.assetType, item.sourceType, item.activeVersionId, item.createdAt, item.updatedAt, JSON.stringify(item)])
+  for (const item of changed(before.versions, state.versions)) {
+    const previous = before.versions.find(version => version.id === item.id)
+    const data = { ...item, chunks: undefined }
+    await client.query('INSERT INTO smarthub.asset_versions VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, data=EXCLUDED.data', [item.id, item.assetId, item.number, item.contentHash, item.status, item.configVersionId, item.createdAt, JSON.stringify(data)])
+    if (!previous || JSON.stringify(previous.chunks) !== JSON.stringify(item.chunks)) {
+      await client.query('DELETE FROM smarthub.asset_chunks WHERE asset_version_id=$1', [item.id])
+      for (const chunk of item.chunks) await insertChunk(client, 'asset_chunks', item.id, chunk)
+    }
   }
-  for (const item of state.indexes) await client.query('INSERT INTO smarthub.index_versions VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [item.id, item.knowledgeBaseId, item.number, item.status, item.configVersionId, item.createdAt, JSON.stringify(item)])
-  for (const item of state.tasks) await client.query('INSERT INTO smarthub.sync_tasks VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [item.id, item.knowledgeBaseId, item.type, item.status, item.step, item.progress, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.indexes, state.indexes)) {
+    const previous = before.indexes.find(index => index.id === item.id)
+    const data = { ...item, indexedChunks: undefined }
+    await client.query('INSERT INTO smarthub.index_versions VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.number, item.status, item.configVersionId, item.createdAt, JSON.stringify(data)])
+    if (!previous || JSON.stringify(previous.indexedChunks) !== JSON.stringify(item.indexedChunks)) {
+      await client.query('DELETE FROM smarthub.index_chunks WHERE index_version_id=$1', [item.id])
+      for (const chunk of item.indexedChunks ?? []) await insertChunk(client, 'index_chunks', item.id, chunk)
+    }
+  }
+  for (const item of changed(before.tasks, state.tasks)) await client.query('INSERT INTO smarthub.sync_tasks VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, step=EXCLUDED.step, progress=EXCLUDED.progress, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.type, item.status, item.step, item.progress, item.createdAt, JSON.stringify(item)])
+}
+
+async function insertChunk(client: PoolClient, table: 'asset_chunks' | 'index_chunks', ownerId: string, chunk: Chunk) {
+  const data = { ...chunk, embedding: undefined }
+  if (table === 'asset_chunks') {
+    await client.query('INSERT INTO smarthub.asset_chunks (id, asset_version_id, chunk_key, ordinal, content, content_hash, embedding, embedding_dimensions, data) VALUES ($1,$2,$3,$4,$5,$6,$7::vector,$8,$9::jsonb)', [chunk.id, ownerId, chunk.chunkKey, chunk.ordinal, chunk.content, chunk.contentHash, encodeVector(chunk.embedding), chunk.embedding.length, JSON.stringify(data)])
+  } else {
+    await client.query('INSERT INTO smarthub.index_chunks (index_version_id, id, asset_version_id, chunk_key, ordinal, content, content_hash, embedding, embedding_dimensions, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::vector,$9,$10::jsonb)', [ownerId, chunk.id, chunk.assetVersionId, chunk.chunkKey, chunk.ordinal, chunk.content, chunk.contentHash, encodeVector(chunk.embedding), chunk.embedding.length, JSON.stringify(data)])
+  }
+}
+
+async function deleteMissing<T extends { id: string }>(client: PoolClient, table: string, before: T[], after: T[]) {
+  const retained = new Set(after.map(item => item.id))
+  const missing = before.filter(item => !retained.has(item.id)).map(item => item.id)
+  if (missing.length) await client.query(`DELETE FROM smarthub.${table} WHERE id = ANY($1::text[])`, [missing])
+}
+
+function changed<T extends { id: string }>(before: T[], after: T[]) {
+  const previous = new Map(before.map(item => [item.id, JSON.stringify(item)]))
+  return after.filter(item => previous.get(item.id) !== JSON.stringify(item))
 }
 
 function encodeVector(vector: number[]) {
   if (!vector.length || vector.some(value => !Number.isFinite(value))) throw new Error('向量不能为空且必须全部为有限数值')
   return `[${vector.join(',')}]`
 }
+function decodeVector(value: string) { return value.replace(/^\[|\]$/g, '').split(',').filter(Boolean).map(Number) }
 
 function positiveInteger(value: number, name: string) { if (!Number.isInteger(value) || value <= 0) throw new Error(`${name}必须是正整数`); return value }
 function stringArray(value: unknown) { return Array.isArray(value) ? value.map(String) : [] }
@@ -168,7 +237,7 @@ function orderDirectories(directories: DatabaseState['directories']) {
   const ordered: DatabaseState['directories'] = []
   const remaining = [...directories]
   while (remaining.length) {
-    const index = remaining.findIndex(item => !item.parentId || ordered.some(parent => parent.id === item.parentId))
+    const index = remaining.findIndex(item => !item.parentId || ordered.some(parent => parent.id === item.parentId) || !remaining.some(parent => parent.id === item.parentId))
     if (index < 0) throw new Error('知识库目录层级存在循环或缺失父目录')
     ordered.push(remaining.splice(index, 1)[0])
   }

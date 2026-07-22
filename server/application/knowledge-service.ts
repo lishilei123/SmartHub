@@ -27,8 +27,12 @@ export class KnowledgeService {
     })
   }
 
-  async recoverInterruptedRebuilds() {
-    return this.store.transaction(state => state.tasks.filter(task => task.type === 'rebuild' && ['queued', 'running'].includes(task.status)).map(task => {
+  async recoverInterruptedTasks() {
+    return this.store.transaction(state => state.tasks.filter(task => ['queued', 'running'].includes(task.status)).map(task => {
+      const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null
+      const candidate = candidateId ? state.indexes.find(index => index.id === candidateId) : null
+      if (candidate?.status === 'candidate') candidate.status = 'failed'
+      delete task.input.candidateIndexVersionId
       task.status = 'queued'; task.step = 'waiting'; task.progress = 0; task.startedAt = undefined
       return task.id
     }))
@@ -48,7 +52,7 @@ export class KnowledgeService {
 
   async ensureDefaultKnowledgeBase(projectName = 'SmartHub') {
     const normalizedName = projectName.trim() || 'SmartHub'
-    const existing = selectDefaultKnowledgeBase(this.store.read(), normalizedName)
+    const existing = selectDefaultKnowledgeBase(await this.store.snapshot(), normalizedName)
     if (existing) return existing
     return this.store.transaction(async state => {
       const concurrent = selectDefaultKnowledgeBase(state, normalizedName)
@@ -102,8 +106,8 @@ export class KnowledgeService {
     })
   }
 
-  overview(knowledgeBaseId: string) {
-    const state = this.store.read(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+  async overview(knowledgeBaseId: string) {
+    const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
     const assets = state.assets.filter(item => item.knowledgeBaseId === knowledgeBaseId)
     const versions = state.versions.filter(item => assets.some(asset => asset.id === item.assetId))
     const tasks = state.tasks.filter(item => item.knowledgeBaseId === knowledgeBaseId)
@@ -111,8 +115,8 @@ export class KnowledgeService {
     return { knowledgeBase: kb, counts: { assets: assets.length, ready: versions.filter(item => item.status === 'ready').length, syncing: versions.filter(item => item.status === 'syncing' || item.status === 'pending').length, failed: versions.filter(item => item.status === 'failed').length }, byAssetType: countBy('assetType'), bySource: countBy('sourceType'), activeIndex: state.indexes.find(item => item.id === kb.activeIndexVersionId) ?? null, latestTask: tasks.at(-1) ?? null, latestFailure: tasks.filter(item => item.status === 'failed').at(-1) ?? null }
   }
 
-  config(knowledgeBaseId: string) {
-    const state = this.store.read(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+  async config(knowledgeBaseId: string) {
+    const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
     return required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
   }
 
@@ -131,9 +135,19 @@ export class KnowledgeService {
     })
   }
 
-  directories(knowledgeBaseId: string) {
-    required(this.store.read().knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
-    return this.store.read().directories.filter(item => item.knowledgeBaseId === knowledgeBaseId).sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  async testEmbeddingConfig(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
+    const saved = await this.config(knowledgeBaseId)
+    const config = { ...saved.config, ...patch }
+    validateConfig(config)
+    const vectors = await this.embedTexts(config, ['SmartHub 知识库连接测试'])
+    const vector = required(vectors[0], 'Embedding Provider 未返回测试向量')
+    return { ok: true, model: config.embeddingModel, dimensions: vector.length }
+  }
+
+  async directories(knowledgeBaseId: string) {
+    const state = await this.store.snapshot()
+    required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    return state.directories.filter(item => item.knowledgeBaseId === knowledgeBaseId).sort((left, right) => left.createdAt.localeCompare(right.createdAt))
   }
 
   async createDirectory(knowledgeBaseId: string, name: string, parentId: string | null) {
@@ -180,7 +194,7 @@ export class KnowledgeService {
       }
       state.directories = state.directories.filter(item => !descendants.has(item.id))
       const kb = required(state.knowledgeBases.find(item => item.id === directory.knowledgeBaseId), '知识库不存在')
-      if (kb.activeIndexVersionId) publishIndex(state, kb.id, kb.activeConfigVersionId, state.assets.filter(item => item.knowledgeBaseId === kb.id && item.activeVersionId).map(item => item.activeVersionId!))
+      if (kb.activeIndexVersionId) { const activeIndex = state.indexes.find(item => item.id === kb.activeIndexVersionId); publishIndex(state, kb.id, activeIndex?.configVersionId ?? kb.activeConfigVersionId, state.assets.filter(item => item.knowledgeBaseId === kb.id && item.activeVersionId).map(item => item.activeVersionId!)) }
       return { mode, deletedDirectoryIds: [...descendants], affectedAssets: affectedAssets.length }
     })
   }
@@ -201,49 +215,144 @@ export class KnowledgeService {
       let asset = state.assets.find(item => item.knowledgeBaseId === input.knowledgeBaseId && item.logicalPath.toLocaleLowerCase() === input.logicalPath.toLocaleLowerCase())
       const activeVersion = asset ? state.versions.find(item => item.id === asset!.activeVersionId) : undefined
       if (activeVersion?.contentHash === contentHash) return { deduplicated: true, asset, version: activeVersion, task: null }
+      const inFlightVersion = asset ? state.versions.find(item => item.assetId === asset!.id && item.contentHash === contentHash && ['pending', 'syncing'].includes(item.status)) : undefined
+      const inFlightTask = inFlightVersion ? state.tasks.find(item => item.input.assetVersionId === inFlightVersion.id && ['queued', 'running'].includes(item.status)) : undefined
+      if (asset && inFlightVersion && inFlightTask) return { deduplicated: true, asset, version: inFlightVersion, task: inFlightTask }
       if (!asset) {
         asset = { id: id('ast'), knowledgeBaseId: input.knowledgeBaseId, displayName: input.displayName, logicalPath: input.logicalPath, assetType: input.assetType, sourceType: input.sourceType, sourceKey: input.sourceKey, activeVersionId: null, createdAt: now(), updatedAt: now() }
         state.assets.push(asset)
       }
-      const previous = activeVersion?.chunks ?? []
-      const version: AssetVersion = { id: id('av'), assetId: asset.id, number: state.versions.filter(item => item.assetId === asset!.id).length + 1, content: input.content, contentHash, status: 'syncing', configVersionId: configVersion.id, createdAt: now(), chunks: await this.createChunks(input.content, configVersion.config, previous) }
-      if (this.rawDocuments) Object.assign(version, await this.rawDocuments.save(input.knowledgeBaseId, input.logicalPath, version.id, input.content))
-      version.chunks.forEach(chunk => { chunk.assetVersionId = version.id })
-      const task: SyncTask = { id: id('task'), knowledgeBaseId: input.knowledgeBaseId, type: 'sync', trigger: input.taskTrigger ?? input.sourceType, status: 'running', step: 'embedding', progress: 60, attempts: input.attempts ?? 1, input: { assetId: asset.id, assetVersionId: version.id, logicalPath: input.logicalPath }, configVersionId: configVersion.id, createdAt: now(), startedAt: now(), metrics: { chunks: version.chunks.length, reusedChunks: version.chunks.filter(item => item.reused).length, embeddedChunks: version.chunks.filter(item => !item.reused).length } }
+      const version: AssetVersion = { id: id('av'), assetId: asset.id, number: state.versions.filter(item => item.assetId === asset!.id).length + 1, content: input.content, contentHash, status: 'pending', configVersionId: configVersion.id, createdAt: now(), chunks: [] }
+      if (this.rawDocuments) Object.assign(version, await this.rawDocuments.saveSnapshot(input.knowledgeBaseId, input.logicalPath, version.id, input.content))
+      const task: SyncTask = { id: id('task'), knowledgeBaseId: input.knowledgeBaseId, type: 'sync', trigger: input.taskTrigger ?? input.sourceType, status: 'queued', step: 'waiting', progress: 0, attempts: input.attempts ?? 1, input: { assetId: asset.id, assetVersionId: version.id, logicalPath: input.logicalPath, displayName: input.displayName, assetType: input.assetType, sourceKey: input.sourceKey, sourceType: input.sourceType, simulateFailureAt: input.simulateFailureAt }, configVersionId: configVersion.id, createdAt: now() }
       state.versions.push(version); state.tasks.push(task)
-      if (input.simulateFailureAt) { version.status = 'failed'; version.error = `模拟 ${input.simulateFailureAt} 阶段失败`; task.status = 'failed'; task.step = input.simulateFailureAt; task.error = version.error; task.finishedAt = now(); return { deduplicated: false, asset, version, task } }
-      publishIndex(state, kb.id, configVersion.id, [...state.assets.filter(item => item.knowledgeBaseId === kb.id && item.activeVersionId).map(item => item.activeVersionId!), version.id])
-      version.status = 'ready'; version.readyAt = now(); asset.activeVersionId = version.id; asset.updatedAt = now(); asset.displayName = input.displayName; asset.assetType = input.assetType; asset.sourceKey = input.sourceKey; asset.sourceType = input.sourceType
-      task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now()
       return { deduplicated: false, asset, version, task }
     })
   }
 
-  assets(knowledgeBaseId: string, filters: { assetType?: string; sourceType?: string; status?: string; path?: string; includeDeleted?: boolean; query?: string } = {}) {
-    const state = this.store.read()
+  async processTask(taskId: string) {
+    const task = required((await this.store.snapshot()).tasks.find(item => item.id === taskId), '任务不存在')
+    if (task.type === 'sync') return this.processQueuedSync(taskId)
+    if (task.type === 'rebuild') return this.processQueuedRebuild(taskId)
+    if (task.type === 'delete') return this.processQueuedDelete(taskId)
+    return task
+  }
+
+  async processQueuedSync(taskId: string) {
+    const work = await this.store.transaction(state => {
+      const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+      if (task.type !== 'sync' || task.status !== 'queued') return null
+      const version = required(state.versions.find(item => item.id === task.input.assetVersionId), '资产版本不存在')
+      const asset = required(state.assets.find(item => item.id === version.assetId), '知识资产不存在')
+      const config = required(state.configs.find(item => item.id === task.configVersionId), '配置不存在')
+      const previous = state.versions.find(item => item.id === asset.activeVersionId)?.chunks ?? []
+      const candidate = createCandidateIndex(state, task.knowledgeBaseId, task.configVersionId)
+      task.status = 'running'; task.step = 'embedding'; task.progress = 35; task.startedAt = now(); task.input.candidateIndexVersionId = candidate.id
+      version.status = 'syncing'
+      return { content: version.content, versionId: version.id, assetId: asset.id, previous, config: config.config, candidateId: candidate.id, simulateFailureAt: task.input.simulateFailureAt }
+    })
+    if (!work) return null
+    try {
+      const chunks = (await this.createChunks(work.content, work.config, work.previous)).map(chunk => ({ ...chunk, assetVersionId: work.versionId }))
+      if (work.simulateFailureAt) throw new Error(`模拟 ${String(work.simulateFailureAt)} 阶段失败`)
+      return await this.store.transaction(async state => {
+        const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+        const candidate = required(state.indexes.find(item => item.id === work.candidateId), '候选索引不存在')
+        if (task.status === 'cancelled') { candidate.status = 'failed'; return task }
+        if (task.status !== 'running') return task
+        const version = required(state.versions.find(item => item.id === work.versionId), '资产版本不存在')
+        const asset = required(state.assets.find(item => item.id === work.assetId), '知识资产不存在')
+        const newer = state.versions.some(item => item.assetId === asset.id && item.number > version.number && !['failed', 'deleted'].includes(item.status))
+        if (newer) { candidate.status = 'failed'; version.status = 'failed'; version.error = '已被同一资料的更新版本取代'; task.status = 'cancelled'; task.step = 'superseded'; task.finishedAt = now(); return task }
+        const kb = required(state.knowledgeBases.find(item => item.id === task.knowledgeBaseId), '知识库不存在')
+        const current = state.indexes.find(item => item.id === kb.activeIndexVersionId)
+        const targetVersionIds = new Set(state.versions.filter(item => item.assetId === asset.id).map(item => item.id))
+        const retainedChunks = (current?.indexedChunks ?? []).filter(chunk => !targetVersionIds.has(chunk.assetVersionId))
+        const members = state.assets.filter(item => item.knowledgeBaseId === kb.id && item.id !== asset.id && item.activeVersionId).map(item => item.activeVersionId!)
+        candidate.assetVersionIds = [...members, version.id]; candidate.indexedChunks = [...retainedChunks, ...chunks]
+        validateCandidate(candidate, task, state)
+        if (this.rawDocuments) await this.rawDocuments.activateSnapshot(kb.id, String(task.input.logicalPath), version.id)
+        activateCandidateIndex(state, candidate, current)
+        version.chunks = chunks; version.status = 'ready'; version.readyAt = now(); version.error = undefined
+        asset.activeVersionId = version.id; asset.updatedAt = now(); asset.displayName = String(task.input.displayName); asset.assetType = String(task.input.assetType); asset.sourceKey = String(task.input.sourceKey); asset.sourceType = task.input.sourceType as SourceType
+        task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.metrics = { chunks: chunks.length, reusedChunks: chunks.filter(item => item.reused).length, embeddedChunks: chunks.filter(item => !item.reused).length }
+        return task
+      })
+    } catch (error) {
+      return this.store.transaction(state => {
+        const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+        const candidate = state.indexes.find(item => item.id === work.candidateId)
+        if (candidate?.status === 'candidate') candidate.status = 'failed'
+        if (task.status === 'cancelled') return task
+        const version = state.versions.find(item => item.id === work.versionId)
+        if (version) { version.status = 'failed'; version.error = error instanceof Error ? error.message : '同步失败' }
+        task.status = 'failed'; task.step = String(task.input.simulateFailureAt ?? 'embedding'); task.error = error instanceof Error ? error.message : '同步失败'; task.finishedAt = now()
+        return task
+      })
+    }
+  }
+
+  async assets(knowledgeBaseId: string, filters: { assetType?: string; sourceType?: string; status?: string; path?: string; includeDeleted?: boolean; query?: string } = {}) {
+    const state = await this.store.snapshot()
     return state.assets.filter(asset => asset.knowledgeBaseId === knowledgeBaseId).map(asset => ({ ...asset, activeVersion: state.versions.find(version => version.id === asset.activeVersionId) ?? null, versions: state.versions.filter(version => version.assetId === asset.id).map(version => ({ ...version, content: undefined })) })).filter(asset => (!filters.assetType || asset.assetType === filters.assetType) && (!filters.sourceType || asset.sourceType === filters.sourceType) && (!filters.status || asset.activeVersion?.status === filters.status) && (!filters.path || asset.logicalPath.includes(filters.path)) && (filters.includeDeleted || Boolean(asset.activeVersion)) && (!filters.query || `${asset.displayName} ${asset.logicalPath} ${asset.activeVersion?.content}`.toLocaleLowerCase().includes(filters.query.toLocaleLowerCase())))
   }
 
-  version(versionId: string) { return required(this.store.read().versions.find(item => item.id === versionId), '资产版本不存在') }
+  async version(versionId: string) { return required((await this.store.snapshot()).versions.find(item => item.id === versionId), '资产版本不存在') }
 
-  tasks(knowledgeBaseId: string) { return this.store.read().tasks.filter(item => item.knowledgeBaseId === knowledgeBaseId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) }
-  task(taskId: string) { return required(this.store.read().tasks.find(item => item.id === taskId), '任务不存在') }
+  async tasks(knowledgeBaseId: string) { return (await this.store.snapshot()).tasks.filter(item => item.knowledgeBaseId === knowledgeBaseId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) }
+  async task(taskId: string) { return required((await this.store.snapshot()).tasks.find(item => item.id === taskId), '任务不存在') }
 
   async retry(taskId: string) {
-    const state = this.store.read(); const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
-    if (task.status !== 'failed') throw new Error('只有失败任务可以重试')
-    const version = required(state.versions.find(item => item.id === task.input.assetVersionId), '失败资产版本不存在'); const asset = required(state.assets.find(item => item.id === version.assetId), '知识资产不存在')
-    return this.ingest({ knowledgeBaseId: task.knowledgeBaseId, sourceType: asset.sourceType, sourceKey: asset.sourceKey, assetType: asset.assetType, displayName: asset.displayName, logicalPath: asset.logicalPath, content: version.content, taskTrigger: 'retry', attempts: task.attempts + 1 })
+    return this.store.transaction(state => {
+      const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+      if (task.status !== 'failed') throw new Error('只有失败任务可以重试')
+      const version = required(state.versions.find(item => item.id === task.input.assetVersionId), '失败资产版本不存在')
+      const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null
+      const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null
+      if (candidate?.status === 'candidate') candidate.status = 'failed'
+      delete task.input.candidateIndexVersionId
+      delete task.input.simulateFailureAt
+      task.status = 'queued'; task.trigger = 'retry'; task.step = 'waiting'; task.progress = 0; task.attempts += 1; task.startedAt = undefined; task.finishedAt = undefined; task.error = undefined
+      version.status = 'pending'; version.error = undefined
+      return task
+    })
   }
 
   async deleteAsset(assetId: string) {
-    return this.store.transaction(async state => {
+    return this.store.transaction(state => {
       const asset = required(state.assets.find(item => item.id === assetId), '知识资产不存在'); const active = required(state.versions.find(item => item.id === asset.activeVersionId), '活动版本不存在'); const kb = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId), '知识库不存在')
-      const task: SyncTask = { id: id('task'), knowledgeBaseId: kb.id, type: 'delete', trigger: 'manual', status: 'running', step: 'building_candidate', progress: 60, attempts: 1, input: { assetId, assetVersionId: active.id }, configVersionId: kb.activeConfigVersionId, createdAt: now(), startedAt: now() }
-      state.tasks.push(task); const members = state.assets.filter(item => item.knowledgeBaseId === kb.id && item.id !== assetId && item.activeVersionId).map(item => item.activeVersionId!); publishIndex(state, kb.id, kb.activeConfigVersionId, members)
-      if (this.rawDocuments) await this.rawDocuments.deleteActive(kb.id, asset.logicalPath)
-      active.status = 'deleted'; asset.activeVersionId = null; asset.updatedAt = now(); task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); return { asset, task }
+      const existing = state.tasks.find(task => task.type === 'delete' && task.input.assetId === assetId && ['queued', 'running'].includes(task.status))
+      if (existing) return { asset, task: existing }
+      const activeIndex = state.indexes.find(item => item.id === kb.activeIndexVersionId)
+      const task: SyncTask = { id: id('task'), knowledgeBaseId: kb.id, type: 'delete', trigger: 'manual', status: 'queued', step: 'waiting', progress: 0, attempts: 1, input: { assetId, assetVersionId: active.id, logicalPath: asset.logicalPath }, configVersionId: activeIndex?.configVersionId ?? kb.activeConfigVersionId, createdAt: now() }
+      state.tasks.push(task); return { asset, task }
     })
+  }
+
+  async processQueuedDelete(taskId: string) {
+    try {
+      return await this.store.transaction(async state => {
+        const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+        if (task.type !== 'delete' || task.status !== 'queued') return task
+        const asset = required(state.assets.find(item => item.id === task.input.assetId), '知识资产不存在')
+        const active = required(state.versions.find(item => item.id === task.input.assetVersionId), '活动版本不存在')
+        if (asset.activeVersionId !== active.id) { task.status = 'cancelled'; task.step = 'superseded'; task.finishedAt = now(); return task }
+        const kb = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId), '知识库不存在')
+        const current = state.indexes.find(item => item.id === kb.activeIndexVersionId)
+        const candidate = createCandidateIndex(state, kb.id, task.configVersionId)
+        task.status = 'running'; task.step = 'building_candidate'; task.progress = 60; task.startedAt = now(); task.input.candidateIndexVersionId = candidate.id
+        const removedVersionIds = new Set(state.versions.filter(version => version.assetId === asset.id).map(version => version.id))
+        candidate.assetVersionIds = state.assets.filter(item => item.knowledgeBaseId === kb.id && item.id !== asset.id && item.activeVersionId).map(item => item.activeVersionId!)
+        candidate.indexedChunks = (current?.indexedChunks ?? []).filter(chunk => !removedVersionIds.has(chunk.assetVersionId))
+        validateCandidate(candidate, task, state)
+        if (this.rawDocuments) await this.rawDocuments.deleteActive(kb.id, asset.logicalPath)
+        activateCandidateIndex(state, candidate, current)
+        active.status = 'deleted'; asset.activeVersionId = null; asset.updatedAt = now(); task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now()
+        return task
+      })
+    } catch (error) {
+      return this.store.transaction(state => { const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? error.message : '删除任务失败'; task.finishedAt = now(); return task })
+    }
   }
 
   async updateAsset(assetId: string, patch: { displayName?: string; targetDirectoryId?: string | null }) {
@@ -267,23 +376,43 @@ export class KnowledgeService {
   }
 
   async search(knowledgeBaseId: string, input: { query: string; mode?: 'keyword' | 'vector' | 'hybrid'; assetType?: AssetType; sourceType?: SourceType; logicalPath?: string }) {
-    const state = this.store.read(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
     const query = input.query.trim()
     if (!query) throw new Error('检索内容不能为空')
-    if (!state.versions.some(item => item.status === 'ready' && state.assets.some(asset => asset.knowledgeBaseId === knowledgeBaseId && asset.activeVersionId === item.id))) return { status: 'no_ready_assets', results: [] }
+    if (!state.versions.some(item => item.status === 'ready' && state.assets.some(asset => asset.knowledgeBaseId === knowledgeBaseId && asset.activeVersionId === item.id))) {
+      const indexing = state.tasks.some(task => task.knowledgeBaseId === knowledgeBaseId && ['sync', 'rebuild'].includes(task.type) && ['queued', 'running'].includes(task.status))
+      return { status: indexing ? 'initial_indexing' : 'no_ready_assets', results: [] }
+    }
     if (!kb.activeIndexVersionId) return { status: 'no_active_index', results: [] }
     const index = required(state.indexes.find(item => item.id === kb.activeIndexVersionId), '活动索引不存在')
     const indexConfig = required(state.configs.find(item => item.id === index.configVersionId), '索引配置不存在').config
     const latestConfig = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '当前查询配置不存在').config
     const config = withLatestQueryConfig(indexConfig, latestConfig)
-    const mode = input.mode ?? (config.hybridSearch ? 'hybrid' : 'keyword')
-    const queryVector = mode === 'keyword' ? undefined : (await this.embedTexts(config, [query]))[0]
+    const requestedMode = input.mode ?? (config.hybridSearch ? 'hybrid' : 'keyword')
+    const hasFilterMatch = index.assetVersionIds.some(versionId => { const version = state.versions.find(item => item.id === versionId); const asset = state.assets.find(item => item.id === version?.assetId); return Boolean(asset && (!input.assetType || asset.assetType === input.assetType) && (!input.sourceType || asset.sourceType === input.sourceType) && (!input.logicalPath || asset.logicalPath.includes(input.logicalPath))) })
+    if ((input.assetType || input.sourceType || input.logicalPath) && !hasFilterMatch) return { status: 'filter_empty', results: [] }
+    let mode = requestedMode
+    let queryVector: number[] | undefined
+    let degradedReason: string | undefined
+    if (mode !== 'keyword') {
+      try { queryVector = (await this.embedTexts(config, [query]))[0] }
+      catch (error) {
+        degradedReason = error instanceof Error ? error.message : 'Embedding Provider 不可用'
+        if (mode === 'vector') return { status: 'vector_unavailable', results: [], degradation: { requestedMode, fallbackMode: null, reason: degradedReason } }
+        mode = 'keyword'
+      }
+    }
     const [keywordCandidates, vectorCandidates] = await Promise.all([
       mode === 'vector' ? Promise.resolve([]) : this.recall(index, config, 'keyword', query, undefined, config.keywordRecall, input),
       mode === 'keyword' ? Promise.resolve([]) : this.recall(index, config, 'vector', query, queryVector, config.vectorRecall, input),
     ])
     const merged = mergeCandidates(keywordCandidates, vectorCandidates, mode)
-    const reranked = config.rerankerEnabled && merged.length ? await this.rerank(config, query, merged) : merged
+    let reranked = merged
+    let rerankerDegraded = false
+    if (config.rerankerEnabled && merged.length) {
+      try { reranked = await this.rerank(config, query, merged) }
+      catch (error) { rerankerDegraded = true; degradedReason ??= error instanceof Error ? error.message : 'Reranker 不可用' }
+    }
     const eligible = reranked.filter(item => item.score >= config.relevanceThreshold).sort((a, b) => b.score - a.score)
     const candidates = eligible.slice(0, config.finalResults).map(item => ({
       score: item.score,
@@ -297,28 +426,19 @@ export class KnowledgeService {
     return {
       status: candidates.length ? 'ok' : 'no_matches',
       indexVersionId: index.id,
-      retrieval: { mode, minimumRelevance: config.relevanceThreshold, keywordCandidates: keywordCandidates.length, vectorCandidates: vectorCandidates.length, mergedCandidates: merged.length, eligibleCandidates: eligible.length, returned: candidates.length, rerankerEnabled: config.rerankerEnabled },
+      retrieval: { mode, requestedMode, degraded: Boolean(degradedReason), degradedReason, minimumRelevance: config.relevanceThreshold, keywordCandidates: keywordCandidates.length, vectorCandidates: vectorCandidates.length, mergedCandidates: merged.length, eligibleCandidates: eligible.length, returned: candidates.length, rerankerEnabled: config.rerankerEnabled, rerankerDegraded },
       results: candidates,
     }
   }
 
   async rebuild(knowledgeBaseId: string, outcome: 'success' | 'failure' | 'cancel' = 'success') {
-    return this.store.transaction(async state => {
-      const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在'); const oldIndexId = kb.activeIndexVersionId
-      const task: SyncTask = { id: id('task'), knowledgeBaseId, type: 'rebuild', trigger: 'manual', status: 'running', step: 'building_candidate', progress: 70, attempts: 1, input: { oldIndexId }, configVersionId: kb.activeConfigVersionId, createdAt: now(), startedAt: now() }
-      state.tasks.push(task)
-      if (outcome !== 'success') { task.status = outcome === 'failure' ? 'failed' : 'cancelled'; task.error = outcome === 'failure' ? '模拟索引校验失败' : undefined; task.finishedAt = now(); return { task, activeIndexVersionId: oldIndexId } }
-      const members = state.assets.filter(item => item.knowledgeBaseId === knowledgeBaseId && item.activeVersionId).map(item => item.activeVersionId!)
-      const config = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
-      const rebuiltChunks: Chunk[] = []
-      for (const versionId of members) {
-        const version = required(state.versions.find(item => item.id === versionId), '资产版本不存在')
-        const chunks = (await this.createChunks(version.content, config.config)).map(chunk => ({ ...chunk, assetVersionId: version.id }))
-        version.chunks = chunks
-        rebuiltChunks.push(...chunks)
-      }
-      const index = publishIndex(state, knowledgeBaseId, kb.activeConfigVersionId, members, rebuiltChunks); config.requiresRebuild = false; task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.metrics = { chunks: rebuiltChunks.length, embeddedChunks: rebuiltChunks.length }; return { task, index, previousIndexVersionId: oldIndexId }
-    })
+    const task = await this.queueRebuild(knowledgeBaseId)
+    if (outcome === 'cancel') { await this.cancelTask(task.id); return { task: await this.task(task.id), activeIndexVersionId: (await this.overview(knowledgeBaseId)).knowledgeBase.activeIndexVersionId } }
+    if (outcome === 'failure') await this.store.transaction(state => { const queued = required(state.tasks.find(item => item.id === task.id), '任务不存在'); queued.input.simulateFailure = true })
+    await this.processQueuedRebuild(task.id)
+    const completed = await this.task(task.id)
+    const state = await this.store.snapshot()
+    return { task: completed, index: completed.status === 'succeeded' ? state.indexes.find(item => item.id === completed.input.candidateIndexVersionId) : undefined, activeIndexVersionId: state.knowledgeBases.find(item => item.id === knowledgeBaseId)?.activeIndexVersionId }
   }
 
   async queueRebuild(knowledgeBaseId: string) {
@@ -332,30 +452,57 @@ export class KnowledgeService {
   }
 
   async processQueuedRebuild(taskId: string) {
-    const accepted = await this.store.transaction(state => { const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); if (task.status !== 'queued') return false; task.status = 'running'; task.step = 'building_candidate'; task.progress = 35; task.startedAt = now(); return true })
-    if (!accepted) return null
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 500))
-    if (this.store.read().tasks.find(item => item.id === taskId)?.status === 'cancelled') return null
+    const work = await this.store.transaction(state => {
+      const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+      if (task.type !== 'rebuild' || task.status !== 'queued') return null
+      const kb = required(state.knowledgeBases.find(item => item.id === task.knowledgeBaseId), '知识库不存在')
+      const config = required(state.configs.find(item => item.id === task.configVersionId), '配置不存在')
+      const versions = state.assets.filter(item => item.knowledgeBaseId === kb.id && item.activeVersionId).map(item => required(state.versions.find(version => version.id === item.activeVersionId), '资产版本不存在'))
+      const candidate = createCandidateIndex(state, kb.id, task.configVersionId)
+      candidate.assetVersionIds = versions.map(version => version.id)
+      task.status = 'running'; task.step = 'building_candidate'; task.progress = 20; task.startedAt = now(); task.input.candidateIndexVersionId = candidate.id; task.input.baseIndexVersionId = kb.activeIndexVersionId
+      return { candidateId: candidate.id, knowledgeBaseId: kb.id, configVersionId: config.id, config: config.config, versions: versions.map(version => ({ id: version.id, content: version.content })), simulateFailure: Boolean(task.input.simulateFailure) }
+    })
+    if (!work) return null
     try {
-      const queued = required(this.store.read().tasks.find(item => item.id === taskId), '任务不存在')
-      const result = await this.rebuild(queued.knowledgeBaseId, 'success')
+      const rebuiltChunks: Chunk[] = []
+      for (const version of work.versions) rebuiltChunks.push(...(await this.createChunks(version.content, work.config)).map(chunk => ({ ...chunk, assetVersionId: version.id })))
+      if (work.simulateFailure) throw new Error('模拟索引校验失败')
       return this.store.transaction(state => {
-        const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); const generatedIndex = state.tasks.findIndex(item => item.id === result.task.id)
-        if (generatedIndex >= 0) state.tasks.splice(generatedIndex, 1)
-        if (task.status === 'cancelled') return task
-        task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.metrics = result.task.metrics; return task
+        const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+        const candidate = required(state.indexes.find(item => item.id === work.candidateId), '候选索引不存在')
+        if (task.status === 'cancelled') { candidate.status = 'failed'; return task }
+        const kb = required(state.knowledgeBases.find(item => item.id === work.knowledgeBaseId), '知识库不存在')
+        if (kb.activeIndexVersionId !== task.input.baseIndexVersionId) throw new Error('活动索引已变化，请重新发起重建')
+        candidate.indexedChunks = rebuiltChunks
+        validateCandidate(candidate, task, state)
+        const current = state.indexes.find(item => item.id === kb.activeIndexVersionId)
+        activateCandidateIndex(state, candidate, current)
+        const config = required(state.configs.find(item => item.id === work.configVersionId), '配置不存在'); config.requiresRebuild = false
+        task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.metrics = { chunks: rebuiltChunks.length, embeddedChunks: rebuiltChunks.length }; return task
       })
     } catch (error) {
       return this.store.transaction(state => {
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         if (task.status === 'cancelled') return task
+        const candidate = state.indexes.find(item => item.id === work.candidateId)
+        if (candidate?.status === 'candidate') candidate.status = 'failed'
         task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? error.message : '索引重建失败'; task.finishedAt = now(); return task
       })
     }
   }
 
   async cancelTask(taskId: string) {
-    return this.store.transaction(state => { const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); if (!['queued', 'running'].includes(task.status)) throw new Error('只有等待中或运行中的任务可以取消'); task.status = 'cancelled'; task.step = 'cancelled'; task.finishedAt = now(); return task })
+    return this.store.transaction(state => {
+      const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+      if (!['queued', 'running'].includes(task.status)) throw new Error('只有等待中或运行中的任务可以取消')
+      task.status = 'cancelled'; task.step = 'cancelled'; task.finishedAt = now()
+      const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null
+      const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null
+      if (candidate?.status === 'candidate') candidate.status = 'failed'
+      if (task.type === 'sync') { const version = state.versions.find(item => item.id === task.input.assetVersionId); if (version && ['pending', 'syncing'].includes(version.status)) { version.status = 'failed'; version.error = '同步任务已取消' } }
+      return task
+    })
   }
 
   private async createChunks(content: string, config: KnowledgeConfig, previous: Chunk[] = []): Promise<Chunk[]> {
@@ -386,7 +533,7 @@ export class KnowledgeService {
   }
 
   private async recall(index: DatabaseState['indexes'][number], config: KnowledgeConfig, mode: 'keyword' | 'vector', query: string, queryVector: number[] | undefined, limit: number, filters: RetrievalInput) {
-    if (this.store.searchChunks) return this.store.searchChunks({ versionIds: index.assetVersionIds, mode, query, queryVector, dimensions: config.embeddingDimensions, limit, assetType: filters.assetType, sourceType: filters.sourceType, logicalPath: filters.logicalPath })
+    if (this.store.searchChunks) return this.store.searchChunks({ indexVersionId: index.id, mode, query, queryVector, dimensions: config.embeddingDimensions, limit, assetType: filters.assetType, sourceType: filters.sourceType, logicalPath: filters.logicalPath })
     const state = this.store.read()
     const terms = query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []
     return index.assetVersionIds.flatMap(versionId => {
@@ -476,8 +623,29 @@ function ensureDirectoryPath(state: DatabaseState, knowledgeBaseId: string, segm
 
 function publishIndex(state: DatabaseState, knowledgeBaseId: string, configVersionId: string, members: string[], indexedChunks?: Chunk[]) {
   const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在'); const previous = state.indexes.find(item => item.id === kb.activeIndexVersionId)
-  const index = { id: id('idx'), knowledgeBaseId, number: state.indexes.filter(item => item.knowledgeBaseId === knowledgeBaseId).length + 1, status: 'active' as const, assetVersionIds: [...new Set(members)], configVersionId, indexedChunks: indexedChunks ?? members.flatMap(versionId => state.versions.find(item => item.id === versionId)?.chunks ?? []), createdAt: now(), activatedAt: now() }
-  if (previous) previous.status = 'superseded'; state.indexes.push(index); kb.activeIndexVersionId = index.id; return index
+  const index = createCandidateIndex(state, knowledgeBaseId, configVersionId)
+  index.assetVersionIds = [...new Set(members)]; index.indexedChunks = indexedChunks ?? members.flatMap(versionId => state.versions.find(item => item.id === versionId)?.chunks ?? [])
+  activateCandidateIndex(state, index, previous)
+  return index
+}
+function createCandidateIndex(state: DatabaseState, knowledgeBaseId: string, configVersionId: string) {
+  required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+  const index = { id: id('idx'), knowledgeBaseId, number: state.indexes.filter(item => item.knowledgeBaseId === knowledgeBaseId).length + 1, status: 'candidate' as const, assetVersionIds: [] as string[], configVersionId, indexedChunks: [] as Chunk[], createdAt: now() }
+  state.indexes.push(index)
+  return index
+}
+function validateCandidate(candidate: DatabaseState['indexes'][number], task: SyncTask, state: DatabaseState) {
+  if (candidate.status !== 'candidate' || candidate.knowledgeBaseId !== task.knowledgeBaseId) throw new Error('候选索引状态不合法')
+  if (task.status !== 'running') throw new Error('任务已失效或取消')
+  if (candidate.configVersionId !== task.configVersionId) throw new Error('候选索引配置快照不一致')
+  const config = required(state.configs.find(item => item.id === candidate.configVersionId), '候选索引配置不存在').config
+  if (candidate.indexedChunks?.some(chunk => chunk.assetVersionId && (!candidate.assetVersionIds.includes(chunk.assetVersionId) || chunk.embedding.length !== config.embeddingDimensions))) throw new Error('候选索引 Chunk 或向量维度校验失败')
+}
+function activateCandidateIndex(state: DatabaseState, candidate: DatabaseState['indexes'][number], previous?: DatabaseState['indexes'][number]) {
+  const kb = required(state.knowledgeBases.find(item => item.id === candidate.knowledgeBaseId), '知识库不存在')
+  if (candidate.status !== 'candidate') throw new Error('只有候选索引可以激活')
+  if (previous && previous.id !== candidate.id) previous.status = 'superseded'
+  candidate.status = 'active'; candidate.activatedAt = now(); kb.activeIndexVersionId = candidate.id
 }
 function required<T>(value: T | null | undefined, message: string): T { if (value == null) throw new Error(message); return value }
 function validateConfig(config: KnowledgeConfig) {

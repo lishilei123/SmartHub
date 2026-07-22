@@ -16,9 +16,10 @@ test('远程模式调用 OpenAI 兼容 Embeddings API 并保存返回向量', as
   const kbId = created.knowledgeBase!.id
   await service.saveConfig(kbId, { embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingApiKey: 'secret', embeddingModel: 'embedding-a', embeddingDimensions: 3, embeddingBatchSize: 2 })
   const synced = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 规则\n必须校验幂等键' })
+  await service.processTask(synced.task!.id)
   assert.equal(calls[0].url, 'https://embedding.example.com/v1/embeddings')
   assert.equal(new Headers(calls[0].init?.headers).get('authorization'), 'Bearer secret')
-  assert.deepEqual(synced.version.chunks[0].embedding, [1, 0, 0])
+  assert.deepEqual((await service.version(synced.version.id)).chunks[0].embedding, [1, 0, 0])
 })
 
 test('远程 Embedding 失败会重试并明确报错，不回退 Hash 向量', async () => {
@@ -32,6 +33,8 @@ test('远程 Embedding 失败会重试并明确报错，不回退 Hash 向量', 
   const created = await service.createProject('远程失败验收')
   const kbId = created.knowledgeBase!.id
   await service.saveConfig(kbId, { embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingModel: 'embedding-a', embeddingDimensions: 3, embeddingRetries: 1 })
-  await assert.rejects(() => service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 规则\n内容' }), /provider unavailable/u)
+  const queued = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 规则\n内容' })
+  await service.processTask(queued.task!.id)
+  assert.match((await service.task(queued.task!.id)).error ?? '', /provider unavailable/u)
   assert.equal(requests, 2)
 })

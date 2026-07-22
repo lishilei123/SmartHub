@@ -36,7 +36,7 @@ export async function loadKnowledgeAssets(kbId: string, includeDeleted = false):
 }
 
 export async function uploadKnowledgeFile(kbId: string, file: File, logicalPath: string, assetType = 'other') {
-  return request<{ deduplicated: boolean }>(`/knowledge-bases/${kbId}/uploads`, { method: 'POST', body: JSON.stringify({ sourceKey: `browser:${logicalPath}`, assetType, displayName: file.name, logicalPath, content: await file.text() }) })
+  return request<{ deduplicated: boolean; task: ApiTask | null }>(`/knowledge-bases/${kbId}/uploads`, { method: 'POST', body: JSON.stringify({ sourceKey: `browser:${logicalPath}`, assetType, displayName: file.name, logicalPath, content: await file.text() }) })
 }
 export async function uploadKnowledgeArchive(kbId: string, file: File, targetPath = '', assetType = 'other') {
   const { default: JSZip } = await import('jszip')
@@ -56,22 +56,37 @@ export async function uploadKnowledgeArchive(kbId: string, file: File, targetPat
     else skipped += 1
   }
   if (!documents.length) throw new Error('压缩包中没有可入库的 Markdown 或 TXT 文件。')
-  return request<{ documents: number; attachments: number; deduplicated: number; skipped: number }>(`/knowledge-bases/${kbId}/archives`, { method: 'POST', body: JSON.stringify({ documents, attachments, skipped }) })
+  return request<{ documents: number; attachments: number; deduplicated: number; taskIds: string[]; skipped: number }>(`/knowledge-bases/${kbId}/archives`, { method: 'POST', body: JSON.stringify({ documents, attachments, skipped }) })
 }
 export const loadConfig = (kbId: string) => request<ApiConfig>(`/knowledge-bases/${kbId}/config`)
 export const saveConfig = (kbId: string, config: Record<string, unknown>) => request<{ changed: boolean; impact: string; configVersion: ApiConfig }>(`/knowledge-bases/${kbId}/config`, { method: 'PUT', body: JSON.stringify(config) })
 export const rebuildIndex = (kbId: string, outcome?: 'failure' | 'cancel') => request<{ task: ApiTask; index?: { id: string; number: number } }>(`/knowledge-bases/${kbId}/rebuild`, { method: 'POST', body: JSON.stringify(outcome ? { outcome } : {}) })
 export const loadTasks = (kbId: string) => request<ApiTask[]>(`/knowledge-bases/${kbId}/tasks`)
+export const loadTask = (taskId: string) => request<ApiTask>(`/tasks/${taskId}`)
+export async function waitForTasks(taskIds: string[], attempts = 300) {
+  const pending = new Set(taskIds)
+  for (let attempt = 0; attempt < attempts && pending.size; attempt += 1) {
+    await new Promise(resolvePromise => window.setTimeout(resolvePromise, 200))
+    for (const taskId of [...pending]) {
+      const task = await loadTask(taskId)
+      if (task.status === 'failed') throw new Error(task.error ?? '知识库任务失败')
+      if (task.status === 'cancelled') throw new Error('知识库任务已取消')
+      if (task.status === 'succeeded') pending.delete(taskId)
+    }
+  }
+  if (pending.size) throw new Error('知识库任务等待超时，可稍后刷新查看结果')
+}
 export const retryTask = (taskId: string) => request(`/tasks/${taskId}/retry`, { method: 'POST', body: '{}' })
 export const cancelTask = (taskId: string) => request<ApiTask>(`/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' })
 export type ApiSearchResult = { score: number; retrievalMode: string; excerpt: string; scores?: { keyword: number; vector: number; reranker?: number; final: number }; asset: { id: string; displayName: string; assetType: string; sourceType: string; logicalPath: string }; version: { id: string; number: number }; chunk: { chunkKey: string; headingPath: string[]; startLine: number; endLine: number } }
-export type ApiSearchMeta = { mode: string; minimumRelevance: number; keywordCandidates: number; vectorCandidates: number; mergedCandidates: number; eligibleCandidates: number; returned: number; rerankerEnabled: boolean }
+export type ApiSearchMeta = { mode: string; requestedMode?: string; degraded?: boolean; degradedReason?: string; minimumRelevance: number; keywordCandidates: number; vectorCandidates: number; mergedCandidates: number; eligibleCandidates: number; returned: number; rerankerEnabled: boolean; rerankerDegraded?: boolean }
 export const searchKnowledge = (kbId: string, query: string) => request<{ status: string; retrieval?: ApiSearchMeta; results: ApiSearchResult[] }>(`/knowledge-bases/${kbId}/search`, { method: 'POST', body: JSON.stringify({ query }) })
 export const loadLocalModelStatus = () => request<LocalModelStatus>('/local-model/status')
 export const startLocalModel = (model: string) => request<LocalModelStatus>('/local-model/start', { method: 'POST', body: JSON.stringify({ model }) })
 export const stopLocalModel = () => request<LocalModelStatus>('/local-model/stop', { method: 'POST', body: '{}' })
+export const testEmbeddingConfig = (kbId: string, config: Record<string, unknown>) => request<{ ok: true; model: string; dimensions: number }>(`/knowledge-bases/${kbId}/embedding/test`, { method: 'POST', body: JSON.stringify(config) })
 export const createKnowledgeDirectory = (kbId: string, name: string, parentId: string | null) => request<ApiDirectory>(`/knowledge-bases/${kbId}/directories`, { method: 'POST', body: JSON.stringify({ name, parentId }) })
 export const renameKnowledgeDirectory = (directoryId: string, name: string) => request<ApiDirectory>(`/directories/${directoryId}`, { method: 'PUT', body: JSON.stringify({ name }) })
 export const deleteKnowledgeDirectory = (directoryId: string, mode: 'recursive' | 'move', targetParentId: string | null = null) => request<{ deletedDirectoryIds: string[]; affectedAssets: number }>(`/directories/${directoryId}`, { method: 'DELETE', body: JSON.stringify({ mode, targetParentId }) })
 export const updateKnowledgeAsset = (assetId: string, patch: { displayName?: string; targetDirectoryId?: string | null }) => request<ApiAsset>(`/assets/${assetId}`, { method: 'PUT', body: JSON.stringify(patch) })
-export const deleteKnowledgeAsset = (assetId: string) => request(`/assets/${assetId}`, { method: 'DELETE' })
+export const deleteKnowledgeAsset = (assetId: string) => request<{ task: ApiTask }>(`/assets/${assetId}`, { method: 'DELETE' })
