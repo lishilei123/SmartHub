@@ -2,6 +2,8 @@ import { encodingForModel, getEncoding, type TiktokenModel } from 'js-tiktoken'
 import type { TokenCodec } from '../application/content.js'
 import type { KnowledgeConfig } from '../domain/types.js'
 
+export type ResolvedEmbeddingRoute = { sourceId: string; model: string; baseUrl: string; apiKey?: string }
+
 type Fetch = typeof fetch
 type EmbeddingResponse = { data?: { embedding?: number[]; index?: number }[] }
 type RemotePayload = {
@@ -22,14 +24,14 @@ export class RemoteEmbeddingClient {
     return { count: text => tokenizer.encode(text).length, maxTokens: 8191 }
   }
 
-  async embed(config: KnowledgeConfig, texts: string[], model = config.embeddingModel, signal?: AbortSignal) {
+  async embed(route: ResolvedEmbeddingRoute, config: KnowledgeConfig, texts: string[], signal?: AbortSignal) {
     throwIfAborted(signal)
     if (!texts.length) return []
     const vectors: number[][] = []
     for (let offset = 0; offset < texts.length; offset += config.embeddingBatchSize) {
       throwIfAborted(signal)
       const batch = texts.slice(offset, offset + config.embeddingBatchSize)
-      const response = await this.post(config, { model, input: batch, dimensions: config.embeddingDimensions }, signal)
+      const response = await this.post(route, config, { model: route.model, input: batch, dimensions: config.embeddingDimensions }, signal)
       const ordered = [...(response.data ?? [])].sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
       if (ordered.length !== batch.length) throw new Error(`远程 Embedding 返回数量不匹配：期望 ${batch.length}，实际 ${ordered.length}`)
       for (const item of ordered) {
@@ -42,15 +44,15 @@ export class RemoteEmbeddingClient {
     return vectors
   }
 
-  async detectDimensions(config: KnowledgeConfig, model = config.embeddingModel) {
-    const response = await this.post(config, { model, input: ['SmartHub 向量维度自动检测'] })
+  async detectDimensions(route: ResolvedEmbeddingRoute, config: KnowledgeConfig) {
+    const response = await this.post(route, config, { model: route.model, input: ['SmartHub 向量维度自动检测'] })
     const vector = response.data?.[0]?.embedding
     if (!Array.isArray(vector) || !vector.length || vector.some(value => !Number.isFinite(value))) throw new Error('远程 Embedding 未返回有效向量，无法自动检测维度')
     return vector.length
   }
 
-  private async post(config: KnowledgeConfig, body: Record<string, unknown>, signal?: AbortSignal) {
-    const endpoint = embeddingsEndpoint(config.embeddingBaseUrl)
+  private async post(route: ResolvedEmbeddingRoute, config: KnowledgeConfig, body: Record<string, unknown>, signal?: AbortSignal) {
+    const endpoint = embeddingsEndpoint(route.baseUrl)
     let lastError: Error | null = null
     for (let attempt = 0; attempt <= config.embeddingRetries; attempt += 1) {
       throwIfAborted(signal)
@@ -61,7 +63,7 @@ export class RemoteEmbeddingClient {
       try {
         const response = await this.request(endpoint.url, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', ...(config.embeddingApiKey ? { authorization: `Bearer ${config.embeddingApiKey}` } : {}) },
+          headers: { 'content-type': 'application/json', ...(route.apiKey ? { authorization: `Bearer ${route.apiKey}` } : {}) },
           body: JSON.stringify(body),
           signal: controller.signal,
         })
@@ -77,7 +79,7 @@ export class RemoteEmbeddingClient {
         await waitForRetry(Math.min(250 * (2 ** attempt), 4000), signal)
       } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort) }
     }
-    throw new Error(`远程 Embedding 请求失败：${lastError?.message ?? '未知错误'}`)
+    throw new Error(`远程 Embedding 请求失败：${safeProviderMessage(lastError?.message)}`)
   }
 }
 
@@ -96,7 +98,7 @@ function waitForRetry(delayMs: number, signal?: AbortSignal) {
 
 function embeddingsEndpoint(baseUrl: string): { url: string; protocol: 'openai' | 'ollama' } {
   const value = baseUrl.trim().replace(/\/+$/, '')
-  if (!value) throw new Error('远程 Embedding Base URL 不能为空')
+  if (!value) throw new Error('远程 Embedding 来源未配置地址')
   if (/\/api\/embed$/i.test(value)) return { url: value, protocol: 'ollama' }
   if (/\/api$/i.test(value)) return { url: `${value}/embed`, protocol: 'ollama' }
   if (/^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):11434$/i.test(value)) return { url: `${value}/api/embed`, protocol: 'ollama' }
@@ -106,15 +108,13 @@ function embeddingsEndpoint(baseUrl: string): { url: string; protocol: 'openai' 
 function parsePayload(response: Response, raw: string): RemotePayload {
   let value: unknown
   try { value = JSON.parse(raw) }
-  catch { throw new RemoteResponseError(response.status, invalidResponseMessage(response, raw)) }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RemoteResponseError(response.status, invalidResponseMessage(response, raw))
+  catch { throw new RemoteResponseError(response.status, `远程 Embedding 返回了非 JSON 响应（HTTP ${response.status}）。`) }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RemoteResponseError(response.status, `远程 Embedding 返回了无效响应（HTTP ${response.status}）。`)
   return value as RemotePayload
 }
 
 function normalizePayload(payload: RemotePayload, protocol: 'openai' | 'ollama'): EmbeddingResponse {
-  if (protocol === 'ollama' || Array.isArray(payload.embeddings)) {
-    return { data: payload.embeddings?.map((embedding, index) => ({ embedding, index })) }
-  }
+  if (protocol === 'ollama' || Array.isArray(payload.embeddings)) return { data: payload.embeddings?.map((embedding, index) => ({ embedding, index })) }
   return { data: payload.data }
 }
 
@@ -123,9 +123,7 @@ function responseError(payload: RemotePayload) {
   return payload.error?.message
 }
 
-function invalidResponseMessage(response: Response, raw: string) {
-  const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || '未知内容类型'
-  const compact = raw.replace(/\s+/gu, ' ').trim()
-  const preview = compact ? compact.slice(0, 160) : '响应内容为空'
-  return `远程 Embedding 返回了非 JSON 响应（HTTP ${response.status}，${contentType}）：${preview}。请确认 Base URL：Ollama 使用 http://localhost:11434/api/embed，OpenAI 兼容接口通常使用 .../v1`
+function safeProviderMessage(message?: string) {
+  if (!message) return '远程服务不可用'
+  return message.replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').replace(/(?:bearer|api[_ -]?key|token)\s+[^\s,;]+/giu, '$1 [已隐藏]').slice(0, 240)
 }

@@ -32,8 +32,6 @@ export interface ChunkSearchInput {
   queryVector?: number[]
   dimensions: number
   limit: number
-  assetType?: string
-  sourceType?: string
   logicalPath?: string
 }
 

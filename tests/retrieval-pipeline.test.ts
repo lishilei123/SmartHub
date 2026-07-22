@@ -4,23 +4,32 @@ import { JsonStore, KnowledgeService, type LocalModelRuntime } from '../server/i
 import { RemoteEmbeddingClient } from '../server/infrastructure/remote-embedding-client.js'
 import type { ChunkSearchInput, StoredChunkCandidate } from '../server/infrastructure/store.js'
 
+function localSources(models: { name: string; dimensions: number }[]) {
+  return [{
+    id: 'local-default',
+    name: '本地模型',
+    type: 'local' as const,
+    models,
+  }]
+}
+
 class RecordingStore extends JsonStore {
   readonly recalls: ChunkSearchInput[] = []
   override async searchChunks(input: ChunkSearchInput): Promise<StoredChunkCandidate[]> {
     this.recalls.push(input)
     const state = this.read()
     const index = state.indexes.find(item => item.id === input.indexVersionId)
-    return (index?.assetVersionIds ?? []).flatMap(versionId => {
-      const version = state.versions.find(item => item.id === versionId)
-      const asset = state.assets.find(item => item.id === version?.assetId)
-      if (!version || !asset) return []
-      return version.chunks.map(chunk => ({
+    return (index?.indexedChunks ?? []).flatMap(chunk => {
+      const version = state.versions.find(item => item.id === chunk.assetVersionId)
+      const metadata = chunk.assetMetadata
+      if (!version || !metadata || (input.logicalPath && !metadata.logicalPath.includes(input.logicalPath))) return []
+      return [{
         score: input.mode === 'keyword' ? 0.8 : 0.9,
-        asset: { id: asset.id, displayName: asset.displayName, assetType: asset.assetType, sourceType: asset.sourceType, logicalPath: asset.logicalPath },
+        asset: { id: metadata.assetId, displayName: metadata.displayName, assetType: metadata.assetType, sourceType: metadata.sourceType, logicalPath: metadata.logicalPath },
         version: { id: version.id, number: version.number },
         chunk: { id: chunk.id, chunkKey: chunk.chunkKey, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar },
         content: chunk.content,
-      }))
+      }]
     }).slice(0, input.limit)
   }
 }
@@ -57,7 +66,7 @@ test('启用 Reranker 后候选内容使用配置模型执行二阶段语义重�
   await service.initialize()
   const created = await service.createProject('重排验收')
   const kbId = created.knowledgeBase!.id
-  await service.saveConfig(kbId, { embeddingModel: 'embedding-test', embeddingDimensions: 3, embeddingBatchSize: 32, rerankerEnabled: true, rerankerModel: 'reranker-test' })
+  await service.saveConfig(kbId, { embeddingSources: localSources([{ name: 'embedding-test', dimensions: 3 }, { name: 'reranker-test', dimensions: 3 }]), embeddingModel: 'embedding-test', embeddingDimensions: 3, embeddingBatchSize: 32, rerankerEnabled: true, rerankerModel: 'reranker-test' })
   const queued = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 退款\n必须校验幂等键' }); await service.processTask(queued.task!.id)
   await service.search(kbId, { query: '退款', mode: 'keyword' })
   const rerankerCall = calls.find(call => call.model === 'reranker-test')
@@ -76,7 +85,7 @@ test('混合检索在向量服务不可用时降级到关键词，纯向量检�
   const service = new KnowledgeService(new JsonStore(null), undefined, undefined, remote)
   await service.initialize()
   const created = await service.createProject('检索降级验收'); const kbId = created.knowledgeBase!.id
-  await service.saveConfig(kbId, { embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingModel: 'embedding-a', embeddingDimensions: 3, embeddingRetries: 0, rerankerEnabled: false })
+  await service.saveConfig(kbId, { embeddingSourceId: 'test-remote', embeddingSources: [...localSources([{ name: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', dimensions: 384 }]), { id: 'test-remote', name: '测试远程来源', type: 'remote_api', baseUrl: 'https://embedding.example.com/v1', apiKey: '', models: [{ name: 'embedding-a', dimensions: 3 }] }], embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingApiKey: '', embeddingModel: 'embedding-a', embeddingDimensions: 3, embeddingRetries: 0, rerankerEnabled: false })
   const queued = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 退款\n退款必须校验幂等键' })
   await service.processTask(queued.task!.id)
   available = false

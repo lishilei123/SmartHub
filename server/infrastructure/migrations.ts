@@ -86,6 +86,64 @@ const migrations: Migration[] = [{
     'DROP INDEX CONCURRENTLY IF EXISTS smarthub.asset_chunks_embedding_384_hnsw_idx',
     'DROP INDEX CONCURRENTLY IF EXISTS smarthub.index_chunks_embedding_384_hnsw_idx',
   ],
+}, {
+  version: 3,
+  name: 'freeze-index-metadata-and-scrub-legacy-embedding-secrets',
+  sql: `
+    UPDATE smarthub.index_chunks chunk
+    SET data = jsonb_set(
+      chunk.data,
+      '{assetMetadata}',
+      jsonb_build_object(
+        'assetId', asset.id,
+        'displayName', asset.display_name,
+        'assetType', asset.asset_type,
+        'sourceType', asset.source_type,
+        'logicalPath', asset.logical_path
+      )
+    )
+    FROM smarthub.asset_versions version
+    JOIN smarthub.knowledge_assets asset ON asset.id = version.asset_id
+    WHERE chunk.asset_version_id = version.id
+      AND NOT (chunk.data ? 'assetMetadata');
+
+    CREATE OR REPLACE FUNCTION smarthub.scrub_embedding_secrets(value jsonb)
+    RETURNS jsonb
+    LANGUAGE plpgsql
+    IMMUTABLE
+    AS $$
+    DECLARE
+      key text;
+      item jsonb;
+      result jsonb;
+    BEGIN
+      CASE jsonb_typeof(value)
+        WHEN 'object' THEN
+          result := '{}'::jsonb;
+          FOR key, item IN SELECT * FROM jsonb_each(value) LOOP
+            IF key IN ('embeddingApiKey', 'apiKey', 'embeddingBaseUrl', 'baseUrl') THEN CONTINUE; END IF;
+            result := result || jsonb_build_object(key, smarthub.scrub_embedding_secrets(item));
+          END LOOP;
+          RETURN result;
+        WHEN 'array' THEN
+          RETURN COALESCE((SELECT jsonb_agg(smarthub.scrub_embedding_secrets(elements.item)) FROM jsonb_array_elements(value) AS elements(item)), '[]'::jsonb);
+        ELSE
+          RETURN value;
+      END CASE;
+    END $$;
+
+    UPDATE smarthub.projects SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.knowledge_bases SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.knowledge_directories SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.config_versions SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.knowledge_assets SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.asset_versions SET data = smarthub.scrub_embedding_secrets(data) - 'error';
+    UPDATE smarthub.asset_chunks SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.index_versions SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.index_chunks SET data = smarthub.scrub_embedding_secrets(data);
+    UPDATE smarthub.sync_tasks SET data = smarthub.scrub_embedding_secrets(data) - 'error';
+    DROP FUNCTION smarthub.scrub_embedding_secrets(jsonb);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

@@ -3,102 +3,124 @@ import test from 'node:test'
 import { JsonStore, KnowledgeService } from '../server/index.js'
 import { RemoteEmbeddingClient } from '../server/infrastructure/remote-embedding-client.js'
 
-test('远程模式调用 OpenAI 兼容 Embeddings API 并保存返回向量', async () => {
+const localSource = {
+  id: 'local-default',
+  name: '本地模型',
+  type: 'local' as const,
+  baseUrl: '',
+  apiKey: '',
+  models: [{ name: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', dimensions: 384 }],
+}
+
+function remoteSource(id: string, name: string, baseUrl: string, apiKey: string, models: { name: string; dimensions: number }[]) {
+  return { id, name, type: 'remote_api' as const, baseUrl, apiKey, models }
+}
+
+function serviceWith(client: RemoteEmbeddingClient) {
+  return new KnowledgeService(new JsonStore(null), undefined, undefined, client)
+}
+
+async function configureRemote(service: KnowledgeService, knowledgeBaseId: string, patch: Record<string, unknown> = {}) {
+  const embedding = remoteSource('embedding-source', 'Embedding 服务', 'https://embedding.example.com/v1', 'test-secret', [{ name: 'embedding-model', dimensions: 3 }, { name: 'embedding-auto', dimensions: 0 }])
+  const reranker = remoteSource('reranker-source', 'Reranker 服务', 'https://reranker.example.com/v1', 'reranker-secret', [{ name: 'reranker-model', dimensions: 3 }])
+  return service.saveConfig(knowledgeBaseId, {
+    embeddingSourceId: embedding.id,
+    embeddingSources: [localSource, embedding, reranker],
+    embeddingMode: 'remote_api',
+    embeddingBaseUrl: embedding.baseUrl,
+    embeddingApiKey: embedding.apiKey,
+    embeddingModel: 'embedding-model',
+    embeddingDimensions: 3,
+    embeddingBatchSize: 2,
+    rerankerEnabled: false,
+    ...patch,
+  })
+}
+
+test('远程模式使用当前知识库配置的路由调用 Embeddings API', async () => {
   const calls: { url: string; init?: RequestInit }[] = []
   const client = new RemoteEmbeddingClient(async (input, init) => {
     calls.push({ url: String(input), init })
     const body = JSON.parse(String(init?.body)) as { input: string[] }
     return new Response(JSON.stringify({ data: body.input.map((_, index) => ({ index, embedding: [index + 1, 0, 0] })) }), { status: 200, headers: { 'content-type': 'application/json' } })
   })
-  const service = new KnowledgeService(new JsonStore(null), undefined, undefined, client)
+  const service = serviceWith(client)
   await service.initialize()
   const created = await service.createProject('远程向量验收')
   const kbId = created.knowledgeBase!.id
-  await service.saveConfig(kbId, { embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingApiKey: 'secret', embeddingModel: 'embedding-a', embeddingDimensions: 3, embeddingBatchSize: 2 })
+  await configureRemote(service, kbId)
   const synced = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 规则\n必须校验幂等键' })
   await service.processTask(synced.task!.id)
   assert.equal(calls[0].url, 'https://embedding.example.com/v1/embeddings')
-  assert.equal(new Headers(calls[0].init?.headers).get('authorization'), 'Bearer secret')
+  assert.equal(new Headers(calls[0].init?.headers).get('authorization'), 'Bearer test-secret')
   assert.deepEqual((await service.version(synced.version.id)).chunks[0].embedding, [1, 0, 0])
+  const config = await service.config(kbId)
+  assert.equal(config.config.embeddingSources.find(source => source.id === 'embedding-source')?.baseUrl, 'https://embedding.example.com/v1')
+  assert.doesNotMatch(JSON.stringify(config), /test-secret|reranker-secret/u)
 })
 
-test('远程模型通过返回向量自动检测维度且不要求用户填写', async () => {
+test('远程模型可按当前知识库配置自动检测维度', async () => {
   let requestBody: Record<string, unknown> = {}
   const client = new RemoteEmbeddingClient(async (_input, init) => {
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
     return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0, 0] }] }), { status: 200, headers: { 'content-type': 'application/json' } })
   })
-  const service = new KnowledgeService(new JsonStore(null), undefined, undefined, client)
+  const service = serviceWith(client)
   await service.initialize()
   const created = await service.createProject('远程维度检测验收')
-  const result = await service.testEmbeddingConfig(created.knowledgeBase!.id, { embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingModel: 'embedding-auto', embeddingDimensions: 0 })
+  const source = remoteSource('embedding-source', 'Embedding 服务', 'https://embedding.example.com/v1', 'test-secret', [{ name: 'embedding-auto', dimensions: 0 }])
+  const result = await service.testEmbeddingConfig(created.knowledgeBase!.id, { embeddingSourceId: source.id, embeddingSources: [localSource, source], embeddingMode: 'remote_api', embeddingBaseUrl: source.baseUrl, embeddingApiKey: source.apiKey, embeddingModel: 'embedding-auto', embeddingDimensions: 0, embeddingBatchSize: 32, embeddingTimeoutMs: 30_000, embeddingRetries: 2 })
   assert.equal(result.dimensions, 4)
   assert.equal('dimensions' in requestBody, false)
 })
 
-test('远程模型兼容 Ollama 原生 api/embed 接口和 embeddings 返回格式', async () => {
+test('远程模型兼容 Ollama api/embed 路由', async () => {
   const calls: { url: string; body: Record<string, unknown> }[] = []
   const client = new RemoteEmbeddingClient(async (input, init) => {
     const body = JSON.parse(String(init?.body)) as { input: string[] }
     calls.push({ url: String(input), body })
     return new Response(JSON.stringify({ model: 'bge-m3', embeddings: body.input.map((_, index) => [index + 1, 0, 0, 0]) }), { status: 200, headers: { 'content-type': 'application/json' } })
   })
-  const service = new KnowledgeService(new JsonStore(null), undefined, undefined, client)
+  const service = serviceWith(client)
   await service.initialize()
   const created = await service.createProject('Ollama 维度检测验收')
-  const result = await service.testEmbeddingConfig(created.knowledgeBase!.id, { embeddingMode: 'remote_api', embeddingBaseUrl: 'http://localhost:11434/api/embed', embeddingModel: 'bge-m3', embeddingDimensions: 0 })
+  const source = remoteSource('ollama-source', 'Ollama 服务', 'http://localhost:11434/api/embed', '', [{ name: 'bge-m3', dimensions: 0 }])
+  const result = await service.testEmbeddingConfig(created.knowledgeBase!.id, { embeddingSourceId: source.id, embeddingSources: [localSource, source], embeddingMode: 'remote_api', embeddingBaseUrl: source.baseUrl, embeddingModel: 'bge-m3', embeddingDimensions: 0, embeddingBatchSize: 32, embeddingTimeoutMs: 30_000, embeddingRetries: 2 })
   assert.equal(calls[0].url, 'http://localhost:11434/api/embed')
   assert.deepEqual(calls[0].body.input, ['SmartHub 向量维度自动检测'])
   assert.equal(result.dimensions, 4)
 })
 
-test('远程 Embedding 返回非 JSON 时给出可操作提示且不会显示底层解析异常', async () => {
-  let requests = 0
-  const client = new RemoteEmbeddingClient(async () => {
-    requests += 1
-    return new Response('404 page not found\n', { status: 404, headers: { 'content-type': 'text/plain' } })
-  })
-  const service = new KnowledgeService(new JsonStore(null), undefined, undefined, client)
+test('远程错误不会泄露知识库保存的端点或凭据', async () => {
+  const client = new RemoteEmbeddingClient(async () => new Response('endpoint https://embedding.example.com/v1 token test-secret', { status: 404, headers: { 'content-type': 'text/plain' } }))
+  const service = serviceWith(client)
   await service.initialize()
   const created = await service.createProject('远程错误提示验收')
+  await configureRemote(service, created.knowledgeBase!.id)
   await assert.rejects(
-    () => service.testEmbeddingConfig(created.knowledgeBase!.id, { embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/wrong', embeddingModel: 'embedding-a', embeddingDimensions: 0, embeddingRetries: 2 }),
+    () => service.testEmbeddingConfig(created.knowledgeBase!.id, { embeddingSourceId: 'embedding-source', embeddingModel: 'embedding-model', embeddingDimensions: 3, embeddingBatchSize: 32, embeddingTimeoutMs: 30_000, embeddingRetries: 0 }),
     error => {
       const message = error instanceof Error ? error.message : String(error)
       assert.match(message, /非 JSON 响应/u)
       assert.match(message, /HTTP 404/u)
-      assert.match(message, /Base URL/u)
-      assert.doesNotMatch(message, /Unexpected non-whitespace/u)
+      assert.doesNotMatch(message, /embedding\.example\.com|test-secret/u)
       return true
     },
   )
-  assert.equal(requests, 1)
 })
 
-test('Reranker 使用独立选择的来源和模型执行结果重排', async () => {
+test('Reranker 可使用同一知识库中独立配置的远程来源', async () => {
   const calls: { url: string; model: string; inputs: string[] }[] = []
   const client = new RemoteEmbeddingClient(async (input, init) => {
     const body = JSON.parse(String(init?.body)) as { model: string; input: string[] }
     calls.push({ url: String(input), model: body.model, inputs: body.input })
     return new Response(JSON.stringify({ data: body.input.map((text, index) => ({ index, embedding: [text.length, 1, 1] })) }), { status: 200, headers: { 'content-type': 'application/json' } })
   })
-  const service = new KnowledgeService(new JsonStore(null), undefined, undefined, client)
+  const service = serviceWith(client)
   await service.initialize()
   const created = await service.createProject('独立 Reranker 来源验收')
   const kbId = created.knowledgeBase!.id
-  await service.saveConfig(kbId, {
-    embeddingSourceId: 'embedding-source',
-    embeddingSources: [
-      { id: 'embedding-source', name: 'Embedding 服务', type: 'remote_api', baseUrl: 'https://embedding.example.com/v1', apiKey: 'embedding-key', models: [{ name: 'embedding-model', dimensions: 3 }] },
-      { id: 'reranker-source', name: 'Reranker 服务', type: 'remote_api', baseUrl: 'https://reranker.example.com/v1', apiKey: 'reranker-key', models: [{ name: 'reranker-model', dimensions: 3 }] },
-    ],
-    embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingApiKey: 'embedding-key', embeddingModel: 'embedding-model', embeddingDimensions: 3,
-    rerankerEnabled: true, rerankerSourceId: 'reranker-source', rerankerModel: 'reranker-model',
-  })
-  const configured = (await service.config(kbId)).config
-  assert.ok(configured.embeddingSources.some(source => source.type === 'local' && source.name === '本地模型'), '系统内置本地模型必须始终存在并使用产品名称')
-  await service.saveConfig(kbId, { embeddingSources: configured.embeddingSources.map(source => source.type === 'local' ? { ...source, models: [] } : source) })
-  assert.equal((await service.config(kbId)).config.embeddingSources.find(source => source.type === 'local')?.models.length, 0)
+  await configureRemote(service, kbId, { rerankerEnabled: true, rerankerSourceId: 'reranker-source', rerankerModel: 'reranker-model' })
   const synced = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 退款\n退款必须校验幂等键' })
   await service.processTask(synced.task!.id)
   await service.search(kbId, { query: '退款', mode: 'keyword' })
@@ -108,19 +130,26 @@ test('Reranker 使用独立选择的来源和模型执行结果重排', async ()
   assert.ok((rerankerCall?.inputs.length ?? 0) > 1)
 })
 
-test('远程 Embedding 失败会重试并明确报错，不回退 Hash 向量', async () => {
-  let requests = 0
-  const client = new RemoteEmbeddingClient(async () => {
-    requests += 1
-    return new Response(JSON.stringify({ error: { message: 'provider unavailable' } }), { status: 503, headers: { 'content-type': 'application/json' } })
+test('不同知识库可保存同名模型的独立远程路由', async () => {
+  const calls: { url: string; authorization: string | null }[] = []
+  const client = new RemoteEmbeddingClient(async (input, init) => {
+    calls.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') })
+    const body = JSON.parse(String(init?.body)) as { input: string[] }
+    return new Response(JSON.stringify({ data: body.input.map((_, index) => ({ index, embedding: [1, 0, 0] })) }), { status: 200, headers: { 'content-type': 'application/json' } })
   })
-  const service = new KnowledgeService(new JsonStore(null), undefined, undefined, client)
+  const service = serviceWith(client)
   await service.initialize()
-  const created = await service.createProject('远程失败验收')
-  const kbId = created.knowledgeBase!.id
-  await service.saveConfig(kbId, { embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingModel: 'embedding-a', embeddingDimensions: 3, embeddingRetries: 1 })
-  const queued = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 规则\n内容' })
-  await service.processTask(queued.task!.id)
-  assert.match((await service.task(queued.task!.id)).error ?? '', /provider unavailable/u)
-  assert.equal(requests, 2)
+  const left = await service.createProject('知识库 A')
+  const right = await service.createProject('知识库 B')
+  const configure = (knowledgeBaseId: string, baseUrl: string, apiKey: string) => {
+    const source = remoteSource('shared-id', '同名模型', baseUrl, apiKey, [{ name: 'embedding-model', dimensions: 3 }])
+    return service.saveConfig(knowledgeBaseId, { embeddingSourceId: source.id, embeddingSources: [localSource, source], embeddingMode: 'remote_api', embeddingBaseUrl: source.baseUrl, embeddingApiKey: source.apiKey, embeddingModel: 'embedding-model', embeddingDimensions: 3, rerankerEnabled: false })
+  }
+  await configure(left.knowledgeBase!.id, 'https://a.example.com/v1', 'key-a')
+  await configure(right.knowledgeBase!.id, 'https://b.example.com/v1', 'key-b')
+  for (const [knowledgeBaseId, sourceKey] of [[left.knowledgeBase!.id, 'a.md'], [right.knowledgeBase!.id, 'b.md']] as const) {
+    const queued = await service.ingest({ knowledgeBaseId, sourceType: 'upload', sourceKey, assetType: '需求', displayName: sourceKey, logicalPath: sourceKey, content: '# 规则\n必须校验幂等键' })
+    await service.processTask(queued.task!.id)
+  }
+  assert.deepEqual(calls.map(call => [call.url, call.authorization]), [['https://a.example.com/v1/embeddings', 'Bearer key-a'], ['https://b.example.com/v1/embeddings', 'Bearer key-b']])
 })

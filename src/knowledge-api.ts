@@ -20,7 +20,7 @@ export async function ensureKnowledgeBase() {
   return result.knowledgeBase.id
 }
 
-type ApiVersion = { id: string; number: number; content: string; status: string; createdAt: string; readyAt?: string; chunks: { headingPath: string[] }[] }
+export type ApiVersion = { id: string; number: number; content: string; status: string; createdAt: string; readyAt?: string; chunks: { headingPath: string[] }[] }
 type ApiAsset = { id: string; displayName: string; logicalPath: string; assetType: string; sourceType: string; activeVersionId: string | null; activeVersion: ApiVersion | null; versions: { id: string; number: number; status: string; createdAt: string }[]; operationTaskId?: string; task?: KnowledgeTask | null }
 type ApiDirectory = { id: string; knowledgeBaseId: string; name: string; parentId: string | null; operationTaskId?: string; task?: KnowledgeTask | null }
 export async function loadKnowledgeAssets(kbId: string, includeDeleted = false): Promise<{ directories: KnowledgeDirectory[]; documents: KnowledgeDocument[] }> {
@@ -88,7 +88,8 @@ export const retryTask = (taskId: string) => request(`/tasks/${taskId}/retry`, {
 export const cancelTask = (taskId: string) => request<ApiTask>(`/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' })
 export type ApiSearchResult = { score: number; retrievalMode: string; excerpt: string; scores?: { keyword: number; vector: number; reranker?: number; final: number }; asset: { id: string; displayName: string; assetType: string; sourceType: string; logicalPath: string }; version: { id: string; number: number }; chunk: { chunkKey: string; headingPath: string[]; startLine: number; endLine: number } }
 export type ApiSearchMeta = { mode: string; requestedMode?: string; degraded?: boolean; degradedReason?: string; minimumRelevance: number; keywordCandidates: number; vectorCandidates: number; mergedCandidates: number; eligibleCandidates: number; returned: number; rerankerEnabled: boolean; rerankerDegraded?: boolean }
-export const searchKnowledge = (kbId: string, query: string) => request<{ status: string; retrieval?: ApiSearchMeta; results: ApiSearchResult[] }>(`/knowledge-bases/${kbId}/search`, { method: 'POST', body: JSON.stringify({ query }) })
+export const searchKnowledge = (kbId: string, query: string, filters: { logicalPath?: string } = {}) => request<{ status: string; retrieval?: ApiSearchMeta; results: ApiSearchResult[] }>(`/knowledge-bases/${kbId}/search`, { method: 'POST', body: JSON.stringify({ query, ...filters }) })
+export const loadAssetVersion = (versionId: string) => request<ApiVersion>(`/asset-versions/${versionId}`)
 export const loadLocalModelStatus = () => request<LocalModelStatus>('/local-model/status')
 export const loadLocalModelStatuses = () => request<LocalModelStatus[]>('/local-models')
 export const startLocalModel = (model: string) => request<LocalModelStatus>('/local-model/start', { method: 'POST', body: JSON.stringify({ model }) })

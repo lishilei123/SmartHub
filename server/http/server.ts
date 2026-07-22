@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { AssetType, KnowledgeConfig, SourceType } from '../domain/types.js'
+import type { AssetType, KnowledgeConfig } from '../domain/types.js'
 import { localModelRuntime, rawDocumentStore, service, stateStore, usingPostgres } from '../runtime.js'
 
 export { localModelRuntime, rawDocumentStore, service, stateStore }
@@ -71,7 +71,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const version = /^\/api\/asset-versions\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && version) return send(response, 200, await service.version(version[1]))
   const search = /^\/api\/knowledge-bases\/([^/]+)\/search$/.exec(url.pathname)
-  if (method === 'POST' && search) { const body = await json(request); return send(response, 200, await service.search(search[1], { query: String(body.query ?? ''), mode: body.mode as 'keyword' | 'vector' | 'hybrid' | undefined, assetType: body.assetType as AssetType | undefined, sourceType: body.sourceType as SourceType | undefined, logicalPath: body.logicalPath as string | undefined })) }
+  if (method === 'POST' && search) { const body = await json(request); return send(response, 200, await service.search(search[1], { query: String(body.query ?? ''), mode: body.mode as 'keyword' | 'vector' | 'hybrid' | undefined, logicalPath: body.logicalPath as string | undefined })) }
   const rebuild = /^\/api\/knowledge-bases\/([^/]+)\/rebuild$/.exec(url.pathname)
   if (method === 'POST' && rebuild) { const body = await json(request); if (body.outcome) return send(response, 202, await service.rebuild(rebuild[1], body.outcome as 'success' | 'failure' | 'cancel')); const task = await service.queueRebuild(rebuild[1]); if (task.status === 'queued') await notifyTask(task.id); return send(response, 202, { task }) }
   send(response, 404, { error: '接口不存在' })

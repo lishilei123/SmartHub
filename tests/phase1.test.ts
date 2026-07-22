@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import test from 'node:test'
-import { KnowledgeService, JsonStore, type AssetType } from '../server/index.js'
+import { defaultConfig, KnowledgeService, JsonStore, type AssetType } from '../server/index.js'
 import { RawDocumentStore } from '../server/infrastructure/raw-document-store.js'
 
 async function fixture() {
@@ -48,7 +48,7 @@ test('AC-002/003 多类型资料统一接入且相同内容短路', async () => 
   const types: AssetType[] = ['requirement', 'technical_design', 'api_spec', 'test_case', 'test_report']
   for (const [index, assetType] of types.entries()) await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: `${index}.md`, assetType, displayName: assetType, logicalPath: `${assetType}.md`, content: document(assetType) })
   const before = service.store.read(); const duplicate = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: '0.md', assetType: 'requirement', displayName: 'requirement', logicalPath: 'requirement.md', content: document('requirement') })
-  const after = service.store.read(); assert.equal(duplicate.deduplicated, true); assert.equal(after.versions.length, before.versions.length); assert.equal(after.tasks.length, before.tasks.length); assert.equal((await service.assets(kbId, { assetType: 'test_case' })).length, 1)
+  const after = service.store.read(); assert.equal(duplicate.deduplicated, true); assert.equal(after.versions.length, before.versions.length); assert.equal(after.tasks.length, before.tasks.length); assert.ok((await service.assets(kbId)).some(asset => asset.assetType === 'test_case'))
 })
 
 test('AC-004 局部修改仅计算变化 Chunk 并保留历史版本', async () => {
@@ -156,13 +156,37 @@ test('AC-006 新版本失败不会破坏旧活动索引', async () => {
 
 test('AC-007 检索结果绑定固定资产版本与原文位置', async () => {
   const { service, kbId } = await fixture(); const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '退款需求', logicalPath: 'requirements/a.md', content: document() })
-  const found = await service.search(kbId, { query: '幂等', mode: 'keyword', assetType: 'requirement' }); assert.equal(found.status, 'ok'); assert.equal(found.results[0].version.id, synced.version.id); assert.ok(found.results[0].chunk.startLine > 0); assert.equal((await service.version(found.results[0].version.id)).content, document())
+  const found = await service.search(kbId, { query: '幂等', mode: 'keyword', logicalPath: 'requirements' }); assert.equal(found.status, 'ok'); assert.equal(found.results[0].asset.assetType, 'requirement'); assert.equal(found.results[0].asset.sourceType, 'upload'); assert.equal(found.results[0].version.id, synced.version.id); assert.ok(found.results[0].chunk.startLine > 0); assert.equal((await service.version(found.results[0].version.id)).content, document())
+})
+
+test('索引成员元数据在重命名和移动前冻结，重建后才采用当前元数据', async () => {
+  const { service, kbId } = await fixture()
+  const original = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'browser:requirements/refund.md', assetType: 'requirement', displayName: '退款规则.md', logicalPath: 'requirements/refund.md', content: document() })
+  const archive = await service.createDirectory(kbId, '已归档', null)
+  await service.updateAsset(original.asset!.id, { displayName: '退款规则-历史.md', targetDirectoryId: archive.id })
+
+  const beforeRebuild = await service.search(kbId, { query: '幂等', mode: 'keyword' })
+  assert.equal(beforeRebuild.status, 'ok')
+  assert.equal(beforeRebuild.results[0].asset.displayName, '退款规则.md')
+  assert.equal(beforeRebuild.results[0].asset.logicalPath, 'requirements/refund.md')
+  assert.equal(beforeRebuild.results[0].version.id, original.version.id)
+  assert.equal((await service.assets(kbId))[0].displayName, '退款规则-历史.md')
+  assert.equal((await service.assets(kbId))[0].logicalPath, '已归档/退款规则-历史.md')
+  assert.equal((await service.search(kbId, { query: '幂等', mode: 'keyword', logicalPath: '已归档' })).status, 'filter_empty')
+
+  await service.rebuild(kbId)
+  const afterRebuild = await service.search(kbId, { query: '幂等', mode: 'keyword', logicalPath: '已归档' })
+  assert.equal(afterRebuild.status, 'ok')
+  assert.equal(afterRebuild.results[0].asset.displayName, '退款规则-历史.md')
+  assert.equal(afterRebuild.results[0].asset.logicalPath, '已归档/退款规则-历史.md')
+  assert.equal(afterRebuild.results[0].version.id, original.version.id)
 })
 
 test('AC-008 查询配置无需重建，兼容性配置受控重建且失败保旧索引', async () => {
   const { service, kbId } = await fixture(); await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); const oldIndex = (await service.overview(kbId)).knowledgeBase.activeIndexVersionId; const oldIndexConfig = service.store.read().indexes.find(item => item.id === oldIndex)!.configVersionId
   const queryChange = await service.saveConfig(kbId, { relevanceThreshold: 0.2 }); assert.equal(queryChange.impact, 'query'); assert.equal(queryChange.configVersion.requiresRebuild, false)
-  const indexChange = await service.saveConfig(kbId, { chunkTargetSize: 700, chunkMaxSize: 800, embeddingDimensions: 32 }); assert.equal(indexChange.impact, 'index_rebuild'); assert.equal(indexChange.configVersion.requiresRebuild, true); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, oldIndex)
+  const current = (await service.config(kbId)).config
+  const indexChange = await service.saveConfig(kbId, { chunkTargetSize: 700, chunkMaxSize: 800, embeddingSources: current.embeddingSources.map(source => source.id === 'local-default' ? { ...source, models: [...source.models, { name: 'test/embedding-32', dimensions: 32 }] } : source), embeddingModel: 'test/embedding-32', embeddingDimensions: 32 }); assert.equal(indexChange.impact, 'index_rebuild'); assert.equal(indexChange.configVersion.requiresRebuild, true); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, oldIndex)
   const pending = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'b.md', assetType: 'other', displayName: '待重建期间资料', logicalPath: 'b.md', content: '# 新资料\n仍按旧活动索引配置处理' }); assert.equal(pending.version.configVersionId, oldIndexConfig); const activeBeforeRebuild = (await service.overview(kbId)).knowledgeBase.activeIndexVersionId; assert.equal(service.store.read().indexes.find(item => item.id === activeBeforeRebuild)!.configVersionId, oldIndexConfig)
   await service.rebuild(kbId, 'failure'); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, activeBeforeRebuild)
   const originalDimension = service.store.read().versions.find(item => item.id === pending.version.id)!.chunks[0].embedding.length
@@ -181,9 +205,57 @@ test('查询参数保存后立即覆盖活动索引中的旧查询参数', async
   assert.equal(result.results[0].scores.keyword, 1)
 })
 
-test('FR-003/004 配置草稿字段完整持久化且无变化不生成版本', async () => {
-  const { service, kbId } = await fixture(); const saved = await service.saveConfig(kbId, { parserVersion: 'markdown-v2', preprocessVersion: 'normalize-v2', chunkTargetSize: 500, chunkMaxSize: 800, chunkOverlap: 50, headingDepth: 5, embeddingMode: 'remote_api', embeddingBaseUrl: 'https://embedding.example.com/v1', embeddingApiKey: 'sk-test', embeddingModel: 'embedding-a', embeddingDimensions: 128, embeddingBatchSize: 16, embeddingTimeoutMs: 15000, embeddingRetries: 3, keywordRecall: 30, vectorRecall: 50, finalResults: 10, relevanceThreshold: .4, hybridSearch: false, rerankerEnabled: true, rerankerModel: 'embedding-a' }); const config = await service.config(kbId); assert.equal(saved.changed, true); assert.equal(config.config.embeddingDimensions, 128); assert.equal(config.config.embeddingApiKey, 'sk-test'); assert.equal(config.config.rerankerModel, 'embedding-a'); const unchanged = await service.saveConfig(kbId, config.config); assert.equal(unchanged.changed, false); assert.equal(service.store.read().configs.filter(item => item.knowledgeBaseId === kbId).length, 2)
+test('FR-003/004 知识库凭据配置掩码返回且无变化不生成版本', async () => {
+  const { service, kbId } = await fixture()
+  const remote = { id: 'remote-secure', name: '远程模型', type: 'remote_api' as const, baseUrl: 'https://embedding.example.com/v1', apiKey: 'config-secret', models: [{ name: 'embedding-secure', dimensions: 384 }] }
+  const saved = await service.saveConfig(kbId, { parserVersion: 'markdown-v2', preprocessVersion: 'normalize-v2', chunkTargetSize: 500, chunkMaxSize: 800, chunkOverlap: 50, headingDepth: 5, embeddingSourceId: remote.id, embeddingSources: [...defaultConfig.embeddingSources, remote], embeddingMode: 'remote_api', embeddingBaseUrl: remote.baseUrl, embeddingApiKey: remote.apiKey, embeddingModel: 'embedding-secure', embeddingDimensions: 384, embeddingBatchSize: 16, embeddingTimeoutMs: 15000, embeddingRetries: 3, keywordRecall: 30, vectorRecall: 50, finalResults: 10, relevanceThreshold: .4, hybridSearch: false, rerankerEnabled: false })
+  const config = await service.config(kbId)
+  assert.equal(saved.changed, true)
+  assert.equal(config.config.embeddingDimensions, 384)
+  assert.equal(config.config.embeddingBaseUrl, remote.baseUrl)
+  assert.equal(config.config.embeddingApiKey, '')
+  assert.equal(config.config.embeddingSources.find(source => source.id === remote.id)?.apiKey, '')
+  assert.doesNotMatch(JSON.stringify(config), /config-secret/u)
+  assert.equal(service.store.read().configs.at(-1)?.config.embeddingSources.find(source => source.id === remote.id)?.apiKey, 'config-secret')
+  const unchanged = await service.saveConfig(kbId, config.config)
+  assert.equal(unchanged.changed, false)
+  assert.equal(service.store.read().configs.filter(item => item.knowledgeBaseId === kbId).length, 2)
   await assert.rejects(() => service.saveConfig(kbId, { chunkTargetSize: 900, chunkMaxSize: 800 }), /最大大小/)
+})
+
+test('JSON 旧状态启动时清理非配置载荷中的 Embedding 凭据并补齐索引元数据快照', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'smarthub-legacy-state-'))
+  const file = resolve(root, 'smarthub.json')
+  const knowledgeBaseId = 'kb-legacy'
+  const assetId = 'asset-legacy'
+  const versionId = 'version-legacy'
+  const configId = 'config-legacy'
+  const indexId = 'index-legacy'
+  const chunk = { id: 'chunk-legacy', chunkKey: 'chunk-legacy', assetVersionId: versionId, ordinal: 0, headingPath: ['历史'], content: '历史检索证据', contentHash: 'hash', tokenCount: 4, startLine: 1, endLine: 1, startChar: 0, endChar: 6, embedding: [1, 0, 0], reused: false }
+  await writeFile(file, JSON.stringify({
+    projects: [{ id: 'project-legacy', name: '历史项目', createdAt: '2026-01-01T00:00:00.000Z' }],
+    knowledgeBases: [{ id: knowledgeBaseId, projectId: 'project-legacy', name: '历史知识库', createdAt: '2026-01-01T00:00:00.000Z', activeIndexVersionId: indexId, activeConfigVersionId: configId }],
+    directories: [],
+    configs: [{ id: configId, knowledgeBaseId, version: 1, createdAt: '2026-01-01T00:00:00.000Z', compatibilityFingerprint: 'legacy', requiresRebuild: false, config: { ...defaultConfig, embeddingApiKey: 'sk-legacy-secret', embeddingBaseUrl: 'https://legacy.example.com/v1', embeddingSources: [{ ...defaultConfig.embeddingSources[0], apiKey: 'nested-secret', baseUrl: 'https://nested.example.com' }] } }],
+    assets: [{ id: assetId, knowledgeBaseId, displayName: '历史资料.md', logicalPath: 'legacy/历史资料.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'legacy', activeVersionId: versionId, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }],
+    versions: [{ id: versionId, assetId, number: 1, content: '历史检索证据', contentHash: 'hash', status: 'ready', configVersionId: configId, createdAt: '2026-01-01T00:00:00.000Z', error: 'token version-secret https://legacy.example.com/v1', chunks: [chunk] }],
+    indexes: [{ id: indexId, knowledgeBaseId, number: 1, status: 'active', assetVersionIds: [versionId], configVersionId: configId, indexedChunks: [{ ...chunk, apiKey: 'chunk-secret' }], createdAt: '2026-01-01T00:00:00.000Z' }],
+    tasks: [{ id: 'task-legacy', knowledgeBaseId, type: 'sync', trigger: 'upload', status: 'failed', step: 'failed', progress: 0, attempts: 0, input: { assetVersionId: versionId, embeddingApiKey: 'task-secret', nested: { baseUrl: 'https://task.example.com' } }, configVersionId: configId, createdAt: '2026-01-01T00:00:00.000Z', error: 'Bearer task-token https://task.example.com' }],
+  }), 'utf8')
+
+  const store = new JsonStore(file)
+  const service = new KnowledgeService(store)
+  await service.initialize()
+  const state = store.read()
+  const serialized = JSON.stringify(state)
+  assert.doesNotMatch(serialized, /sk-legacy-secret|nested-secret|chunk-secret|task-secret/u)
+  assert.doesNotMatch(serialized, /legacy\.example\.com|nested\.example\.com|task\.example\.com|version-secret|task-token/u)
+  const indexed = state.indexes.find(index => index.id === indexId)!.indexedChunks![0]
+  assert.deepEqual(indexed.assetMetadata, { assetId, displayName: '历史资料.md', assetType: 'requirement', sourceType: 'upload', logicalPath: 'legacy/历史资料.md' })
+  const returnedConfig = (await service.config(knowledgeBaseId)).config
+  assert.equal(returnedConfig.embeddingApiKey, '')
+  assert.equal(returnedConfig.embeddingSources[0].apiKey, '')
+  assert.doesNotMatch(JSON.stringify(returnedConfig), /sk-legacy-secret|nested-secret/u)
 })
 
 test('AC-009 只有显式接入的人工保存资料进入知识库', async () => {
@@ -198,6 +270,6 @@ test('FR-020/021 异步重建可观察、可取消且取消不切换活动索引
 })
 
 test('删除资产先发布新索引并保留 deleted 历史版本', async () => {
-  const { service, kbId } = await fixture(); const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); await service.saveConfig(kbId, { embeddingDimensions: 32 }); const deletion = await service.deleteAsset(synced.asset!.id); await service.processTask(deletion.task.id)
+  const { service, kbId } = await fixture(); const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); const deletion = await service.deleteAsset(synced.asset!.id); await service.processTask(deletion.task.id)
   assert.equal((await service.search(kbId, { query: '幂等' })).status, 'no_ready_assets'); assert.equal((await service.version(synced.version.id)).status, 'deleted'); assert.equal((await service.assets(kbId)).length, 0); assert.equal((await service.assets(kbId, { includeDeleted: true })).length, 1)
 })

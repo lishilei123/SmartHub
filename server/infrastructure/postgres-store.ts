@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import type { Chunk, DatabaseState, SyncTask } from '../domain/types.js'
+import type { Chunk, DatabaseState, IndexChunk, SyncTask } from '../domain/types.js'
 import type { ChunkSearchInput, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
@@ -213,7 +213,7 @@ export class PostgresStore implements StateStore {
   async searchChunks(input: ChunkSearchInput): Promise<StoredChunkCandidate[]> {
     const dimensions = positiveInteger(input.dimensions, '向量维度')
     const limit = positiveInteger(input.limit, '召回数量')
-    const filters = [input.indexVersionId, input.mode === 'vector' ? encodeVector(input.queryVector ?? []) : input.query, input.assetType ?? null, input.sourceType ?? null, input.logicalPath ?? null, limit]
+    const filters = [input.indexVersionId, input.mode === 'vector' ? encodeVector(input.queryVector ?? []) : input.query, input.logicalPath ?? null, limit]
     const score = input.mode === 'vector'
       ? `(1 + (1 - (c.embedding::vector(${dimensions}) <=> $2::vector(${dimensions})))) / 2`
       : `(CASE WHEN c.content ILIKE '%' || $2 || '%' THEN 0.7 ELSE 0 END) + similarity(c.content, $2) * 0.3`
@@ -222,30 +222,27 @@ export class PostgresStore implements StateStore {
       : `${score} DESC`
     const retrievalPredicate = input.mode === 'keyword' ? `AND (c.content ILIKE '%' || $2 || '%' OR c.content % $2)` : ''
     const result = await this.pool.query<{
-      score: number; asset_id: string; display_name: string; asset_type: string; source_type: string; logical_path: string
-      version_id: string; version_number: number; chunk_id: string; chunk_key: string; content: string; chunk_data: Record<string, unknown>
+      score: number; version_id: string; version_number: number; chunk_id: string; chunk_key: string; content: string; chunk_data: IndexChunk
     }>(`
       SELECT ${score} AS score,
-        a.id AS asset_id, a.display_name, a.asset_type, a.source_type, a.logical_path,
         v.id AS version_id, v.version AS version_number,
         c.id AS chunk_id, c.chunk_key, c.content, c.data AS chunk_data
       FROM smarthub.index_chunks c
       JOIN smarthub.asset_versions v ON v.id = c.asset_version_id
-      JOIN smarthub.knowledge_assets a ON a.id = v.asset_id
       WHERE c.index_version_id = $1
         AND c.embedding_dimensions = ${dimensions}
-        AND ($3::text IS NULL OR a.asset_type = $3)
-        AND ($4::text IS NULL OR a.source_type = $4)
-        AND ($5::text IS NULL OR a.logical_path LIKE '%' || $5 || '%')
+        AND ($3::text IS NULL OR c.data->'assetMetadata'->>'logicalPath' LIKE '%' || replace(replace(replace($3, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\')
         ${retrievalPredicate}
       ORDER BY ${ordering}
-      LIMIT $6
+      LIMIT $4
     `, filters)
-    return result.rows.map(row => {
+    return result.rows.flatMap(row => {
       const chunk = row.chunk_data
-      return {
+      const metadata = chunk.assetMetadata
+      if (!metadata) return []
+      return [{
         score: Number(row.score),
-        asset: { id: row.asset_id, displayName: row.display_name, assetType: row.asset_type, sourceType: row.source_type, logicalPath: row.logical_path },
+        asset: { id: metadata.assetId, displayName: metadata.displayName, assetType: metadata.assetType, sourceType: metadata.sourceType, logicalPath: metadata.logicalPath },
         version: { id: row.version_id, number: row.version_number },
         chunk: {
           id: row.chunk_id,
@@ -255,7 +252,7 @@ export class PostgresStore implements StateStore {
           startChar: Number(chunk.startChar ?? 0), endChar: Number(chunk.endChar ?? 0),
         },
         content: row.content,
-      }
+      }]
     })
   }
 
@@ -320,7 +317,7 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const chunks = await client.query<{ asset_version_id: string; embedding: string; data: Chunk }>('SELECT asset_version_id, embedding::text AS embedding, data FROM smarthub.asset_chunks ORDER BY asset_version_id, ordinal, id')
   for (const row of chunks.rows) versions.find(version => version.id === row.asset_version_id)?.chunks.push({ ...row.data, embedding: decodeVector(row.embedding) })
   const indexes = rows[6].rows.map(row => ({ ...row.data, indexedChunks: [] })) as DatabaseState['indexes']
-  const indexChunks = await client.query<{ index_version_id: string; embedding: string; data: Chunk }>('SELECT index_version_id, embedding::text AS embedding, data FROM smarthub.index_chunks ORDER BY index_version_id, ordinal, id')
+  const indexChunks = await client.query<{ index_version_id: string; embedding: string; data: IndexChunk }>('SELECT index_version_id, embedding::text AS embedding, data FROM smarthub.index_chunks ORDER BY index_version_id, ordinal, id')
   for (const row of indexChunks.rows) indexes.find(index => index.id === row.index_version_id)?.indexedChunks?.push({ ...row.data, embedding: decodeVector(row.embedding) })
   const taskRows = await client.query<{
     data: SyncTask; status: SyncTask['status']; step: string; progress: number; created_at: string; available_at: string; attempt_count: number; max_attempts: number; dedupe_key: string | null; target_id: string | null; scope: SyncTask['scope']; lease_owner: string | null; run_token: string | null; lease_expires_at: string | null; heartbeat_at: string | null; cancel_requested_at: string | null; started_at: string | null; finished_at: string | null; updated_at: string
@@ -395,7 +392,7 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   `, [item.id, item.knowledgeBaseId, item.type, item.status, item.step, item.progress, item.createdAt, JSON.stringify(item), item.availableAt ?? item.createdAt, item.attempts, item.maxAttempts ?? 3, item.dedupeKey ?? null, item.targetId ?? null, item.scope ?? 'asset', item.leaseOwner ?? null, item.runToken ?? null, item.leaseExpiresAt ?? null, item.heartbeatAt ?? null, item.cancelRequestedAt ?? null, item.startedAt ?? null, item.finishedAt ?? null, item.updatedAt ?? new Date().toISOString()])
 }
 
-async function insertChunk(client: PoolClient, table: 'asset_chunks' | 'index_chunks', ownerId: string, chunk: Chunk) {
+async function insertChunk(client: PoolClient, table: 'asset_chunks' | 'index_chunks', ownerId: string, chunk: Chunk | IndexChunk) {
   const data = { ...chunk, embedding: undefined }
   if (table === 'asset_chunks') {
     await client.query('INSERT INTO smarthub.asset_chunks (id, asset_version_id, chunk_key, ordinal, content, content_hash, embedding, embedding_dimensions, data) VALUES ($1,$2,$3,$4,$5,$6,$7::vector,$8,$9::jsonb)', [chunk.id, ownerId, chunk.chunkKey, chunk.ordinal, chunk.content, chunk.contentHash, encodeVector(chunk.embedding), chunk.embedding.length, JSON.stringify(data)])

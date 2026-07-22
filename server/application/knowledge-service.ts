@@ -1,18 +1,18 @@
 import { extname, isAbsolute } from 'node:path'
-import { defaultConfig, type AssetType, type AssetVersion, type Chunk, type DatabaseState, type EmbeddingSource, type KnowledgeConfig, type SourceType, type SyncTask } from '../domain/types.js'
+import { defaultConfig, type AssetType, type AssetVersion, type Chunk, type DatabaseState, type EmbeddingSource, type IndexAssetMetadata, type IndexChunk, type KnowledgeConfig, type SourceType, type SyncTask } from '../domain/types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RawDocumentStore } from '../infrastructure/raw-document-store.js'
 import type { LocalModelRuntime } from '../infrastructure/local-model-runtime.js'
-import { RemoteEmbeddingClient } from '../infrastructure/remote-embedding-client.js'
+import { RemoteEmbeddingClient, type ResolvedEmbeddingRoute } from '../infrastructure/remote-embedding-client.js'
 import type { StoredChunkCandidate } from '../infrastructure/store.js'
 import { chunkDocument, cosine, defaultTokenCodec, embedding, sha256, type TokenCodec } from './content.js'
 
-type RetrievalInput = { assetType?: AssetType; sourceType?: SourceType; logicalPath?: string }
+type RetrievalInput = { logicalPath?: string }
 type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; vectorScore: number; rerankerScore?: number; score: number }
 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
-const compatibilityFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkTargetSize: config.chunkTargetSize, chunkMaxSize: config.chunkMaxSize, chunkOverlap: config.chunkOverlap, headingDepth: config.headingDepth, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingModel: config.embeddingModel, embeddingDimensions: config.embeddingDimensions }))
+const compatibilityFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkTargetSize: config.chunkTargetSize, chunkMaxSize: config.chunkMaxSize, chunkOverlap: config.chunkOverlap, headingDepth: config.headingDepth, embeddingSourceId: config.embeddingSourceId, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingModel: config.embeddingModel, embeddingDimensions: config.embeddingDimensions }))
 const queryFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ keywordRecall: config.keywordRecall, vectorRecall: config.vectorRecall, finalResults: config.finalResults, relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId, rerankerModel: config.rerankerModel, rerankerSource: config.embeddingSources.find(source => source.id === config.rerankerSourceId) }))
 
 export class KnowledgeService {
@@ -21,14 +21,42 @@ export class KnowledgeService {
     await this.store.load()
     await this.store.transaction(state => {
       state.directories ??= []
+      state.projects = state.projects.map(scrubLegacyEmbeddingSecrets)
+      state.knowledgeBases = state.knowledgeBases.map(scrubLegacyEmbeddingSecrets)
+      state.directories = state.directories.map(scrubLegacyEmbeddingSecrets)
+      state.assets = state.assets.map(scrubLegacyEmbeddingSecrets)
+      state.indexes = state.indexes.map(scrubLegacyEmbeddingSecrets)
+      state.tasks = state.tasks.map(task => ({
+        ...scrubLegacyEmbeddingSecrets(task),
+        ...(task.error ? { error: safeErrorMessage(task.error) } : {}),
+      }))
+      state.versions = state.versions.map(version => ({
+        ...scrubLegacyEmbeddingSecrets(version),
+        ...(version.error ? { error: safeErrorMessage(version.error) } : {}),
+      }))
       state.configs.forEach(item => {
-        const legacyHashModel = !item.config.embeddingModel || item.config.embeddingModel === 'hash-embedding-v1'
-        const savedSources = Array.isArray(item.config.embeddingSources) ? item.config.embeddingSources : []
-        const migrated = { ...defaultConfig, ...item.config, embeddingMode: item.config.embeddingMode ?? 'local', ...(legacyHashModel ? { embeddingModel: defaultConfig.embeddingModel, embeddingDimensions: defaultConfig.embeddingDimensions, rerankerModel: defaultConfig.rerankerModel } : {}) }
-        item.config = normalizeEmbeddingSources(migrated, savedSources)
+        const legacy = item.config as KnowledgeConfig & Record<string, unknown>
+        const legacyHashModel = !legacy.embeddingModel || legacy.embeddingModel === 'hash-embedding-v1'
+        const migrated = {
+          ...defaultConfig,
+          ...legacy,
+          embeddingMode: legacy.embeddingMode ?? 'local',
+          ...(legacyHashModel ? { embeddingModel: defaultConfig.embeddingModel, embeddingDimensions: defaultConfig.embeddingDimensions, rerankerModel: defaultConfig.rerankerModel } : {}),
+        }
+        item.config = normalizeEmbeddingSources(migrated)
+        item.compatibilityFingerprint = compatibilityFingerprint(item.config)
       })
       state.versions.forEach(version => version.chunks.forEach(chunk => { chunk.tokenCount ??= defaultTokenCodec.count(chunk.content) }))
       state.assets.forEach(asset => ensureDirectoryPath(state, asset.knowledgeBaseId, asset.logicalPath.replaceAll('\\', '/').split('/').slice(0, -1)))
+      state.indexes.forEach(index => {
+        index.indexedChunks?.forEach(chunk => {
+          if (!chunk.assetMetadata) {
+            const version = state.versions.find(item => item.id === chunk.assetVersionId)
+            const asset = state.assets.find(item => item.id === version?.assetId)
+            if (asset) chunk.assetMetadata = indexAssetMetadata(asset)
+          }
+        })
+      })
     })
   }
 
@@ -135,29 +163,32 @@ export class KnowledgeService {
 
   async config(knowledgeBaseId: string) {
     const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
-    return required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
+    const version = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
+    return { ...version, config: redactConfig(normalizeEmbeddingSources(version.config)) }
   }
 
   async saveConfig(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
     return this.store.transaction(async state => {
       const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
       const current = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
-      const config = normalizeEmbeddingSources({ ...current.config, ...patch })
+      const config = normalizeEmbeddingSources(mergeConfigPatch(current.config, patch))
       validateConfig(config)
-      if (JSON.stringify(config) === JSON.stringify(current.config)) return { changed: false, configVersion: current, impact: 'none' }
+      if (JSON.stringify(config) === JSON.stringify(current.config)) return { changed: false, configVersion: { ...current, config: redactConfig(current.config) }, impact: 'none' }
       const compatible = compatibilityFingerprint(config) === current.compatibilityFingerprint
       const queryOnly = compatible && queryFingerprint(config) !== queryFingerprint(current.config)
       const version = { id: id('cfg'), knowledgeBaseId, version: current.version + 1, config, createdAt: now(), compatibilityFingerprint: compatibilityFingerprint(config), requiresRebuild: !compatible && Boolean(kb.activeIndexVersionId) }
       state.configs.push(version); kb.activeConfigVersionId = version.id
-      return { changed: true, configVersion: version, impact: !compatible ? 'index_rebuild' : queryOnly ? 'query' : 'ingestion' }
+      return { changed: true, configVersion: { ...version, config: redactConfig(version.config) }, impact: !compatible ? 'index_rebuild' : queryOnly ? 'query' : 'ingestion' }
     })
   }
 
   async testEmbeddingConfig(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
-    const saved = await this.config(knowledgeBaseId)
-    const config = normalizeEmbeddingSources({ ...saved.config, ...patch })
+    const state = await this.store.snapshot()
+    const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    const saved = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
+    const config = normalizeEmbeddingSources(mergeConfigPatch(saved.config, patch))
     validateEmbeddingProbe(config)
-    if (config.embeddingMode === 'remote_api') return { ok: true as const, model: config.embeddingModel, dimensions: await this.remoteEmbeddings.detectDimensions(config) }
+    if (config.embeddingMode === 'remote_api') return { ok: true as const, model: config.embeddingModel, dimensions: await this.remoteEmbeddings.detectDimensions(remoteRoute(config, config.embeddingSourceId, config.embeddingModel), config) }
     if (!this.localModels) throw new Error('本地模型运行时不可用，无法自动检测维度')
     const status = await this.localModels.ensureRunning(config.embeddingModel)
     return { ok: true as const, model: config.embeddingModel, dimensions: required(status.dimensions, '本地模型未返回向量维度') }
@@ -296,11 +327,12 @@ export class KnowledgeService {
       const candidate = createCandidateIndex(state, task.knowledgeBaseId, task.configVersionId)
       task.status = 'running'; task.step = 'embedding'; task.progress = 35; task.startedAt ??= now(); task.updatedAt = now(); task.input.candidateIndexVersionId = candidate.id; task.input.baseIndexVersionId = kb.activeIndexVersionId
       version.status = 'syncing'
-      return { content: version.content, versionId: version.id, assetId: asset.id, previous, config: config.config, candidateId: candidate.id, simulateFailureAt: task.input.simulateFailureAt }
+      return { content: version.content, versionId: version.id, assetId: asset.id, previous, config: config.config, candidateId: candidate.id, assetMetadata: { assetId: asset.id, displayName: String(task.input.displayName), assetType: String(task.input.assetType), sourceType: task.input.sourceType as SourceType, logicalPath: String(task.input.logicalPath) } satisfies IndexAssetMetadata, simulateFailureAt: task.input.simulateFailureAt }
     })
     if (!work) return null
     try {
       const chunks = (await this.createChunks(work.content, work.config, work.previous, signal)).map(chunk => ({ ...chunk, assetVersionId: work.versionId }))
+      const indexedChunks = chunks.map(chunk => ({ ...chunk, assetMetadata: work.assetMetadata } satisfies IndexChunk))
       throwIfAborted(signal)
       if (work.simulateFailureAt) throw new Error(`模拟 ${String(work.simulateFailureAt)} 阶段失败`)
       const prepared = await this.taskTransaction(taskId, lease, state => {
@@ -316,7 +348,7 @@ export class KnowledgeService {
         const targetVersionIds = new Set(state.versions.filter(item => item.assetId === asset.id).map(item => item.id))
         const retainedChunks = (current?.indexedChunks ?? []).filter(chunk => !targetVersionIds.has(chunk.assetVersionId))
         const members = state.assets.filter(item => item.knowledgeBaseId === kb.id && item.id !== asset.id && item.activeVersionId).map(item => item.activeVersionId!)
-        candidate.assetVersionIds = [...members, version.id]; candidate.indexedChunks = [...retainedChunks, ...chunks]
+        candidate.assetVersionIds = [...members, version.id]; candidate.indexedChunks = [...retainedChunks, ...indexedChunks]
         validateCandidate(candidate, task, state)
         task.step = 'vector_indexing'; task.progress = 80; task.updatedAt = now()
         return true
@@ -351,14 +383,14 @@ export class KnowledgeService {
         if (candidate?.status === 'candidate') candidate.status = 'failed'
         if (task.status === 'cancelled') return task
         const version = state.versions.find(item => item.id === work.versionId)
-        if (version) { version.status = 'failed'; version.error = error instanceof Error ? error.message : '同步失败' }
-        task.status = 'failed'; task.step = String(task.input.simulateFailureAt ?? 'embedding'); task.error = error instanceof Error ? error.message : '同步失败'; task.finishedAt = now(); task.updatedAt = now()
+        if (version) { version.status = 'failed'; version.error = error instanceof Error ? safeErrorMessage(error.message) : '同步失败' }
+        task.status = 'failed'; task.step = String(task.input.simulateFailureAt ?? 'embedding'); task.error = error instanceof Error ? safeErrorMessage(error.message) : '同步失败'; task.finishedAt = now(); task.updatedAt = now()
         return task
       })
     }
   }
 
-  async assets(knowledgeBaseId: string, filters: { assetType?: string; sourceType?: string; status?: string; path?: string; includeDeleted?: boolean; query?: string } = {}) {
+  async assets(knowledgeBaseId: string, filters: { status?: string; path?: string; includeDeleted?: boolean; query?: string } = {}) {
     const state = await this.store.snapshot()
     return state.assets
       .filter(asset => asset.knowledgeBaseId === knowledgeBaseId)
@@ -368,7 +400,7 @@ export class KnowledgeService {
         versions: state.versions.filter(version => version.assetId === asset.id).map(version => ({ ...version, content: undefined })),
         task: taskSummary(activeTaskForAsset(state.tasks, asset)),
       }))
-      .filter(asset => (!filters.assetType || asset.assetType === filters.assetType) && (!filters.sourceType || asset.sourceType === filters.sourceType) && (!filters.status || asset.activeVersion?.status === filters.status) && (!filters.path || asset.logicalPath.includes(filters.path)) && (filters.includeDeleted || Boolean(asset.activeVersion) || Boolean(asset.task)) && (!filters.query || `${asset.displayName} ${asset.logicalPath} ${asset.activeVersion?.content}`.toLocaleLowerCase().includes(filters.query.toLocaleLowerCase())))
+      .filter(asset => (!filters.status || asset.activeVersion?.status === filters.status) && (!filters.path || asset.logicalPath.includes(filters.path)) && (filters.includeDeleted || Boolean(asset.activeVersion) || Boolean(asset.task)) && (!filters.query || `${asset.displayName} ${asset.logicalPath} ${asset.activeVersion?.content}`.toLocaleLowerCase().includes(filters.query.toLocaleLowerCase())))
   }
 
   async version(versionId: string) { return required((await this.store.snapshot()).versions.find(item => item.id === versionId), '资产版本不存在') }
@@ -461,7 +493,7 @@ export class KnowledgeService {
       })
     } catch (error) {
       if (signal?.aborted) return await this.task(taskId)
-      return this.taskTransaction(taskId, lease, state => { const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null; const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null; if (candidate?.status === 'candidate') candidate.status = 'failed'; if (task.status !== 'cancelled') { task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? error.message : '删除任务失败'; task.finishedAt = now(); task.updatedAt = now() } return task })
+      return this.taskTransaction(taskId, lease, state => { const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null; const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null; if (candidate?.status === 'candidate') candidate.status = 'failed'; if (task.status !== 'cancelled') { task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '删除任务失败'; task.finishedAt = now(); task.updatedAt = now() } return task })
     }
   }
 
@@ -537,7 +569,7 @@ export class KnowledgeService {
         if (signal?.aborted) return await this.task(taskId)
         return await this.taskTransaction(taskId, lease, state => {
           const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
-          task.status = 'failed'; task.step = 'file_cleanup'; task.error = error instanceof Error ? error.message : '活动文件清理失败'; task.updatedAt = now(); return task
+          task.status = 'failed'; task.step = 'file_cleanup'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '活动文件清理失败'; task.updatedAt = now(); return task
         })
       }
     } catch (error) {
@@ -547,7 +579,7 @@ export class KnowledgeService {
         const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null
         const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null
         if (candidate?.status === 'candidate') candidate.status = 'failed'
-        if (task.status !== 'cancelled') { task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? error.message : '目录删除任务失败'; task.finishedAt = now(); task.updatedAt = now(); releaseDirectoryDeleteScope(state, task) }
+        if (task.status !== 'cancelled') { task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '目录删除任务失败'; task.finishedAt = now(); task.updatedAt = now(); releaseDirectoryDeleteScope(state, task) }
         return task
       })
     }
@@ -575,7 +607,7 @@ export class KnowledgeService {
       if (signal?.aborted) return await this.task(taskId)
       return this.taskTransaction(taskId, lease, state => {
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
-        if (task.status === 'running') { task.status = 'failed'; task.step = 'file_cleanup'; task.error = error instanceof Error ? error.message : '活动文件清理失败'; task.updatedAt = now() }
+        if (task.status === 'running') { task.status = 'failed'; task.step = 'file_cleanup'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '活动文件清理失败'; task.updatedAt = now() }
         return task
       })
     }
@@ -602,7 +634,7 @@ export class KnowledgeService {
     })
   }
 
-  async search(knowledgeBaseId: string, input: { query: string; mode?: 'keyword' | 'vector' | 'hybrid'; assetType?: AssetType; sourceType?: SourceType; logicalPath?: string }) {
+  async search(knowledgeBaseId: string, input: { query: string; mode?: 'keyword' | 'vector' | 'hybrid'; logicalPath?: string }) {
     const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
     const query = input.query.trim()
     if (!query) throw new Error('检索内容不能为空')
@@ -616,15 +648,15 @@ export class KnowledgeService {
     const latestConfig = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '当前查询配置不存在').config
     const config = withLatestQueryConfig(indexConfig, latestConfig)
     const requestedMode = input.mode ?? (config.hybridSearch ? 'hybrid' : 'keyword')
-    const hasFilterMatch = index.assetVersionIds.some(versionId => { const version = state.versions.find(item => item.id === versionId); const asset = state.assets.find(item => item.id === version?.assetId); return Boolean(asset && (!input.assetType || asset.assetType === input.assetType) && (!input.sourceType || asset.sourceType === input.sourceType) && (!input.logicalPath || asset.logicalPath.includes(input.logicalPath))) })
-    if ((input.assetType || input.sourceType || input.logicalPath) && !hasFilterMatch) return { status: 'filter_empty', results: [] }
+    const hasFilterMatch = index.indexedChunks?.some(chunk => !input.logicalPath || chunk.assetMetadata?.logicalPath.includes(input.logicalPath)) ?? false
+    if (input.logicalPath && !hasFilterMatch) return { status: 'filter_empty', results: [] }
     let mode = requestedMode
     let queryVector: number[] | undefined
     let degradedReason: string | undefined
     if (mode !== 'keyword') {
       try { queryVector = (await this.embedTexts(config, [query]))[0] }
       catch (error) {
-        degradedReason = error instanceof Error ? error.message : 'Embedding Provider 不可用'
+        degradedReason = error instanceof Error ? safeErrorMessage(error.message) : 'Embedding Provider 不可用'
         if (mode === 'vector') return { status: 'vector_unavailable', results: [], degradation: { requestedMode, fallbackMode: null, reason: degradedReason } }
         mode = 'keyword'
       }
@@ -638,7 +670,7 @@ export class KnowledgeService {
     let rerankerDegraded = false
     if (config.rerankerEnabled && merged.length) {
       try { reranked = await this.rerank(config, query, merged) }
-      catch (error) { rerankerDegraded = true; degradedReason ??= error instanceof Error ? error.message : 'Reranker 不可用' }
+      catch (error) { rerankerDegraded = true; degradedReason ??= error instanceof Error ? safeErrorMessage(error.message) : 'Reranker 不可用' }
     }
     const eligible = reranked.filter(item => item.score >= config.relevanceThreshold).sort((a, b) => b.score - a.score)
     const candidates = eligible.slice(0, config.finalResults).map(item => ({
@@ -687,18 +719,18 @@ export class KnowledgeService {
       if (!canRunTask(task, lease) || task.type !== 'rebuild') return null
       const kb = required(state.knowledgeBases.find(item => item.id === task.knowledgeBaseId), '知识库不存在')
       const config = required(state.configs.find(item => item.id === task.configVersionId), '配置不存在')
-      const versions = state.assets.filter(item => item.knowledgeBaseId === kb.id && item.activeVersionId).map(item => required(state.versions.find(version => version.id === item.activeVersionId), '资产版本不存在'))
+      const versions = state.assets.filter(item => item.knowledgeBaseId === kb.id && item.activeVersionId).map(asset => ({ version: required(state.versions.find(version => version.id === asset.activeVersionId), '资产版本不存在'), assetMetadata: indexAssetMetadata(asset) }))
       const candidate = createCandidateIndex(state, kb.id, task.configVersionId)
-      candidate.assetVersionIds = versions.map(version => version.id)
+      candidate.assetVersionIds = versions.map(item => item.version.id)
       task.status = 'running'; task.step = 'building_candidate'; task.progress = 20; task.startedAt ??= now(); task.updatedAt = now(); task.input.candidateIndexVersionId = candidate.id; task.input.baseIndexVersionId = kb.activeIndexVersionId
-      return { candidateId: candidate.id, knowledgeBaseId: kb.id, configVersionId: config.id, config: config.config, versions: versions.map(version => ({ id: version.id, content: version.content })), simulateFailure: Boolean(task.input.simulateFailure) }
+      return { candidateId: candidate.id, knowledgeBaseId: kb.id, configVersionId: config.id, config: config.config, versions: versions.map(({ version, assetMetadata }) => ({ id: version.id, content: version.content, assetMetadata })), simulateFailure: Boolean(task.input.simulateFailure) }
     })
     if (!work) return null
     try {
-      const rebuiltChunks: Chunk[] = []
+      const rebuiltChunks: IndexChunk[] = []
       for (const version of work.versions) {
         throwIfAborted(signal)
-        rebuiltChunks.push(...(await this.createChunks(version.content, work.config, [], signal)).map(chunk => ({ ...chunk, assetVersionId: version.id })))
+        rebuiltChunks.push(...(await this.createChunks(version.content, work.config, [], signal)).map(chunk => ({ ...chunk, assetVersionId: version.id, assetMetadata: version.assetMetadata })))
       }
       throwIfAborted(signal)
       if (work.simulateFailure) throw new Error('模拟索引校验失败')
@@ -737,7 +769,7 @@ export class KnowledgeService {
         if (task.status === 'cancelled') return task
         const candidate = state.indexes.find(item => item.id === work.candidateId)
         if (candidate?.status === 'candidate') candidate.status = 'failed'
-        task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? error.message : '索引重建失败'; task.finishedAt = now(); task.updatedAt = now(); return task
+        task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '索引重建失败'; task.finishedAt = now(); task.updatedAt = now(); return task
       })
     }
   }
@@ -794,7 +826,7 @@ export class KnowledgeService {
     throwIfAborted(signal)
     if (!texts.length) return []
     if (!model.trim()) throw new Error('知识库当前没有可用模型')
-    if (config.embeddingMode === 'remote_api') return this.remoteEmbeddings.embed(config, texts, model, signal)
+    if (config.embeddingMode === 'remote_api') return this.remoteEmbeddings.embed(remoteRoute(config, config.embeddingSourceId, model), config, texts, signal)
     if (this.localModels) {
       await this.localModels.ensureRunning(model)
       throwIfAborted(signal)
@@ -810,21 +842,18 @@ export class KnowledgeService {
   }
 
   private async recall(index: DatabaseState['indexes'][number], config: KnowledgeConfig, mode: 'keyword' | 'vector', query: string, queryVector: number[] | undefined, limit: number, filters: RetrievalInput) {
-    if (this.store.searchChunks) return this.store.searchChunks({ indexVersionId: index.id, mode, query, queryVector, dimensions: config.embeddingDimensions, limit, assetType: filters.assetType, sourceType: filters.sourceType, logicalPath: filters.logicalPath })
+    if (this.store.searchChunks) return this.store.searchChunks({ indexVersionId: index.id, mode, query, queryVector, dimensions: config.embeddingDimensions, limit, logicalPath: filters.logicalPath })
     const state = this.store.read()
     const terms = query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []
-    return index.assetVersionIds.flatMap(versionId => {
-      const version = state.versions.find(item => item.id === versionId)
-      const asset = state.assets.find(item => item.id === version?.assetId)
-      if (!version || !asset || (filters.assetType && asset.assetType !== filters.assetType) || (filters.sourceType && asset.sourceType !== filters.sourceType) || (filters.logicalPath && !asset.logicalPath.includes(filters.logicalPath))) return []
-      const chunks = index.indexedChunks?.filter(chunk => chunk.assetVersionId === version.id) ?? version.chunks
-      return chunks.map(chunk => {
-        const text = chunk.content.toLocaleLowerCase()
-        const score = mode === 'keyword'
-          ? (terms.length ? terms.filter(term => text.includes(term)).length / terms.length : 0)
-          : (cosine(required(queryVector, '查询向量不存在'), chunk.embedding) + 1) / 2
-        return { score, asset: { id: asset.id, displayName: asset.displayName, assetType: asset.assetType, sourceType: asset.sourceType, logicalPath: asset.logicalPath }, version: { id: version.id, number: version.number }, chunk: { id: chunk.id, chunkKey: chunk.chunkKey, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar }, content: chunk.content } satisfies StoredChunkCandidate
-      })
+    return (index.indexedChunks ?? []).flatMap(chunk => {
+      const version = state.versions.find(item => item.id === chunk.assetVersionId)
+      const metadata = chunk.assetMetadata
+      if (!version || !metadata || (filters.logicalPath && !metadata.logicalPath.includes(filters.logicalPath))) return []
+      const text = chunk.content.toLocaleLowerCase()
+      const score = mode === 'keyword'
+        ? (terms.length ? terms.filter(term => text.includes(term)).length / terms.length : 0)
+        : (cosine(required(queryVector, '查询向量不存在'), chunk.embedding) + 1) / 2
+      return [{ score, asset: { id: metadata.assetId, displayName: metadata.displayName, assetType: metadata.assetType, sourceType: metadata.sourceType, logicalPath: metadata.logicalPath }, version: { id: version.id, number: version.number }, chunk: { id: chunk.id, chunkKey: chunk.chunkKey, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar }, content: chunk.content } satisfies StoredChunkCandidate]
     }).sort((left, right) => right.score - left.score).slice(0, limit)
   }
 
@@ -969,19 +998,27 @@ function selectDefaultKnowledgeBase(state: DatabaseState, projectName: string) {
 }
 function ensureDirectoryPath(state: DatabaseState, knowledgeBaseId: string, segments: string[]) { let parentId: string | null = null; for (const rawName of segments) { const name = validateDirectoryName(rawName); let directory = state.directories.find(item => item.knowledgeBaseId === knowledgeBaseId && item.parentId === parentId && item.name.toLocaleLowerCase() === name.toLocaleLowerCase()); if (!directory) { const createdAt = now(); directory = { id: id('dir'), knowledgeBaseId, name, parentId, createdAt, updatedAt: createdAt }; state.directories.push(directory) } parentId = directory.id } return parentId }
 
-function publishIndex(state: DatabaseState, knowledgeBaseId: string, configVersionId: string, members: string[], indexedChunks?: Chunk[]) {
+function publishIndex(state: DatabaseState, knowledgeBaseId: string, configVersionId: string, members: string[], indexedChunks?: IndexChunk[]) {
   const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在'); const previous = state.indexes.find(item => item.id === kb.activeIndexVersionId)
   const index = createCandidateIndex(state, knowledgeBaseId, configVersionId)
-  index.assetVersionIds = [...new Set(members)]; index.indexedChunks = indexedChunks ?? members.flatMap(versionId => state.versions.find(item => item.id === versionId)?.chunks ?? [])
+  index.assetVersionIds = [...new Set(members)]; index.indexedChunks = indexedChunks ?? members.flatMap(versionId => {
+    const version = state.versions.find(item => item.id === versionId)
+    const asset = state.assets.find(item => item.id === version?.assetId)
+    return version && asset ? version.chunks.map(chunk => ({ ...chunk, assetMetadata: indexAssetMetadata(asset) })) : []
+  })
   activateCandidateIndex(state, index, previous)
   return index
 }
 function createCandidateIndex(state: DatabaseState, knowledgeBaseId: string, configVersionId: string) {
   required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
-  const index = { id: id('idx'), knowledgeBaseId, number: state.indexes.filter(item => item.knowledgeBaseId === knowledgeBaseId).length + 1, status: 'candidate' as const, assetVersionIds: [] as string[], configVersionId, indexedChunks: [] as Chunk[], createdAt: now() }
+  const index = { id: id('idx'), knowledgeBaseId, number: state.indexes.filter(item => item.knowledgeBaseId === knowledgeBaseId).length + 1, status: 'candidate' as const, assetVersionIds: [] as string[], configVersionId, indexedChunks: [] as IndexChunk[], createdAt: now() }
   state.indexes.push(index)
   return index
 }
+function indexAssetMetadata(asset: DatabaseState['assets'][number]): IndexAssetMetadata {
+  return { assetId: asset.id, displayName: asset.displayName, assetType: asset.assetType, sourceType: asset.sourceType, logicalPath: asset.logicalPath }
+}
+
 function validateCandidate(candidate: DatabaseState['indexes'][number], task: SyncTask, state: DatabaseState) {
   if (candidate.status !== 'candidate' || candidate.knowledgeBaseId !== task.knowledgeBaseId) throw new Error('候选索引状态不合法')
   if (task.status !== 'running') throw new Error('任务已失效或取消')
@@ -1011,10 +1048,8 @@ function validateConfig(config: KnowledgeConfig) {
   for (const source of config.embeddingSources) {
     if (!source.id.trim() || !source.name.trim()) throw new Error('模型来源名称不能为空')
     if (source.type === 'remote_api' && !/^https?:\/\//i.test(source.baseUrl)) throw new Error(`远程来源 ${source.name} 的 Base URL 必须使用 http:// 或 https://`)
-    if (source.type === 'remote_api' && !source.models.length) throw new Error(`远程来源 ${source.name} 至少需要一个模型`)
     if (source.models.some(model => !model.name.trim() || model.dimensions < 0)) throw new Error(`模型来源 ${source.name} 包含无效模型`)
   }
-  if (config.embeddingMode === 'remote_api' && !/^https?:\/\//i.test(config.embeddingBaseUrl)) throw new Error('远程 Embedding Base URL 必须使用 http:// 或 https://')
   if (config.keywordRecall <= 0 || config.vectorRecall <= 0 || config.finalResults <= 0 || config.relevanceThreshold < 0 || config.relevanceThreshold > 1) throw new Error('检索参数不合法')
   if (config.rerankerEnabled) modelRouteConfig(config, config.rerankerSourceId, config.rerankerModel)
 }
@@ -1022,35 +1057,53 @@ function validateConfig(config: KnowledgeConfig) {
 function validateEmbeddingProbe(config: KnowledgeConfig) {
   if (!config.embeddingModel.trim()) throw new Error('模型名称不能为空')
   if (config.embeddingBatchSize <= 0 || config.embeddingTimeoutMs <= 0 || config.embeddingRetries < 0) throw new Error('Embedding 请求参数不合法')
-  if (config.embeddingMode === 'remote_api' && !/^https?:\/\//i.test(config.embeddingBaseUrl)) throw new Error('远程 Embedding Base URL 必须使用 http:// 或 https://')
 }
 
 function normalizeEmbeddingSources(config: KnowledgeConfig, sourceOverride?: EmbeddingSource[]): KnowledgeConfig {
-  const provided = sourceOverride ?? config.embeddingSources
-  const fallbackId = config.embeddingSourceId?.trim() || `${config.embeddingMode}-default`
+  const provided = sourceOverride ?? (Array.isArray(config.embeddingSources) ? config.embeddingSources : [])
+  const fallbackId = config.embeddingSourceId || 'local-default'
   const sources = provided.length ? structuredClone(provided) : [{ id: fallbackId, name: config.embeddingMode === 'local' ? '本地模型' : '默认远程来源', type: config.embeddingMode, baseUrl: config.embeddingBaseUrl, apiKey: config.embeddingApiKey, models: [{ name: config.embeddingModel, dimensions: config.embeddingDimensions }] }]
-  sources.filter(source => source.type === 'local' && source.name === 'SmartHub 本地运行时').forEach(source => { source.name = '本地模型' })
-  if (!sources.some(source => source.type === 'local')) {
-    const template = structuredClone(required(defaultConfig.embeddingSources.find(source => source.type === 'local'), '系统内置本地模型来源缺失'))
-    while (sources.some(source => source.id === template.id)) template.id = `${template.id}-builtin`
-    sources.unshift(template)
+  const localDefault = sources.find(source => source.id === 'local-default')
+  if (!localDefault) sources.unshift(structuredClone(defaultConfig.embeddingSources[0]))
+  else { localDefault.baseUrl = ''; localDefault.apiKey = ''; localDefault.name = '本地模型'; localDefault.type = 'local' }
+  const selected = sources.find(source => source.id === config.embeddingSourceId) ?? sources[0]
+  const selectedModel = selected.models.find(model => model.name === config.embeddingModel) ?? selected.models[0]
+  if (!selectedModel) return { ...config, embeddingSources: sources, embeddingSourceId: selected.id, embeddingMode: selected.type, embeddingBaseUrl: selected.baseUrl, embeddingApiKey: selected.apiKey, embeddingModel: '', embeddingDimensions: 0, rerankerEnabled: false, rerankerSourceId: selected.id, rerankerModel: '' }
+  const rerankerSource = sources.find(source => source.id === config.rerankerSourceId && source.models.some(model => model.name === config.rerankerModel)) ?? selected
+  const rerankerModel = rerankerSource.models.some(model => model.name === config.rerankerModel) ? config.rerankerModel : selectedModel.name
+  return { ...config, embeddingSources: sources, embeddingSourceId: selected.id, embeddingMode: selected.type, embeddingBaseUrl: selected.baseUrl, embeddingApiKey: selected.apiKey, embeddingModel: selectedModel.name, embeddingDimensions: selectedModel.dimensions, rerankerSourceId: rerankerSource.id, rerankerModel }
+}
+
+function mergeConfigPatch(current: KnowledgeConfig, patch: Partial<KnowledgeConfig>): KnowledgeConfig {
+  const currentSources = new Map(current.embeddingSources.map(source => [source.id, source]))
+  const embeddingSources = patch.embeddingSources?.map(source => {
+    const existing = currentSources.get(source.id)
+    const apiKey = source.apiKey === undefined || source.apiKey === '' ? existing?.apiKey ?? '' : source.apiKey
+    return { ...source, apiKey }
+  }) ?? current.embeddingSources
+  const selected = embeddingSources.find(source => source.id === (patch.embeddingSourceId ?? current.embeddingSourceId))
+  return {
+    ...current,
+    ...patch,
+    embeddingSources,
+    embeddingBaseUrl: selected?.baseUrl ?? patch.embeddingBaseUrl ?? current.embeddingBaseUrl,
+    embeddingApiKey: selected?.apiKey ?? patch.embeddingApiKey ?? current.embeddingApiKey,
   }
-  let selected = sources.find(source => source.id === config.embeddingSourceId && source.type === config.embeddingMode)
-  if (!selected) selected = sources.find(source => source.type === config.embeddingMode)
-  if (!selected) {
-    const id = `${config.embeddingMode}-compat-${sources.length + 1}`
-    selected = { id, name: config.embeddingMode === 'local' ? '本地模型' : '远程兼容来源', type: config.embeddingMode, baseUrl: config.embeddingBaseUrl, apiKey: config.embeddingApiKey, models: [{ name: config.embeddingModel, dimensions: config.embeddingDimensions }] }
-    sources.push(selected)
+}
+
+function redactConfig(config: KnowledgeConfig): KnowledgeConfig {
+  return {
+    ...config,
+    embeddingApiKey: '',
+    embeddingSources: config.embeddingSources.map(source => ({ ...source, apiKey: '' })),
   }
-  if (config.embeddingModel) {
-    const selectedModel = selected.models.find(model => model.name === config.embeddingModel)
-    if (selectedModel) selectedModel.dimensions = config.embeddingDimensions
-    else selected.models.push({ name: config.embeddingModel, dimensions: config.embeddingDimensions })
-  }
-  let rerankerSource = sources.find(source => source.id === config.rerankerSourceId)
-  if (!rerankerSource) rerankerSource = sources.find(source => source.models.some(model => model.name === config.rerankerModel)) ?? selected
-  if (config.rerankerModel && !rerankerSource.models.some(model => model.name === config.rerankerModel)) rerankerSource.models.push({ name: config.rerankerModel, dimensions: config.embeddingDimensions })
-  return { ...config, embeddingSourceId: selected.id, embeddingSources: sources, rerankerSourceId: rerankerSource.id }
+}
+
+function remoteRoute(config: KnowledgeConfig, sourceId: string, modelName: string): ResolvedEmbeddingRoute {
+  const source = config.embeddingSources.find(item => item.id === sourceId)
+  if (!source || source.type !== 'remote_api') throw new Error('远程 Embedding 来源不存在')
+  if (!source.models.some(model => model.name === modelName)) throw new Error(`远程来源 ${source.name} 中不存在模型 ${modelName}`)
+  return { sourceId, model: modelName, baseUrl: source.baseUrl, ...(source.apiKey ? { apiKey: source.apiKey } : {}) }
 }
 
 function modelRouteConfig(config: KnowledgeConfig, sourceId: string, modelName: string): KnowledgeConfig {
@@ -1061,4 +1114,21 @@ function modelRouteConfig(config: KnowledgeConfig, sourceId: string, modelName: 
   if (!model) throw new Error(`Reranker 来源 ${source.name} 中不存在模型 ${modelName}`)
   if (model.dimensions <= 0) throw new Error(`请先检测 Reranker 模型 ${modelName} 的向量维度`)
   return { ...config, embeddingSourceId: source.id, embeddingMode: source.type, embeddingBaseUrl: source.baseUrl, embeddingApiKey: source.apiKey, embeddingModel: model.name, embeddingDimensions: model.dimensions }
+}
+
+function scrubLegacyEmbeddingSecrets<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(scrubLegacyEmbeddingSecrets) as T
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return value
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !['embeddingApiKey', 'embeddingBaseUrl', 'apiKey', 'baseUrl'].includes(key))
+      .map(([key, item]) => [key, scrubLegacyEmbeddingSecrets(item)]),
+  ) as T
+}
+
+function safeErrorMessage(message: string) {
+  return message
+    .replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]')
+    .replace(/(?:bearer|api[_ -]?key|token)\s*[:=]?\s*[^\s,;]+/giu, '$1 [已隐藏]')
+    .slice(0, 240)
 }

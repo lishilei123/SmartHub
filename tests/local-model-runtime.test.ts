@@ -87,7 +87,15 @@ test('本地模式的上传解析和混合检索使用系统内置模型向量',
   await service.initialize()
   const created = await service.createProject('本地模型验收')
   const kbId = created.knowledgeBase!.id
-  await service.saveConfig(kbId, { embeddingModel: 'test/embedding-model', embeddingDimensions: 3, rerankerModel: 'test/embedding-model' })
+  const config = (await service.config(kbId)).config
+  await service.saveConfig(kbId, {
+    embeddingSources: config.embeddingSources.map(source => source.id === 'local-default'
+      ? { ...source, models: [...source.models, { name: 'test/embedding-model', dimensions: 3 }] }
+      : source),
+    embeddingModel: 'test/embedding-model',
+    embeddingDimensions: 3,
+    rerankerModel: 'test/embedding-model',
+  })
   const synced = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'refund.md', assetType: '需求', displayName: '退款规则', logicalPath: 'requirements/refund.md', content: '# 退款规则\n退款必须校验幂等键。' })
   await service.processTask(synced.task!.id)
   assert.equal(runtime.status().phase, 'running')

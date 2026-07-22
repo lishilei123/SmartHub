@@ -10,7 +10,7 @@ import {
   initialSettings, requirementsByVersion, type KnowledgeDirectory, type KnowledgeDocument, type Requirement,
   type EmbeddingSourceDraft, type SettingsDraft, type Version,
 } from './prototype-data'
-import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, ensureKnowledgeBase, loadConfig, loadKnowledgeAssets, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
+import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, ensureKnowledgeBase, loadAssetVersion, loadConfig, loadKnowledgeAssets, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
@@ -19,7 +19,7 @@ type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'executio
 type NotifyTone = 'success' | 'error' | 'warning'
 type Notify = (message: string, tone?: NotifyTone) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
-type SearchLocation = { assetId: string; startLine: number; endLine: number; nonce: number }
+type SearchLocation = { assetId: string; assetVersionId: string; startLine: number; endLine: number; nonce: number }
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 
 const pageStorageKey = 'smarthub-current-page'
@@ -298,6 +298,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const [searchMeta, setSearchMeta] = useState<ApiSearchMeta | null>(null)
   const [searchStatus, setSearchStatus] = useState('')
   const [searchLocation, setSearchLocation] = useState<SearchLocation | null>(null)
+  const [evidenceFile, setEvidenceFile] = useState<KnowledgeDocument | null>(null)
   const [treeCollapsed, setTreeCollapsed] = useState(false)
   const [outlineCollapsed, setOutlineCollapsed] = useState(false)
   const [viewMode, setViewMode] = useState<'preview' | 'source' | 'split'>('preview')
@@ -425,7 +426,8 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     return result
   }, [deleteDirectoryId, directoriesByParent])
   const moveCandidates = useMemo(() => directories.filter(directory => !deleteDirectoryIds.has(directory.id)), [deleteDirectoryIds, directories])
-  const file = documents.find(document => document.id === selectedId)
+  const currentFile = documents.find(document => document.id === selectedId)
+  const file = evidenceFile?.id === selectedId ? evidenceFile : currentFile
   const source = file ? makeSource(file) : ''
   const format = file?.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
   const outline = useMemo(() => format === 'markdown' ? parseMarkdownOutline(source) : emptyMarkdownOutline, [format, source])
@@ -461,7 +463,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     else if (buttonBounds.bottom > outlineBounds.bottom) outlineElement.scrollTop += buttonBounds.bottom - outlineBounds.bottom
   }, [activeSectionKey])
   useEffect(() => {
-    if (!searchLocation || searchLocation.assetId !== selectedId || viewMode !== 'preview') return
+    if (!searchLocation || searchLocation.assetId !== selectedId || searchLocation.assetVersionId !== file?.assetVersionId || viewMode !== 'preview') return
     let highlighted: HTMLElement | null = null
     let highlightTimer = 0
     const frame = window.requestAnimationFrame(() => {
@@ -488,7 +490,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
       }
     })
     return () => { window.cancelAnimationFrame(frame); if (highlightTimer) window.clearTimeout(highlightTimer); highlighted?.classList.remove('search-location-hit') }
-  }, [format, searchLocation, selectedId, source, viewMode])
+  }, [file?.assetVersionId, format, searchLocation, selectedId, source, viewMode])
   useEffect(() => {
     if (searchLocation?.assetId === selectedId) return
     const frame = window.requestAnimationFrame(() => {
@@ -621,16 +623,43 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     }
     catch (error) { setUploadState('failed'); notify(error instanceof Error ? error.message : '上传失败') }
   }
-  const selectFile = (id: string) => { setSelectedId(id); setActiveSectionKey(null); setSearchLocation(null); setSelectedDirectoryId(null) }
-  const openSearchResult = (result: ApiSearchResult) => {
+  const clearEvidencePreview = () => { setEvidenceFile(null); setSearchLocation(null) }
+  const selectFile = (id: string) => { setSelectedId(id); setActiveSectionKey(null); clearEvidencePreview(); setSelectedDirectoryId(null) }
+  const openSearchResult = async (result: ApiSearchResult) => {
+    const requestId = ++searchRequestRef.current
     setSelectedId(result.asset.id)
     setSelectedDirectoryId(null)
     setViewMode('preview')
     setActiveSectionKey(null)
-    setSearchLocation({ assetId: result.asset.id, startLine: result.chunk.startLine, endLine: result.chunk.endLine, nonce: Date.now() })
-    searchRequestRef.current += 1
     setSearchStatus('')
-    notify(`已定位固定版本 V${result.version.number} · L${result.chunk.startLine}-${result.chunk.endLine}`)
+    try {
+      const version = await loadAssetVersion(result.version.id)
+      if (requestId !== searchRequestRef.current) return
+      const name = result.asset.displayName
+      const format = name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
+      const outline = format === 'markdown' ? parseMarkdownOutline(version.content) : undefined
+      setEvidenceFile({
+        id: result.asset.id,
+        name,
+        parentId: null,
+        version: `V${result.version.number}`,
+        updated: version.readyAt ? new Date(version.readyAt).toLocaleString('zh-CN') : new Date(version.createdAt).toLocaleString('zh-CN'),
+        title: outline?.title ?? name.replace(/\.(md|txt)$/i, ''),
+        intro: version.content.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? '',
+        sections: outline?.sections.map(section => section.title) ?? [],
+        content: version.content,
+        assetType: result.asset.assetType,
+        sourceType: result.asset.sourceType,
+        assetVersionId: version.id,
+        versions: [{ id: version.id, number: version.number, status: version.status, createdAt: version.createdAt }],
+        status: version.status,
+        logicalPath: result.asset.logicalPath,
+      })
+      setSearchLocation({ assetId: result.asset.id, assetVersionId: version.id, startLine: result.chunk.startLine, endLine: result.chunk.endLine, nonce: Date.now() })
+      notify(`已打开检索证据固定版本 V${result.version.number} · L${result.chunk.startLine}-${result.chunk.endLine}`)
+    } catch (error) {
+      if (requestId === searchRequestRef.current) notify(error instanceof Error ? error.message : '固定版本加载失败', 'error')
+    }
   }
   const openLinkedDocument = (logicalPath: string) => {
     const linked = documents.find(document => document.logicalPath?.replaceAll('\\', '/').toLocaleLowerCase() === logicalPath.toLocaleLowerCase())
@@ -641,14 +670,14 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const renameFile = async () => {
     if (!file) return
     setFileActionBusy(true); setFileActionError('')
-    try { await updateKnowledgeAsset(file.id, { displayName: fileNameDraft }); await refreshKnowledge(); addAudit(`重命名知识文件：${file.name} → ${fileNameDraft}`); notify('文件名称及物理路径已保存。'); setMoreOpen(false) }
+    try { await updateKnowledgeAsset(file.id, { displayName: fileNameDraft }); clearEvidencePreview(); await refreshKnowledge(); addAudit(`重命名知识文件：${file.name} → ${fileNameDraft}`); notify('文件名称及物理路径已保存。'); setMoreOpen(false) }
     catch (error) { setFileActionError(error instanceof Error ? error.message : '文件重命名失败') }
     finally { setFileActionBusy(false) }
   }
   const moveFile = async () => {
     if (!file) return
     setFileActionBusy(true); setFileActionError('')
-    try { await updateKnowledgeAsset(file.id, { targetDirectoryId: fileTargetDirectoryId || null }); await refreshKnowledge(); addAudit(`移动知识文件：${file.name}`); notify('文件已移动并保存到目标目录。'); setMoreOpen(false) }
+    try { await updateKnowledgeAsset(file.id, { targetDirectoryId: fileTargetDirectoryId || null }); clearEvidencePreview(); await refreshKnowledge(); addAudit(`移动知识文件：${file.name}`); notify('文件已移动并保存到目标目录。'); setMoreOpen(false) }
     catch (error) { setFileActionError(error instanceof Error ? error.message : '文件移动失败') }
     finally { setFileActionBusy(false) }
   }
@@ -710,7 +739,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   return <section className="card knowledge-page">
     <div className="knowledge-toolbar"><div ref={searchInputRef} className="mini-search wide"><Search size={16} /><input aria-label="搜索知识库" value={query} onChange={event => updateSearchQuery(event.target.value)} onFocus={reopenSearchResults} placeholder="搜索文件名称或文档内容" /></div><Badge tone={apiState === 'ready' ? 'green' : apiState === 'connecting' ? 'orange' : 'gray'}>{apiState === 'ready' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{apiState === 'ready' ? '知识库已连接' : apiState === 'connecting' ? '正在连接' : 'API 未启动'}</Badge>{activeIndexSummary && <Badge tone="blue">活动索引 V{activeIndexSummary.number} · {activeIndexSummary.dimensions} 维 · {activeIndexSummary.chunks} Chunk · {activeIndexSummary.hnswReady === null ? '内存检索' : activeIndexSummary.hnswReady ? 'HNSW 就绪' : '精确检索'}</Badge>}{candidateProgress && <Badge tone="orange">候选索引 {candidateProgress.step} · {candidateProgress.progress}%（旧索引继续服务）</Badge>}<button className="btn ghost" disabled={syncState === 'running' || apiState !== 'ready'} onClick={() => void sync()}><RefreshCw size={16} />{syncState === 'running' ? '刷新中' : '刷新'}</button><button className="btn primary" disabled={uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload size={16} />{uploadState === 'running' ? '上传中' : '上传资料'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={chooseUpload} />{searchStatus && <div ref={searchPopoverRef} className="knowledge-search-results" role="dialog" aria-label="知识库检索结果">{searchMeta && <div className="search-summary"><b>{retrievalModeLabel(searchMeta.mode)}{searchMeta.degraded ? '（已降级）' : ''}</b><span>关键词召回 {searchMeta.keywordCandidates} · 向量召回 {searchMeta.vectorCandidates} · 通过门槛 {searchMeta.eligibleCandidates}</span><em>{searchMeta.degraded ? '向量服务不可用，已使用关键词检索' : `最低相关度 ${Math.round(searchMeta.minimumRelevance * 100)}%`}</em></div>}{searchResults.length ? searchResults.map(result => <button key={`${result.version.id}-${result.chunk.chunkKey}`} onClick={() => openSearchResult(result)}><b>{result.asset.displayName}<em className="final-score">综合 {Math.round(result.score * 100)}%</em></b><span>{result.excerpt}</span><small>{result.asset.logicalPath} · {result.chunk.headingPath.join(' / ') || '正文'} · L{result.chunk.startLine}-{result.chunk.endLine}</small>{result.scores && <div className="score-breakdown"><i className={result.scores.keyword > 0 ? 'active' : ''}>关键词 {Math.round(result.scores.keyword * 100)}%</i><i className={result.scores.vector > 0 ? 'active' : ''}>向量 {Math.round(result.scores.vector * 100)}%</i>{result.scores.reranker != null && <i className="active">重排 {Math.round(result.scores.reranker * 100)}%</i>}</div>}</button>) : <p>{searchStatus === 'no_ready_assets' ? '尚无已就绪资料。' : searchStatus === 'initial_indexing' ? '正在建立首个索引，请稍后重试。' : searchStatus === 'no_active_index' ? '尚未建立活动索引。' : searchStatus === 'vector_unavailable' ? '向量服务暂不可用，可切换关键词检索。' : searchStatus === 'filter_empty' ? '当前筛选范围没有可检索资料。' : '当前范围没有匹配结果。'}</p>}</div>}</div>
     <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-root"><FolderOpen /><b>SmartHub 知识库</b><small>{documents.length}</small><button className="icon-btn tree-root-action" onClick={() => openCreate(null)} aria-label="在知识库根目录新建目录"><FolderPlus /></button><button className="icon-btn tree-collapse" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{queryText && !matchingDocumentIds.size ? <p className="empty-state">没有匹配的文档。</p> : <div className="tree-content">{rootDirectories.map(directory => renderDirectory(directory, 0))}{rootDocuments.map(document => renderFile(document, '30px'))}</div>}</aside>
-      <article ref={documentPanelRef} className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span title={file ? getBreadcrumb(file) : undefined}>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions"><Badge tone={file.task?.status === 'failed' ? 'red' : file.task ? 'orange' : file.status === 'ready' ? 'green' : 'gray'}>{file.task?.status === 'failed' ? '入库失败' : file.task ? `${file.task.step} ${file.task.progress}%` : file.status === 'ready' ? '已入库' : '等待入库'}</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => openFileActions()}><MoreHorizontal /></button></div>}</div>
+      <article ref={documentPanelRef} className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span title={file ? getBreadcrumb(file) : undefined}>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions">{evidenceFile && <Badge tone="purple">检索证据固定版本</Badge>}<Badge tone={file.task?.status === 'failed' ? 'red' : file.task ? 'orange' : file.status === 'ready' ? 'green' : 'gray'}>{file.task?.status === 'failed' ? '入库失败' : file.task ? `${file.task.step} ${file.task.progress}%` : file.status === 'ready' ? '已入库' : '等待入库'}</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => openFileActions()}><MoreHorizontal /></button></div>}</div>
         {file ? viewMode === 'preview' ? <div className="preview-body"><DocumentContent ref={previewRef} file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} /><nav ref={outlineRef} className="document-outline" aria-label="本文目录"><b>本文目录</b>{outline.sections.map(section => <button key={section.key} data-outline-section-key={section.key} className={activeSectionKey === section.key ? 'active' : ''} onClick={() => jumpToSection(section.key)}>{section.title}</button>)}</nav></div> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>请上传资料，或检查知识库服务连接后再刷新。</p></div>}
       </article></div>
     {imageOpen && <ImageLightbox onClose={() => setImageOpen(false)} />}
@@ -733,7 +762,7 @@ function SourceView({ source }: { source: string }) {
 const DocumentContent = forwardRef<HTMLDivElement, { file: KnowledgeDocument; source: string; format: 'markdown' | 'text'; outline: MarkdownOutline; knowledgeBaseId: string; activeSectionKey: string | null; onOpenDocument: (logicalPath: string) => void; onOpenImage: () => void; compact?: boolean }>(function DocumentContent({ file, source, format, outline, knowledgeBaseId, activeSectionKey, onOpenDocument, onOpenImage, compact = false }, ref) {
   const className = compact ? 'split-markdown' : 'markdown-view'
   if (file.content) {
-    return <div ref={ref} className={className}><div className="document-meta"><Badge tone="blue">{format === 'text' ? 'TXT' : 'Markdown'}</Badge><span>版本 {file.version}</span><span>更新于 {file.updated}</span><Badge tone="green">已入活动索引</Badge></div><MarkdownDocument source={source} format={format} knowledgeBaseId={knowledgeBaseId} logicalPath={file.logicalPath} outline={outline} activeSectionKey={activeSectionKey} anchorPrefix={compact ? `split-${file.id}` : `preview-${file.id}`} onOpenKnowledgeDocument={onOpenDocument} /><div className="readonly-notice">固定资产版本：{file.assetVersionId} · 来源：{file.sourceType} · 类型：{file.assetType}</div></div>
+    return <div ref={ref} className={className}><div className="document-meta"><Badge tone="blue">{format === 'text' ? 'TXT' : 'Markdown'}</Badge><span>版本 {file.version}</span><span>更新于 {file.updated}</span><Badge tone="green">已入活动索引</Badge></div><MarkdownDocument source={source} format={format} knowledgeBaseId={knowledgeBaseId} logicalPath={file.logicalPath} outline={outline} activeSectionKey={activeSectionKey} anchorPrefix={compact ? `split-${file.id}` : `preview-${file.id}`} onOpenKnowledgeDocument={onOpenDocument} /><div className="readonly-notice">固定资产版本：{file.assetVersionId} · 类型：{file.assetType}</div></div>
   }
   return <div ref={ref} className={className}><div className="document-meta"><Badge tone="blue">Markdown</Badge><span>版本 {file.version}</span><span>更新于 {file.updated}</span><Badge tone="orange">只读</Badge></div><h1>{file.title}</h1><p>{file.intro}</p><div className="md-callout"><CircleHelp size={18} /><div><b>只读原型说明</b><span>编辑、保存、发布和历史恢复需要后端服务；当前只能查看本地示例。</span></div></div>{outline.sections.map((section, index) => <section id={`preview-${file.id}-${section.key}`} data-document-section-key={section.key} className={activeSectionKey === section.key ? 'document-section-heading active-document-section' : 'document-section-heading'} key={section.key}><h2>{section.title}</h2><p>随着业务规模持续增长，原有流程在扩展性、异常恢复和统一治理方面逐渐暴露出不足。本地示例用于验证阅读、定位和视图切换交互。</p>{index === 0 && <button className="md-image" onClick={onOpenImage} aria-label="打开统一支付与退款处理流程原图"><img src="/assets/payment-flow.svg" alt="统一支付与退款处理流程" /><span><span>图 1：统一支付与退款处理流程</span><em>点击查看原图</em></span></button>}{index === 1 && <ul><li>统一核心流程及状态流转规则。</li><li>完善异常、超时和重试场景。</li><li>保留来源引用并支持版本追溯。</li></ul>}</section>)}</div>
 })
@@ -821,6 +850,7 @@ function FormRow({ label, help, children }: { label: string; help: string; child
 function SwitchRow({ title, desc, checked, onChange }: { title: string; desc: string; checked: boolean; onChange: (value: boolean) => void }) { return <div className="form-row"><span><b>{title}</b><small>{desc}</small></span><label className="switch"><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} aria-label={title} /><i /></label></div> }
 
 type SourceEditorDraft = { name: string; baseUrl: string; apiKey: string; modelName: string }
+
 const localModelRecommendations = [
   { name: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', title: '多语言通用 · 推荐', detail: '中英文知识库 · 384 维' },
   { name: 'Xenova/multilingual-e5-small', title: '多语言检索', detail: '面向语义检索 · 384 维' },
@@ -958,7 +988,7 @@ function EmbeddingModelPrototype({ knowledgeBaseId, draft, update, notify }: { k
         const detectedDimensions = runtime?.dimensions ?? model.dimensions
         const dimensionReady = detectedDimensions > 0
         const statusLabel = source.type === 'remote_api' ? model.dimensions > 0 ? '已检测' : '待检测' : runtime?.fallbackUsed && running ? '镜像运行' : phaseLabel(runtime?.phase)
-        return <div className={`source-model-row ${working ? 'working' : ''}`} key={model.name}><div className="model-identity"><div className={`model-state-dot ${runtime?.phase ?? (source.type === 'remote_api' && model.dimensions > 0 ? 'configured' : 'idle')}`} /><span><b title={model.name}>{model.name}</b><small>{source.type === 'local' ? '本地模型' : 'API 模型'}{runtime?.maxTokens ? ` · 最大 ${runtime.maxTokens} tokens` : ''}</small></span></div><div className={`model-dimension ${dimensionReady ? 'ready' : 'pending'} ${runtime?.error ? 'failed' : ''}`}><b>{dimensionReady ? `${detectedDimensions} 维` : '自动检测'}</b><small title={runtime?.error}>{runtime?.error ?? (dimensionReady ? '已识别' : source.type === 'local' ? '运行后识别' : '检测后识别')}</small></div><Badge tone={source.type === 'remote_api' ? model.dimensions > 0 ? 'blue' : 'orange' : phaseTone(runtime?.phase)}>{statusLabel}</Badge><div className="model-row-actions">{source.type === 'local' ? <button className={`btn ${running ? 'danger' : 'ghost'}`} disabled={runtimeBusy === model.name || working} onClick={() => void operateLocalModel(model.name, running)}>{running ? <><XCircle />停止</> : <><Play />运行</>}</button> : <button className="btn ghost" disabled={Boolean(testingModel)} onClick={() => void testConnection(source, model)}><Activity />{testingModel === testKey ? '检测中' : model.dimensions > 0 ? '重检' : '检测'}</button>}<button className="icon-btn model-remove" title="移除模型" aria-label={`移除模型 ${model.name}`} onClick={() => void removeModel(source, model.name)}><Trash2 /></button></div>{working && <div className="model-row-progress"><Progress value={runtime?.progress ?? 0} tone="orange" /><small>{runtime?.progress ?? 0}%</small></div>}</div>
+        return <div className={`source-model-row ${working ? 'working' : ''}`} key={model.name}><div className="model-identity"><div className={`model-state-dot ${runtime?.phase ?? (source.type === 'remote_api' && model.dimensions > 0 ? 'configured' : 'idle')}`} /><span><b title={model.name}>{model.name}</b><small>{source.type === 'local' ? '本地模型' : 'API 模型'}{runtime?.maxTokens ? ` · 最大 ${runtime.maxTokens} tokens` : ''}</small></span></div><div className={`model-dimension ${dimensionReady ? 'ready' : 'pending'} ${runtime?.error ? 'failed' : ''}`}><b>{dimensionReady ? `${detectedDimensions} 维` : '自动检测'}</b><small title={runtime?.error}>{runtime?.error ?? (dimensionReady ? '已识别' : source.type === 'local' ? '运行后识别' : '检测后识别')}</small></div><Badge tone={source.type === 'remote_api' ? model.dimensions > 0 ? 'blue' : 'orange' : phaseTone(runtime?.phase)}>{statusLabel}</Badge><div className="model-row-actions">{source.type === 'local' ? <button className={`btn ${running ? 'danger' : 'ghost'}`} disabled={runtimeBusy === model.name || working} onClick={() => void operateLocalModel(model.name, running)}>{running ? <><XCircle />停止</> : <><Play />运行</>}</button> : <button className="btn ghost" disabled={Boolean(testingModel)} onClick={() => void testConnection(source, model)}><Activity />{testingModel === testKey ? '检测中' : model.dimensions > 0 ? '重检' : '检测'}</button>}{source.type === 'local' && <button className="icon-btn model-remove" title="移除模型" aria-label={`移除模型 ${model.name}`} onClick={() => void removeModel(source, model.name)}><Trash2 /></button>}</div>{working && <div className="model-row-progress"><Progress value={runtime?.progress ?? 0} tone="orange" /><small>{runtime?.progress ?? 0}%</small></div>}</div>
       })}{source.models.length === 1 && <button type="button" className="source-model-add-slot" onClick={() => document.getElementById(`model-input-${source.id}`)?.focus()}><Plus /><span><b>继续添加模型</b><small>同一来源可以配置多个模型</small></span></button>}{source.models.length === 0 && <div className="source-model-empty"><Download /><span><b>暂无{source.type === 'local' ? '本地' : '远程'}模型</b><small>可以从下方输入模型名称并添加。</small></span></div>}</div>
       <div className="add-source-model">{source.type === 'local' ? <div className="model-recommendation-combobox" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setRecommendationSourceId('') }}><input id={`model-input-${source.id}`} value={modelDrafts[source.id] ?? ''} onFocus={() => setRecommendationSourceId(source.id)} onChange={event => { setModelDrafts(current => ({ ...current, [source.id]: event.target.value })); setRecommendationSourceId(source.id) }} placeholder="选择推荐模型或输入 Hugging Face 模型名" aria-label="本地模型名称" autoComplete="off" /><button className="recommendation-trigger" type="button" title="选择推荐模型" aria-label="选择推荐模型" aria-expanded={recommendationSourceId === source.id} onClick={() => setRecommendationSourceId(current => current === source.id ? '' : source.id)}><Sparkles /><ChevronDown /></button>{recommendationSourceId === source.id && <div className="model-recommendation-menu" role="listbox"><header><span><Sparkles />推荐模型</span><small>也可以直接输入其他模型名称</small></header>{localModelRecommendations.filter(item => { const query = (modelDrafts[source.id] ?? '').trim().toLocaleLowerCase(); return !query || item.name.toLocaleLowerCase().includes(query) || item.title.toLocaleLowerCase().includes(query) }).map(item => { const added = source.models.some(model => model.name === item.name); return <button type="button" role="option" aria-selected={modelDrafts[source.id] === item.name} disabled={added} key={item.name} onClick={() => { setModelDrafts(current => ({ ...current, [source.id]: item.name })); setRecommendationSourceId('') }}><span><b>{item.title}</b><small>{item.name}</small></span><em>{added ? '已添加' : item.detail}</em></button>})}{localModelRecommendations.every(item => { const query = (modelDrafts[source.id] ?? '').trim().toLocaleLowerCase(); return query && !item.name.toLocaleLowerCase().includes(query) && !item.title.toLocaleLowerCase().includes(query) }) && <p>没有匹配的推荐项，可直接使用当前输入的自定义模型。</p>}</div>}</div> : <input id={`model-input-${source.id}`} value={modelDrafts[source.id] ?? ''} onChange={event => setModelDrafts(current => ({ ...current, [source.id]: event.target.value }))} placeholder="API 模型名称" />}<span className="auto-dimension"><Activity />维度自动检测</span><button className="btn ghost" onClick={() => addModel(source)}><Plus />添加模型</button></div>
     </section>)}</div>

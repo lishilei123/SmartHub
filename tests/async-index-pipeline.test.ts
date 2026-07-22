@@ -36,7 +36,15 @@ test('Embedding 进行中取消任务不会切换旧活动索引', async () => {
   } as unknown as LocalModelRuntime
   const service = new KnowledgeService(new JsonStore(null), undefined, runtime); await service.initialize()
   const created = await service.createProject('取消切换验收'); const kbId = created.knowledgeBase!.id
-  await service.saveConfig(kbId, { embeddingModel: 'test-model', embeddingDimensions: 3, rerankerEnabled: false })
+  const config = (await service.config(kbId)).config
+  await service.saveConfig(kbId, {
+    embeddingSources: config.embeddingSources.map(source => source.id === 'local-default'
+      ? { ...source, models: [...source.models, { name: 'test-model', dimensions: 3 }] }
+      : source),
+    embeddingModel: 'test-model',
+    embeddingDimensions: 3,
+    rerankerEnabled: false,
+  })
   const first = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 规则\n旧内容' }); await service.processTask(first.task!.id)
   const oldIndex = (await service.overview(kbId)).knowledgeBase.activeIndexVersionId
   hold = true
