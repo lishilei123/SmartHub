@@ -174,11 +174,15 @@ export class KnowledgeService {
       const config = normalizeEmbeddingSources(mergeConfigPatch(current.config, patch))
       validateConfig(config)
       if (JSON.stringify(config) === JSON.stringify(current.config)) return { changed: false, configVersion: { ...current, config: redactConfig(current.config) }, impact: 'none' }
-      const compatible = compatibilityFingerprint(config) === current.compatibilityFingerprint
-      const queryOnly = compatible && queryFingerprint(config) !== queryFingerprint(current.config)
-      const version = { id: id('cfg'), knowledgeBaseId, version: current.version + 1, config, createdAt: now(), compatibilityFingerprint: compatibilityFingerprint(config), requiresRebuild: !compatible && Boolean(kb.activeIndexVersionId) }
+      const fingerprint = compatibilityFingerprint(config)
+      const compatibleWithCurrent = fingerprint === current.compatibilityFingerprint
+      const queryOnly = compatibleWithCurrent && queryFingerprint(config) !== queryFingerprint(current.config)
+      const activeIndex = kb.activeIndexVersionId ? required(state.indexes.find(item => item.id === kb.activeIndexVersionId), '活动索引不存在') : null
+      const activeIndexConfig = activeIndex ? required(state.configs.find(item => item.id === activeIndex.configVersionId), '活动索引配置不存在') : null
+      const requiresRebuild = Boolean(activeIndexConfig && fingerprint !== activeIndexConfig.compatibilityFingerprint)
+      const version = { id: id('cfg'), knowledgeBaseId, version: current.version + 1, config, createdAt: now(), compatibilityFingerprint: fingerprint, requiresRebuild }
       state.configs.push(version); kb.activeConfigVersionId = version.id
-      return { changed: true, configVersion: { ...version, config: redactConfig(version.config) }, impact: !compatible ? 'index_rebuild' : queryOnly ? 'query' : 'ingestion' }
+      return { changed: true, configVersion: { ...version, config: redactConfig(version.config) }, impact: requiresRebuild ? 'index_rebuild' : queryOnly ? 'query' : 'ingestion' }
     })
   }
 

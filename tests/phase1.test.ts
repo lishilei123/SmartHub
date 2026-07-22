@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import test from 'node:test'
 import { defaultConfig, KnowledgeService, JsonStore, type AssetType } from '../server/index.js'
 import { RawDocumentStore } from '../server/infrastructure/raw-document-store.js'
+import { toIsoTimestamp } from '../server/infrastructure/postgres-store.js'
 
 async function fixture() {
   const service = new KnowledgeService(new JsonStore(null)); await service.initialize()
@@ -23,6 +24,14 @@ async function ingestReady(service: KnowledgeService, input: Parameters<Knowledg
 }
 
 const document = (section = '退款请求必须携带幂等键。') => `# 支付平台\n\n## 退款规则\n\n${section}\n\n## 审计\n\n所有操作记录审计日志。`
+
+test('PostgreSQL 任务时间统一为 ISO 字符串', () => {
+  const timestamp = new Date('2026-07-23T10:20:30.000Z')
+  assert.equal(toIsoTimestamp(timestamp), '2026-07-23T10:20:30.000Z')
+  assert.equal(toIsoTimestamp('2026-07-23T10:20:30.000Z'), '2026-07-23T10:20:30.000Z')
+  assert.equal(toIsoTimestamp(null), undefined)
+  assert.equal(toIsoTimestamp(undefined), undefined)
+})
 
 test('AC-001 创建项目时自动创建唯一默认知识库', async () => {
   const { service, kbId } = await fixture(); const overview = await service.overview(kbId)
@@ -188,7 +197,10 @@ test('AC-008 查询配置无需重建，兼容性配置受控重建且失败保�
   const current = (await service.config(kbId)).config
   const indexChange = await service.saveConfig(kbId, { chunkTargetSize: 700, chunkMaxSize: 800, embeddingSources: current.embeddingSources.map(source => source.id === 'local-default' ? { ...source, models: [...source.models, { name: 'test/embedding-32', dimensions: 32 }] } : source), embeddingModel: 'test/embedding-32', embeddingDimensions: 32 }); assert.equal(indexChange.impact, 'index_rebuild'); assert.equal(indexChange.configVersion.requiresRebuild, true); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, oldIndex)
   const pending = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'b.md', assetType: 'other', displayName: '待重建期间资料', logicalPath: 'b.md', content: '# 新资料\n仍按旧活动索引配置处理' }); assert.equal(pending.version.configVersionId, oldIndexConfig); const activeBeforeRebuild = (await service.overview(kbId)).knowledgeBase.activeIndexVersionId; assert.equal(service.store.read().indexes.find(item => item.id === activeBeforeRebuild)!.configVersionId, oldIndexConfig)
-  await service.rebuild(kbId, 'failure'); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, activeBeforeRebuild)
+  const restored = await service.saveConfig(kbId, { chunkTargetSize: current.chunkTargetSize, chunkMaxSize: current.chunkMaxSize, embeddingModel: current.embeddingModel, embeddingDimensions: current.embeddingDimensions }); assert.equal(restored.impact, 'ingestion'); assert.equal(restored.configVersion.requiresRebuild, false); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, activeBeforeRebuild)
+  const restoredIngest = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'restored.md', assetType: 'other', displayName: '恢复后资料', logicalPath: 'restored.md', content: '# 恢复模型\n应使用当前兼容配置处理' }); assert.equal(restoredIngest.version.configVersionId, restored.configVersion.id); const activeAfterRestoredIngest = (await service.overview(kbId)).knowledgeBase.activeIndexVersionId
+  await service.saveConfig(kbId, { chunkTargetSize: 700, chunkMaxSize: 800, embeddingModel: 'test/embedding-32', embeddingDimensions: 32 }); assert.equal((await service.config(kbId)).requiresRebuild, true)
+  await service.rebuild(kbId, 'failure'); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, activeAfterRestoredIngest)
   const originalDimension = service.store.read().versions.find(item => item.id === pending.version.id)!.chunks[0].embedding.length
   const success = await service.rebuild(kbId, 'success'); assert.notEqual(success.index!.id, oldIndex); assert.equal(success.index!.indexedChunks![0].embedding.length, 32); assert.equal(service.store.read().versions.find(item => item.id === pending.version.id)!.chunks[0].embedding.length, originalDimension); assert.equal((await service.config(kbId)).requiresRebuild, false)
 })

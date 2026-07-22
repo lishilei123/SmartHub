@@ -309,6 +309,10 @@ export class PostgresStore implements StateStore {
 
 type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>
 
+export function toIsoTimestamp(value: Date | string | null | undefined) {
+  return value == null ? undefined : value instanceof Date ? value.toISOString() : value
+}
+
 async function loadState(client: Queryable): Promise<DatabaseState> {
   const tables = ['projects', 'knowledge_bases', 'knowledge_directories', 'config_versions', 'knowledge_assets', 'asset_versions', 'index_versions'] as const
   const rows = []
@@ -320,28 +324,28 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const indexChunks = await client.query<{ index_version_id: string; embedding: string; data: IndexChunk }>('SELECT index_version_id, embedding::text AS embedding, data FROM smarthub.index_chunks ORDER BY index_version_id, ordinal, id')
   for (const row of indexChunks.rows) indexes.find(index => index.id === row.index_version_id)?.indexedChunks?.push({ ...row.data, embedding: decodeVector(row.embedding) })
   const taskRows = await client.query<{
-    data: SyncTask; status: SyncTask['status']; step: string; progress: number; created_at: string; available_at: string; attempt_count: number; max_attempts: number; dedupe_key: string | null; target_id: string | null; scope: SyncTask['scope']; lease_owner: string | null; run_token: string | null; lease_expires_at: string | null; heartbeat_at: string | null; cancel_requested_at: string | null; started_at: string | null; finished_at: string | null; updated_at: string
+    data: SyncTask; status: SyncTask['status']; step: string; progress: number; created_at: Date | string; available_at: Date | string; attempt_count: number; max_attempts: number; dedupe_key: string | null; target_id: string | null; scope: SyncTask['scope']; lease_owner: string | null; run_token: string | null; lease_expires_at: Date | string | null; heartbeat_at: Date | string | null; cancel_requested_at: Date | string | null; started_at: Date | string | null; finished_at: Date | string | null; updated_at: Date | string
   }>('SELECT data, status, step, progress, created_at, available_at, attempt_count, max_attempts, dedupe_key, target_id, scope, lease_owner, run_token::text AS run_token, lease_expires_at, heartbeat_at, cancel_requested_at, started_at, finished_at, updated_at FROM smarthub.sync_tasks ORDER BY created_at, id')
   const tasks = taskRows.rows.map(row => ({
     ...row.data,
     status: row.status,
     step: row.step,
     progress: row.progress,
-    createdAt: row.created_at,
+    createdAt: toIsoTimestamp(row.created_at)!,
     attempts: row.attempt_count || row.data.attempts,
-    availableAt: row.available_at,
+    availableAt: toIsoTimestamp(row.available_at)!,
     maxAttempts: row.max_attempts,
     dedupeKey: row.dedupe_key ?? undefined,
     targetId: row.target_id ?? undefined,
     scope: row.scope ?? undefined,
     leaseOwner: row.lease_owner ?? undefined,
     runToken: row.run_token ?? undefined,
-    leaseExpiresAt: row.lease_expires_at ?? undefined,
-    heartbeatAt: row.heartbeat_at ?? undefined,
-    cancelRequestedAt: row.cancel_requested_at ?? undefined,
-    startedAt: row.started_at ?? undefined,
-    finishedAt: row.finished_at ?? undefined,
-    updatedAt: row.updated_at,
+    leaseExpiresAt: toIsoTimestamp(row.lease_expires_at),
+    heartbeatAt: toIsoTimestamp(row.heartbeat_at),
+    cancelRequestedAt: toIsoTimestamp(row.cancel_requested_at),
+    startedAt: toIsoTimestamp(row.started_at),
+    finishedAt: toIsoTimestamp(row.finished_at),
+    updatedAt: toIsoTimestamp(row.updated_at)!,
   })) as DatabaseState['tasks']
   return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks }
 }
