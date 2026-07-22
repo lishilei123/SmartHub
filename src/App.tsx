@@ -7,16 +7,25 @@ import {
   TestTube2, Trash2, Upload, Users, XCircle, Zap,
 } from 'lucide-react'
 import {
-  initialSettings, knowledgeDirectories, knowledgeDocuments, requirementsByVersion, type KnowledgeDirectory,
-  type KnowledgeDocument, type Requirement, type SettingsDraft, type Version,
+  initialSettings, requirementsByVersion, type KnowledgeDirectory, type KnowledgeDocument, type Requirement,
+  type SettingsDraft, type Version,
 } from './prototype-data'
 import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, ensureKnowledgeBase, loadConfig, loadKnowledgeAssets, loadLocalModelStatus, loadTasks, rebuildIndex, renameKnowledgeDirectory, saveConfig, searchKnowledge, startLocalModel, stopLocalModel, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
+import { getActiveDocumentSectionKey } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
 type Notify = (message: string) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
+
+const pageStorageKey = 'smarthub-current-page'
+const pageKeys: PageKey[] = ['dashboard', 'requirements', 'documents', 'design', 'execution', 'reports', 'settings']
+const restorePage = (): PageKey => {
+  if (typeof window === 'undefined') return 'dashboard'
+  const saved = window.localStorage.getItem(pageStorageKey)
+  return pageKeys.includes(saved as PageKey) ? saved as PageKey : 'dashboard'
+}
 
 const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: string }[] = [
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard },
@@ -68,13 +77,13 @@ function Modal({ title, onClose, children, className = '' }: { title: string; on
 }
 
 function App() {
-  const [page, setPage] = useState<PageKey>('dashboard')
+  const [page, setPage] = useState<PageKey>(restorePage)
   const [version, setVersion] = useState<Version>('V3.6')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toast, setToast] = useState<{ id: number; message: string } | null>(null)
   const [requirementLists, setRequirementLists] = useState<Record<Version, Requirement[]>>(requirementsByVersion)
-  const [knowledgeDirectoryList, setKnowledgeDirectoryList] = useState<KnowledgeDirectory[]>(knowledgeDirectories)
-  const [knowledgeDocumentList, setKnowledgeDocumentList] = useState<KnowledgeDocument[]>(knowledgeDocuments)
+  const [knowledgeDirectoryList, setKnowledgeDirectoryList] = useState<KnowledgeDirectory[]>([])
+  const [knowledgeDocumentList, setKnowledgeDocumentList] = useState<KnowledgeDocument[]>([])
   const [requirementCreateOpen, setRequirementCreateOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const [audit, setAudit] = useState<string[]>(['已打开当前会话的 SmartHub 本地原型'])
@@ -90,6 +99,7 @@ function App() {
   }
 
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current) }, [])
+  useEffect(() => { window.localStorage.setItem(pageStorageKey, page) }, [page])
   const refreshKnowledge = async (includeDeleted = false, id = knowledgeBaseId) => {
     if (!id) return
     const data = await loadKnowledgeAssets(id, includeDeleted)
@@ -307,6 +317,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const timers = useRef<number[]>([])
   const uploadRef = useRef<HTMLInputElement>(null)
   const previewRef = useRef<HTMLDivElement>(null)
+  const outlineRef = useRef<HTMLElement>(null)
   const [uploadCandidates, setUploadCandidates] = useState<File[]>([])
   const [uploadAssetType, setUploadAssetType] = useState('other')
   const [uploadLogicalPath, setUploadLogicalPath] = useState('')
@@ -372,6 +383,37 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const source = file ? makeSource(file) : ''
   const format = file?.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
   const outline = useMemo(() => format === 'markdown' ? parseMarkdownOutline(source) : emptyMarkdownOutline, [format, source])
+  useEffect(() => {
+    const preview = previewRef.current
+    if (!preview || viewMode !== 'preview' || format !== 'markdown' || !outline.sections.length) {
+      setActiveSectionKey(null)
+      return
+    }
+
+    const getActiveSection = () => {
+      const previewTop = preview.getBoundingClientRect().top
+      const sections = [...preview.querySelectorAll<HTMLElement>('[data-document-section-key]')].map(section => ({
+        key: section.dataset.documentSectionKey ?? '',
+        top: section.getBoundingClientRect().top - previewTop + preview.scrollTop,
+      })).filter(section => section.key)
+      const key = getActiveDocumentSectionKey(sections, preview.scrollTop + 14)
+      setActiveSectionKey(current => current === key ? current : key)
+    }
+
+    getActiveSection()
+    preview.addEventListener('scroll', getActiveSection, { passive: true })
+    return () => preview.removeEventListener('scroll', getActiveSection)
+  }, [format, outline, selectedId, viewMode])
+  useEffect(() => {
+    const outlineElement = outlineRef.current
+    const activeButton = outlineElement?.querySelector<HTMLElement>('[data-outline-section-key].active')
+    if (!outlineElement || !activeButton) return
+
+    const outlineBounds = outlineElement.getBoundingClientRect()
+    const buttonBounds = activeButton.getBoundingClientRect()
+    if (buttonBounds.top < outlineBounds.top) outlineElement.scrollTop += buttonBounds.top - outlineBounds.top
+    else if (buttonBounds.bottom > outlineBounds.bottom) outlineElement.scrollTop += buttonBounds.bottom - outlineBounds.bottom
+  }, [activeSectionKey])
 
   const getDirectoryBreadcrumb = (directoryId: string) => {
     const names: string[] = []
@@ -515,8 +557,13 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     finally { setFileActionBusy(false) }
   }
   const jumpToSection = (sectionKey: string) => {
+    const preview = previewRef.current
+    const target = preview?.querySelector<HTMLElement>(`[data-document-section-key="${sectionKey}"]`)
     setActiveSectionKey(sectionKey)
-    previewRef.current?.querySelector<HTMLElement>(`[data-document-section-key="${sectionKey}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if (!preview || !target) return
+
+    const top = target.getBoundingClientRect().top - preview.getBoundingClientRect().top + preview.scrollTop - 14
+    preview.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
   }
   const renderFile = (document: KnowledgeDocument, paddingLeft: string) => <div className={`tree-file-row ${selectedId === document.id ? 'active' : ''}`} key={document.id}><button className={`tree-file ${selectedId === document.id ? 'active' : ''}`} style={{ paddingLeft }} onClick={() => selectFile(document.id)} title={document.name}><FileText /><span>{document.name}</span></button><button className="icon-btn tree-file-action" aria-label={`${document.name}更多操作`} onClick={() => openFileActions(document)}><MoreHorizontal /></button></div>
   const renderDirectory = (directory: KnowledgeDirectory, depth: number): ReactNode => {
@@ -528,7 +575,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     return <div className="tree-directory" key={directory.id}>
       <div className={`tree-folder ${selectedDirectoryId === directory.id ? 'selected' : ''}`} style={{ paddingLeft: `${8 + depth * 17}px` }}>
         {hasChildren ? <button className="tree-expand" onClick={() => toggleDirectory(directory.id)} aria-label={expanded ? `收起${directory.name}` : `展开${directory.name}`} aria-expanded={expanded}>{expanded ? <ChevronDown /> : <ChevronRight />}</button> : <span className="tree-expand-placeholder" />}
-        <button className="tree-folder-name" onClick={() => setSelectedDirectoryId(directory.id)}><FolderOpen /><span>{directory.name}</span></button>
+        <button className="tree-folder-name" onClick={() => { setSelectedDirectoryId(directory.id); if (hasChildren) toggleDirectory(directory.id) }}><FolderOpen /><span>{directory.name}</span></button>
         <small>{documentCountByDirectory.get(directory.id) ?? 0}</small>
         <button className="icon-btn tree-action" aria-label={`${directory.name}更多操作`} onClick={() => setDirectoryActionId(current => current === directory.id ? null : directory.id)}><MoreHorizontal /></button>
         {directoryActionId === directory.id && <div className="tree-menu" role="menu"><button role="menuitem" onClick={() => openCreate(directory.id)}><FolderPlus />新建子目录</button><button role="menuitem" onClick={() => openRename(directory)}><Pencil />重命名</button><button className="danger" role="menuitem" onClick={() => openDelete(directory)}><Trash2 />删除目录</button></div>}
@@ -552,7 +599,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     {searchStatus && <div className="knowledge-search-results">{searchResults.length ? searchResults.map(result => <button key={`${result.version.id}-${result.chunk.chunkKey}`} onClick={() => { selectFile(result.asset.id); setQuery(''); notify(`已定位固定版本 V${result.version.number} · L${result.chunk.startLine}-${result.chunk.endLine}`) }}><b>{result.asset.displayName}<em>{Math.round(result.score * 100)}%</em></b><span>{result.excerpt}</span><small>{result.asset.logicalPath} · {result.chunk.headingPath.join(' / ') || '正文'} · L{result.chunk.startLine}-{result.chunk.endLine}</small></button>) : <p>{searchStatus === 'no_ready_assets' ? '尚无已就绪资料。' : searchStatus === 'no_active_index' ? '尚未建立活动索引。' : '当前范围没有匹配结果。'}</p>}</div>}
     <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-root"><FolderOpen /><b>SmartHub 知识库</b><small>{documents.length}</small><button className="icon-btn tree-root-action" onClick={() => openCreate(null)} aria-label="在知识库根目录新建目录"><FolderPlus /></button><button className="icon-btn tree-collapse" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{queryText && !matchingDocumentIds.size ? <p className="empty-state">没有匹配的文档。</p> : <div className="tree-content">{rootDirectories.map(directory => renderDirectory(directory, 0))}{rootDocuments.map(document => renderFile(document, '30px'))}</div>}</aside>
       <article className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span title={file ? getBreadcrumb(file) : undefined}>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions"><Badge tone="green">已入库</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => openFileActions()}><MoreHorizontal /></button></div>}</div>
-        {file ? viewMode === 'preview' ? <div className="preview-body"><DocumentContent ref={previewRef} file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} /><nav className="document-outline" aria-label="本文目录"><b>本文目录</b>{outline.sections.map(section => <button key={section.key} className={activeSectionKey === section.key ? 'active' : ''} onClick={() => jumpToSection(section.key)}>{section.title}</button>)}</nav></div> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>可以新建目录、移动现有目录，或刷新页面恢复示例文档。</p></div>}
+        {file ? viewMode === 'preview' ? <div className="preview-body"><DocumentContent ref={previewRef} file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} /><nav ref={outlineRef} className="document-outline" aria-label="本文目录"><b>本文目录</b>{outline.sections.map(section => <button key={section.key} data-outline-section-key={section.key} className={activeSectionKey === section.key ? 'active' : ''} onClick={() => jumpToSection(section.key)}>{section.title}</button>)}</nav></div> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>请上传资料，或检查知识库服务连接后再刷新。</p></div>}
       </article></div>
     {imageOpen && <ImageLightbox onClose={() => setImageOpen(false)} />}
     {uploadCandidates.length > 0 && <Modal title={uploadIsArchive ? '上传 Markdown 压缩包' : uploadIsMultiple ? `批量上传 ${uploadCandidates.length} 个文档` : '上传知识资产'} onClose={() => setUploadCandidates([])}><div className="modal-form"><p>{uploadIsArchive ? '将保留 ZIP 内的目录结构，导入 Markdown/TXT，并保存其中被文档相对路径引用的 PNG、JPG、GIF、WebP 或 SVG 图片。' : uploadIsMultiple ? '所选 Markdown/TXT 将统一上传到目标目录，每个文件独立生成资产版本并进入活动索引。' : '文件将按逻辑路径保存到系统默认知识库目录，并生成不可变版本快照；索引切换完成后进入检索。'}</p><label>{uploadIsMultiple ? '已选文件' : '文件'}<input value={uploadIsMultiple ? `${uploadCandidates.length} 个：${uploadCandidates.map(file => file.name).join('、')}` : uploadCandidates[0].name} readOnly title={uploadCandidates.map(file => file.name).join('\n')} /></label><label>资料类型<input value={uploadAssetType} onChange={event => setUploadAssetType(event.target.value)} placeholder="输入资料类型" /></label><label>{uploadIsArchive || uploadIsMultiple ? '导入到目录（可留空）' : '知识库路径'}<input list="knowledge-upload-paths" value={uploadLogicalPath} onChange={event => setUploadLogicalPath(event.target.value)} placeholder={uploadIsArchive || uploadIsMultiple ? '输入或选择现有目录' : '输入或选择知识库路径'} /><small className="field-hint">可从现有知识库目录中选择，也可以直接输入新路径。</small></label><datalist id="knowledge-upload-paths">{uploadPathSuggestions.map(path => <option key={path} value={path} />)}</datalist><div className="modal-actions"><button className="btn ghost" onClick={() => setUploadCandidates([])}>取消</button><button className="btn primary" disabled={(!uploadIsArchive && !uploadIsMultiple && !uploadLogicalPath.trim()) || !uploadAssetType.trim() || uploadState === 'running'} onClick={() => void upload()}><Upload />确认上传</button></div></div></Modal>}
