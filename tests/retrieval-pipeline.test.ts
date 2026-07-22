@@ -33,6 +33,8 @@ test('关键词和向量召回数量分别进入两阶段混合检索', async ()
   await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: '需求', displayName: 'a.md', logicalPath: 'a.md', content: '# 退款\n必须校验幂等键' })
   const result = await service.search(kbId, { query: '退款', mode: 'hybrid' })
   assert.equal(result.status, 'ok')
+  assert.equal(result.results[0].scores.vector, 0.9)
+  assert.equal(result.results[0].scores.keyword, 0.8)
   assert.deepEqual(store.recalls.map(call => [call.mode, call.limit]), [['keyword', 3], ['vector', 5]])
 })
 

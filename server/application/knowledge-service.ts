@@ -8,7 +8,7 @@ import type { StoredChunkCandidate } from '../infrastructure/store.js'
 import { chunkDocument, cosine, defaultTokenCodec, embedding, sha256, type TokenCodec } from './content.js'
 
 type RetrievalInput = { assetType?: AssetType; sourceType?: SourceType; logicalPath?: string }
-type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; vectorScore: number; score: number }
+type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; vectorScore: number; rerankerScore?: number; score: number }
 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
@@ -273,7 +273,9 @@ export class KnowledgeService {
     if (!state.versions.some(item => item.status === 'ready' && state.assets.some(asset => asset.knowledgeBaseId === knowledgeBaseId && asset.activeVersionId === item.id))) return { status: 'no_ready_assets', results: [] }
     if (!kb.activeIndexVersionId) return { status: 'no_active_index', results: [] }
     const index = required(state.indexes.find(item => item.id === kb.activeIndexVersionId), '活动索引不存在')
-    const config = required(state.configs.find(item => item.id === index.configVersionId), '索引配置不存在').config
+    const indexConfig = required(state.configs.find(item => item.id === index.configVersionId), '索引配置不存在').config
+    const latestConfig = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '当前查询配置不存在').config
+    const config = withLatestQueryConfig(indexConfig, latestConfig)
     const mode = input.mode ?? (config.hybridSearch ? 'hybrid' : 'keyword')
     const queryVector = mode === 'keyword' ? undefined : (await this.embedTexts(config, [query]))[0]
     const [keywordCandidates, vectorCandidates] = await Promise.all([
@@ -289,6 +291,7 @@ export class KnowledgeService {
       version: item.candidate.version,
       chunk: item.candidate.chunk,
       excerpt: item.candidate.content.slice(0, 280),
+      scores: { keyword: item.keywordScore, vector: item.vectorScore, reranker: item.rerankerScore, final: item.score },
     }))
     return { status: candidates.length ? 'ok' : 'no_matches', indexVersionId: index.id, results: candidates }
   }
@@ -400,7 +403,7 @@ export class KnowledgeService {
     const queryVector = required(vectors[0], 'Reranker 未返回查询向量')
     return candidates.map((item, index) => {
       const semanticScore = (cosine(queryVector, required(vectors[index + 1], 'Reranker 未返回完整候选向量')) + 1) / 2
-      return { ...item, score: item.score * 0.6 + semanticScore * 0.4 }
+      return { ...item, rerankerScore: semanticScore, score: item.score * 0.6 + semanticScore * 0.4 }
     })
   }
 
@@ -432,6 +435,19 @@ function mergeCandidates(keyword: StoredChunkCandidate[], vector: StoredChunkCan
     ...item,
     score: mode === 'keyword' ? item.keywordScore : mode === 'vector' ? item.vectorScore : item.keywordScore * 0.45 + item.vectorScore * 0.55,
   })).sort((left, right) => right.score - left.score)
+}
+
+function withLatestQueryConfig(indexConfig: KnowledgeConfig, latestConfig: KnowledgeConfig): KnowledgeConfig {
+  return {
+    ...indexConfig,
+    keywordRecall: latestConfig.keywordRecall,
+    vectorRecall: latestConfig.vectorRecall,
+    finalResults: latestConfig.finalResults,
+    relevanceThreshold: latestConfig.relevanceThreshold,
+    hybridSearch: latestConfig.hybridSearch,
+    rerankerEnabled: latestConfig.rerankerEnabled,
+    rerankerModel: latestConfig.rerankerModel,
+  }
 }
 
 function validateDirectoryName(name: string) { const value = name.trim(); if (!value) throw new Error('目录名称不能为空'); if (/[\\/]/.test(value) || value === '.' || value === '..') throw new Error('目录名称不能包含路径分隔符'); return value }

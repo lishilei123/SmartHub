@@ -64,8 +64,8 @@ export const rebuildIndex = (kbId: string, outcome?: 'failure' | 'cancel') => re
 export const loadTasks = (kbId: string) => request<ApiTask[]>(`/knowledge-bases/${kbId}/tasks`)
 export const retryTask = (taskId: string) => request(`/tasks/${taskId}/retry`, { method: 'POST', body: '{}' })
 export const cancelTask = (taskId: string) => request<ApiTask>(`/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' })
-export type ApiSearchResult = { score: number; retrievalMode: string; excerpt: string; asset: { id: string; displayName: string; assetType: string; sourceType: string; logicalPath: string }; version: { id: string; number: number }; chunk: { chunkKey: string; headingPath: string[]; startLine: number; endLine: number } }
-export const searchKnowledge = (kbId: string, query: string) => request<{ status: string; results: ApiSearchResult[] }>(`/knowledge-bases/${kbId}/search`, { method: 'POST', body: JSON.stringify({ query, mode: 'hybrid' }) })
+export type ApiSearchResult = { score: number; retrievalMode: string; excerpt: string; scores?: { keyword: number; vector: number; reranker?: number; final: number }; asset: { id: string; displayName: string; assetType: string; sourceType: string; logicalPath: string }; version: { id: string; number: number }; chunk: { chunkKey: string; headingPath: string[]; startLine: number; endLine: number } }
+export const searchKnowledge = (kbId: string, query: string) => request<{ status: string; results: ApiSearchResult[] }>(`/knowledge-bases/${kbId}/search`, { method: 'POST', body: JSON.stringify({ query }) })
 export const loadLocalModelStatus = () => request<LocalModelStatus>('/local-model/status')
 export const startLocalModel = (model: string) => request<LocalModelStatus>('/local-model/start', { method: 'POST', body: JSON.stringify({ model }) })
 export const stopLocalModel = () => request<LocalModelStatus>('/local-model/stop', { method: 'POST', body: '{}' })
