@@ -12,12 +12,13 @@ import {
 } from './prototype-data'
 import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, ensureKnowledgeBase, loadConfig, loadKnowledgeAssets, loadLocalModelStatus, loadTasks, rebuildIndex, renameKnowledgeDirectory, saveConfig, searchKnowledge, startLocalModel, stopLocalModel, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
-import { getActiveDocumentSectionKey } from './document-scroll'
+import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
 type Notify = (message: string) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
+type SearchLocation = { assetId: string; startLine: number; endLine: number; nonce: number }
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 
 const pageStorageKey = 'smarthub-current-page'
@@ -295,6 +296,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const [searchResults, setSearchResults] = useState<ApiSearchResult[]>([])
   const [searchMeta, setSearchMeta] = useState<ApiSearchMeta | null>(null)
   const [searchStatus, setSearchStatus] = useState('')
+  const [searchLocation, setSearchLocation] = useState<SearchLocation | null>(null)
   const [treeCollapsed, setTreeCollapsed] = useState(false)
   const [outlineCollapsed, setOutlineCollapsed] = useState(false)
   const [viewMode, setViewMode] = useState<'preview' | 'source' | 'split'>('preview')
@@ -319,7 +321,13 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const timers = useRef<number[]>([])
   const uploadRef = useRef<HTMLInputElement>(null)
   const previewRef = useRef<HTMLDivElement>(null)
+  const documentPanelRef = useRef<HTMLElement>(null)
   const outlineRef = useRef<HTMLElement>(null)
+  const searchInputRef = useRef<HTMLDivElement>(null)
+  const searchPopoverRef = useRef<HTMLDivElement>(null)
+  const searchRequestRef = useRef(0)
+  const searchResultQueryRef = useRef('')
+  const searchResultStatusRef = useRef('')
   const [uploadCandidates, setUploadCandidates] = useState<File[]>([])
   const [uploadAssetType, setUploadAssetType] = useState('other')
   const [uploadLogicalPath, setUploadLogicalPath] = useState('')
@@ -333,7 +341,19 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   useEffect(() => {
     if (selectedDirectoryId && !directories.some(directory => directory.id === selectedDirectoryId)) setSelectedDirectoryId(null)
   }, [directories, selectedDirectoryId])
-  useEffect(() => { if (!query.trim() || apiState !== 'ready') { setSearchResults([]); setSearchMeta(null); setSearchStatus(''); return }; const timer = window.setTimeout(() => void search(), 350); return () => window.clearTimeout(timer) }, [query, apiState, knowledgeBaseId])
+  useEffect(() => { if (!query.trim() || apiState !== 'ready') { searchRequestRef.current += 1; searchResultQueryRef.current = ''; searchResultStatusRef.current = ''; setSearchResults([]); setSearchMeta(null); setSearchStatus(''); return }; const timer = window.setTimeout(() => void search(), 350); return () => window.clearTimeout(timer) }, [query, apiState, knowledgeBaseId])
+  useEffect(() => {
+    if (!searchStatus) return
+    const close = () => { searchRequestRef.current += 1; setSearchStatus('') }
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (!searchInputRef.current?.contains(target) && !searchPopoverRef.current?.contains(target)) close()
+    }
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
+    document.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('pointerdown', onPointerDown); window.removeEventListener('keydown', onKeyDown) }
+  }, [searchStatus])
 
   const directoryById = useMemo(() => new Map(directories.map(directory => [directory.id, directory])), [directories])
   const directoriesByParent = useMemo(() => {
@@ -416,6 +436,43 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     if (buttonBounds.top < outlineBounds.top) outlineElement.scrollTop += buttonBounds.top - outlineBounds.top
     else if (buttonBounds.bottom > outlineBounds.bottom) outlineElement.scrollTop += buttonBounds.bottom - outlineBounds.bottom
   }, [activeSectionKey])
+  useEffect(() => {
+    if (!searchLocation || searchLocation.assetId !== selectedId || viewMode !== 'preview') return
+    let highlighted: HTMLElement | null = null
+    let highlightTimer = 0
+    const frame = window.requestAnimationFrame(() => {
+      const preview = previewRef.current
+      if (!preview) return
+      const located = [...preview.querySelectorAll<HTMLElement>('[data-source-start-line]')]
+      const lines = located.map(element => Number(element.dataset.sourceStartLine ?? 0))
+      const index = getClosestSourceLineIndex(lines, searchLocation.startLine)
+      const target = index >= 0 ? located[index] : null
+      if (target) {
+        highlighted = target
+        target.classList.add('search-location-hit')
+        const top = target.getBoundingClientRect().top - preview.getBoundingClientRect().top + preview.scrollTop - 18
+        preview.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+        const sectionElements = [...preview.querySelectorAll<HTMLElement>('[data-document-section-key][data-source-start-line]')]
+        const sectionIndex = getClosestSourceLineIndex(sectionElements.map(element => Number(element.dataset.sourceStartLine ?? 0)), searchLocation.startLine)
+        const sectionKey = sectionIndex >= 0 ? sectionElements[sectionIndex].dataset.documentSectionKey : null
+        if (sectionKey) setActiveSectionKey(sectionKey)
+        highlightTimer = window.setTimeout(() => target.classList.remove('search-location-hit'), 2600)
+      } else {
+        const totalLines = Math.max(1, source.split('\n').length - 1)
+        const ratio = Math.max(0, Math.min(1, (searchLocation.startLine - 1) / totalLines))
+        preview.scrollTo({ top: ratio * Math.max(0, preview.scrollHeight - preview.clientHeight), behavior: 'smooth' })
+      }
+    })
+    return () => { window.cancelAnimationFrame(frame); if (highlightTimer) window.clearTimeout(highlightTimer); highlighted?.classList.remove('search-location-hit') }
+  }, [format, searchLocation, selectedId, source, viewMode])
+  useEffect(() => {
+    if (searchLocation?.assetId === selectedId) return
+    const frame = window.requestAnimationFrame(() => {
+      const panel = documentPanelRef.current
+      panel?.querySelectorAll<HTMLElement>('.markdown-view, .source-view, .split-markdown').forEach(element => { element.scrollTop = 0 })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [searchLocation, selectedId])
 
   const getDirectoryBreadcrumb = (directoryId: string) => {
     const names: string[] = []
@@ -500,7 +557,17 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     try { await refreshKnowledge(); setSyncState('completed'); addAudit('刷新知识库真实状态'); notify('知识库状态已刷新。') }
     catch (error) { setSyncState('failed'); notify(error instanceof Error ? error.message : '刷新失败') }
   }
-  const search = async () => { if (!query.trim() || !knowledgeBaseId) return; try { const result = await searchKnowledge(knowledgeBaseId, query); setSearchResults(result.results); setSearchMeta(result.retrieval ?? null); setSearchStatus(result.status) } catch (error) { notify(error instanceof Error ? error.message : '检索失败') } }
+  const search = async () => { const searchQuery = query.trim(); if (!searchQuery || !knowledgeBaseId) return; const requestId = ++searchRequestRef.current; try { const result = await searchKnowledge(knowledgeBaseId, searchQuery); if (requestId !== searchRequestRef.current) return; searchResultQueryRef.current = searchQuery; searchResultStatusRef.current = result.status; setSearchResults(result.results); setSearchMeta(result.retrieval ?? null); setSearchStatus(result.status) } catch (error) { if (requestId === searchRequestRef.current) notify(error instanceof Error ? error.message : '检索失败') } }
+  const updateSearchQuery = (value: string) => {
+    setQuery(value)
+    if (value.trim() !== searchResultQueryRef.current) setSearchStatus('')
+  }
+  const reopenSearchResults = () => {
+    const searchQuery = query.trim()
+    if (!searchQuery) return
+    if (searchQuery === searchResultQueryRef.current && searchResultStatusRef.current) setSearchStatus(searchResultStatusRef.current)
+    else void search()
+  }
   const chooseUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = [...(event.target.files ?? [])]; event.target.value = ''; if (!selected.length) return
     const archives = selected.filter(file => file.name.toLowerCase().endsWith('.zip'))
@@ -530,7 +597,17 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     }
     catch (error) { setUploadState('failed'); notify(error instanceof Error ? error.message : '上传失败') }
   }
-  const selectFile = (id: string) => { setSelectedId(id); setActiveSectionKey(null); setSelectedDirectoryId(null) }
+  const selectFile = (id: string) => { setSelectedId(id); setActiveSectionKey(null); setSearchLocation(null); setSelectedDirectoryId(null) }
+  const openSearchResult = (result: ApiSearchResult) => {
+    setSelectedId(result.asset.id)
+    setSelectedDirectoryId(null)
+    setViewMode('preview')
+    setActiveSectionKey(null)
+    setSearchLocation({ assetId: result.asset.id, startLine: result.chunk.startLine, endLine: result.chunk.endLine, nonce: Date.now() })
+    searchRequestRef.current += 1
+    setSearchStatus('')
+    notify(`已定位固定版本 V${result.version.number} · L${result.chunk.startLine}-${result.chunk.endLine}`)
+  }
   const openLinkedDocument = (logicalPath: string) => {
     const linked = documents.find(document => document.logicalPath?.replaceAll('\\', '/').toLocaleLowerCase() === logicalPath.toLocaleLowerCase())
     if (!linked) { notify(`知识库中未找到链接文档：${logicalPath}`); return }
@@ -597,10 +674,9 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const uploadPathSuggestions = uploadIsArchive || uploadIsMultiple ? uploadDirectorySuggestions : uploadCandidates.length === 1 ? [uploadCandidates[0].name, ...uploadDirectorySuggestions.map(path => `${path}/${uploadCandidates[0].name}`)] : []
 
   return <section className="card knowledge-page">
-    <div className="knowledge-toolbar"><div className="mini-search wide"><Search size={16} /><input aria-label="搜索知识库" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索文件名称或文档内容" /></div><Badge tone={apiState === 'ready' ? 'green' : apiState === 'connecting' ? 'orange' : 'gray'}>{apiState === 'ready' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{apiState === 'ready' ? '知识库已连接' : apiState === 'connecting' ? '正在连接' : 'API 未启动'}</Badge><button className="btn ghost" disabled={syncState === 'running' || apiState !== 'ready'} onClick={() => void sync()}><GitBranch size={16} />{syncState === 'running' ? '同步中' : '立即同步'}</button><button className="btn primary" disabled={uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload size={16} />{uploadState === 'running' ? '上传中' : '上传资料'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={chooseUpload} /></div>
-    {searchStatus && <div className="knowledge-search-results">{searchMeta && <div className="search-summary"><b>{retrievalModeLabel(searchMeta.mode)}</b><span>关键词召回 {searchMeta.keywordCandidates} · 向量召回 {searchMeta.vectorCandidates} · 通过门槛 {searchMeta.eligibleCandidates}</span><em>最低相关度 {Math.round(searchMeta.minimumRelevance * 100)}%</em></div>}{searchResults.length ? searchResults.map(result => <button key={`${result.version.id}-${result.chunk.chunkKey}`} onClick={() => { selectFile(result.asset.id); setQuery(''); notify(`已定位固定版本 V${result.version.number} · L${result.chunk.startLine}-${result.chunk.endLine}`) }}><b>{result.asset.displayName}<em className="final-score">综合 {Math.round(result.score * 100)}%</em></b><span>{result.excerpt}</span><small>{result.asset.logicalPath} · {result.chunk.headingPath.join(' / ') || '正文'} · L{result.chunk.startLine}-{result.chunk.endLine}</small>{result.scores && <div className="score-breakdown"><i className={result.scores.keyword > 0 ? 'active' : ''}>关键词 {Math.round(result.scores.keyword * 100)}%</i><i className={result.scores.vector > 0 ? 'active' : ''}>向量 {Math.round(result.scores.vector * 100)}%</i>{result.scores.reranker != null && <i className="active">重排 {Math.round(result.scores.reranker * 100)}%</i>}</div>}</button>) : <p>{searchStatus === 'no_ready_assets' ? '尚无已就绪资料。' : searchStatus === 'no_active_index' ? '尚未建立活动索引。' : '当前范围没有匹配结果。'}</p>}</div>}
+    <div className="knowledge-toolbar"><div ref={searchInputRef} className="mini-search wide"><Search size={16} /><input aria-label="搜索知识库" value={query} onChange={event => updateSearchQuery(event.target.value)} onFocus={reopenSearchResults} placeholder="搜索文件名称或文档内容" /></div><Badge tone={apiState === 'ready' ? 'green' : apiState === 'connecting' ? 'orange' : 'gray'}>{apiState === 'ready' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{apiState === 'ready' ? '知识库已连接' : apiState === 'connecting' ? '正在连接' : 'API 未启动'}</Badge><button className="btn ghost" disabled={syncState === 'running' || apiState !== 'ready'} onClick={() => void sync()}><GitBranch size={16} />{syncState === 'running' ? '同步中' : '立即同步'}</button><button className="btn primary" disabled={uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload size={16} />{uploadState === 'running' ? '上传中' : '上传资料'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={chooseUpload} />{searchStatus && <div ref={searchPopoverRef} className="knowledge-search-results" role="dialog" aria-label="知识库检索结果">{searchMeta && <div className="search-summary"><b>{retrievalModeLabel(searchMeta.mode)}</b><span>关键词召回 {searchMeta.keywordCandidates} · 向量召回 {searchMeta.vectorCandidates} · 通过门槛 {searchMeta.eligibleCandidates}</span><em>最低相关度 {Math.round(searchMeta.minimumRelevance * 100)}%</em></div>}{searchResults.length ? searchResults.map(result => <button key={`${result.version.id}-${result.chunk.chunkKey}`} onClick={() => openSearchResult(result)}><b>{result.asset.displayName}<em className="final-score">综合 {Math.round(result.score * 100)}%</em></b><span>{result.excerpt}</span><small>{result.asset.logicalPath} · {result.chunk.headingPath.join(' / ') || '正文'} · L{result.chunk.startLine}-{result.chunk.endLine}</small>{result.scores && <div className="score-breakdown"><i className={result.scores.keyword > 0 ? 'active' : ''}>关键词 {Math.round(result.scores.keyword * 100)}%</i><i className={result.scores.vector > 0 ? 'active' : ''}>向量 {Math.round(result.scores.vector * 100)}%</i>{result.scores.reranker != null && <i className="active">重排 {Math.round(result.scores.reranker * 100)}%</i>}</div>}</button>) : <p>{searchStatus === 'no_ready_assets' ? '尚无已就绪资料。' : searchStatus === 'no_active_index' ? '尚未建立活动索引。' : '当前范围没有匹配结果。'}</p>}</div>}</div>
     <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-root"><FolderOpen /><b>SmartHub 知识库</b><small>{documents.length}</small><button className="icon-btn tree-root-action" onClick={() => openCreate(null)} aria-label="在知识库根目录新建目录"><FolderPlus /></button><button className="icon-btn tree-collapse" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{queryText && !matchingDocumentIds.size ? <p className="empty-state">没有匹配的文档。</p> : <div className="tree-content">{rootDirectories.map(directory => renderDirectory(directory, 0))}{rootDocuments.map(document => renderFile(document, '30px'))}</div>}</aside>
-      <article className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span title={file ? getBreadcrumb(file) : undefined}>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions"><Badge tone="green">已入库</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => openFileActions()}><MoreHorizontal /></button></div>}</div>
+      <article ref={documentPanelRef} className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span title={file ? getBreadcrumb(file) : undefined}>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions"><Badge tone="green">已入库</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => openFileActions()}><MoreHorizontal /></button></div>}</div>
         {file ? viewMode === 'preview' ? <div className="preview-body"><DocumentContent ref={previewRef} file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} /><nav ref={outlineRef} className="document-outline" aria-label="本文目录"><b>本文目录</b>{outline.sections.map(section => <button key={section.key} data-outline-section-key={section.key} className={activeSectionKey === section.key ? 'active' : ''} onClick={() => jumpToSection(section.key)}>{section.title}</button>)}</nav></div> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>请上传资料，或检查知识库服务连接后再刷新。</p></div>}
       </article></div>
     {imageOpen && <ImageLightbox onClose={() => setImageOpen(false)} />}

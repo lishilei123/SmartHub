@@ -13,3 +13,13 @@ export function getActiveDocumentSectionKey(sections: DocumentSectionPosition[],
   }
   return activeKey
 }
+
+export function getClosestSourceLineIndex(lines: number[], targetLine: number) {
+  if (!lines.length) return -1
+  let closest = 0
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index] > targetLine) break
+    closest = index
+  }
+  return closest
+}

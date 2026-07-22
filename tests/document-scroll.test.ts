@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { getActiveDocumentSectionKey } from '../src/document-scroll.ts'
+import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from '../src/document-scroll.ts'
 
 const sections = [
   { key: 'section-0', top: 120 },
@@ -22,4 +22,11 @@ test('uses the last section at or above the reading line', () => {
 
 test('returns null when the document has no navigable sections', () => {
   assert.equal(getActiveDocumentSectionKey([], 300), null)
+})
+
+test('finds the rendered source block at or immediately before a Chunk line', () => {
+  assert.equal(getClosestSourceLineIndex([1, 5, 12, 20], 12), 2)
+  assert.equal(getClosestSourceLineIndex([1, 5, 12, 20], 18), 2)
+  assert.equal(getClosestSourceLineIndex([5, 12], 1), 0)
+  assert.equal(getClosestSourceLineIndex([], 10), -1)
 })

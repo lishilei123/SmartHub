@@ -25,13 +25,13 @@ test('renders GFM pipe tables as semantic tables', () => {
 test('renders standard Markdown blocks structurally', () => {
   const html = render('# 标题\n\n- 一\n- 二\n\n> 引用\n\n```ts\nconst value = 1\n```')
 
-  assert.match(html, /<h1>标题<\/h1>/)
+  assert.match(html, /<h1[^>]*data-source-start-line="1"[^>]*>标题<\/h1>/)
   assert.equal((html.match(/<ul>/g) ?? []).length, 1)
-  assert.equal((html.match(/<li>/g) ?? []).length, 2)
-  assert.match(html, /<li>一<\/li>/)
-  assert.match(html, /<li>二<\/li>/)
-  assert.match(html, /<blockquote>\s*<p>引用<\/p>\s*<\/blockquote>/)
-  assert.match(html, /<pre><code class="language-ts">const value = 1\n<\/code><\/pre>/)
+  assert.equal((html.match(/<li\b/g) ?? []).length, 2)
+  assert.match(html, /<li[^>]*>一<\/li>/)
+  assert.match(html, /<li[^>]*>二<\/li>/)
+  assert.match(html, /<blockquote[^>]*>\s*<p[^>]*>引用<\/p>\s*<\/blockquote>/)
+  assert.match(html, /<pre[^>]*><code class="language-ts">const value = 1\n<\/code><\/pre>/)
 })
 
 test('adds anchors from the shared outline for every navigable heading', () => {
@@ -40,9 +40,9 @@ test('adds anchors from the shared outline for every navigable heading', () => {
   const html = renderToStaticMarkup(createElement(MarkdownDocument, { source, format: 'markdown', outline, activeSectionKey: 'section-1', anchorPrefix: 'preview-document' }))
 
   assert.deepEqual(outline.sections.map(section => section.title), ['第一节', '重新分级', '第二节'])
-  assert.match(html, /<h2 id="preview-document-section-0" data-document-section-key="section-0" class="document-section-heading">第一节<\/h2>/)
-  assert.match(html, /<h1 id="preview-document-section-1" data-document-section-key="section-1" class="document-section-heading active-document-section">重新分级<\/h1>/)
-  assert.match(html, /<h3 id="preview-document-section-2" data-document-section-key="section-2" class="document-section-heading">第二节<\/h3>/)
+  assert.match(html, /<h2(?=[^>]*id="preview-document-section-0")(?=[^>]*data-document-section-key="section-0")(?=[^>]*class="document-section-heading")[^>]*>第一节<\/h2>/)
+  assert.match(html, /<h1(?=[^>]*id="preview-document-section-1")(?=[^>]*data-document-section-key="section-1")(?=[^>]*class="document-section-heading active-document-section")[^>]*>重新分级<\/h1>/)
+  assert.match(html, /<h3(?=[^>]*id="preview-document-section-2")(?=[^>]*data-document-section-key="section-2")(?=[^>]*class="document-section-heading")[^>]*>第二节<\/h3>/)
 })
 
 test('excludes fenced code pseudo-headings and distinguishes duplicate headings', () => {

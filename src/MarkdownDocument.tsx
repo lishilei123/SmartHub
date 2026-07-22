@@ -4,6 +4,13 @@ import type { ComponentPropsWithoutRef } from 'react'
 import { emptyMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 
 export type DocumentFormat = 'markdown' | 'text'
+type PositionedNode = { position?: { start?: { line?: number; offset?: number }; end?: { line?: number } } }
+
+const sourceLocation = (node?: PositionedNode) => {
+  const startLine = node?.position?.start?.line
+  const endLine = node?.position?.end?.line
+  return typeof startLine === 'number' ? { 'data-source-start-line': startLine, ...(typeof endLine === 'number' ? { 'data-source-end-line': endLine } : {}) } : {}
+}
 
 export function resolveKnowledgeDocumentLink(logicalPath: string, href: string) {
   if (!href || /^(?:[a-z]+:|\/\/|#|\/)/i.test(href)) return null
@@ -30,15 +37,19 @@ export function MarkdownDocument({ source, format, knowledgeBaseId = '', logical
   if (format === 'text') return <pre className="plain-text-document">{source}</pre>
 
   const sectionsByOffset = new Map(outline.sections.map(section => [section.sourceOffset, section]))
-  const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => ({ children, className, node, ...props }: ComponentPropsWithoutRef<'h2'> & { node?: { position?: { start?: { offset?: number } } } }) => {
+  const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => ({ children, className, node, ...props }: ComponentPropsWithoutRef<'h2'> & { node?: PositionedNode }) => {
     const section = sectionsByOffset.get(node?.position?.start?.offset ?? -1)
     const classes = [className, section ? 'document-section-heading' : '', section && section.key === activeSectionKey ? 'active-document-section' : ''].filter(Boolean).join(' ')
-    return <Tag {...props} {...(section ? { id: `${anchorPrefix}-${section.key}`, 'data-document-section-key': section.key } : {})} className={classes || undefined}>{children}</Tag>
+    return <Tag {...props} {...sourceLocation(node)} {...(section ? { id: `${anchorPrefix}-${section.key}`, 'data-document-section-key': section.key } : {})} className={classes || undefined}>{children}</Tag>
   }
   return <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
     h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
-    table({ className, children, ...props }) {
-      return <div className="md-table-wrap"><table {...props} className={['md-table', className].filter(Boolean).join(' ')}>{children}</table></div>
+    p({ node, ...props }) { return <p {...props} {...sourceLocation(node)} /> },
+    li({ node, ...props }) { return <li {...props} {...sourceLocation(node)} /> },
+    blockquote({ node, ...props }) { return <blockquote {...props} {...sourceLocation(node)} /> },
+    pre({ node, ...props }) { return <pre {...props} {...sourceLocation(node)} /> },
+    table({ className, children, node, ...props }) {
+      return <div className="md-table-wrap" {...sourceLocation(node)}><table {...props} className={['md-table', className].filter(Boolean).join(' ')}>{children}</table></div>
     },
     a({ href, children, node, ...props }) {
       void node
