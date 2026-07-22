@@ -22,12 +22,14 @@ export class RemoteEmbeddingClient {
     return { count: text => tokenizer.encode(text).length, maxTokens: 8191 }
   }
 
-  async embed(config: KnowledgeConfig, texts: string[], model = config.embeddingModel) {
+  async embed(config: KnowledgeConfig, texts: string[], model = config.embeddingModel, signal?: AbortSignal) {
+    throwIfAborted(signal)
     if (!texts.length) return []
     const vectors: number[][] = []
     for (let offset = 0; offset < texts.length; offset += config.embeddingBatchSize) {
+      throwIfAborted(signal)
       const batch = texts.slice(offset, offset + config.embeddingBatchSize)
-      const response = await this.post(config, { model, input: batch, dimensions: config.embeddingDimensions })
+      const response = await this.post(config, { model, input: batch, dimensions: config.embeddingDimensions }, signal)
       const ordered = [...(response.data ?? [])].sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
       if (ordered.length !== batch.length) throw new Error(`远程 Embedding 返回数量不匹配：期望 ${batch.length}，实际 ${ordered.length}`)
       for (const item of ordered) {
@@ -47,11 +49,14 @@ export class RemoteEmbeddingClient {
     return vector.length
   }
 
-  private async post(config: KnowledgeConfig, body: Record<string, unknown>) {
+  private async post(config: KnowledgeConfig, body: Record<string, unknown>, signal?: AbortSignal) {
     const endpoint = embeddingsEndpoint(config.embeddingBaseUrl)
     let lastError: Error | null = null
     for (let attempt = 0; attempt <= config.embeddingRetries; attempt += 1) {
+      throwIfAborted(signal)
       const controller = new AbortController()
+      const abort = () => controller.abort(signal?.reason)
+      signal?.addEventListener('abort', abort, { once: true })
       const timeout = setTimeout(() => controller.abort(), config.embeddingTimeoutMs)
       try {
         const response = await this.request(endpoint.url, {
@@ -65,17 +70,29 @@ export class RemoteEmbeddingClient {
         if (!response.ok) throw new RemoteResponseError(response.status, responseError(payload) ?? `HTTP ${response.status}`)
         return normalizePayload(payload, endpoint.protocol)
       } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error
         lastError = error instanceof Error ? error : new Error('远程 Embedding 请求失败')
         const retryable = !(error instanceof RemoteResponseError) || error.status === 429 || error.status >= 500
         if (!retryable || attempt >= config.embeddingRetries) break
-        await new Promise(resolvePromise => setTimeout(resolvePromise, Math.min(250 * (2 ** attempt), 4000)))
-      } finally { clearTimeout(timeout) }
+        await waitForRetry(Math.min(250 * (2 ** attempt), 4000), signal)
+      } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort) }
     }
     throw new Error(`远程 Embedding 请求失败：${lastError?.message ?? '未知错误'}`)
   }
 }
 
 class RemoteResponseError extends Error { constructor(readonly status: number, message: string) { super(message) } }
+
+function throwIfAborted(signal?: AbortSignal) { if (signal?.aborted) throw signal.reason ?? new Error('Embedding 请求已中止') }
+
+function waitForRetry(delayMs: number, signal?: AbortSignal) {
+  return new Promise<void>((resolvePromise, reject) => {
+    if (signal?.aborted) { reject(signal.reason ?? new Error('Embedding 请求已中止')); return }
+    const timeout = setTimeout(() => { signal?.removeEventListener('abort', abort); resolvePromise() }, delayMs)
+    const abort = () => { clearTimeout(timeout); reject(signal?.reason ?? new Error('Embedding 请求已中止')) }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
 
 function embeddingsEndpoint(baseUrl: string): { url: string; protocol: 'openai' | 'ollama' } {
   const value = baseUrl.trim().replace(/\/+$/, '')

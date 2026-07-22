@@ -1,10 +1,12 @@
 import { parseMarkdownOutline } from './markdown-outline'
-import type { KnowledgeDirectory, KnowledgeDocument } from './prototype-data'
+import type { KnowledgeDirectory, KnowledgeDocument, KnowledgeTask } from './prototype-data'
 
 const base = 'http://127.0.0.1:8787/api'
 export type EmbeddingSource = { id: string; name: string; type: 'remote_api' | 'local'; baseUrl: string; apiKey: string; models: { name: string; dimensions: number }[] }
 export type ApiConfig = { id: string; version: number; requiresRebuild: boolean; config: { parserVersion: string; preprocessVersion: string; chunkTargetSize: number; chunkMaxSize: number; chunkOverlap: number; headingDepth: number; embeddingSourceId: string; embeddingSources: EmbeddingSource[]; embeddingMode: 'remote_api' | 'local'; embeddingBaseUrl: string; embeddingApiKey: string; embeddingModel: string; embeddingDimensions: number; embeddingBatchSize: number; embeddingTimeoutMs: number; embeddingRetries: number; keywordRecall: number; vectorRecall: number; finalResults: number; relevanceThreshold: number; hybridSearch: boolean; rerankerEnabled: boolean; rerankerSourceId: string; rerankerModel: string } }
-export type ApiTask = { id: string; type: string; status: string; step: string; progress: number; attempts: number; createdAt: string; error?: string; metrics?: Record<string, number> }
+export type ApiTask = KnowledgeTask & { attempts: number; createdAt: string; scope?: string; targetId?: string; metrics?: Record<string, number> }
+export type ApiIndexSummary = { id: string; number: number; dimensions: number; chunks: number; hnswReady: boolean | null }
+export type ApiOverview = { indexSummary: ApiIndexSummary | null; candidateSummary: { task: KnowledgeTask; index: { id: string; number: number; chunks: number } | null } | null }
 export type LocalModelStatus = { phase: 'idle' | 'downloading' | 'loading' | 'running' | 'stopping' | 'failed'; model: string; progress: number; cacheDirectory: string; file?: string; dimensions?: number; maxTokens?: number; modelHub?: string; fallbackUsed?: boolean; error?: string; updatedAt: string }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -19,19 +21,23 @@ export async function ensureKnowledgeBase() {
 }
 
 type ApiVersion = { id: string; number: number; content: string; status: string; createdAt: string; readyAt?: string; chunks: { headingPath: string[] }[] }
-type ApiAsset = { id: string; displayName: string; logicalPath: string; assetType: string; sourceType: string; activeVersionId: string | null; activeVersion: ApiVersion | null; versions: { id: string; number: number; status: string; createdAt: string }[] }
-type ApiDirectory = { id: string; knowledgeBaseId: string; name: string; parentId: string | null }
+type ApiAsset = { id: string; displayName: string; logicalPath: string; assetType: string; sourceType: string; activeVersionId: string | null; activeVersion: ApiVersion | null; versions: { id: string; number: number; status: string; createdAt: string }[]; operationTaskId?: string; task?: KnowledgeTask | null }
+type ApiDirectory = { id: string; knowledgeBaseId: string; name: string; parentId: string | null; operationTaskId?: string; task?: KnowledgeTask | null }
 export async function loadKnowledgeAssets(kbId: string, includeDeleted = false): Promise<{ directories: KnowledgeDirectory[]; documents: KnowledgeDocument[] }> {
   const [assets, savedDirectories] = await Promise.all([request<ApiAsset[]>(`/knowledge-bases/${kbId}/assets${includeDeleted ? '?includeDeleted=true' : ''}`), request<ApiDirectory[]>(`/knowledge-bases/${kbId}/directories`)])
-  const directoryMap = new Map(savedDirectories.map(item => [item.id, { id: item.id, name: item.name, parentId: item.parentId }]))
+  const directoryMap = new Map(savedDirectories.map(item => [item.id, { id: item.id, name: item.name, parentId: item.parentId, operationTaskId: item.operationTaskId, task: item.task }]))
   const pathToId = new Map<string, string>()
   const resolveDirectoryPath = (directory: KnowledgeDirectory): string => { const parentPath = directory.parentId ? resolveDirectoryPath(directoryMap.get(directory.parentId)!) : ''; const path = parentPath ? `${parentPath}/${directory.name}` : directory.name; pathToId.set(path.toLocaleLowerCase(), directory.id); return path }
   savedDirectories.forEach(item => resolveDirectoryPath(directoryMap.get(item.id)!))
   const documents = await Promise.all(assets.map(async asset => {
     const parts = asset.logicalPath.replaceAll('\\', '/').split('/').filter(Boolean); parts.pop(); let parentId: string | null = null; let path = ''
-    for (const part of parts) { path = path ? `${path}/${part}` : part; let id = pathToId.get(path.toLocaleLowerCase()); if (!id) { id = `api-dir:${path}`; directoryMap.set(id, { id, name: part, parentId }); pathToId.set(path.toLocaleLowerCase(), id) } parentId = id }
-    const current = asset.activeVersion ?? await request<ApiVersion>(`/asset-versions/${asset.versions.at(-1)!.id}`); const content = current.content; const format = asset.displayName.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'; const outline = format === 'markdown' ? parseMarkdownOutline(content) : undefined
-    return { id: asset.id, name: asset.displayName, parentId, version: `V${current.number}`, updated: current.readyAt ? new Date(current.readyAt).toLocaleString('zh-CN') : new Date(current.createdAt).toLocaleString('zh-CN'), title: outline?.title ?? asset.displayName.replace(/\.(md|txt)$/i, ''), intro: content.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? '纯文本知识资产', sections: outline?.sections.map(section => section.title) ?? [], content, assetType: asset.assetType, sourceType: asset.sourceType, assetVersionId: current.id, versions: asset.versions, status: current.status, logicalPath: asset.logicalPath }
+    for (const part of parts) { path = path ? `${path}/${part}` : part; let id = pathToId.get(path.toLocaleLowerCase()); if (!id) { id = `api-dir:${path}`; directoryMap.set(id, { id, name: part, parentId, operationTaskId: undefined, task: null }); pathToId.set(path.toLocaleLowerCase(), id) } parentId = id }
+    const latest = asset.versions.at(-1)
+    const current = asset.activeVersion ?? (latest ? await request<ApiVersion>(`/asset-versions/${latest.id}`) : null)
+    const content = current?.content ?? ''
+    const format = asset.displayName.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
+    const outline = content && format === 'markdown' ? parseMarkdownOutline(content) : undefined
+    return { id: asset.id, name: asset.displayName, parentId, version: current ? `V${current.number}` : '待入库', updated: current ? (current.readyAt ? new Date(current.readyAt).toLocaleString('zh-CN') : new Date(current.createdAt).toLocaleString('zh-CN')) : '等待处理', title: outline?.title ?? asset.displayName.replace(/\.(md|txt)$/i, ''), intro: content.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? '等待索引处理', sections: outline?.sections.map(section => section.title) ?? [], content, assetType: asset.assetType, sourceType: asset.sourceType, assetVersionId: current?.id, versions: asset.versions, status: current?.status ?? 'pending', logicalPath: asset.logicalPath, operationTaskId: asset.operationTaskId, task: asset.task }
   }))
   return { directories: [...directoryMap.values()], documents }
 }
@@ -59,6 +65,7 @@ export async function uploadKnowledgeArchive(kbId: string, file: File, targetPat
   if (!documents.length) throw new Error('压缩包中没有可入库的 Markdown 或 TXT 文件。')
   return request<{ documents: number; attachments: number; deduplicated: number; taskIds: string[]; skipped: number }>(`/knowledge-bases/${kbId}/archives`, { method: 'POST', body: JSON.stringify({ documents, attachments, skipped }) })
 }
+export const loadKnowledgeOverview = (kbId: string) => request<ApiOverview>(`/knowledge-bases/${kbId}/overview`)
 export const loadConfig = (kbId: string) => request<ApiConfig>(`/knowledge-bases/${kbId}/config`)
 export const saveConfig = (kbId: string, config: Record<string, unknown>) => request<{ changed: boolean; impact: string; configVersion: ApiConfig }>(`/knowledge-bases/${kbId}/config`, { method: 'PUT', body: JSON.stringify(config) })
 export const rebuildIndex = (kbId: string, outcome?: 'failure' | 'cancel') => request<{ task: ApiTask; index?: { id: string; number: number } }>(`/knowledge-bases/${kbId}/rebuild`, { method: 'POST', body: JSON.stringify(outcome ? { outcome } : {}) })
@@ -89,6 +96,8 @@ export const stopLocalModel = (model: string) => request<LocalModelStatus>('/loc
 export const testEmbeddingConfig = (kbId: string, config: Record<string, unknown>) => request<{ ok: true; model: string; dimensions: number }>(`/knowledge-bases/${kbId}/embedding/test`, { method: 'POST', body: JSON.stringify(config) })
 export const createKnowledgeDirectory = (kbId: string, name: string, parentId: string | null) => request<ApiDirectory>(`/knowledge-bases/${kbId}/directories`, { method: 'POST', body: JSON.stringify({ name, parentId }) })
 export const renameKnowledgeDirectory = (directoryId: string, name: string) => request<ApiDirectory>(`/directories/${directoryId}`, { method: 'PUT', body: JSON.stringify({ name }) })
-export const deleteKnowledgeDirectory = (directoryId: string, mode: 'recursive' | 'move', targetParentId: string | null = null) => request<{ deletedDirectoryIds: string[]; affectedAssets: number }>(`/directories/${directoryId}`, { method: 'DELETE', body: JSON.stringify({ mode, targetParentId }) })
+export type ApiDirectoryMoveResult = { mode: 'move'; deletedDirectoryIds: string[]; affectedAssets: number }
+export type ApiDirectoryDeleteTaskResult = { mode: 'recursive'; task: ApiTask; scopeSummary: { directories: number; assets: number } }
+export const deleteKnowledgeDirectory = (directoryId: string, mode: 'recursive' | 'move', targetParentId: string | null = null) => request<ApiDirectoryMoveResult | ApiDirectoryDeleteTaskResult>(`/directories/${directoryId}`, { method: 'DELETE', body: JSON.stringify({ mode, targetParentId }) })
 export const updateKnowledgeAsset = (assetId: string, patch: { displayName?: string; targetDirectoryId?: string | null }) => request<ApiAsset>(`/assets/${assetId}`, { method: 'PUT', body: JSON.stringify(patch) })
 export const deleteKnowledgeAsset = (assetId: string) => request<{ task: ApiTask }>(`/assets/${assetId}`, { method: 'DELETE' })

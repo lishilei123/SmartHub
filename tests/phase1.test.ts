@@ -77,9 +77,55 @@ test('知识库目录创建、重命名和删除均持久化', async () => {
   assert.equal(await readFile(resolve(documentsRoot, kbId, 'files', '产品需求', '支付', 'a.md'), 'utf8'), document())
   const reloaded = new KnowledgeService(new JsonStore(dataFile), new RawDocumentStore(documentsRoot)); await reloaded.initialize()
   assert.deepEqual((await reloaded.directories(kbId)).map(item => item.name), ['产品需求', '支付'])
-  await reloaded.deleteDirectory(payment.id, 'recursive')
+  const deletion = await reloaded.deleteDirectory(payment.id, 'recursive')
+  assert.ok('task' in deletion)
+  await reloaded.processTask(deletion.task.id)
   assert.equal((await reloaded.directories(kbId)).some(item => item.id === payment.id), false)
   assert.equal((await reloaded.assets(kbId)).length, 0)
+})
+
+test('目录清理失败仅重试文件清理并保持删除范围锁', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'smarthub-directory-cleanup-'))
+  const documentsRoot = resolve(root, 'knowledge-bases')
+  const storage = new RawDocumentStore(documentsRoot)
+  let failCleanup = true
+  const failingStorage = Object.assign(Object.create(Object.getPrototypeOf(storage)), storage, {
+    deleteActiveDirectory: async (knowledgeBaseId: string, logicalPrefix: string) => {
+      if (failCleanup) throw new Error('模拟文件清理失败')
+      return storage.deleteActiveDirectory(knowledgeBaseId, logicalPrefix)
+    },
+  }) as RawDocumentStore
+  const service = new KnowledgeService(new JsonStore(resolve(root, 'state.json')), failingStorage)
+  await service.initialize()
+  const created = await service.createProject('目录清理重试验收')
+  const kbId = created.knowledgeBase!.id
+  const directory = await service.createDirectory(kbId, '待删除', null)
+  const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'browser:待删除/a.md', assetType: '需求', displayName: 'a.md', logicalPath: '待删除/a.md', content: document() })
+  const activeBefore = (await service.overview(kbId)).knowledgeBase.activeIndexVersionId
+  const deletion = await service.deleteDirectory(directory.id, 'recursive')
+  assert.ok('task' in deletion)
+  await service.processTask(deletion.task.id)
+  const failed = await service.task(deletion.task.id)
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.step, 'file_cleanup')
+  assert.equal(failed.input.fileCleanupOnly, true)
+  assert.notEqual((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, activeBefore)
+  assert.equal((await service.directories(kbId)).some(item => item.id === directory.id), true)
+  assert.equal((await service.directories(kbId)).find(item => item.id === directory.id)?.task?.status, 'failed')
+  assert.equal((await service.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id)?.operationTaskId, deletion.task.id)
+  await assert.rejects(() => service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'browser:待删除/new.md', assetType: '需求', displayName: 'new.md', logicalPath: '待删除/new.md', content: document() }), /后台删除/)
+  await assert.rejects(() => service.cancelTask(deletion.task.id), /只能重试/)
+  const candidateId = failed.input.candidateIndexVersionId
+  failCleanup = false
+  const retried = await service.retry(deletion.task.id)
+  assert.equal(retried.input.candidateIndexVersionId, candidateId)
+  await service.processTask(retried.id)
+  const completed = await service.task(retried.id)
+  assert.equal(completed.status, 'succeeded')
+  assert.equal(completed.step, 'completed')
+  assert.equal((await service.directories(kbId)).some(item => item.id === directory.id), false)
+  assert.equal((await service.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id)?.operationTaskId, undefined)
+  await assert.rejects(() => readFile(resolve(documentsRoot, kbId, 'files', '待删除', 'a.md'), 'utf8'), /ENOENT/)
 })
 
 test('知识文件移动、重命名和删除同步数据库状态与默认目录', async () => {
@@ -105,7 +151,7 @@ test('AC-006 新版本失败不会破坏旧活动索引', async () => {
   const { service, kbId } = await fixture(); const first = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); const oldIndex = (await service.overview(kbId)).knowledgeBase.activeIndexVersionId
   const failed = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document('变更内容'), simulateFailureAt: 'embedding' })
   assert.equal(failed.version.status, 'failed'); assert.equal((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, oldIndex); assert.equal((await service.assets(kbId))[0].activeVersionId, first.version.id); assert.equal((await service.search(kbId, { query: '幂等' })).status, 'ok')
-  const retried = await service.retry(failed.task!.id); await service.processTask(retried.id); const completed = await service.task(retried.id); assert.equal((await service.version(failed.version.id)).status, 'ready'); assert.equal(completed.trigger, 'retry'); assert.equal(completed.attempts, 2); assert.notEqual((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, oldIndex)
+  const retried = await service.retry(failed.task!.id); await service.processTask(retried.id); const completed = await service.task(retried.id); assert.equal((await service.version(failed.version.id)).status, 'ready'); assert.equal(completed.trigger, 'retry'); assert.equal(completed.attempts, 0); assert.notEqual((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, oldIndex)
 })
 
 test('AC-007 检索结果绑定固定资产版本与原文位置', async () => {

@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { DatabaseState } from '../domain/types.js'
 
+export interface TaskLease { workerId: string; runToken: string }
+
 const emptyState = (): DatabaseState => ({ projects: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [] })
 
 export interface StateStore {
@@ -10,7 +12,16 @@ export interface StateStore {
   read(): DatabaseState
   snapshot(): Promise<DatabaseState>
   transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
+  transactionWithTaskLease?<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   searchChunks?(input: ChunkSearchInput): Promise<StoredChunkCandidate[]>
+  claimTask?(workerId: string, leaseMs: number): Promise<DatabaseState['tasks'][number] | null>
+  heartbeatTask?(taskId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
+  releaseTask?(taskId: string, lease: TaskLease, retryDelayMs?: number): Promise<boolean>
+  ownsTask?(taskId: string, lease: TaskLease): Promise<boolean>
+  notifyTask?(): Promise<void>
+  waitForTaskNotification?(timeoutMs: number): Promise<void>
+  ensureVectorIndex?(indexVersionId: string, dimensions: number): Promise<void>
+  isVectorIndexReady?(indexVersionId: string, dimensions: number): Promise<boolean>
   close?(): Promise<void>
 }
 

@@ -57,10 +57,23 @@ export const requirementsByVersion: Record<Version, Requirement[]> = {
   ],
 }
 
+export type KnowledgeTask = {
+  id: string
+  type: string
+  status: string
+  step: string
+  progress: number
+  error?: string
+  canRetry?: boolean
+  canCancel?: boolean
+}
+
 export type KnowledgeDirectory = {
   id: string
   name: string
   parentId: string | null
+  operationTaskId?: string
+  task?: KnowledgeTask | null
 }
 
 export type KnowledgeDocument = {
@@ -79,6 +92,8 @@ export type KnowledgeDocument = {
   versions?: { id: string; number: number; status: string; createdAt: string }[]
   status?: string
   logicalPath?: string
+  operationTaskId?: string
+  task?: KnowledgeTask | null
 }
 
 export const knowledgeDirectories: KnowledgeDirectory[] = [

@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import type { Chunk, DatabaseState, IndexVersion } from '../domain/types.js'
-import type { ChunkSearchInput, StateStore, StoredChunkCandidate } from './store.js'
+import type { Chunk, DatabaseState, SyncTask } from '../domain/types.js'
+import type { ChunkSearchInput, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
+import { verifyMigrations } from './migrations.js'
 
 const emptyState = (): DatabaseState => ({ projects: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [] })
 
@@ -8,13 +10,16 @@ export class PostgresStore implements StateStore {
   private state: DatabaseState = emptyState()
   private queue = Promise.resolve()
   private readonly pool: Pool
+  private notificationClient: PoolClient | null = null
+  private notificationReady: Promise<void> | null = null
+  private notificationWaiters: Array<() => void> = []
 
   constructor(connectionString: string) { this.pool = new Pool({ connectionString }) }
 
   async load() {
     const client = await this.pool.connect()
     try {
-      await migrate(client)
+      await verifyMigrations(client)
       this.state = await loadState(client)
     } finally { client.release() }
   }
@@ -35,7 +40,175 @@ export class PostgresStore implements StateStore {
     } finally { client.release() }
   }
 
-  async close() { await this.pool.end() }
+  async close() {
+    if (this.notificationClient) { this.notificationClient.release(); this.notificationClient = null }
+    await this.pool.end()
+  }
+
+  async notifyTask() { await this.pool.query("SELECT pg_notify('smarthub_task_ready', 'queued')") }
+
+  async waitForTaskNotification(timeoutMs: number) {
+    await this.listenForTaskNotifications()
+    await new Promise<void>(resolve => {
+      const timeout = setTimeout(() => {
+        const index = this.notificationWaiters.indexOf(wake)
+        if (index >= 0) this.notificationWaiters.splice(index, 1)
+        resolve()
+      }, Math.max(1, timeoutMs))
+      const wake = () => { clearTimeout(timeout); resolve() }
+      this.notificationWaiters.push(wake)
+    })
+  }
+
+  private async listenForTaskNotifications() {
+    if (!this.notificationReady) {
+      this.notificationReady = (async () => {
+        let client: PoolClient | null = null
+        try {
+          client = await this.pool.connect()
+          this.notificationClient = client
+          client.on('notification', message => {
+            if (message.channel !== 'smarthub_task_ready') return
+            const waiters = this.notificationWaiters.splice(0)
+            waiters.forEach(wake => wake())
+          })
+          const listenerClient = client
+          listenerClient.on('error', () => {
+            if (this.notificationClient === listenerClient) { this.notificationClient = null; this.notificationReady = null; listenerClient.release() }
+          })
+          await client.query('LISTEN smarthub_task_ready')
+        } catch (error) {
+          if (this.notificationClient === client) this.notificationClient = null
+          this.notificationReady = null
+          client?.release()
+          throw error
+        }
+      })()
+    }
+    await this.notificationReady
+  }
+
+  async ensureVectorIndex(indexVersionId: string, dimensions: number) {
+    const dimension = positiveInteger(dimensions, '向量维度')
+    if (dimension > 4_000) throw new Error('向量维度超过 HNSW 支持范围')
+    const suffix = createHash('sha256').update(`${indexVersionId}:${dimension}`).digest('hex').slice(0, 20)
+    const indexName = `idx_hnsw_${suffix}`
+    await this.pool.query(`
+      INSERT INTO smarthub.vector_index_catalog (index_version_id, embedding_dimensions, index_name, status)
+      VALUES ($1, $2, $3, 'building')
+      ON CONFLICT (index_version_id, embedding_dimensions) DO NOTHING
+    `, [indexVersionId, dimension, indexName])
+    const catalog = await this.pool.query<{ status: string }>('SELECT status FROM smarthub.vector_index_catalog WHERE index_version_id=$1 AND embedding_dimensions=$2', [indexVersionId, dimension])
+    if (catalog.rows[0]?.status === 'ready') return
+    try {
+      const indexVersionLiteral = `'${indexVersionId.replaceAll("'", "''")}'`
+      await this.pool.query(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${quoteIdentifier(indexName)} ON smarthub.index_chunks USING hnsw ((embedding::vector(${dimension})) vector_cosine_ops) WHERE index_version_id = ${indexVersionLiteral} AND embedding_dimensions = ${dimension}`)
+      const valid = await this.pool.query<{ valid: boolean }>(`SELECT i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname=$1`, [indexName])
+      if (!valid.rows[0]?.valid) throw new Error('HNSW 索引未处于有效状态')
+      await this.pool.query("UPDATE smarthub.vector_index_catalog SET status='ready', ready_at=now(), error=NULL WHERE index_version_id=$1 AND embedding_dimensions=$2", [indexVersionId, dimension])
+    } catch (error) {
+      await this.pool.query("UPDATE smarthub.vector_index_catalog SET status='failed', error=$3 WHERE index_version_id=$1 AND embedding_dimensions=$2", [indexVersionId, dimension, error instanceof Error ? error.message : 'HNSW 创建失败'])
+      throw error
+    }
+  }
+
+  async isVectorIndexReady(indexVersionId: string, dimensions: number) {
+    const result = await this.pool.query("SELECT 1 FROM smarthub.vector_index_catalog WHERE index_version_id=$1 AND embedding_dimensions=$2 AND status='ready'", [indexVersionId, positiveInteger(dimensions, '向量维度')])
+    return result.rowCount === 1
+  }
+
+  async claimTask(workerId: string, leaseMs: number): Promise<SyncTask | null> {
+    const client = await this.pool.connect()
+    const runToken = crypto.randomUUID()
+    try {
+      await client.query('BEGIN')
+      await client.query(`
+        WITH expired AS (
+          SELECT id, data->>'candidateIndexVersionId' AS candidate_id
+          FROM smarthub.sync_tasks
+          WHERE status = 'running' AND lease_expires_at < now() AND cancel_requested_at IS NULL
+          FOR UPDATE
+        ), requeued AS (
+          UPDATE smarthub.sync_tasks
+          SET status = 'queued', step = 'waiting', progress = 0, updated_at = now(), finished_at = NULL,
+              lease_owner = NULL, run_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+              available_at = now(),
+              data = jsonb_set(jsonb_set(jsonb_set(data - 'candidateIndexVersionId' - 'error' - 'finishedAt', '{status}', to_jsonb('queued'::text)), '{step}', to_jsonb('waiting'::text)), '{progress}', to_jsonb(0))
+          WHERE id IN (SELECT id FROM expired)
+          RETURNING id
+        )
+        UPDATE smarthub.index_versions index_version
+        SET status = 'failed', data = jsonb_set(data, '{status}', to_jsonb('failed'::text))
+        WHERE index_version.id IN (SELECT candidate_id FROM expired WHERE candidate_id IS NOT NULL)
+          AND index_version.status = 'candidate'
+      `)
+      const result = await client.query<{ id: string; data: SyncTask }>(`
+        WITH next_task AS (
+          SELECT id
+          FROM smarthub.sync_tasks
+          WHERE status = 'queued'
+            AND available_at <= now()
+          ORDER BY priority DESC, available_at, created_at
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        UPDATE smarthub.sync_tasks task
+        SET status = 'running',
+            step = 'claimed',
+            progress = 1,
+            started_at = COALESCE(task.started_at, now()),
+            updated_at = now(),
+            attempt_count = task.attempt_count + 1,
+            lease_owner = $1,
+            run_token = $3::uuid,
+            lease_expires_at = now() + ($2::text || ' milliseconds')::interval,
+            heartbeat_at = now(),
+            data = jsonb_set(jsonb_set(task.data, '{status}', to_jsonb('running'::text)), '{step}', to_jsonb('claimed'::text))
+        FROM next_task
+        WHERE task.id = next_task.id
+        RETURNING task.id, task.data
+      `, [workerId, Math.max(1_000, leaseMs), runToken])
+      await client.query('COMMIT')
+      if (!result.rows[0]) return null
+      const task = result.rows[0].data
+      return { ...task, status: 'running', step: 'claimed', progress: 1, attempts: (task.attempts ?? 0) + 1, leaseOwner: workerId, runToken }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
+  async heartbeatTask(taskId: string, lease: TaskLease, leaseMs: number) {
+    const result = await this.pool.query(`
+      UPDATE smarthub.sync_tasks
+      SET lease_expires_at = now() + ($4::text || ' milliseconds')::interval,
+          heartbeat_at = now(), updated_at = now()
+      WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND run_token = $3::uuid
+        AND lease_expires_at > now()
+    `, [taskId, lease.workerId, lease.runToken, Math.max(1_000, leaseMs)])
+    return result.rowCount === 1
+  }
+
+  async ownsTask(taskId: string, lease: TaskLease) {
+    const result = await this.pool.query(`
+      SELECT 1 FROM smarthub.sync_tasks
+      WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND run_token = $3::uuid AND lease_expires_at > now()
+    `, [taskId, lease.workerId, lease.runToken])
+    return result.rowCount === 1
+  }
+
+  async releaseTask(taskId: string, lease: TaskLease, retryDelayMs = 0) {
+    const result = await this.pool.query(`
+      UPDATE smarthub.sync_tasks
+      SET status = 'queued', step = 'waiting', progress = 0, updated_at = now(),
+          available_at = now() + ($4::text || ' milliseconds')::interval,
+          lease_owner = NULL, run_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL, finished_at = NULL,
+          data = jsonb_set(jsonb_set(jsonb_set(data - 'error' - 'finishedAt', '{status}', to_jsonb('queued'::text)), '{step}', to_jsonb('waiting'::text)), '{progress}', to_jsonb(0))
+      WHERE id = $1 AND status IN ('running', 'failed') AND lease_owner = $2 AND run_token = $3::uuid
+        AND lease_expires_at > now()
+    `, [taskId, lease.workerId, lease.runToken, Math.max(0, retryDelayMs)])
+    return result.rowCount === 1
+  }
 
   async searchChunks(input: ChunkSearchInput): Promise<StoredChunkCandidate[]> {
     const dimensions = positiveInteger(input.dimensions, '向量维度')
@@ -87,16 +260,42 @@ export class PostgresStore implements StateStore {
   }
 
   async transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T> {
-    let result!: T
+    return await this.runTransaction(operation) as T
+  }
+
+  async transactionWithTaskLease<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
+    return this.runTransaction(operation, { taskId, lease })
+  }
+
+  private async runTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>, fencing?: { taskId: string; lease: TaskLease }): Promise<T | null> {
+    let result: T | null = null
     let failure: unknown
     this.queue = this.queue.then(async () => {
       const client = await this.pool.connect()
       try {
         await client.query('BEGIN')
         await client.query("SELECT pg_advisory_xact_lock(hashtext('smarthub_state'))")
+        if (fencing) {
+          const owned = await client.query(`
+            SELECT 1 FROM smarthub.sync_tasks
+            WHERE id = $1 AND status = 'running' AND lease_owner = $2
+              AND run_token = $3::uuid AND lease_expires_at > now()
+            FOR UPDATE
+          `, [fencing.taskId, fencing.lease.workerId, fencing.lease.runToken])
+          if (owned.rowCount !== 1) { await client.query('ROLLBACK'); return }
+        }
         const before = await loadState(client)
         const draft = structuredClone(before)
         result = await operation(draft)
+        if (fencing) {
+          const stillOwned = await client.query(`
+            SELECT 1 FROM smarthub.sync_tasks
+            WHERE id = $1 AND status = 'running' AND lease_owner = $2
+              AND run_token = $3::uuid AND lease_expires_at > now()
+            FOR UPDATE
+          `, [fencing.taskId, fencing.lease.workerId, fencing.lease.runToken])
+          if (stillOwned.rowCount !== 1) { result = null; await client.query('ROLLBACK'); return }
+        }
         await persistChanges(client, before, draft)
         await client.query('COMMIT')
         this.state = draft
@@ -111,52 +310,10 @@ export class PostgresStore implements StateStore {
   }
 }
 
-async function migrate(client: PoolClient) {
-  await client.query('CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;')
-  await client.query(`
-    CREATE SCHEMA IF NOT EXISTS smarthub;
-    CREATE TABLE IF NOT EXISTS smarthub.projects (id text PRIMARY KEY, name text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
-    CREATE TABLE IF NOT EXISTS smarthub.knowledge_bases (id text PRIMARY KEY, project_id text NOT NULL REFERENCES smarthub.projects(id), name text NOT NULL, active_index_version_id text, active_config_version_id text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
-    CREATE TABLE IF NOT EXISTS smarthub.knowledge_directories (id text PRIMARY KEY, knowledge_base_id text NOT NULL REFERENCES smarthub.knowledge_bases(id), parent_id text REFERENCES smarthub.knowledge_directories(id), name text NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (knowledge_base_id, parent_id, name));
-    CREATE TABLE IF NOT EXISTS smarthub.config_versions (id text PRIMARY KEY, knowledge_base_id text NOT NULL REFERENCES smarthub.knowledge_bases(id), version integer NOT NULL, requires_rebuild boolean NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (knowledge_base_id, version));
-    CREATE TABLE IF NOT EXISTS smarthub.knowledge_assets (id text PRIMARY KEY, knowledge_base_id text NOT NULL REFERENCES smarthub.knowledge_bases(id), logical_path text NOT NULL, display_name text NOT NULL, asset_type text NOT NULL, source_type text NOT NULL, active_version_id text, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (knowledge_base_id, logical_path));
-    CREATE TABLE IF NOT EXISTS smarthub.asset_versions (id text PRIMARY KEY, asset_id text NOT NULL REFERENCES smarthub.knowledge_assets(id), version integer NOT NULL, content_hash char(64) NOT NULL, status text NOT NULL, config_version_id text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (asset_id, version));
-    CREATE TABLE IF NOT EXISTS smarthub.asset_chunks (id text PRIMARY KEY, asset_version_id text NOT NULL REFERENCES smarthub.asset_versions(id) ON DELETE CASCADE, chunk_key text NOT NULL, ordinal integer NOT NULL, content text NOT NULL, content_hash char(64) NOT NULL, embedding vector NOT NULL, embedding_dimensions integer NOT NULL, data jsonb NOT NULL, UNIQUE (asset_version_id, chunk_key));
-    CREATE TABLE IF NOT EXISTS smarthub.index_versions (id text PRIMARY KEY, knowledge_base_id text NOT NULL REFERENCES smarthub.knowledge_bases(id), version integer NOT NULL, status text NOT NULL, config_version_id text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (knowledge_base_id, version));
-    CREATE TABLE IF NOT EXISTS smarthub.index_chunks (index_version_id text NOT NULL REFERENCES smarthub.index_versions(id) ON DELETE CASCADE, id text NOT NULL, asset_version_id text NOT NULL REFERENCES smarthub.asset_versions(id), chunk_key text NOT NULL, ordinal integer NOT NULL, content text NOT NULL, content_hash char(64) NOT NULL, embedding vector NOT NULL, embedding_dimensions integer NOT NULL, data jsonb NOT NULL, PRIMARY KEY (index_version_id, id));
-    CREATE TABLE IF NOT EXISTS smarthub.sync_tasks (id text PRIMARY KEY, knowledge_base_id text NOT NULL REFERENCES smarthub.knowledge_bases(id), type text NOT NULL, status text NOT NULL, step text NOT NULL, progress integer NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
-    CREATE INDEX IF NOT EXISTS knowledge_assets_kb_path_idx ON smarthub.knowledge_assets (knowledge_base_id, logical_path);
-    CREATE INDEX IF NOT EXISTS asset_chunks_version_idx ON smarthub.asset_chunks (asset_version_id);
-    CREATE INDEX IF NOT EXISTS asset_chunks_content_trgm_idx ON smarthub.asset_chunks USING gin (content gin_trgm_ops);
-    CREATE INDEX IF NOT EXISTS index_chunks_index_version_idx ON smarthub.index_chunks (index_version_id);
-    CREATE INDEX IF NOT EXISTS index_chunks_content_trgm_idx ON smarthub.index_chunks USING gin (content gin_trgm_ops);
-    CREATE INDEX IF NOT EXISTS sync_tasks_kb_created_idx ON smarthub.sync_tasks (knowledge_base_id, created_at DESC);
-  `)
-  await client.query(`
-    ALTER TABLE smarthub.asset_chunks ADD COLUMN IF NOT EXISTS embedding_dimensions integer;
-    DO $$
-    BEGIN
-      IF (SELECT udt_name = '_float8' FROM information_schema.columns WHERE table_schema = 'smarthub' AND table_name = 'asset_chunks' AND column_name = 'embedding') THEN
-        UPDATE smarthub.asset_chunks SET embedding_dimensions = array_length(embedding, 1) WHERE embedding_dimensions IS NULL;
-        ALTER TABLE smarthub.asset_chunks ALTER COLUMN embedding TYPE vector USING ('[' || array_to_string(embedding, ',') || ']')::vector;
-      END IF;
-    END $$;
-    UPDATE smarthub.asset_chunks SET embedding_dimensions = vector_dims(embedding) WHERE embedding_dimensions IS NULL;
-    ALTER TABLE smarthub.asset_chunks ALTER COLUMN embedding_dimensions SET NOT NULL;
-    CREATE INDEX IF NOT EXISTS asset_chunks_embedding_384_hnsw_idx ON smarthub.asset_chunks USING hnsw ((embedding::vector(384)) vector_cosine_ops) WHERE embedding_dimensions = 384;
-    CREATE INDEX IF NOT EXISTS index_chunks_embedding_384_hnsw_idx ON smarthub.index_chunks USING hnsw ((embedding::vector(384)) vector_cosine_ops) WHERE embedding_dimensions = 384;
-    INSERT INTO smarthub.index_chunks (index_version_id, id, asset_version_id, chunk_key, ordinal, content, content_hash, embedding, embedding_dimensions, data)
-    SELECT i.id, c.id, c.asset_version_id, c.chunk_key, c.ordinal, c.content, c.content_hash, c.embedding, c.embedding_dimensions, c.data
-    FROM smarthub.index_versions i
-    JOIN smarthub.asset_chunks c ON c.asset_version_id IN (SELECT jsonb_array_elements_text(i.data->'assetVersionIds'))
-    ON CONFLICT (index_version_id, id) DO NOTHING;
-  `)
-}
-
 type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>
 
 async function loadState(client: Queryable): Promise<DatabaseState> {
-  const tables = ['projects', 'knowledge_bases', 'knowledge_directories', 'config_versions', 'knowledge_assets', 'asset_versions', 'index_versions', 'sync_tasks'] as const
+  const tables = ['projects', 'knowledge_bases', 'knowledge_directories', 'config_versions', 'knowledge_assets', 'asset_versions', 'index_versions'] as const
   const rows = []
   for (const table of tables) rows.push(await client.query<{ data: DatabaseState[keyof DatabaseState][number] }>(`SELECT data FROM smarthub.${table} ORDER BY created_at, id`))
   const versions = rows[5].rows.map(row => ({ ...row.data, chunks: [] })) as DatabaseState['versions']
@@ -165,7 +322,31 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const indexes = rows[6].rows.map(row => ({ ...row.data, indexedChunks: [] })) as DatabaseState['indexes']
   const indexChunks = await client.query<{ index_version_id: string; embedding: string; data: Chunk }>('SELECT index_version_id, embedding::text AS embedding, data FROM smarthub.index_chunks ORDER BY index_version_id, ordinal, id')
   for (const row of indexChunks.rows) indexes.find(index => index.id === row.index_version_id)?.indexedChunks?.push({ ...row.data, embedding: decodeVector(row.embedding) })
-  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks: rows[7].rows.map(row => row.data) as DatabaseState['tasks'] }
+  const taskRows = await client.query<{
+    data: SyncTask; status: SyncTask['status']; step: string; progress: number; created_at: string; available_at: string; attempt_count: number; max_attempts: number; dedupe_key: string | null; target_id: string | null; scope: SyncTask['scope']; lease_owner: string | null; run_token: string | null; lease_expires_at: string | null; heartbeat_at: string | null; cancel_requested_at: string | null; started_at: string | null; finished_at: string | null; updated_at: string
+  }>('SELECT data, status, step, progress, created_at, available_at, attempt_count, max_attempts, dedupe_key, target_id, scope, lease_owner, run_token::text AS run_token, lease_expires_at, heartbeat_at, cancel_requested_at, started_at, finished_at, updated_at FROM smarthub.sync_tasks ORDER BY created_at, id')
+  const tasks = taskRows.rows.map(row => ({
+    ...row.data,
+    status: row.status,
+    step: row.step,
+    progress: row.progress,
+    createdAt: row.created_at,
+    attempts: row.attempt_count || row.data.attempts,
+    availableAt: row.available_at,
+    maxAttempts: row.max_attempts,
+    dedupeKey: row.dedupe_key ?? undefined,
+    targetId: row.target_id ?? undefined,
+    scope: row.scope ?? undefined,
+    leaseOwner: row.lease_owner ?? undefined,
+    runToken: row.run_token ?? undefined,
+    leaseExpiresAt: row.lease_expires_at ?? undefined,
+    heartbeatAt: row.heartbeat_at ?? undefined,
+    cancelRequestedAt: row.cancel_requested_at ?? undefined,
+    startedAt: row.started_at ?? undefined,
+    finishedAt: row.finished_at ?? undefined,
+    updatedAt: row.updated_at,
+  })) as DatabaseState['tasks']
+  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks }
 }
 
 async function persistChanges(client: PoolClient, before: DatabaseState, state: DatabaseState) {
@@ -201,7 +382,17 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
       for (const chunk of item.indexedChunks ?? []) await insertChunk(client, 'index_chunks', item.id, chunk)
     }
   }
-  for (const item of changed(before.tasks, state.tasks)) await client.query('INSERT INTO smarthub.sync_tasks VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, step=EXCLUDED.step, progress=EXCLUDED.progress, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.type, item.status, item.step, item.progress, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.tasks, state.tasks)) await client.query(`
+    INSERT INTO smarthub.sync_tasks (id, knowledge_base_id, type, status, step, progress, created_at, data, available_at, attempt_count, max_attempts, dedupe_key, target_id, scope, lease_owner, run_token, lease_expires_at, heartbeat_at, cancel_requested_at, started_at, finished_at, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16::uuid,$17,$18,$19,$20,$21,$22)
+    ON CONFLICT (id) DO UPDATE SET
+      status=EXCLUDED.status, step=EXCLUDED.step, progress=EXCLUDED.progress, data=EXCLUDED.data,
+      available_at=EXCLUDED.available_at, attempt_count=EXCLUDED.attempt_count, max_attempts=EXCLUDED.max_attempts,
+      dedupe_key=EXCLUDED.dedupe_key, target_id=EXCLUDED.target_id, scope=EXCLUDED.scope,
+      lease_owner=EXCLUDED.lease_owner, run_token=EXCLUDED.run_token, lease_expires_at=EXCLUDED.lease_expires_at,
+      heartbeat_at=EXCLUDED.heartbeat_at, cancel_requested_at=EXCLUDED.cancel_requested_at,
+      started_at=EXCLUDED.started_at, finished_at=EXCLUDED.finished_at, updated_at=EXCLUDED.updated_at
+  `, [item.id, item.knowledgeBaseId, item.type, item.status, item.step, item.progress, item.createdAt, JSON.stringify(item), item.availableAt ?? item.createdAt, item.attempts, item.maxAttempts ?? 3, item.dedupeKey ?? null, item.targetId ?? null, item.scope ?? 'asset', item.leaseOwner ?? null, item.runToken ?? null, item.leaseExpiresAt ?? null, item.heartbeatAt ?? null, item.cancelRequestedAt ?? null, item.startedAt ?? null, item.finishedAt ?? null, item.updatedAt ?? new Date().toISOString()])
 }
 
 async function insertChunk(client: PoolClient, table: 'asset_chunks' | 'index_chunks', ownerId: string, chunk: Chunk) {
@@ -222,6 +413,10 @@ async function deleteMissing<T extends { id: string }>(client: PoolClient, table
 function changed<T extends { id: string }>(before: T[], after: T[]) {
   const previous = new Map(before.map(item => [item.id, JSON.stringify(item)]))
   return after.filter(item => previous.get(item.id) !== JSON.stringify(item))
+}
+
+function quoteIdentifier(value: string) {
+  return `"${value.replaceAll('"', '""')}"`
 }
 
 function encodeVector(vector: number[]) {

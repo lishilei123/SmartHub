@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { start } from '../server/http/server.js'
+
+process.env.SMARTHUB_FORCE_JSON_STORE = 'true'
+const { start } = await import('../server/http/server.js')
+delete process.env.SMARTHUB_FORCE_JSON_STORE
 
 test('本地模型运行状态接口返回系统默认缓存目录', async () => {
   const server = await start(0)

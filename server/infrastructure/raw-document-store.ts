@@ -46,6 +46,15 @@ export class RawDocumentStore {
     await rm(this.activePath(knowledgeBaseId, logicalPath), { force: true })
   }
 
+  async deleteActiveDirectory(knowledgeBaseId: string, logicalPrefix: string) {
+    const normalized = logicalPrefix.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '')
+    if (!normalized || normalized.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('目录路径不合法')
+    const knowledgeRoot = resolve(this.root, knowledgeBaseId)
+    const target = resolve(knowledgeRoot, 'files', ...normalized.split('/'))
+    if (!target.startsWith(`${knowledgeRoot}${sep}`)) throw new Error('目录路径越过知识库默认目录')
+    await rm(target, { recursive: true, force: true })
+  }
+
   async saveAttachment(knowledgeBaseId: string, logicalPath: string, content: Buffer) {
     const extension = extname(logicalPath).toLowerCase()
     if (!['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(extension)) throw new Error(`不支持的附件类型：${extension || '无扩展名'}`)
