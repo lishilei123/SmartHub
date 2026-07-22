@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import type { TokenCodec } from '../application/content.js'
 
 export type LocalModelPhase = 'idle' | 'downloading' | 'loading' | 'running' | 'stopping' | 'failed'
 
@@ -10,13 +11,16 @@ export interface LocalModelStatus {
   cacheDirectory: string
   file?: string
   dimensions?: number
+  maxTokens?: number
   error?: string
   updatedAt: string
 }
 
 type ProgressInfo = { status: string; file?: string; progress?: number }
 type TensorResult = { tolist(): unknown[] }
-export type FeatureExtractor = ((texts: string | string[], options: { pooling: 'mean'; normalize: true }) => Promise<TensorResult>) & { dispose(): Promise<void> }
+type TokenizerResult = { input_ids: TensorResult }
+type ModelTokenizer = ((text: string, options?: { add_special_tokens?: boolean }) => TokenizerResult) & { model_max_length?: number }
+export type FeatureExtractor = ((texts: string | string[], options: { pooling: 'mean'; normalize: true }) => Promise<TensorResult>) & { dispose(): Promise<void>; tokenizer?: ModelTokenizer }
 export type FeatureExtractorLoader = (model: string, cacheDirectory: string, onProgress: (info: ProgressInfo) => void) => Promise<FeatureExtractor>
 
 const now = () => new Date().toISOString()
@@ -67,7 +71,7 @@ export class LocalModelRuntime {
       const vectors = await runExtractor(extractor, ['SmartHub 本地模型运行检查'])
       if (generation !== this.generation) { await extractor.dispose(); return }
       this.extractor = extractor
-      this.current = { ...this.current, phase: 'running', progress: 100, dimensions: vectors[0]?.length ?? 0, updatedAt: now() }
+      this.current = { ...this.current, phase: 'running', progress: 100, dimensions: vectors[0]?.length ?? 0, maxTokens: extractor.tokenizer?.model_max_length, updatedAt: now() }
     } catch (error) {
       if (generation !== this.generation) return
       this.extractor = null
@@ -88,6 +92,16 @@ export class LocalModelRuntime {
     if (this.current.phase !== 'running' || !this.extractor) throw new Error('本地模型未运行，请先在知识库配置中拉取并启动模型')
     if (this.current.model !== model.trim()) throw new Error(`当前运行模型为 ${this.current.model}，请先启动配置中的模型 ${model}`)
     return runExtractor(this.extractor, texts)
+  }
+
+  async tokenCodec(model: string): Promise<TokenCodec | null> {
+    await this.ensureRunning(model)
+    const tokenizer = this.extractor?.tokenizer
+    if (!tokenizer) return null
+    return {
+      maxTokens: tokenizer.model_max_length,
+      count: text => flatten(tokenizer(text, { add_special_tokens: false }).input_ids.tolist()).length,
+    }
   }
 
   async ensureRunning(model: string, timeoutMs = 5 * 60 * 1000) {
@@ -113,6 +127,8 @@ async function runExtractor(extractor: FeatureExtractor, texts: string[]) {
   if (!Array.isArray(list[0])) return [list.map(Number)]
   return list.map(row => (row as unknown[]).map(Number))
 }
+
+function flatten(values: unknown[]): unknown[] { return values.flatMap(value => Array.isArray(value) ? flatten(value) : [value]) }
 
 function describeError(error: unknown) {
   if (!(error instanceof Error)) return '本地模型加载失败'

@@ -15,6 +15,7 @@
   "dependencies": {
     "@huggingface/transformers": "3.8.1",
     "@vitejs/plugin-react": "latest",
+    "js-tiktoken": "^1.0.21",
     "jszip": "^3.10.1",
     "lucide-react": "latest",
     "mdast-util-to-string": "^4.0.0",

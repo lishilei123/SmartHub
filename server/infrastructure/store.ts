@@ -9,7 +9,28 @@ export interface StateStore {
   load(): Promise<void>
   read(): DatabaseState
   transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
+  searchChunks?(input: ChunkSearchInput): Promise<StoredChunkCandidate[]>
   close?(): Promise<void>
+}
+
+export interface ChunkSearchInput {
+  versionIds: string[]
+  mode: 'keyword' | 'vector'
+  query: string
+  queryVector?: number[]
+  dimensions: number
+  limit: number
+  assetType?: string
+  sourceType?: string
+  logicalPath?: string
+}
+
+export interface StoredChunkCandidate {
+  score: number
+  asset: { id: string; displayName: string; assetType: string; sourceType: string; logicalPath: string }
+  version: { id: string; number: number }
+  chunk: { id: string; chunkKey: string; headingPath: string[]; startLine: number; endLine: number; startChar: number; endChar: number }
+  content: string
 }
 
 export class JsonStore implements StateStore {

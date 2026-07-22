@@ -105,10 +105,10 @@ test('AC-007 检索结果绑定固定资产版本与原文位置', async () => {
 test('AC-008 查询配置无需重建，兼容性配置受控重建且失败保旧索引', async () => {
   const { service, kbId } = await fixture(); await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); const oldIndex = service.overview(kbId).knowledgeBase.activeIndexVersionId; const oldIndexConfig = service.store.read().indexes.find(item => item.id === oldIndex)!.configVersionId
   const queryChange = await service.saveConfig(kbId, { relevanceThreshold: 0.2 }); assert.equal(queryChange.impact, 'query'); assert.equal(queryChange.configVersion.requiresRebuild, false)
-  const indexChange = await service.saveConfig(kbId, { chunkTargetSize: 700, embeddingDimensions: 32 }); assert.equal(indexChange.impact, 'index_rebuild'); assert.equal(indexChange.configVersion.requiresRebuild, true); assert.equal(service.overview(kbId).knowledgeBase.activeIndexVersionId, oldIndex)
+  const indexChange = await service.saveConfig(kbId, { chunkTargetSize: 700, chunkMaxSize: 800, embeddingDimensions: 32 }); assert.equal(indexChange.impact, 'index_rebuild'); assert.equal(indexChange.configVersion.requiresRebuild, true); assert.equal(service.overview(kbId).knowledgeBase.activeIndexVersionId, oldIndex)
   const pending = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'b.md', assetType: 'other', displayName: '待重建期间资料', logicalPath: 'b.md', content: '# 新资料\n仍按旧活动索引配置处理' }); assert.equal(pending.version.configVersionId, oldIndexConfig); const activeBeforeRebuild = service.overview(kbId).knowledgeBase.activeIndexVersionId; assert.equal(service.store.read().indexes.find(item => item.id === activeBeforeRebuild)!.configVersionId, oldIndexConfig)
   await service.rebuild(kbId, 'failure'); assert.equal(service.overview(kbId).knowledgeBase.activeIndexVersionId, activeBeforeRebuild)
-  const success = await service.rebuild(kbId, 'success'); assert.notEqual(success.index!.id, oldIndex); assert.equal(success.index!.indexedChunks![0].embedding.length, 32); assert.equal(service.config(kbId).requiresRebuild, false)
+  const success = await service.rebuild(kbId, 'success'); assert.notEqual(success.index!.id, oldIndex); assert.equal(success.index!.indexedChunks![0].embedding.length, 32); assert.equal(service.store.read().versions.find(item => item.id === success.index!.assetVersionIds[0])!.chunks[0].embedding.length, 32); assert.equal(service.config(kbId).requiresRebuild, false)
 })
 
 test('FR-003/004 配置草稿字段完整持久化且无变化不生成版本', async () => {
@@ -122,7 +122,7 @@ test('AC-009 只有显式接入的人工保存资料进入知识库', async () =
 })
 
 test('FR-020/021 异步重建可观察、可取消且取消不切换活动索引', async () => {
-  const { service, kbId } = await fixture(); await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); await service.saveConfig(kbId, { chunkTargetSize: 700 }); const oldIndex = service.overview(kbId).knowledgeBase.activeIndexVersionId
+  const { service, kbId } = await fixture(); await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); await service.saveConfig(kbId, { chunkTargetSize: 700, chunkMaxSize: 800 }); const oldIndex = service.overview(kbId).knowledgeBase.activeIndexVersionId
   const cancelled = await service.queueRebuild(kbId); const running = service.processQueuedRebuild(cancelled.id); await new Promise(resolvePromise => setTimeout(resolvePromise, 50)); await service.cancelTask(cancelled.id); await running; assert.equal(service.tasks(kbId).find(task => task.id === cancelled.id)?.status, 'cancelled'); assert.equal(service.overview(kbId).knowledgeBase.activeIndexVersionId, oldIndex)
   const queued = await service.queueRebuild(kbId); await service.processQueuedRebuild(queued.id); assert.equal(service.tasks(kbId).find(task => task.id === queued.id)?.status, 'succeeded'); assert.notEqual(service.overview(kbId).knowledgeBase.activeIndexVersionId, oldIndex)
 })

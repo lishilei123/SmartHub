@@ -3,7 +3,12 @@ import { defaultConfig, type AssetType, type AssetVersion, type Chunk, type Data
 import type { StateStore } from '../infrastructure/store.js'
 import { RawDocumentStore } from '../infrastructure/raw-document-store.js'
 import type { LocalModelRuntime } from '../infrastructure/local-model-runtime.js'
-import { chunkDocument, cosine, embedding, sha256 } from './content.js'
+import { RemoteEmbeddingClient } from '../infrastructure/remote-embedding-client.js'
+import type { StoredChunkCandidate } from '../infrastructure/store.js'
+import { chunkDocument, cosine, defaultTokenCodec, embedding, sha256, type TokenCodec } from './content.js'
+
+type RetrievalInput = { assetType?: AssetType; sourceType?: SourceType; logicalPath?: string }
+type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; vectorScore: number; score: number }
 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
@@ -11,12 +16,13 @@ const compatibilityFingerprint = (config: KnowledgeConfig) => sha256(JSON.string
 const queryFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ keywordRecall: config.keywordRecall, vectorRecall: config.vectorRecall, finalResults: config.finalResults, relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerModel: config.rerankerModel }))
 
 export class KnowledgeService {
-  constructor(readonly store: StateStore, private readonly rawDocuments?: RawDocumentStore, private readonly localModels?: LocalModelRuntime) {}
+  constructor(readonly store: StateStore, private readonly rawDocuments?: RawDocumentStore, private readonly localModels?: LocalModelRuntime, private readonly remoteEmbeddings = new RemoteEmbeddingClient()) {}
   async initialize() {
     await this.store.load()
     await this.store.transaction(state => {
       state.directories ??= []
       state.configs.forEach(item => { const legacyHashModel = !item.config.embeddingModel || item.config.embeddingModel === 'hash-embedding-v1'; item.config = { ...defaultConfig, ...item.config, embeddingMode: item.config.embeddingMode ?? 'local', ...(legacyHashModel ? { embeddingModel: defaultConfig.embeddingModel, embeddingDimensions: defaultConfig.embeddingDimensions, rerankerModel: defaultConfig.rerankerModel } : {}) } })
+      state.versions.forEach(version => version.chunks.forEach(chunk => { chunk.tokenCount ??= defaultTokenCodec.count(chunk.content) }))
       state.assets.forEach(asset => ensureDirectoryPath(state, asset.knowledgeBaseId, asset.logicalPath.replaceAll('\\', '/').split('/').slice(0, -1)))
     })
   }
@@ -262,24 +268,28 @@ export class KnowledgeService {
 
   async search(knowledgeBaseId: string, input: { query: string; mode?: 'keyword' | 'vector' | 'hybrid'; assetType?: AssetType; sourceType?: SourceType; logicalPath?: string }) {
     const state = this.store.read(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    const query = input.query.trim()
+    if (!query) throw new Error('检索内容不能为空')
     if (!state.versions.some(item => item.status === 'ready' && state.assets.some(asset => asset.knowledgeBaseId === knowledgeBaseId && asset.activeVersionId === item.id))) return { status: 'no_ready_assets', results: [] }
     if (!kb.activeIndexVersionId) return { status: 'no_active_index', results: [] }
     const index = required(state.indexes.find(item => item.id === kb.activeIndexVersionId), '活动索引不存在')
     const config = required(state.configs.find(item => item.id === index.configVersionId), '索引配置不存在').config
-    const terms = input.query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []
     const mode = input.mode ?? (config.hybridSearch ? 'hybrid' : 'keyword')
-    if (mode !== 'keyword' && config.embeddingMode === 'local' && this.localModels) await this.localModels.ensureRunning(config.embeddingModel)
-    const queryVector = mode === 'keyword' ? [] : config.embeddingMode === 'local' && this.localModels ? (await this.localModels.embed(config.embeddingModel, [input.query]))[0] : embedding(input.query, config.embeddingDimensions)
-    const candidates = index.assetVersionIds.flatMap(versionId => {
-      const version = state.versions.find(item => item.id === versionId); const asset = state.assets.find(item => item.id === version?.assetId)
-      if (!version || !asset || (input.assetType && asset.assetType !== input.assetType) || (input.sourceType && asset.sourceType !== input.sourceType) || (input.logicalPath && !asset.logicalPath.includes(input.logicalPath))) return []
-      const indexedChunks = index.indexedChunks?.filter(chunk => chunk.assetVersionId === version.id) ?? version.chunks
-      return indexedChunks.map(chunk => {
-        const text = chunk.content.toLocaleLowerCase(); const keyword = terms.length ? terms.filter(term => text.includes(term)).length / terms.length : 0; const vector = mode === 'keyword' ? 0 : (cosine(queryVector, chunk.embedding) + 1) / 2
-        const score = mode === 'keyword' ? keyword : mode === 'vector' ? vector : keyword * .45 + vector * .55
-        return { score, retrievalMode: mode, asset: { id: asset.id, displayName: asset.displayName, assetType: asset.assetType, sourceType: asset.sourceType, logicalPath: asset.logicalPath }, version: { id: version.id, number: version.number }, chunk: { id: chunk.id, chunkKey: chunk.chunkKey, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar }, excerpt: chunk.content.slice(0, 280) }
-      })
-    }).filter(item => item.score >= config.relevanceThreshold).sort((a, b) => b.score - a.score).slice(0, config.finalResults)
+    const queryVector = mode === 'keyword' ? undefined : (await this.embedTexts(config, [query]))[0]
+    const [keywordCandidates, vectorCandidates] = await Promise.all([
+      mode === 'vector' ? Promise.resolve([]) : this.recall(index, config, 'keyword', query, undefined, config.keywordRecall, input),
+      mode === 'keyword' ? Promise.resolve([]) : this.recall(index, config, 'vector', query, queryVector, config.vectorRecall, input),
+    ])
+    const merged = mergeCandidates(keywordCandidates, vectorCandidates, mode)
+    const reranked = config.rerankerEnabled && merged.length ? await this.rerank(config, query, merged) : merged
+    const candidates = reranked.filter(item => item.score >= config.relevanceThreshold).sort((a, b) => b.score - a.score).slice(0, config.finalResults).map(item => ({
+      score: item.score,
+      retrievalMode: mode,
+      asset: item.candidate.asset,
+      version: item.candidate.version,
+      chunk: item.candidate.chunk,
+      excerpt: item.candidate.content.slice(0, 280),
+    }))
     return { status: candidates.length ? 'ok' : 'no_matches', indexVersionId: index.id, results: candidates }
   }
 
@@ -292,7 +302,12 @@ export class KnowledgeService {
       const members = state.assets.filter(item => item.knowledgeBaseId === knowledgeBaseId && item.activeVersionId).map(item => item.activeVersionId!)
       const config = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
       const rebuiltChunks: Chunk[] = []
-      for (const versionId of members) { const version = required(state.versions.find(item => item.id === versionId), '资产版本不存在'); rebuiltChunks.push(...(await this.createChunks(version.content, config.config)).map(chunk => ({ ...chunk, assetVersionId: version.id }))) }
+      for (const versionId of members) {
+        const version = required(state.versions.find(item => item.id === versionId), '资产版本不存在')
+        const chunks = (await this.createChunks(version.content, config.config)).map(chunk => ({ ...chunk, assetVersionId: version.id }))
+        version.chunks = chunks
+        rebuiltChunks.push(...chunks)
+      }
       const index = publishIndex(state, knowledgeBaseId, kb.activeConfigVersionId, members, rebuiltChunks); config.requiresRebuild = false; task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.metrics = { chunks: rebuiltChunks.length, embeddedChunks: rebuiltChunks.length }; return { task, index, previousIndexVersionId: oldIndexId }
     })
   }
@@ -335,13 +350,58 @@ export class KnowledgeService {
   }
 
   private async createChunks(content: string, config: KnowledgeConfig, previous: Chunk[] = []): Promise<Chunk[]> {
-    const chunks: Chunk[] = chunkDocument(content, config, previous)
-    if (config.embeddingMode !== 'local' || !this.localModels) return chunks
-    await this.localModels.ensureRunning(config.embeddingModel)
+    const tokenizer = await this.tokenizer(config)
+    const chunks: Chunk[] = chunkDocument(content, config, previous, tokenizer)
+    chunks.filter(chunk => chunk.reused && chunk.embedding.length !== config.embeddingDimensions).forEach(chunk => { chunk.reused = false; chunk.embedding = [] })
     const changed = chunks.filter(chunk => !chunk.reused)
-    const vectors = await this.localModels.embed(config.embeddingModel, changed.map(chunk => chunk.content))
+    const vectors = await this.embedTexts(config, changed.map(chunk => chunk.content))
     changed.forEach((chunk, index) => { chunk.embedding = required(vectors[index], '本地模型未返回完整向量结果') })
     return chunks
+  }
+
+  private async tokenizer(config: KnowledgeConfig): Promise<TokenCodec> {
+    if (config.embeddingMode === 'remote_api') return this.remoteEmbeddings.tokenCodec(config.embeddingModel)
+    return (this.localModels ? await this.localModels.tokenCodec(config.embeddingModel) : null) ?? defaultTokenCodec
+  }
+
+  private async embedTexts(config: KnowledgeConfig, texts: string[], model = config.embeddingModel) {
+    if (!texts.length) return []
+    if (config.embeddingMode === 'remote_api') return this.remoteEmbeddings.embed(config, texts, model)
+    if (this.localModels) {
+      await this.localModels.ensureRunning(model)
+      const vectors: number[][] = []
+      for (let offset = 0; offset < texts.length; offset += config.embeddingBatchSize) vectors.push(...await this.localModels.embed(model, texts.slice(offset, offset + config.embeddingBatchSize)))
+      return vectors
+    }
+    return texts.map(text => embedding(text, config.embeddingDimensions))
+  }
+
+  private async recall(index: DatabaseState['indexes'][number], config: KnowledgeConfig, mode: 'keyword' | 'vector', query: string, queryVector: number[] | undefined, limit: number, filters: RetrievalInput) {
+    if (this.store.searchChunks) return this.store.searchChunks({ versionIds: index.assetVersionIds, mode, query, queryVector, dimensions: config.embeddingDimensions, limit, assetType: filters.assetType, sourceType: filters.sourceType, logicalPath: filters.logicalPath })
+    const state = this.store.read()
+    const terms = query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []
+    return index.assetVersionIds.flatMap(versionId => {
+      const version = state.versions.find(item => item.id === versionId)
+      const asset = state.assets.find(item => item.id === version?.assetId)
+      if (!version || !asset || (filters.assetType && asset.assetType !== filters.assetType) || (filters.sourceType && asset.sourceType !== filters.sourceType) || (filters.logicalPath && !asset.logicalPath.includes(filters.logicalPath))) return []
+      const chunks = index.indexedChunks?.filter(chunk => chunk.assetVersionId === version.id) ?? version.chunks
+      return chunks.map(chunk => {
+        const text = chunk.content.toLocaleLowerCase()
+        const score = mode === 'keyword'
+          ? (terms.length ? terms.filter(term => text.includes(term)).length / terms.length : 0)
+          : (cosine(required(queryVector, '查询向量不存在'), chunk.embedding) + 1) / 2
+        return { score, asset: { id: asset.id, displayName: asset.displayName, assetType: asset.assetType, sourceType: asset.sourceType, logicalPath: asset.logicalPath }, version: { id: version.id, number: version.number }, chunk: { id: chunk.id, chunkKey: chunk.chunkKey, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar }, content: chunk.content } satisfies StoredChunkCandidate
+      })
+    }).sort((left, right) => right.score - left.score).slice(0, limit)
+  }
+
+  private async rerank(config: KnowledgeConfig, query: string, candidates: RankedCandidate[]) {
+    const vectors = await this.embedTexts(config, [query, ...candidates.map(item => item.candidate.content)], config.rerankerModel)
+    const queryVector = required(vectors[0], 'Reranker 未返回查询向量')
+    return candidates.map((item, index) => {
+      const semanticScore = (cosine(queryVector, required(vectors[index + 1], 'Reranker 未返回完整候选向量')) + 1) / 2
+      return { ...item, score: item.score * 0.6 + semanticScore * 0.4 }
+    })
   }
 
   private async relocateAssets(state: DatabaseState, knowledgeBaseId: string, oldPrefix: string, newPrefix: string) {
@@ -358,6 +418,20 @@ export class KnowledgeService {
     return moves.length
   }
 
+}
+
+function mergeCandidates(keyword: StoredChunkCandidate[], vector: StoredChunkCandidate[], mode: 'keyword' | 'vector' | 'hybrid') {
+  const merged = new Map<string, RankedCandidate>()
+  for (const candidate of keyword) merged.set(candidate.chunk.id, { candidate, keywordScore: candidate.score, vectorScore: 0, score: candidate.score })
+  for (const candidate of vector) {
+    const current = merged.get(candidate.chunk.id)
+    if (current) current.vectorScore = candidate.score
+    else merged.set(candidate.chunk.id, { candidate, keywordScore: 0, vectorScore: candidate.score, score: candidate.score })
+  }
+  return [...merged.values()].map(item => ({
+    ...item,
+    score: mode === 'keyword' ? item.keywordScore : mode === 'vector' ? item.vectorScore : item.keywordScore * 0.45 + item.vectorScore * 0.55,
+  })).sort((left, right) => right.score - left.score)
 }
 
 function validateDirectoryName(name: string) { const value = name.trim(); if (!value) throw new Error('目录名称不能为空'); if (/[\\/]/.test(value) || value === '.' || value === '..') throw new Error('目录名称不能包含路径分隔符'); return value }
