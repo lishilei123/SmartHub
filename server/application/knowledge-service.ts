@@ -284,7 +284,8 @@ export class KnowledgeService {
     ])
     const merged = mergeCandidates(keywordCandidates, vectorCandidates, mode)
     const reranked = config.rerankerEnabled && merged.length ? await this.rerank(config, query, merged) : merged
-    const candidates = reranked.filter(item => item.score >= config.relevanceThreshold).sort((a, b) => b.score - a.score).slice(0, config.finalResults).map(item => ({
+    const eligible = reranked.filter(item => item.score >= config.relevanceThreshold).sort((a, b) => b.score - a.score)
+    const candidates = eligible.slice(0, config.finalResults).map(item => ({
       score: item.score,
       retrievalMode: mode,
       asset: item.candidate.asset,
@@ -293,7 +294,12 @@ export class KnowledgeService {
       excerpt: item.candidate.content.slice(0, 280),
       scores: { keyword: item.keywordScore, vector: item.vectorScore, reranker: item.rerankerScore, final: item.score },
     }))
-    return { status: candidates.length ? 'ok' : 'no_matches', indexVersionId: index.id, results: candidates }
+    return {
+      status: candidates.length ? 'ok' : 'no_matches',
+      indexVersionId: index.id,
+      retrieval: { mode, minimumRelevance: config.relevanceThreshold, keywordCandidates: keywordCandidates.length, vectorCandidates: vectorCandidates.length, mergedCandidates: merged.length, eligibleCandidates: eligible.length, returned: candidates.length, rerankerEnabled: config.rerankerEnabled },
+      results: candidates,
+    }
   }
 
   async rebuild(knowledgeBaseId: string, outcome: 'success' | 'failure' | 'cancel' = 'success') {
