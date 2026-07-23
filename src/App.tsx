@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SetStateAction } from 'react'
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import {
   Activity, AlertTriangle, ArrowDown, ArrowUp, BookOpen, Bot, BrainCircuit, Check, CheckCircle2, ChevronDown,
   ChevronRight, CircleHelp, Clock3, Code2, Columns2, Database, Download, FileCode2, FileText,
@@ -7,13 +7,14 @@ import {
   TestTube2, Trash2, Upload, Users, XCircle, Zap,
 } from 'lucide-react'
 import {
-  initialSettings, requirementsByVersion, type KnowledgeDirectory, type KnowledgeDocument, type Requirement,
+  initialSettings, type KnowledgeDirectory, type KnowledgeDocument,
   type EmbeddingSourceDraft, type GenerativeModelDraft, type GenerativeSourceDraft, type SettingsDraft, type Version,
 } from './prototype-data'
 import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, discoverGenerativeModels, ensureKnowledgeBase, loadAssetVersion, loadConfig, loadGenerativeModelSources, loadKnowledgeAssets, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, probeGenerativeModel, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, saveGenerativeModelSources, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
+import { RequirementReviewPage } from './RequirementReviewPage'
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
 type NotifyTone = 'success' | 'error' | 'warning'
@@ -32,7 +33,7 @@ const restorePage = (): PageKey => {
 
 const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: string }[] = [
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard },
-  { key: 'requirements', label: '需求分析', icon: BrainCircuit, hint: '3' },
+  { key: 'requirements', label: '需求分析', icon: BrainCircuit },
   { key: 'design', label: '测试设计', icon: TestTube2, hint: '8' },
   { key: 'execution', label: '测试执行', icon: Play },
   { key: 'reports', label: '报告与诊断', icon: Activity },
@@ -84,10 +85,8 @@ function App() {
   const [version, setVersion] = useState<Version>('V3.6')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toast, setToast] = useState<{ id: number; message: string; tone: NotifyTone } | null>(null)
-  const [requirementLists, setRequirementLists] = useState<Record<Version, Requirement[]>>(requirementsByVersion)
   const [knowledgeDirectoryList, setKnowledgeDirectoryList] = useState<KnowledgeDirectory[]>([])
   const [knowledgeDocumentList, setKnowledgeDocumentList] = useState<KnowledgeDocument[]>([])
-  const [requirementCreateOpen, setRequirementCreateOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const [audit, setAudit] = useState<string[]>(['已打开当前会话的 SmartHub 本地原型'])
   const [knowledgeBaseId, setKnowledgeBaseId] = useState('')
@@ -129,23 +128,6 @@ function App() {
     void connect()
     return () => { cancelled = true; if (retryTimer) window.clearTimeout(retryTimer) }
   }, [])
-  const addRequirement = (title: string) => {
-    const item: Requirement = {
-      id: `REQ-LOCAL-${Date.now().toString().slice(-5)}`,
-      title,
-      version: '草稿',
-      updated: '刚刚',
-      author: '李磊',
-      status: '待分析',
-      intro: '当前会话中新建的本地需求分析草稿，刷新页面后将恢复为示例数据。',
-      sections: ['需求说明', '业务规则', '验收标准'],
-      findings: [],
-    }
-    setRequirementLists(current => ({ ...current, [version]: [item, ...current[version]] }))
-    setAudit(current => [`创建本地需求分析：${title}`, ...current])
-    notify('已创建本地需求分析草稿；刷新页面后不会保留。')
-  }
-
   const meta = pageMeta[page]
 
   return <div className={`app-shell ${sidebarCollapsed ? 'shell-collapsed' : ''}`}>
@@ -167,10 +149,10 @@ function App() {
       <button className="sidebar-foot" onClick={() => notify('帮助与反馈为静态原型说明：当前数据仅保留在本次会话中。')}><CircleHelp size={17} /><span>帮助与反馈</span><span className="version">v0.1</span></button>
     </aside>
     <main>
-      <section className={`content ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
-        <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div>{page === 'requirements' && <div className="head-actions"><button className="btn ghost" onClick={() => setActivityOpen(true)}><Clock3 size={16} />操作记录</button><button className="btn primary" onClick={() => setRequirementCreateOpen(true)}><Plus size={17} />新建需求分析</button></div>}</div>
+      <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
+        {page !== 'requirements' && <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>}
         {page === 'dashboard' && <Dashboard navigate={setPage} version={version} />}
-        {page === 'requirements' && <Requirements version={version} requirements={requirementLists[version]} createOpen={requirementCreateOpen} setCreateOpen={setRequirementCreateOpen} onCreate={addRequirement} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
+        {page === 'requirements' && <RequirementReviewPage version={version} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onOpenKnowledge={() => setPage('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} directories={knowledgeDirectoryList} documents={knowledgeDocumentList} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'design' && <StaticNotice title="测试设计" text="测试设计页面仍展示示例资产；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'execution' && <StaticNotice title="测试执行" text="测试执行页面仍展示示例执行数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
@@ -184,110 +166,11 @@ function App() {
 }
 
 function Dashboard({ navigate, version }: { navigate: (page: PageKey) => void; version: Version }) {
-  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> 当前版本 {version}</Badge><h2>本地原型交互已接通</h2><p>知识库上传、模型运行、文档解析与索引同步均连接本地 API 和 PostgreSQL；未进入一期范围的需求 AI 功能仍使用示例数据。</p><div><button className="btn primary" onClick={() => navigate('requirements')}>进入需求分析</button><button className="btn ghost" onClick={() => navigate('documents')}>查看知识库</button></div></section><section className="card quick-card"><BrainCircuit /><h3>需求分析</h3><p>搜索需求、切换分析视图并运行可取消的本地模拟任务。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求分析 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>真实上传、解析、保存文档并浏览固定版本证据。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>配置并运行系统内置模型，管理知识库索引。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
+  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> 当前版本 {version}</Badge><h2>知识资产与需求评审已接通</h2><p>知识库上传、固定版本、模型配置和 RequirementAnalysisAgent 均连接本地 API；需求评审结果只展示真实模型与服务端校验结果。</p><div><button className="btn primary" onClick={() => navigate('requirements')}>进入需求评审</button><button className="btn ghost" onClick={() => navigate('documents')}>查看知识库</button></div></section><section className="card quick-card"><BrainCircuit /><h3>需求评审</h3><p>从 ready 的固定需求版本发起真实分析，查看 Finding、证据与原文联动。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求评审 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>真实上传、解析、保存文档并浏览固定版本证据。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>配置并运行系统内置模型，管理知识库索引。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
 }
 
 function StaticNotice({ title, text }: { title: string; text: string }) {
   return <section className="card static-notice"><h2>{title}</h2><p>{text}</p></section>
-}
-
-function Requirements({ version, requirements, createOpen, setCreateOpen, onCreate, notify, addAudit }: { version: Version; requirements: Requirement[]; createOpen: boolean; setCreateOpen: Dispatch<SetStateAction<boolean>>; onCreate: (title: string) => void; notify: Notify; addAudit: (entry: string) => void }) {
-  const [selectedId, setSelectedId] = useState(requirements[0]?.id ?? '')
-  const [query, setQuery] = useState('')
-  const [directoryCollapsed, setDirectoryCollapsed] = useState(false)
-  const [tab, setTab] = useState<'overview' | 'source' | 'diff' | 'tree' | 'evidence'>('overview')
-  const [job, setJob] = useState<JobStatus>('idle')
-  const [progress, setProgress] = useState(0)
-  const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
-  const [prompt, setPrompt] = useState('')
-  const [newTitle, setNewTitle] = useState('')
-  const [titleError, setTitleError] = useState('')
-  const jobTimer = useRef<number | undefined>(undefined)
-  const replyTimer = useRef<number | undefined>(undefined)
-
-  useEffect(() => {
-    if (!requirements.some(item => item.id === selectedId)) setSelectedId(requirements[0]?.id ?? '')
-    setJob('idle')
-    setProgress(0)
-    setMessages([])
-    setTab('overview')
-  }, [version, requirements, selectedId])
-  useEffect(() => () => {
-    if (jobTimer.current) window.clearInterval(jobTimer.current)
-    if (replyTimer.current) window.clearTimeout(replyTimer.current)
-  }, [])
-
-  const selected = requirements.find(item => item.id === selectedId) ?? requirements[0]
-  const filtered = requirements.filter(item => `${item.title} ${item.id}`.toLowerCase().includes(query.toLowerCase()))
-  if (!selected) return null
-
-  const stopJobTimer = () => { if (jobTimer.current) window.clearInterval(jobTimer.current); jobTimer.current = undefined }
-  const startAnalysis = () => {
-    if (job === 'running') return
-    stopJobTimer()
-    setJob('running')
-    setProgress(12)
-    addAudit(`启动“${selected.title}”的本地 AI 分析模拟`)
-    jobTimer.current = window.setInterval(() => {
-      setProgress(current => {
-        const next = Math.min(current + 18, 100)
-        if (next === 100) {
-          stopJobTimer()
-          setJob('completed')
-          addAudit(`完成“${selected.title}”的本地 AI 分析模拟`)
-          notify('本地模拟分析已完成，未调用真实模型或知识库。')
-        }
-        return next
-      })
-    }, 650)
-  }
-  const cancelAnalysis = () => {
-    stopJobTimer()
-    setJob('cancelled')
-    addAudit(`取消“${selected.title}”的本地 AI 分析模拟`)
-    notify('已取消本地模拟分析；已有示例数据保持不变。')
-  }
-  const submitQuestion = (question = prompt) => {
-    const value = question.trim()
-    if (!value || replyTimer.current) return
-    setMessages(current => [...current, { role: 'user', text: value }])
-    setPrompt('')
-    replyTimer.current = window.setTimeout(() => {
-      const answer = selected.findings.length
-        ? `本地模拟回答：${selected.findings[0].title}。${selected.findings[0].text} 该结论引用当前页面的示例需求与分析结果。`
-        : '本地模拟回答：当前需求尚无分析结论。请先运行本地模拟分析，再基于示例结果继续提问。'
-      setMessages(current => [...current, { role: 'assistant', text: answer }])
-      replyTimer.current = undefined
-    }, 420)
-  }
-  const createRequirement = () => {
-    const value = newTitle.trim()
-    if (!value) { setTitleError('请输入需求分析名称。'); return }
-    onCreate(value)
-    setNewTitle('')
-    setTitleError('')
-    setCreateOpen(false)
-  }
-  const jobDescription = job === 'running' ? '正在按阶段检查需求结构、示例证据与测试点...' : job === 'completed' ? '本地模拟分析已完成，可重新运行。' : job === 'cancelled' ? '本地模拟分析已取消，可重新运行。' : '尚未启动本地模拟分析。'
-
-  return <div className={`split-layout ${directoryCollapsed ? 'directory-collapsed' : ''}`}>
-    <section className={`card side-list ${directoryCollapsed ? 'collapsed' : ''}`}><div className="filter-row"><div className="mini-search"><Search size={15} /><input aria-label="搜索需求" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索需求" /></div><button className="icon-btn directory-toggle" onClick={() => setDirectoryCollapsed(value => !value)} aria-label={directoryCollapsed ? '展开需求目录' : '收起需求目录'}>{directoryCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" onClick={() => setCreateOpen(true)} aria-label="新建需求分析"><Plus /></button></div>{filtered.length ? filtered.map(item => <button key={item.id} className={`doc-row ${selected.id === item.id ? 'selected' : ''}`} onClick={() => setSelectedId(item.id)}><FileText size={18} /><span><b>{item.title}</b><small>{item.id} · {item.status}</small></span>{item.status === '分析中' && <i />}</button>) : <p className="empty-state">没有匹配的需求。</p>}</section>
-    <section className="card requirement-main"><div className="document-title"><div><Badge tone="blue">需求 {selected.version}</Badge><h2>{selected.title}</h2><p>更新于 {selected.updated} · {selected.author} · 当前版本 {version}</p></div><div className="button-stack">{job === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle size={17} />取消模拟</button> : <button className="btn primary" onClick={startAnalysis}><Sparkles size={17} />{job === 'completed' ? '重新模拟分析' : '一键 AI 分析'}</button>}<small>本地模拟</small></div></div>
-      <div className={`analysis-progress ${job}`} aria-live="polite"><div className="spinner"><BrainCircuit size={22} /></div><div><b>{job === 'running' ? 'AI 正在分析需求' : job === 'completed' ? '分析结果已生成' : '本地分析准备就绪'}</b><span>{jobDescription}</span><Progress value={progress} /></div><strong>{progress}%</strong></div>
-      <div className="tabs" role="tablist" aria-label="需求分析内容">{([['overview', '分析概览'], ['source', '原始文档'], ['diff', '版本差异'], ['tree', '功能树'], ['evidence', '证据引用']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} role="tab" aria-selected={tab === key} onClick={() => setTab(key)}>{label}</button>)}</div>
-      <RequirementTab tab={tab} requirement={selected} />
-    </section>
-    <aside className="ai-panel card"><div className="ai-head"><div className="ai-avatar"><Sparkles size={17} /></div><span><b>需求 AI 助手</b><small>仅使用当前页面的本地示例数据</small></span><Badge tone="violet">模拟</Badge></div><div className="chat-history">{messages.length ? messages.map((message, index) => <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}><b>{message.role === 'user' ? '你' : '本地助手'}</b><p>{message.text}</p></div>) : <div className="chat-empty"><div><Bot size={29} /></div><h3>有什么想进一步了解？</h3><p>回答会明确标注为本地模拟，不会调用模型或泄露真实知识库内容。</p>{['帮我补充验收标准', '列出所有异常场景', '解释当前风险'].map(question => <button key={question} onClick={() => submitQuestion(question)}>{question}</button>)}</div>}</div><div className="chat-input"><textarea aria-label="针对当前需求提问" value={prompt} onChange={event => setPrompt(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitQuestion() } }} placeholder="针对当前需求提问..." /><button onClick={() => submitQuestion()} aria-label="发送问题" disabled={!prompt.trim()}><Sparkles size={17} /></button></div></aside>
-    {createOpen && <Modal title="新建需求分析" onClose={() => { setCreateOpen(false); setTitleError('') }}><div className="modal-form"><p>新建内容仅保留在当前会话，刷新页面后会恢复示例数据。</p><label>需求分析名称<input value={newTitle} onChange={event => { setNewTitle(event.target.value); setTitleError('') }} autoFocus placeholder="例如：支付退款异常分析" /></label>{titleError && <small className="field-error">{titleError}</small>}<div className="modal-actions"><button className="btn ghost" onClick={() => setCreateOpen(false)}>取消</button><button className="btn primary" onClick={createRequirement}>创建本地草稿</button></div></div></Modal>}
-  </div>
-}
-
-function RequirementTab({ tab, requirement }: { tab: 'overview' | 'source' | 'diff' | 'tree' | 'evidence'; requirement: Requirement }) {
-  if (tab === 'source') return <pre className="requirement-source">{`# ${requirement.title}\n\n${requirement.intro}\n\n${requirement.sections.map((section, index) => `## ${index + 1}. ${section}\n\n此处为当前版本的本地示例需求内容。`).join('\n\n')}`}</pre>
-  if (tab === 'diff') return <section className="tab-panel"><h3>版本差异（本地示例）</h3><div className="diff-line add">+ 补充退款请求必须携带唯一幂等键。</div><div className="diff-line add">+ 明确部分退款金额不得超过可退款余额。</div><div className="diff-line remove">- 删除未说明处理方式的“异常退款”描述。</div></section>
-  if (tab === 'tree') return <section className="tab-panel"><h3>功能树</h3>{requirement.sections.map((section, index) => <div className="feature-node" key={section}><ChevronRight /> <b>{index + 1}. {section}</b><span>建议 {index + 3} 个测试点</span></div>)}</section>
-  if (tab === 'evidence') return <section className="tab-panel"><h3>证据引用</h3>{requirement.findings.length ? requirement.findings.map(finding => <div className="evidence" key={finding.title}><FileText /><span><b>{finding.title}</b><small>当前需求 {requirement.version} · 本地 fixture</small></span><Badge tone={finding.tone}>{finding.tag}</Badge></div>) : <p className="empty-state">当前本地草稿尚未生成示例证据。</p>}</section>
-  return <><div className="analysis-grid"><div className="analysis-card"><span>结构化需求</span><strong>{requirement.sections.length * 9}</strong><small>本地识别项</small></div><div className="analysis-card warning"><span>待确认问题</span><strong>{requirement.findings.length}</strong><small>需人工确认</small></div><div className="analysis-card danger"><span>潜在风险</span><strong>{requirement.findings.filter(item => item.tone !== 'blue').length}</strong><small>来自示例结果</small></div><div className="analysis-card success-card"><span>测试点建议</span><strong>{requirement.sections.length * 12}</strong><small>本地估算</small></div></div><div className="findings"><h3>重点分析结论</h3>{requirement.findings.length ? requirement.findings.map(finding => <div className="finding" key={finding.title}><div className={`finding-icon ${finding.tone}`}><AlertTriangle size={18} /></div><div><b>{finding.title}</b><p>{finding.text}</p></div><Badge tone={finding.tone}>{finding.tag}</Badge></div>) : <p className="empty-state">运行本地模拟分析后可查看示例结论。</p>}</div></>
 }
 
 function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, documents, notify, addAudit }: { knowledgeBaseId: string; apiState: 'connecting' | 'ready' | 'offline'; refreshKnowledge: (includeDeleted?: boolean) => Promise<void>; directories: KnowledgeDirectory[]; documents: KnowledgeDocument[]; notify: Notify; addAudit: (entry: string) => void }) {
