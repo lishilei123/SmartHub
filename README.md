@@ -1,11 +1,13 @@
-# SmartHub Phase 1
+# SmartHub Phase 1 + Phase 2 Agent M2
 
-当前仓库已按《第一期：项目知识库构建与配置需求文档》实现可运行的一期资料接入与检索闭环，同时保留后续阶段的产品原型页面。
+当前仓库已实现第一期资料接入与检索闭环，并按第二期技术方案完成可运行的 `RequirementAnalysisAgent` 与受控工具底座。正式 ReviewRun/Job 持久化、Finding 人工处置和评审页面属于第二期后续 M3～M5，不由 Agent 适配层代替。
 
-## 一期文档
+## 阶段文档
 
 - [一期需求文档](需求文档/第一期-项目知识库构建与配置需求文档.md)
 - [一期技术方案（含架构设计）](技术文档/第一期-项目知识库构建与配置技术文档.md)
+- [第二期需求文档](需求文档/第二期-需求评审与大模型配置需求文档.md)
+- [第二期技术方案](技术文档/第二期-需求评审与大模型配置技术文档.md)
 
 ## 已实现
 
@@ -31,6 +33,30 @@
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、配置版本、资产、不可变版本、资产 Chunk、索引固定 Chunk 和任务分别写入 `smarthub` schema。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除，不再全库 `TRUNCATE + 重写`。Chunk 向量使用 pgvector 的 `vector` 类型，并为默认384维模型建立 HNSW 余弦索引。首次连接时会安装可用的 `vector`、`pg_trgm` 扩展、自动建表或迁移旧向量。未配置 `DATABASE_URL` 时回退到 JSON 文件和进程内精确检索。
 
 生产 API 注入 SmartHub 内置模型运行池。知识库配置先选择来源，再选择该来源中的生效模型；本地模式下上传解析、索引重建和向量/混合检索均路由到所选模型，发现模型未运行时会自动拉取并启动，同时不会停止池内其他模型。单元测试通过运行时接口注入轻量测试模型，不下载大模型。
+
+## 第二期 RequirementAnalysisAgent
+
+- 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
+- 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
+- Agent 定义、Prompt、工具列表、执行限制和内容 Hash 独立版本化；
+- 每次运行固定 requirement 资产版本、活动索引版本、模型与 Agent 定义，不在运行中漂移到最新资料；
+- 默认开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `review.submit_result`。PI 层使用兼容模型协议的安全函数名，业务审计仍记录稳定工具 ID；
+- 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；
+- `review.submit_result` 只产生候选结果，框架外 `ReviewResultValidator` 再校验 Schema、固定索引证据、引用摘录、严重度与证据门槛；
+- PI 生命周期事件只保留安全元数据，支持外部 `AbortSignal`、运行截止时间、最大 turn 和最大工具调用限制。
+
+运行前需要先在“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型，同时确保目标 `requirement` 资产版本为 `ready` 且属于当前活动索引。当前薄 API 同步返回经过校验的候选结果，供 M3 Review Worker/ReviewRun 持久化层接管：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$body = @{
+  assetVersionId = '<ready requirement assetVersionId>'
+  sourceId = '<model source id>'
+  modelId = '<enabled model id>'
+  focusAreas = @('状态与异常', '可测试性')
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/requirement-analysis/run' -ContentType 'application/json; charset=utf-8' -Body $body
+```
 
 ## 本地运行
 
@@ -80,7 +106,7 @@ npm test
 npm run build
 ```
 
-测试覆盖真实 Token 计数、最大长度、重叠和代码块保护、上传入队、处理中取消、候选索引切换、重复上传短路、局部 Chunk 复用、远程 Embedding 请求与失败语义、生成式模型连接的持久化/掩码读取/留空保留/发现/探测、检索自动降级、两路召回数量、Reranker、系统默认目录落盘、不可变原文快照、失败保留旧索引、固定版本证据和配置重建。
+测试覆盖真实 Token 计数、最大长度、重叠和代码块保护、上传入队、处理中取消、候选索引切换、重复上传短路、局部 Chunk 复用、远程 Embedding 请求与失败语义、生成式模型连接的持久化/掩码读取/留空保留/发现/探测、检索自动降级、两路召回数量、Reranker、系统默认目录落盘、不可变原文快照、失败保留旧索引、固定版本证据、配置重建，以及 PI Agent 真实工具循环、候选结果提交与独立校验。
 
 ## 接口摘要
 
@@ -95,6 +121,7 @@ npm run build
 - `POST /api/model-sources/discover`
 - `POST /api/model-sources/:sourceId/models/:modelId/probe`
 - `GET /api/models`
+- `POST /api/requirement-analysis/run`
 - `GET /api/knowledge-bases/:id/overview`
 - `GET|PUT /api/knowledge-bases/:id/config`
 - `POST /api/knowledge-bases/:id/embedding/test`
@@ -111,4 +138,4 @@ npm run build
 - `POST /api/knowledge-bases/:id/search`
 - `POST /api/knowledge-bases/:id/rebuild`
 
-一期明确不包含 AI 需求分析、AI 对话、Git/代码分析、测试执行、权限治理以及 PDF/Word/Excel/OpenAPI 专用解析器。
+当前 Agent 交付不包含技术方案生成、多 Agent 协作、Git/代码分析、测试执行，以及 PDF/Word/Excel/图片等专用解析能力。

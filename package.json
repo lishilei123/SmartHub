@@ -16,6 +16,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
     "@huggingface/transformers": "3.8.1",
     "@vitejs/plugin-react": "latest",
     "js-tiktoken": "^1.0.21",
@@ -28,6 +30,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
+    "typebox": "1.1.38",
     "unified": "^11.0.0",
     "unist-util-visit": "^5.1.0",
     "vite": "latest"
