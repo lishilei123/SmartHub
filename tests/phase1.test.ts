@@ -219,7 +219,7 @@ test('查询参数保存后立即覆盖活动索引中的旧查询参数', async
 
 test('FR-003/004 知识库凭据配置掩码返回且无变化不生成版本', async () => {
   const { service, kbId } = await fixture()
-  const remote = { id: 'remote-secure', name: '远程模型', type: 'remote_api' as const, baseUrl: 'https://embedding.example.com/v1', apiKey: 'config-secret', models: [{ name: 'embedding-secure', dimensions: 384 }] }
+  const remote = { id: 'remote-secure', name: '远程模型', type: 'remote_api' as const, baseUrl: 'https://embedding.example.com/v1', apiKey: 'config-secret', models: [{ name: 'embedding-secure', dimensions: 384 }, { name: 'embedding-secondary', dimensions: 768 }] }
   const saved = await service.saveConfig(kbId, { parserVersion: 'markdown-v2', preprocessVersion: 'normalize-v2', chunkTargetSize: 500, chunkMaxSize: 800, chunkOverlap: 50, headingDepth: 5, embeddingSourceId: remote.id, embeddingSources: [...defaultConfig.embeddingSources, remote], embeddingMode: 'remote_api', embeddingBaseUrl: remote.baseUrl, embeddingApiKey: remote.apiKey, embeddingModel: 'embedding-secure', embeddingDimensions: 384, embeddingBatchSize: 16, embeddingTimeoutMs: 15000, embeddingRetries: 3, keywordRecall: 30, vectorRecall: 50, finalResults: 10, relevanceThreshold: .4, hybridSearch: false, rerankerEnabled: false })
   const config = await service.config(kbId)
   assert.equal(saved.changed, true)
@@ -229,9 +229,26 @@ test('FR-003/004 知识库凭据配置掩码返回且无变化不生成版本', 
   assert.equal(config.config.embeddingSources.find(source => source.id === remote.id)?.apiKey, '')
   assert.doesNotMatch(JSON.stringify(config), /config-secret/u)
   assert.equal(service.store.read().configs.at(-1)?.config.embeddingSources.find(source => source.id === remote.id)?.apiKey, 'config-secret')
-  const unchanged = await service.saveConfig(kbId, config.config)
+
+  const edited = await service.saveConfig(kbId, {
+    embeddingSources: config.config.embeddingSources.map(source => source.id === remote.id ? { ...source, name: '已编辑远程模型', baseUrl: 'https://edited.example.com/v1', apiKey: '' } : source),
+  })
+  const editedConfig = await service.config(kbId)
+  const editedSource = editedConfig.config.embeddingSources.find(source => source.id === remote.id)
+  assert.equal(edited.changed, true)
+  assert.equal(editedConfig.config.embeddingSourceId, remote.id)
+  assert.equal(editedConfig.config.embeddingModel, 'embedding-secure')
+  assert.equal(editedConfig.config.embeddingDimensions, 384)
+  assert.equal(editedSource?.name, '已编辑远程模型')
+  assert.equal(editedSource?.baseUrl, 'https://edited.example.com/v1')
+  assert.deepEqual(editedSource?.models, remote.models)
+  assert.equal(editedSource?.apiKey, '')
+  assert.equal(service.store.read().configs.at(-1)?.config.embeddingSources.find(source => source.id === remote.id)?.apiKey, 'config-secret')
+  assert.doesNotMatch(JSON.stringify(editedConfig), /config-secret/u)
+
+  const unchanged = await service.saveConfig(kbId, editedConfig.config)
   assert.equal(unchanged.changed, false)
-  assert.equal(service.store.read().configs.filter(item => item.knowledgeBaseId === kbId).length, 2)
+  assert.equal(service.store.read().configs.filter(item => item.knowledgeBaseId === kbId).length, 3)
   await assert.rejects(() => service.saveConfig(kbId, { chunkTargetSize: 900, chunkMaxSize: 800 }), /最大大小/)
 })
 

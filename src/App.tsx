@@ -849,7 +849,7 @@ function FormSection({ title, desc, children }: { title: string; desc?: string; 
 function FormRow({ label, help, children }: { label: string; help: string; children: ReactNode }) { return <label className="form-row"><span><b>{label}</b><small>{help}</small></span><div>{children}</div></label> }
 function SwitchRow({ title, desc, checked, onChange }: { title: string; desc: string; checked: boolean; onChange: (value: boolean) => void }) { return <div className="form-row"><span><b>{title}</b><small>{desc}</small></span><label className="switch"><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} aria-label={title} /><i /></label></div> }
 
-type SourceEditorDraft = { name: string; baseUrl: string; apiKey: string; modelName: string }
+type SourceEditorDraft = { id?: string; name: string; baseUrl: string; apiKey: string; modelName: string }
 
 const localModelRecommendations = [
   { name: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', title: '多语言通用 · 推荐', detail: '中英文知识库 · 384 维' },
@@ -899,13 +899,32 @@ function EmbeddingModelPrototype({ knowledgeBaseId, draft, update, notify }: { k
   const updateSources = (sources: EmbeddingSourceDraft[]) => update('embeddingSources', sources)
   const replaceSource = (next: EmbeddingSourceDraft) => updateSources(draft.embeddingSources.map(source => source.id === next.id ? next : source))
 
-  const addSource = () => {
+  const saveSource = () => {
     if (!sourceEditor) return
-    const name = sourceEditor.name.trim(); const modelName = sourceEditor.modelName.trim()
-    if (!name || !modelName) { notify('请填写来源名称和模型名称。'); return }
-    if (!/^https?:\/\//i.test(sourceEditor.baseUrl)) { notify('远程来源 Base URL 必须使用 http:// 或 https://。'); return }
-    const source: EmbeddingSourceDraft = { id: crypto.randomUUID(), name, type: 'remote_api', baseUrl: sourceEditor.baseUrl.trim(), apiKey: sourceEditor.apiKey, models: [{ name: modelName, dimensions: 0 }] }
-    updateSources([...draft.embeddingSources, source]); applySelection(source); setSourceEditor(null)
+    const name = sourceEditor.name.trim(); const baseUrl = sourceEditor.baseUrl.trim()
+    if (!name) { notify('请填写来源名称。'); return }
+    if (!/^https?:\/\//i.test(baseUrl)) { notify('远程来源 Base URL 必须使用 http:// 或 https://。'); return }
+    if (sourceEditor.id) {
+      const current = draft.embeddingSources.find(source => source.id === sourceEditor.id)
+      if (!current || current.type !== 'remote_api') { notify('远程来源不存在，无法保存编辑。'); return }
+      const source: EmbeddingSourceDraft = { ...current, name, baseUrl, apiKey: sourceEditor.apiKey }
+      replaceSource(source)
+      if (draft.embeddingSourceId === source.id) {
+        const model = source.models.find(candidate => candidate.name === draft.embeddingModel)
+        if (model) applySelection(source, model)
+      }
+      setSourceEditor(null); notify(`已更新远程来源 ${name}。`)
+      return
+    }
+    const modelName = sourceEditor.modelName.trim()
+    if (!modelName) { notify('请填写首个模型名称。'); return }
+    const source: EmbeddingSourceDraft = { id: crypto.randomUUID(), name, type: 'remote_api', baseUrl, apiKey: sourceEditor.apiKey, models: [{ name: modelName, dimensions: 0 }] }
+    updateSources([...draft.embeddingSources, source]); setSourceEditor(null); notify(`已添加远程来源 ${name}，请在“知识库生效模型”中手动选择。`)
+  }
+
+  const editSource = (source: EmbeddingSourceDraft) => {
+    if (source.type !== 'remote_api') return
+    setSourceEditor({ id: source.id, name: source.name, baseUrl: source.baseUrl, apiKey: '', modelName: '' })
   }
 
   const addModel = (source: EmbeddingSourceDraft) => {
@@ -979,7 +998,7 @@ function EmbeddingModelPrototype({ knowledgeBaseId, draft, update, notify }: { k
   return <div className="model-resource-config">
     <div className="model-source-toolbar"><div><b>模型来源</b><small>本地模型始终可用；这里可以继续添加远程 API 来源</small></div><button className="btn primary" onClick={() => setSourceEditor({ name: '', baseUrl: '', apiKey: '', modelName: '' })}><Plus />添加远程来源</button></div>
     <div className="model-source-list">{draft.embeddingSources.map(source => <section className={`model-source-card ${source.id === draft.embeddingSourceId ? 'selected' : ''} ${recommendationSourceId === source.id ? 'recommendations-open' : ''}`} key={source.id}>
-      <header><div className={`source-kind ${source.type}`} >{source.type === 'local' ? <Download /> : <Database />}</div><span><b>{source.name}</b><small title={source.type === 'remote_api' ? source.baseUrl : undefined}>{source.type === 'local' ? '系统内置 · 可同时运行多个模型' : source.baseUrl}</small></span><Badge tone={source.type === 'local' ? 'green' : 'purple'}>{source.type === 'local' ? '本地' : '远程 API'} · {source.models.length} 个</Badge>{source.type === 'remote_api' && <button className="icon-btn" title="删除来源" aria-label={`删除来源 ${source.name}`} onClick={() => removeSource(source.id)}><Trash2 /></button>}</header>
+      <header><div className={`source-kind ${source.type}`} >{source.type === 'local' ? <Download /> : <Database />}</div><span><b>{source.name}</b><small title={source.type === 'remote_api' ? source.baseUrl : undefined}>{source.type === 'local' ? '系统内置 · 可同时运行多个模型' : source.baseUrl}</small></span><Badge tone={source.type === 'local' ? 'green' : 'purple'}>{source.type === 'local' ? '本地' : '远程 API'} · {source.models.length} 个</Badge>{source.type === 'remote_api' && <><button className="icon-btn" title="编辑来源" aria-label={`编辑来源 ${source.name}`} onClick={() => editSource(source)}><Pencil /></button><button className="icon-btn" title="删除来源" aria-label={`删除来源 ${source.name}`} onClick={() => removeSource(source.id)}><Trash2 /></button></>}</header>
       <div className="source-model-list"><div className="source-model-table-head"><span>模型</span><span>向量维度</span><span>状态</span><span>操作</span></div>{source.models.map(model => {
         const runtime = source.type === 'local' ? runtimeStatuses.find(status => status.model === model.name) : undefined
         const working = runtime?.phase === 'downloading' || runtime?.phase === 'loading' || runtime?.phase === 'stopping'
@@ -994,7 +1013,7 @@ function EmbeddingModelPrototype({ knowledgeBaseId, draft, update, notify }: { k
     </section>)}</div>
     <div className="active-model-picker"><div className="picker-title"><CheckCircle2 /><span><b>知识库生效模型</b><small>先选择来源，再选择该来源下用于向量化和检索的模型</small></span></div><label><span>使用来源</span><select value={selectedSource?.id ?? ''} onChange={event => { const source = draft.embeddingSources.find(item => item.id === event.target.value); if (source) applySelection(source) }}>{draft.embeddingSources.map(source => <option key={source.id} value={source.id}>{source.name} · {source.type === 'local' ? '本地' : '远程'}</option>)}</select></label><label><span>使用模型</span><select value={draft.embeddingModel} disabled={!selectedSource?.models.length} onChange={event => { const model = selectedSource?.models.find(item => item.name === event.target.value); if (selectedSource && model) applySelection(selectedSource, model) }}>{!selectedSource?.models.length && <option value="">暂无模型</option>}{selectedSource?.models.map(model => <option key={model.name} value={model.name}>{model.name} · {model.dimensions > 0 ? `${model.dimensions} 维` : '自动检测'}</option>)}</select></label></div>
     {selectedSource && <div className={`active-model-summary ${draft.embeddingModel ? '' : 'empty'}`}><Zap /><span><b>{draft.embeddingModel ? `当前选择：${selectedSource.name} / ${draft.embeddingModel}` : '当前没有生效模型'}</b><small>{draft.embeddingModel ? selectedSource.type === 'local' ? '保存后，任务会使用对应的本地运行实例；未运行时将自动启动。' : `请求将发送到 ${selectedSource.baseUrl}` : '可以保存空模型列表；添加本地模型或选择远程模型后即可恢复向量能力。'}</small></span></div>}
-    {sourceEditor && <Modal title="添加远程模型来源" onClose={() => setSourceEditor(null)}><div className="modal-form"><p>支持 OpenAI 兼容 Embeddings API 和 Ollama 原生 API。Ollama 可直接填写 <code>http://localhost:11434/api/embed</code>。</p><label>来源名称<input value={sourceEditor.name} onChange={event => setSourceEditor(current => current ? { ...current, name: event.target.value } : current)} placeholder="例如：本机 Ollama" /></label><label>Base URL<input value={sourceEditor.baseUrl} onChange={event => setSourceEditor(current => current ? { ...current, baseUrl: event.target.value } : current)} placeholder="https://api.example.com/v1 或 http://localhost:11434/api/embed" /></label><label>API Key（可选）<input type="password" value={sourceEditor.apiKey} onChange={event => setSourceEditor(current => current ? { ...current, apiKey: event.target.value } : current)} placeholder="Ollama 本地接口可留空" /></label><label>首个模型<input value={sourceEditor.modelName} onChange={event => setSourceEditor(current => current ? { ...current, modelName: event.target.value } : current)} placeholder="例如：bge-m3" /></label><div className="auto-detect-note"><Activity /><span><b>向量维度：自动检测</b><small>添加后点击“检测”，系统将请求一次 Embedding 并记录实际维度。</small></span></div><div className="modal-actions"><button className="btn ghost" onClick={() => setSourceEditor(null)}>取消</button><button className="btn primary" onClick={addSource}><Plus />添加并选择</button></div></div></Modal>}
+    {sourceEditor && <Modal title={sourceEditor.id ? '编辑远程模型来源' : '添加远程模型来源'} onClose={() => setSourceEditor(null)}><div className="modal-form"><p>支持 OpenAI 兼容 Embeddings API 和 Ollama 原生 API。Ollama 可直接填写 <code>http://localhost:11434/api/embed</code>。</p><label>来源名称<input value={sourceEditor.name} onChange={event => setSourceEditor(current => current ? { ...current, name: event.target.value } : current)} placeholder="例如：本机 Ollama" /></label><label>Base URL<input value={sourceEditor.baseUrl} onChange={event => setSourceEditor(current => current ? { ...current, baseUrl: event.target.value } : current)} placeholder="https://api.example.com/v1 或 http://localhost:11434/api/embed" /></label><label>API Key（可选）<input type="password" value={sourceEditor.apiKey} onChange={event => setSourceEditor(current => current ? { ...current, apiKey: event.target.value } : current)} placeholder={sourceEditor.id ? '留空保留已保存的凭据' : 'Ollama 本地接口可留空'} /></label>{sourceEditor.id ? <div className="auto-detect-note"><Activity /><span><b>模型与维度将保留</b><small>API Key 留空会保留已保存的凭据；如需刷新模型维度，请在来源卡片中点击“重检”。</small></span></div> : <><label>首个模型<input value={sourceEditor.modelName} onChange={event => setSourceEditor(current => current ? { ...current, modelName: event.target.value } : current)} placeholder="例如：bge-m3" /></label><div className="auto-detect-note"><Activity /><span><b>向量维度：自动检测</b><small>添加后点击“检测”，系统将请求一次 Embedding 并记录实际维度。添加后不会自动切换知识库生效模型。</small></span></div></>}<div className="modal-actions"><button className="btn ghost" onClick={() => setSourceEditor(null)}>取消</button><button className="btn primary" onClick={saveSource}>{sourceEditor.id ? <><Check />保存来源</> : <><Plus />添加来源</>}</button></div></div></Modal>}
   </div>
 }
 

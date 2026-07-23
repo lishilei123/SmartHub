@@ -59,6 +59,27 @@ test('远程模式使用当前知识库配置的路由调用 Embeddings API', as
   assert.doesNotMatch(JSON.stringify(config), /test-secret|reranker-secret/u)
 })
 
+test('编辑远程来源后使用新地址并保留已保存的凭据', async () => {
+  const calls: { url: string; authorization: string | null }[] = []
+  const client = new RemoteEmbeddingClient(async (input, init) => {
+    calls.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') })
+    const body = JSON.parse(String(init?.body)) as { input: string[] }
+    return new Response(JSON.stringify({ data: body.input.map((_, index) => ({ index, embedding: [1, 0, 0] })) }), { status: 200, headers: { 'content-type': 'application/json' } })
+  })
+  const service = serviceWith(client)
+  await service.initialize()
+  const created = await service.createProject('编辑远程来源验收')
+  const kbId = created.knowledgeBase!.id
+  await configureRemote(service, kbId)
+  const redacted = await service.config(kbId)
+  await service.saveConfig(kbId, {
+    embeddingSources: redacted.config.embeddingSources.map(source => source.id === 'embedding-source' ? { ...source, name: '编辑后的 Embedding 服务', baseUrl: 'https://edited.example.com/v1', apiKey: '' } : source),
+  })
+  const synced = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'edited.md', assetType: '需求', displayName: 'edited.md', logicalPath: 'edited.md', content: '# 编辑后路由\n必须继续使用保存的密钥' })
+  await service.processTask(synced.task!.id)
+  assert.deepEqual(calls, [{ url: 'https://edited.example.com/v1/embeddings', authorization: 'Bearer test-secret' }])
+})
+
 test('远程模型可按当前知识库配置自动检测维度', async () => {
   let requestBody: Record<string, unknown> = {}
   const client = new RemoteEmbeddingClient(async (_input, init) => {
