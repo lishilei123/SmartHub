@@ -1012,17 +1012,71 @@ function RetrievalIndexConfig({ knowledgeBaseId, requiresRebuild, onRebuilt, dra
   const [rebuild, setRebuild] = useState<JobStatus>('idle')
   const [rebuildProgress, setRebuildProgress] = useState(0)
   const [rebuildTaskId, setRebuildTaskId] = useState('')
+  const [rebuildPollVersion, setRebuildPollVersion] = useState(0)
+
+  useEffect(() => {
+    if (!knowledgeBaseId) return
+    let cancelled = false
+    let timer: number | undefined
+    const refreshRebuild = async () => {
+      try {
+        const tasks = await loadTasks(knowledgeBaseId)
+        if (cancelled) return
+        const activeTask = tasks.find(task => task.type === 'rebuild' && (task.status === 'queued' || task.status === 'running'))
+        const trackedTask = rebuildTaskId ? tasks.find(task => task.id === rebuildTaskId) : undefined
+        const task = activeTask ?? trackedTask
+        if (!task) return
+        setRebuildTaskId(task.id)
+        setRebuildProgress(task.progress)
+        if (task.status === 'queued' || task.status === 'running') {
+          setRebuild('running')
+          timer = window.setTimeout(() => void refreshRebuild(), 1_000)
+          return
+        }
+        setRebuildTaskId('')
+        if (task.status === 'succeeded') {
+          setRebuild('completed')
+          onRebuilt()
+          notify('候选索引校验完成，活动索引已原子切换。')
+        } else if (task.status === 'cancelled') {
+          setRebuild('cancelled')
+          notify('索引重建已取消，旧活动索引继续生效。')
+        } else if (task.status === 'failed') {
+          setRebuild('failed')
+          notify(task.error ?? '索引重建失败，旧索引继续生效。', 'error')
+        }
+      } catch {
+        if (!cancelled) timer = window.setTimeout(() => void refreshRebuild(), 3_000)
+      }
+    }
+    void refreshRebuild()
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
+  }, [knowledgeBaseId, rebuildTaskId, rebuildPollVersion, onRebuilt, notify])
+
   const startRebuild = async () => {
     if (rebuild === 'running') return
-    setRebuild('running'); setRebuildProgress(10)
+    setRebuild('running')
+    setRebuildProgress(0)
     try {
-      const queued = await rebuildIndex(knowledgeBaseId); setRebuildTaskId(queued.task.id)
-      for (let attempt = 0; attempt < 60; attempt++) { await new Promise(resolvePromise => window.setTimeout(resolvePromise, 200)); const task = (await loadTasks(knowledgeBaseId)).find(item => item.id === queued.task.id); if (!task) continue; setRebuildProgress(task.progress); if (task.status === 'succeeded') { setRebuild('completed'); onRebuilt(); notify('候选索引校验完成，活动索引已原子切换。'); return } if (task.status === 'cancelled') { setRebuild('cancelled'); notify('索引重建已取消，旧活动索引继续生效。'); return } if (task.status === 'failed') throw new Error(task.error ?? '索引重建失败') }
-      throw new Error('索引重建等待超时')
+      const queued = await rebuildIndex(knowledgeBaseId)
+      setRebuildTaskId(queued.task.id)
+      setRebuildProgress(queued.task.progress)
+      setRebuildPollVersion(version => version + 1)
+    } catch (error) {
+      setRebuild('failed')
+      notify(error instanceof Error ? error.message : '索引重建失败，旧索引继续生效。', 'error')
     }
-    catch (error) { setRebuild('failed'); notify(error instanceof Error ? error.message : '索引重建失败，旧索引继续生效。') }
   }
-  const cancelRebuild = async () => { if (!rebuildTaskId) return; await cancelTask(rebuildTaskId); setRebuild('cancelled'); setRebuildProgress(0); notify('已取消索引重建；旧活动索引继续生效。') }
+
+  const cancelRebuild = async () => {
+    if (!rebuildTaskId) return
+    try {
+      await cancelTask(rebuildTaskId)
+      setRebuildPollVersion(version => version + 1)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '取消索引重建失败。', 'error')
+    }
+  }
   const rerankerSource = draft.embeddingSources.find(source => source.id === draft.rerankerSourceId)
   const rerankerModel = rerankerSource?.models.find(model => model.name === draft.rerankerModel)
   const toggleReranker = (enabled: boolean) => {

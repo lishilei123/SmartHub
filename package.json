@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently --kill-others --names API,WEB \"npm run dev:api\" \"npm run dev:web\"",
+    "dev": "concurrently --kill-others --names API,WORKER,WEB \"npm run dev:api\" \"npm run dev:worker\" \"npm run dev:web\"",
     "dev:web": "vite --host 127.0.0.1",
     "dev:api": "node --watch --import tsx server/http/server.ts",
     "start:api": "tsx server/http/server.ts",
