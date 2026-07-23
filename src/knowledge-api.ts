@@ -1,4 +1,5 @@
 import { parseMarkdownOutline } from './markdown-outline'
+import type { GenerativeSourceDraft } from './prototype-data'
 import type { KnowledgeDirectory, KnowledgeDocument, KnowledgeTask } from './prototype-data'
 
 const base = 'http://127.0.0.1:8787/api'
@@ -95,6 +96,11 @@ export const loadLocalModelStatuses = () => request<LocalModelStatus[]>('/local-
 export const startLocalModel = (model: string) => request<LocalModelStatus>('/local-model/start', { method: 'POST', body: JSON.stringify({ model }) })
 export const stopLocalModel = (model: string) => request<LocalModelStatus>('/local-model/stop', { method: 'POST', body: JSON.stringify({ model }) })
 export const testEmbeddingConfig = (kbId: string, config: Record<string, unknown>) => request<{ ok: true; model: string; dimensions: number }>(`/knowledge-bases/${kbId}/embedding/test`, { method: 'POST', body: JSON.stringify(config) })
+export type ModelProbeResult = { ok: boolean; message: string; checkedAt: string; source: GenerativeSourceDraft }
+export const loadGenerativeModelSources = () => request<GenerativeSourceDraft[]>('/model-sources')
+export const saveGenerativeModelSources = (sources: GenerativeSourceDraft[]) => request<GenerativeSourceDraft[]>('/model-sources', { method: 'PUT', body: JSON.stringify(sources) })
+export const discoverGenerativeModels = (source: { id?: string; providerType: GenerativeSourceDraft['providerType']; baseUrl: string; apiKey: string }) => request<{ name: string; displayName: string }[]>('/model-sources/discover', { method: 'POST', body: JSON.stringify(source) })
+export const probeGenerativeModel = (sourceId: string, modelId: string) => request<ModelProbeResult>(`/model-sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}/probe`, { method: 'POST', body: '{}' })
 export const createKnowledgeDirectory = (kbId: string, name: string, parentId: string | null) => request<ApiDirectory>(`/knowledge-bases/${kbId}/directories`, { method: 'POST', body: JSON.stringify({ name, parentId }) })
 export const renameKnowledgeDirectory = (directoryId: string, name: string) => request<ApiDirectory>(`/directories/${directoryId}`, { method: 'PUT', body: JSON.stringify({ name }) })
 export type ApiDirectoryMoveResult = { mode: 'move'; deletedDirectoryIds: string[]; affectedAssets: number }

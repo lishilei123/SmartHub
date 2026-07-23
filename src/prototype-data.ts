@@ -136,8 +136,9 @@ export type GenerativeSourceDraft = {
   id: string
   name: string
   providerType: 'openai' | 'anthropic' | 'openai_compatible'
-  endpointRef: string
-  credentialRef: string
+  baseUrl: string
+  apiKey: string
+  hasApiKey?: boolean
   enabled: boolean
   health: 'healthy' | 'degraded' | 'unknown'
   priority: number
@@ -185,7 +186,7 @@ export type SettingsDraft = {
 }
 
 export const initialSettings: SettingsDraft = {
-  mainModel: 'model-gpt-52',
+  mainModel: '',
   temperature: 0.2,
   intelligentRouting: true,
   fallbackEnabled: true,
@@ -193,29 +194,8 @@ export const initialSettings: SettingsDraft = {
   requestTimeoutSeconds: 120,
   retryCount: 2,
   structuredOutput: true,
-  generativeSources: [
-    {
-      id: 'source-openai', name: 'OpenAI 主渠道', providerType: 'openai', endpointRef: 'OPENAI_API_BASE', credentialRef: 'secret://openai/production', enabled: true, health: 'healthy', priority: 1,
-      models: [
-        { id: 'model-gpt-52', name: 'gpt-5.2', displayName: 'GPT-5.2', contextWindow: 400000, maxOutputTokens: 128000, capabilities: ['structured_output', 'tool_calling', 'vision'], enabled: true, health: 'healthy' },
-        { id: 'model-gpt-51-mini', name: 'gpt-5.1-mini', displayName: 'GPT-5.1 Mini', contextWindow: 400000, maxOutputTokens: 128000, capabilities: ['structured_output', 'tool_calling'], enabled: true, health: 'healthy' },
-      ],
-    },
-    {
-      id: 'source-anthropic', name: 'Anthropic 备用渠道', providerType: 'anthropic', endpointRef: 'ANTHROPIC_API_BASE', credentialRef: 'secret://anthropic/production', enabled: true, health: 'healthy', priority: 2,
-      models: [
-        { id: 'model-claude-sonnet', name: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', contextWindow: 200000, maxOutputTokens: 64000, capabilities: ['structured_output', 'tool_calling', 'vision'], enabled: true, health: 'healthy' },
-        { id: 'model-claude-haiku', name: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5', contextWindow: 200000, maxOutputTokens: 64000, capabilities: ['structured_output', 'tool_calling'], enabled: true, health: 'degraded' },
-      ],
-    },
-    {
-      id: 'source-private', name: '企业私有模型', providerType: 'openai_compatible', endpointRef: 'PRIVATE_LLM_BASE_URL', credentialRef: 'secret://private-llm/review', enabled: true, health: 'unknown', priority: 3,
-      models: [
-        { id: 'model-private-72b', name: 'smarthub-review-72b', displayName: 'SmartHub Review 72B', contextWindow: 131072, maxOutputTokens: 16384, capabilities: ['structured_output', 'tool_calling'], enabled: true, health: 'unknown' },
-      ],
-    },
-  ],
-  fallbackModelIds: ['model-claude-sonnet', 'model-private-72b'],
+  generativeSources: [],
+  fallbackModelIds: [],
   chunkSize: '400 tokens',
   chunkOverlap: '50 tokens',
   vectorRecall: '40',

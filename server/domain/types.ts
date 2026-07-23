@@ -3,6 +3,39 @@ export type SourceType = 'upload'
 export type VersionStatus = 'pending' | 'syncing' | 'ready' | 'failed' | 'deleted'
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type TaskScope = 'asset' | 'directory_recursive' | 'knowledge_base'
+export type ModelHealth = 'healthy' | 'degraded' | 'unknown'
+export type GenerativeProviderType = 'openai' | 'anthropic' | 'openai_compatible'
+export type GenerativeCapability = 'structured_output' | 'tool_calling' | 'vision'
+
+export interface GenerativeModel {
+  id: string
+  name: string
+  displayName: string
+  contextWindow: number
+  maxOutputTokens: number
+  capabilities: GenerativeCapability[]
+  enabled: boolean
+  health: ModelHealth
+  lastCheckedAt?: string
+  healthMessage?: string
+}
+
+export interface GenerativeModelSource {
+  id: string
+  name: string
+  providerType: GenerativeProviderType
+  baseUrl: string
+  apiKey: string
+  hasApiKey?: boolean
+  enabled: boolean
+  health: ModelHealth
+  priority: number
+  models: GenerativeModel[]
+  createdAt: string
+  updatedAt: string
+  lastCheckedAt?: string
+  healthMessage?: string
+}
 
 export interface EmbeddingSourceModel {
   name: string
@@ -58,7 +91,7 @@ export interface IndexChunk extends Chunk { assetMetadata: IndexAssetMetadata }
 export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: IndexChunk[]; createdAt: string; activatedAt?: string }
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
 
-export interface DatabaseState { projects: Project[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[] }
+export interface DatabaseState { projects: Project[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[] }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

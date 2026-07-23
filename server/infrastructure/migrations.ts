@@ -144,6 +144,22 @@ const migrations: Migration[] = [{
     UPDATE smarthub.sync_tasks SET data = smarthub.scrub_embedding_secrets(data) - 'error';
     DROP FUNCTION smarthub.scrub_embedding_secrets(jsonb);
   `,
+}, {
+  version: 4,
+  name: 'generative model registry',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.model_sources (
+      id text PRIMARY KEY,
+      display_name text NOT NULL,
+      provider_type text NOT NULL,
+      enabled boolean NOT NULL,
+      priority integer NOT NULL,
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS model_sources_priority_idx ON smarthub.model_sources (priority, created_at);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

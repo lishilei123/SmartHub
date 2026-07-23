@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { KnowledgeService } from './application/knowledge-service.js'
+import { ModelService } from './application/model-service.js'
 import { LocalModelRuntime } from './infrastructure/local-model-runtime.js'
 import { PostgresStore } from './infrastructure/postgres-store.js'
 import { RawDocumentStore } from './infrastructure/raw-document-store.js'
@@ -22,4 +23,5 @@ export const localModelRuntime = new LocalModelRuntime(modelRoot)
 export const stateStore: StateStore = databaseUrl ? new PostgresStore(databaseUrl) : new JsonStore(dataFile)
 export const rawDocumentStore = new RawDocumentStore(documentRoot)
 export const service = new KnowledgeService(stateStore, rawDocumentStore, localModelRuntime)
+export const modelService = new ModelService(stateStore)
 export const usingPostgres = stateStore instanceof PostgresStore

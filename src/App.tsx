@@ -10,7 +10,7 @@ import {
   initialSettings, requirementsByVersion, type KnowledgeDirectory, type KnowledgeDocument, type Requirement,
   type EmbeddingSourceDraft, type GenerativeModelDraft, type GenerativeSourceDraft, type SettingsDraft, type Version,
 } from './prototype-data'
-import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, ensureKnowledgeBase, loadAssetVersion, loadConfig, loadKnowledgeAssets, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
+import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, discoverGenerativeModels, ensureKnowledgeBase, loadAssetVersion, loadConfig, loadGenerativeModelSources, loadKnowledgeAssets, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, probeGenerativeModel, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, saveGenerativeModelSources, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
@@ -799,11 +799,12 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
   const [configVersion, setConfigVersion] = useState<number | null>(null)
   const [requiresRebuild, setRequiresRebuild] = useState(false)
   const editorScrollRef = useRef<HTMLDivElement>(null)
-  useEffect(() => { if (!knowledgeBaseId) return; void loadConfig(knowledgeBaseId).then(value => {
+  useEffect(() => { if (!knowledgeBaseId) return; void Promise.all([loadConfig(knowledgeBaseId), loadGenerativeModelSources()]).then(([value, generativeSources]) => {
     const config = value.config
-    const mapped: SettingsDraft = { ...initialSettings, parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkSize: `${config.chunkTargetSize} tokens`, chunkMaxSize: String(config.chunkMaxSize), chunkOverlap: `${config.chunkOverlap} tokens`, headingDepth: String(config.headingDepth), embeddingSourceId: config.embeddingSourceId, embeddingSources: config.embeddingSources, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingApiKey: config.embeddingApiKey, embeddingModel: config.embeddingModel, embeddingDimensions: String(config.embeddingDimensions), embeddingBatchSize: String(config.embeddingBatchSize), embeddingTimeoutMs: String(config.embeddingTimeoutMs), embeddingRetries: String(config.embeddingRetries), vectorRecall: String(config.vectorRecall), keywordRecall: String(config.keywordRecall), finalResults: String(config.finalResults), relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId ?? config.embeddingSourceId, rerankerModel: config.rerankerModel }
-    setSaved(mapped); setDraft(mapped); setConfigVersion(value.version); setRequiresRebuild(value.requiresRebuild)
-  }).catch(() => notify('知识库配置 API 未连接。')) }, [knowledgeBaseId])
+    const mapped: SettingsDraft = { ...initialSettings, generativeSources, parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkSize: `${config.chunkTargetSize} tokens`, chunkMaxSize: String(config.chunkMaxSize), chunkOverlap: `${config.chunkOverlap} tokens`, headingDepth: String(config.headingDepth), embeddingSourceId: config.embeddingSourceId, embeddingSources: config.embeddingSources, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingApiKey: config.embeddingApiKey, embeddingModel: config.embeddingModel, embeddingDimensions: String(config.embeddingDimensions), embeddingBatchSize: String(config.embeddingBatchSize), embeddingTimeoutMs: String(config.embeddingTimeoutMs), embeddingRetries: String(config.embeddingRetries), vectorRecall: String(config.vectorRecall), keywordRecall: String(config.keywordRecall), finalResults: String(config.finalResults), relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId ?? config.embeddingSourceId, rerankerModel: config.rerankerModel }
+    const loaded = { ...mapped, ...repairGenerativeRouting(generativeSources, new Set(), mapped) }
+    setSaved(loaded); setDraft(loaded); setConfigVersion(value.version); setRequiresRebuild(value.requiresRebuild)
+  }).catch(error => notify(error instanceof Error ? error.message : '系统配置 API 未连接。', 'error')) }, [knowledgeBaseId])
   const current = items[selected]
   const CurrentIcon = current.icon
   const dirty = JSON.stringify(saved) !== JSON.stringify(draft)
@@ -811,6 +812,13 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
   useEffect(() => { const warn = (event: BeforeUnloadEvent) => { if (!dirty) return; event.preventDefault(); event.returnValue = '' }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn) }, [dirty])
   const update = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => setDraft(currentDraft => ({ ...currentDraft, [key]: value }))
   const save = async () => {
+    if (selected === 0) {
+      try {
+        const generativeSources = await saveGenerativeModelSources(draft.generativeSources)
+        const next = { ...draft, generativeSources, ...repairGenerativeRouting(generativeSources, new Set(), draft) }
+        setSaved(next); setDraft(next); addAudit('保存生成式模型来源和模型配置'); notify('模型来源和模型配置已持久化。'); return
+      } catch (error) { notify(error instanceof Error ? error.message : '模型配置保存失败', 'error'); return }
+    }
     if (selected === 2 && knowledgeBaseId) {
       if (draft.embeddingModel && Number(draft.embeddingDimensions) <= 0) { notify('请先运行本地模型，或测试远程模型，以自动检测向量维度。'); return }
       const rerankerSource = draft.embeddingSources.find(source => source.id === draft.rerankerSourceId)
@@ -822,11 +830,18 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
         setSaved(draft); setConfigVersion(result.configVersion.version); setRequiresRebuild(result.configVersion.requiresRebuild); addAudit(`保存知识库配置 V${result.configVersion.version}`); notify(result.impact === 'index_rebuild' ? '配置已保存；兼容性变更需要确认重建索引。' : result.impact === 'query' ? '检索配置已保存，无需重建索引。' : '知识库配置已保存。'); return
       } catch (error) { notify(error instanceof Error ? error.message : '配置保存失败'); return }
     }
-    setSaved(draft); addAudit(`保存系统设置草稿：${current.name}`); notify('配置已保存在当前会话。')
+    setSaved(draft); addAudit(`保存系统设置草稿：${current.name}`); notify('此模块尚未接入服务端，配置仅保存在当前会话。', 'warning')
   }
   return <div className={`settings-layout ${collapsed ? 'directory-collapsed' : ''}`}><aside className={`card settings-directory ${collapsed ? 'collapsed' : ''}`}><div className="settings-dir-head"><b>配置目录</b><button className="icon-btn" title={collapsed ? '展开配置目录' : '收起配置目录'} aria-label={collapsed ? '展开配置目录' : '收起配置目录'} onClick={() => setCollapsed(value => !value)}>{collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{['AI 能力', '资源与集成', '安全与治理'].map(group => <div className="settings-group" key={group}><p>{group}</p>{items.map((item, index) => item.group === group && <button key={item.name} className={selected === index ? 'active' : ''} onClick={() => setSelected(index)}><item.icon /><span><b>{item.name}</b><small>{item.desc}</small></span><ChevronRight /></button>)}</div>)}</aside>
     <section className="card settings-editor"><div className="settings-editor-head"><div className="setting-symbol"><CurrentIcon /></div><div><h2>{current.name}</h2><p>{current.desc}{selected === 2 && configVersion ? ` · 配置 V${configVersion}` : ''}</p></div><Badge tone={dirty ? 'orange' : requiresRebuild && selected === 2 ? 'orange' : 'green'}>{dirty ? '有未保存更改' : requiresRebuild && selected === 2 ? '待重建' : '已保存'}</Badge><button className="btn primary" disabled={!dirty} onClick={() => void save()}><Check />保存配置</button></div><div className="settings-editor-scroll" ref={editorScrollRef}>
-      {selected === 0 && <ModelManagementSettings draft={draft} update={update} notify={notify} />}
+      {selected === 0 && <ModelManagementSettings draft={draft} update={update} notify={notify} onHealthUpdated={source => {
+        const mergeHealth = (sources: GenerativeSourceDraft[]) => sources.map(item => item.id !== source.id ? item : { ...item, health: source.health, models: item.models.map(model => {
+          const checked = source.models.find(candidate => candidate.id === model.id)
+          return checked ? { ...model, health: checked.health } : model
+        }) })
+        setDraft(current => ({ ...current, generativeSources: mergeHealth(current.generativeSources) }))
+        setSaved(current => ({ ...current, generativeSources: mergeHealth(current.generativeSources) }))
+      }} />}
       {selected === 1 && <PromptAgentSettings draft={draft} update={update} notify={notify} />}
       {selected === 2 && <div className="settings-form">
         <FormSection title="向量模型配置" desc="集中管理多个来源和模型，再选择知识库实际使用的来源与模型"><EmbeddingModelPrototype knowledgeBaseId={knowledgeBaseId} draft={draft} update={update} notify={notify} /></FormSection>
@@ -841,9 +856,9 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
 
 function StaticSettings({ title, text }: { title: string; text: string }) { return <div className="settings-form"><FormSection title={title} desc={text}><p className="readonly-notice">此项没有后端支撑，因此不伪造成功、连接或持久化状态。</p></FormSection></div> }
 
-type GenerativeSourceEditor = { id?: string; name: string; providerType: GenerativeSourceDraft['providerType']; endpointRef: string; credentialRef: string; models: GenerativeModelDraft[] }
+type GenerativeSourceEditor = { id?: string; name: string; providerType: GenerativeSourceDraft['providerType']; baseUrl: string; apiKey: string; models: GenerativeModelDraft[] }
 
-type GenerativeSourceEditorErrors = { source?: string; models?: Record<string, string> }
+type GenerativeSourceEditorErrors = { source?: string; modelList?: string; models?: Record<string, string> }
 
 const createGenerativeModel = (): GenerativeModelDraft => ({ id: crypto.randomUUID(), name: '', displayName: '', contextWindow: 128000, maxOutputTokens: 8192, capabilities: ['structured_output', 'tool_calling'], enabled: true, health: 'unknown' })
 
@@ -855,7 +870,7 @@ const repairGenerativeRouting = (nextSources: GenerativeSourceDraft[], removedMo
   return { mainModel, fallbackModelIds }
 }
 
-function ModelManagementSettings({ draft, update, notify }: { draft: SettingsDraft; update: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void; notify: Notify }) {
+function ModelManagementSettings({ draft, update, notify, onHealthUpdated }: { draft: SettingsDraft; update: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void; notify: Notify; onHealthUpdated: (source: GenerativeSourceDraft) => void }) {
   const [sourceEditor, setSourceEditor] = useState<GenerativeSourceEditor | null>(null)
   const [sourceEditorErrors, setSourceEditorErrors] = useState<GenerativeSourceEditorErrors>({})
   const [testingModelId, setTestingModelId] = useState('')
@@ -864,36 +879,45 @@ function ModelManagementSettings({ draft, update, notify }: { draft: SettingsDra
   const setSources = (next: GenerativeSourceDraft[]) => update('generativeSources', next)
   const updateSource = (id: string, patch: Partial<GenerativeSourceDraft>) => setSources(sources.map(source => source.id === id ? { ...source, ...patch } : source))
   const deleteSource = (source: GenerativeSourceDraft) => {
-    if (!window.confirm(`移除模型来源“${source.name}”？此操作仅影响当前前端草稿。`)) return
+    if (!window.confirm(`移除模型来源“${source.name}”？点击页面“保存配置”后将从服务端删除。`)) return
     const removedIds = new Set(source.models.map(model => model.id)); const remaining = sources.filter(item => item.id !== source.id)
     const routing = repairGenerativeRouting(remaining, removedIds, draft)
     setSources(remaining); update('mainModel', routing.mainModel); update('fallbackModelIds', routing.fallbackModelIds)
   }
   const openSourceEditor = (source?: GenerativeSourceDraft) => {
     setSourceEditorErrors({})
-    setSourceEditor(source ? { id: source.id, name: source.name, providerType: source.providerType, endpointRef: source.endpointRef, credentialRef: source.credentialRef, models: source.models.map(model => ({ ...model, capabilities: [...model.capabilities] })) } : { name: '', providerType: 'openai_compatible', endpointRef: '', credentialRef: '', models: [createGenerativeModel()] })
+    setSourceEditor(source ? { id: source.id, name: source.name, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: '', models: source.models.map(model => ({ ...model, capabilities: [...model.capabilities] })) } : { name: '', providerType: 'openai_compatible', baseUrl: '', apiKey: '', models: [] })
   }
   const updateEditorModel = (id: string, patch: Partial<GenerativeModelDraft>) => setSourceEditor(current => current && { ...current, models: current.models.map(model => model.id === id ? { ...model, ...patch } : model) })
-  const addEditorModel = () => setSourceEditor(current => current && { ...current, models: [...current.models, createGenerativeModel()] })
-  const discoverModels = () => {
-    const discovered = ['gpt-5.2', 'gpt-5.1-mini', 'gpt-4.1'].map(name => ({ ...createGenerativeModel(), name, displayName: name === 'gpt-5.2' ? 'GPT-5.2' : name === 'gpt-5.1-mini' ? 'GPT-5.1 Mini' : 'GPT-4.1' }))
-    setSourceEditor(current => {
-      if (!current) return current
-      const knownNames = new Set(current.models.map(model => model.name.trim().toLocaleLowerCase()))
-      const additions = discovered.filter(model => !knownNames.has(model.name.toLocaleLowerCase()))
-      return additions.length ? { ...current, models: [...current.models, ...additions] } : current
-    })
-    notify('已获取当前配置模型示例，可继续编辑后保存。', 'warning')
+  const addEditorModel = () => { setSourceEditorErrors(current => ({ ...current, modelList: undefined })); setSourceEditor(current => current && { ...current, models: [...current.models, createGenerativeModel()] }) }
+  const discoverModels = async () => {
+    if (!sourceEditor) return
+    try {
+      const discovered = await discoverGenerativeModels(sourceEditor)
+      if (discovered.length) setSourceEditorErrors(errors => ({ ...errors, modelList: undefined }))
+      setSourceEditor(current => {
+        if (!current) return current
+        const knownNames = new Set(current.models.map(model => model.name.trim().toLocaleLowerCase()))
+        const additions = discovered.filter(model => !knownNames.has(model.name.toLocaleLowerCase())).map(model => ({ ...createGenerativeModel(), ...model }))
+        return additions.length ? { ...current, models: [...current.models, ...additions] } : current
+      })
+      notify(discovered.length ? `已从部署端点获取 ${discovered.length} 个模型。` : '部署端点未返回可用模型。', discovered.length ? 'success' : 'warning')
+    } catch (error) { notify(error instanceof Error ? error.message : '获取模型失败', 'error') }
   }
-  const removeEditorModel = (id: string) => setSourceEditor(current => current && current.models.length > 1 ? { ...current, models: current.models.filter(model => model.id !== id) } : current)
-  const testModelConnection = (source: GenerativeSourceDraft, model: GenerativeModelDraft) => {
+  const removeEditorModel = (id: string) => setSourceEditor(current => current ? { ...current, models: current.models.filter(model => model.id !== id) } : current)
+  const testModelConnection = async (source: GenerativeSourceDraft, model: GenerativeModelDraft) => {
     if (!source.enabled || !model.enabled) { notify('请先启用模型来源和模型后再测试。', 'warning'); return }
     setTestingModelId(model.id)
-    window.setTimeout(() => { setTestingModelId(''); notify(`${model.displayName}：演示连通性测试完成，未发起真实服务请求。`, 'warning') }, 500)
+    try {
+      const result = await probeGenerativeModel(source.id, model.id)
+      onHealthUpdated(result.source)
+      notify(`${model.displayName}：${result.message}`, result.ok ? 'success' : 'error')
+    } catch (error) { notify(error instanceof Error ? error.message : '模型连通性测试失败', 'error') }
+    finally { setTestingModelId('') }
   }
   const saveSource = () => {
     if (!sourceEditor) return
-    const name = sourceEditor.name.trim(); const endpointRef = sourceEditor.endpointRef.trim(); const credentialRef = sourceEditor.credentialRef.trim()
+    const name = sourceEditor.name.trim(); const baseUrl = sourceEditor.baseUrl.trim(); const apiKey = sourceEditor.apiKey.trim()
     const normalizedModels = sourceEditor.models.map(model => ({ ...model, name: model.name.trim(), displayName: model.displayName.trim(), capabilities: [...new Set(model.capabilities)] }))
     const modelErrors: Record<string, string> = {}; const names = new Set<string>()
     for (const model of normalizedModels) {
@@ -902,28 +926,29 @@ function ModelManagementSettings({ draft, update, notify }: { draft: SettingsDra
       if (key && names.has(key)) modelErrors[model.id] = '同一来源不能有重复的模型标识。'
       names.add(key)
     }
-    const sourceError = !name || !endpointRef || !credentialRef ? '请完整填写来源名称、端点引用和凭据引用。' : undefined
-    if (sourceError || Object.keys(modelErrors).length) { setSourceEditorErrors({ source: sourceError, models: modelErrors }); notify('请修正来源和模型配置。', 'warning'); return }
+    const sourceError = !name || !baseUrl ? '请完整填写来源名称和 Base URL。' : undefined
+    const modelListError = normalizedModels.length ? undefined : '请先获取当前配置模型或手动添加至少一个模型。'
+    if (sourceError || modelListError || Object.keys(modelErrors).length) { setSourceEditorErrors({ source: sourceError, modelList: modelListError, models: modelErrors }); notify('请修正来源和模型配置。', 'warning'); return }
     const source: GenerativeSourceDraft | null = sourceEditor.id ? (() => {
       const existingSource = sources.find(item => item.id === sourceEditor.id)
       if (!existingSource) return null
-      return { ...existingSource, name, providerType: sourceEditor.providerType, endpointRef, credentialRef, models: normalizedModels }
-    })() : { id: crypto.randomUUID(), name, providerType: sourceEditor.providerType, endpointRef, credentialRef, enabled: true, health: 'unknown', priority: sources.length + 1, models: normalizedModels }
+      return { ...existingSource, name, providerType: sourceEditor.providerType, baseUrl, apiKey, models: normalizedModels }
+    })() : { id: crypto.randomUUID(), name, providerType: sourceEditor.providerType, baseUrl, apiKey, enabled: true, health: 'unknown', priority: sources.length + 1, models: normalizedModels }
     if (!source) { notify('模型来源不存在，无法保存修改。', 'warning'); return }
     const existing = sources.find(item => item.id === source.id)
     const removedIds = new Set(existing ? existing.models.filter(model => !source.models.some(next => next.id === model.id)).map(model => model.id) : [])
     const nextSources = existing ? sources.map(item => item.id === source.id ? source : item) : [...sources, source]
     const routing = repairGenerativeRouting(nextSources, removedIds, draft)
     setSources(nextSources); update('mainModel', routing.mainModel); update('fallbackModelIds', routing.fallbackModelIds)
-    setSourceEditor(null); setSourceEditorErrors({}); notify(existing ? '模型来源和模型配置已保存到当前草稿。' : '模型来源已加入前端草稿，尚未连接服务端。')
+    setSourceEditor(null); setSourceEditorErrors({}); notify(existing ? '修改已加入草稿，请点击“保存配置”持久化。' : '来源已加入草稿，请点击“保存配置”持久化。', 'warning')
   }
   return <div className="model-config-page">
-    <div className="model-config-panel"><ModelPanelHead title="模型来源" desc="统一维护可供各 Agent 使用的生成式模型渠道；凭据只保存引用。"><button className="btn primary" onClick={() => openSourceEditor()}><Plus />添加来源</button></ModelPanelHead><div className="generative-source-grid">{sources.map(source => <article className={`generative-source-card ${source.enabled ? '' : 'disabled'}`} key={source.id} aria-label={`${source.name} 模型来源`}><header><div className="source-logo"><Server /></div><div><b>{source.name}</b><small>{providerLabel(source.providerType)}</small></div><Badge tone={source.enabled ? modelHealthTone(source.health) : 'gray'}>{source.enabled ? modelHealthLabel(source.health) : '已停用'}</Badge><label className="switch"><input type="checkbox" checked={source.enabled} onChange={event => updateSource(source.id, { enabled: event.target.checked })} aria-label={`启用 ${source.name}`} /><i /></label></header><div className="source-reference"><span>端点引用<b>{source.endpointRef}</b></span><span>凭据引用<b>{source.credentialRef.replace(/\/.+$/, '/••••••')}</b></span></div><div className="source-model-chips">{source.models.map(model => <button type="button" key={model.id} disabled={!source.enabled || !model.enabled || testingModelId === model.id} onClick={() => testModelConnection(source, model)} title={`测试 ${model.displayName} 连通性`} aria-label={`测试 ${model.displayName} 连通性`}><i className={model.health} aria-hidden="true" /><span>{testingModelId === model.id ? '测试中…' : model.displayName}</span><small>{formatModelTokens(model.contextWindow)}</small></button>)}</div><footer><span>{source.models.length} 个模型</span><div><button className="icon-btn" onClick={() => openSourceEditor(source)} title={`编辑来源 ${source.name}`} aria-label={`编辑来源 ${source.name}`}><Pencil /></button><button className="icon-btn danger-text" onClick={() => deleteSource(source)} title={`移除来源 ${source.name}`} aria-label={`移除来源 ${source.name}`}><Trash2 /></button></div></footer></article>)}</div></div>
-    {sourceEditor && <Modal title={sourceEditor.id ? '编辑生成式模型来源' : '添加生成式模型来源'} className="model-source-modal" onClose={() => { setSourceEditor(null); setSourceEditorErrors({}) }}><div className="modal-form"><div className="model-source-modal-content"><p>只保存部署侧端点和凭据引用，浏览器不接收 API Key 明文。</p><label>来源名称<input value={sourceEditor.name} onChange={event => setSourceEditor(current => current && { ...current, name: event.target.value })} placeholder="例如：OpenAI 灾备渠道" /></label><label>协议类型<select value={sourceEditor.providerType} onChange={event => setSourceEditor(current => current && { ...current, providerType: event.target.value as GenerativeSourceDraft['providerType'] })}><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="openai_compatible">OpenAI Compatible</option></select></label><label>端点引用<input value={sourceEditor.endpointRef} onChange={event => setSourceEditor(current => current && { ...current, endpointRef: event.target.value })} placeholder="OPENAI_BACKUP_BASE_URL" /></label><label>凭据引用<input value={sourceEditor.credentialRef} onChange={event => setSourceEditor(current => current && { ...current, credentialRef: event.target.value })} placeholder="secret://openai/backup" /></label>{sourceEditorErrors.source && <span className="field-error">{sourceEditorErrors.source}</span>}<section className="generative-model-editor"><header><div><b>模型配置</b><small>可获取当前配置模型，也可手动填写并维护模型。</small></div><div className="generative-model-editor-actions"><button type="button" className="btn ghost" onClick={discoverModels}><RefreshCw />获取当前配置模型</button><button type="button" className="btn ghost" onClick={addEditorModel}><Plus />手动添加模型</button></div></header><div>{sourceEditor.models.map((model, index) => <article key={model.id}><header><div><b>模型 {index + 1}</b>{model.id === draft.mainModel && <Badge tone="green">默认模型</Badge>}{draft.fallbackModelIds.includes(model.id) && <Badge tone="purple">回退模型</Badge>}</div><button type="button" className="icon-btn danger-text" disabled={sourceEditor.models.length === 1} title={sourceEditor.models.length === 1 ? '每个来源至少保留一个模型' : `移除模型 ${model.displayName || model.name || index + 1}`} aria-label={`移除模型 ${model.displayName || model.name || index + 1}`} onClick={() => removeEditorModel(model.id)}><Trash2 /></button></header><div className="generative-model-fields"><label>模型标识<input value={model.name} onChange={event => updateEditorModel(model.id, { name: event.target.value })} placeholder="gpt-5.1-mini" /></label><label>展示名称<input value={model.displayName} onChange={event => updateEditorModel(model.id, { displayName: event.target.value })} placeholder="GPT-5.1 Mini" /></label></div><div className="generative-model-options"><span>能力</span>{(['structured_output', 'tool_calling', 'vision'] as const).map(capability => <label key={capability}><input type="checkbox" checked={model.capabilities.includes(capability)} onChange={event => updateEditorModel(model.id, { capabilities: event.target.checked ? [...model.capabilities, capability] : model.capabilities.filter(item => item !== capability) })} />{capability === 'structured_output' ? '结构化输出' : capability === 'tool_calling' ? '工具调用' : '视觉'}</label>)}<label className="model-enabled"><input type="checkbox" checked={model.enabled} onChange={event => updateEditorModel(model.id, { enabled: event.target.checked })} />启用模型</label></div>{sourceEditorErrors.models?.[model.id] && <span className="field-error">{sourceEditorErrors.models[model.id]}</span>}</article>)}</div></section></div><div className="modal-actions"><button className="btn ghost" onClick={() => { setSourceEditor(null); setSourceEditorErrors({}) }}>取消</button><button className="btn primary" onClick={saveSource}>{sourceEditor.id ? <Check /> : <Plus />}{sourceEditor.id ? '保存修改' : '加入草稿'}</button></div></div></Modal>}
+    <div className="model-config-panel"><ModelPanelHead title="模型来源" desc="统一维护可供各 Agent 使用的生成式模型渠道；连接信息由服务端保存。"><button className="btn primary" onClick={() => openSourceEditor()}><Plus />添加来源</button></ModelPanelHead><div className="generative-source-grid">{sources.map(source => <article className={`generative-source-card ${source.enabled ? '' : 'disabled'}`} key={source.id} aria-label={`${source.name} 模型来源`}><header><div className="source-logo"><Server /></div><div><b>{source.name}</b><small>{providerLabel(source.providerType)}</small></div><Badge tone={source.enabled ? modelHealthTone(source.health) : 'gray'}>{source.enabled ? modelHealthLabel(source.health) : '已停用'}</Badge><label className="switch"><input type="checkbox" checked={source.enabled} onChange={event => updateSource(source.id, { enabled: event.target.checked })} aria-label={`启用 ${source.name}`} /><i /></label></header><div className="source-reference"><span>Base URL<b>{source.baseUrl}</b></span></div><div className="source-model-chips">{source.models.map(model => <button type="button" key={model.id} disabled={!source.enabled || !model.enabled || testingModelId === model.id} onClick={() => testModelConnection(source, model)} title={`测试 ${model.displayName} 连通性`} aria-label={`测试 ${model.displayName} 连通性`}><i className={model.health} aria-hidden="true" /><span>{testingModelId === model.id ? '测试中…' : model.displayName}</span></button>)}</div><footer><span>{source.models.length} 个模型</span><div><button className="icon-btn" onClick={() => openSourceEditor(source)} title={`编辑来源 ${source.name}`} aria-label={`编辑来源 ${source.name}`}><Pencil /></button><button className="icon-btn danger-text" onClick={() => deleteSource(source)} title={`移除来源 ${source.name}`} aria-label={`移除来源 ${source.name}`}><Trash2 /></button></div></footer></article>)}</div></div>
+    {sources.length === 0 && <div className="model-source-empty"><Server /><b>尚未配置生成式模型来源</b><span>填写 Base URL、API Key 和模型后保存，即可进行真实发现与连通性探测。</span></div>}
+    {sourceEditor && <Modal title={sourceEditor.id ? '编辑生成式模型来源' : '添加生成式模型来源'} className="model-source-modal" onClose={() => { setSourceEditor(null); setSourceEditorErrors({}) }}><div className="modal-form"><div className="model-source-modal-content"><p>Base URL 和 API Key 由服务端保存；读取配置时不会回显 API Key。</p><label>来源名称<input value={sourceEditor.name} onChange={event => setSourceEditor(current => current && { ...current, name: event.target.value })} placeholder="例如：OpenAI 灾备渠道" /></label><label>协议类型<select value={sourceEditor.providerType} onChange={event => setSourceEditor(current => current && { ...current, providerType: event.target.value as GenerativeSourceDraft['providerType'] })}><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="openai_compatible">OpenAI Compatible</option></select></label><label>Base URL<input value={sourceEditor.baseUrl} onChange={event => setSourceEditor(current => current && { ...current, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" /></label><label>API Key（可选）<input type="password" value={sourceEditor.apiKey} onChange={event => setSourceEditor(current => current && { ...current, apiKey: event.target.value })} placeholder={sourceEditor.id ? '留空保留已保存的 API Key' : '无需鉴权时可留空'} /></label>{sourceEditorErrors.source && <span className="field-error">{sourceEditorErrors.source}</span>}<section className="generative-model-editor"><header><div><b>模型配置</b><small>可获取当前配置模型，也可手动填写并维护模型。</small></div><div className="generative-model-editor-actions"><button type="button" className="btn ghost" onClick={discoverModels}><RefreshCw />获取当前配置模型</button><button type="button" className="btn ghost" onClick={addEditorModel}><Plus />手动添加模型</button></div></header>{sourceEditorErrors.modelList && <span className="field-error">{sourceEditorErrors.modelList}</span>}<div>{sourceEditor.models.map((model, index) => <article key={model.id}><header><div><b>模型 {index + 1}</b>{model.id === draft.mainModel && <Badge tone="green">默认模型</Badge>}{draft.fallbackModelIds.includes(model.id) && <Badge tone="purple">回退模型</Badge>}</div><button type="button" className="icon-btn danger-text" title={`移除模型 ${model.displayName || model.name || index + 1}`} aria-label={`移除模型 ${model.displayName || model.name || index + 1}`} onClick={() => removeEditorModel(model.id)}><Trash2 /></button></header><div className="generative-model-fields"><label>模型标识<input value={model.name} onChange={event => updateEditorModel(model.id, { name: event.target.value })} placeholder="gpt-5.1-mini" /></label><label>展示名称<input value={model.displayName} onChange={event => updateEditorModel(model.id, { displayName: event.target.value })} placeholder="GPT-5.1 Mini" /></label></div><div className="generative-model-options"><span>能力</span>{(['structured_output', 'tool_calling', 'vision'] as const).map(capability => <label key={capability}><input type="checkbox" checked={model.capabilities.includes(capability)} onChange={event => updateEditorModel(model.id, { capabilities: event.target.checked ? [...model.capabilities, capability] : model.capabilities.filter(item => item !== capability) })} />{capability === 'structured_output' ? '结构化输出' : capability === 'tool_calling' ? '工具调用' : '视觉'}</label>)}<label className="model-enabled"><input type="checkbox" checked={model.enabled} onChange={event => updateEditorModel(model.id, { enabled: event.target.checked })} />启用模型</label></div>{sourceEditorErrors.models?.[model.id] && <span className="field-error">{sourceEditorErrors.models[model.id]}</span>}</article>)}</div></section></div><div className="modal-actions"><button className="btn ghost" onClick={() => { setSourceEditor(null); setSourceEditorErrors({}) }}>取消</button><button className="btn primary" onClick={saveSource}>{sourceEditor.id ? <Check /> : <Plus />}{sourceEditor.id ? '保存修改' : '加入草稿'}</button></div></div></Modal>}
   </div>
 }
 
-const formatModelTokens = (value: number) => value >= 1000 ? `${Math.round(value / 1000)}K` : String(value)
 const modelHealthLabel = (health: GenerativeSourceDraft['health']) => health === 'healthy' ? '健康' : health === 'degraded' ? '降级' : '待探测'
 const modelHealthTone = (health: GenerativeSourceDraft['health']) => health === 'healthy' ? 'green' : health === 'degraded' ? 'orange' : 'gray'
 

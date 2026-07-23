@@ -2,9 +2,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AssetType, KnowledgeConfig } from '../domain/types.js'
-import { localModelRuntime, rawDocumentStore, service, stateStore, usingPostgres } from '../runtime.js'
+import { localModelRuntime, modelService, rawDocumentStore, service, stateStore, usingPostgres } from '../runtime.js'
 
-export { localModelRuntime, rawDocumentStore, service, stateStore }
+export { localModelRuntime, modelService, rawDocumentStore, service, stateStore }
 
 export async function start(port = Number(process.env.PORT ?? 8787)) {
   await service.initialize()
@@ -24,6 +24,20 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   if (method === 'GET' && url.pathname === '/api/local-model/status') return send(response, 200, localModelRuntime.status())
   if (method === 'POST' && url.pathname === '/api/local-model/start') { const body = await json(request); return send(response, 202, localModelRuntime.start(String(body.model ?? ''))) }
   if (method === 'POST' && url.pathname === '/api/local-model/stop') { const body = await json(request); return send(response, 200, await localModelRuntime.stop(String(body.model ?? ''))) }
+  if (method === 'GET' && url.pathname === '/api/model-sources') return send(response, 200, await modelService.listSources())
+  if (method === 'PUT' && url.pathname === '/api/model-sources') return send(response, 200, await modelService.replaceSources(await json(request)))
+  if (method === 'POST' && url.pathname === '/api/model-sources') return send(response, 201, await modelService.createSource(await json(request)))
+  if (method === 'POST' && url.pathname === '/api/model-sources/discover') return send(response, 200, await modelService.discover(await json(request)))
+  if (method === 'GET' && url.pathname === '/api/models') {
+    const sources = await modelService.listSources()
+    const sourceId = url.searchParams.get('sourceId')
+    return send(response, 200, sources.filter(source => !sourceId || source.id === sourceId).flatMap(source => source.models.map(model => ({ ...model, sourceId: source.id, sourceName: source.name, providerType: source.providerType }))))
+  }
+  const modelSource = /^\/api\/model-sources\/([^/]+)$/.exec(url.pathname)
+  if (method === 'PATCH' && modelSource) return send(response, 200, await modelService.updateSource(modelSource[1], await json(request)))
+  if (method === 'DELETE' && modelSource) return send(response, 200, await modelService.deleteSource(modelSource[1]))
+  const modelProbe = /^\/api\/model-sources\/([^/]+)\/models\/([^/]+)\/probe$/.exec(url.pathname)
+  if (method === 'POST' && modelProbe) return send(response, 200, await modelService.probe(modelProbe[1], modelProbe[2]))
   if (method === 'POST' && url.pathname === '/api/default-knowledge-base') return send(response, 200, await service.ensureDefaultKnowledgeBase('SmartHub'))
   if (method === 'DELETE' && url.pathname === '/api/maintenance/empty-knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-empty-smarthub-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupEmptyDefaultKnowledgeBases('SmartHub')) }
   if (method === 'DELETE' && url.pathname === '/api/maintenance/knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-all-other-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupKnowledgeBasesExcept(String(body.keepKnowledgeBaseId ?? ''))) }
@@ -78,7 +92,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
 }
 
 async function json(request: IncomingMessage) { const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk)); return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {} }
-function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type' }); response.end(body == null ? '' : JSON.stringify(body)) }
+function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type' }); response.end(body == null ? '' : JSON.stringify(body)) }
 function sendBinary(response: ServerResponse, status: number, body: Buffer, type: string) { response.writeHead(status, { 'content-type': type, 'content-length': body.length, 'cache-control': 'private, max-age=3600', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' }); response.end(body) }
 function contentType(path: string) { const extension = path.toLowerCase().split('.').at(-1); return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml; charset=utf-8' } as Record<string, string>)[extension ?? ''] ?? 'application/octet-stream' }
 async function notifyTask(_taskId: string) {
