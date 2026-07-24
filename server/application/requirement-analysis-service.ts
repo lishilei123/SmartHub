@@ -19,15 +19,33 @@ export class RequirementAnalysisService {
   private readonly activeRuns = new Map<string, AbortController>()
   constructor(private readonly store: StateStore, private readonly runtime: AgentRuntime, private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver()) { this.validator = new ReviewResultValidator(store) }
 
-  async list(projectVersionId: string) {
+  async list(projectVersionId: string, options: { limit?: number; cursor?: string; runningOnly?: boolean } = {}) {
+    const limit = Math.min(Math.max(1, Math.floor(options.limit ?? 50)), 100)
+    const projectVersion = this.store.getProjectVersion
+      ? await this.store.getProjectVersion(projectVersionId)
+      : (await this.store.snapshot()).projectVersions.find(item => item.id === projectVersionId)
+    required(projectVersion, '项目版本不存在')
+
+    if (this.store.listReviewRuns) {
+      const page = await this.store.listReviewRuns(projectVersionId, { limit, cursor: options.cursor, runningOnly: options.runningOnly })
+      return { items: page.items.map(presentRunSummary), nextCursor: page.nextCursor }
+    }
+
     const state = await this.store.snapshot()
-    required(state.projectVersions.find(item => item.id === projectVersionId), '项目版本不存在')
-    return state.reviewRuns.filter(item => item.projectVersionId === projectVersionId).sort((left, right) => right.createdAt.localeCompare(left.createdAt)).map(presentRun)
+    const runs = state.reviewRuns
+      .filter(item => item.projectVersionId === projectVersionId && (!options.runningOnly || item.status === 'running'))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+    const offset = decodeCursor(options.cursor, runs)
+    const items = runs.slice(offset, offset + limit)
+    const last = items.at(-1)
+    return { items: items.map(presentRunSummary), nextCursor: offset + limit < runs.length && last ? encodeCursor(last) : undefined }
   }
 
   async get(runId: string) {
-    const state = await this.store.snapshot()
-    return presentRun(required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在'))
+    const run = this.store.getReviewRun
+      ? await this.store.getReviewRun(runId)
+      : (await this.store.snapshot()).reviewRuns.find(item => item.id === runId)
+    return presentRun(required(run, '需求评审运行不存在'))
   }
 
   async start(request: RequirementAnalysisRequest) {
@@ -159,6 +177,28 @@ export class RequirementAnalysisService {
   }
 }
 
+function presentRunSummary(run: ReviewRun) {
+  return {
+    id: run.id,
+    runId: run.id,
+    projectVersionId: run.projectVersionId,
+    assetId: run.assetId,
+    assetVersionId: run.assetVersionId,
+    documentTitle: run.documentTitle,
+    documentVersion: `V${run.documentVersion}`,
+    logicalPath: run.logicalPath,
+    modelLabel: run.modelLabel,
+    status: run.status,
+    step: run.step,
+    progress: run.progress,
+    createdAt: run.createdAt,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    error: run.error,
+    snapshot: redactSnapshot(run.snapshot),
+  }
+}
+
 function presentRun(run: ReviewRun) {
   const response = run.result && run.execution ? {
     runId: run.id,
@@ -194,7 +234,20 @@ function redactSnapshot(snapshot: ReviewRun['snapshot']) {
   return { ...snapshot, agentDefinition: { ...definition, systemPrompt: undefined, taskTemplate: undefined } }
 }
 
-function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }
+function encodeCursor(run: ReviewRun) { return Buffer.from(JSON.stringify([run.createdAt, run.id])).toString('base64url') }
+function decodeCursor(cursor: string | undefined, runs: ReviewRun[]) {
+  if (!cursor) return 0
+  try {
+    const [createdAt, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[]
+    if (typeof createdAt !== 'string' || typeof id !== 'string') throw new Error('invalid')
+    const index = runs.findIndex(run => run.createdAt === createdAt && run.id === id)
+    if (index < 0) throw new Error('invalid')
+    return index + 1
+  } catch {
+    throw new Error('评审历史游标无效')
+  }
+}
+function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }
 function cleanList(value: string[] | undefined) { return Array.isArray(value) ? [...new Set(value.map(item => String(item).trim()).filter(Boolean))].slice(0, 20) : [] }
 function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) {
   let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'

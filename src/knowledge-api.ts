@@ -22,10 +22,13 @@ export async function ensureKnowledgeBase() {
 }
 
 export type ApiVersion = { id: string; number: number; content: string; status: string; createdAt: string; readyAt?: string; chunks: { headingPath: string[] }[] }
-type ApiAsset = { id: string; displayName: string; logicalPath: string; assetType: string; sourceType: string; activeVersionId: string | null; activeVersion: ApiVersion | null; versions: { id: string; number: number; status: string; createdAt: string }[]; operationTaskId?: string; task?: KnowledgeTask | null }
+const assetVersionRequests = new Map<string, Promise<ApiVersion>>()
+type ApiAsset = { id: string; displayName: string; logicalPath: string; assetType: string; sourceType: string; activeVersionId: string | null; activeVersion: (Omit<ApiVersion, 'content'> & { content?: string }) | null; versions: { id: string; number: number; status: string; createdAt: string }[]; operationTaskId?: string; task?: KnowledgeTask | null }
 type ApiDirectory = { id: string; knowledgeBaseId: string; name: string; parentId: string | null; operationTaskId?: string; task?: KnowledgeTask | null }
 export async function loadKnowledgeAssets(kbId: string, includeDeleted = false): Promise<{ directories: KnowledgeDirectory[]; documents: KnowledgeDocument[] }> {
-  const [assets, savedDirectories] = await Promise.all([request<ApiAsset[]>(`/knowledge-bases/${kbId}/assets${includeDeleted ? '?includeDeleted=true' : ''}`), request<ApiDirectory[]>(`/knowledge-bases/${kbId}/directories`)])
+  const assetQuery = new URLSearchParams({ includeContent: 'false' })
+  if (includeDeleted) assetQuery.set('includeDeleted', 'true')
+  const [assets, savedDirectories] = await Promise.all([request<ApiAsset[]>(`/knowledge-bases/${kbId}/assets?${assetQuery}`), request<ApiDirectory[]>(`/knowledge-bases/${kbId}/directories`)])
   const directoryMap = new Map(savedDirectories.map(item => [item.id, { id: item.id, name: item.name, parentId: item.parentId, operationTaskId: item.operationTaskId, task: item.task }]))
   const pathToId = new Map<string, string>()
   const resolveDirectoryPath = (directory: KnowledgeDirectory): string => { const parentPath = directory.parentId ? resolveDirectoryPath(directoryMap.get(directory.parentId)!) : ''; const path = parentPath ? `${parentPath}/${directory.name}` : directory.name; pathToId.set(path.toLocaleLowerCase(), directory.id); return path }
@@ -35,10 +38,10 @@ export async function loadKnowledgeAssets(kbId: string, includeDeleted = false):
     for (const part of parts) { path = path ? `${path}/${part}` : part; let id = pathToId.get(path.toLocaleLowerCase()); if (!id) { id = `api-dir:${path}`; directoryMap.set(id, { id, name: part, parentId, operationTaskId: undefined, task: null }); pathToId.set(path.toLocaleLowerCase(), id) } parentId = id }
     const latest = asset.versions.at(-1)
     const current = asset.activeVersion ?? (latest ? await request<ApiVersion>(`/asset-versions/${latest.id}`) : null)
-    const content = current?.content ?? ''
+    const content = current?.content
     const format = asset.displayName.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
     const outline = content && format === 'markdown' ? parseMarkdownOutline(content) : undefined
-    return { id: asset.id, name: asset.displayName, parentId, version: current ? `V${current.number}` : '待入库', updated: current ? (current.readyAt ? new Date(current.readyAt).toLocaleString('zh-CN') : new Date(current.createdAt).toLocaleString('zh-CN')) : '等待处理', title: outline?.title ?? asset.displayName.replace(/\.(md|txt)$/i, ''), intro: content.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? '等待索引处理', sections: outline?.sections.map(section => section.title) ?? [], content, assetType: asset.assetType, sourceType: asset.sourceType, assetVersionId: current?.id, versions: asset.versions, status: current?.status ?? 'pending', logicalPath: asset.logicalPath, operationTaskId: asset.operationTaskId, task: asset.task }
+    return { id: asset.id, name: asset.displayName, parentId, version: current ? `V${current.number}` : '待入库', updated: current ? (current.readyAt ? new Date(current.readyAt).toLocaleString('zh-CN') : new Date(current.createdAt).toLocaleString('zh-CN')) : '等待处理', title: outline?.title ?? asset.displayName.replace(/\.(md|txt)$/i, ''), intro: content?.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? (current ? '打开文档后加载正文' : '等待索引处理'), sections: outline?.sections.map(section => section.title) ?? [], content, assetType: asset.assetType, sourceType: asset.sourceType, assetVersionId: current?.id, versions: asset.versions, status: current?.status ?? 'pending', logicalPath: asset.logicalPath, operationTaskId: asset.operationTaskId, task: asset.task }
   }))
   return { directories: [...directoryMap.values()], documents }
 }
@@ -116,7 +119,39 @@ export const cancelTask = (taskId: string) => request<ApiTask>(`/tasks/${taskId}
 export type ApiSearchResult = { score: number; retrievalMode: string; excerpt: string; scores?: { keyword: number; vector: number; reranker?: number; final: number }; asset: { id: string; displayName: string; assetType: string; sourceType: string; logicalPath: string }; version: { id: string; number: number }; chunk: { chunkKey: string; headingPath: string[]; startLine: number; endLine: number } }
 export type ApiSearchMeta = { mode: string; requestedMode?: string; degraded?: boolean; degradedReason?: string; minimumRelevance: number; keywordCandidates: number; vectorCandidates: number; mergedCandidates: number; eligibleCandidates: number; returned: number; rerankerEnabled: boolean; rerankerDegraded?: boolean }
 export const searchKnowledge = (kbId: string, query: string, filters: { logicalPath?: string } = {}) => request<{ status: string; retrieval?: ApiSearchMeta; results: ApiSearchResult[] }>(`/knowledge-bases/${kbId}/search`, { method: 'POST', body: JSON.stringify({ query, ...filters }) })
-export const loadAssetVersion = (versionId: string) => request<ApiVersion>(`/asset-versions/${versionId}`)
+export function loadAssetVersion(versionId: string) {
+  const cached = assetVersionRequests.get(versionId)
+  if (cached) return cached
+  const pending = request<ApiVersion>(`/asset-versions/${versionId}`).then(version => {
+    // Ready versions are immutable snapshots. Other states may still change,
+    // so only retain ready results and merely deduplicate in-flight requests.
+    if (version.status !== 'ready') assetVersionRequests.delete(versionId)
+    return version
+  }).catch(error => {
+    assetVersionRequests.delete(versionId)
+    throw error
+  })
+  assetVersionRequests.set(versionId, pending)
+  return pending
+}
+
+export async function loadKnowledgeDocument(document: KnowledgeDocument): Promise<KnowledgeDocument> {
+  if (document.content !== undefined || !document.assetVersionId) return document
+  const version = await loadAssetVersion(document.assetVersionId)
+  const content = version.content ?? ''
+  const format = document.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
+  const outline = format === 'markdown' ? parseMarkdownOutline(content) : undefined
+  return {
+    ...document,
+    content,
+    version: `V${version.number}`,
+    updated: version.readyAt ? new Date(version.readyAt).toLocaleString('zh-CN') : new Date(version.createdAt).toLocaleString('zh-CN'),
+    title: outline?.title ?? document.title,
+    intro: content.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? '',
+    sections: outline?.sections.map(section => section.title) ?? [],
+    status: version.status,
+  }
+}
 export const loadLocalModelStatus = () => request<LocalModelStatus>('/local-model/status')
 export const loadLocalModelStatuses = () => request<LocalModelStatus[]>('/local-models')
 export const startLocalModel = (model: string) => request<LocalModelStatus>('/local-model/start', { method: 'POST', body: JSON.stringify({ model }) })

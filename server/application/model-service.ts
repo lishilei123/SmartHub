@@ -9,8 +9,10 @@ export class ModelService {
   constructor(private readonly store: StateStore) {}
 
   async listSources() {
-    const state = await this.store.snapshot()
-    return state.modelSources.sort((left, right) => left.priority - right.priority || left.createdAt.localeCompare(right.createdAt)).map(source => this.publicSource(source))
+    const sources = this.store.listModelSources
+      ? await this.store.listModelSources()
+      : (await this.store.snapshot()).modelSources
+    return sources.sort((left, right) => left.priority - right.priority || left.createdAt.localeCompare(right.createdAt)).map(source => this.publicSource(source))
   }
 
   async replaceSources(input: unknown) {

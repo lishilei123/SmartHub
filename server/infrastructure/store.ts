@@ -1,9 +1,38 @@
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
-import type { DatabaseState } from '../domain/types.js'
+import type { ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
 
 export interface TaskLease { workerId: string; runToken: string }
+
+export type RequirementBindingMetadata = ProjectVersionRequirementBinding & {
+  asset: {
+    displayName: string
+    logicalPath: string
+    assetType: string
+    sourceType: string
+    activeVersionId: string | null
+  }
+  version: {
+    id: string
+    number: number
+    status: string
+    createdAt: string
+    readyAt?: string
+  }
+  versions: Array<{
+    id: string
+    number: number
+    status: string
+    createdAt: string
+    readyAt?: string
+  }>
+}
+
+export type ReviewRunPage = {
+  items: ReviewRun[]
+  nextCursor?: string
+}
 
 const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], reviewRuns: [] })
 
@@ -11,6 +40,12 @@ export interface StateStore {
   load(): Promise<void>
   read(): DatabaseState
   snapshot(): Promise<DatabaseState>
+  getActiveKnowledgeConfig?(knowledgeBaseId: string): Promise<ConfigVersion | null>
+  listModelSources?(): Promise<GenerativeModelSource[]>
+  getProjectVersion?(projectVersionId: string): Promise<ProjectVersion | null>
+  listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
+  listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
+  getReviewRun?(runId: string): Promise<ReviewRun | null>
   transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
   transactionWithTaskLease?<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   searchChunks?(input: ChunkSearchInput): Promise<StoredChunkCandidate[]>

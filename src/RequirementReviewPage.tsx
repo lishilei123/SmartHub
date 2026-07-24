@@ -11,6 +11,7 @@ import { emptyMarkdownOutline, parseMarkdownOutline } from './markdown-outline'
 import {
   askRequirementReviewQuestion,
   cancelRequirementReviewRun,
+  loadRequirementReviewRun,
   loadRequirementReviewRuns,
   startRequirementAnalysis,
   type RequirementAnalysisResponse,
@@ -31,7 +32,7 @@ type SourceQuote = ReviewQuestionQuote
 type ChatMessage = { role: 'user' | 'assistant' | 'system'; text: string; quote?: SourceQuote; citations?: string[]; limitations?: string[]; modelLabel?: string }
 type UploadProgress = { stage: 'reading' | 'submitting' | 'processing' | 'binding' | 'completed' | 'failed'; percent: number; detail: string }
 
-type RunRecord = RequirementReviewRun & { content: string }
+type RunRecord = RequirementReviewRun & { content?: string }
 
 type ModelChoice = {
   key: string
@@ -68,6 +69,7 @@ const runTone = (status?: RunStatus) => status === 'succeeded' ? 'green' : statu
 const runLabel = (status?: RunStatus) => status === 'succeeded' ? '评审完成' : status === 'running' ? '分析中' : status === 'failed' ? '运行失败' : status === 'cancelled' ? '已取消' : '待评审'
 const formatTime = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const taskStepLabel = (step: string) => ({ waiting: '等待 Worker', claimed: '任务已领取', embedding: '解析并生成 Embedding', vector_indexing: '构建向量索引', committing: '发布活动索引', completed: '索引发布完成', failed: '任务处理失败', cancelled: '任务已取消', superseded: '已被新版本替代' } as Record<string, string>)[step] ?? '正在处理知识资产'
+const completedUploadVisibleMs = 15_000
 
 export function RequirementReviewPage({
   projectVersion,
@@ -104,6 +106,9 @@ export function RequirementReviewPage({
   const [view, setView] = useState<ViewKey>('overview')
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [runsState, setRunsState] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const [runsCursor, setRunsCursor] = useState<string | undefined>()
+  const [runsLoadingMore, setRunsLoadingMore] = useState(false)
+  const [contentByVersion, setContentByVersion] = useState<Record<string, string>>({})
   const [selectedRunId, setSelectedRunId] = useState('')
   const [models, setModels] = useState<GenerativeSourceDraft[]>([])
   const [modelsState, setModelsState] = useState<'loading' | 'ready' | 'failed'>('loading')
@@ -136,34 +141,42 @@ export function RequirementReviewPage({
   const uploadRef = useRef<HTMLInputElement>(null)
   const readOnly = projectVersion?.status !== 'open'
 
+  useEffect(() => {
+    if (uploadProgress?.stage !== 'completed') return
+    const timer = window.setTimeout(() => {
+      setUploadProgress(current => current?.stage === 'completed' ? null : current)
+    }, completedUploadVisibleMs)
+    return () => window.clearTimeout(timer)
+  }, [uploadProgress?.stage])
+
   const refreshBindings = async () => {
     if (!projectVersion) { setBindings([]); setBoundDocuments([]); setBindingsState('ready'); return }
     setBindingsState('loading')
     try {
       const loadedBindings = await loadRequirementBindings(projectVersion.id)
-      const resolved = await Promise.all(loadedBindings.map(async binding => {
-        const base = documents.find(document => document.id === binding.assetId)
-        if (!base) return null
-        if (base.assetVersionId === binding.assetVersionId) return base
-        const fixed = await loadAssetVersion(binding.assetVersionId)
-        if (fixed.status !== 'ready') return null
-        const content = fixed.content ?? ''
-        const format = base.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
-        const fixedOutline = format === 'markdown' ? parseMarkdownOutline(content) : undefined
-        return {
-          ...base,
-          assetVersionId: fixed.id,
-          version: `V${fixed.number}`,
-          content,
-          status: fixed.status,
-          updated: fixed.readyAt ? formatTime(fixed.readyAt) : formatTime(fixed.createdAt),
-          title: fixedOutline?.title ?? base.title,
-          intro: content.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? base.intro,
-          sections: fixedOutline?.sections.map(section => section.title) ?? base.sections,
-        } satisfies KnowledgeDocument
-      }))
+      const resolved = loadedBindings
+        .filter(binding => binding.version.status === 'ready')
+        .map(binding => {
+          const base = documents.find(document => document.id === binding.assetId)
+          return {
+            id: binding.assetId,
+            name: binding.asset.displayName,
+            parentId: base?.parentId ?? null,
+            version: `V${binding.version.number}`,
+            updated: formatTime(binding.version.readyAt ?? binding.version.createdAt),
+            title: base?.title ?? binding.asset.displayName.replace(/\.(md|txt)$/iu, ''),
+            intro: base?.intro ?? '打开原始文档时加载正文',
+            sections: base?.sections ?? [],
+            assetType: binding.asset.assetType,
+            sourceType: binding.asset.sourceType,
+            assetVersionId: binding.version.id,
+            versions: binding.versions,
+            status: binding.version.status,
+            logicalPath: binding.asset.logicalPath,
+          } satisfies KnowledgeDocument
+        })
       setBindings(loadedBindings)
-      setBoundDocuments(resolved.filter((item): item is KnowledgeDocument => Boolean(item)))
+      setBoundDocuments(resolved)
       setBindingsState('ready')
     } catch (error) {
       setBindingsState('failed')
@@ -175,16 +188,12 @@ export function RequirementReviewPage({
 
   useEffect(() => {
     let cancelled = false
-    if (!projectVersion) { setRuns([]); setRunsState('ready'); return }
+    if (!projectVersion) { setRuns([]); setRunsCursor(undefined); setRunsState('ready'); return }
     setRunsState('loading')
-    loadRequirementReviewRuns(projectVersion.id).then(async persisted => {
-      const hydrated = await Promise.all(persisted.map(async run => {
-        const version = await loadAssetVersion(run.assetVersionId)
-        return { ...run, content: version.content ?? '' } satisfies RunRecord
-      }))
-      if (!cancelled) { setRuns(hydrated); setRunsState('ready') }
+    loadRequirementReviewRuns(projectVersion.id).then(page => {
+      if (!cancelled) { setRuns(page.items); setRunsCursor(page.nextCursor); setRunsState('ready') }
     }).catch(error => {
-      if (!cancelled) { setRuns([]); setRunsState('failed'); notify(error instanceof Error ? error.message : '需求评审历史读取失败', 'error') }
+      if (!cancelled) { setRuns([]); setRunsCursor(undefined); setRunsState('failed'); notify(error instanceof Error ? error.message : '需求评审历史读取失败', 'error') }
     })
     return () => { cancelled = true }
   }, [projectVersion?.id])
@@ -196,31 +205,27 @@ export function RequirementReviewPage({
     let timer: ReturnType<typeof setTimeout> | undefined
     const poll = async () => {
       try {
-        const persisted = await loadRequirementReviewRuns(projectVersion.id)
+        const page = await loadRequirementReviewRuns(projectVersion.id, { runningOnly: true })
         if (cancelled) return
-        setRuns(current => persisted.map(run => ({
-          ...run,
-          content: current.find(item => item.id === run.id)?.content
-            ?? requirementDocuments.find(document => document.assetVersionId === run.assetVersionId)?.content
-            ?? '',
-        })))
-        if (persisted.some(run => run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:'))) {
+        const active = new Map(page.items.map(run => [run.id, run]))
+        setRuns(current => current.map(run => active.get(run.id) ?? (run.status === 'running' ? { ...run, status: 'succeeded', step: 'completed', progress: 100 } : run)))
+        if (page.items.some(run => run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:'))) {
           void loadGenerativeModelSources().then(setModels).catch(() => undefined)
         }
-        if (persisted.some(run => run.status === 'running')) timer = setTimeout(() => { void poll() }, 1_000)
+        if (page.items.length) timer = setTimeout(() => { void poll() }, 1_000)
       } catch {
         if (!cancelled) timer = setTimeout(() => { void poll() }, 2_000)
       }
     }
     timer = setTimeout(() => { void poll() }, 500)
     return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [hasRunningRuns, projectVersion?.id, requirementDocuments])
+  }, [hasRunningRuns, projectVersion?.id])
 
   const selectedDocument = requirementDocuments.find(document => document.id === selectedAssetId) ?? requirementDocuments[0]
   const selectedRun = runs.find(run => run.id === selectedRunId && run.assetId === selectedDocument?.id)
   const result = selectedRun?.response?.result
   const evidenceById = useMemo(() => new Map((result?.evidence ?? []).map(evidence => [evidence.clientEvidenceId, evidence])), [result])
-  const documentContent = selectedRun?.content ?? selectedDocument?.content ?? ''
+  const documentContent = selectedRun?.content ?? contentByVersion[selectedRun?.assetVersionId ?? selectedDocument?.assetVersionId ?? ''] ?? selectedDocument?.content ?? ''
   const documentVersionId = selectedRun?.assetVersionId ?? selectedDocument?.assetVersionId ?? ''
   const documentFormat = selectedDocument?.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
   const outline = useMemo(() => documentFormat === 'markdown' && documentContent ? parseMarkdownOutline(documentContent) : emptyMarkdownOutline, [documentContent, documentFormat])
@@ -256,6 +261,25 @@ export function RequirementReviewPage({
   useEffect(() => {
     if (!modelChoices.some(model => model.key === selectedModelKey)) setSelectedModelKey(modelChoices.find(model => model.healthy)?.key ?? modelChoices[0]?.key ?? '')
   }, [modelChoices, selectedModelKey])
+
+  useEffect(() => {
+    if (!selectedRun?.id || selectedRun.response || selectedRun.status === 'running') return
+    let cancelled = false
+    void loadRequirementReviewRun(selectedRun.id).then(detail => {
+      if (!cancelled) setRuns(current => current.map(run => run.id === detail.id ? { ...run, ...detail } : run))
+    }).catch(error => { if (!cancelled) notify(error instanceof Error ? error.message : '需求评审详情读取失败', 'error') })
+    return () => { cancelled = true }
+  }, [selectedRun?.id, selectedRun?.response, selectedRun?.status, notify])
+
+  const sourceVersionId = selectedRun?.assetVersionId ?? selectedDocument?.assetVersionId
+  useEffect(() => {
+    if (view !== 'source' || !sourceVersionId || contentByVersion[sourceVersionId]) return
+    let cancelled = false
+    void loadAssetVersion(sourceVersionId).then(version => {
+      if (!cancelled) setContentByVersion(current => ({ ...current, [version.id]: version.content ?? '' }))
+    }).catch(error => { if (!cancelled) notify(error instanceof Error ? error.message : '固定版本读取失败', 'error') })
+    return () => { cancelled = true }
+  }, [contentByVersion, notify, sourceVersionId, view])
 
   useEffect(() => {
     const history = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
@@ -340,6 +364,20 @@ export function RequirementReviewPage({
     setSelectedEvidenceId('')
     setSourceQuote(null)
     setView('overview')
+  }
+
+  const loadMoreRuns = async () => {
+    if (!projectVersion || !runsCursor || runsLoadingMore) return
+    setRunsLoadingMore(true)
+    try {
+      const page = await loadRequirementReviewRuns(projectVersion.id, { cursor: runsCursor })
+      setRuns(current => [...current, ...page.items.filter(item => !current.some(run => run.id === item.id))])
+      setRunsCursor(page.nextCursor)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '更多评审历史读取失败', 'error')
+    } finally {
+      setRunsLoadingMore(false)
+    }
   }
 
   const startAnalysis = async () => {
@@ -694,7 +732,7 @@ export function RequirementReviewPage({
       <main className="rr-main">
         <div className="rr-main-toolbar">
           <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
-          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{runsForDocument.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select><ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
+          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{runsForDocument.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
         </div>
 
         {selectedRun?.status === 'running' && <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>RequirementAnalysisAgent 正在后台执行</b><span>页面每秒同步服务端状态；刷新、切换页面或关闭浏览器不会取消本次评审。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>}

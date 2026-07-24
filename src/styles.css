@@ -142,3 +142,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .rr-message.assistant{margin-right:18px;background:#f7f8ff;border:1px solid #e1e3fb;color:#4f5870}.rr-message>p svg{width:12px;vertical-align:middle}.rr-message-citations{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.rr-message-citations button{border:1px solid #cfe2d8;border-radius:10px;background:#f1fbf5;color:#397558;font-size:7px}.rr-message-citations button svg{width:10px;vertical-align:middle}.rr-message-limitations{display:block;margin-top:6px;color:#8a6b3f}
 
 @media(max-width:760px){.version-manager{grid-template-columns:1fr}.version-manager>section+section{border-left:0;border-top:1px solid #e7e9ef}.version-manager-modal .modal{width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow:auto}.rr-version-gate>div{padding:30px 22px}}
+
+@keyframes page-loading-spin{to{transform:rotate(360deg)}}
+.page-loading{min-height:240px;display:flex;align-items:center;justify-content:center;gap:10px;color:#6d7887;font-size:11px}.page-loading svg{width:18px;color:#5965e9;animation:page-loading-spin .9s linear infinite}
+.document-loading-icon{animation:page-loading-spin .9s linear infinite}

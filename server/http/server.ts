@@ -40,7 +40,11 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionId: String(body.assetVersionId ?? ''), sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
   }
   const projectVersionReviewRuns = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs$/.exec(url.pathname)
-  if (method === 'GET' && projectVersionReviewRuns) return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1]))
+  if (method === 'GET' && projectVersionReviewRuns) return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1], {
+    limit: optionalPositiveInteger(url.searchParams.get('limit')),
+    cursor: url.searchParams.get('cursor') ?? undefined,
+    runningOnly: url.searchParams.get('runningOnly') === 'true',
+  }))
   const requirementReviewRun = /^\/api\/requirement-review-runs\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && requirementReviewRun) return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1]))
   const requirementReviewRunCancel = /^\/api\/requirement-review-runs\/([^/]+)\/cancel$/.exec(url.pathname)
@@ -121,6 +125,12 @@ async function route(request: IncomingMessage, response: ServerResponse) {
 }
 
 function stringList(value: unknown) { return Array.isArray(value) ? value.map(String) : undefined }
+function optionalPositiveInteger(value: string | null) {
+  if (value == null || value === '') return undefined
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('limit 必须是正整数')
+  return parsed
+}
 async function json(request: IncomingMessage) { const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk)); return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {} }
 function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type' }); response.end(body == null ? '' : JSON.stringify(body)) }
 function sendBinary(response: ServerResponse, status: number, body: Buffer, type: string) { response.writeHead(status, { 'content-type': type, 'content-length': body.length, 'cache-control': 'private, max-age=3600', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' }); response.end(body) }

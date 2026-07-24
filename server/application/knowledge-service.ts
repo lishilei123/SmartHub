@@ -164,6 +164,10 @@ export class KnowledgeService {
   }
 
   async config(knowledgeBaseId: string) {
+    if (this.store.getActiveKnowledgeConfig) {
+      const version = required(await this.store.getActiveKnowledgeConfig(knowledgeBaseId), '知识库不存在')
+      return { ...version, config: redactConfig(normalizeEmbeddingSources(version.config)) }
+    }
     const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
     const version = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
     return { ...version, config: redactConfig(normalizeEmbeddingSources(version.config)) }
@@ -396,8 +400,9 @@ export class KnowledgeService {
     }
   }
 
-  async assets(knowledgeBaseId: string, filters: { status?: string; path?: string; includeDeleted?: boolean; query?: string } = {}) {
+  async assets(knowledgeBaseId: string, filters: { status?: string; path?: string; includeDeleted?: boolean | string; includeContent?: boolean | string; query?: string } = {}) {
     const state = await this.store.snapshot()
+    const includeContent = filters.includeContent !== false && filters.includeContent !== 'false'
     return state.assets
       .filter(asset => asset.knowledgeBaseId === knowledgeBaseId)
       .map(asset => ({
@@ -407,6 +412,7 @@ export class KnowledgeService {
         task: taskSummary(activeTaskForAsset(state.tasks, asset)),
       }))
       .filter(asset => (!filters.status || asset.activeVersion?.status === filters.status) && (!filters.path || asset.logicalPath.includes(filters.path)) && (filters.includeDeleted || Boolean(asset.activeVersion) || Boolean(asset.task)) && (!filters.query || `${asset.displayName} ${asset.logicalPath} ${asset.activeVersion?.content}`.toLocaleLowerCase().includes(filters.query.toLocaleLowerCase())))
+      .map(asset => includeContent || !asset.activeVersion ? asset : { ...asset, activeVersion: { ...asset.activeVersion, content: undefined } })
   }
 
   async version(versionId: string) { return required((await this.store.snapshot()).versions.find(item => item.id === versionId), '资产版本不存在') }

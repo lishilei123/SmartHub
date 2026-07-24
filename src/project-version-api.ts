@@ -10,7 +10,16 @@ export type ProjectVersion = {
   createdAt: string
   updatedAt: string
 }
-export type RequirementBinding = { id: string; projectVersionId: string; assetId: string; assetVersionId: string; createdAt: string }
+export type RequirementBinding = {
+  id: string
+  projectVersionId: string
+  assetId: string
+  assetVersionId: string
+  createdAt: string
+  asset: { displayName: string; logicalPath: string; assetType: string; sourceType: string; activeVersionId: string | null }
+  version: { id: string; number: number; status: string; createdAt: string; readyAt?: string }
+  versions: Array<{ id: string; number: number; status: string; createdAt: string; readyAt?: string }>
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import type { Chunk, DatabaseState, IndexChunk, SyncTask } from '../domain/types.js'
-import type { ChunkSearchInput, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
+import type { Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
+import type { ChunkSearchInput, RequirementBindingMetadata, ReviewRunPage, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
 const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], reviewRuns: [] })
@@ -38,6 +38,118 @@ export class PostgresStore implements StateStore {
       await client.query('ROLLBACK')
       throw error
     } finally { client.release() }
+  }
+
+  async getActiveKnowledgeConfig(knowledgeBaseId: string): Promise<ConfigVersion | null> {
+    const result = await this.pool.query<{ data: ConfigVersion }>(`
+      SELECT config.data
+      FROM smarthub.knowledge_bases base
+      JOIN smarthub.config_versions config ON config.id = base.active_config_version_id
+      WHERE base.id = $1
+    `, [knowledgeBaseId])
+    return result.rows[0]?.data ?? null
+  }
+
+  async listModelSources(): Promise<GenerativeModelSource[]> {
+    const result = await this.pool.query<{ data: GenerativeModelSource }>('SELECT data FROM smarthub.model_sources ORDER BY priority, created_at, id')
+    return result.rows.map(row => row.data)
+  }
+
+  async getProjectVersion(projectVersionId: string): Promise<ProjectVersion | null> {
+    const result = await this.pool.query<{ data: ProjectVersion }>('SELECT data FROM smarthub.project_versions WHERE id=$1', [projectVersionId])
+    return result.rows[0]?.data ?? null
+  }
+
+  async listRequirementBindings(projectVersionId: string): Promise<RequirementBindingMetadata[]> {
+    const result = await this.pool.query<{
+      binding_data: RequirementBindingMetadata
+      asset_id: string
+      asset_display_name: string
+      asset_logical_path: string
+      asset_type: string
+      asset_source_type: string
+      active_version_id: string | null
+      version_id: string
+      version_number: number
+      version_status: string
+      version_created_at: Date | string
+      version_ready_at: Date | string | null
+      versions: Array<{ id: string; number: number; status: string; createdAt: string; readyAt?: string }> | null
+    }>(`
+      SELECT binding.data AS binding_data,
+        asset.id AS asset_id,
+        asset.display_name AS asset_display_name,
+        asset.logical_path AS asset_logical_path,
+        asset.asset_type,
+        asset.source_type AS asset_source_type,
+        asset.active_version_id,
+        version.id AS version_id,
+        version.version AS version_number,
+        version.status AS version_status,
+        version.created_at AS version_created_at,
+        (version.data->>'readyAt')::timestamptz AS version_ready_at,
+        versions.items AS versions
+      FROM smarthub.project_version_requirement_bindings binding
+      JOIN smarthub.knowledge_assets asset ON asset.id = binding.asset_id
+      JOIN smarthub.asset_versions version ON version.id = binding.asset_version_id
+      LEFT JOIN LATERAL (
+        SELECT jsonb_agg(jsonb_build_object(
+          'id', candidate.id,
+          'number', candidate.version,
+          'status', candidate.status,
+          'createdAt', candidate.created_at,
+          'readyAt', candidate.data->>'readyAt'
+        ) ORDER BY candidate.version) AS items
+        FROM smarthub.asset_versions candidate
+        WHERE candidate.asset_id = asset.id
+      ) versions ON true
+      WHERE binding.project_version_id = $1
+      ORDER BY binding.created_at, binding.id
+    `, [projectVersionId])
+    return result.rows.map(row => ({
+      ...row.binding_data,
+      asset: {
+        displayName: row.asset_display_name,
+        logicalPath: row.asset_logical_path,
+        assetType: row.asset_type,
+        sourceType: row.asset_source_type,
+        activeVersionId: row.active_version_id,
+      },
+      version: {
+        id: row.version_id,
+        number: row.version_number,
+        status: row.version_status,
+        createdAt: toIsoTimestamp(row.version_created_at)!,
+        readyAt: toIsoTimestamp(row.version_ready_at),
+      },
+      versions: row.versions ?? [],
+    }))
+  }
+
+  async listReviewRuns(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage> {
+    const limit = Math.min(Math.max(1, options.limit), 100)
+    const cursor = decodeReviewRunCursor(options.cursor)
+    const result = await this.pool.query<{ data: ReviewRun }>(`
+      SELECT data - 'result' - 'execution' AS data
+      FROM smarthub.review_runs
+      WHERE project_version_id = $1
+        AND ($2::boolean = false OR status = 'running')
+        AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::text))
+      ORDER BY created_at DESC, id DESC
+      LIMIT $5
+    `, [projectVersionId, Boolean(options.runningOnly), cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1])
+    const rows = result.rows.map(row => row.data)
+    const items = rows.slice(0, limit)
+    const last = items.at(-1)
+    return {
+      items,
+      nextCursor: rows.length > limit && last ? encodeReviewRunCursor(last.createdAt, last.id) : undefined,
+    }
+  }
+
+  async getReviewRun(runId: string): Promise<ReviewRun | null> {
+    const result = await this.pool.query<{ data: ReviewRun }>('SELECT data FROM smarthub.review_runs WHERE id=$1', [runId])
+    return result.rows[0]?.data ?? null
   }
 
   async close() {
@@ -440,6 +552,18 @@ function decodeVector(value: string) { return value.replace(/^\[|\]$/g, '').spli
 
 function positiveInteger(value: number, name: string) { if (!Number.isInteger(value) || value <= 0) throw new Error(`${name}必须是正整数`); return value }
 function stringArray(value: unknown) { return Array.isArray(value) ? value.map(String) : [] }
+function encodeReviewRunCursor(createdAt: string, id: string) { return Buffer.from(JSON.stringify([createdAt, id])).toString('base64url') }
+function decodeReviewRunCursor(value: string | undefined) {
+  if (!value) return undefined
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!Array.isArray(parsed) || typeof parsed[0] !== 'string' || typeof parsed[1] !== 'string') throw new Error('invalid')
+    if (Number.isNaN(Date.parse(parsed[0]))) throw new Error('invalid')
+    return { createdAt: parsed[0], id: parsed[1] }
+  } catch {
+    throw new Error('评审历史游标无效')
+  }
+}
 
 function orderDirectories(directories: DatabaseState['directories']) {
   const ordered: DatabaseState['directories'] = []

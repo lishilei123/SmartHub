@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectVersionStatus } from '../domain/types.js'
-import type { StateStore } from '../infrastructure/store.js'
+import type { RequirementBindingMetadata, StateStore } from '../infrastructure/store.js'
 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${randomUUID()}`
@@ -59,9 +59,16 @@ export class ProjectVersionService {
   }
 
   async bindings(projectVersionId: string) {
+    if (this.store.listRequirementBindings && this.store.getProjectVersion) {
+      const version = await this.store.getProjectVersion(projectVersionId)
+      if (!version) throw new Error('项目版本不存在')
+      return await this.store.listRequirementBindings(projectVersionId)
+    }
     const state = await this.store.snapshot()
     const version = versionInSingleProject(state, projectVersionId)
-    return state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id)
+    return state.projectVersionRequirementBindings
+      .filter(item => item.projectVersionId === version.id)
+      .map(bindingMetadata(state))
   }
 
   async bindRequirement(projectVersionId: string, assetVersionId: string) {
@@ -93,6 +100,22 @@ export class ProjectVersionService {
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.id !== binding.id)
       return binding
     })
+  }
+}
+
+function bindingMetadata(state: Awaited<ReturnType<StateStore['snapshot']>>) {
+  return (binding: Awaited<ReturnType<StateStore['snapshot']>>['projectVersionRequirementBindings'][number]): RequirementBindingMetadata => {
+    const asset = required(state.assets.find(item => item.id === binding.assetId), '需求资产不存在')
+    const version = required(state.versions.find(item => item.id === binding.assetVersionId), '需求资产版本不存在')
+    return {
+      ...binding,
+      asset: { displayName: asset.displayName, logicalPath: asset.logicalPath, assetType: asset.assetType, sourceType: asset.sourceType, activeVersionId: asset.activeVersionId },
+      version: { id: version.id, number: version.number, status: version.status, createdAt: version.createdAt, readyAt: version.readyAt },
+      versions: state.versions
+        .filter(item => item.assetId === asset.id)
+        .sort((left, right) => left.number - right.number)
+        .map(item => ({ id: item.id, number: item.number, status: item.status, createdAt: item.createdAt, readyAt: item.readyAt })),
+    }
   }
 }
 

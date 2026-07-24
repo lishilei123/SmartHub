@@ -98,6 +98,11 @@ export type RequirementReviewRun = {
   response?: RequirementAnalysisResponse
 }
 
+export type RequirementReviewRunPage = {
+  items: RequirementReviewRun[]
+  nextCursor?: string
+}
+
 export type ReviewQuestionQuote = { text: string; assetVersionId: string; heading: string; startLine?: number; endLine?: number; findingId?: string }
 export type ReviewQuestionResponse = {
   id: string
@@ -123,11 +128,16 @@ export async function startRequirementAnalysis(projectVersionId: string, input: 
   return body as RequirementReviewRun
 }
 
-export async function loadRequirementReviewRuns(projectVersionId: string) {
-  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-review-runs`)
-  const body = await response.json() as RequirementReviewRun[] | { error?: string }
-  if (!response.ok) throw new Error(!Array.isArray(body) && body.error ? body.error : '需求评审历史读取失败')
-  return body as RequirementReviewRun[]
+export async function loadRequirementReviewRuns(projectVersionId: string, options: { limit?: number; cursor?: string; runningOnly?: boolean } = {}) {
+  const query = new URLSearchParams()
+  if (options.limit) query.set('limit', String(options.limit))
+  if (options.cursor) query.set('cursor', options.cursor)
+  if (options.runningOnly) query.set('runningOnly', 'true')
+  const suffix = query.size ? `?${query}` : ''
+  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-review-runs${suffix}`)
+  const body = await response.json() as RequirementReviewRunPage | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审历史读取失败')
+  return body as RequirementReviewRunPage
 }
 
 export async function loadRequirementReviewRun(runId: string) {

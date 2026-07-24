@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
+import { forwardRef, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import {
   Activity, AlertTriangle, ArrowDown, ArrowUp, BookOpen, Bot, BrainCircuit, Check, CheckCircle2, ChevronDown,
   ChevronRight, CircleHelp, Clock3, Code2, Columns2, Database, Download, FileCode2, FileText,
@@ -10,12 +10,13 @@ import {
   initialSettings, type KnowledgeDirectory, type KnowledgeDocument,
   type EmbeddingSourceDraft, type GenerativeModelDraft, type GenerativeSourceDraft, type SettingsDraft,
 } from './prototype-data'
-import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, discoverGenerativeModels, ensureKnowledgeBase, loadAssetVersion, loadConfig, loadGenerativeModelSources, loadKnowledgeAssets, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, probeGenerativeModel, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, saveGenerativeModelSources, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
+import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, discoverGenerativeModels, ensureKnowledgeBase, loadAssetVersion, loadConfig, loadGenerativeModelSources, loadKnowledgeAssets, loadKnowledgeDocument, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, probeGenerativeModel, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, saveGenerativeModelSources, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
-import { RequirementReviewPage } from './RequirementReviewPage'
 import { createProjectVersion, deleteProjectVersion, loadProjectVersions, updateProjectVersionStatus, type ProjectVersion, type ProjectVersionStatus } from './project-version-api'
+
+const RequirementReviewPage = lazy(() => import('./RequirementReviewPage').then(module => ({ default: module.RequirementReviewPage })))
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
 type NotifyTone = 'success' | 'error' | 'warning'
@@ -117,9 +118,20 @@ function App() {
     if (!id) return
     const data = await loadKnowledgeAssets(id, includeDeleted)
     setKnowledgeDirectoryList(data.directories)
-    setKnowledgeDocumentList(data.documents)
+    setKnowledgeDocumentList(current => {
+      const hydrated = new Map(current.filter(document => document.content !== undefined).map(document => [`${document.id}:${document.assetVersionId}`, document]))
+      return data.documents.map(document => {
+        const cached = hydrated.get(`${document.id}:${document.assetVersionId}`)
+        return cached ? { ...document, content: cached.content, title: cached.title, intro: cached.intro, sections: cached.sections } : document
+      })
+    })
     setKnowledgeApiState('ready')
   }, [knowledgeBaseId])
+  const hydrateDocument = useCallback(async (document: KnowledgeDocument) => {
+    const loaded = await loadKnowledgeDocument(document)
+    setKnowledgeDocumentList(current => current.map(item => item.id === loaded.id && item.assetVersionId === loaded.assetVersionId ? loaded : item))
+    return loaded
+  }, [])
   useEffect(() => {
     let cancelled = false
     let retryTimer: number | undefined
@@ -129,8 +141,10 @@ function App() {
         const id = await ensureKnowledgeBase()
         if (cancelled) return
         setKnowledgeBaseId(id)
-        await refreshKnowledge(false, id)
-        await refreshProjectVersions()
+        await Promise.all([
+          refreshKnowledge(false, id),
+          refreshProjectVersions(),
+        ])
       } catch {
         if (cancelled) return
         setKnowledgeApiState('offline')
@@ -168,8 +182,8 @@ function App() {
       <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>
         {page === 'dashboard' && <Dashboard navigate={setPage} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
-        {page === 'requirements' && <RequirementReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => setPage('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
-        {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} directories={knowledgeDirectoryList} documents={knowledgeDocumentList} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
+        {page === 'requirements' && <Suspense fallback={<PageLoading label="正在加载需求评审工作台…" />}><RequirementReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => setPage('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
+        {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={knowledgeDirectoryList} documents={knowledgeDocumentList} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'design' && <StaticNotice title="测试设计" text="测试设计页面仍展示示例资产；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'execution' && <StaticNotice title="测试执行" text="测试执行页面仍展示示例执行数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'reports' && <StaticNotice title="报告与诊断" text="报告页面仍展示示例质量数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
@@ -228,7 +242,11 @@ function StaticNotice({ title, text }: { title: string; text: string }) {
   return <section className="card static-notice"><h2>{title}</h2><p>{text}</p></section>
 }
 
-function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, documents, notify, addAudit }: { knowledgeBaseId: string; apiState: 'connecting' | 'ready' | 'offline'; refreshKnowledge: (includeDeleted?: boolean) => Promise<void>; directories: KnowledgeDirectory[]; documents: KnowledgeDocument[]; notify: Notify; addAudit: (entry: string) => void }) {
+function PageLoading({ label }: { label: string }) {
+  return <section className="card page-loading" role="status"><RefreshCw /><span>{label}</span></section>
+}
+
+function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, directories, documents, notify, addAudit }: { knowledgeBaseId: string; apiState: 'connecting' | 'ready' | 'offline'; refreshKnowledge: (includeDeleted?: boolean) => Promise<void>; loadDocument: (document: KnowledgeDocument) => Promise<KnowledgeDocument>; directories: KnowledgeDirectory[]; documents: KnowledgeDocument[]; notify: Notify; addAudit: (entry: string) => void }) {
   const [selectedId, setSelectedId] = useState(documents[0]?.id ?? '')
   const [selectedDirectoryId, setSelectedDirectoryId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -286,8 +304,10 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
         setActiveIndexSummary(overview.indexSummary)
         setCandidateProgress(overview.candidateSummary ? { step: overview.candidateSummary.task.step, progress: overview.candidateSummary.task.progress } : null)
         const active = tasks.some(task => task.status === 'queued' || task.status === 'running')
-        await refreshKnowledge()
-        if (!cancelled && active) timer = window.setTimeout(() => void refreshTaskState(), 1_000)
+        if (active) {
+          await refreshKnowledge()
+          if (!cancelled) timer = window.setTimeout(() => void refreshTaskState(), 1_000)
+        }
       } catch {
         if (!cancelled) timer = window.setTimeout(() => void refreshTaskState(), 3_000)
       }
@@ -366,7 +386,16 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
   const moveCandidates = useMemo(() => directories.filter(directory => !deleteDirectoryIds.has(directory.id)), [deleteDirectoryIds, directories])
   const currentFile = documents.find(document => document.id === selectedId)
   const file = evidenceFile?.id === selectedId ? evidenceFile : currentFile
-  const source = file ? makeSource(file) : ''
+  useEffect(() => {
+    if (!currentFile?.assetVersionId || currentFile.content !== undefined) return
+    let cancelled = false
+    void loadDocument(currentFile).catch(error => {
+      if (!cancelled) notify(error instanceof Error ? error.message : '文档正文加载失败', 'error')
+    })
+    return () => { cancelled = true }
+  }, [currentFile?.assetVersionId, currentFile?.content, loadDocument])
+  const documentContentLoading = Boolean(file?.assetVersionId && file.content === undefined)
+  const source = file && !documentContentLoading ? makeSource(file) : ''
   const format = file?.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
   const outline = useMemo(() => format === 'markdown' ? parseMarkdownOutline(source) : emptyMarkdownOutline, [format, source])
   useEffect(() => {
@@ -678,7 +707,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, directories, d
     <div className="knowledge-toolbar"><div ref={searchInputRef} className="mini-search wide"><Search size={16} /><input aria-label="搜索知识库" value={query} onChange={event => updateSearchQuery(event.target.value)} onFocus={reopenSearchResults} placeholder="搜索文件名称或文档内容" /></div><Badge tone={apiState === 'ready' ? 'green' : apiState === 'connecting' ? 'orange' : 'gray'}>{apiState === 'ready' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{apiState === 'ready' ? '知识库已连接' : apiState === 'connecting' ? '正在连接' : 'API 未启动'}</Badge>{activeIndexSummary && <Badge tone="blue">活动索引 V{activeIndexSummary.number} · {activeIndexSummary.dimensions} 维 · {activeIndexSummary.chunks} Chunk · {activeIndexSummary.hnswReady === null ? '内存检索' : activeIndexSummary.hnswReady ? 'HNSW 就绪' : '精确检索'}</Badge>}{candidateProgress && <Badge tone="orange">候选索引 {candidateProgress.step} · {candidateProgress.progress}%（旧索引继续服务）</Badge>}<button className="btn ghost" disabled={syncState === 'running' || apiState !== 'ready'} onClick={() => void sync()}><RefreshCw size={16} />{syncState === 'running' ? '刷新中' : '刷新'}</button><button className="btn primary" disabled={uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload size={16} />{uploadState === 'running' ? '上传中' : '上传资料'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={chooseUpload} />{searchStatus && <div ref={searchPopoverRef} className="knowledge-search-results" role="dialog" aria-label="知识库检索结果">{searchMeta && <div className="search-summary"><b>{retrievalModeLabel(searchMeta.mode)}{searchMeta.degraded ? '（已降级）' : ''}</b><span>关键词召回 {searchMeta.keywordCandidates} · 向量召回 {searchMeta.vectorCandidates} · 通过门槛 {searchMeta.eligibleCandidates}</span><em>{searchMeta.degraded ? '向量服务不可用，已使用关键词检索' : `最低相关度 ${Math.round(searchMeta.minimumRelevance * 100)}%`}</em></div>}{searchResults.length ? searchResults.map(result => <button key={`${result.version.id}-${result.chunk.chunkKey}`} onClick={() => openSearchResult(result)}><b>{result.asset.displayName}<em className="final-score">综合 {Math.round(result.score * 100)}%</em></b><span>{result.excerpt}</span><small>{result.asset.logicalPath} · {result.chunk.headingPath.join(' / ') || '正文'} · L{result.chunk.startLine}-{result.chunk.endLine}</small>{result.scores && <div className="score-breakdown"><i className={result.scores.keyword > 0 ? 'active' : ''}>关键词 {Math.round(result.scores.keyword * 100)}%</i><i className={result.scores.vector > 0 ? 'active' : ''}>向量 {Math.round(result.scores.vector * 100)}%</i>{result.scores.reranker != null && <i className="active">重排 {Math.round(result.scores.reranker * 100)}%</i>}</div>}</button>) : <p>{searchStatus === 'no_ready_assets' ? '尚无已就绪资料。' : searchStatus === 'initial_indexing' ? '正在建立首个索引，请稍后重试。' : searchStatus === 'no_active_index' ? '尚未建立活动索引。' : searchStatus === 'vector_unavailable' ? '向量服务暂不可用，可切换关键词检索。' : searchStatus === 'filter_empty' ? '当前筛选范围没有可检索资料。' : '当前范围没有匹配结果。'}</p>}</div>}</div>
     <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-root"><FolderOpen /><b>SmartHub 知识库</b><small>{documents.length}</small><button className="icon-btn tree-root-action" onClick={() => openCreate(null)} aria-label="在知识库根目录新建目录"><FolderPlus /></button><button className="icon-btn tree-collapse" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{queryText && !matchingDocumentIds.size ? <p className="empty-state">没有匹配的文档。</p> : <div className="tree-content">{rootDirectories.map(directory => renderDirectory(directory, 0))}{rootDocuments.map(document => renderFile(document, '30px'))}</div>}</aside>
       <article ref={documentPanelRef} className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span title={file ? getBreadcrumb(file) : undefined}>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions">{evidenceFile && <Badge tone="purple">检索证据固定版本</Badge>}<Badge tone={file.task?.status === 'failed' ? 'red' : file.task ? 'orange' : file.status === 'ready' ? 'green' : 'gray'}>{file.task?.status === 'failed' ? '入库失败' : file.task ? `${file.task.step} ${file.task.progress}%` : file.status === 'ready' ? '已入库' : '等待入库'}</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => openFileActions()}><MoreHorizontal /></button></div>}</div>
-        {file ? viewMode === 'preview' ? <div className="preview-body"><DocumentContent ref={previewRef} file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} /><nav ref={outlineRef} className="document-outline" aria-label="本文目录"><b>本文目录</b>{outline.sections.map(section => <button key={section.key} data-outline-section-key={section.key} className={activeSectionKey === section.key ? 'active' : ''} onClick={() => jumpToSection(section.key)}>{section.title}</button>)}</nav></div> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>请上传资料，或检查知识库服务连接后再刷新。</p></div>}
+        {file ? documentContentLoading ? <div className="document-empty" role="status"><RefreshCw className="document-loading-icon" /><h2>正在加载文档正文</h2><p>列表已就绪，正在读取所选固定版本。</p></div> : viewMode === 'preview' ? <div className="preview-body"><DocumentContent ref={previewRef} file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} /><nav ref={outlineRef} className="document-outline" aria-label="本文目录"><b>本文目录</b>{outline.sections.map(section => <button key={section.key} data-outline-section-key={section.key} className={activeSectionKey === section.key ? 'active' : ''} onClick={() => jumpToSection(section.key)}>{section.title}</button>)}</nav></div> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>请上传资料，或检查知识库服务连接后再刷新。</p></div>}
       </article></div>
     {imageOpen && <ImageLightbox onClose={() => setImageOpen(false)} />}
     {uploadCandidates.length > 0 && <Modal title={uploadIsArchive ? '上传 Markdown 压缩包' : uploadIsMultiple ? `批量上传 ${uploadCandidates.length} 个文档` : '上传知识资产'} onClose={() => setUploadCandidates([])}><div className="modal-form"><p>{uploadIsArchive ? '将保留 ZIP 内的目录结构，导入 Markdown/TXT，并保存其中被文档相对路径引用的 PNG、JPG、GIF、WebP 或 SVG 图片。' : uploadIsMultiple ? '所选 Markdown/TXT 将统一上传到目标目录，每个文件独立生成资产版本并进入活动索引。' : '文件将按逻辑路径保存到系统默认知识库目录，并生成不可变版本快照；索引切换完成后进入检索。'}</p><label>{uploadIsMultiple ? '已选文件' : '文件'}<input value={uploadIsMultiple ? `${uploadCandidates.length} 个：${uploadCandidates.map(file => file.name).join('、')}` : uploadCandidates[0].name} readOnly title={uploadCandidates.map(file => file.name).join('\n')} /></label><label>资料类型<input value={uploadAssetType} onChange={event => setUploadAssetType(event.target.value)} placeholder="输入资料类型" /></label><label>{uploadIsArchive || uploadIsMultiple ? '导入到目录（可留空）' : '知识库路径'}<input list="knowledge-upload-paths" value={uploadLogicalPath} onChange={event => setUploadLogicalPath(event.target.value)} placeholder={uploadIsArchive || uploadIsMultiple ? '输入或选择现有目录' : '输入或选择知识库路径'} /><small className="field-hint">可从现有知识库目录中选择，也可以直接输入新路径。</small></label><datalist id="knowledge-upload-paths">{uploadPathSuggestions.map(path => <option key={path} value={path} />)}</datalist><div className="modal-actions"><button className="btn ghost" onClick={() => setUploadCandidates([])}>取消</button><button className="btn primary" disabled={(!uploadIsArchive && !uploadIsMultiple && !uploadLogicalPath.trim()) || !uploadAssetType.trim() || uploadState === 'running'} onClick={() => void upload()}><Upload />确认上传</button></div></div></Modal>}
@@ -736,13 +765,27 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
   const [draft, setDraft] = useState<SettingsDraft>(initialSettings)
   const [configVersion, setConfigVersion] = useState<number | null>(null)
   const [requiresRebuild, setRequiresRebuild] = useState(false)
+  const [modelsLoaded, setModelsLoaded] = useState(false)
+  const [configLoaded, setConfigLoaded] = useState(false)
   const editorScrollRef = useRef<HTMLDivElement>(null)
-  useEffect(() => { if (!knowledgeBaseId) return; void Promise.all([loadConfig(knowledgeBaseId), loadGenerativeModelSources()]).then(([value, generativeSources]) => {
-    const config = value.config
-    const mapped: SettingsDraft = { ...initialSettings, generativeSources, parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkSize: `${config.chunkTargetSize} tokens`, chunkMaxSize: String(config.chunkMaxSize), chunkOverlap: `${config.chunkOverlap} tokens`, headingDepth: String(config.headingDepth), embeddingSourceId: config.embeddingSourceId, embeddingSources: config.embeddingSources, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingApiKey: config.embeddingApiKey, embeddingModel: config.embeddingModel, embeddingDimensions: String(config.embeddingDimensions), embeddingBatchSize: String(config.embeddingBatchSize), embeddingTimeoutMs: String(config.embeddingTimeoutMs), embeddingRetries: String(config.embeddingRetries), vectorRecall: String(config.vectorRecall), keywordRecall: String(config.keywordRecall), finalResults: String(config.finalResults), relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId ?? config.embeddingSourceId, rerankerModel: config.rerankerModel }
-    const loaded = { ...mapped, ...repairGenerativeRouting(generativeSources, new Set(), mapped) }
-    setSaved(loaded); setDraft(loaded); setConfigVersion(value.version); setRequiresRebuild(value.requiresRebuild)
-  }).catch(error => notify(error instanceof Error ? error.message : '系统配置 API 未连接。', 'error')) }, [knowledgeBaseId])
+  useEffect(() => {
+    if (!knowledgeBaseId || selected !== 0 || modelsLoaded) return
+    void loadGenerativeModelSources().then(generativeSources => {
+      setSaved(current => ({ ...current, generativeSources, ...repairGenerativeRouting(generativeSources, new Set(), current) }))
+      setDraft(current => ({ ...current, generativeSources, ...repairGenerativeRouting(generativeSources, new Set(), current) }))
+      setModelsLoaded(true)
+    }).catch(error => notify(error instanceof Error ? error.message : '模型管理 API 未连接。', 'error'))
+  }, [knowledgeBaseId, modelsLoaded, notify, selected])
+  useEffect(() => {
+    if (!knowledgeBaseId || selected !== 2 || configLoaded) return
+    void loadConfig(knowledgeBaseId).then(value => {
+      const config = value.config
+      const mapped = { parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkSize: `${config.chunkTargetSize} tokens`, chunkMaxSize: String(config.chunkMaxSize), chunkOverlap: `${config.chunkOverlap} tokens`, headingDepth: String(config.headingDepth), embeddingSourceId: config.embeddingSourceId, embeddingSources: config.embeddingSources, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingApiKey: config.embeddingApiKey, embeddingModel: config.embeddingModel, embeddingDimensions: String(config.embeddingDimensions), embeddingBatchSize: String(config.embeddingBatchSize), embeddingTimeoutMs: String(config.embeddingTimeoutMs), embeddingRetries: String(config.embeddingRetries), vectorRecall: String(config.vectorRecall), keywordRecall: String(config.keywordRecall), finalResults: String(config.finalResults), relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId ?? config.embeddingSourceId, rerankerModel: config.rerankerModel }
+      setSaved(current => ({ ...current, ...mapped }))
+      setDraft(current => ({ ...current, ...mapped }))
+      setConfigVersion(value.version); setRequiresRebuild(value.requiresRebuild); setConfigLoaded(true)
+    }).catch(error => notify(error instanceof Error ? error.message : '知识库配置 API 未连接。', 'error'))
+  }, [configLoaded, knowledgeBaseId, notify, selected])
   const current = items[selected]
   const CurrentIcon = current.icon
   const dirty = JSON.stringify(saved) !== JSON.stringify(draft)

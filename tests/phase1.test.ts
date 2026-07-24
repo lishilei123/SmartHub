@@ -38,6 +38,17 @@ test('AC-001 创建项目时自动创建唯一默认知识库', async () => {
   assert.equal(overview.knowledgeBase.activeIndexVersionId, null); assert.equal(overview.counts.assets, 0)
 })
 
+test('知识资产列表可省略正文并保留固定版本元数据', async () => {
+  const { service, kbId } = await fixture()
+  const ready = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'metadata.md', assetType: 'requirement', displayName: '元数据资料', logicalPath: 'metadata.md', content: document() })
+  const [full] = await service.assets(kbId)
+  const [metadata] = await service.assets(kbId, { includeContent: false })
+  assert.equal(full.activeVersion?.content, document())
+  assert.equal(metadata.activeVersion?.content, undefined)
+  assert.equal(metadata.activeVersion?.id, ready.version.id)
+  assert.equal(metadata.activeVersion?.status, 'ready')
+})
+
 test('默认知识库由后端稳定复用且并发初始化不创建空库', async () => {
   const service = new KnowledgeService(new JsonStore(null)); await service.initialize()
   const [first, second] = await Promise.all([service.ensureDefaultKnowledgeBase(), service.ensureDefaultKnowledgeBase()])
