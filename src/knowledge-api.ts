@@ -44,7 +44,7 @@ export async function loadKnowledgeAssets(kbId: string, includeDeleted = false):
 }
 
 export async function uploadKnowledgeFile(kbId: string, file: File, logicalPath: string, assetType = 'other') {
-  return request<{ deduplicated: boolean; task: ApiTask | null }>(`/knowledge-bases/${kbId}/uploads`, { method: 'POST', body: JSON.stringify({ sourceKey: `browser:${logicalPath}`, assetType, displayName: file.name, logicalPath, content: await file.text() }) })
+  return request<{ deduplicated: boolean; asset: { id: string }; version: { id: string }; task: ApiTask | null }>(`/knowledge-bases/${kbId}/uploads`, { method: 'POST', body: JSON.stringify({ sourceKey: `browser:${logicalPath}`, assetType, displayName: file.name, logicalPath, content: await file.text() }) })
 }
 export async function uploadKnowledgeArchive(kbId: string, file: File, targetPath = '', assetType = 'other') {
   const { default: JSZip } = await import('jszip')
@@ -64,7 +64,7 @@ export async function uploadKnowledgeArchive(kbId: string, file: File, targetPat
     else skipped += 1
   }
   if (!documents.length) throw new Error('压缩包中没有可入库的 Markdown 或 TXT 文件。')
-  return request<{ documents: number; attachments: number; deduplicated: number; taskIds: string[]; skipped: number }>(`/knowledge-bases/${kbId}/archives`, { method: 'POST', body: JSON.stringify({ documents, attachments, skipped }) })
+  return request<{ documents: number; attachments: number; deduplicated: number; taskIds: string[]; assetVersionIds: string[]; skipped: number }>(`/knowledge-bases/${kbId}/archives`, { method: 'POST', body: JSON.stringify({ documents, attachments, skipped }) })
 }
 export const loadKnowledgeOverview = (kbId: string) => request<ApiOverview>(`/knowledge-bases/${kbId}/overview`)
 export const loadConfig = (kbId: string) => request<ApiConfig>(`/knowledge-bases/${kbId}/config`)

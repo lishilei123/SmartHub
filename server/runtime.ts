@@ -9,6 +9,7 @@ import { LocalModelRuntime } from './infrastructure/local-model-runtime.js'
 import { PostgresStore } from './infrastructure/postgres-store.js'
 import { RawDocumentStore } from './infrastructure/raw-document-store.js'
 import { JsonStore, type StateStore } from './infrastructure/store.js'
+import { ProjectVersionService } from './application/project-version-service.js'
 
 const envFile = resolve(fileURLToPath(new URL('../.env.local', import.meta.url)))
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -28,4 +29,5 @@ export const service = new KnowledgeService(stateStore, rawDocumentStore, localM
 export const modelService = new ModelService(stateStore)
 export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore)
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime)
+export const projectVersionService = new ProjectVersionService(stateStore)
 export const usingPostgres = stateStore instanceof PostgresStore

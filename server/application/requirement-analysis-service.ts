@@ -5,6 +5,7 @@ import { ReviewResultValidator } from '../agent/result-validator.js'
 import { createRequirementAnalysisAgentDefinition } from '../agent/requirement-analysis-agent.js'
 
 export interface RequirementAnalysisRequest {
+  projectVersionId: string
   assetVersionId: string
   sourceId: string
   modelId: string
@@ -18,12 +19,16 @@ export class RequirementAnalysisService {
 
   async analyze(request: RequirementAnalysisRequest, signal = new AbortController().signal) {
     const state = await this.store.snapshot()
+    const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
+    if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求评审')
     const version = required(state.versions.find(item => item.id === request.assetVersionId), '需求资产版本不存在')
     if (version.status !== 'ready') throw new Error('需求资产版本尚未就绪')
     const asset = required(state.assets.find(item => item.id === version.assetId), '需求资产不存在')
     if (asset.assetType !== 'requirement') throw new Error('只有 requirement 类型资产可以发起需求评审')
     const knowledgeBase = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId), '知识库不存在')
     const project = required(state.projects.find(item => item.id === knowledgeBase.projectId), '项目不存在')
+    if (projectVersion.projectId !== project.id) throw new Error('需求资产不属于当前项目版本')
+    required(state.projectVersionRequirementBindings.find(item => item.projectVersionId === projectVersion.id && item.assetId === asset.id && item.assetVersionId === version.id), '需求资产版本未绑定到当前项目版本')
     const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), '知识库没有活动索引')
     if (!index.assetVersionIds.includes(version.id)) throw new Error('需求资产版本不属于当前活动索引')
     const source = required(state.modelSources.find(item => item.id === request.sourceId && item.enabled), '生成式模型来源不可用')
@@ -37,6 +42,8 @@ export class RequirementAnalysisService {
       runId: `review_run_${randomUUID()}`,
       projectId: project.id,
       projectName: project.name,
+      projectVersionId: projectVersion.id,
+      projectVersionName: projectVersion.name,
       knowledgeBaseId: knowledgeBase.id,
       assetId: asset.id,
       assetVersionId: version.id,

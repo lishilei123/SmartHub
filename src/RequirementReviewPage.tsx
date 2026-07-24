@@ -4,7 +4,7 @@ import {
   FileText, GitBranch, ListFilter, LoaderCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen,
   PanelRightClose, PanelRightOpen, Play, Quote, RefreshCw, Search, Send, ShieldCheck, Sparkles, Upload, XCircle,
 } from 'lucide-react'
-import type { GenerativeSourceDraft, KnowledgeDocument, Version } from './prototype-data'
+import type { GenerativeSourceDraft, KnowledgeDocument } from './prototype-data'
 import { loadAssetVersion, loadGenerativeModelSources, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTasks } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { emptyMarkdownOutline, parseMarkdownOutline } from './markdown-outline'
@@ -16,6 +16,7 @@ import {
   type ReviewFindingType,
   type ReviewSeverity,
 } from './requirement-analysis-api'
+import { bindRequirementVersion, loadRequirementBindings, unbindRequirementVersion, type ProjectVersion, type RequirementBinding } from './project-version-api'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 type ViewKey = 'overview' | 'source' | 'diff' | 'tree' | 'evidence'
@@ -65,33 +66,43 @@ function ReviewBadge({ children, tone = 'gray' }: { children: React.ReactNode; t
   return <span className={`rr-badge ${tone}`}>{children}</span>
 }
 
+function ReviewModal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><div className="modal rr-binding-modal" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-btn" onClick={onClose} aria-label={`关闭${title}`}><XCircle /></button></header>{children}</div></div>
+}
+
 const severityTone = (severity: ReviewSeverity) => severity === 'critical' ? 'red' : severity === 'high' ? 'orange' : severity === 'medium' ? 'gold' : severity === 'low' ? 'blue' : 'gray'
 const runTone = (status?: RunStatus) => status === 'succeeded' ? 'green' : status === 'running' ? 'purple' : status === 'failed' ? 'red' : status === 'cancelled' ? 'orange' : 'gray'
 const runLabel = (status?: RunStatus) => status === 'succeeded' ? '评审完成' : status === 'running' ? '分析中' : status === 'failed' ? '运行失败' : status === 'cancelled' ? '已取消' : '待评审'
 const formatTime = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 
 export function RequirementReviewPage({
-  version,
+  projectVersion,
   documents,
   knowledgeBaseId,
   apiState,
   refreshKnowledge,
+  onManageVersions,
   onOpenKnowledge,
   onOpenActivity,
   notify,
   addAudit,
 }: {
-  version: Version
+  projectVersion: ProjectVersion | null
   documents: KnowledgeDocument[]
   knowledgeBaseId: string
   apiState: 'connecting' | 'ready' | 'offline'
   refreshKnowledge: () => Promise<void>
+  onManageVersions: () => void
   onOpenKnowledge: () => void
   onOpenActivity: () => void
   notify: Notify
   addAudit: (entry: string) => void
 }) {
-  const requirementDocuments = useMemo(() => documents.filter(document => document.assetType === 'requirement' && document.status === 'ready' && document.assetVersionId), [documents])
+  const [bindings, setBindings] = useState<RequirementBinding[]>([])
+  const [boundDocuments, setBoundDocuments] = useState<KnowledgeDocument[]>([])
+  const [bindingsState, setBindingsState] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const availableRequirementDocuments = useMemo(() => documents.filter(document => document.assetType === 'requirement' && document.status === 'ready' && document.assetVersionId), [documents])
+  const requirementDocuments = boundDocuments
   const [selectedAssetId, setSelectedAssetId] = useState('')
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | RunStatus | 'not_started'>('all')
@@ -119,9 +130,49 @@ export function RequirementReviewPage({
   const [diffContents, setDiffContents] = useState<Record<string, string>>({})
   const [diffLoading, setDiffLoading] = useState(false)
   const [uploadState, setUploadState] = useState<'idle' | 'running'>('idle')
+  const [bindingManagerOpen, setBindingManagerOpen] = useState(false)
+  const [bindingActionId, setBindingActionId] = useState('')
   const requestController = useRef<AbortController | null>(null)
   const sourceRef = useRef<HTMLDivElement>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
+  const readOnly = projectVersion?.status !== 'open'
+
+  const refreshBindings = async () => {
+    if (!projectVersion) { setBindings([]); setBoundDocuments([]); setBindingsState('ready'); return }
+    setBindingsState('loading')
+    try {
+      const loadedBindings = await loadRequirementBindings(projectVersion.id)
+      const resolved = await Promise.all(loadedBindings.map(async binding => {
+        const base = documents.find(document => document.id === binding.assetId)
+        if (!base) return null
+        if (base.assetVersionId === binding.assetVersionId) return base
+        const fixed = await loadAssetVersion(binding.assetVersionId)
+        if (fixed.status !== 'ready') return null
+        const content = fixed.content ?? ''
+        const format = base.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
+        const fixedOutline = format === 'markdown' ? parseMarkdownOutline(content) : undefined
+        return {
+          ...base,
+          assetVersionId: fixed.id,
+          version: `V${fixed.number}`,
+          content,
+          status: fixed.status,
+          updated: fixed.readyAt ? formatTime(fixed.readyAt) : formatTime(fixed.createdAt),
+          title: fixedOutline?.title ?? base.title,
+          intro: content.split('\n').find(line => line.trim() && !line.startsWith('#'))?.trim() ?? base.intro,
+          sections: fixedOutline?.sections.map(section => section.title) ?? base.sections,
+        } satisfies KnowledgeDocument
+      }))
+      setBindings(loadedBindings)
+      setBoundDocuments(resolved.filter((item): item is KnowledgeDocument => Boolean(item)))
+      setBindingsState('ready')
+    } catch (error) {
+      setBindingsState('failed')
+      notify(error instanceof Error ? error.message : '需求版本绑定读取失败', 'error')
+    }
+  }
+
+  useEffect(() => { void refreshBindings() }, [projectVersion?.id, documents])
 
   const selectedDocument = requirementDocuments.find(document => document.id === selectedAssetId) ?? requirementDocuments[0]
   const selectedRun = runs.find(run => run.id === selectedRunId && run.assetId === selectedDocument?.id)
@@ -237,7 +288,7 @@ export function RequirementReviewPage({
     setView('overview')
     addAudit(`启动需求评审：${selectedDocument.title} · ${selectedDocument.assetVersionId}`)
     try {
-      const response = await runRequirementAnalysis({
+      const response = await runRequirementAnalysis(projectVersion!.id, {
         assetVersionId: selectedDocument.assetVersionId,
         sourceId: selectedModel.sourceId,
         modelId: selectedModel.modelId,
@@ -265,19 +316,21 @@ export function RequirementReviewPage({
   const uploadRequirements = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = [...(event.target.files ?? [])]
     event.target.value = ''
-    if (!files.length || !knowledgeBaseId || uploadState === 'running') return
+    if (!files.length || !knowledgeBaseId || uploadState === 'running' || !projectVersion || readOnly) return
     setUploadState('running')
     const taskIds: string[] = []
     let documentCount = 0
     let attachmentCount = 0
     let skippedCount = 0
     let deduplicatedCount = 0
+    const assetVersionIds: string[] = []
     try {
       for (const file of files) {
         const extension = file.name.split('.').at(-1)?.toLowerCase()
         if (extension === 'zip') {
           const result = await uploadKnowledgeArchive(knowledgeBaseId, file, '需求文档', 'requirement')
           taskIds.push(...result.taskIds)
+          assetVersionIds.push(...result.assetVersionIds)
           documentCount += result.documents
           attachmentCount += result.attachments
           skippedCount += result.skipped
@@ -287,6 +340,7 @@ export function RequirementReviewPage({
           const result = await uploadKnowledgeFile(knowledgeBaseId, file, `需求文档/${file.name}`, 'requirement')
           documentCount += 1
           if (result.task?.id) taskIds.push(result.task.id)
+          assetVersionIds.push(result.version.id)
           if (result.deduplicated) deduplicatedCount += 1
           addAudit(`上传需求文档：${file.name}`)
         } else {
@@ -295,6 +349,8 @@ export function RequirementReviewPage({
       }
       if (!documentCount) throw new Error('没有可上传的需求文档，仅支持 Markdown、TXT 或包含这些文件的 ZIP。')
       if (taskIds.length) await waitForTasks(taskIds)
+      for (const assetVersionId of assetVersionIds) await bindRequirementVersion(projectVersion.id, assetVersionId)
+      await refreshBindings()
       await refreshKnowledge()
       notify(`需求资料已入库：${documentCount} 篇文档${attachmentCount ? `、${attachmentCount} 个附件` : ''}${deduplicatedCount ? `，${deduplicatedCount} 篇内容已去重` : ''}${skippedCount ? `，跳过 ${skippedCount} 个不支持文件` : ''}。`)
     } catch (error) {
@@ -323,7 +379,7 @@ export function RequirementReviewPage({
   }
 
   const updateFindingState = (finding: ReviewFinding, state: FindingState) => {
-    if (!selectedRun) return
+    if (!selectedRun || readOnly) return
     setFindingStates(current => ({ ...current, [`${selectedRun.id}:${finding.clientFindingId}`]: state }))
     addAudit(`前端处置 ${finding.clientFindingId}：${findingStateLabels[state]}（当前会话）`)
     notify('处置状态已更新；当前后端尚无 Finding Action 接口，仅保留在本次前端会话。', 'warning')
@@ -445,13 +501,40 @@ export function RequirementReviewPage({
   const removedLines = leftLines.filter(line => !rightLines.includes(line))
   const addedLines = rightLines.filter(line => !leftLines.includes(line))
   const currentMessages = selectedRun ? chatMessages[selectedRun.id] ?? [] : []
-  const canRun = Boolean(selectedDocument?.assetVersionId && selectedModel?.healthy && apiState === 'ready' && !requestController.current)
+  const canRun = Boolean(projectVersion && !readOnly && selectedDocument?.assetVersionId && selectedModel?.healthy && apiState === 'ready' && bindingsState === 'ready' && !requestController.current)
 
-  return <section className={`rr-page ${leftCollapsed ? 'left-collapsed' : ''} ${chatCollapsed ? 'chat-collapsed' : ''}`}>
+  const bindDocument = async (document: KnowledgeDocument) => {
+    if (!projectVersion || readOnly || !document.assetVersionId || bindingActionId) return
+    setBindingActionId(document.id)
+    try {
+      const previous = bindings.find(item => item.assetId === document.id)
+      await bindRequirementVersion(projectVersion.id, document.assetVersionId)
+      await refreshBindings()
+      addAudit(`${previous ? '替换' : '新增'}项目版本需求绑定：${document.title} · ${document.assetVersionId}`)
+      notify(previous ? `已将“${document.title}”替换为 ${document.version}。` : `已将“${document.title}”加入当前版本。`)
+    } catch (error) { notify(error instanceof Error ? error.message : '需求绑定更新失败', 'error') }
+    finally { setBindingActionId('') }
+  }
+
+  const unbindDocument = async (binding: RequirementBinding, documentTitle: string) => {
+    if (!projectVersion || readOnly || bindingActionId) return
+    setBindingActionId(binding.assetId)
+    try {
+      await unbindRequirementVersion(projectVersion.id, binding.id)
+      await refreshBindings()
+      addAudit(`移除项目版本需求绑定：${documentTitle} · ${binding.assetVersionId}`)
+      notify(`已从当前版本移除“${documentTitle}”；知识库原文仍保留。`)
+    } catch (error) { notify(error instanceof Error ? error.message : '需求绑定移除失败', 'error') }
+    finally { setBindingActionId('') }
+  }
+
+  if (!projectVersion) return <section className="rr-version-gate"><div><GitBranch /><ReviewBadge tone="purple">项目空间按版本隔离</ReviewBadge><h1>新建项目版本后才能进行需求分析</h1><p>平台固定为一个项目。需求文档绑定、评审运行、Finding 处置和对话上下文都归属于项目版本；知识库与系统设置保持全局共享。</p><button className="btn primary" onClick={onManageVersions}><GitBranch />新建项目版本</button></div></section>
+
+  return <><section className={`rr-page ${leftCollapsed ? 'left-collapsed' : ''} ${chatCollapsed ? 'chat-collapsed' : ''}`}>
     <header className="rr-header">
       <div className="rr-title-block">
         <div className="rr-title-icon"><Sparkles /></div>
-        <div><span>需求评审工作台 · {version}</span><h1>{selectedDocument?.title ?? '需求分析'}</h1><p>{selectedDocument ? `${selectedDocument.logicalPath} · 固定版本 ${documentVersionId}` : '请先在知识库准备 ready 的需求资产'}</p></div>
+        <div><span>需求评审工作台 · {projectVersion.name}</span><h1>{selectedDocument?.title ?? '需求分析'}</h1><p>{selectedDocument ? `${selectedDocument.logicalPath} · 固定版本 ${documentVersionId}` : bindingsState === 'loading' ? '正在加载当前版本的需求绑定' : '当前版本尚未绑定 ready 的需求资产'}</p></div>
       </div>
       <div className="rr-run-summary">
         <ReviewBadge tone={runTone(selectedRun?.status)}>{runLabel(selectedRun?.status)}</ReviewBadge>
@@ -459,12 +542,13 @@ export function RequirementReviewPage({
         <span><small>固定资产版本</small><b title={documentVersionId}>{documentVersionId ? documentVersionId.slice(0, 14) : '—'}</b></span>
       </div>
       <div className="rr-header-actions">
+        <ReviewBadge tone={readOnly ? 'orange' : 'green'}>{readOnly ? projectVersion.status === 'locked' ? '版本已锁定 · 只读' : '版本已归档 · 只读' : '版本可编辑'}</ReviewBadge>
         <label className="rr-model-select"><span>评审模型</span><select value={selectedModelKey} onChange={event => setSelectedModelKey(event.target.value)} disabled={modelsState !== 'ready' || selectedRun?.status === 'running'}><option value="">选择支持工具调用的模型</option>{modelChoices.map(model => <option value={model.key} key={model.key}>{model.healthy ? '●' : '○'} {model.label}</option>)}</select></label>
         <button className="btn ghost" onClick={() => setSnapshotOpen(value => !value)} disabled={!selectedRun}><ShieldCheck />固定快照</button>
         <button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />导出报告</button>
         {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun}><Play />{selectedRun?.status === 'succeeded' ? '重新评审' : '开始评审'}</button>}
       </div>
-      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>资产版本</dt><dd>{selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.response?.snapshot.indexVersionId ?? '运行完成后返回'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.response ? `${selectedRun.response.snapshot.agentDefinition.agentKey} ${selectedRun.response.snapshot.agentDefinition.version}` : 'RequirementAnalysisAgent'}</dd></div></dl></div>}
+      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.response?.snapshot.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>资产版本</dt><dd>{selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.response?.snapshot.indexVersionId ?? '运行完成后返回'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.response ? `${selectedRun.response.snapshot.agentDefinition.agentKey} ${selectedRun.response.snapshot.agentDefinition.version}` : 'RequirementAnalysisAgent'}</dd></div></dl></div>}
     </header>
 
     <div className="rr-workspace">
@@ -478,7 +562,7 @@ export function RequirementReviewPage({
             const count = runs.filter(run => run.assetId === document.id).length
             return <button className={`rr-review-row ${selectedDocument?.id === document.id ? 'active' : ''}`} key={document.id} onClick={() => setSelectedAssetId(document.id)}><span className="rr-file-icon">MD</span><span><b>{document.title}</b><small>{document.version} · {latest ? runLabel(latest.status) : '待评审'}</small><em>{document.logicalPath}</em></span>{count > 0 && <i>{count}</i>}</button>
           })}{!filteredDocuments.length && <div className="rr-empty compact"><FileText /><b>没有可评审需求</b><p>仅展示知识库中 ready 的 requirement 类型 Markdown/纯文本资产。</p></div>}</div>
-          <div className="rr-list-footer"><button className="rr-upload-button" disabled={uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload />{uploadState === 'running' ? '正在解析并入库…' : '上传需求 / ZIP'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={event => void uploadRequirements(event)} /><button onClick={onOpenKnowledge}><BookOpen />前往知识库管理版本</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></div>
+          <div className="rr-list-footer"><button className="rr-upload-button" disabled={readOnly || uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload />{readOnly ? '当前版本只读' : uploadState === 'running' ? '正在解析并入库…' : '上传需求 / ZIP'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={event => void uploadRequirements(event)} /><button onClick={() => setBindingManagerOpen(true)}><FileDiff />管理需求绑定</button><button onClick={onManageVersions}><GitBranch />切换 / 管理版本</button><button onClick={onOpenKnowledge}><BookOpen />前往知识库</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></div>
         </>}
       </aside>
 
@@ -509,7 +593,12 @@ export function RequirementReviewPage({
           <div className="rr-chat-input"><textarea value={chatDraft} onChange={event => setChatDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendChat() } }} disabled={selectedRun?.status !== 'succeeded'} placeholder={selectedRun?.status === 'succeeded' ? '基于固定评审运行提问…' : '完成一次真实评审后可引用提问'} /><div><span><CircleHelp />问答 API 待接入</span><button onClick={sendChat} disabled={!chatDraft.trim() || selectedRun?.status !== 'succeeded'} aria-label="发送评审问题"><Send /></button></div></div></>}
       </aside>
     </div>
-  </section>
+  </section>{bindingManagerOpen && <ReviewModal title={`${projectVersion.name} · 需求绑定`} onClose={() => setBindingManagerOpen(false)}><div className="rr-binding-manager"><header><div><b>{readOnly ? '当前版本只读' : '维护当前版本的需求范围'}</b><span>继承得到的是独立固定绑定。加入、替换或移除只影响 {projectVersion.name}，不会修改来源版本或删除知识库文件。</span></div><ReviewBadge tone={readOnly ? 'orange' : 'green'}>{bindings.length} 条绑定</ReviewBadge></header><div className="rr-binding-list">{availableRequirementDocuments.map(document => {
+    const binding = bindings.find(item => item.assetId === document.id)
+    const boundDocument = boundDocuments.find(item => item.id === document.id)
+    const isLatest = binding?.assetVersionId === document.assetVersionId
+    return <article key={document.id}><FileText /><span><b>{document.title}</b><small>{document.logicalPath}</small><em>{binding ? `当前绑定 ${boundDocument?.version ?? binding.assetVersionId}` : '尚未加入当前版本'} · 知识库最新 {document.version}</em></span><div>{binding && <ReviewBadge tone={isLatest ? 'green' : 'orange'}>{isLatest ? '已绑定最新固定版' : '存在可替换版本'}</ReviewBadge>}{!binding && <button className="btn primary" disabled={readOnly || Boolean(bindingActionId)} onClick={() => void bindDocument(document)}><CheckCircle2 />加入</button>}{binding && !isLatest && <button className="btn primary" disabled={readOnly || Boolean(bindingActionId)} onClick={() => void bindDocument(document)}><RefreshCw />替换为 {document.version}</button>}{binding && <button className="btn ghost danger-text" disabled={readOnly || Boolean(bindingActionId)} onClick={() => void unbindDocument(binding, document.title)}><XCircle />移除</button>}</div></article>
+  })}{!availableRequirementDocuments.length && <div className="rr-empty compact"><FileText /><b>知识库暂无 ready 需求</b><p>可以先上传 Markdown、TXT 或 ZIP，入库完成后会自动绑定当前版本。</p></div>}</div><footer><button className="btn ghost" onClick={onOpenKnowledge}><BookOpen />打开全局知识库</button><button className="btn primary" onClick={() => setBindingManagerOpen(false)}>完成</button></footer></div></ReviewModal>}</>
 }
 
 function OverviewView({ result, stats, visibleFindings, selectedFindingId, selectedRun, findingStates, findingTypeFilter, setFindingTypeFilter, severityFilter, setSeverityFilter, basisFilter, setBasisFilter, findingStateFilter, setFindingStateFilter, onSelectFinding, onLocate, onQuote, onState, onStart, canRun }: {

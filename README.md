@@ -11,7 +11,8 @@
 
 ## 已实现
 
-- 创建项目时自动创建唯一默认知识库；
+- 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
+- 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承评审运行与对话；
 - 页面启动时由后端解析并复用唯一的 SmartHub 默认知识库，不依赖浏览器 localStorage 决定数据归属，刷新、切换访问域名或开发模式重复挂载不会创建并切换到新空库；
 - UTF-8 Markdown/TXT 支持单文件上传、一次多选批量上传，也可通过 ZIP 批量导入；ZIP 保留子目录结构，并支持 Markdown 以相对路径引用其中的 PNG、JPG、GIF、WebP 和 SVG 图片；
 - 知识库目录创建、重命名、移动和递归删除持久化到 PostgreSQL；选中目录后上传会自动使用对应逻辑路径；
@@ -28,6 +29,7 @@
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
 - “系统管理 → 模型管理”已接入独立的生成式模型注册表：前端直接维护 Base URL、API Key、模型、能力、启停与优先级；服务端将连接配置持久化到 PostgreSQL/JSON，读取和保存响应可回显 Base URL，但不回显 API Key；编辑时 API Key 留空会保留数据库中的旧值；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
+- 需求分析上传支持 Markdown、TXT 和 ZIP；上传完成的固定需求资产版本自动绑定到当前项目版本。评审接口按 `projectVersionId` 校验版本状态和需求绑定，版本之间的前端运行、Finding 处置与问答上下文通过版本工作区独立挂载；
 - AC-001～AC-009 自动化验收场景。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、配置版本、资产、不可变版本、资产 Chunk、索引固定 Chunk 和任务分别写入 `smarthub` schema。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除，不再全库 `TRUNCATE + 重写`。Chunk 向量使用 pgvector 的 `vector` 类型，并为默认384维模型建立 HNSW 余弦索引。首次连接时会安装可用的 `vector`、`pg_trgm` 扩展、自动建表或迁移旧向量。未配置 `DATABASE_URL` 时回退到 JSON 文件和进程内精确检索。
@@ -39,13 +41,13 @@
 - 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
 - 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
 - Agent 定义、Prompt、工具列表、执行限制和内容 Hash 独立版本化；
-- 每次运行固定 requirement 资产版本、活动索引版本、模型与 Agent 定义，不在运行中漂移到最新资料；
+- 每次运行固定项目版本、requirement 资产版本、活动索引版本、模型与 Agent 定义，不在运行中漂移到最新资料；
 - 默认开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `review.submit_result`。PI 层使用兼容模型协议的安全函数名，业务审计仍记录稳定工具 ID；
 - 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；
 - `review.submit_result` 只产生候选结果，框架外 `ReviewResultValidator` 再校验 Schema、固定索引证据、引用摘录、严重度与证据门槛；
 - PI 生命周期事件只保留安全元数据，支持外部 `AbortSignal`、运行截止时间、最大 turn 和最大工具调用限制。
 
-运行前需要先在“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型，同时确保目标 `requirement` 资产版本为 `ready` 且属于当前活动索引。当前薄 API 同步返回经过校验的候选结果，供 M3 Review Worker/ReviewRun 持久化层接管：
+运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一个 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。当前薄 API 同步返回经过校验的候选结果，供 M3 Review Worker/ReviewRun 持久化层接管：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -55,7 +57,7 @@ $body = @{
   modelId = '<enabled model id>'
   focusAreas = @('状态与异常', '可测试性')
 } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/requirement-analysis/run' -ContentType 'application/json; charset=utf-8' -Body $body
+Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/project-versions/<projectVersionId>/requirement-reviews/run' -ContentType 'application/json; charset=utf-8' -Body $body
 ```
 
 ## 本地运行
@@ -74,7 +76,7 @@ $ErrorActionPreference = 'Stop'
 npm run dev
 ```
 
-浏览器打开 `http://127.0.0.1:5173`，从左侧进入唯一的“知识库”。API 默认监听 `http://127.0.0.1:8787`。网页先启动时会自动重试 API 连接，连接成功后“刷新”和“上传资料”自动恢复可用。上传 ZIP 时可指定目标目录；压缩包内的 Markdown/TXT 会异步进入索引，图片作为本地附件保存并用于安全预览，其他类型会跳过。
+浏览器打开 `http://127.0.0.1:5173`。首次使用先点击左侧版本入口新建项目版本，再进入“需求分析”；知识库和系统管理为全局页面，不随版本切换。API 默认监听 `http://127.0.0.1:8787`。网页先启动时会自动重试 API 连接，连接成功后“刷新”和“上传资料”自动恢复可用。上传 ZIP 时可指定目标目录；压缩包内的 Markdown/TXT 会异步进入索引，图片作为本地附件保存并用于安全预览，其他类型会跳过。
 
 数据库连接写在不提交 Git 的 `.env.local` 中，可参考 `.env.example`。数据库需预先存在，并且 PostgreSQL 实例需要提供 pgvector；扩展与表结构由 API 自动创建：
 
@@ -106,12 +108,16 @@ npm test
 npm run build
 ```
 
-测试覆盖真实 Token 计数、最大长度、重叠和代码块保护、上传入队、处理中取消、候选索引切换、重复上传短路、局部 Chunk 复用、远程 Embedding 请求与失败语义、生成式模型连接的持久化/掩码读取/留空保留/发现/探测、检索自动降级、两路召回数量、Reranker、系统默认目录落盘、不可变原文快照、失败保留旧索引、固定版本证据、配置重建，以及 PI Agent 真实工具循环、候选结果提交与独立校验。
+测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、最大长度、重叠和代码块保护、上传入队、处理中取消、候选索引切换、重复上传短路、局部 Chunk 复用、远程 Embedding 请求与失败语义、生成式模型连接的持久化/掩码读取/留空保留/发现/探测、检索自动降级、两路召回数量、Reranker、系统默认目录落盘、不可变原文快照、失败保留旧索引、固定版本证据、配置重建，以及 PI Agent 真实工具循环、候选结果提交与独立校验。
 
 ## 接口摘要
 
-- `POST /api/projects`
 - `POST /api/default-knowledge-base`
+- `GET|POST /api/project-versions`
+- `PATCH /api/project-versions/:id/status`
+- `DELETE /api/project-versions/:id`
+- `GET|POST /api/project-versions/:id/requirement-bindings`
+- `DELETE /api/project-versions/:id/requirement-bindings/:bindingId`
 - `GET /api/local-models`
 - `GET /api/local-model/status`
 - `POST /api/local-model/start`
@@ -121,7 +127,7 @@ npm run build
 - `POST /api/model-sources/discover`
 - `POST /api/model-sources/:sourceId/models/:modelId/probe`
 - `GET /api/models`
-- `POST /api/requirement-analysis/run`
+- `POST /api/project-versions/:id/requirement-reviews/run`
 - `GET /api/knowledge-bases/:id/overview`
 - `GET|PUT /api/knowledge-bases/:id/config`
 - `POST /api/knowledge-bases/:id/embedding/test`

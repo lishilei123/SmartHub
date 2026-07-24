@@ -2,9 +2,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AssetType, KnowledgeConfig } from '../domain/types.js'
-import { localModelRuntime, modelService, rawDocumentStore, requirementAnalysisService, service, stateStore, usingPostgres } from '../runtime.js'
+import { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, service, stateStore, usingPostgres } from '../runtime.js'
 
-export { localModelRuntime, modelService, rawDocumentStore, requirementAnalysisService, service, stateStore }
+export { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, service, stateStore }
 
 export async function start(port = Number(process.env.PORT ?? 8787)) {
   await service.initialize()
@@ -33,11 +33,12 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     const sourceId = url.searchParams.get('sourceId')
     return send(response, 200, sources.filter(source => !sourceId || source.id === sourceId).flatMap(source => source.models.map(model => ({ ...model, sourceId: source.id, sourceName: source.name, providerType: source.providerType }))))
   }
-  if (method === 'POST' && url.pathname === '/api/requirement-analysis/run') {
+  const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
+  if (method === 'POST' && projectVersionRun) {
     const body = await json(request)
     const controller = new AbortController()
     request.once('aborted', () => controller.abort(new Error('客户端已中断请求')))
-    return send(response, 200, await requirementAnalysisService.analyze({ assetVersionId: String(body.assetVersionId ?? ''), sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }, controller.signal))
+    return send(response, 200, await requirementAnalysisService.analyze({ projectVersionId: projectVersionRun[1], assetVersionId: String(body.assetVersionId ?? ''), sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }, controller.signal))
   }
   const modelSource = /^\/api\/model-sources\/([^/]+)$/.exec(url.pathname)
   if (method === 'PATCH' && modelSource) return send(response, 200, await modelService.updateSource(modelSource[1], await json(request)))
@@ -45,9 +46,19 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const modelProbe = /^\/api\/model-sources\/([^/]+)\/models\/([^/]+)\/probe$/.exec(url.pathname)
   if (method === 'POST' && modelProbe) return send(response, 200, await modelService.probe(modelProbe[1], modelProbe[2]))
   if (method === 'POST' && url.pathname === '/api/default-knowledge-base') return send(response, 200, await service.ensureDefaultKnowledgeBase('SmartHub'))
+  if (method === 'GET' && url.pathname === '/api/project-versions') return send(response, 200, await projectVersionService.list())
+  if (method === 'POST' && url.pathname === '/api/project-versions') { const body = await json(request); return send(response, 201, await projectVersionService.create({ name: String(body.name ?? ''), description: body.description ? String(body.description) : undefined, sourceProjectVersionId: body.sourceProjectVersionId ? String(body.sourceProjectVersionId) : undefined, inheritRequirementBindings: body.inheritRequirementBindings === true })) }
+  const projectVersionStatus = /^\/api\/project-versions\/([^/]+)\/status$/.exec(url.pathname)
+  if (method === 'PATCH' && projectVersionStatus) { const body = await json(request); return send(response, 200, await projectVersionService.updateStatus(projectVersionStatus[1], String(body.status ?? '') as 'open' | 'locked' | 'archived')) }
+  const projectVersion = /^\/api\/project-versions\/([^/]+)$/.exec(url.pathname)
+  if (method === 'DELETE' && projectVersion) return send(response, 200, await projectVersionService.delete(projectVersion[1]))
+  const requirementBindings = /^\/api\/project-versions\/([^/]+)\/requirement-bindings$/.exec(url.pathname)
+  if (method === 'GET' && requirementBindings) return send(response, 200, await projectVersionService.bindings(requirementBindings[1]))
+  if (method === 'POST' && requirementBindings) { const body = await json(request); return send(response, 201, await projectVersionService.bindRequirement(requirementBindings[1], String(body.assetVersionId ?? ''))) }
+  const requirementBinding = /^\/api\/project-versions\/([^/]+)\/requirement-bindings\/([^/]+)$/.exec(url.pathname)
+  if (method === 'DELETE' && requirementBinding) return send(response, 200, await projectVersionService.unbindRequirement(requirementBinding[1], requirementBinding[2]))
   if (method === 'DELETE' && url.pathname === '/api/maintenance/empty-knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-empty-smarthub-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupEmptyDefaultKnowledgeBases('SmartHub')) }
   if (method === 'DELETE' && url.pathname === '/api/maintenance/knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-all-other-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupKnowledgeBasesExcept(String(body.keepKnowledgeBaseId ?? ''))) }
-  if (method === 'POST' && url.pathname === '/api/projects') { const body = await json(request); return send(response, 201, await service.createProject(String(body.name ?? ''))) }
   const overview = /^\/api\/knowledge-bases\/([^/]+)\/overview$/.exec(url.pathname)
   if (method === 'GET' && overview) return send(response, 200, await service.overview(overview[1]))
   const directories = /^\/api\/knowledge-bases\/([^/]+)\/directories$/.exec(url.pathname)
@@ -69,9 +80,9 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     if (documents.length > 500 || attachments.length > 2000) throw new Error('压缩包文件数量超过限制')
     let attachmentBytes = 0
     for (const item of attachments) { const path = String(item.logicalPath ?? ''); const encoded = String(item.contentBase64 ?? ''); const content = Buffer.from(encoded, 'base64'); attachmentBytes += content.length; if (content.length > 15 * 1024 * 1024 || attachmentBytes > 100 * 1024 * 1024) throw new Error('压缩包图片容量超过限制'); await rawDocumentStore.saveAttachment(archives[1], path, content) }
-    let deduplicated = 0; const taskIds: string[] = []
-    for (const item of documents) { const result = await service.ingest({ knowledgeBaseId: archives[1], sourceType: 'upload', sourceKey: `archive:${String(item.logicalPath)}`, assetType: String(item.assetType ?? 'other'), displayName: String(item.displayName), logicalPath: String(item.logicalPath), content: String(item.content) }); if (result.deduplicated) deduplicated += 1; if (result.task) { taskIds.push(result.task.id); await notifyTask(result.task.id) } }
-    return send(response, taskIds.length ? 202 : 200, { documents: documents.length, attachments: attachments.length, deduplicated, taskIds, skipped: Number(body.skipped ?? 0) })
+    let deduplicated = 0; const taskIds: string[] = []; const assetVersionIds: string[] = []
+    for (const item of documents) { const result = await service.ingest({ knowledgeBaseId: archives[1], sourceType: 'upload', sourceKey: `archive:${String(item.logicalPath)}`, assetType: String(item.assetType ?? 'other'), displayName: String(item.displayName), logicalPath: String(item.logicalPath), content: String(item.content) }); assetVersionIds.push(result.version.id); if (result.deduplicated) deduplicated += 1; if (result.task) { taskIds.push(result.task.id); await notifyTask(result.task.id) } }
+    return send(response, taskIds.length ? 202 : 200, { documents: documents.length, attachments: attachments.length, deduplicated, taskIds, assetVersionIds, skipped: Number(body.skipped ?? 0) })
   }
   const knowledgeFile = /^\/api\/knowledge-bases\/([^/]+)\/files\/(.+)$/.exec(url.pathname)
   if (method === 'GET' && knowledgeFile) { const logicalPath = decodeURIComponent(knowledgeFile[2]); const content = await rawDocumentStore.readAttachment(knowledgeFile[1], logicalPath); return sendBinary(response, 200, content, contentType(logicalPath)) }

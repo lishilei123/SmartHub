@@ -46,6 +46,8 @@ export type RequirementAnalysisResponse = {
   snapshot: {
     projectId: string
     projectName: string
+    projectVersionId: string
+    projectVersionName: string
     knowledgeBaseId: string
     assetId: string
     assetVersionId: string
@@ -72,8 +74,8 @@ export type RequirementAnalysisResponse = {
   }
 }
 
-export async function runRequirementAnalysis(input: { assetVersionId: string; sourceId: string; modelId: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
-  const response = await fetch(`${apiBase}/requirement-analysis/run`, {
+export async function runRequirementAnalysis(projectVersionId: string, input: { assetVersionId: string; sourceId: string; modelId: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
+  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-reviews/run`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),

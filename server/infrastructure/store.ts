@@ -5,7 +5,7 @@ import type { DatabaseState } from '../domain/types.js'
 
 export interface TaskLease { workerId: string; runToken: string }
 
-const emptyState = (): DatabaseState => ({ projects: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -49,7 +49,7 @@ export class JsonStore implements StateStore {
   constructor(private readonly file: string | null) {}
   async load() {
     if (!this.file) return
-    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.directories ??= []; this.state.modelSources ??= [] }
+    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= [] }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   read() { return structuredClone(this.state) }

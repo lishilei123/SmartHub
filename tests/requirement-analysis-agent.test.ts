@@ -14,11 +14,13 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   const content = '# 取消订单\n\n用户可以取消待支付订单。'
   await store.transaction(state => {
     state.projects.push({ id: 'project-1', name: '订单项目', createdAt: '2026-07-23T00:00:00.000Z' })
+    state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1.0', status: 'open', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
     state.configs.push({ id: 'config-1', knowledgeBaseId: 'kb-1', version: 1, config: structuredClone(defaultConfig), createdAt: '2026-07-23T00:00:00.000Z', compatibilityFingerprint: 'config-hash', requiresRebuild: false })
     state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', createdAt: '2026-07-23T00:00:00.000Z', activeIndexVersionId: 'index-1', activeConfigVersionId: 'config-1' })
     state.assets.push({ id: 'asset-1', knowledgeBaseId: 'kb-1', displayName: '取消订单需求', logicalPath: 'requirements/cancel.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'cancel.md', activeVersionId: 'version-1', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
     const chunk = { id: 'chunk-1', chunkKey: 'cancel', assetVersionId: 'version-1', ordinal: 0, headingPath: ['取消订单'], content: '用户可以取消待支付订单。', contentHash: 'chunk-hash', tokenCount: 10, startLine: 3, endLine: 3, startChar: 8, endChar: 21, embedding: [], reused: false }
     state.versions.push({ id: 'version-1', assetId: 'asset-1', number: 1, content, contentHash: 'asset-hash', status: 'ready', configVersionId: 'config-1', createdAt: '2026-07-23T00:00:00.000Z', readyAt: '2026-07-23T00:00:01.000Z', chunks: [chunk] })
+    state.projectVersionRequirementBindings.push({ id: 'binding-1', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-1', createdAt: '2026-07-23T00:00:01.000Z' })
     state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', assetVersionIds: ['version-1'], configVersionId: 'config-1', indexedChunks: [{ ...chunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/cancel.md' } }], createdAt: '2026-07-23T00:00:00.000Z', activatedAt: '2026-07-23T00:00:01.000Z' })
     state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'review-model', displayName: 'Review Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling', 'structured_output'], enabled: true, health: 'healthy' }], createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
   })
@@ -36,7 +38,7 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   ])
   const runtime = new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn })
   const service = new RequirementAnalysisService(store, runtime)
-  const output = await service.analyze({ assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
+  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
   assert.equal(output.status, 'candidate_validated')
   assert.equal(output.result.findings[0].title, '取消后状态缺失')
   assert.equal(output.execution.framework.name, 'pi-agent-core')
@@ -51,6 +53,6 @@ test('独立结果校验拒绝伪造固定索引证据', async () => {
   faux.setResponses([])
   const runtime = new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn })
   const service = new RequirementAnalysisService(store, runtime)
-  await assert.rejects(() => service.analyze({ assetVersionId: 'missing', sourceId: 'missing', modelId: 'missing' }), /需求资产版本不存在/u)
+  await assert.rejects(() => service.analyze({ projectVersionId: 'missing', assetVersionId: 'missing', sourceId: 'missing', modelId: 'missing' }), /项目版本不存在/u)
 })
 

@@ -80,6 +80,9 @@ export interface KnowledgeConfig {
 }
 
 export interface Project { id: string; name: string; createdAt: string }
+export type ProjectVersionStatus = 'open' | 'locked' | 'archived'
+export interface ProjectVersion { id: string; projectId: string; name: string; description?: string; status: ProjectVersionStatus; sourceProjectVersionId?: string; createdAt: string; updatedAt: string }
+export interface ProjectVersionRequirementBinding { id: string; projectVersionId: string; assetId: string; assetVersionId: string; createdAt: string }
 export interface KnowledgeBase { id: string; projectId: string; name: string; createdAt: string; activeIndexVersionId: string | null; activeConfigVersionId: string }
 export interface KnowledgeDirectory { id: string; knowledgeBaseId: string; name: string; parentId: string | null; createdAt: string; updatedAt: string; operationTaskId?: string }
 export interface ConfigVersion { id: string; knowledgeBaseId: string; version: number; config: KnowledgeConfig; createdAt: string; compatibilityFingerprint: string; requiresRebuild: boolean }
@@ -91,7 +94,7 @@ export interface IndexChunk extends Chunk { assetMetadata: IndexAssetMetadata }
 export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: IndexChunk[]; createdAt: string; activatedAt?: string }
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
 
-export interface DatabaseState { projects: Project[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[] }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[] }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

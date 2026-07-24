@@ -8,13 +8,14 @@ import {
 } from 'lucide-react'
 import {
   initialSettings, type KnowledgeDirectory, type KnowledgeDocument,
-  type EmbeddingSourceDraft, type GenerativeModelDraft, type GenerativeSourceDraft, type SettingsDraft, type Version,
+  type EmbeddingSourceDraft, type GenerativeModelDraft, type GenerativeSourceDraft, type SettingsDraft,
 } from './prototype-data'
 import { cancelTask, createKnowledgeDirectory, deleteKnowledgeAsset, deleteKnowledgeDirectory, discoverGenerativeModels, ensureKnowledgeBase, loadAssetVersion, loadConfig, loadGenerativeModelSources, loadKnowledgeAssets, loadKnowledgeOverview, loadLocalModelStatuses, loadTasks, probeGenerativeModel, rebuildIndex, renameKnowledgeDirectory, retryTask, saveConfig, saveGenerativeModelSources, searchKnowledge, startLocalModel, stopLocalModel, testEmbeddingConfig, updateKnowledgeAsset, uploadKnowledgeArchive, uploadKnowledgeFile, type ApiIndexSummary, type ApiSearchMeta, type ApiSearchResult, type LocalModelStatus } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 import { RequirementReviewPage } from './RequirementReviewPage'
+import { createProjectVersion, deleteProjectVersion, loadProjectVersions, updateProjectVersionStatus, type ProjectVersion, type ProjectVersionStatus } from './project-version-api'
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
 type NotifyTone = 'success' | 'error' | 'warning'
@@ -24,6 +25,7 @@ type SearchLocation = { assetId: string; assetVersionId: string; startLine: numb
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 
 const pageStorageKey = 'smarthub-current-page'
+const projectVersionStorageKey = 'smarthub-project-version-id'
 const pageKeys: PageKey[] = ['dashboard', 'requirements', 'documents', 'design', 'execution', 'reports', 'settings']
 const restorePage = (): PageKey => {
   if (typeof window === 'undefined') return 'dashboard'
@@ -82,7 +84,9 @@ function Modal({ title, onClose, children, className = '' }: { title: string; on
 
 function App() {
   const [page, setPage] = useState<PageKey>(restorePage)
-  const [version, setVersion] = useState<Version>('V3.6')
+  const [projectVersions, setProjectVersions] = useState<ProjectVersion[]>([])
+  const [selectedProjectVersionId, setSelectedProjectVersionId] = useState(() => typeof window === 'undefined' ? '' : window.localStorage.getItem(projectVersionStorageKey) ?? '')
+  const [versionManagerOpen, setVersionManagerOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toast, setToast] = useState<{ id: number; message: string; tone: NotifyTone } | null>(null)
   const [knowledgeDirectoryList, setKnowledgeDirectoryList] = useState<KnowledgeDirectory[]>([])
@@ -102,6 +106,13 @@ function App() {
 
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current) }, [])
   useEffect(() => { window.localStorage.setItem(pageStorageKey, page) }, [page])
+  const activeProjectVersion = projectVersions.find(item => item.id === selectedProjectVersionId) ?? null
+  const refreshProjectVersions = useCallback(async () => {
+    const versions = await loadProjectVersions()
+    setProjectVersions(versions)
+    setSelectedProjectVersionId(current => versions.some(item => item.id === current) ? current : versions[0]?.id ?? '')
+    return versions
+  }, [])
   const refreshKnowledge = useCallback(async (includeDeleted = false, id = knowledgeBaseId) => {
     if (!id) return
     const data = await loadKnowledgeAssets(id, includeDeleted)
@@ -119,6 +130,7 @@ function App() {
         if (cancelled) return
         setKnowledgeBaseId(id)
         await refreshKnowledge(false, id)
+        await refreshProjectVersions()
       } catch {
         if (cancelled) return
         setKnowledgeApiState('offline')
@@ -128,13 +140,17 @@ function App() {
     void connect()
     return () => { cancelled = true; if (retryTimer) window.clearTimeout(retryTimer) }
   }, [])
+  useEffect(() => {
+    if (selectedProjectVersionId) window.localStorage.setItem(projectVersionStorageKey, selectedProjectVersionId)
+    else window.localStorage.removeItem(projectVersionStorageKey)
+  }, [selectedProjectVersionId])
   const meta = pageMeta[page]
 
   return <div className={`app-shell ${sidebarCollapsed ? 'shell-collapsed' : ''}`}>
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="brand"><div className="brand-mark"><Zap size={19} fill="currentColor" /></div><div><b>SmartHub</b><span>AI TESTING PLATFORM</span></div><button className="sidebar-toggle" title={sidebarCollapsed ? '展开导航' : '收起导航'} aria-label={sidebarCollapsed ? '展开导航' : '收起导航'} onClick={() => setSidebarCollapsed(value => !value)}>{sidebarCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>
-      <button className="project-picker" onClick={() => setVersion(current => current === 'V3.6' ? 'V3.5' : 'V3.6')} aria-label="切换当前版本">
-        <span className="project-logo">V</span><span><small>当前版本</small><strong>SmartHub · {version}</strong></span><ChevronDown size={15} />
+      <button className="project-picker" onClick={() => setVersionManagerOpen(true)} aria-label="切换当前版本">
+        <span className="project-logo">V</span><span><small>{activeProjectVersion ? '当前版本' : '尚未创建版本'}</small><strong>{activeProjectVersion ? `SmartHub · ${activeProjectVersion.name}` : '新建版本后开始工作'}</strong></span><ChevronDown size={15} />
       </button>
       <nav>
         <p className="nav-label nav-scope"><span>项目空间</span><em>按版本隔离</em></p>
@@ -151,8 +167,8 @@ function App() {
     <main>
       <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         {page !== 'requirements' && <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>}
-        {page === 'dashboard' && <Dashboard navigate={setPage} version={version} />}
-        {page === 'requirements' && <RequirementReviewPage version={version} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onOpenKnowledge={() => setPage('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
+        {page === 'dashboard' && <Dashboard navigate={setPage} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
+        {page === 'requirements' && <RequirementReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => setPage('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} directories={knowledgeDirectoryList} documents={knowledgeDocumentList} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'design' && <StaticNotice title="测试设计" text="测试设计页面仍展示示例资产；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'execution' && <StaticNotice title="测试执行" text="测试执行页面仍展示示例执行数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
@@ -162,11 +178,50 @@ function App() {
     </main>
     {toast && <div className={`toast ${toast.tone}`} role={toast.tone === 'error' ? 'alert' : 'status'}>{toast.tone === 'error' ? <XCircle size={18} /> : toast.tone === 'warning' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}{toast.message}</div>}
     {activityOpen && <Modal title="本次会话操作记录" onClose={() => setActivityOpen(false)}><div className="activity-modal"><p>记录只保留在当前浏览器会话中。</p>{audit.map((entry, index) => <div key={`${entry}-${index}`}><Clock3 size={15} /><span>{entry}</span></div>)}</div></Modal>}
+    {versionManagerOpen && <ProjectVersionManager versions={projectVersions} selectedId={selectedProjectVersionId} onSelect={id => { setSelectedProjectVersionId(id); setVersionManagerOpen(false) }} onRefresh={refreshProjectVersions} onClose={() => setVersionManagerOpen(false)} notify={notify} />}
   </div>
 }
 
-function Dashboard({ navigate, version }: { navigate: (page: PageKey) => void; version: Version }) {
-  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> 当前版本 {version}</Badge><h2>知识资产与需求评审已接通</h2><p>知识库上传、固定版本、模型配置和 RequirementAnalysisAgent 均连接本地 API；需求评审结果只展示真实模型与服务端校验结果。</p><div><button className="btn primary" onClick={() => navigate('requirements')}>进入需求评审</button><button className="btn ghost" onClick={() => navigate('documents')}>查看知识库</button></div></section><section className="card quick-card"><BrainCircuit /><h3>需求评审</h3><p>从 ready 的固定需求版本发起真实分析，查看 Finding、证据与原文联动。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求评审 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>真实上传、解析、保存文档并浏览固定版本证据。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>配置并运行系统内置模型，管理知识库索引。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
+function Dashboard({ navigate, projectVersion, onManageVersions }: { navigate: (page: PageKey) => void; projectVersion: ProjectVersion | null; onManageVersions: () => void }) {
+  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> {projectVersion ? `当前版本 ${projectVersion.name}` : '尚未创建项目版本'}</Badge><h2>{projectVersion ? '当前项目空间已按版本隔离' : '先创建项目版本，再开始需求分析'}</h2><p>{projectVersion ? '需求绑定、评审运行与处置上下文只属于当前版本；知识库与系统配置仍为平台全局资源。' : '平台固定服务 SmartHub 单项目，项目空间通过版本切换，不提供项目创建或项目切换。'}</p><div><button className="btn primary" onClick={projectVersion ? () => navigate('requirements') : onManageVersions}>{projectVersion ? '进入需求评审' : '新建项目版本'}</button><button className="btn ghost" onClick={() => navigate('documents')}>查看知识库</button></div></section><section className="card quick-card"><BrainCircuit /><h3>需求评审</h3><p>从当前项目版本绑定的 ready 需求发起分析，版本间结果互不可见。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求评审 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>知识库由平台单项目共享，不随项目版本复制。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>模型与平台配置为全局资源，不参与版本隔离。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
+}
+
+function ProjectVersionManager({ versions, selectedId, onSelect, onRefresh, onClose, notify }: { versions: ProjectVersion[]; selectedId: string; onSelect: (id: string) => void; onRefresh: () => Promise<ProjectVersion[]>; onClose: () => void; notify: Notify }) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [sourceId, setSourceId] = useState('')
+  const [inherit, setInherit] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<ProjectVersion | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const create = async () => {
+    if (!name.trim() || saving) return
+    setSaving(true)
+    try {
+      const created = await createProjectVersion({ name, description, sourceProjectVersionId: sourceId || undefined, inheritRequirementBindings: Boolean(sourceId && inherit) })
+      await onRefresh()
+      notify(`项目版本 ${created.name} 已创建。`)
+      onSelect(created.id)
+    } catch (error) { notify(error instanceof Error ? error.message : '项目版本创建失败', 'error') }
+    finally { setSaving(false) }
+  }
+  const changeStatus = async (version: ProjectVersion, status: ProjectVersionStatus) => {
+    try { await updateProjectVersionStatus(version.id, status); await onRefresh(); notify(`${version.name} 已设为${status === 'open' ? '可编辑' : status === 'locked' ? '已锁定' : '已归档'}。`) }
+    catch (error) { notify(error instanceof Error ? error.message : '版本状态更新失败', 'error') }
+  }
+  const remove = async () => {
+    if (!deleteTarget || deleting) return
+    setDeleting(true)
+    try {
+      const deleted = await deleteProjectVersion(deleteTarget.id)
+      const remaining = await onRefresh()
+      notify(`项目版本 ${deleted.name} 已删除，同时移除 ${deleted.deletedBindings} 条需求绑定。`)
+      if (deleteTarget.id === selectedId) onSelect(remaining[0]?.id ?? '')
+      else setDeleteTarget(null)
+    } catch (error) { notify(error instanceof Error ? error.message : '项目版本删除失败', 'error') }
+    finally { setDeleting(false) }
+  }
+  return <><Modal title="项目版本" onClose={onClose} className="version-manager-modal"><div className="version-manager"><section><h3>当前项目版本</h3><p>需求分析数据按版本隔离；锁定和归档版本只能查看。删除版本会同时删除该版本的需求绑定。</p><div className="project-version-list">{versions.map(version => <article className={version.id === selectedId ? 'active' : ''} key={version.id}><button className="version-select" onClick={() => onSelect(version.id)}><GitBranch /><span><b>{version.name}</b><small>{version.description || '未填写版本说明'} · {new Date(version.createdAt).toLocaleString('zh-CN')}</small></span><Badge tone={version.status === 'open' ? 'green' : version.status === 'locked' ? 'orange' : 'gray'}>{version.status === 'open' ? '可编辑' : version.status === 'locked' ? '已锁定' : '已归档'}</Badge></button><select aria-label={`设置 ${version.name} 状态`} value={version.status} onChange={event => void changeStatus(version, event.target.value as ProjectVersionStatus)}><option value="open">可编辑</option><option value="locked">锁定</option><option value="archived">归档</option></select><button className="version-delete" title={`删除 ${version.name}`} aria-label={`删除 ${version.name}`} onClick={() => setDeleteTarget(version)}><Trash2 /></button></article>)}{!versions.length && <div className="version-empty"><GitBranch /><b>尚无项目版本</b><span>创建第一个版本后，才能进入需求分析。</span></div>}</div></section><section className="version-create"><h3>新建版本</h3><label>版本名称<input value={name} onChange={event => setName(event.target.value)} placeholder="例如：V1.0 / 2026-Q3" /></label><label>版本说明<textarea value={description} onChange={event => setDescription(event.target.value)} placeholder="本版本目标或范围（可选）" /></label><label>来源版本<select value={sourceId} onChange={event => setSourceId(event.target.value)}><option value="">空白版本</option>{versions.map(version => <option value={version.id} key={version.id}>{version.name}</option>)}</select></label>{sourceId && <label className="version-inherit"><input type="checkbox" checked={inherit} onChange={event => setInherit(event.target.checked)} />继承来源版本的需求绑定（不继承评审运行和对话）</label>}<button className="btn primary full" disabled={!name.trim() || saving} onClick={() => void create()}><Plus />{saving ? '创建中…' : '创建并进入版本'}</button></section></div></Modal>{deleteTarget && <Modal title="删除项目版本" onClose={() => { if (!deleting) setDeleteTarget(null) }}><div className="modal-form version-delete-confirm"><div className="danger-confirm"><AlertTriangle /><span><b>确定删除“{deleteTarget.name}”吗？</b><small>该版本的需求绑定将一并删除，操作不可恢复。知识库原始文件不会被删除。</small></span></div><div className="modal-actions"><button className="btn ghost" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button><button className="btn danger" disabled={deleting} onClick={() => void remove()}><Trash2 />{deleting ? '删除中…' : '确认删除'}</button></div></div></Modal>}</>
 }
 
 function StaticNotice({ title, text }: { title: string; text: string }) {

@@ -4,7 +4,7 @@ import type { Chunk, DatabaseState, IndexChunk, SyncTask } from '../domain/types
 import type { ChunkSearchInput, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
-const emptyState = (): DatabaseState => ({ projects: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [] })
 
 export class PostgresStore implements StateStore {
   private state: DatabaseState = emptyState()
@@ -348,10 +348,13 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
     updatedAt: toIsoTimestamp(row.updated_at)!,
   })) as DatabaseState['tasks']
   const modelSources = await client.query<{ data: DatabaseState['modelSources'][number] }>('SELECT data FROM smarthub.model_sources ORDER BY priority, created_at, id')
-  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data) }
+  const projectVersions = await client.query<{ data: DatabaseState['projectVersions'][number] }>('SELECT data FROM smarthub.project_versions ORDER BY created_at, id')
+  const projectVersionRequirementBindings = await client.query<{ data: DatabaseState['projectVersionRequirementBindings'][number] }>('SELECT data FROM smarthub.project_version_requirement_bindings ORDER BY created_at, id')
+  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data) }
 }
 
 async function persistChanges(client: PoolClient, before: DatabaseState, state: DatabaseState) {
+  await deleteMissing(client, 'project_version_requirement_bindings', before.projectVersionRequirementBindings, state.projectVersionRequirementBindings)
   await deleteMissing(client, 'model_sources', before.modelSources, state.modelSources)
   await deleteMissing(client, 'sync_tasks', before.tasks, state.tasks)
   await deleteMissing(client, 'index_versions', before.indexes, state.indexes)
@@ -360,9 +363,11 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   await deleteMissing(client, 'config_versions', before.configs, state.configs)
   await deleteMissing(client, 'knowledge_directories', before.directories, state.directories)
   await deleteMissing(client, 'knowledge_bases', before.knowledgeBases, state.knowledgeBases)
+  await deleteMissing(client, 'project_versions', before.projectVersions, state.projectVersions)
   await deleteMissing(client, 'projects', before.projects, state.projects)
 
   for (const item of changed(before.projects, state.projects)) await client.query('INSERT INTO smarthub.projects VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.name, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.projectVersions, state.projectVersions)) await client.query('INSERT INTO smarthub.project_versions (id, project_id, name, status, source_project_version_id, created_at, updated_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.projectId, item.name, item.status, item.sourceProjectVersionId ?? null, item.createdAt, item.updatedAt, JSON.stringify(item)])
   for (const item of changed(before.modelSources, state.modelSources)) await client.query('INSERT INTO smarthub.model_sources (id, display_name, provider_type, enabled, priority, created_at, updated_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, provider_type=EXCLUDED.provider_type, enabled=EXCLUDED.enabled, priority=EXCLUDED.priority, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.name, item.providerType, item.enabled, item.priority, item.createdAt, item.updatedAt, JSON.stringify(item)])
   for (const item of changed(before.knowledgeBases, state.knowledgeBases)) await client.query('INSERT INTO smarthub.knowledge_bases VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET project_id=EXCLUDED.project_id, name=EXCLUDED.name, active_index_version_id=EXCLUDED.active_index_version_id, active_config_version_id=EXCLUDED.active_config_version_id, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.projectId, item.name, item.activeIndexVersionId, item.activeConfigVersionId, item.createdAt, JSON.stringify(item)])
   for (const item of orderDirectories(changed(before.directories, state.directories))) await client.query('INSERT INTO smarthub.knowledge_directories VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET knowledge_base_id=EXCLUDED.knowledge_base_id, parent_id=EXCLUDED.parent_id, name=EXCLUDED.name, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.parentId, item.name, item.createdAt, item.updatedAt, JSON.stringify(item)])
@@ -377,6 +382,7 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
       for (const chunk of item.chunks) await insertChunk(client, 'asset_chunks', item.id, chunk)
     }
   }
+  for (const item of changed(before.projectVersionRequirementBindings, state.projectVersionRequirementBindings)) await client.query('INSERT INTO smarthub.project_version_requirement_bindings (id, project_version_id, asset_id, asset_version_id, created_at, data) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET asset_version_id=EXCLUDED.asset_version_id, data=EXCLUDED.data', [item.id, item.projectVersionId, item.assetId, item.assetVersionId, item.createdAt, JSON.stringify(item)])
   for (const item of changed(before.indexes, state.indexes)) {
     const previous = before.indexes.find(index => index.id === item.id)
     const data = { ...item, indexedChunks: undefined }

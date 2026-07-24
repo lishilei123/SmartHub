@@ -20,6 +20,8 @@ export class KnowledgeService {
   async initialize() {
     await this.store.load()
     await this.store.transaction(state => {
+      state.projectVersions ??= []
+      state.projectVersionRequirementBindings ??= []
       state.directories ??= []
       state.projects = state.projects.map(scrubLegacyEmbeddingSecrets)
       state.knowledgeBases = state.knowledgeBases.map(scrubLegacyEmbeddingSecrets)

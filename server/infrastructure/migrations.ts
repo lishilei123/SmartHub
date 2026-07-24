@@ -160,6 +160,33 @@ const migrations: Migration[] = [{
     );
     CREATE INDEX IF NOT EXISTS model_sources_priority_idx ON smarthub.model_sources (priority, created_at);
   `,
+}, {
+  version: 5,
+  name: 'project-version-isolation',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.project_versions (
+      id text PRIMARY KEY,
+      project_id text NOT NULL REFERENCES smarthub.projects(id),
+      name text NOT NULL,
+      status text NOT NULL,
+      source_project_version_id text REFERENCES smarthub.project_versions(id),
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (project_id, name)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.project_version_requirement_bindings (
+      id text PRIMARY KEY,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      asset_id text NOT NULL REFERENCES smarthub.knowledge_assets(id),
+      asset_version_id text NOT NULL REFERENCES smarthub.asset_versions(id),
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (project_version_id, asset_id)
+    );
+    CREATE INDEX IF NOT EXISTS project_versions_project_created_idx ON smarthub.project_versions (project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS project_version_bindings_version_idx ON smarthub.project_version_requirement_bindings (project_version_id, created_at);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

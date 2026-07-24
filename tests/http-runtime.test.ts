@@ -17,8 +17,8 @@ async function withServer(run: (baseUrl: string) => Promise<void>) {
 }
 
 async function createKnowledgeBase(baseUrl: string) {
-  const response = await fetch(`${baseUrl}/projects`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: `HTTP 验收 ${crypto.randomUUID()}` }) })
-  assert.equal(response.status, 201)
+  const response = await fetch(`${baseUrl}/default-knowledge-base`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+  assert.equal(response.status, 200)
   const value = await response.json() as { knowledgeBase: { id: string } }
   return value.knowledgeBase.id
 }
