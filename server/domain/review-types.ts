@@ -10,6 +10,13 @@ export interface CandidateEvidence {
   locator: { heading: string; start: number; end: number }
 }
 
+export interface CandidateRequirementPoint {
+  clientRequirementPointId: string
+  title: string
+  description: string
+  evidenceRefs: string[]
+}
+
 export interface CandidateFinding {
   clientFindingId: string
   type: ReviewFindingType
@@ -19,6 +26,7 @@ export interface CandidateFinding {
   description: string
   impact: string
   recommendation: string
+  requirementPointRefs: string[]
   evidenceRefs: string[]
 }
 
@@ -29,6 +37,7 @@ export interface CandidateReviewResult {
     strengths: string[]
     risks: string[]
   }
+  requirementPoints: CandidateRequirementPoint[]
   findings: CandidateFinding[]
   evidence: CandidateEvidence[]
   coverage: {

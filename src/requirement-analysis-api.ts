@@ -12,6 +12,13 @@ export type ReviewEvidence = {
   locator: { heading: string; start: number; end: number }
 }
 
+export type RequirementPoint = {
+  clientRequirementPointId: string
+  title: string
+  description: string
+  evidenceRefs: string[]
+}
+
 export type ReviewFinding = {
   clientFindingId: string
   type: ReviewFindingType
@@ -21,6 +28,7 @@ export type ReviewFinding = {
   description: string
   impact: string
   recommendation: string
+  requirementPointRefs: string[]
   evidenceRefs: string[]
 }
 
@@ -31,6 +39,7 @@ export type RequirementAnalysisResult = {
     strengths: string[]
     risks: string[]
   }
+  requirementPoints: RequirementPoint[]
   findings: ReviewFinding[]
   evidence: ReviewEvidence[]
   coverage: {
@@ -54,6 +63,7 @@ export type RequirementAnalysisResponse = {
     assetContentHash: string
     indexVersionId: string
     logicalPath: string
+    assets: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }[]
     modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number }
     focusAreas: string[]
     excludedAreas: string[]
@@ -83,6 +93,9 @@ export type RequirementReviewRun = {
   projectVersionId: string
   assetId: string
   assetVersionId: string
+  assetIds: string[]
+  assetVersionIds: string[]
+  documents: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }[]
   documentTitle: string
   documentVersion: string
   logicalPath: string
@@ -116,7 +129,7 @@ export type ReviewQuestionResponse = {
   createdAt: string
 }
 
-export async function startRequirementAnalysis(projectVersionId: string, input: { assetVersionId: string; sourceId: string; modelId: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
+export async function startRequirementAnalysis(projectVersionId: string, input: { assetVersionIds: string[]; sourceId: string; modelId: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
   const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-reviews/run`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

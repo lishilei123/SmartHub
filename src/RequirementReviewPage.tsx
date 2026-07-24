@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, BookOpen, Bot, CheckCircle2, ChevronRight, CircleHelp, Clock3, Download, FileDiff,
   FileText, GitBranch, ListFilter, LoaderCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen,
-  PanelRightClose, PanelRightOpen, Play, Quote, RefreshCw, Search, Send, ShieldCheck, Sparkles, Upload, XCircle,
+  PanelRightClose, PanelRightOpen, Play, Quote, RefreshCw, Send, ShieldCheck, Sparkles, Upload, XCircle,
 } from 'lucide-react'
 import type { GenerativeSourceDraft, KnowledgeDocument } from './prototype-data'
 import { loadAssetVersion, loadGenerativeModelSources, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
@@ -52,7 +52,7 @@ const viewTabs: { key: ViewKey; label: string; icon: typeof BookOpen }[] = [
   { key: 'overview', label: '评审概览', icon: Sparkles },
   { key: 'source', label: '原始文档', icon: BookOpen },
   { key: 'diff', label: '版本差异', icon: FileDiff },
-  { key: 'tree', label: '功能树', icon: GitBranch },
+  { key: 'tree', label: '需求点', icon: GitBranch },
   { key: 'evidence', label: '证据引用', icon: ShieldCheck },
 ]
 
@@ -100,7 +100,6 @@ export function RequirementReviewPage({
   const availableRequirementDocuments = useMemo(() => documents.filter(document => document.assetType === 'requirement' && document.status === 'ready' && document.assetVersionId), [documents])
   const requirementDocuments = boundDocuments
   const [selectedAssetId, setSelectedAssetId] = useState('')
-  const [query, setQuery] = useState('')
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [chatCollapsed, setChatCollapsed] = useState(false)
   const [view, setView] = useState<ViewKey>('overview')
@@ -222,11 +221,11 @@ export function RequirementReviewPage({
   }, [hasRunningRuns, projectVersion?.id])
 
   const selectedDocument = requirementDocuments.find(document => document.id === selectedAssetId) ?? requirementDocuments[0]
-  const selectedRun = runs.find(run => run.id === selectedRunId && run.assetId === selectedDocument?.id)
+  const selectedRun = runs.find(run => run.id === selectedRunId)
   const result = selectedRun?.response?.result
   const evidenceById = useMemo(() => new Map((result?.evidence ?? []).map(evidence => [evidence.clientEvidenceId, evidence])), [result])
-  const documentContent = selectedRun?.content ?? contentByVersion[selectedRun?.assetVersionId ?? selectedDocument?.assetVersionId ?? ''] ?? selectedDocument?.content ?? ''
-  const documentVersionId = selectedRun?.assetVersionId ?? selectedDocument?.assetVersionId ?? ''
+  const documentContent = contentByVersion[selectedDocument?.assetVersionId ?? ''] ?? selectedDocument?.content ?? ''
+  const documentVersionId = selectedDocument?.assetVersionId ?? ''
   const documentFormat = selectedDocument?.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
   const outline = useMemo(() => documentFormat === 'markdown' && documentContent ? parseMarkdownOutline(documentContent) : emptyMarkdownOutline, [documentContent, documentFormat])
 
@@ -240,13 +239,13 @@ export function RequirementReviewPage({
   }, [requirementDocuments, selectedAssetId])
 
   useEffect(() => {
-    const latestRun = runs.find(run => run.assetId === selectedDocument?.id)
+    const latestRun = runs[0]
     setSelectedRunId(latestRun?.id ?? '')
     setSelectedFindingId('')
     setSelectedEvidenceId('')
     setSourceQuote(null)
     setView('overview')
-  }, [runsState, selectedDocument?.id])
+  }, [runsState])
 
   useEffect(() => {
     let cancelled = false
@@ -271,7 +270,7 @@ export function RequirementReviewPage({
     return () => { cancelled = true }
   }, [selectedRun?.id, selectedRun?.response, selectedRun?.status, notify])
 
-  const sourceVersionId = selectedRun?.assetVersionId ?? selectedDocument?.assetVersionId
+  const sourceVersionId = selectedDocument?.assetVersionId
   useEffect(() => {
     if (view !== 'source' || !sourceVersionId || contentByVersion[sourceVersionId]) return
     let cancelled = false
@@ -283,12 +282,12 @@ export function RequirementReviewPage({
 
   useEffect(() => {
     const history = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
-    const right = selectedRun?.assetVersionId ?? selectedDocument?.assetVersionId ?? history.at(-1)?.id ?? ''
+    const right = selectedDocument?.assetVersionId ?? history.at(-1)?.id ?? ''
     const rightIndex = history.findIndex(item => item.id === right)
     const left = history[Math.max(0, rightIndex - 1)]?.id ?? history.at(-2)?.id ?? ''
     setDiffVersionIds([left && left !== right ? left : '', right])
     setDiffContents({})
-  }, [selectedDocument?.id, selectedDocument?.assetVersionId, selectedRun?.assetVersionId])
+  }, [selectedDocument?.id, selectedDocument?.assetVersionId])
 
   useEffect(() => {
     if (view !== 'diff') return
@@ -350,15 +349,11 @@ export function RequirementReviewPage({
 
   useEffect(() => () => requestController.current?.abort(), [])
 
-  const runsForDocument = runs.filter(run => run.assetId === selectedDocument?.id)
-  const filteredDocuments = requirementDocuments.filter(document => {
-    return `${document.title} ${document.logicalPath ?? ''}`.toLowerCase().includes(query.trim().toLowerCase())
-  })
-
+  const reviewRuns = runs
   const selectRun = (runId: string) => {
     const run = runs.find(item => item.id === runId)
     if (!run) return
-    setSelectedAssetId(run.assetId)
+    setSelectedAssetId(run.documents?.[0]?.assetId ?? run.assetId)
     setSelectedRunId(run.id)
     setSelectedFindingId('')
     setSelectedEvidenceId('')
@@ -381,7 +376,8 @@ export function RequirementReviewPage({
   }
 
   const startAnalysis = async () => {
-    if (!selectedDocument?.assetVersionId || !selectedModel || !selectedModel.healthy || requestController.current) return
+    const fixedDocuments = requirementDocuments.filter(document => document.assetVersionId)
+    if (!fixedDocuments.length || !selectedModel || !selectedModel.healthy || requestController.current) return
     const controller = new AbortController()
     requestController.current = controller
     const temporaryId = `pending-${Date.now()}`
@@ -389,12 +385,14 @@ export function RequirementReviewPage({
     const pendingRun: RunRecord = {
       id: temporaryId,
       projectVersionId: projectVersion!.id,
-      assetId: selectedDocument.id,
-      assetVersionId: selectedDocument.assetVersionId,
-      documentTitle: selectedDocument.title,
-      documentVersion: selectedDocument.version,
-      logicalPath: selectedDocument.logicalPath ?? selectedDocument.name,
-      content: selectedDocument.content ?? '',
+      assetId: fixedDocuments[0].id,
+      assetVersionId: fixedDocuments[0].assetVersionId!,
+      assetIds: fixedDocuments.map(document => document.id),
+      assetVersionIds: fixedDocuments.map(document => document.assetVersionId!),
+      documents: fixedDocuments.map(document => ({ assetId: document.id, assetVersionId: document.assetVersionId!, assetContentHash: '', logicalPath: document.logicalPath ?? document.name, displayName: document.name })),
+      documentTitle: `${fixedDocuments.length} 份需求文档`,
+      documentVersion: '固定批次',
+      logicalPath: fixedDocuments.map(document => document.logicalPath ?? document.name).join('；'),
       createdAt: startedAt,
       status: 'running',
       step: 'agent_executing',
@@ -405,22 +403,22 @@ export function RequirementReviewPage({
     setRuns(current => [pendingRun, ...current])
     setSelectedRunId(temporaryId)
     setView('overview')
-    addAudit(`启动需求评审：${selectedDocument.title} · ${selectedDocument.assetVersionId}`)
+    addAudit(`启动多文档需求点提取与评审：${fixedDocuments.length} 份固定文档`)
     try {
       const started = await startRequirementAnalysis(projectVersion!.id, {
-        assetVersionId: selectedDocument.assetVersionId,
+        assetVersionIds: fixedDocuments.map(document => document.assetVersionId!),
         sourceId: selectedModel.sourceId,
         modelId: selectedModel.modelId,
         focusAreas: ['功能完整性', '异常流程', '边界条件', '可测试性'],
       }, controller.signal)
-      setRuns(current => current.map(run => run.id === temporaryId ? { ...started, content: selectedDocument.content ?? '' } : run))
+      setRuns(current => current.map(run => run.id === temporaryId ? started : run))
       setSelectedRunId(started.id)
-      addAudit(`需求评审已进入后台运行：${selectedDocument.title} · ${started.id}`)
-      notify('需求评审已启动。刷新或切换页面不会取消，返回后可继续查看进度。')
+      addAudit(`多文档需求点提取与评审已进入后台运行：${started.id}`)
+      notify(`已固定 ${fixedDocuments.length} 份文档，正在提取需求点并评审。刷新或切换页面不会取消。`)
     } catch (error) {
       const message = controller.signal.aborted ? '评审启动响应已中断；若任务已创建，重新进入页面后仍可恢复查看' : error instanceof Error ? error.message : '需求评审启动失败'
       setRuns(current => current.map(run => run.id === temporaryId ? { ...run, status: 'failed', step: 'failed', error: message } : run))
-      addAudit(`启动需求评审失败：${selectedDocument.title}`)
+      addAudit('启动多文档需求点提取与评审失败')
       notify(message, controller.signal.aborted ? 'warning' : 'error')
     } finally {
       requestController.current = null
@@ -432,7 +430,7 @@ export function RequirementReviewPage({
     try {
       const cancelled = await cancelRequirementReviewRun(selectedRun.id)
       setRuns(current => current.map(run => run.id === cancelled.id ? { ...cancelled, content: run.content } : run))
-      addAudit(`用户取消需求评审：${selectedRun.documentTitle} · ${selectedRun.id}`)
+      addAudit(`用户取消需求点提取与评审：${selectedRun.id}`)
       notify('已取消本次需求评审。', 'warning')
     } catch (error) {
       notify(error instanceof Error ? error.message : '需求评审取消失败', 'error')
@@ -509,15 +507,27 @@ export function RequirementReviewPage({
   }
 
   const locateEvidence = (evidence: ReviewEvidence, findingId?: string) => {
+    const sourceDocument = requirementDocuments.find(document => document.assetVersionId === evidence.sourceRef.assetVersionId)
+    if (sourceDocument) setSelectedAssetId(sourceDocument.id)
     setSelectedEvidenceId(evidence.clientEvidenceId)
     if (findingId) setSelectedFindingId(findingId)
     setView('source')
+  }
+
+  useEffect(() => {
+    const evidence = evidenceById.get(selectedEvidenceId)
+    if (view !== 'source' || !evidence || evidence.sourceRef.assetVersionId !== documentVersionId || !documentContent) return
     const heading = evidence.locator.heading.trim()
     const section = outline.sections.find(item => item.title === heading || item.title.includes(heading) || heading.includes(item.title))
-    if (section) activateSection(section.key)
-    else setActiveSectionKey(null)
-    if (!section) notify('证据已绑定固定版本，但当前返回的标题定位无法映射到文档大纲。', 'warning')
-  }
+    if (!section) { setActiveSectionKey(null); return }
+    pendingSectionScroll.current = section.key
+    setActiveSectionKey(section.key)
+    requestAnimationFrame(() => {
+      if (pendingSectionScroll.current !== section.key) return
+      pendingSectionScroll.current = null
+      scrollToSection(section.key)
+    })
+  }, [documentContent, documentVersionId, evidenceById, outline.sections, selectedEvidenceId, view])
 
   const locateFinding = (finding: ReviewFinding) => {
     setSelectedFindingId(finding.clientFindingId)
@@ -601,15 +611,18 @@ export function RequirementReviewPage({
     const response = selectedRun.response
     const stateFor = (finding: ReviewFinding) => findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open'
     const lines = [
-      `# ${selectedRun.documentTitle} · 需求评审报告`, '',
+      `# ${projectVersion?.name ?? '当前版本'} · 需求点提取与评审报告`, '',
       `- 运行 ID：${selectedRun.id}`,
-      `- 固定资产版本：${selectedRun.assetVersionId}`,
+      `- 固定输入文档：${(selectedRun.assetVersionIds ?? [selectedRun.assetVersionId]).length} 份`,
+      ...(selectedRun.documents ?? []).map(item => `  - ${item.displayName}：${item.assetVersionId}`),
       `- 索引版本：${response.snapshot.indexVersionId}`,
       `- 模型：${selectedRun.modelLabel}`,
       `- 生成时间：${formatTime(response.snapshot.createdAt)}`,
       `- 综合评分：${response.result.summary.score}`, '',
       '## 评审摘要', '',
       ...response.result.summary.risks.map(item => `- 风险：${item}`), '',
+      '## 需求点', '',
+      ...(response.result.requirementPoints ?? []).flatMap(point => [`### ${point.clientRequirementPointId} · ${point.title}`, '', point.description, '', `- 证据：${point.evidenceRefs.join('、')}`, '']),
       '## Findings', '',
       ...response.result.findings.flatMap((finding, index) => {
         const evidence = finding.evidenceRefs.map(reference => evidenceById.get(reference)).filter((item): item is ReviewEvidence => Boolean(item))
@@ -619,6 +632,7 @@ export function RequirementReviewPage({
           `- 严重度：${severityLabels[finding.severity]}`,
           `- 置信度：${Math.round(finding.confidence * 100)}%`,
           `- 处置状态：${findingStateLabels[stateFor(finding)]}`,
+          `- 关联需求点：${finding.requirementPointRefs.join('、')}`,
           `- 问题：${finding.description}`,
           `- 影响：${finding.impact}`,
           `- 建议确认：${finding.recommendation}`,
@@ -635,7 +649,7 @@ export function RequirementReviewPage({
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `${selectedRun.documentTitle.replace(/[\\/:*?"<>|]/g, '-')}-评审报告.md`
+    link.download = `${(projectVersion?.name ?? '当前版本').replace(/[\\/:*?"<>|]/g, '-')}-需求点评审报告.md`
     link.click()
     URL.revokeObjectURL(url)
     addAudit(`导出需求评审报告：${selectedRun.id}`)
@@ -651,7 +665,7 @@ export function RequirementReviewPage({
   })
 
   const stats = {
-    features: outline.sections.length,
+    requirements: result?.requirementPoints?.length ?? 0,
     findings: result?.findings.length ?? 0,
     high: result?.findings.filter(finding => finding.severity === 'critical' || finding.severity === 'high').length ?? 0,
     pending: result?.findings.filter(finding => !finding.evidenceRefs.length).length ?? 0,
@@ -664,7 +678,7 @@ export function RequirementReviewPage({
   const removedLines = leftLines.filter(line => !rightLines.includes(line))
   const addedLines = rightLines.filter(line => !leftLines.includes(line))
   const currentMessages = selectedRun ? chatMessages[selectedRun.id] ?? [] : []
-  const canRun = Boolean(projectVersion && !readOnly && selectedDocument?.assetVersionId && selectedModel?.healthy && apiState === 'ready' && bindingsState === 'ready' && !requestController.current)
+  const canRun = Boolean(projectVersion && !readOnly && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && selectedModel?.healthy && apiState === 'ready' && bindingsState === 'ready' && !requestController.current)
 
   const bindDocument = async (document: KnowledgeDocument) => {
     if (!projectVersion || readOnly || !document.assetVersionId || bindingActionId) return
@@ -697,34 +711,29 @@ export function RequirementReviewPage({
     <header className="rr-header">
       <div className="rr-title-block">
         <div className="rr-title-icon"><Sparkles /></div>
-        <div><span>需求评审工作台 · {projectVersion.name}</span><h1>{selectedDocument?.title ?? '需求分析'}</h1><p>{selectedDocument ? `${selectedDocument.logicalPath} · 固定版本 ${documentVersionId}` : bindingsState === 'loading' ? '正在加载当前版本的需求绑定' : '当前版本尚未绑定 ready 的需求资产'}</p></div>
+        <div><span>需求点提取与评审 · {projectVersion.name}</span><h1>{requirementDocuments.length ? `${requirementDocuments.length} 份文档联合分析` : '需求分析'}</h1><p>{requirementDocuments.length ? `先跨文档提取并归并需求点，再关联 Finding 与固定证据` : bindingsState === 'loading' ? '正在加载当前版本的需求绑定' : '当前版本尚未绑定 ready 的需求资产'}</p></div>
       </div>
       <div className="rr-run-summary">
         <ReviewBadge tone={runTone(selectedRun?.status)}>{runLabel(selectedRun?.status)}</ReviewBadge>
         <span><small>运行 ID</small><b title={selectedRun?.id}>{selectedRun?.id ? selectedRun.id.replace('review_run_', '').slice(0, 12) : '尚未创建'}</b></span>
-        <span><small>固定资产版本</small><b title={documentVersionId}>{documentVersionId ? documentVersionId.slice(0, 14) : '—'}</b></span>
+        <span><small>固定输入文档</small><b>{selectedRun?.assetVersionIds?.length ?? requirementDocuments.length} 份</b></span>
       </div>
       <div className="rr-header-actions">
         <ReviewBadge tone={readOnly ? 'orange' : 'green'}>{readOnly ? projectVersion.status === 'locked' ? '版本已锁定 · 只读' : '版本已归档 · 只读' : '版本可编辑'}</ReviewBadge>
         <label className="rr-model-select"><span>评审模型</span><select value={selectedModelKey} onChange={event => setSelectedModelKey(event.target.value)} disabled={modelsState !== 'ready' || selectedRun?.status === 'running'}><option value="">选择支持工具调用的模型</option>{modelChoices.map(model => <option value={model.key} key={model.key}>{model.healthy ? '●' : '○'} {model.label}</option>)}</select></label>
         <button className="btn ghost" onClick={() => setSnapshotOpen(value => !value)} disabled={!selectedRun}><ShieldCheck />固定快照</button>
         <button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />导出报告</button>
-        {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!selectedModel?.healthy ? '请先选择通过工具调用检测的健康模型' : undefined}><Play />{selectedRun ? '重新评审' : '开始评审'}</button>}
+        {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!selectedModel?.healthy ? '请先选择通过工具调用检测的健康模型' : undefined}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}
       </div>
-      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>资产版本</dt><dd>{selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : 'RequirementAnalysisAgent'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
+      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>输入文档</dt><dd>{(selectedRun.documents ?? selectedRun.snapshot?.assets ?? []).map(document => `${document.displayName} · ${document.assetVersionId}`).join('\n') || selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : 'RequirementAnalysisAgent'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
     </header>
 
     <div className="rr-workspace">
       <aside className="rr-review-list">
-        <div className="rr-panel-head"><span><FileText /><b>需求评审</b></span><button onClick={() => setLeftCollapsed(value => !value)} aria-label={leftCollapsed ? '展开需求列表' : '收起需求列表'}>{leftCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>
+        <div className="rr-panel-head"><span><FileText /><b>需求文件目录</b></span><button onClick={() => setLeftCollapsed(value => !value)} aria-label={leftCollapsed ? '展开需求文件目录' : '收起需求文件目录'}>{leftCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>
         {!leftCollapsed && <>
-          <div className="rr-list-tools"><div><Search /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索需求或路径" /></div></div>
-          <div className="rr-list-meta"><span>{filteredDocuments.length} 个 ready 需求</span><button onClick={() => void refreshKnowledge()}><RefreshCw />刷新</button></div>
-          <div className="rr-list-scroll">{filteredDocuments.map(document => {
-            const latest = runs.find(run => run.assetId === document.id)
-            const count = runs.filter(run => run.assetId === document.id).length
-            return <button className={`rr-review-row ${selectedDocument?.id === document.id ? 'active' : ''}`} key={document.id} onClick={() => setSelectedAssetId(document.id)}><span className="rr-file-icon">MD</span><span><b>{document.title}</b><small>{document.version} · {latest ? runLabel(latest.status) : '待评审'}</small><em>{document.logicalPath}</em></span>{count > 0 && <i>{count}</i>}</button>
-          })}{!filteredDocuments.length && <div className="rr-empty compact"><FileText /><b>没有可评审需求</b><p>仅展示知识库中 ready 的 requirement 类型 Markdown/纯文本资产。</p></div>}</div>
+          <div className="rr-list-meta"><span>{requirementDocuments.length} 份固定输入文档</span><button onClick={() => void refreshKnowledge()}><RefreshCw />刷新</button></div>
+          <div className="rr-list-scroll">{requirementDocuments.map(document => <button className={`rr-review-row ${selectedDocument?.id === document.id ? 'active' : ''}`} key={document.id} onClick={() => { setSelectedAssetId(document.id); setView('source') }}><span className="rr-file-icon">MD</span><span><b>{document.title}</b><small>{document.version} · 固定输入</small><em>{document.logicalPath}</em></span></button>)}{!requirementDocuments.length && <div className="rr-empty compact"><FileText /><b>没有可分析的需求文档</b><p>仅展示当前项目版本已绑定且 ready 的 requirement 类型 Markdown/纯文本资产。</p></div>}</div>
           <div className="rr-list-footer"><button className="rr-upload-button" disabled={readOnly || uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload />{readOnly ? '当前版本只读' : uploadState === 'running' ? '正在解析并入库…' : '上传需求 / ZIP'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={event => void uploadRequirements(event)} />{uploadProgress && <div className={`rr-upload-progress ${uploadProgress.stage}`} role="status" aria-live="polite"><div><span>{uploadProgress.stage === 'failed' ? '上传未完成' : uploadProgress.stage === 'completed' ? '上传完成' : '上传解析进度'}</span><b>{uploadProgress.percent}%</b></div><progress max="100" value={uploadProgress.percent} /><small>{uploadProgress.detail}</small></div>}<button onClick={() => setBindingManagerOpen(true)}><FileDiff />管理需求绑定</button><button onClick={onManageVersions}><GitBranch />切换 / 管理版本</button><button onClick={onOpenKnowledge}><BookOpen />前往知识库</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></div>
         </>}
       </aside>
@@ -732,7 +741,7 @@ export function RequirementReviewPage({
       <main className="rr-main">
         <div className="rr-main-toolbar">
           <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
-          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{runsForDocument.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
+          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
         </div>
 
         {selectedRun?.status === 'running' && <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>RequirementAnalysisAgent 正在后台执行</b><span>页面每秒同步服务端状态；刷新、切换页面或关闭浏览器不会取消本次评审。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>}
@@ -743,7 +752,7 @@ export function RequirementReviewPage({
           {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} basisFilter={basisFilter} setBasisFilter={setBasisFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
           {view === 'source' && <SourceDocumentView document={selectedDocument} content={documentContent} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} />}
           {view === 'diff' && <DiffView versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
-          {view === 'tree' && <FeatureTreeView outline={outline.sections} reviewedAreas={result?.coverage.reviewedAreas ?? []} evidence={result?.evidence ?? []} findings={result?.findings ?? []} onOpenSection={activateSection} />}
+          {view === 'tree' && <RequirementPointsView requirementPoints={result?.requirementPoints ?? []} evidence={result?.evidence ?? []} findings={result?.findings ?? []} onLocateEvidence={locateEvidence} onSelectFinding={setSelectedFindingId} />}
           {view === 'evidence' && <EvidenceView evidence={result?.evidence ?? []} findings={result?.findings ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
         </div>
       </main>
@@ -765,14 +774,14 @@ export function RequirementReviewPage({
 }
 
 function OverviewView({ result, stats, visibleFindings, selectedFindingId, selectedRun, findingStates, findingTypeFilter, setFindingTypeFilter, severityFilter, setSeverityFilter, basisFilter, setBasisFilter, findingStateFilter, setFindingStateFilter, onSelectFinding, onLocate, onQuote, onState, onStart, canRun }: {
-  result?: RequirementAnalysisResponse['result']; stats: { features: number; findings: number; high: number; pending: number; evidence: number }; visibleFindings: ReviewFinding[]; selectedFindingId: string; selectedRun?: RunRecord; findingStates: Record<string, FindingState>;
+  result?: RequirementAnalysisResponse['result']; stats: { requirements: number; findings: number; high: number; pending: number; evidence: number }; visibleFindings: ReviewFinding[]; selectedFindingId: string; selectedRun?: RunRecord; findingStates: Record<string, FindingState>;
   findingTypeFilter: 'all' | ReviewFindingType; setFindingTypeFilter: (value: 'all' | ReviewFindingType) => void; severityFilter: 'all' | ReviewSeverity; setSeverityFilter: (value: 'all' | ReviewSeverity) => void; basisFilter: 'all' | 'evidence' | 'inference'; setBasisFilter: (value: 'all' | 'evidence' | 'inference') => void; findingStateFilter: 'all' | FindingState; setFindingStateFilter: (value: 'all' | FindingState) => void;
   onSelectFinding: (id: string) => void; onLocate: (finding: ReviewFinding) => void; onQuote: (finding: ReviewFinding) => void; onState: (finding: ReviewFinding, state: FindingState) => void; onStart: () => void; canRun: boolean
 }) {
-  if (!result) return <div className="rr-empty"><Sparkles /><b>{selectedRun?.status === 'running' ? '正在等待真实评审结果' : selectedRun?.status === 'failed' ? '本次评审失败，可重新评审' : selectedRun?.status === 'cancelled' ? '本次评审已取消，可重新评审' : '尚未生成评审结果'}</b><p>选择 ready 的需求资产和健康模型，运行 RequirementAnalysisAgent 后查看结构化 Finding、证据和覆盖范围。</p>{selectedRun?.status !== 'running' && <button className="btn primary" onClick={onStart} disabled={!canRun}><Play />{selectedRun ? '重新评审' : '开始真实评审'}</button>}</div>
+  if (!result) return <div className="rr-empty"><Sparkles /><b>{selectedRun?.status === 'running' ? '正在提取需求点并执行评审' : selectedRun?.status === 'failed' ? '本次分析失败，可重新运行' : selectedRun?.status === 'cancelled' ? '本次分析已取消，可重新运行' : '尚未提取需求点'}</b><p>当前运行会固定左侧目录中的全部 ready 文档，先跨文档提取并归并需求点，再生成关联 Finding 与固定证据。</p>{selectedRun?.status !== 'running' && <button className="btn primary" onClick={onStart} disabled={!canRun}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}</div>
   return <div className="rr-overview">
     <div className="rr-assessment"><div><span>AI 评审摘要</span><h2>{result.summary.overallAssessment === 'blocked' ? '存在阻断问题' : result.summary.overallAssessment === 'needs_revision' ? '建议修改后确认' : result.summary.overallAssessment === 'pass_with_notes' ? '附带关注项通过' : '评审通过'}</h2><p>{result.summary.risks[0] ?? result.summary.strengths[0] ?? '本次评审已完成结构化校验。'}</p></div><div className="rr-score"><strong>{result.summary.score}</strong><span>综合评分</span></div></div>
-    <div className="rr-stat-grid"><article><FileText /><span>功能章节</span><strong>{stats.features}</strong><small>固定原文大纲</small></article><article><AlertTriangle /><span>Finding</span><strong>{stats.findings}</strong><small>正式结构化结果</small></article><article className="danger"><ShieldCheck /><span>阻断/高风险</span><strong>{stats.high}</strong><small>优先人工确认</small></article><article className="warning"><CircleHelp /><span>待确认</span><strong>{stats.pending}</strong><small>无固定证据</small></article><article className="success"><CheckCircle2 /><span>有证据项</span><strong>{stats.evidence}</strong><small>可定位固定原文</small></article></div>
+    <div className="rr-stat-grid"><article><GitBranch /><span>需求点</span><strong>{stats.requirements}</strong><small>跨文档提取归并</small></article><article><AlertTriangle /><span>Finding</span><strong>{stats.findings}</strong><small>关联到需求点</small></article><article className="danger"><ShieldCheck /><span>阻断/高风险</span><strong>{stats.high}</strong><small>优先人工确认</small></article><article className="warning"><CircleHelp /><span>待确认</span><strong>{stats.pending}</strong><small>证据不足项</small></article><article className="success"><CheckCircle2 /><span>有证据项</span><strong>{stats.evidence}</strong><small>可定位固定原文</small></article></div>
     <div className="rr-finding-toolbar"><span><ListFilter />Finding 筛选</span><select value={findingTypeFilter} onChange={event => setFindingTypeFilter(event.target.value as 'all' | ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={severityFilter} onChange={event => setSeverityFilter(event.target.value as 'all' | ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={basisFilter} onChange={event => setBasisFilter(event.target.value as typeof basisFilter)}><option value="all">全部依据</option><option value="evidence">有固定证据</option><option value="inference">模型推测</option></select><select value={findingStateFilter} onChange={event => setFindingStateFilter(event.target.value as 'all' | FindingState)}><option value="all">全部处置</option>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>{visibleFindings.length} / {result.findings.length}</small></div>
     <div className="rr-findings">{visibleFindings.map(finding => {
       const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open' : 'open'
@@ -792,12 +801,14 @@ function DiffView({ versions, value, onChange, loading, removed, added }: { vers
   return <div className="rr-diff"><header><div><span>基准版本</span><select value={value[0]} onChange={event => onChange([event.target.value, value[1]])}>{versions.map(item => <option value={item.id} key={item.id}>V{item.number} · {item.id}</option>)}</select></div><ChevronRight /><div><span>目标版本</span><select value={value[1]} onChange={event => onChange([value[0], event.target.value])}>{versions.map(item => <option value={item.id} key={item.id}>V{item.number} · {item.id}</option>)}</select></div><ReviewBadge tone="blue">真实固定版本</ReviewBadge></header>{loading ? <div className="rr-empty compact"><LoaderCircle className="rotating" /><b>正在读取固定版本</b></div> : <div className="rr-diff-columns"><section><h3>删除内容 <span>{removed.length}</span></h3>{removed.map((line, index) => <p className="removed" key={`${line}-${index}`}>− {line}</p>)}{!removed.length && <small>没有检测到删除行。</small>}</section><section><h3>新增内容 <span>{added.length}</span></h3>{added.map((line, index) => <p className="added" key={`${line}-${index}`}>+ {line}</p>)}{!added.length && <small>没有检测到新增行。</small>}</section></div>}</div>
 }
 
-function FeatureTreeView({ outline, reviewedAreas, evidence, findings, onOpenSection }: { outline: ReturnType<typeof parseMarkdownOutline>['sections']; reviewedAreas: string[]; evidence: ReviewEvidence[]; findings: ReviewFinding[]; onOpenSection: (key: string) => void }) {
-  const countFor = (title: string) => {
-    const evidenceIds = new Set(evidence.filter(item => item.locator.heading.includes(title) || title.includes(item.locator.heading)).map(item => item.clientEvidenceId))
-    return findings.filter(finding => finding.evidenceRefs.some(reference => evidenceIds.has(reference))).length
-  }
-  return <div className="rr-tree"><header><GitBranch /><div><h2>需求功能树</h2><p>由固定 Markdown 大纲与正式 Evidence 关系生成，不包含测试用例。</p></div><ReviewBadge tone="green">{outline.length} 个章节</ReviewBadge></header><div className="rr-tree-root"><span><FileText /></span><div><b>需求范围</b><small>{reviewedAreas.length ? `已评审：${reviewedAreas.join('、')}` : '等待真实评审覆盖信息'}</small></div></div>{outline.map(section => <button className="rr-tree-node" style={{ marginLeft: `${Math.max(0, section.depth - 2) * 22}px` }} key={section.key} onClick={() => onOpenSection(section.key)}><ChevronRight /><span><b>{section.title}</b><small>定位到固定原文章节</small></span><ReviewBadge tone={countFor(section.title) ? 'orange' : 'gray'}>{countFor(section.title)} 条 Finding</ReviewBadge></button>)}</div>
+function RequirementPointsView({ requirementPoints, evidence, findings, onLocateEvidence, onSelectFinding }: { requirementPoints: RequirementAnalysisResponse['result']['requirementPoints']; evidence: ReviewEvidence[]; findings: ReviewFinding[]; onLocateEvidence: (evidence: ReviewEvidence, findingId?: string) => void; onSelectFinding: (findingId: string) => void }) {
+  const evidenceById = new Map(evidence.map(item => [item.clientEvidenceId, item]))
+  if (!requirementPoints.length) return <div className="rr-empty"><GitBranch /><b>暂无已验证需求点</b><p>完成多文档提取后，需求点及其 Finding、固定证据关系会显示在这里。</p></div>
+  return <div className="rr-tree"><header><GitBranch /><div><h2>需求点</h2><p>由本次固定的多份文档提取并归并；每个需求点必须至少关联一条已校验证据。</p></div><ReviewBadge tone="green">{requirementPoints.length} 个需求点</ReviewBadge></header><div className="rr-tree-root"><span><FileText /></span><div><b>本次固定输入</b><small>{new Set(evidence.map(item => item.sourceRef.assetVersionId)).size} 份文档 · {evidence.length} 条固定证据</small></div></div>{requirementPoints.map(point => {
+    const linkedFindings = findings.filter(finding => finding.requirementPointRefs.includes(point.clientRequirementPointId))
+    const linkedEvidence = point.evidenceRefs.map(reference => evidenceById.get(reference)).filter((item): item is ReviewEvidence => Boolean(item))
+    return <article className="rr-requirement-point" key={point.clientRequirementPointId}><header><span className="rr-requirement-id">{point.clientRequirementPointId}</span><div><h3>{point.title}</h3><p>{point.description}</p></div><ReviewBadge tone={linkedFindings.length ? 'orange' : 'green'}>{linkedFindings.length} 条 Finding</ReviewBadge></header><div className="rr-requirement-relations"><section><b>Finding</b>{linkedFindings.length ? linkedFindings.map(finding => <button key={finding.clientFindingId} onClick={() => onSelectFinding(finding.clientFindingId)}><AlertTriangle />{finding.clientFindingId} · {finding.title}<ReviewBadge tone={severityTone(finding.severity)}>{severityLabels[finding.severity]}</ReviewBadge></button>) : <span><CheckCircle2 />未发现关联问题</span>}</section><section><b>固定证据</b>{linkedEvidence.map(item => <button key={item.clientEvidenceId} onClick={() => onLocateEvidence(item, linkedFindings[0]?.clientFindingId)}><Quote />{item.clientEvidenceId} · {item.locator.heading}<small>{item.sourceRef.assetVersionId}</small></button>)}</section></div></article>
+  })}</div>
 }
 
 function EvidenceView({ evidence, findings, selectedEvidenceId, onLocate }: { evidence: ReviewEvidence[]; findings: ReviewFinding[]; selectedEvidenceId: string; onLocate: (evidence: ReviewEvidence, findingId?: string) => void }) {

@@ -16,7 +16,7 @@ export interface AgentDefinitionVersion {
   version: string
   status: 'published'
   modelScene: 'requirement_analysis'
-  resultSchemaVersion: 'review-result/v1'
+  resultSchemaVersion: 'review-result/v2'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -45,6 +45,7 @@ export interface ReviewRunSnapshot {
   assetContentHash: string
   indexVersionId: string
   logicalPath: string
+  assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }>
   modelRef: { sourceId: string; modelId: string; providerType: 'openai' | 'anthropic' | 'openai_compatible'; modelName: string; contextWindow: number; maxOutputTokens: number }
   focusAreas: string[]
   excludedAreas: string[]

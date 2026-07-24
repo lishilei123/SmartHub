@@ -15,29 +15,35 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   const store = new JsonStore(null)
   await store.load()
   const content = '# 取消订单\n\n用户可以取消待支付订单。'
+  const paymentContent = '# 支付超时\n\n订单超过十五分钟未支付时自动关闭。'
   await store.transaction(state => {
     state.projects.push({ id: 'project-1', name: '订单项目', createdAt: '2026-07-23T00:00:00.000Z' })
     state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1.0', status: 'open', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
     state.configs.push({ id: 'config-1', knowledgeBaseId: 'kb-1', version: 1, config: structuredClone(defaultConfig), createdAt: '2026-07-23T00:00:00.000Z', compatibilityFingerprint: 'config-hash', requiresRebuild: false })
     state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', createdAt: '2026-07-23T00:00:00.000Z', activeIndexVersionId: 'index-1', activeConfigVersionId: 'config-1' })
     state.assets.push({ id: 'asset-1', knowledgeBaseId: 'kb-1', displayName: '取消订单需求', logicalPath: 'requirements/cancel.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'cancel.md', activeVersionId: 'version-1', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
+    state.assets.push({ id: 'asset-2', knowledgeBaseId: 'kb-1', displayName: '支付超时需求', logicalPath: 'requirements/payment.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'payment.md', activeVersionId: 'version-2', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
     const chunk = { id: 'chunk-1', chunkKey: 'cancel', assetVersionId: 'version-1', ordinal: 0, headingPath: ['取消订单'], content: '用户可以取消待支付订单。', contentHash: 'chunk-hash', tokenCount: 10, startLine: 3, endLine: 3, startChar: 8, endChar: 21, embedding: [], reused: false }
+    const paymentChunk = { id: 'chunk-2', chunkKey: 'payment', assetVersionId: 'version-2', ordinal: 0, headingPath: ['支付超时'], content: '订单超过十五分钟未支付时自动关闭。', contentHash: 'payment-chunk-hash', tokenCount: 12, startLine: 3, endLine: 3, startChar: 8, endChar: 25, embedding: [], reused: false }
     state.versions.push({ id: 'version-1', assetId: 'asset-1', number: 1, content, contentHash: 'asset-hash', status: 'ready', configVersionId: 'config-1', createdAt: '2026-07-23T00:00:00.000Z', readyAt: '2026-07-23T00:00:01.000Z', chunks: [chunk] })
+    state.versions.push({ id: 'version-2', assetId: 'asset-2', number: 1, content: paymentContent, contentHash: 'payment-asset-hash', status: 'ready', configVersionId: 'config-1', createdAt: '2026-07-23T00:00:00.000Z', readyAt: '2026-07-23T00:00:01.000Z', chunks: [paymentChunk] })
     state.projectVersionRequirementBindings.push({ id: 'binding-1', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-1', createdAt: '2026-07-23T00:00:01.000Z' })
-    state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', assetVersionIds: ['version-1'], configVersionId: 'config-1', indexedChunks: [{ ...chunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/cancel.md' } }], createdAt: '2026-07-23T00:00:00.000Z', activatedAt: '2026-07-23T00:00:01.000Z' })
+    state.projectVersionRequirementBindings.push({ id: 'binding-2', projectVersionId: 'project-version-1', assetId: 'asset-2', assetVersionId: 'version-2', createdAt: '2026-07-23T00:00:01.000Z' })
+    state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', assetVersionIds: ['version-1', 'version-2'], configVersionId: 'config-1', indexedChunks: [{ ...chunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/cancel.md' } }, { ...paymentChunk, assetMetadata: { assetId: 'asset-2', displayName: '支付超时需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/payment.md' } }], createdAt: '2026-07-23T00:00:00.000Z', activatedAt: '2026-07-23T00:00:01.000Z' })
     state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'review-model', displayName: 'Review Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling', 'structured_output'], enabled: true, health: 'healthy' }], createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
   })
 
   const faux = fauxProvider()
   const result = {
     summary: { overallAssessment: 'needs_revision', score: 65, strengths: ['目标明确'], risks: ['取消后的状态未定义'] },
-    findings: [{ clientFindingId: 'F-001', type: 'state_gap', severity: 'high', confidence: 0.9, title: '取消后状态缺失', description: '需求只定义可取消，未定义取消后的订单状态。', impact: '实现和验收口径可能不一致。', recommendation: '补充状态迁移、幂等与失败处理。', evidenceRefs: ['E-001'] }],
-    evidence: [{ clientEvidenceId: 'E-001', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-1', assetVersionId: 'version-1' }, quote: '用户可以取消待支付订单。', locator: { heading: '取消订单', start: 8, end: 21 } }],
+    requirementPoints: [{ clientRequirementPointId: 'RP-001', title: '取消待支付订单', description: '用户可以取消处于待支付状态的订单。', evidenceRefs: ['E-001'] }, { clientRequirementPointId: 'RP-002', title: '支付超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', evidenceRefs: ['E-002'] }],
+    findings: [{ clientFindingId: 'F-001', type: 'state_gap', severity: 'high', confidence: 0.9, title: '取消后状态缺失', description: '需求只定义可取消，未定义取消后的订单状态。', impact: '实现和验收口径可能不一致。', recommendation: '补充状态迁移、幂等与失败处理。', requirementPointRefs: ['RP-001'], evidenceRefs: ['E-001'] }],
+    evidence: [{ clientEvidenceId: 'E-001', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-1', assetVersionId: 'version-1' }, quote: '用户可以取消待支付订单。', locator: { heading: '取消订单', start: 8, end: 21 } }, { clientEvidenceId: 'E-002', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-2', assetVersionId: 'version-2' }, quote: '订单超过十五分钟未支付时自动关闭。', locator: { heading: '支付超时', start: 8, end: 25 } }],
     coverage: { reviewedAreas: ['状态与异常'], notReviewedAreas: [], limitations: [] },
   }
   faux.setResponses([
     fauxAssistantMessage(fauxText('分析完成。')),
-    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', {}), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-1' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', result), { stopReason: 'toolUse' }),
   ])
   const observedToolChoices: unknown[] = []
@@ -47,8 +53,11 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   }
   const runtime = new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: trackedStream })
   const service = new RequirementAnalysisService(store, runtime)
-  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
+  await assert.rejects(() => service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1'], sourceId: 'source-1', modelId: 'model-1' }), /全部有效需求绑定/u)
+  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
   assert.equal(output.status, 'candidate_validated')
+  assert.equal(output.result.requirementPoints.length, 2)
+  assert.deepEqual(output.snapshot.assets.map(asset => asset.assetVersionId), ['version-1', 'version-2'])
   assert.equal(output.result.findings[0].title, '取消后状态缺失')
   assert.equal(output.execution.framework.name, 'pi-agent-core')
   assert.equal(output.execution.toolCalls, 2)
@@ -58,16 +67,17 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   assert.deepEqual(observedToolChoices[1], { type: 'function', function: { name: 'review_submit_result' } })
   assert.deepEqual(observedToolChoices[2], { type: 'function', function: { name: 'review_submit_result' } })
   const stored = await service.list('project-version-1')
-  assert.equal(stored.length, 1)
-  assert.equal(stored[0].status, 'succeeded')
-  assert.equal(stored[0].response?.result.findings[0].clientFindingId, 'F-001')
-  assert.equal(stored[0].response?.snapshot.agentDefinition.promptRef.version, '1.0.0')
-  assert.equal(stored[0].response?.snapshot.agentDefinition.toolsetVersion, '1.0.0')
-  assert.match(stored[0].response?.snapshot.agentDefinition.toolsetContentSha256 ?? '', /^[a-f0-9]{64}$/u)
-  assert.equal(stored[0].response?.snapshot.modelRef.modelId, 'model-1')
-  assert.deepEqual(stored[0].response?.snapshot.agentDefinition.skillBindings, [])
-  assert.deepEqual(stored[0].response?.snapshot.agentDefinition.mcpBindings, [])
-  assert.equal(stored[0].response?.snapshot.agentDefinition.systemPrompt, undefined)
+  assert.equal(stored.items.length, 1)
+  assert.equal(stored.items[0].status, 'succeeded')
+  const storedDetail = await service.get(stored.items[0].id)
+  assert.equal(storedDetail.response?.result.findings[0].clientFindingId, 'F-001')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.promptRef.version, '2.0.0')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.toolsetVersion, '2.0.0')
+  assert.match(storedDetail.response?.snapshot.agentDefinition.toolsetContentSha256 ?? '', /^[a-f0-9]{64}$/u)
+  assert.equal(storedDetail.response?.snapshot.modelRef.modelId, 'model-1')
+  assert.deepEqual(storedDetail.response?.snapshot.agentDefinition.skillBindings, [])
+  assert.deepEqual(storedDetail.response?.snapshot.agentDefinition.mcpBindings, [])
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.systemPrompt, undefined)
 
   const qaProvider = fauxProvider()
   qaProvider.setResponses([
@@ -87,12 +97,12 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   ])
   const invalidRuntime = new PiAgentRuntimeAdapter(store, { model: invalid.getModel() as Model<Api>, streamFn: invalid.provider.streamSimple.bind(invalid.provider) as StreamFn })
   const invalidService = new RequirementAnalysisService(store, invalidRuntime)
-  await assert.rejects(() => invalidService.analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' }), /AGENT_RESULT_VALIDATION_FAILED/u)
+  await assert.rejects(() => invalidService.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' }), /AGENT_RESULT_VALIDATION_FAILED/u)
   const history = await invalidService.list('project-version-1')
-  assert.equal(history.length, 2)
-  const failed = history.find(item => item.status === 'failed')
+  assert.equal(history.items.length, 2)
+  const failed = history.items.find(item => item.status === 'failed')
   assert.match(failed?.error ?? '', /AGENT_RESULT_VALIDATION_FAILED/u)
-  assert.ok(history.some(item => item.status === 'succeeded'))
+  assert.ok(history.items.some(item => item.status === 'succeeded'))
 
   const correcting = fauxProvider()
   correcting.setResponses([
@@ -100,7 +110,7 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
     fauxAssistantMessage(fauxToolCall('review_submit_result', result), { stopReason: 'toolUse' }),
   ])
   const correctingRuntime = new PiAgentRuntimeAdapter(store, { model: correcting.getModel() as Model<Api>, streamFn: correcting.provider.streamSimple.bind(correcting.provider) as StreamFn })
-  const corrected = await new RequirementAnalysisService(store, correctingRuntime).analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
+  const corrected = await new RequirementAnalysisService(store, correctingRuntime).analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
   assert.equal(corrected.status, 'candidate_validated')
   assert.equal(corrected.execution.toolCalls, 2)
 
@@ -108,8 +118,8 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   cancelledController.abort(new Error('AGENT_CANCELLED'))
   const cancellingRuntime: AgentRuntime = { execute: async () => { throw new Error('AGENT_CANCELLED') } }
   const cancellingService = new RequirementAnalysisService(store, cancellingRuntime)
-  await assert.rejects(() => cancellingService.analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' }, cancelledController.signal), /AGENT_CANCELLED/u)
-  assert.equal((await cancellingService.list('project-version-1')).filter(item => item.status === 'cancelled').length, 1)
+  await assert.rejects(() => cancellingService.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' }, cancelledController.signal), /AGENT_CANCELLED/u)
+  assert.equal((await cancellingService.list('project-version-1')).items.filter(item => item.status === 'cancelled').length, 1)
 
   const backgroundRuntime: AgentRuntime = {
     execute: async (_input, signal) => await new Promise((_resolve, reject) => {
@@ -117,7 +127,7 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
     }),
   }
   const backgroundService = new RequirementAnalysisService(store, backgroundRuntime)
-  const backgroundRun = await backgroundService.start({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
+  const backgroundRun = await backgroundService.start({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
   assert.equal(backgroundRun.status, 'running')
   assert.equal((await backgroundService.get(backgroundRun.id)).status, 'running')
   const explicitlyCancelled = await backgroundService.cancel(backgroundRun.id)

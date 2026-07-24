@@ -37,7 +37,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
   if (method === 'POST' && projectVersionRun) {
     const body = await json(request)
-    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionId: String(body.assetVersionId ?? ''), sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
+    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionIds: stringList(body.assetVersionIds), assetVersionId: body.assetVersionId ? String(body.assetVersionId) : undefined, sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
   }
   const projectVersionReviewRuns = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs$/.exec(url.pathname)
   if (method === 'GET' && projectVersionReviewRuns) return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1], {

@@ -15,6 +15,7 @@ export class ReviewResultValidator {
     if (!assessments.has(input.summary?.overallAssessment)) issues.push(issue('summary.overallAssessment', '总体结论不合法'))
     if (!Number.isFinite(input.summary?.score) || input.summary.score < 0 || input.summary.score > 100) issues.push(issue('summary.score', '评分必须为 0～100'))
     for (const key of ['strengths', 'risks'] as const) if (!isStrings(input.summary?.[key])) issues.push(issue(`summary.${key}`, '必须是字符串数组'))
+    if (!Array.isArray(input.requirementPoints)) issues.push(issue('requirementPoints', '必须是数组'))
     if (!Array.isArray(input.findings)) issues.push(issue('findings', '必须是数组'))
     if (!Array.isArray(input.evidence)) issues.push(issue('evidence', '必须是数组'))
     if (!input.coverage || !isStrings(input.coverage.reviewedAreas) || !isStrings(input.coverage.notReviewedAreas) || !isStrings(input.coverage.limitations)) issues.push(issue('coverage', '覆盖范围结构不合法'))
@@ -24,14 +25,24 @@ export class ReviewResultValidator {
     const state = await this.store.snapshot()
     const index = state.indexes.find(item => item.id === snapshot.indexVersionId && item.knowledgeBaseId === snapshot.knowledgeBaseId)
     const allowedChunks = new Map((index?.indexedChunks ?? []).map(chunk => [chunk.id, chunk]))
+    const allowedAssetVersionIds = new Set(snapshot.assets.map(asset => asset.assetVersionId))
     input.evidence.forEach((evidence, position) => {
       const path = `evidence[${position}]`
       if (!evidence.clientEvidenceId || evidenceIds.has(evidence.clientEvidenceId)) issues.push(issue(`${path}.clientEvidenceId`, '证据 ID 为空或重复'))
       evidenceIds.add(evidence.clientEvidenceId)
       const chunk = allowedChunks.get(evidence.sourceRef?.chunkId)
-      if (!chunk || chunk.assetVersionId !== evidence.sourceRef?.assetVersionId || evidence.sourceRef.assetVersionId !== snapshot.assetVersionId && !index?.assetVersionIds.includes(evidence.sourceRef.assetVersionId)) issues.push(issue(`${path}.sourceRef`, '证据不属于固定索引快照'))
+      if (!chunk || chunk.assetVersionId !== evidence.sourceRef?.assetVersionId || !allowedAssetVersionIds.has(evidence.sourceRef.assetVersionId)) issues.push(issue(`${path}.sourceRef`, '证据不属于本次运行固定的输入文档'))
       if (!evidence.quote?.trim() || !chunk?.content.includes(evidence.quote.trim())) issues.push(issue(`${path}.quote`, '引用摘录无法在固定 Chunk 中定位'))
       if (!Number.isInteger(evidence.locator?.start) || !Number.isInteger(evidence.locator?.end) || evidence.locator.start < 0 || evidence.locator.end < evidence.locator.start) issues.push(issue(`${path}.locator`, '证据定位范围不合法'))
+    })
+
+    const requirementPointIds = new Set<string>()
+    input.requirementPoints.forEach((point, position) => {
+      const path = `requirementPoints[${position}]`
+      if (!point.clientRequirementPointId || requirementPointIds.has(point.clientRequirementPointId)) issues.push(issue(`${path}.clientRequirementPointId`, '需求点 ID 为空或重复'))
+      requirementPointIds.add(point.clientRequirementPointId)
+      for (const key of ['title', 'description'] as const) if (!point[key]?.trim()) issues.push(issue(`${path}.${key}`, '字段不能为空'))
+      if (!isStrings(point.evidenceRefs) || !point.evidenceRefs.length || point.evidenceRefs.some(reference => !evidenceIds.has(reference))) issues.push(issue(`${path}.evidenceRefs`, '需求点至少需要一条有效固定证据'))
     })
 
     const findingIds = new Set<string>()
@@ -44,6 +55,7 @@ export class ReviewResultValidator {
       if (!severities.has(finding.severity)) issues.push(issue(`${path}.severity`, '严重度不合法'))
       if (!Number.isFinite(finding.confidence) || finding.confidence < 0 || finding.confidence > 1) issues.push(issue(`${path}.confidence`, '置信度必须为 0～1'))
       for (const key of ['title', 'description', 'impact', 'recommendation'] as const) if (!finding[key]?.trim()) issues.push(issue(`${path}.${key}`, '字段不能为空'))
+      if (!isStrings(finding.requirementPointRefs) || !finding.requirementPointRefs.length || finding.requirementPointRefs.some(reference => !requirementPointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, 'Finding 至少需要关联一个有效需求点'))
       if (!isStrings(finding.evidenceRefs) || finding.evidenceRefs.some(reference => !evidenceIds.has(reference))) issues.push(issue(`${path}.evidenceRefs`, '包含无效证据引用'))
       if (['critical', 'high'].includes(finding.severity) && !finding.evidenceRefs.length) issues.push(issue(`${path}.evidenceRefs`, 'critical/high Finding 至少需要一条证据'))
     })

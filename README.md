@@ -1,6 +1,6 @@
 # SmartHub Phase 1 + Phase 2 ReviewRun M3
 
-当前仓库已实现第一期资料接入与检索闭环，并按第二期技术方案完成可运行的 `RequirementAnalysisAgent`、受控工具底座、M3 `ReviewRun` 持久化首个闭环，以及绑定固定 ReviewRun 的真实评审问答。Finding 人工处置和独立 Review Job/Worker 仍属于第二期后续 M3～M5，不由前端本地状态代替。
+当前仓库已实现第一期资料接入与检索闭环，并按第二期技术方案完成可运行的 `RequirementAnalysisAgent`、多文档固定输入、需求点提取与 Finding/Evidence 关联、受控工具底座、M3 `ReviewRun` 持久化首个闭环，以及绑定固定 ReviewRun 的真实评审问答。Finding 人工处置和独立 Review Job/Worker 仍属于第二期后续 M3～M5，不由前端本地状态代替。
 
 ## 阶段文档
 
@@ -42,19 +42,19 @@
 - 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
 - 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
 - Agent 定义、Prompt、Toolset、Skill、MCP 绑定、执行限制和内容 Hash 独立版本化并写入运行快照；内置定义解析器和工具注册表工厂均可替换，后续插件通过版本引用和受控适配器接入，不绕过 Tool Runtime；
-- 每次运行固定项目版本、requirement 资产版本、活动索引版本、模型与 Agent 定义，不在运行中漂移到最新资料；
+- 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与 Agent 定义，不在运行中漂移到最新资料；
 - 默认开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `review.submit_result`。PI 层使用兼容模型协议的安全函数名，业务审计仍记录稳定工具 ID；
 - 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；
-- `review.submit_result` 只产生候选结果，框架外 `ReviewResultValidator` 再校验 Schema、固定索引证据、引用摘录、严重度与证据门槛；
+- `review.submit_result` 只产生 `review-result/v2` 候选结果，框架外 `ReviewResultValidator` 再校验 Schema、输入文档范围、需求点证据、Finding 到需求点的关联、引用摘录、严重度与证据门槛；
 - PI 生命周期事件只保留安全元数据，支持外部 `AbortSignal`、运行截止时间、最大 turn 和最大工具调用限制；
 - 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。已有 ReviewRun 的项目版本禁止物理删除，只能归档。
 
-运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一个 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 持久化 ReviewRun 后立即返回，Agent 在服务端后台继续执行，页面通过 ReviewRun 接口恢复并轮询状态：
+运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；Agent 在服务端后台先提取、归并需求点，再生成关联 Finding 与 Evidence，页面通过 ReviewRun 接口恢复并轮询状态：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $body = @{
-  assetVersionId = '<ready requirement assetVersionId>'
+  assetVersionIds = @('<ready requirement assetVersionId 1>', '<ready requirement assetVersionId 2>')
   sourceId = '<model source id>'
   modelId = '<enabled model id>'
   focusAreas = @('状态与异常', '可测试性')

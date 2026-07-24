@@ -25,13 +25,16 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
   })
 
   registry.register({
-    id: 'knowledge.read_asset', piName: 'knowledge_read_asset', version: '1.0.0', label: '读取固定需求资产', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '读取本次固定资产版本的目录和指定行范围，不会切换到最新版本。',
-    parameters: Type.Object({ startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }),
+    id: 'knowledge.read_asset', piName: 'knowledge_read_asset', version: '2.0.0', label: '读取固定需求资产', risk: 'read', idempotent: true, timeoutMs: 30_000,
+    description: '读取本次运行固定的某个输入资产版本及指定行范围，不会切换到最新版本。多文档运行必须传 assetVersionId。',
+    parameters: Type.Object({ assetVersionId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }),
   }, async request => {
-    const args = request.arguments as { startLine?: number; endLine?: number }
+    const args = request.arguments as { assetVersionId?: string; startLine?: number; endLine?: number }
     const state = await store.snapshot()
-    const version = required(state.versions.find(item => item.id === request.context.snapshot.assetVersionId && item.assetId === request.context.snapshot.assetId), '固定资产版本不存在')
+    const fixedAssets = request.context.snapshot.assets
+    const assetVersionId = args.assetVersionId ?? (fixedAssets.length === 1 ? fixedAssets[0].assetVersionId : '')
+    if (!assetVersionId || !fixedAssets.some(asset => asset.assetVersionId === assetVersionId)) throw new Error('必须选择本次运行固定的输入资产版本')
+    const version = required(state.versions.find(item => item.id === assetVersionId), '固定资产版本不存在')
     const lines = version.content.split(/\r?\n/u)
     const start = Math.min(args.startLine ?? 1, Math.max(lines.length, 1))
     const end = Math.min(Math.max(args.endLine ?? Math.min(start + 199, lines.length), start), lines.length)
@@ -65,8 +68,8 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
   })
 
   registry.register({
-    id: 'review.submit_result', piName: 'review_submit_result', version: '1.0.0', label: '提交候选评审结果', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
-    description: '提交 review-result/v1 候选结果并结束 Agent。候选结果仍由 SmartHub 独立校验，不直接写入正式 Finding。',
+    id: 'review.submit_result', piName: 'review_submit_result', version: '2.0.0', label: '提交候选评审结果', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
+    description: '提交 review-result/v2 候选结果并结束 Agent。候选结果仍由 SmartHub 独立校验，不直接写入正式需求点或 Finding。',
     parameters: reviewResultSchema(),
   }, async request => {
     const feedback = await submit(structuredClone(request.arguments) as CandidateReviewResult)
@@ -81,11 +84,17 @@ function reviewResultSchema() {
   const strings = Type.Array(Type.String({ minLength: 1, maxLength: 4000 }), { maxItems: 100 })
   return Type.Object({
     summary: Type.Object({ overallAssessment: Type.Union(['pass', 'pass_with_notes', 'needs_revision', 'blocked'].map(value => Type.Literal(value))), score: Type.Number({ minimum: 0, maximum: 100 }), strengths: strings, risks: strings }),
+    requirementPoints: Type.Array(Type.Object({
+      clientRequirementPointId: Type.String({ minLength: 1, maxLength: 100 }),
+      title: Type.String({ minLength: 1, maxLength: 300 }),
+      description: Type.String({ minLength: 1, maxLength: 8000 }),
+      evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }),
+    }), { maxItems: 300 }),
     findings: Type.Array(Type.Object({
       clientFindingId: Type.String({ minLength: 1, maxLength: 100 }),
       type: Type.Union(['missing_requirement', 'ambiguity', 'conflict', 'boundary_gap', 'state_gap', 'exception_gap', 'security_risk', 'testability_gap', 'dependency_risk', 'other'].map(value => Type.Literal(value))),
       severity: Type.Union(['critical', 'high', 'medium', 'low', 'info'].map(value => Type.Literal(value))),
-      confidence: Type.Number({ minimum: 0, maximum: 1 }), title: Type.String({ minLength: 1, maxLength: 300 }), description: Type.String({ minLength: 1, maxLength: 8000 }), impact: Type.String({ minLength: 1, maxLength: 4000 }), recommendation: Type.String({ minLength: 1, maxLength: 4000 }), evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { maxItems: 20 }),
+      confidence: Type.Number({ minimum: 0, maximum: 1 }), title: Type.String({ minLength: 1, maxLength: 300 }), description: Type.String({ minLength: 1, maxLength: 8000 }), impact: Type.String({ minLength: 1, maxLength: 4000 }), recommendation: Type.String({ minLength: 1, maxLength: 4000 }), requirementPointRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }), evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { maxItems: 20 }),
     }), { maxItems: 100 }),
     evidence: Type.Array(Type.Object({ clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), sourceType: Type.Literal('knowledge_chunk'), sourceRef: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }) }), quote: Type.String({ minLength: 1, maxLength: 4000 }), locator: Type.Object({ heading: Type.String(), start: Type.Integer({ minimum: 0 }), end: Type.Integer({ minimum: 0 }) }) }), { maxItems: 300 }),
     coverage: Type.Object({ reviewedAreas: strings, notReviewedAreas: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 100 }), limitations: Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 100 }) }),

@@ -7,7 +7,8 @@ import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-ag
 
 export interface RequirementAnalysisRequest {
   projectVersionId: string
-  assetVersionId: string
+  assetVersionIds?: string[]
+  assetVersionId?: string
   sourceId: string
   modelId: string
   focusAreas?: string[]
@@ -80,22 +81,30 @@ export class RequirementAnalysisService {
     const state = await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求评审')
-    const version = required(state.versions.find(item => item.id === request.assetVersionId), '需求资产版本不存在')
-    if (version.status !== 'ready') throw new Error('需求资产版本尚未就绪')
-    const asset = required(state.assets.find(item => item.id === version.assetId), '需求资产不存在')
-    if (asset.assetType !== 'requirement') throw new Error('只有 requirement 类型资产可以发起需求评审')
-    const knowledgeBase = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId), '知识库不存在')
+    const effectiveBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === projectVersion.id)
+    const effectiveVersionIds = [...new Set(effectiveBindings.map(binding => binding.assetVersionId))]
+    const requestedVersionIds = [...new Set([...(request.assetVersionIds ?? []), ...(request.assetVersionId ? [request.assetVersionId] : [])].map(item => String(item).trim()).filter(Boolean))]
+    if (!requestedVersionIds.length) requestedVersionIds.push(...effectiveVersionIds)
+    if (!requestedVersionIds.length) throw new Error('至少需要一份已绑定的需求文档')
+    if (requestedVersionIds.length !== effectiveVersionIds.length || requestedVersionIds.some(versionId => !effectiveVersionIds.includes(versionId))) throw new Error('评审输入必须包含当前项目版本的全部有效需求绑定')
+    const versions = requestedVersionIds.map(versionId => required(state.versions.find(item => item.id === versionId), `需求资产版本不存在：${versionId}`))
+    if (versions.some(version => version.status !== 'ready')) throw new Error('存在尚未就绪的需求资产版本')
+    const assets = versions.map(version => required(state.assets.find(item => item.id === version.assetId), '需求资产不存在'))
+    if (assets.some(asset => asset.assetType !== 'requirement')) throw new Error('只有 requirement 类型资产可以发起需求评审')
+    const knowledgeBaseIds = new Set(assets.map(asset => asset.knowledgeBaseId))
+    if (knowledgeBaseIds.size !== 1) throw new Error('同一次评审的需求文档必须属于同一知识库')
+    const knowledgeBase = required(state.knowledgeBases.find(item => item.id === assets[0].knowledgeBaseId), '知识库不存在')
     const project = required(state.projects.find(item => item.id === knowledgeBase.projectId), '项目不存在')
     if (projectVersion.projectId !== project.id) throw new Error('需求资产不属于当前项目版本')
-    required(state.projectVersionRequirementBindings.find(item => item.projectVersionId === projectVersion.id && item.assetId === asset.id && item.assetVersionId === version.id), '需求资产版本未绑定到当前项目版本')
+    versions.forEach((version, index) => required(state.projectVersionRequirementBindings.find(item => item.projectVersionId === projectVersion.id && item.assetId === assets[index].id && item.assetVersionId === version.id), `需求资产版本未绑定到当前项目版本：${version.id}`))
     const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), '知识库没有活动索引')
-    if (!index.assetVersionIds.includes(version.id)) throw new Error('需求资产版本不属于当前活动索引')
+    if (versions.some(version => !index.assetVersionIds.includes(version.id))) throw new Error('存在不属于当前活动索引的需求资产版本')
     const source = required(state.modelSources.find(item => item.id === request.sourceId && item.enabled), '生成式模型来源不可用')
     const model = required(source.models.find(item => item.id === request.modelId && item.enabled), '生成式模型不可用')
     if (!model.capabilities.includes('tool_calling')) throw new Error('需求分析模型必须支持 tool_calling')
     if (model.health !== 'healthy') throw new Error('请先完成所选生成式模型的连通性探测并确保健康状态正常')
     const definition = await this.definitions.resolve('requirement-analysis')
-    const estimatedInputTokens = Math.ceil(version.content.length / 4) + 4_000
+    const estimatedInputTokens = Math.ceil(versions.reduce((total, version) => total + version.content.length, 0) / 4) + 4_000
     if (estimatedInputTokens + model.maxOutputTokens > model.contextWindow) throw new Error('需求版本超过模型上下文预算，请选择更大上下文模型')
     const now = new Date().toISOString()
     const snapshot = {
@@ -105,11 +114,12 @@ export class RequirementAnalysisService {
       projectVersionId: projectVersion.id,
       projectVersionName: projectVersion.name,
       knowledgeBaseId: knowledgeBase.id,
-      assetId: asset.id,
-      assetVersionId: version.id,
-      assetContentHash: version.contentHash,
+      assetId: assets[0].id,
+      assetVersionId: versions[0].id,
+      assetContentHash: versions[0].contentHash,
       indexVersionId: index.id,
-      logicalPath: asset.logicalPath,
+      logicalPath: assets[0].logicalPath,
+      assets: assets.map((asset, position) => ({ assetId: asset.id, assetVersionId: versions[position].id, assetContentHash: versions[position].contentHash, logicalPath: asset.logicalPath, displayName: asset.displayName })),
       modelRef: { sourceId: source.id, modelId: model.id, providerType: source.providerType, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
       focusAreas: cleanList(request.focusAreas),
       excludedAreas: cleanList(request.excludedAreas),
@@ -119,11 +129,11 @@ export class RequirementAnalysisService {
     const run: ReviewRun = {
       id: snapshot.runId,
       projectVersionId: projectVersion.id,
-      assetId: asset.id,
-      assetVersionId: version.id,
-      documentTitle: asset.displayName,
-      documentVersion: version.number,
-      logicalPath: asset.logicalPath,
+      assetId: assets[0].id,
+      assetVersionId: versions[0].id,
+      documentTitle: `${assets.length} 份需求文档`,
+      documentVersion: versions[0].number,
+      logicalPath: assets.map(asset => asset.logicalPath).join('；'),
       sourceId: source.id,
       modelId: model.id,
       modelLabel: `${source.name} · ${model.displayName}`,
@@ -178,12 +188,16 @@ export class RequirementAnalysisService {
 }
 
 function presentRunSummary(run: ReviewRun) {
+  const assets = snapshotAssets(run)
   return {
     id: run.id,
     runId: run.id,
     projectVersionId: run.projectVersionId,
     assetId: run.assetId,
     assetVersionId: run.assetVersionId,
+    assetIds: assets.map(asset => asset.assetId),
+    assetVersionIds: assets.map(asset => asset.assetVersionId),
+    documents: assets,
     documentTitle: run.documentTitle,
     documentVersion: `V${run.documentVersion}`,
     logicalPath: run.logicalPath,
@@ -200,6 +214,7 @@ function presentRunSummary(run: ReviewRun) {
 }
 
 function presentRun(run: ReviewRun) {
+  const assets = snapshotAssets(run)
   const response = run.result && run.execution ? {
     runId: run.id,
     status: 'candidate_validated' as const,
@@ -213,6 +228,9 @@ function presentRun(run: ReviewRun) {
     projectVersionId: run.projectVersionId,
     assetId: run.assetId,
     assetVersionId: run.assetVersionId,
+    assetIds: assets.map(asset => asset.assetId),
+    assetVersionIds: assets.map(asset => asset.assetVersionId),
+    documents: assets,
     documentTitle: run.documentTitle,
     documentVersion: `V${run.documentVersion}`,
     logicalPath: run.logicalPath,
@@ -231,7 +249,11 @@ function presentRun(run: ReviewRun) {
 
 function redactSnapshot(snapshot: ReviewRun['snapshot']) {
   const definition = snapshot.agentDefinition
-  return { ...snapshot, agentDefinition: { ...definition, systemPrompt: undefined, taskTemplate: undefined } }
+  return { ...snapshot, assets: snapshot.assets ?? [{ assetId: snapshot.assetId, assetVersionId: snapshot.assetVersionId, assetContentHash: snapshot.assetContentHash, logicalPath: snapshot.logicalPath, displayName: snapshot.logicalPath }], agentDefinition: { ...definition, systemPrompt: undefined, taskTemplate: undefined } }
+}
+
+function snapshotAssets(run: ReviewRun) {
+  return run.snapshot.assets ?? [{ assetId: run.assetId, assetVersionId: run.assetVersionId, assetContentHash: run.snapshot.assetContentHash, logicalPath: run.logicalPath, displayName: run.documentTitle }]
 }
 
 function encodeCursor(run: ReviewRun) { return Buffer.from(JSON.stringify([run.createdAt, run.id])).toString('base64url') }

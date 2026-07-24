@@ -98,7 +98,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (!candidate) {
         await record({ type: 'result_submission_retry', turn: turns })
         forceResultSubmission = true
-        await agent.prompt('现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 review_submit_result 提交完整的 review-result/v1。若参数校验失败，请按工具错误修正参数后再次提交。')
+        await agent.prompt('现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 review_submit_result 提交完整的 review-result/v2。若参数校验失败，请按工具错误修正参数后再次提交。')
         await agent.waitForIdle()
         forceResultSubmission = false
       }
