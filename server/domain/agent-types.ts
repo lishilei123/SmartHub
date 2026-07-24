@@ -72,6 +72,15 @@ export interface AgentExecutionEvent {
   toolId?: string
   toolCallId?: string
   isError?: boolean
+  role?: 'user' | 'assistant' | 'tool'
+  content?: string
+  toolCalls?: Array<{ id: string; name: string }>
+  toolArguments?: unknown
+  toolResult?: unknown
+  stopReason?: string
+  model?: string
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }
+  framework?: { name: 'pi-agent-core'; version: string }
 }
 
 export interface AgentExecutionInput {
@@ -85,6 +94,7 @@ export interface AgentExecutionOutput {
   events: AgentExecutionEvent[]
   turns: number
   toolCalls: number
+  toolErrors: number
   framework: { name: 'pi-agent-core'; version: string }
 }
 

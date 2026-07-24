@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import type { Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
+import type { AgentExecutionRecord, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
 import type { ChunkSearchInput, RequirementBindingMetadata, ReviewRunPage, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
@@ -150,6 +150,25 @@ export class PostgresStore implements StateStore {
   async getReviewRun(runId: string): Promise<ReviewRun | null> {
     const result = await this.pool.query<{ data: ReviewRun }>('SELECT data FROM smarthub.review_runs WHERE id=$1', [runId])
     return result.rows[0]?.data ?? null
+  }
+
+  async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
+    let failure: unknown
+    this.queue = this.queue.then(async () => {
+      try {
+        const result = await this.pool.query<{ data: ReviewRun }>(`
+          UPDATE smarthub.review_runs
+          SET data = jsonb_set(data, '{execution}', $2::jsonb, true)
+          WHERE id = $1
+          RETURNING data
+        `, [runId, JSON.stringify(execution)])
+        if (!result.rows[0]) throw new Error('需求评审运行不存在')
+        const index = this.state.reviewRuns.findIndex(item => item.id === runId)
+        if (index >= 0) this.state.reviewRuns[index] = result.rows[0].data
+      } catch (error) { failure = error }
+    })
+    await this.queue
+    if (failure) throw failure
   }
 
   async close() {

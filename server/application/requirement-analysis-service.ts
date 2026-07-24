@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import type { AgentDefinitionResolver, AgentRuntime } from '../domain/agent-types.js'
-import type { ReviewRun } from '../domain/types.js'
+import type { AgentDefinitionResolver, AgentExecutionEvent, AgentRuntime } from '../domain/agent-types.js'
+import type { AgentExecutionRecord, ReviewRun } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { ReviewResultValidator } from '../agent/result-validator.js'
 import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
@@ -146,10 +146,15 @@ export class RequirementAnalysisService {
     }
     await this.store.transaction(draft => { draft.reviewRuns.push(run) })
     onCreated?.(presentRun(run))
+    const observedEvents: AgentExecutionEvent[] = []
     try {
       const output = await this.runtime.execute({
         snapshot,
         model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
+        onEvent: async event => {
+          observedEvents.push(event)
+          if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, observedEvents)
+        },
       }, signal)
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
       const validation = await this.validator.validate(output.candidate, snapshot)
@@ -157,7 +162,7 @@ export class RequirementAnalysisService {
       const finishedAt = new Date().toISOString()
       await this.store.transaction(draft => {
         const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
-        Object.assign(current, { status: 'succeeded', step: 'completed', progress: 100, finishedAt, result: output.candidate, execution: { turns: output.turns, toolCalls: output.toolCalls, framework: output.framework, events: output.events }, error: undefined } satisfies Partial<ReviewRun>)
+        Object.assign(current, { status: 'succeeded', step: 'completed', progress: 100, finishedAt, result: output.candidate, execution: { turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, events: output.events }, error: undefined } satisfies Partial<ReviewRun>)
       })
       const completed = await this.get(run.id)
       return required(completed.response, '需求评审结果不存在')
@@ -166,7 +171,10 @@ export class RequirementAnalysisService {
       const status = signal.aborted || /AGENT_CANCELLED|客户端已中断/u.test(message) ? 'cancelled' : 'failed'
       await this.store.transaction(draft => {
         const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
-        Object.assign(current, { status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message } satisfies Partial<ReviewRun>)
+        Object.assign(current, {
+          status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
+          ...(observedEvents.length ? { execution: executionProgress(observedEvents) } : {}),
+        } satisfies Partial<ReviewRun>)
         if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
           const currentSource = draft.modelSources.find(item => item.id === source.id)
           const currentModel = currentSource?.models.find(item => item.id === model.id)
@@ -184,6 +192,15 @@ export class RequirementAnalysisService {
       })
       throw new Error(message)
     }
+  }
+
+  private async saveExecutionProgress(runId: string, events: AgentExecutionEvent[]) {
+    const execution = executionProgress(events)
+    if (this.store.saveReviewRunExecution) return this.store.saveReviewRunExecution(runId, execution)
+    await this.store.transaction(draft => {
+      const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+      current.execution = execution
+    })
   }
 }
 
@@ -243,6 +260,7 @@ function presentRun(run: ReviewRun) {
     finishedAt: run.finishedAt,
     error: run.error,
     snapshot: redactSnapshot(run.snapshot),
+    execution: response ? undefined : run.execution,
     response,
   }
 }
@@ -271,6 +289,17 @@ function decodeCursor(cursor: string | undefined, runs: ReviewRun[]) {
 }
 function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }
 function cleanList(value: string[] | undefined) { return Array.isArray(value) ? [...new Set(value.map(item => String(item).trim()).filter(Boolean))].slice(0, 20) : [] }
+function shouldCheckpointExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry'].includes(event.type) }
+function executionProgress(events: AgentExecutionEvent[]): AgentExecutionRecord {
+  const framework = events.find(event => event.framework)?.framework
+  return {
+    turns: events.reduce((maximum, event) => Math.max(maximum, event.turn ?? 0), 0),
+    toolCalls: events.filter(event => event.type === 'tool_execution_start').length,
+    toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
+    ...(framework ? { framework } : {}),
+    events: structuredClone(events),
+  }
+}
 function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) {
   let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'
   if (credential) message = message.replaceAll(credential, '[已隐藏凭据]')

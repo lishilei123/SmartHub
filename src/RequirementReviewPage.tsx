@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, BookOpen, Bot, CheckCircle2, ChevronRight, CircleHelp, Clock3, Download, FileDiff,
+  Activity, AlertTriangle, BookOpen, Bot, CheckCircle2, ChevronRight, CircleHelp, Clock3, Download, FileDiff,
   FileText, GitBranch, ListFilter, LoaderCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen,
-  PanelRightClose, PanelRightOpen, Play, Quote, RefreshCw, Send, ShieldCheck, Sparkles, Upload, XCircle,
+  PanelRightClose, PanelRightOpen, Play, Quote, RefreshCw, Send, ShieldCheck, Sparkles, Upload, Wrench, XCircle,
 } from 'lucide-react'
 import type { GenerativeSourceDraft, KnowledgeDocument } from './prototype-data'
 import { loadAssetVersion, loadGenerativeModelSources, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
@@ -14,6 +14,7 @@ import {
   loadRequirementReviewRun,
   loadRequirementReviewRuns,
   startRequirementAnalysis,
+  type AgentExecutionEvent,
   type RequirementAnalysisResponse,
   type ReviewEvidence,
   type ReviewFinding,
@@ -60,16 +61,62 @@ function ReviewBadge({ children, tone = 'gray' }: { children: React.ReactNode; t
   return <span className={`rr-badge ${tone}`}>{children}</span>
 }
 
-function ReviewModal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><div className="modal rr-binding-modal" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-btn" onClick={onClose} aria-label={`关闭${title}`}><XCircle /></button></header>{children}</div></div>
+function ReviewModal({ title, onClose, children, className = 'rr-binding-modal' }: { title: string; onClose: () => void; children: React.ReactNode; className?: string }) {
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><div className={`modal ${className}`} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-btn" onClick={onClose} aria-label={`关闭${title}`}><XCircle /></button></header>{children}</div></div>
 }
 
 const severityTone = (severity: ReviewSeverity) => severity === 'critical' ? 'red' : severity === 'high' ? 'orange' : severity === 'medium' ? 'gold' : severity === 'low' ? 'blue' : 'gray'
 const runTone = (status?: RunStatus) => status === 'succeeded' ? 'green' : status === 'running' ? 'purple' : status === 'failed' ? 'red' : status === 'cancelled' ? 'orange' : 'gray'
 const runLabel = (status?: RunStatus) => status === 'succeeded' ? '评审完成' : status === 'running' ? '分析中' : status === 'failed' ? '运行失败' : status === 'cancelled' ? '已取消' : '待评审'
+const runErrorMessage = (error?: string) => error === 'AGENT_TURN_LIMIT_EXCEEDED'
+  ? 'Agent 达到本次运行轮次上限，仍未提交有效评审结果。请重新评审；若持续出现，请调整当前项目版本的需求范围或更换模型。'
+  : error
 const formatTime = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const taskStepLabel = (step: string) => ({ waiting: '等待 Worker', claimed: '任务已领取', embedding: '解析并生成 Embedding', vector_indexing: '构建向量索引', committing: '发布活动索引', completed: '索引发布完成', failed: '任务处理失败', cancelled: '任务已取消', superseded: '已被新版本替代' } as Record<string, string>)[step] ?? '正在处理知识资产'
 const completedUploadVisibleMs = 15_000
+
+const agentEventLabels: Record<string, string> = {
+  runtime_initialized: 'Runtime 初始化',
+  agent_start: 'Agent 开始', agent_end: 'Agent 本轮结束', turn_start: 'Turn 开始', turn_end: 'Turn 结束',
+  message_start: '消息开始', message_update: '消息流更新', message_end: '消息完成',
+  tool_execution_start: '工具调用开始', tool_execution_update: '工具调用更新', tool_execution_end: '工具调用结束',
+  result_submission_required: '进入结果提交窗口', result_submission_retry: '要求重新提交结果',
+}
+
+function eventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
+function formatTraceValue(value: unknown) { return value === undefined ? '' : JSON.stringify(value, null, 2) }
+
+function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord; loading: boolean; tab: 'conversation' | 'events'; onTab: (tab: 'conversation' | 'events') => void; onClose: () => void }) {
+  const execution = run.response?.execution ?? run.execution
+  const events = execution?.events ?? []
+  const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
+  const completedToolIds = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
+  const conversation = events.filter(event => (event.type === 'message_end' && (event.role === 'user' || event.role === 'assistant'))
+    || event.type === 'tool_execution_end'
+    || (event.type === 'tool_execution_start' && !completedToolIds.has(event.toolCallId))
+    || event.type === 'result_submission_required'
+    || event.type === 'result_submission_retry')
+  const hasDetailedTrace = events.some(event => event.content || event.toolArguments !== undefined || event.toolResult !== undefined || event.toolCalls?.length)
+
+  return <ReviewModal title="Agent 运行记录" className="rr-run-record-modal" onClose={onClose}><div className="rr-run-record">
+    <div className="rr-run-record-summary"><div><ReviewBadge tone={runTone(run.status)}>{runLabel(run.status)}</ReviewBadge><b>{run.id}</b><span>{run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(run.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? 0}</dd></div><div><dt>工具调用</dt><dd>{execution?.toolCalls ?? 0}{execution?.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : run.status === 'running' ? '运行中' : '未完成 / 旧记录'}</dd></div></dl></div>
+    {run.error && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(run.error)}</span></div>}
+    <div className="rr-run-record-notice"><ShieldCheck /><span>记录模型可见消息、工具参数与工具返回；API 凭据、签名、图片二进制和模型隐藏思维不会写入运行记录。</span></div>
+    <div className="rr-run-record-tabs"><button className={tab === 'conversation' ? 'active' : ''} onClick={() => onTab('conversation')}><MessageSquareText />Agent 对话 <span>{conversation.length}</span></button><button className={tab === 'events' ? 'active' : ''} onClick={() => onTab('events')}><Activity />事件时间线 <span>{events.length}</span></button></div>
+    <div className="rr-run-record-body">{loading ? <div className="rr-trace-empty"><LoaderCircle className="rotating" /><b>正在读取运行记录</b></div> : tab === 'conversation' ? <div className="rr-agent-conversation">
+      {conversation.map(event => {
+        if (event.type === 'message_end') return <article className={`rr-agent-message ${event.role}`} key={event.sequence}><header><span>{event.role === 'user' ? <FileText /> : <Bot />}{event.role === 'user' ? '运行任务' : event.model ?? run.modelLabel}</span><small>Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></header>{event.content ? <p>{event.content}</p> : null}{event.toolCalls?.length ? <div className="rr-agent-tool-requests">{event.toolCalls.map(call => <span key={call.id}><Wrench />请求 {call.name}</span>)}</div> : null}{event.usage && <footer>Token：输入 {event.usage.input} · 输出 {event.usage.output} · 缓存读取 {event.usage.cacheRead} · 总计 {event.usage.totalTokens} · {event.stopReason ?? '未知停止原因'}</footer>}</article>
+        if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+          const start = event.type === 'tool_execution_start' ? event : toolStarts.get(event.toolCallId ?? '')
+          return <article className={`rr-agent-tool ${event.isError ? 'failed' : ''}`} key={event.sequence}><header><span><Wrench />{event.toolId ?? start?.toolId ?? '未知工具'}</span><ReviewBadge tone={event.type === 'tool_execution_start' ? 'orange' : event.isError ? 'red' : 'green'}>{event.type === 'tool_execution_start' ? '执行中' : event.isError ? '失败' : '完成'}</ReviewBadge><small>Turn {event.turn ?? start?.turn ?? 0} · {eventTime(event.occurredAt)}</small></header><div><details><summary>查看调用参数</summary><pre>{formatTraceValue(start?.toolArguments) || '该历史记录未保存参数'}</pre></details>{event.type === 'tool_execution_end' && <details><summary>查看工具返回</summary><pre>{formatTraceValue(event.toolResult) || '该历史记录未保存返回内容'}</pre></details>}</div><footer>{event.toolCallId}</footer></article>
+        }
+        return <div className="rr-agent-control" key={event.sequence}><Sparkles /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></span></div>
+      })}
+      {!conversation.length && <div className="rr-trace-empty"><MessageSquareText /><b>{run.status === 'running' ? '等待首个 Agent Turn 完成' : '没有可展示的 Agent 对话'}</b><p>{events.length ? '这是一条旧运行，只保存了生命周期元数据。请发起新评审以采集完整对话和工具交互。' : '该运行创建时尚未启用交互记录。'}</p></div>}
+      {conversation.length > 0 && !hasDetailedTrace && <div className="rr-trace-legacy"><AlertTriangle />旧运行只保存事件点，没有保存消息正文和工具参数/返回。</div>}
+    </div> : <div className="rr-agent-events">{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : event.type.includes('message') ? 'message' : ''} /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.role ? ` · ${event.role}` : ''}</small></span><time>{eventTime(event.occurredAt)}</time></article>)}{!events.length && <div className="rr-trace-empty"><Activity /><b>暂无事件记录</b><p>{run.status === 'running' ? '首个 Turn 完成后会同步到这里。' : '该历史运行未采集执行事件。'}</p></div>}</div>}</div>
+  </div></ReviewModal>
+}
 
 export function RequirementReviewPage({
   projectVersion,
@@ -133,6 +180,9 @@ export function RequirementReviewPage({
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
   const [bindingManagerOpen, setBindingManagerOpen] = useState(false)
   const [bindingActionId, setBindingActionId] = useState('')
+  const [runRecordOpen, setRunRecordOpen] = useState(false)
+  const [runRecordTab, setRunRecordTab] = useState<'conversation' | 'events'>('conversation')
+  const [runRecordLoading, setRunRecordLoading] = useState(false)
   const requestController = useRef<AbortController | null>(null)
   const sourceRef = useRef<HTMLDivElement>(null)
   const outlineRef = useRef<HTMLElement>(null)
@@ -270,6 +320,24 @@ export function RequirementReviewPage({
     return () => { cancelled = true }
   }, [selectedRun?.id, selectedRun?.response, selectedRun?.status, notify])
 
+  useEffect(() => {
+    if (!runRecordOpen || !selectedRun?.id || selectedRun.status !== 'running' || selectedRun.id.startsWith('pending-')) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const detail = await loadRequirementReviewRun(selectedRun.id)
+        if (cancelled) return
+        setRuns(current => current.map(run => run.id === detail.id ? { ...run, ...detail } : run))
+        if (detail.status === 'running') timer = setTimeout(() => { void poll() }, 1_000)
+      } catch {
+        if (!cancelled) timer = setTimeout(() => { void poll() }, 2_000)
+      }
+    }
+    timer = setTimeout(() => { void poll() }, 1_000)
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [runRecordOpen, selectedRun?.id, selectedRun?.status])
+
   const sourceVersionId = selectedDocument?.assetVersionId
   useEffect(() => {
     if (view !== 'source' || !sourceVersionId || contentByVersion[sourceVersionId]) return
@@ -372,6 +440,21 @@ export function RequirementReviewPage({
       notify(error instanceof Error ? error.message : '更多评审历史读取失败', 'error')
     } finally {
       setRunsLoadingMore(false)
+    }
+  }
+
+  const openRunRecord = async () => {
+    if (!selectedRun || selectedRun.id.startsWith('pending-')) return
+    setRunRecordOpen(true)
+    setRunRecordTab('conversation')
+    setRunRecordLoading(true)
+    try {
+      const detail = await loadRequirementReviewRun(selectedRun.id)
+      setRuns(current => current.map(run => run.id === detail.id ? { ...run, ...detail } : run))
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Agent 运行记录读取失败', 'error')
+    } finally {
+      setRunRecordLoading(false)
     }
   }
 
@@ -741,11 +824,11 @@ export function RequirementReviewPage({
       <main className="rr-main">
         <div className="rr-main-toolbar">
           <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
-          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
+          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button><ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
         </div>
 
         {selectedRun?.status === 'running' && <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>RequirementAnalysisAgent 正在后台执行</b><span>页面每秒同步服务端状态；刷新、切换页面或关闭浏览器不会取消本次评审。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>}
-        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>评审运行失败</b><span>{selectedRun.error}</span>{!selectedModel?.healthy && <small>请在顶部切换到通过工具调用检测的健康模型后重新评审。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
+        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>评审运行失败</b><span>{runErrorMessage(selectedRun.error)}</span>{!selectedModel?.healthy && <small>请在顶部切换到通过工具调用检测的健康模型后重新评审。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
         {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{!selectedModel?.healthy && <small>请先选择健康模型。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
 
         <div className={`rr-view-content ${view === 'source' ? 'rr-source-view' : ''}`}>
@@ -765,7 +848,7 @@ export function RequirementReviewPage({
           <div className="rr-chat-input"><textarea value={chatDraft} onChange={event => setChatDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat() } }} disabled={selectedRun?.status !== 'succeeded' || Boolean(chatSendingRunId)} placeholder={selectedRun?.status === 'succeeded' ? '基于固定评审运行提问…' : '完成一次真实评审后可引用提问'} /><div><span><ShieldCheck />固定 ReviewRun · 真实模型</span><button onClick={() => void sendChat()} disabled={!chatDraft.trim() || selectedRun?.status !== 'succeeded' || Boolean(chatSendingRunId)} aria-label="发送评审问题">{chatSendingRunId ? <LoaderCircle className="rotating" /> : <Send />}</button></div></div></>}
       </aside>
     </div>
-  </section>{bindingManagerOpen && <ReviewModal title={`${projectVersion.name} · 需求绑定`} onClose={() => setBindingManagerOpen(false)}><div className="rr-binding-manager"><header><div><b>{readOnly ? '当前版本只读' : '维护当前版本的需求范围'}</b><span>继承得到的是独立固定绑定。加入、替换或移除只影响 {projectVersion.name}，不会修改来源版本或删除知识库文件。</span></div><ReviewBadge tone={readOnly ? 'orange' : 'green'}>{bindings.length} 条绑定</ReviewBadge></header><div className="rr-binding-list">{availableRequirementDocuments.map(document => {
+  </section>{runRecordOpen && selectedRun && <RunRecordModal run={selectedRun} loading={runRecordLoading} tab={runRecordTab} onTab={setRunRecordTab} onClose={() => setRunRecordOpen(false)} />}{bindingManagerOpen && <ReviewModal title={`${projectVersion.name} · 需求绑定`} onClose={() => setBindingManagerOpen(false)}><div className="rr-binding-manager"><header><div><b>{readOnly ? '当前版本只读' : '维护当前版本的需求范围'}</b><span>继承得到的是独立固定绑定。加入、替换或移除只影响 {projectVersion.name}，不会修改来源版本或删除知识库文件。</span></div><ReviewBadge tone={readOnly ? 'orange' : 'green'}>{bindings.length} 条绑定</ReviewBadge></header><div className="rr-binding-list">{availableRequirementDocuments.map(document => {
     const binding = bindings.find(item => item.assetId === document.id)
     const boundDocument = boundDocuments.find(item => item.id === document.id)
     const isLatest = binding?.assetVersionId === document.assetVersionId

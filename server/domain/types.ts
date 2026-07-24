@@ -97,6 +97,13 @@ export interface IndexChunk extends Chunk { assetMetadata: IndexAssetMetadata }
 export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: IndexChunk[]; createdAt: string; activatedAt?: string }
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
 export type ReviewRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
+export interface AgentExecutionRecord {
+  turns: number
+  toolCalls: number
+  toolErrors?: number
+  framework?: { name: 'pi-agent-core'; version: string }
+  events: AgentExecutionEvent[]
+}
 export interface ReviewRun {
   id: string
   projectVersionId: string
@@ -116,7 +123,7 @@ export interface ReviewRun {
   finishedAt?: string
   snapshot: ReviewRunSnapshot
   result?: CandidateReviewResult
-  execution?: { turns: number; toolCalls: number; framework: { name: 'pi-agent-core'; version: string }; events: AgentExecutionEvent[] }
+  execution?: AgentExecutionRecord
   error?: string
 }
 

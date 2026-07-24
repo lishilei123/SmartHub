@@ -45,8 +45,9 @@
 - 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与 Agent 定义，不在运行中漂移到最新资料；
 - 默认开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `review.submit_result`。PI 层使用兼容模型协议的安全函数名，业务审计仍记录稳定工具 ID；
 - 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；
-- `review.submit_result` 只产生 `review-result/v2` 候选结果，框架外 `ReviewResultValidator` 再校验 Schema、输入文档范围、需求点证据、Finding 到需求点的关联、引用摘录、严重度与证据门槛；
-- PI 生命周期事件只保留安全元数据，支持外部 `AbortSignal`、运行截止时间、最大 turn 和最大工具调用限制；
+- `knowledge.read_asset` 对目录分页，并在指定行范围读取时默认不重复返回目录；`evidence.validate` 要求从固定 Chunk 连续逐字引用，失败时返回原因和修复动作，成功时返回可直接提交的精确标题与字符范围；
+- `review.submit_result` 只产生 `review-result/v2` 候选结果，框架外 `ReviewResultValidator` 再校验 Schema、每份输入文档的证据覆盖、需求点证据、Finding 到需求点及证据的关联、引用摘录与精确定位、严重度与证据门槛；
+- ReviewRun 按工具完成和 turn 结束边界持久化 Agent 运行记录，页面可查看模型可见对话、工具参数/返回和完整语义事件时间线；逐 Token 的 `message_update` 和无内容的工具增量事件不重复入库，工具尝试与异常数独立展示。API 凭据、签名、图片二进制和模型隐藏思维不写入记录。运行时支持外部 `AbortSignal`、截止时间、最大 turn 和最大工具调用限制；当前默认最多 24 turns，并预留最后 3 turns 强制提交或修正候选结果；
 - 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。已有 ReviewRun 的项目版本禁止物理删除，只能归档。
 
 运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；Agent 在服务端后台先提取、归并需求点，再生成关联 Finding 与 Evidence，页面通过 ReviewRun 接口恢复并轮询状态：

@@ -49,6 +49,33 @@ export type RequirementAnalysisResult = {
   }
 }
 
+export type AgentExecutionEvent = {
+  sequence: number
+  type: string
+  occurredAt: string
+  turn?: number
+  toolId?: string
+  toolCallId?: string
+  isError?: boolean
+  role?: 'user' | 'assistant' | 'tool'
+  content?: string
+  toolCalls?: { id: string; name: string }[]
+  toolArguments?: unknown
+  toolResult?: unknown
+  stopReason?: string
+  model?: string
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }
+  framework?: { name: string; version: string }
+}
+
+export type AgentExecutionRecord = {
+  turns: number
+  toolCalls: number
+  toolErrors?: number
+  framework?: { name: string; version: string }
+  events: AgentExecutionEvent[]
+}
+
 export type RequirementAnalysisResponse = {
   runId: string
   status: 'candidate_validated'
@@ -80,12 +107,7 @@ export type RequirementAnalysisResponse = {
     }
   }
   result: RequirementAnalysisResult
-  execution: {
-    turns: number
-    toolCalls: number
-    framework: { name: string; version: string }
-    events: { type?: string; stage?: string; message?: string; createdAt?: string }[]
-  }
+  execution: AgentExecutionRecord & { framework: { name: string; version: string } }
 }
 
 export type RequirementReviewRun = {
@@ -108,6 +130,7 @@ export type RequirementReviewRun = {
   finishedAt?: string
   error?: string
   snapshot?: RequirementAnalysisResponse['snapshot']
+  execution?: AgentExecutionRecord
   response?: RequirementAnalysisResponse
 }
 

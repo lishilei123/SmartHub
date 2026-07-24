@@ -25,11 +25,18 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
   })
 
   registry.register({
-    id: 'knowledge.read_asset', piName: 'knowledge_read_asset', version: '2.0.0', label: '读取固定需求资产', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '读取本次运行固定的某个输入资产版本及指定行范围，不会切换到最新版本。多文档运行必须传 assetVersionId。',
-    parameters: Type.Object({ assetVersionId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }),
+    id: 'knowledge.read_asset', piName: 'knowledge_read_asset', version: '2.1.0', label: '读取固定需求资产', risk: 'read', idempotent: true, timeoutMs: 30_000,
+    description: '分页读取本次运行固定的输入资产版本。首次读取返回有限目录；后续指定行范围时默认不重复返回目录。多文档运行必须传 assetVersionId。',
+    parameters: Type.Object({
+      assetVersionId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+      startLine: Type.Optional(Type.Integer({ minimum: 1 })),
+      endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+      includeOutline: Type.Optional(Type.Boolean()),
+      outlineOffset: Type.Optional(Type.Integer({ minimum: 0 })),
+      outlineLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 80 })),
+    }),
   }, async request => {
-    const args = request.arguments as { assetVersionId?: string; startLine?: number; endLine?: number }
+    const args = request.arguments as { assetVersionId?: string; startLine?: number; endLine?: number; includeOutline?: boolean; outlineOffset?: number; outlineLimit?: number }
     const state = await store.snapshot()
     const fixedAssets = request.context.snapshot.assets
     const assetVersionId = args.assetVersionId ?? (fixedAssets.length === 1 ? fixedAssets[0].assetVersionId : '')
@@ -38,8 +45,22 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
     const lines = version.content.split(/\r?\n/u)
     const start = Math.min(args.startLine ?? 1, Math.max(lines.length, 1))
     const end = Math.min(Math.max(args.endLine ?? Math.min(start + 199, lines.length), start), lines.length)
-    const outline = version.chunks.map(chunk => ({ chunkId: chunk.id, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine }))
-    return { data: { assetVersionId: version.id, contentHash: version.contentHash, totalLines: lines.length, startLine: start, endLine: end, content: lines.slice(start - 1, end).join('\n'), outline } }
+    const includeOutline = args.includeOutline ?? (args.startLine === undefined && args.endLine === undefined)
+    const outlineOffset = Math.min(args.outlineOffset ?? 0, version.chunks.length)
+    const outlineLimit = args.outlineLimit ?? 40
+    const outline = includeOutline
+      ? version.chunks.slice(outlineOffset, outlineOffset + outlineLimit).map(chunk => ({ chunkId: chunk.id, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine }))
+      : []
+    return { data: {
+      assetVersionId: version.id,
+      contentHash: version.contentHash,
+      totalLines: lines.length,
+      startLine: start,
+      endLine: end,
+      content: lines.slice(start - 1, end).join('\n'),
+      outline,
+      outlinePage: { offset: outlineOffset, limit: outlineLimit, total: version.chunks.length, hasMore: includeOutline && outlineOffset + outline.length < version.chunks.length },
+    } }
   })
 
   registry.register({
@@ -55,8 +76,8 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
   })
 
   registry.register({
-    id: 'evidence.validate', piName: 'evidence_validate', version: '1.0.0', label: '校验证据', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '校验证据是否属于固定索引、固定资产版本，以及摘录是否真实存在。',
+    id: 'evidence.validate', piName: 'evidence_validate', version: '1.1.0', label: '校验证据', risk: 'read', idempotent: true, timeoutMs: 30_000,
+    description: '校验证据是否属于固定索引和固定资产版本。quote 必须从 knowledge_read_chunk 的 content 连续、逐字复制，不能拼接非连续原文或使用省略号；chunkId、assetVersionId、quote 缺一不可。',
     parameters: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }), quote: Type.String({ minLength: 1, maxLength: 4000 }) }),
   }, async request => {
     const args = request.arguments as { chunkId: string; assetVersionId: string; quote: string }
@@ -64,7 +85,17 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
     const index = required(state.indexes.find(item => item.id === request.context.snapshot.indexVersionId), '固定索引不存在')
     const chunk = index.indexedChunks?.find(item => item.id === args.chunkId && item.assetVersionId === args.assetVersionId)
     const quote = args.quote.trim()
-    return { data: { valid: Boolean(chunk && quote && chunk.content.includes(quote)), chunkId: args.chunkId, assetVersionId: args.assetVersionId, contentHash: chunk?.contentHash ?? null } }
+    const quoteOffset = chunk?.content.indexOf(quote) ?? -1
+    if (!chunk) return { data: { valid: false, reason: 'chunk_not_in_fixed_snapshot', chunkId: args.chunkId, assetVersionId: args.assetVersionId, contentHash: null, guidance: '请从 knowledge_read_asset、knowledge_search 或 knowledge_read_chunk 返回的固定 Chunk 中选择证据。' } }
+    if (!quote || quoteOffset < 0) return { data: { valid: false, reason: 'quote_not_found', chunkId: args.chunkId, assetVersionId: args.assetVersionId, contentHash: chunk.contentHash, guidance: '请先调用 knowledge_read_chunk，再从 content 中连续、逐字复制 quote；不要拼接多个段落，也不要使用省略号。' } }
+    return { data: {
+      valid: true,
+      chunkId: args.chunkId,
+      assetVersionId: args.assetVersionId,
+      contentHash: chunk.contentHash,
+      quote,
+      locator: { heading: chunk.headingPath.at(-1) ?? '', start: chunk.startChar + quoteOffset, end: chunk.startChar + quoteOffset + quote.length },
+    } }
   })
 
   registry.register({

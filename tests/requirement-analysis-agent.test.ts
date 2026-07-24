@@ -5,6 +5,8 @@ import type { Api, Model } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
 import { PiReviewQaRuntimeAdapter } from '../server/agent/pi-review-qa-runtime.js'
+import { createRequirementAnalysisAgentDefinition } from '../server/agent/requirement-analysis-agent.js'
+import { ReviewResultValidator } from '../server/agent/result-validator.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
 import { ReviewQaService } from '../server/application/review-qa-service.js'
 import type { AgentRuntime } from '../server/domain/agent-types.js'
@@ -38,12 +40,13 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
     summary: { overallAssessment: 'needs_revision', score: 65, strengths: ['目标明确'], risks: ['取消后的状态未定义'] },
     requirementPoints: [{ clientRequirementPointId: 'RP-001', title: '取消待支付订单', description: '用户可以取消处于待支付状态的订单。', evidenceRefs: ['E-001'] }, { clientRequirementPointId: 'RP-002', title: '支付超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', evidenceRefs: ['E-002'] }],
     findings: [{ clientFindingId: 'F-001', type: 'state_gap', severity: 'high', confidence: 0.9, title: '取消后状态缺失', description: '需求只定义可取消，未定义取消后的订单状态。', impact: '实现和验收口径可能不一致。', recommendation: '补充状态迁移、幂等与失败处理。', requirementPointRefs: ['RP-001'], evidenceRefs: ['E-001'] }],
-    evidence: [{ clientEvidenceId: 'E-001', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-1', assetVersionId: 'version-1' }, quote: '用户可以取消待支付订单。', locator: { heading: '取消订单', start: 8, end: 21 } }, { clientEvidenceId: 'E-002', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-2', assetVersionId: 'version-2' }, quote: '订单超过十五分钟未支付时自动关闭。', locator: { heading: '支付超时', start: 8, end: 25 } }],
+    evidence: [{ clientEvidenceId: 'E-001', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-1', assetVersionId: 'version-1' }, quote: '用户可以取消待支付订单。', locator: { heading: '取消订单', start: 8, end: 20 } }, { clientEvidenceId: 'E-002', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-2', assetVersionId: 'version-2' }, quote: '订单超过十五分钟未支付时自动关闭。', locator: { heading: '支付超时', start: 8, end: 25 } }],
     coverage: { reviewedAreas: ['状态与异常'], notReviewedAreas: [], limitations: [] },
   }
   faux.setResponses([
     fauxAssistantMessage(fauxText('分析完成。')),
     fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('evidence_validate', { chunkId: 'chunk-1', assetVersionId: 'version-1', quote: '用户可以取消...订单。' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', result), { stopReason: 'toolUse' }),
   ])
   const observedToolChoices: unknown[] = []
@@ -60,24 +63,54 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   assert.deepEqual(output.snapshot.assets.map(asset => asset.assetVersionId), ['version-1', 'version-2'])
   assert.equal(output.result.findings[0].title, '取消后状态缺失')
   assert.equal(output.execution.framework.name, 'pi-agent-core')
-  assert.equal(output.execution.toolCalls, 2)
+  assert.equal(output.execution.toolCalls, 3)
+  assert.equal(output.execution.toolErrors, 0)
   assert.ok(output.execution.events.some(event => event.type === 'result_submission_retry'))
   assert.ok(output.execution.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'review_submit_result'))
   assert.equal(observedToolChoices[0], undefined)
   assert.deepEqual(observedToolChoices[1], { type: 'function', function: { name: 'review_submit_result' } })
   assert.deepEqual(observedToolChoices[2], { type: 'function', function: { name: 'review_submit_result' } })
+  assert.deepEqual(observedToolChoices[3], { type: 'function', function: { name: 'review_submit_result' } })
   const stored = await service.list('project-version-1')
   assert.equal(stored.items.length, 1)
   assert.equal(stored.items[0].status, 'succeeded')
   const storedDetail = await service.get(stored.items[0].id)
   assert.equal(storedDetail.response?.result.findings[0].clientFindingId, 'F-001')
-  assert.equal(storedDetail.response?.snapshot.agentDefinition.promptRef.version, '2.0.0')
-  assert.equal(storedDetail.response?.snapshot.agentDefinition.toolsetVersion, '2.0.0')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.version, '2.1.0')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.promptRef.version, '2.1.0')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.toolsetVersion, '2.1.0')
   assert.match(storedDetail.response?.snapshot.agentDefinition.toolsetContentSha256 ?? '', /^[a-f0-9]{64}$/u)
   assert.equal(storedDetail.response?.snapshot.modelRef.modelId, 'model-1')
   assert.deepEqual(storedDetail.response?.snapshot.agentDefinition.skillBindings, [])
   assert.deepEqual(storedDetail.response?.snapshot.agentDefinition.mcpBindings, [])
   assert.equal(storedDetail.response?.snapshot.agentDefinition.systemPrompt, undefined)
+  const executionEvents = storedDetail.response?.execution.events ?? []
+  assert.match(executionEvents.find(event => event.type === 'message_end' && event.role === 'user')?.content ?? '', /分析项目 订单项目/u)
+  assert.equal(executionEvents.find(event => event.type === 'message_end' && event.role === 'assistant' && event.content)?.content, '分析完成。')
+  assert.equal(executionEvents.some(event => event.type === 'message_update' || event.type === 'tool_execution_update'), false)
+  assert.deepEqual(executionEvents.find(event => event.type === 'tool_execution_start' && event.toolId === 'knowledge_read_asset')?.toolArguments, { assetVersionId: 'version-1' })
+  const readAssetResult = executionEvents.find(event => event.type === 'tool_execution_end' && event.toolId === 'knowledge_read_asset')?.toolResult as { details?: { data?: { outlinePage?: { total?: number; hasMore?: boolean } } } } | undefined
+  assert.equal(readAssetResult?.details?.data?.outlinePage?.total, 1)
+  assert.equal(readAssetResult?.details?.data?.outlinePage?.hasMore, false)
+  assert.equal(Object.hasOwn(readAssetResult ?? {}, 'content'), false)
+  const evidenceValidationResult = executionEvents.find(event => event.type === 'tool_execution_end' && event.toolId === 'evidence_validate')?.toolResult as { details?: { data?: { valid?: boolean; reason?: string; guidance?: string } } } | undefined
+  assert.equal(evidenceValidationResult?.details?.data?.valid, false)
+  assert.equal(evidenceValidationResult?.details?.data?.reason, 'quote_not_found')
+  assert.match(evidenceValidationResult?.details?.data?.guidance ?? '', /knowledge_read_chunk/u)
+
+  const storedSnapshot = (await store.snapshot()).reviewRuns.find(run => run.id === output.runId)!.snapshot
+  const validator = new ReviewResultValidator(store)
+  const missingDocumentEvidence = structuredClone(result)
+  missingDocumentEvidence.requirementPoints = missingDocumentEvidence.requirementPoints.slice(0, 1)
+  missingDocumentEvidence.evidence = missingDocumentEvidence.evidence.slice(0, 1)
+  const missingCoverageReport = await validator.validate(missingDocumentEvidence, storedSnapshot)
+  assert.equal(missingCoverageReport.valid, false)
+  assert.ok(missingCoverageReport.issues.some(issue => issue.path === 'coverage.assets[1]'))
+  const wrongLocator = structuredClone(result)
+  wrongLocator.evidence[0].locator = { ...wrongLocator.evidence[0].locator, start: 0, end: 1 }
+  const wrongLocatorReport = await validator.validate(wrongLocator, storedSnapshot)
+  assert.equal(wrongLocatorReport.valid, false)
+  assert.ok(wrongLocatorReport.issues.some(issue => issue.path === 'evidence[0].locator'))
 
   const qaProvider = fauxProvider()
   qaProvider.setResponses([
@@ -103,6 +136,10 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   const failed = history.items.find(item => item.status === 'failed')
   assert.match(failed?.error ?? '', /AGENT_RESULT_VALIDATION_FAILED/u)
   assert.ok(history.items.some(item => item.status === 'succeeded'))
+  const failedDetail = await invalidService.get(failed!.id)
+  assert.equal(failedDetail.execution?.framework?.name, 'pi-agent-core')
+  assert.ok(failedDetail.execution?.events.some(event => event.type === 'message_end' && event.role === 'assistant'))
+  assert.ok(failedDetail.execution?.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'review_submit_result'))
 
   const correcting = fauxProvider()
   correcting.setResponses([
@@ -113,6 +150,28 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   const corrected = await new RequirementAnalysisService(store, correctingRuntime).analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
   assert.equal(corrected.status, 'candidate_validated')
   assert.equal(corrected.execution.toolCalls, 2)
+
+  const forcedSubmission = fauxProvider()
+  forcedSubmission.setResponses([
+    fauxAssistantMessage(fauxToolCall('knowledge_search', { query: '订单状态 secret https://provider.example/v1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', { ...result, findings: [{ ...result.findings[0], evidenceRefs: [] }] }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', result), { stopReason: 'toolUse' }),
+  ])
+  const forcedToolChoices: unknown[] = []
+  const forcedStream: StreamFn = (model, context, options) => {
+    forcedToolChoices.push((options as { toolChoice?: unknown } | undefined)?.toolChoice)
+    return (forcedSubmission.provider.streamSimple.bind(forcedSubmission.provider) as StreamFn)(model, context, options)
+  }
+  const forcedRuntime = new PiAgentRuntimeAdapter(store, { model: forcedSubmission.getModel() as Model<Api>, streamFn: forcedStream })
+  const forcedDefinition = createRequirementAnalysisAgentDefinition()
+  forcedDefinition.limits = { ...forcedDefinition.limits, maxTurns: 4 }
+  const forcedResult = await new RequirementAnalysisService(store, forcedRuntime, { resolve: () => forcedDefinition }).analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
+  assert.equal(forcedResult.execution.turns, 3)
+  assert.ok(forcedResult.execution.events.some(event => event.type === 'result_submission_required' && event.turn === 2))
+  assert.deepEqual(forcedResult.execution.events.find(event => event.type === 'tool_execution_start' && event.toolId === 'knowledge_search')?.toolArguments, { query: '订单状态 [已隐藏凭据] [模型端点]' })
+  assert.equal(forcedToolChoices[0], undefined)
+  assert.deepEqual(forcedToolChoices[1], { type: 'function', function: { name: 'review_submit_result' } })
+  assert.deepEqual(forcedToolChoices[2], { type: 'function', function: { name: 'review_submit_result' } })
 
   const cancelledController = new AbortController()
   cancelledController.abort(new Error('AGENT_CANCELLED'))

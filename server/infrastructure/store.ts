@@ -1,7 +1,7 @@
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
-import type { ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
+import type { AgentExecutionRecord, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
 
 export interface TaskLease { workerId: string; runToken: string }
 
@@ -46,6 +46,7 @@ export interface StateStore {
   listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
   listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
   getReviewRun?(runId: string): Promise<ReviewRun | null>
+  saveReviewRunExecution?(runId: string, execution: AgentExecutionRecord): Promise<void>
   transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
   transactionWithTaskLease?<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   searchChunks?(input: ChunkSearchInput): Promise<StoredChunkCandidate[]>
@@ -89,6 +90,13 @@ export class JsonStore implements StateStore {
   }
   read() { return structuredClone(this.state) }
   async snapshot() { return this.read() }
+  async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
+    await this.transaction(state => {
+      const run = state.reviewRuns.find(item => item.id === runId)
+      if (!run) throw new Error('需求评审运行不存在')
+      run.execution = structuredClone(execution)
+    })
+  }
   async transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T> {
     let result!: T
     let failure: unknown
