@@ -19,21 +19,33 @@ export interface AgentDefinitionVersion {
   resultSchemaVersion: 'review-result/v1'
   systemPrompt: string
   taskTemplate: string
+  promptRef: { promptKey: string; version: string; contentSha256: string }
+  toolsetVersion: string
+  toolsetContentSha256: string
+  skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>
+  mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>
   toolIds: string[]
   limits: AgentExecutionLimits
   contentSha256: string
+}
+
+export interface AgentDefinitionResolver {
+  resolve(agentKey: AgentDefinitionVersion['agentKey']): AgentDefinitionVersion | Promise<AgentDefinitionVersion>
 }
 
 export interface ReviewRunSnapshot {
   runId: string
   projectId: string
   projectName: string
+  projectVersionId: string
+  projectVersionName: string
   knowledgeBaseId: string
   assetId: string
   assetVersionId: string
   assetContentHash: string
   indexVersionId: string
   logicalPath: string
+  modelRef: { sourceId: string; modelId: string; providerType: 'openai' | 'anthropic' | 'openai_compatible'; modelName: string; contextWindow: number; maxOutputTokens: number }
   focusAreas: string[]
   excludedAreas: string[]
   agentDefinition: AgentDefinitionVersion

@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai'
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from '@earendil-works/pi-ai'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
+import { PiReviewQaRuntimeAdapter } from '../server/agent/pi-review-qa-runtime.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
+import { ReviewQaService } from '../server/application/review-qa-service.js'
+import type { AgentRuntime } from '../server/domain/agent-types.js'
 import { defaultConfig } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
@@ -33,17 +36,93 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
     coverage: { reviewedAreas: ['状态与异常'], notReviewedAreas: [], limitations: [] },
   }
   faux.setResponses([
+    fauxAssistantMessage(fauxText('分析完成。')),
     fauxAssistantMessage(fauxToolCall('knowledge_read_asset', {}), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', result), { stopReason: 'toolUse' }),
   ])
-  const runtime = new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn })
+  const observedToolChoices: unknown[] = []
+  const trackedStream: StreamFn = (model, context, options) => {
+    observedToolChoices.push((options as { toolChoice?: unknown } | undefined)?.toolChoice)
+    return (faux.provider.streamSimple.bind(faux.provider) as StreamFn)(model, context, options)
+  }
+  const runtime = new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: trackedStream })
   const service = new RequirementAnalysisService(store, runtime)
   const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
   assert.equal(output.status, 'candidate_validated')
   assert.equal(output.result.findings[0].title, '取消后状态缺失')
   assert.equal(output.execution.framework.name, 'pi-agent-core')
   assert.equal(output.execution.toolCalls, 2)
+  assert.ok(output.execution.events.some(event => event.type === 'result_submission_retry'))
   assert.ok(output.execution.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'review_submit_result'))
+  assert.equal(observedToolChoices[0], undefined)
+  assert.deepEqual(observedToolChoices[1], { type: 'function', function: { name: 'review_submit_result' } })
+  assert.deepEqual(observedToolChoices[2], { type: 'function', function: { name: 'review_submit_result' } })
+  const stored = await service.list('project-version-1')
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].status, 'succeeded')
+  assert.equal(stored[0].response?.result.findings[0].clientFindingId, 'F-001')
+  assert.equal(stored[0].response?.snapshot.agentDefinition.promptRef.version, '1.0.0')
+  assert.equal(stored[0].response?.snapshot.agentDefinition.toolsetVersion, '1.0.0')
+  assert.match(stored[0].response?.snapshot.agentDefinition.toolsetContentSha256 ?? '', /^[a-f0-9]{64}$/u)
+  assert.equal(stored[0].response?.snapshot.modelRef.modelId, 'model-1')
+  assert.deepEqual(stored[0].response?.snapshot.agentDefinition.skillBindings, [])
+  assert.deepEqual(stored[0].response?.snapshot.agentDefinition.mcpBindings, [])
+  assert.equal(stored[0].response?.snapshot.agentDefinition.systemPrompt, undefined)
+
+  const qaProvider = fauxProvider()
+  qaProvider.setResponses([
+    fauxAssistantMessage(fauxToolCall('review_answer_submit', { answer: '取消后状态需要人工确认，因为固定需求只说明待支付订单可以取消。', citations: ['E-001'], limitations: ['固定需求未定义取消后的目标状态。'] }), { stopReason: 'toolUse' }),
+  ])
+  const qaService = new ReviewQaService(store, new PiReviewQaRuntimeAdapter({ model: qaProvider.getModel() as Model<Api>, streamFn: qaProvider.provider.streamSimple.bind(qaProvider.provider) as StreamFn }))
+  const qaAnswer = await qaService.ask(output.runId, { question: '为什么需要人工确认取消后的状态？', quote: { text: '用户可以取消待支付订单。', assetVersionId: 'version-1', heading: '取消订单' } })
+  assert.equal(qaAnswer.citations[0], 'E-001')
+  assert.match(qaAnswer.answer, /人工确认/u)
+
+  const invalidQa = new ReviewQaService(store, { answer: async () => ({ answer: '无效引用', citations: ['E-999'], limitations: [] }) })
+  await assert.rejects(() => invalidQa.ask(output.runId, { question: '测试无效引用' }), /REVIEW_QA_INVALID_CITATION/u)
+
+  const invalid = fauxProvider()
+  invalid.setResponses([
+    fauxAssistantMessage(fauxToolCall('review_submit_result', { ...result, evidence: [{ ...result.evidence[0], quote: '伪造证据' }] }), { stopReason: 'toolUse' }),
+  ])
+  const invalidRuntime = new PiAgentRuntimeAdapter(store, { model: invalid.getModel() as Model<Api>, streamFn: invalid.provider.streamSimple.bind(invalid.provider) as StreamFn })
+  const invalidService = new RequirementAnalysisService(store, invalidRuntime)
+  await assert.rejects(() => invalidService.analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' }), /AGENT_RESULT_VALIDATION_FAILED/u)
+  const history = await invalidService.list('project-version-1')
+  assert.equal(history.length, 2)
+  const failed = history.find(item => item.status === 'failed')
+  assert.match(failed?.error ?? '', /AGENT_RESULT_VALIDATION_FAILED/u)
+  assert.ok(history.some(item => item.status === 'succeeded'))
+
+  const correcting = fauxProvider()
+  correcting.setResponses([
+    fauxAssistantMessage(fauxToolCall('review_submit_result', { ...result, findings: [{ ...result.findings[0], evidenceRefs: [] }] }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', result), { stopReason: 'toolUse' }),
+  ])
+  const correctingRuntime = new PiAgentRuntimeAdapter(store, { model: correcting.getModel() as Model<Api>, streamFn: correcting.provider.streamSimple.bind(correcting.provider) as StreamFn })
+  const corrected = await new RequirementAnalysisService(store, correctingRuntime).analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
+  assert.equal(corrected.status, 'candidate_validated')
+  assert.equal(corrected.execution.toolCalls, 2)
+
+  const cancelledController = new AbortController()
+  cancelledController.abort(new Error('AGENT_CANCELLED'))
+  const cancellingRuntime: AgentRuntime = { execute: async () => { throw new Error('AGENT_CANCELLED') } }
+  const cancellingService = new RequirementAnalysisService(store, cancellingRuntime)
+  await assert.rejects(() => cancellingService.analyze({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' }, cancelledController.signal), /AGENT_CANCELLED/u)
+  assert.equal((await cancellingService.list('project-version-1')).filter(item => item.status === 'cancelled').length, 1)
+
+  const backgroundRuntime: AgentRuntime = {
+    execute: async (_input, signal) => await new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }),
+  }
+  const backgroundService = new RequirementAnalysisService(store, backgroundRuntime)
+  const backgroundRun = await backgroundService.start({ projectVersionId: 'project-version-1', assetVersionId: 'version-1', sourceId: 'source-1', modelId: 'model-1' })
+  assert.equal(backgroundRun.status, 'running')
+  assert.equal((await backgroundService.get(backgroundRun.id)).status, 'running')
+  const explicitlyCancelled = await backgroundService.cancel(backgroundRun.id)
+  assert.equal(explicitlyCancelled.status, 'cancelled')
+  assert.equal((await backgroundService.get(backgroundRun.id)).error, '用户已取消本次评审')
 })
 
 test('独立结果校验拒绝伪造固定索引证据', async () => {

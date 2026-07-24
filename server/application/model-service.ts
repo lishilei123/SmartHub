@@ -94,10 +94,16 @@ export class ModelService {
     try {
       const endpoint = source.baseUrl
       const credential = source.apiKey
+      const requireToolCall = model.capabilities.includes('tool_calling')
       const response = source.providerType === 'anthropic'
-        ? await probeAnthropic(endpoint, credential, model.name)
-        : await probeOpenAi(endpoint, credential, model.name)
+        ? await probeAnthropic(endpoint, credential, model.name, requireToolCall)
+        : await probeOpenAi(endpoint, credential, model.name, requireToolCall)
       if (!response.ok) throw await providerError(response, credential, endpoint)
+      if (requireToolCall) {
+        const body = await response.json() as Record<string, unknown>
+        if (!hasRequiredToolCall(body, source.providerType)) throw new Error('模型普通生成可用，但未按要求产生工具调用；不能用于需求评审 Agent')
+        message = '连通性及工具调用探测成功'
+      }
     } catch (error) {
       health = 'degraded'
       message = error instanceof Error ? error.message : '连通性探测失败'
@@ -209,20 +215,37 @@ function modelListUrl(endpoint: string) {
 }
 function chatUrl(endpoint: string) { return /\/chat\/completions$/i.test(endpoint) ? endpoint : `${endpoint}/chat/completions` }
 function anthropicUrl(endpoint: string) { return /\/v1\/messages$/i.test(endpoint) ? endpoint : `${endpoint}/v1/messages` }
-function probeOpenAi(endpoint: string, credential: string, model: string) {
+function probeOpenAi(endpoint: string, credential: string, model: string, requireToolCall: boolean) {
+  const tool = { type: 'function', function: { name: 'smarthub_capability_probe', description: 'Return the fixed probe value.', parameters: { type: 'object', properties: { value: { type: 'string', enum: ['ok'] } }, required: ['value'], additionalProperties: false } } }
   return fetch(chatUrl(endpoint), {
     method: 'POST',
     headers: { ...(credential ? { authorization: `Bearer ${credential}` } : {}), 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with OK.' }], max_tokens: 1, temperature: 0 }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? 'Call smarthub_capability_probe with value "ok". Do not answer with text.' : 'Reply with OK.' }], max_tokens: requireToolCall ? 64 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'function', function: { name: 'smarthub_capability_probe' } } } : {}) }),
     signal: AbortSignal.timeout(30_000),
   })
 }
-function probeAnthropic(endpoint: string, credential: string, model: string) {
+function probeAnthropic(endpoint: string, credential: string, model: string, requireToolCall: boolean) {
+  const tool = { name: 'smarthub_capability_probe', description: 'Return the fixed probe value.', input_schema: { type: 'object', properties: { value: { type: 'string', enum: ['ok'] } }, required: ['value'], additionalProperties: false } }
   return fetch(anthropicUrl(endpoint), {
     method: 'POST',
     headers: { 'x-api-key': credential, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with OK.' }], max_tokens: 1, temperature: 0 }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? 'Call smarthub_capability_probe with value "ok". Do not answer with text.' : 'Reply with OK.' }], max_tokens: requireToolCall ? 64 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'tool', name: 'smarthub_capability_probe' } } : {}) }),
     signal: AbortSignal.timeout(30_000),
+  })
+}
+function hasRequiredToolCall(body: Record<string, unknown>, providerType: GenerativeProviderType) {
+  if (providerType === 'anthropic') {
+    const content = Array.isArray(body.content) ? body.content as Array<Record<string, unknown>> : []
+    return content.some(item => item.type === 'tool_use' && item.name === 'smarthub_capability_probe')
+  }
+  const choices = Array.isArray(body.choices) ? body.choices as Array<Record<string, unknown>> : []
+  return choices.some(choice => {
+    const message = choice.message && typeof choice.message === 'object' ? choice.message as Record<string, unknown> : {}
+    const calls = Array.isArray(message.tool_calls) ? message.tool_calls as Array<Record<string, unknown>> : []
+    return calls.some(call => {
+      const fn = call.function && typeof call.function === 'object' ? call.function as Record<string, unknown> : {}
+      return fn.name === 'smarthub_capability_probe'
+    })
   })
 }
 async function providerError(response: Response, credential: string, endpoint: string) {

@@ -9,6 +9,9 @@ import type { ToolDescriptor } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { createRequirementToolRegistry } from '../tools/requirement-tools.js'
+import type { ReviewSubmissionFeedback } from '../tools/requirement-tools.js'
+import type { ToolRegistry } from '../tools/registry.js'
+import { ReviewResultValidator } from './result-validator.js'
 import { renderRequirementTask } from './requirement-analysis-agent.js'
 
 const require = createRequire(import.meta.url)
@@ -19,16 +22,32 @@ export interface PiRuntimeBindings {
   streamFn?: StreamFn
 }
 
+export type RequirementToolRegistryFactory = (store: StateStore, submit: (candidate: CandidateReviewResult) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) => ToolRegistry
+
 export class PiAgentRuntimeAdapter implements AgentRuntime {
-  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}) {}
+  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly toolRegistryFactory: RequirementToolRegistryFactory = createRequirementToolRegistry) {}
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
     let candidate: CandidateReviewResult | undefined
-    const registry = createRequirementToolRegistry(this.store, value => { candidate = value })
+    let lastSubmissionIssues: Array<{ path: string; message: string }> = []
+    const validator = new ReviewResultValidator(this.store)
+    const registry = this.toolRegistryFactory(this.store, async value => {
+      const validation = await validator.validate(value, input.snapshot)
+      if (!validation.valid) {
+        lastSubmissionIssues = validation.issues
+        return { accepted: false, issues: validation.issues }
+      }
+      candidate = value
+      lastSubmissionIssues = []
+      return { accepted: true }
+    })
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits)
     const allowedToolIds = new Set(input.snapshot.agentDefinition.toolIds)
     const descriptors = registry.descriptors(allowedToolIds)
+    const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))
+    const unavailableToolIds = input.snapshot.agentDefinition.toolIds.filter(toolId => !registeredToolIds.has(toolId))
+    if (unavailableToolIds.length) throw new Error(`AGENT_TOOLS_UNAVAILABLE: ${unavailableToolIds.join(', ')}`)
     const byPiName = new Map(descriptors.map(descriptor => [descriptor.piName, descriptor]))
     const events: AgentExecutionEvent[] = []
     let sequence = 0
@@ -44,7 +63,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     signal.addEventListener('abort', abort, { once: true })
 
     const model = this.bindings.model ?? createModel(input)
-    const streamFn = this.bindings.streamFn ?? createStreamFn(input)
+    const providerStreamFn = this.bindings.streamFn ?? createStreamFn(input)
+    let forceResultSubmission = false
+    const streamFn: StreamFn = (streamModel, context, options) => providerStreamFn(streamModel, context, forceResultSubmission ? {
+      ...options,
+      toolChoice: input.model.providerType === 'anthropic'
+        ? { type: 'tool', name: 'review_submit_result' }
+        : { type: 'function', function: { name: 'review_submit_result' } },
+    } as Parameters<StreamFn>[2] : options)
     let agent: Agent | undefined
     try {
       const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal))
@@ -69,7 +95,17 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       await agent.waitForIdle()
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
       if (turns > limits.maxTurns) throw new Error('AGENT_TURN_LIMIT_EXCEEDED')
-      if (!candidate) throw new Error('AGENT_RESULT_NOT_SUBMITTED')
+      if (!candidate) {
+        await record({ type: 'result_submission_retry', turn: turns })
+        forceResultSubmission = true
+        await agent.prompt('现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 review_submit_result 提交完整的 review-result/v1。若参数校验失败，请按工具错误修正参数后再次提交。')
+        await agent.waitForIdle()
+        forceResultSubmission = false
+      }
+      if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
+      if (turns > limits.maxTurns) throw new Error('AGENT_TURN_LIMIT_EXCEEDED')
+      if (!candidate && lastSubmissionIssues.length) throw new Error(`AGENT_RESULT_VALIDATION_FAILED: ${lastSubmissionIssues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
+      if (!candidate) throw new Error('MODEL_TOOL_CALL_REQUIRED: 模型未调用 review_submit_result，实际工具调用能力不满足需求评审 Agent；请在模型管理中重新探测并选择通过工具调用检测的模型')
       if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > limits.maxCandidateBytes) throw new Error('AGENT_RESULT_TOO_LARGE')
       return { candidate, events, turns, toolCalls: toolRuntime.callCount, framework: { name: 'pi-agent-core', version: piVersion } }
     } finally {

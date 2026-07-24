@@ -54,14 +54,18 @@ export type RequirementAnalysisResponse = {
     assetContentHash: string
     indexVersionId: string
     logicalPath: string
+    modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number }
     focusAreas: string[]
     excludedAreas: string[]
     createdAt: string
     agentDefinition: {
       agentKey: string
       version: string
-      promptVersion: string
+      promptRef: { promptKey: string; version: string; contentSha256: string }
       toolsetVersion: string
+      toolsetContentSha256: string
+      skillBindings: { skillKey: string; version: string; enabled: boolean; configurationHash: string }[]
+      mcpBindings: { serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }[]
       resultSchemaVersion: string
     }
   }
@@ -69,19 +73,85 @@ export type RequirementAnalysisResponse = {
   execution: {
     turns: number
     toolCalls: number
-    framework: string
+    framework: { name: string; version: string }
     events: { type?: string; stage?: string; message?: string; createdAt?: string }[]
   }
 }
 
-export async function runRequirementAnalysis(projectVersionId: string, input: { assetVersionId: string; sourceId: string; modelId: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
+export type RequirementReviewRun = {
+  id: string
+  projectVersionId: string
+  assetId: string
+  assetVersionId: string
+  documentTitle: string
+  documentVersion: string
+  logicalPath: string
+  modelLabel: string
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  step: string
+  progress: number
+  createdAt: string
+  startedAt: string
+  finishedAt?: string
+  error?: string
+  snapshot?: RequirementAnalysisResponse['snapshot']
+  response?: RequirementAnalysisResponse
+}
+
+export type ReviewQuestionQuote = { text: string; assetVersionId: string; heading: string; startLine?: number; endLine?: number; findingId?: string }
+export type ReviewQuestionResponse = {
+  id: string
+  runId: string
+  question: string
+  answer: string
+  citations: string[]
+  limitations: string[]
+  quote?: ReviewQuestionQuote
+  modelLabel: string
+  createdAt: string
+}
+
+export async function startRequirementAnalysis(projectVersionId: string, input: { assetVersionId: string; sourceId: string; modelId: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
   const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-reviews/run`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
     signal,
   })
-  const body = await response.json() as RequirementAnalysisResponse | { error?: string }
+  const body = await response.json() as RequirementReviewRun | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审运行失败')
-  return body as RequirementAnalysisResponse
+  return body as RequirementReviewRun
+}
+
+export async function loadRequirementReviewRuns(projectVersionId: string) {
+  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-review-runs`)
+  const body = await response.json() as RequirementReviewRun[] | { error?: string }
+  if (!response.ok) throw new Error(!Array.isArray(body) && body.error ? body.error : '需求评审历史读取失败')
+  return body as RequirementReviewRun[]
+}
+
+export async function loadRequirementReviewRun(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}`)
+  const body = await response.json() as RequirementReviewRun | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审运行读取失败')
+  return body as RequirementReviewRun
+}
+
+export async function cancelRequirementReviewRun(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  const body = await response.json() as RequirementReviewRun | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审取消失败')
+  return body as RequirementReviewRun
+}
+
+export async function askRequirementReviewQuestion(runId: string, input: { question: string; quote?: ReviewQuestionQuote }, signal?: AbortSignal) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/questions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+    signal,
+  })
+  const body = await response.json() as ReviewQuestionResponse | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '评审问答失败')
+  return body as ReviewQuestionResponse
 }

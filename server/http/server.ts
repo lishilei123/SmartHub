@@ -2,9 +2,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AssetType, KnowledgeConfig } from '../domain/types.js'
-import { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, service, stateStore, usingPostgres } from '../runtime.js'
+import type { ReviewQuestionQuote } from '../domain/review-qa-types.js'
+import { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
 
-export { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, service, stateStore }
+export { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore }
 
 export async function start(port = Number(process.env.PORT ?? 8787)) {
   await service.initialize()
@@ -36,9 +37,20 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
   if (method === 'POST' && projectVersionRun) {
     const body = await json(request)
+    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionId: String(body.assetVersionId ?? ''), sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
+  }
+  const projectVersionReviewRuns = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs$/.exec(url.pathname)
+  if (method === 'GET' && projectVersionReviewRuns) return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1]))
+  const requirementReviewRun = /^\/api\/requirement-review-runs\/([^/]+)$/.exec(url.pathname)
+  if (method === 'GET' && requirementReviewRun) return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1]))
+  const requirementReviewRunCancel = /^\/api\/requirement-review-runs\/([^/]+)\/cancel$/.exec(url.pathname)
+  if (method === 'POST' && requirementReviewRunCancel) return send(response, 202, await requirementAnalysisService.cancel(requirementReviewRunCancel[1]))
+  const requirementReviewQuestions = /^\/api\/requirement-review-runs\/([^/]+)\/questions$/.exec(url.pathname)
+  if (method === 'POST' && requirementReviewQuestions) {
+    const body = await json(request)
     const controller = new AbortController()
-    request.once('aborted', () => controller.abort(new Error('客户端已中断请求')))
-    return send(response, 200, await requirementAnalysisService.analyze({ projectVersionId: projectVersionRun[1], assetVersionId: String(body.assetVersionId ?? ''), sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }, controller.signal))
+    request.once('aborted', () => controller.abort(new Error('REVIEW_QA_CANCELLED')))
+    return send(response, 200, await reviewQaService.ask(requirementReviewQuestions[1], { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined }, controller.signal))
   }
   const modelSource = /^\/api\/model-sources\/([^/]+)$/.exec(url.pathname)
   if (method === 'PATCH' && modelSource) return send(response, 200, await modelService.updateSource(modelSource[1], await json(request)))

@@ -3,7 +3,9 @@ import type { CandidateReviewResult } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { ToolRegistry } from './registry.js'
 
-export function createRequirementToolRegistry(store: StateStore, submit: (candidate: CandidateReviewResult) => void) {
+export interface ReviewSubmissionFeedback { accepted: boolean; issues?: Array<{ path: string; message: string }> }
+
+export function createRequirementToolRegistry(store: StateStore, submit: (candidate: CandidateReviewResult) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
   const registry = new ToolRegistry()
   registry.register({
     id: 'knowledge.search', piName: 'knowledge_search', version: '1.0.0', label: '固定索引检索', risk: 'read', idempotent: true, timeoutMs: 30_000,
@@ -67,8 +69,10 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
     description: '提交 review-result/v1 候选结果并结束 Agent。候选结果仍由 SmartHub 独立校验，不直接写入正式 Finding。',
     parameters: reviewResultSchema(),
   }, async request => {
-    submit(structuredClone(request.arguments) as CandidateReviewResult)
-    return { data: { accepted: true, status: 'pending_validation' }, terminate: true }
+    const feedback = await submit(structuredClone(request.arguments) as CandidateReviewResult)
+    return feedback.accepted
+      ? { data: { accepted: true, status: 'candidate_validated' }, terminate: true }
+      : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] }, terminate: false }
   })
   return registry
 }

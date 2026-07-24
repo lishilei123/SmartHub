@@ -50,6 +50,7 @@ export class ProjectVersionService {
       const version = required(state.projectVersions.find(item => item.id === projectVersionId && item.projectId === project.id), '项目版本不存在')
       const dependent = state.projectVersions.find(item => item.sourceProjectVersionId === version.id)
       if (dependent) throw new Error(`版本正在被 ${dependent.name} 作为继承来源，不能删除`)
+      if (state.reviewRuns.some(item => item.projectVersionId === version.id)) throw new Error('项目版本已存在需求评审运行，只能归档，不能物理删除')
       const deletedBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id).length
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)

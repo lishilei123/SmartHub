@@ -85,6 +85,32 @@ export async function waitForTasks(taskIds: string[], attempts = 300) {
   }
   if (pending.size) throw new Error('知识库任务等待超时，可稍后刷新查看结果')
 }
+export type TaskWaitResults = { succeeded: ApiTask[]; failed: ApiTask[]; cancelled: ApiTask[]; pending: ApiTask[] }
+export type TaskWaitProgress = { total: number; completed: number; percent: number; currentStep: string }
+export async function waitForTaskResults(taskIds: string[], options: { timeoutMs?: number; onProgress?: (progress: TaskWaitProgress) => void } = {}): Promise<TaskWaitResults> {
+  const pendingIds = new Set(taskIds)
+  const latest = new Map<string, ApiTask>()
+  const results: TaskWaitResults = { succeeded: [], failed: [], cancelled: [], pending: [] }
+  const deadline = Date.now() + (options.timeoutMs ?? 10 * 60_000)
+  options.onProgress?.({ total: taskIds.length, completed: 0, percent: 0, currentStep: 'queued' })
+  while (pendingIds.size && Date.now() < deadline) {
+    await new Promise(resolvePromise => window.setTimeout(resolvePromise, 500))
+    const tasks = await Promise.all([...pendingIds].map(loadTask))
+    for (const task of tasks) {
+      latest.set(task.id, task)
+      if (task.status === 'succeeded') { results.succeeded.push(task); pendingIds.delete(task.id) }
+      else if (task.status === 'failed') { results.failed.push(task); pendingIds.delete(task.id) }
+      else if (task.status === 'cancelled') { results.cancelled.push(task); pendingIds.delete(task.id) }
+    }
+    const snapshots = taskIds.map(id => latest.get(id))
+    const completed = snapshots.filter(task => task && ['succeeded', 'failed', 'cancelled'].includes(task.status)).length
+    const percent = taskIds.length ? Math.round(snapshots.reduce((sum, task) => sum + (task?.progress ?? 0), 0) / taskIds.length) : 100
+    const current = snapshots.find(task => task?.status === 'running') ?? snapshots.find(task => task?.status === 'queued')
+    options.onProgress?.({ total: taskIds.length, completed, percent: Math.max(0, Math.min(100, percent)), currentStep: current?.step ?? (completed === taskIds.length ? 'completed' : 'waiting') })
+  }
+  if (pendingIds.size) results.pending = await Promise.all([...pendingIds].map(loadTask))
+  return results
+}
 export const retryTask = (taskId: string) => request(`/tasks/${taskId}/retry`, { method: 'POST', body: '{}' })
 export const cancelTask = (taskId: string) => request<ApiTask>(`/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' })
 export type ApiSearchResult = { score: number; retrievalMode: string; excerpt: string; scores?: { keyword: number; vector: number; reranker?: number; final: number }; asset: { id: string; displayName: string; assetType: string; sourceType: string; logicalPath: string }; version: { id: string; number: number }; chunk: { chunkKey: string; headingPath: string[]; startLine: number; endLine: number } }

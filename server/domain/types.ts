@@ -1,3 +1,6 @@
+import type { AgentExecutionEvent, ReviewRunSnapshot } from './agent-types.js'
+import type { CandidateReviewResult } from './review-types.js'
+
 export type AssetType = string
 export type SourceType = 'upload'
 export type VersionStatus = 'pending' | 'syncing' | 'ready' | 'failed' | 'deleted'
@@ -93,8 +96,31 @@ export interface IndexAssetMetadata { assetId: string; displayName: string; asse
 export interface IndexChunk extends Chunk { assetMetadata: IndexAssetMetadata }
 export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: IndexChunk[]; createdAt: string; activatedAt?: string }
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
+export type ReviewRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
+export interface ReviewRun {
+  id: string
+  projectVersionId: string
+  assetId: string
+  assetVersionId: string
+  documentTitle: string
+  documentVersion: number
+  logicalPath: string
+  sourceId: string
+  modelId: string
+  modelLabel: string
+  status: ReviewRunStatus
+  step: string
+  progress: number
+  createdAt: string
+  startedAt: string
+  finishedAt?: string
+  snapshot: ReviewRunSnapshot
+  result?: CandidateReviewResult
+  execution?: { turns: number; toolCalls: number; framework: { name: 'pi-agent-core'; version: string }; events: AgentExecutionEvent[] }
+  error?: string
+}
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[] }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; reviewRuns: ReviewRun[] }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

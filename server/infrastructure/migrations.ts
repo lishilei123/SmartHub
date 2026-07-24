@@ -187,6 +187,23 @@ const migrations: Migration[] = [{
     CREATE INDEX IF NOT EXISTS project_versions_project_created_idx ON smarthub.project_versions (project_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS project_version_bindings_version_idx ON smarthub.project_version_requirement_bindings (project_version_id, created_at);
   `,
+}, {
+  version: 6,
+  name: 'requirement-review-runs',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.review_runs (
+      id text PRIMARY KEY,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id),
+      asset_id text NOT NULL REFERENCES smarthub.knowledge_assets(id),
+      asset_version_id text NOT NULL REFERENCES smarthub.asset_versions(id),
+      status text NOT NULL,
+      created_at timestamptz NOT NULL,
+      finished_at timestamptz,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS review_runs_project_version_created_idx ON smarthub.review_runs (project_version_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS review_runs_asset_created_idx ON smarthub.review_runs (project_version_id, asset_id, created_at DESC);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

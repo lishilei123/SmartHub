@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import type { AgentRuntime } from '../domain/agent-types.js'
+import type { AgentDefinitionResolver, AgentRuntime } from '../domain/agent-types.js'
+import type { ReviewRun } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { ReviewResultValidator } from '../agent/result-validator.js'
-import { createRequirementAnalysisAgentDefinition } from '../agent/requirement-analysis-agent.js'
+import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
 
 export interface RequirementAnalysisRequest {
   projectVersionId: string
@@ -15,9 +16,49 @@ export interface RequirementAnalysisRequest {
 
 export class RequirementAnalysisService {
   private readonly validator: ReviewResultValidator
-  constructor(private readonly store: StateStore, private readonly runtime: AgentRuntime) { this.validator = new ReviewResultValidator(store) }
+  private readonly activeRuns = new Map<string, AbortController>()
+  constructor(private readonly store: StateStore, private readonly runtime: AgentRuntime, private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver()) { this.validator = new ReviewResultValidator(store) }
 
-  async analyze(request: RequirementAnalysisRequest, signal = new AbortController().signal) {
+  async list(projectVersionId: string) {
+    const state = await this.store.snapshot()
+    required(state.projectVersions.find(item => item.id === projectVersionId), '项目版本不存在')
+    return state.reviewRuns.filter(item => item.projectVersionId === projectVersionId).sort((left, right) => right.createdAt.localeCompare(left.createdAt)).map(presentRun)
+  }
+
+  async get(runId: string) {
+    const state = await this.store.snapshot()
+    return presentRun(required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在'))
+  }
+
+  async start(request: RequirementAnalysisRequest) {
+    const controller = new AbortController()
+    let runId = ''
+    return await new Promise<ReturnType<typeof presentRun>>((resolve, reject) => {
+      void this.analyze(request, controller.signal, run => {
+        runId = run.id
+        this.activeRuns.set(runId, controller)
+        resolve(run)
+      }).catch(error => {
+        if (!runId) reject(error)
+      }).finally(() => {
+        if (runId && this.activeRuns.get(runId) === controller) this.activeRuns.delete(runId)
+      })
+    })
+  }
+
+  async cancel(runId: string) {
+    const state = await this.store.snapshot()
+    const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+    if (run.status !== 'running') return presentRun(run)
+    await this.store.transaction(draft => {
+      const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+      if (current.status === 'running') Object.assign(current, { status: 'cancelled', step: 'cancelled', finishedAt: new Date().toISOString(), error: '用户已取消本次评审' } satisfies Partial<ReviewRun>)
+    })
+    this.activeRuns.get(runId)?.abort(new Error('AGENT_CANCELLED_BY_USER'))
+    return await this.get(runId)
+  }
+
+  async analyze(request: RequirementAnalysisRequest, signal = new AbortController().signal, onCreated?: (run: ReturnType<typeof presentRun>) => void) {
     const state = await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求评审')
@@ -35,9 +76,10 @@ export class RequirementAnalysisService {
     const model = required(source.models.find(item => item.id === request.modelId && item.enabled), '生成式模型不可用')
     if (!model.capabilities.includes('tool_calling')) throw new Error('需求分析模型必须支持 tool_calling')
     if (model.health !== 'healthy') throw new Error('请先完成所选生成式模型的连通性探测并确保健康状态正常')
-    const definition = createRequirementAnalysisAgentDefinition()
+    const definition = await this.definitions.resolve('requirement-analysis')
     const estimatedInputTokens = Math.ceil(version.content.length / 4) + 4_000
     if (estimatedInputTokens + model.maxOutputTokens > model.contextWindow) throw new Error('需求版本超过模型上下文预算，请选择更大上下文模型')
+    const now = new Date().toISOString()
     const snapshot = {
       runId: `review_run_${randomUUID()}`,
       projectId: project.id,
@@ -50,24 +92,106 @@ export class RequirementAnalysisService {
       assetContentHash: version.contentHash,
       indexVersionId: index.id,
       logicalPath: asset.logicalPath,
+      modelRef: { sourceId: source.id, modelId: model.id, providerType: source.providerType, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
       focusAreas: cleanList(request.focusAreas),
       excludedAreas: cleanList(request.excludedAreas),
       agentDefinition: definition,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     }
-    let output: Awaited<ReturnType<AgentRuntime['execute']>>
+    const run: ReviewRun = {
+      id: snapshot.runId,
+      projectVersionId: projectVersion.id,
+      assetId: asset.id,
+      assetVersionId: version.id,
+      documentTitle: asset.displayName,
+      documentVersion: version.number,
+      logicalPath: asset.logicalPath,
+      sourceId: source.id,
+      modelId: model.id,
+      modelLabel: `${source.name} · ${model.displayName}`,
+      status: 'running',
+      step: 'agent_executing',
+      progress: 10,
+      createdAt: now,
+      startedAt: now,
+      snapshot,
+    }
+    await this.store.transaction(draft => { draft.reviewRuns.push(run) })
+    onCreated?.(presentRun(run))
     try {
-      output = await this.runtime.execute({
+      const output = await this.runtime.execute({
         snapshot,
         model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
       }, signal)
+      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
+      const validation = await this.validator.validate(output.candidate, snapshot)
+      if (!validation.valid) throw new Error(`AGENT_RESULT_VALIDATION_FAILED: ${validation.issues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
+      const finishedAt = new Date().toISOString()
+      await this.store.transaction(draft => {
+        const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
+        Object.assign(current, { status: 'succeeded', step: 'completed', progress: 100, finishedAt, result: output.candidate, execution: { turns: output.turns, toolCalls: output.toolCalls, framework: output.framework, events: output.events }, error: undefined } satisfies Partial<ReviewRun>)
+      })
+      const completed = await this.get(run.id)
+      return required(completed.response, '需求评审结果不存在')
     } catch (error) {
-      throw new Error(sanitizeRuntimeError(error, source.baseUrl, source.apiKey))
+      const message = sanitizeRuntimeError(error, source.baseUrl, source.apiKey)
+      const status = signal.aborted || /AGENT_CANCELLED|客户端已中断/u.test(message) ? 'cancelled' : 'failed'
+      await this.store.transaction(draft => {
+        const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
+        Object.assign(current, { status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message } satisfies Partial<ReviewRun>)
+        if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
+          const currentSource = draft.modelSources.find(item => item.id === source.id)
+          const currentModel = currentSource?.models.find(item => item.id === model.id)
+          if (currentSource && currentModel) {
+            const checkedAt = new Date().toISOString()
+            currentModel.health = 'degraded'
+            currentModel.lastCheckedAt = checkedAt
+            currentModel.healthMessage = '需求评审兼容性验证失败：未能提交结构化评审结果'
+            currentSource.health = 'degraded'
+            currentSource.healthMessage = currentModel.healthMessage
+            currentSource.lastCheckedAt = checkedAt
+            currentSource.updatedAt = checkedAt
+          }
+        }
+      })
+      throw new Error(message)
     }
-    const validation = await this.validator.validate(output.candidate, snapshot)
-    if (!validation.valid) throw new Error(`AGENT_RESULT_VALIDATION_FAILED: ${validation.issues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
-    return { runId: snapshot.runId, status: 'candidate_validated' as const, snapshot: { ...snapshot, agentDefinition: { ...definition, systemPrompt: undefined, taskTemplate: undefined } }, result: output.candidate, execution: { turns: output.turns, toolCalls: output.toolCalls, framework: output.framework, events: output.events } }
   }
+}
+
+function presentRun(run: ReviewRun) {
+  const response = run.result && run.execution ? {
+    runId: run.id,
+    status: 'candidate_validated' as const,
+    snapshot: redactSnapshot(run.snapshot),
+    result: run.result,
+    execution: run.execution,
+  } : undefined
+  return {
+    id: run.id,
+    runId: run.id,
+    projectVersionId: run.projectVersionId,
+    assetId: run.assetId,
+    assetVersionId: run.assetVersionId,
+    documentTitle: run.documentTitle,
+    documentVersion: `V${run.documentVersion}`,
+    logicalPath: run.logicalPath,
+    modelLabel: run.modelLabel,
+    status: run.status,
+    step: run.step,
+    progress: run.progress,
+    createdAt: run.createdAt,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    error: run.error,
+    snapshot: redactSnapshot(run.snapshot),
+    response,
+  }
+}
+
+function redactSnapshot(snapshot: ReviewRun['snapshot']) {
+  const definition = snapshot.agentDefinition
+  return { ...snapshot, agentDefinition: { ...definition, systemPrompt: undefined, taskTemplate: undefined } }
 }
 
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }

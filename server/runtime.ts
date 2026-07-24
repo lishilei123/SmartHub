@@ -5,11 +5,13 @@ import { KnowledgeService } from './application/knowledge-service.js'
 import { ModelService } from './application/model-service.js'
 import { RequirementAnalysisService } from './application/requirement-analysis-service.js'
 import { PiAgentRuntimeAdapter } from './agent/pi-agent-runtime.js'
+import { PiReviewQaRuntimeAdapter } from './agent/pi-review-qa-runtime.js'
 import { LocalModelRuntime } from './infrastructure/local-model-runtime.js'
 import { PostgresStore } from './infrastructure/postgres-store.js'
 import { RawDocumentStore } from './infrastructure/raw-document-store.js'
 import { JsonStore, type StateStore } from './infrastructure/store.js'
 import { ProjectVersionService } from './application/project-version-service.js'
+import { ReviewQaService } from './application/review-qa-service.js'
 
 const envFile = resolve(fileURLToPath(new URL('../.env.local', import.meta.url)))
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -29,5 +31,7 @@ export const service = new KnowledgeService(stateStore, rawDocumentStore, localM
 export const modelService = new ModelService(stateStore)
 export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore)
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime)
+export const reviewQaRuntime = new PiReviewQaRuntimeAdapter()
+export const reviewQaService = new ReviewQaService(stateStore, reviewQaRuntime)
 export const projectVersionService = new ProjectVersionService(stateStore)
 export const usingPostgres = stateStore instanceof PostgresStore
