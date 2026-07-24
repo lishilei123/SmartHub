@@ -99,7 +99,6 @@ export function RequirementReviewPage({
   const requirementDocuments = boundDocuments
   const [selectedAssetId, setSelectedAssetId] = useState('')
   const [query, setQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<'all' | RunStatus | 'not_started'>('all')
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [chatCollapsed, setChatCollapsed] = useState(false)
   const [view, setView] = useState<ViewKey>('overview')
@@ -112,6 +111,7 @@ export function RequirementReviewPage({
   const [selectedFindingId, setSelectedFindingId] = useState('')
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('')
   const [activeSectionKey, setActiveSectionKey] = useState<string | null>(null)
+  const [outlineCollapsed, setOutlineCollapsed] = useState(false)
   const [findingTypeFilter, setFindingTypeFilter] = useState<'all' | ReviewFindingType>('all')
   const [severityFilter, setSeverityFilter] = useState<'all' | ReviewSeverity>('all')
   const [basisFilter, setBasisFilter] = useState<'all' | 'evidence' | 'inference'>('all')
@@ -131,6 +131,8 @@ export function RequirementReviewPage({
   const [bindingActionId, setBindingActionId] = useState('')
   const requestController = useRef<AbortController | null>(null)
   const sourceRef = useRef<HTMLDivElement>(null)
+  const outlineRef = useRef<HTMLElement>(null)
+  const pendingSectionScroll = useRef<string | null>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
   const readOnly = projectVersion?.status !== 'open'
 
@@ -278,20 +280,55 @@ export function RequirementReviewPage({
     return () => { cancelled = true }
   }, [diffContents, diffVersionIds, notify, view])
 
+  const scrollToSection = (key: string) => {
+    const scroller = sourceRef.current
+    const target = scroller?.querySelector<HTMLElement>(`[data-document-section-key="${key}"]`)
+    if (!scroller || !target) return
+    const scrollerTop = scroller.getBoundingClientRect().top
+    const targetTop = target.getBoundingClientRect().top
+    scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + targetTop - scrollerTop - 16), behavior: 'smooth' })
+  }
+
+  const activateSection = (key: string) => {
+    pendingSectionScroll.current = key
+    setActiveSectionKey(key)
+    if (view !== 'source') { setView('source'); return }
+    requestAnimationFrame(() => {
+      if (pendingSectionScroll.current !== key) return
+      pendingSectionScroll.current = null
+      scrollToSection(key)
+    })
+  }
+
   useEffect(() => {
-    if (!activeSectionKey || view !== 'source') return
-    const target = sourceRef.current?.querySelector<HTMLElement>(`[data-document-section-key="${activeSectionKey}"]`)
-    target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }, [activeSectionKey, view])
+    if (view !== 'source') return
+    const scroller = sourceRef.current
+    if (!scroller) return
+    const updateActiveSection = () => {
+      const headings = Array.from(scroller.querySelectorAll<HTMLElement>('[data-document-section-key]'))
+      if (!headings.length) { setActiveSectionKey(null); return }
+      const scrollerTop = scroller.getBoundingClientRect().top + 24
+      const current = headings.reduce((active, heading) => heading.getBoundingClientRect().top <= scrollerTop ? heading : active, headings[0])
+      const key = current.dataset.documentSectionKey
+      if (!key) return
+      setActiveSectionKey(active => active === key ? active : key)
+      outlineRef.current?.querySelector<HTMLElement>(`[data-outline-section-key="${key}"]`)?.scrollIntoView({ block: 'nearest' })
+    }
+    const pendingKey = pendingSectionScroll.current
+    if (pendingKey) {
+      pendingSectionScroll.current = null
+      scrollToSection(pendingKey)
+    }
+    updateActiveSection()
+    scroller.addEventListener('scroll', updateActiveSection, { passive: true })
+    return () => scroller.removeEventListener('scroll', updateActiveSection)
+  }, [documentContent, documentVersionId, view])
 
   useEffect(() => () => requestController.current?.abort(), [])
 
   const runsForDocument = runs.filter(run => run.assetId === selectedDocument?.id)
   const filteredDocuments = requirementDocuments.filter(document => {
-    const latest = runs.find(run => run.assetId === document.id)
-    const matchesQuery = `${document.title} ${document.logicalPath ?? ''}`.toLowerCase().includes(query.trim().toLowerCase())
-    const matchesStatus = statusFilter === 'all' || statusFilter === 'not_started' ? statusFilter === 'all' || !latest : latest?.status === statusFilter
-    return matchesQuery && matchesStatus
+    return `${document.title} ${document.logicalPath ?? ''}`.toLowerCase().includes(query.trim().toLowerCase())
   })
 
   const selectRun = (runId: string) => {
@@ -439,7 +476,8 @@ export function RequirementReviewPage({
     setView('source')
     const heading = evidence.locator.heading.trim()
     const section = outline.sections.find(item => item.title === heading || item.title.includes(heading) || heading.includes(item.title))
-    setActiveSectionKey(section?.key ?? null)
+    if (section) activateSection(section.key)
+    else setActiveSectionKey(null)
     if (!section) notify('证据已绑定固定版本，但当前返回的标题定位无法映射到文档大纲。', 'warning')
   }
 
@@ -615,9 +653,9 @@ export function RequirementReviewPage({
     finally { setBindingActionId('') }
   }
 
-  if (!projectVersion) return <section className="rr-version-gate"><div><GitBranch /><ReviewBadge tone="purple">项目空间按版本隔离</ReviewBadge><h1>新建项目版本后才能进行需求分析</h1><p>平台固定为一个项目。需求文档绑定、评审运行、Finding 处置和对话上下文都归属于项目版本；知识库与系统设置保持全局共享。</p><button className="btn primary" onClick={onManageVersions}><GitBranch />新建项目版本</button></div></section>
+  if (!projectVersion) return <section className="card rr-version-gate"><div><GitBranch /><ReviewBadge tone="purple">项目空间按版本隔离</ReviewBadge><h1>新建项目版本后才能进行需求分析</h1><p>平台固定为一个项目。需求文档绑定、评审运行、Finding 处置和对话上下文都归属于项目版本；知识库与系统设置保持全局共享。</p><button className="btn primary" onClick={onManageVersions}><GitBranch />新建项目版本</button></div></section>
 
-  return <><section className={`rr-page ${leftCollapsed ? 'left-collapsed' : ''} ${chatCollapsed ? 'chat-collapsed' : ''}`}>
+  return <><section className={`card rr-page ${leftCollapsed ? 'left-collapsed' : ''} ${chatCollapsed ? 'chat-collapsed' : ''}`}>
     <header className="rr-header">
       <div className="rr-title-block">
         <div className="rr-title-icon"><Sparkles /></div>
@@ -642,7 +680,7 @@ export function RequirementReviewPage({
       <aside className="rr-review-list">
         <div className="rr-panel-head"><span><FileText /><b>需求评审</b></span><button onClick={() => setLeftCollapsed(value => !value)} aria-label={leftCollapsed ? '展开需求列表' : '收起需求列表'}>{leftCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>
         {!leftCollapsed && <>
-          <div className="rr-list-tools"><div><Search /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索需求或路径" /></div><select value={statusFilter} onChange={event => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">全部状态</option><option value="not_started">待评审</option><option value="running">分析中</option><option value="succeeded">评审完成</option><option value="failed">运行失败</option><option value="cancelled">已取消</option></select></div>
+          <div className="rr-list-tools"><div><Search /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索需求或路径" /></div></div>
           <div className="rr-list-meta"><span>{filteredDocuments.length} 个 ready 需求</span><button onClick={() => void refreshKnowledge()}><RefreshCw />刷新</button></div>
           <div className="rr-list-scroll">{filteredDocuments.map(document => {
             const latest = runs.find(run => run.assetId === document.id)
@@ -663,11 +701,11 @@ export function RequirementReviewPage({
         {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>评审运行失败</b><span>{selectedRun.error}</span>{!selectedModel?.healthy && <small>请在顶部切换到通过工具调用检测的健康模型后重新评审。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
         {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{!selectedModel?.healthy && <small>请先选择健康模型。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
 
-        <div className="rr-view-content">
+        <div className={`rr-view-content ${view === 'source' ? 'rr-source-view' : ''}`}>
           {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} basisFilter={basisFilter} setBasisFilter={setBasisFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
-          {view === 'source' && <SourceDocumentView document={selectedDocument} content={documentContent} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} knowledgeBaseId={knowledgeBaseId} onSection={setActiveSectionKey} onQuote={captureSourceQuote} />}
+          {view === 'source' && <SourceDocumentView document={selectedDocument} content={documentContent} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} />}
           {view === 'diff' && <DiffView versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
-          {view === 'tree' && <FeatureTreeView outline={outline.sections} reviewedAreas={result?.coverage.reviewedAreas ?? []} evidence={result?.evidence ?? []} findings={result?.findings ?? []} onOpenSection={key => { setActiveSectionKey(key); setView('source') }} />}
+          {view === 'tree' && <FeatureTreeView outline={outline.sections} reviewedAreas={result?.coverage.reviewedAreas ?? []} evidence={result?.evidence ?? []} findings={result?.findings ?? []} onOpenSection={activateSection} />}
           {view === 'evidence' && <EvidenceView evidence={result?.evidence ?? []} findings={result?.findings ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
         </div>
       </main>
@@ -706,9 +744,9 @@ function OverviewView({ result, stats, visibleFindings, selectedFindingId, selec
   </div>
 }
 
-function SourceDocumentView({ document, content, format, outline, activeSectionKey, selectedEvidence, sourceRef, knowledgeBaseId, onSection, onQuote }: { document?: KnowledgeDocument; content: string; format: 'markdown' | 'text'; outline: ReturnType<typeof parseMarkdownOutline>; activeSectionKey: string | null; selectedEvidence?: ReviewEvidence; sourceRef: React.RefObject<HTMLDivElement | null>; knowledgeBaseId: string; onSection: (key: string) => void; onQuote: () => void }) {
+function SourceDocumentView({ document, content, format, outline, activeSectionKey, outlineCollapsed, selectedEvidence, sourceRef, outlineRef, knowledgeBaseId, onSection, onToggleOutline, onQuote }: { document?: KnowledgeDocument; content: string; format: 'markdown' | 'text'; outline: ReturnType<typeof parseMarkdownOutline>; activeSectionKey: string | null; outlineCollapsed: boolean; selectedEvidence?: ReviewEvidence; sourceRef: React.RefObject<HTMLDivElement | null>; outlineRef: React.RefObject<HTMLElement | null>; knowledgeBaseId: string; onSection: (key: string) => void; onToggleOutline: () => void; onQuote: () => void }) {
   if (!document || !content) return <div className="rr-empty"><BookOpen /><b>固定原文不可用</b><p>请确认需求资产版本已达到 ready 状态。</p></div>
-  return <div className="rr-source-layout"><nav className="rr-outline"><header><b>本文目录</b><ReviewBadge tone="blue">{outline.sections.length}</ReviewBadge></header>{outline.sections.map(section => <button className={activeSectionKey === section.key ? 'active' : ''} style={{ paddingLeft: `${12 + Math.max(0, section.depth - 2) * 10}px` }} onClick={() => onSection(section.key)} key={section.key}><span>{section.title}</span></button>)}</nav><article className="rr-source-document"><header><div><ReviewBadge tone="blue">{format === 'text' ? 'TXT' : 'Markdown'}</ReviewBadge><b>{document.title}</b><span>{document.assetVersionId}</span></div><span><ShieldCheck />只读固定版本</span></header>{selectedEvidence && <div className="rr-evidence-banner"><ShieldCheck /><span><b>已定位证据 · {selectedEvidence.locator.heading}</b><small>{selectedEvidence.quote}</small></span><ReviewBadge tone="green">{selectedEvidence.sourceRef.chunkId}</ReviewBadge></div>}<div className="rr-markdown" ref={sourceRef} onMouseUp={onQuote}><MarkdownDocument source={content} format={format} knowledgeBaseId={knowledgeBaseId} logicalPath={document.logicalPath ?? document.name} outline={outline} activeSectionKey={activeSectionKey} anchorPrefix={`review-${document.assetVersionId}`} /></div><footer><Quote />选中原文可引用到右侧评审问答；不会修改或覆盖固定需求版本。</footer></article></div>
+  return <div className={`rr-source-layout ${outlineCollapsed ? 'outline-collapsed' : ''}`}><nav className="rr-outline" ref={outlineRef}><header><b>本文目录</b>{!outlineCollapsed && <ReviewBadge tone="blue">{outline.sections.length}</ReviewBadge>}<button className="rr-outline-toggle" onClick={onToggleOutline} aria-label={outlineCollapsed ? '展开文档目录' : '收起文档目录'} title={outlineCollapsed ? '展开目录' : '收起目录'}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></header>{!outlineCollapsed && outline.sections.map(section => <button className={activeSectionKey === section.key ? 'active' : ''} data-outline-section-key={section.key} style={{ paddingLeft: `${12 + Math.max(0, section.depth - 2) * 10}px` }} onClick={() => onSection(section.key)} key={section.key}><span>{section.title}</span></button>)}</nav><article className="rr-source-document"><header><div><ReviewBadge tone="blue">{format === 'text' ? 'TXT' : 'Markdown'}</ReviewBadge><b>{document.title}</b><span>{document.assetVersionId}</span></div><span><ShieldCheck />只读固定版本</span></header>{selectedEvidence && <div className="rr-evidence-banner"><ShieldCheck /><span><b>已定位证据 · {selectedEvidence.locator.heading}</b><small>{selectedEvidence.quote}</small></span><ReviewBadge tone="green">{selectedEvidence.sourceRef.chunkId}</ReviewBadge></div>}<div className="rr-markdown" ref={sourceRef} onMouseUp={onQuote}><MarkdownDocument source={content} format={format} knowledgeBaseId={knowledgeBaseId} logicalPath={document.logicalPath ?? document.name} outline={outline} activeSectionKey={activeSectionKey} anchorPrefix={`review-${document.assetVersionId}`} /></div><footer><Quote />选中原文可引用到右侧评审问答；不会修改或覆盖固定需求版本。</footer></article></div>
 }
 
 function DiffView({ versions, value, onChange, loading, removed, added }: { versions: NonNullable<KnowledgeDocument['versions']>; value: [string, string]; onChange: (value: [string, string]) => void; loading: boolean; removed: string[]; added: string[] }) {
