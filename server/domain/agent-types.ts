@@ -1,5 +1,8 @@
 import type { AgentCandidateResult, CandidateRequirementPointExtraction } from './review-types.js'
 
+export type AgentReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type RequirementInputMode = 'full_context' | 'segmented_context'
+
 export interface AgentExecutionLimits {
   maxTurns: number
   maxToolCalls: number
@@ -8,6 +11,9 @@ export interface AgentExecutionLimits {
   maxCandidateBytes: number
   maxFindings: number
   maxRepeatedToolCall: number
+  reasoningEffort?: AgentReasoningEffort
+  reservedOutputTokens?: number
+  correctionReserveTokens?: number
 }
 
 export interface AgentDefinitionVersion {
@@ -16,7 +22,7 @@ export interface AgentDefinitionVersion {
   version: string
   status: 'published'
   modelScene: 'requirement_analysis'
-  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-review/v2'
+  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-review/v2'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -46,7 +52,7 @@ export interface ReviewRunSnapshot {
   indexVersionId: string
   logicalPath: string
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }>
-  modelRef: { sourceId: string; modelId: string; providerType: 'openai' | 'anthropic' | 'openai_compatible'; modelName: string; contextWindow: number; maxOutputTokens: number }
+  modelRef: { sourceId: string; modelId: string; providerType: 'openai' | 'anthropic' | 'openai_compatible'; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
   focusAreas: string[]
   excludedAreas: string[]
   agentDefinition: AgentDefinitionVersion
@@ -59,7 +65,51 @@ export interface ReviewRunSnapshot {
     chunks: Array<{ chunkId: string; contentHash: string; headingPath: string[]; startLine: number; endLine: number; excludedReason?: string }>
   }>
   extractionToolBudget: { directoryCalls: number; chunkCalls: number; evidenceCalls: number; submissionCalls: number; minimumToolCalls: number }
+  extractionInput: {
+    policyVersion: string
+    mode: RequirementInputMode
+    estimatedInputTokens: number
+    safeInputBudget: number
+    packageSha256: string
+    batches: Array<{ batchId: string; ordinal: number; tokenCount: number; contentSha256: string; assetVersionIds: string[]; chunkIds: string[] }>
+  }
   createdAt: string
+}
+
+export interface RequirementInputBatch {
+  batchId: string
+  ordinal: number
+  tokenCount: number
+  assetVersionIds: string[]
+  chunkIds: string[]
+  content: string
+}
+
+export interface RequirementInputPlan {
+  policyVersion: string
+  mode: RequirementInputMode
+  estimatedInputTokens: number
+  safeInputBudget: number
+  packageSha256: string
+  batches: RequirementInputBatch[]
+}
+
+export interface InputDeliveryManifestEntry {
+  batchId: string
+  ordinal: number
+  assetVersionIds: string[]
+  chunkIds: string[]
+  contentSha256: string
+  tokenCount: number
+  modelCallSequence: number
+}
+
+export interface InputDeliveryManifest {
+  policyVersion: string
+  mode: RequirementInputMode
+  packageSha256: string
+  entries: InputDeliveryManifestEntry[]
+  finalMergeCompleted: boolean
 }
 
 export interface AgentModelConnection {
@@ -71,6 +121,7 @@ export interface AgentModelConnection {
   modelName: string
   contextWindow: number
   maxOutputTokens: number
+  supportsReasoning: boolean
 }
 
 export interface AgentExecutionEvent {
@@ -96,6 +147,7 @@ export interface AgentExecutionInput {
   snapshot: ReviewRunSnapshot
   model: AgentModelConnection
   fixedRequirementPointExtraction?: CandidateRequirementPointExtraction
+  requirementInputPlan?: RequirementInputPlan
   onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
 }
 
@@ -106,6 +158,7 @@ export interface AgentExecutionOutput {
   toolCalls: number
   toolErrors: number
   framework: { name: 'pi-agent-core'; version: string }
+  inputDeliveryManifest?: InputDeliveryManifest
 }
 
 export interface AgentRuntime {

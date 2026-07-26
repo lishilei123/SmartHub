@@ -36,7 +36,7 @@ export class PiReviewQaRuntimeAdapter implements ReviewQaRuntime {
         : { type: 'function', function: { name: 'review_answer_submit' } },
     } as Parameters<StreamFn>[2])
     const agent = new Agent({
-      initialState: { systemPrompt: systemPrompt(), model, tools: [tool], thinkingLevel: 'off' },
+      initialState: { systemPrompt: systemPrompt(), model, tools: [tool], thinkingLevel: input.model.supportsReasoning ? 'medium' : 'off' },
       streamFn,
       getApiKey: () => input.model.apiKey,
       sessionId: `${input.snapshot.runId}:qa`,
@@ -80,9 +80,8 @@ function renderQuestion(input: ReviewQaExecutionInput) {
 
 function createModel(input: ReviewQaExecutionInput): Model<Api> {
   const api: Api = input.model.providerType === 'anthropic' ? 'anthropic-messages' : 'openai-completions'
-  return { id: input.model.modelName, name: input.model.modelName, api, provider: input.model.sourceId, baseUrl: normalizeBaseUrl(input.model.baseUrl, api), reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: input.model.contextWindow, maxTokens: Math.min(input.model.maxOutputTokens, 4_096) } as Model<Api>
+  return { id: input.model.modelName, name: input.model.modelName, api, provider: input.model.sourceId, baseUrl: normalizeBaseUrl(input.model.baseUrl, api), reasoning: input.model.supportsReasoning, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: input.model.contextWindow, maxTokens: Math.min(input.model.maxOutputTokens, 4_096) } as Model<Api>
 }
 
 function createStreamFn(input: ReviewQaExecutionInput): StreamFn { return (input.model.providerType === 'anthropic' ? streamAnthropic : streamOpenAi) as StreamFn }
 function normalizeBaseUrl(value: string, api: Api) { const withoutSlash = value.replace(/\/$/u, ''); return api === 'anthropic-messages' ? withoutSlash.replace(/\/messages$/iu, '') : withoutSlash.replace(/\/chat\/completions$/iu, '') }
-

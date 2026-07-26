@@ -3,7 +3,7 @@ import type { GenerativeCapability, GenerativeModel, GenerativeModelSource, Gene
 import type { StateStore } from '../infrastructure/store.js'
 
 const providerTypes = new Set<GenerativeProviderType>(['openai', 'anthropic', 'openai_compatible'])
-const capabilities = new Set<GenerativeCapability>(['structured_output', 'tool_calling', 'vision'])
+const capabilities = new Set<GenerativeCapability>(['structured_output', 'tool_calling', 'vision', 'reasoning'])
 
 export class ModelService {
   constructor(private readonly store: StateStore) {}

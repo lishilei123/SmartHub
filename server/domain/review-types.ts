@@ -10,6 +10,13 @@ export interface CandidateEvidence {
   locator: { heading: string; start: number; end: number }
 }
 
+export interface CandidateEvidenceDraft {
+  clientEvidenceId: string
+  assetVersionId: string
+  chunkId: string
+  quote: string
+}
+
 export interface CandidateRequirementPoint {
   clientRequirementPointId: string
   title: string
@@ -40,8 +47,8 @@ export interface CandidateFinding {
 
 export interface AssetCoverage {
   assetVersionId: string
-  reviewedChunkIds: string[]
-  skippedChunks: Array<{ chunkId: string; reason: string }>
+  deliveredChunkIds: string[]
+  excludedChunks: Array<{ chunkId: string; reason: string }>
 }
 
 export interface ReviewCoverage {
@@ -53,6 +60,11 @@ export interface CandidateRequirementPointExtraction {
   requirementPoints: CandidateRequirementPoint[]
   evidence: CandidateEvidence[]
   coverage: ReviewCoverage
+}
+
+export interface CandidateRequirementPointExtractionV2 {
+  requirementPoints: CandidateRequirementPoint[]
+  evidenceDrafts: CandidateEvidenceDraft[]
 }
 
 export interface CandidateRequirementReview {
@@ -68,7 +80,7 @@ export interface CandidateRequirementReview {
 export interface CandidateReviewResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
 }
 
-export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementReview
+export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV2 | CandidateRequirementReview
 
 export interface ValidationIssue { path: string; message: string }
 export interface ValidationReport { valid: boolean; issues: ValidationIssue[] }

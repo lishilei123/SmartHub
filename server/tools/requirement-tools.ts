@@ -1,109 +1,74 @@
 import { Type } from 'typebox'
-import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
+import type { CandidateRequirementPointExtractionV2, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { ToolRegistry } from './registry.js'
+import { resolveEvidenceQuote } from '../agent/evidence-locator.js'
 
 export interface ReviewSubmissionFeedback { accepted: boolean; issues?: Array<{ path: string; message: string }> }
 
-export function createRequirementPointExtractionToolRegistry(store: StateStore, submit: (candidate: CandidateRequirementPointExtraction) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
+export function createRequirementPointExtractionToolRegistry(store: StateStore, submit: (candidate: CandidateRequirementPointExtractionV2) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
   const registry = new ToolRegistry()
   registry.register({
     id: 'knowledge.search', piName: 'knowledge_search', version: '1.0.0', label: '固定索引检索', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '仅在本次运行固定的知识索引版本内检索相关 Chunk。',
+    description: '仅在本次运行固定的知识索引版本内检索相关 Chunk；正文已直接投递时只用于定向复查。',
     parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 500 }), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) }),
   }, async request => {
     const args = request.arguments as { query: string; limit?: number }
     const state = await store.snapshot()
     const index = required(state.indexes.find(item => item.id === request.context.snapshot.indexVersionId && item.knowledgeBaseId === request.context.snapshot.knowledgeBaseId), '固定索引不存在')
+    const allowedVersions = new Set(request.context.snapshot.assets.map(item => item.assetVersionId))
     const terms = [...new Set(args.query.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(term => term.length > 1))]
-    const results = (index.indexedChunks ?? []).map(chunk => {
+    const results = (index.indexedChunks ?? []).filter(chunk => allowedVersions.has(chunk.assetVersionId)).map(chunk => {
       const haystack = `${chunk.headingPath.join(' ')} ${chunk.content}`.toLocaleLowerCase()
       const hits = terms.reduce((count, term) => count + (haystack.includes(term) ? 1 : 0), 0)
       return { chunk, score: terms.length ? hits / terms.length : 0 }
     }).filter(item => item.score > 0).sort((left, right) => right.score - left.score || left.chunk.ordinal - right.chunk.ordinal).slice(0, args.limit ?? 8)
-    return { data: { retrievalMode: 'fixed_index_keyword', degraded: true, degradedReason: '当前 M2 固定索引工具仅启用关键词召回', results: results.map(({ chunk, score }) => ({ chunkId: chunk.id, assetVersionId: chunk.assetVersionId, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, score, excerpt: chunk.content.slice(0, 1000) })) } }
-  })
-
-  registry.register({
-    id: 'knowledge.read_asset', piName: 'knowledge_read_asset', version: '2.2.0', label: '读取固定需求资产', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '分页读取本次运行固定的输入资产版本。首次读取最多返回 80 个目录节点；outlinePage.hasMore 为 true 时必须继续读取下一页，直至完整覆盖目录。后续指定行范围时默认不重复返回目录。多文档运行必须传 assetVersionId。',
-    parameters: Type.Object({
-      assetVersionId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-      startLine: Type.Optional(Type.Integer({ minimum: 1 })),
-      endLine: Type.Optional(Type.Integer({ minimum: 1 })),
-      includeOutline: Type.Optional(Type.Boolean()),
-      outlineOffset: Type.Optional(Type.Integer({ minimum: 0 })),
-      outlineLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 80 })),
-    }),
-  }, async request => {
-    const args = request.arguments as { assetVersionId?: string; startLine?: number; endLine?: number; includeOutline?: boolean; outlineOffset?: number; outlineLimit?: number }
-    const state = await store.snapshot()
-    const fixedAssets = request.context.snapshot.assets
-    const assetVersionId = args.assetVersionId ?? (fixedAssets.length === 1 ? fixedAssets[0].assetVersionId : '')
-    if (!assetVersionId || !fixedAssets.some(asset => asset.assetVersionId === assetVersionId)) throw new Error('必须选择本次运行固定的输入资产版本')
-    const version = required(state.versions.find(item => item.id === assetVersionId), '固定资产版本不存在')
-    const lines = version.content.split(/\r?\n/u)
-    const start = Math.min(args.startLine ?? 1, Math.max(lines.length, 1))
-    const end = Math.min(Math.max(args.endLine ?? Math.min(start + 199, lines.length), start), lines.length)
-    const includeOutline = args.includeOutline ?? (args.startLine === undefined && args.endLine === undefined)
-    const outlineOffset = Math.min(args.outlineOffset ?? 0, version.chunks.length)
-    const outlineLimit = args.outlineLimit ?? 80
-    const outline = includeOutline
-      ? version.chunks.slice(outlineOffset, outlineOffset + outlineLimit).map(chunk => ({ chunkId: chunk.id, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine }))
-      : []
-    return { data: {
-      assetVersionId: version.id,
-      contentHash: version.contentHash,
-      totalLines: lines.length,
-      startLine: start,
-      endLine: end,
-      content: lines.slice(start - 1, end).join('\n'),
-      outline,
-      outlinePage: { offset: outlineOffset, limit: outlineLimit, total: version.chunks.length, hasMore: includeOutline && outlineOffset + outline.length < version.chunks.length },
-    } }
+    return { data: { retrievalMode: 'fixed_index_keyword', degraded: true, degradedReason: '当前固定索引工具仅启用关键词召回', results: results.map(({ chunk, score }) => ({ chunkId: chunk.id, assetVersionId: chunk.assetVersionId, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, score, excerpt: chunk.content.slice(0, 1000) })) } }
   })
 
   registry.register({
     id: 'knowledge.read_chunk', piName: 'knowledge_read_chunk', version: '1.0.0', label: '读取固定 Chunk', risk: 'read', idempotent: true, repeatPolicy: 'replay_success_once', timeoutMs: 30_000,
-    description: '按 Chunk ID 读取固定索引中的完整内容与定位。',
+    description: '仅在需要复核引用时按 Chunk ID 读取本次固定输入中的完整内容与定位。',
     parameters: Type.Object({ chunkId: Type.String({ minLength: 1, maxLength: 200 }) }),
   }, async request => {
     const args = request.arguments as { chunkId: string }
     const state = await store.snapshot()
     const index = required(state.indexes.find(item => item.id === request.context.snapshot.indexVersionId), '固定索引不存在')
-    const chunk = required(index.indexedChunks?.find(item => item.id === args.chunkId), 'Chunk 不属于固定索引')
+    const allowedVersions = new Set(request.context.snapshot.assets.map(item => item.assetVersionId))
+    const chunk = required(index.indexedChunks?.find(item => item.id === args.chunkId && allowedVersions.has(item.assetVersionId)), 'Chunk 不属于本次固定输入')
     return { data: { chunkId: chunk.id, assetVersionId: chunk.assetVersionId, contentHash: chunk.contentHash, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar, content: chunk.content } }
   })
 
   registry.register({
-    id: 'evidence.validate', piName: 'evidence_validate', version: '1.1.0', label: '校验证据', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '校验证据是否属于固定索引和固定资产版本。quote 必须从 knowledge_read_chunk 的 content 连续、逐字复制，不能拼接非连续原文或使用省略号；chunkId、assetVersionId、quote 缺一不可。',
-    parameters: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }), quote: Type.String({ minLength: 1, maxLength: 4000 }) }),
+    id: 'evidence.validate_batch', piName: 'evidence_validate_batch', version: '1.0.0', label: '批量校验证据草稿', risk: 'read', idempotent: true, timeoutMs: 30_000,
+    description: '批量校验引用是否能通过精确原文或 Markdown 可见文本映射到固定输入的唯一连续位置，并返回规范 quote、chunkId 与 locator；最终提交仍只需 evidenceDrafts。',
+    parameters: Type.Object({ items: Type.Array(Type.Object({
+      clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }),
+      assetVersionId: Type.String({ minLength: 1, maxLength: 200 }),
+      chunkId: Type.String({ minLength: 1, maxLength: 200 }),
+      quote: Type.String({ minLength: 1, maxLength: 4000 }),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: 100 }) }),
   }, async request => {
-    const args = request.arguments as { chunkId: string; assetVersionId: string; quote: string }
+    const args = request.arguments as { items: Array<{ clientEvidenceId: string; assetVersionId: string; chunkId: string; quote: string }> }
     const state = await store.snapshot()
     const index = required(state.indexes.find(item => item.id === request.context.snapshot.indexVersionId), '固定索引不存在')
-    const chunk = index.indexedChunks?.find(item => item.id === args.chunkId && item.assetVersionId === args.assetVersionId)
-    const quote = args.quote.trim()
-    const quoteOffset = chunk?.content.indexOf(quote) ?? -1
-    if (!chunk) return { data: { valid: false, reason: 'chunk_not_in_fixed_snapshot', chunkId: args.chunkId, assetVersionId: args.assetVersionId, contentHash: null, guidance: '请从 knowledge_read_asset、knowledge_search 或 knowledge_read_chunk 返回的固定 Chunk 中选择证据。' } }
-    if (!quote || quoteOffset < 0) return { data: { valid: false, reason: 'quote_not_found', chunkId: args.chunkId, assetVersionId: args.assetVersionId, contentHash: chunk.contentHash, guidance: '请先调用 knowledge_read_chunk，再从 content 中连续、逐字复制 quote；不要拼接多个段落，也不要使用省略号。' } }
-    return { data: {
-      valid: true,
-      chunkId: args.chunkId,
-      assetVersionId: args.assetVersionId,
-      contentHash: chunk.contentHash,
-      quote,
-      locator: { heading: chunk.headingPath.at(-1) ?? '', start: chunk.startChar + quoteOffset, end: chunk.startChar + quoteOffset + quote.length },
-    } }
+    const allowedVersions = new Set(request.context.snapshot.assets.map(item => item.assetVersionId))
+    const chunks = (index.indexedChunks ?? []).filter(chunk => allowedVersions.has(chunk.assetVersionId))
+    return { data: { results: args.items.map(item => {
+      if (!allowedVersions.has(item.assetVersionId)) return { clientEvidenceId: item.clientEvidenceId, valid: false, reason: 'asset_not_in_fixed_snapshot' }
+      const resolved = resolveEvidenceQuote(item, chunks)
+      if (!resolved) return { clientEvidenceId: item.clientEvidenceId, valid: false, reason: 'quote_not_uniquely_locatable' }
+      const { chunk, quote, offset, strategy } = resolved
+      return { clientEvidenceId: item.clientEvidenceId, valid: true, assetVersionId: chunk.assetVersionId, chunkId: chunk.id, contentHash: chunk.contentHash, quote, locator: { heading: chunk.headingPath.at(-1) ?? '', start: chunk.startChar + offset, end: chunk.startChar + offset + quote.length }, strategy }
+    }) } }
   })
 
   registry.register({
-    id: 'requirement-points.submit_result', piName: 'requirement_points_submit_result', version: '1.0.0', label: '提交固定需求点提取结果', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
-    description: '提交 requirement-point-extraction/v1 候选结果并结束提取 Agent。结果只包含需求点、固定证据和覆盖范围。',
-    parameters: requirementPointExtractionSchema(),
+    id: 'requirement-points.submit_result', piName: 'requirement_points_submit_result', version: '2.0.0', label: '提交需求点提取草稿', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
+    description: '提交 requirement-point-extraction/v2。模型只提交需求点和 evidenceDrafts；服务端独立生成规范 Evidence、定位与覆盖清单。',
+    parameters: requirementPointExtractionSchemaV2(),
   }, async request => {
-    const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementPointExtraction)
+    const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementPointExtractionV2)
     return feedback.accepted
       ? { data: { accepted: true, status: 'candidate_validated' }, terminate: true }
       : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] }, terminate: false }
@@ -115,7 +80,7 @@ export function createRequirementReviewToolRegistry(submit: (candidate: Candidat
   const registry = new ToolRegistry()
   registry.register({
     id: 'review.submit_result', piName: 'review_submit_result', version: '3.0.0', label: '提交候选需求评审', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
-    description: '提交 requirement-review/v2 候选结果并结束评审 Agent。协议只接受 Finding 与评审摘要；Finding 必须关联需求点，不能提交需求点、Evidence 或覆盖范围。',
+    description: '提交 requirement-review/v2 候选结果并结束评审 Agent。协议只接受 Finding 与评审摘要；Finding 必须关联需求点。',
     parameters: requirementReviewSchema(),
   }, async request => {
     const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementReview)
@@ -126,34 +91,19 @@ export function createRequirementReviewToolRegistry(submit: (candidate: Candidat
   return registry
 }
 
-function requirementPointExtractionSchema() {
+function requirementPointExtractionSchemaV2() {
   const strings = Type.Array(Type.String({ minLength: 1, maxLength: 4000 }), { maxItems: 100 })
-  const evidenceRefs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 })
   return Type.Object({
     requirementPoints: Type.Array(Type.Object({
-      clientRequirementPointId: Type.String({ minLength: 1, maxLength: 100 }),
-      title: Type.String({ minLength: 1, maxLength: 300 }),
-      description: Type.String({ minLength: 1, maxLength: 8000 }),
-      actor: Type.String({ maxLength: 500 }),
-      action: Type.String({ maxLength: 500 }),
-      object: Type.String({ maxLength: 500 }),
-      conditions: strings,
-      businessRules: strings,
-      exceptions: strings,
-      acceptanceCriteria: strings,
-      evidenceRefs,
-      mergeGroupId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-      mergeRationale: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
+      clientRequirementPointId: Type.String({ minLength: 1, maxLength: 100 }), title: Type.String({ minLength: 1, maxLength: 300 }), description: Type.String({ minLength: 1, maxLength: 8000 }),
+      actor: Type.String({ maxLength: 500 }), action: Type.String({ maxLength: 500 }), object: Type.String({ maxLength: 500 }),
+      conditions: strings, businessRules: strings, exceptions: strings, acceptanceCriteria: strings,
+      evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }),
+      mergeGroupId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })), mergeRationale: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
     }, { additionalProperties: false }), { maxItems: 500 }),
-    evidence: Type.Array(Type.Object({ clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), sourceType: Type.Literal('knowledge_chunk'), sourceRef: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }) }), quote: Type.String({ minLength: 4, maxLength: 4000 }), locator: Type.Object({ heading: Type.String(), start: Type.Integer({ minimum: 0 }), end: Type.Integer({ minimum: 0 }) }) }), { maxItems: 500 }),
-    coverage: Type.Object({
-      assets: Type.Array(Type.Object({
-        assetVersionId: Type.String({ minLength: 1 }),
-        reviewedChunkIds: Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true, maxItems: 2_000 }),
-        skippedChunks: Type.Array(Type.Object({ chunkId: Type.String({ minLength: 1 }), reason: Type.String({ minLength: 1, maxLength: 1_000 }) }, { additionalProperties: false }), { maxItems: 2_000 }),
-      }, { additionalProperties: false }), { minItems: 1, maxItems: 100 }),
-      limitations: Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 }),
-    }, { additionalProperties: false }),
+    evidenceDrafts: Type.Array(Type.Object({
+      clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), assetVersionId: Type.String({ minLength: 1, maxLength: 200 }), chunkId: Type.String({ minLength: 1, maxLength: 200 }), quote: Type.String({ minLength: 4, maxLength: 4000 }),
+    }, { additionalProperties: false }), { maxItems: 500 }),
   }, { additionalProperties: false })
 }
 

@@ -39,20 +39,20 @@
 
 ## 当前已实现的第二期双 Agent 需求分析流程
 
-> 实现边界：当前代码仍是 `requirement-point-extraction/v1` 的“分页目录 + 逐 Chunk 工具读取 + Evidence 校验”链路，Pi Runtime 也仍固定 `thinkingLevel: 'off'`。需求文档 V1.8 与技术文档 V1.5 已将目标方案优化为：正常规模正文通过 `full_context` 首轮完整直传，超长正文通过 `segmented_context` 确定性分批直传并最终归并，服务端根据 `InputDeliveryManifest` 生成 coverage，使用 `requirement-point-extraction/v2` 规范化 Evidence，并把推理等级纳入版本化场景配置。该优化尚未实现，不能把以下当前能力描述当成新方案已交付。
+> 实现边界：`requirement-point-extraction/v2` 正文直传优化已实现。正常规模正文通过 `full_context` 在首轮完整投递；超长正文通过 `segmented_context` 确定性分批投递、隔离批次消息并最终跨批归并。服务端持久化输入包 Hash、批次 Hash 和 `InputDeliveryManifest`，独立生成 coverage 与 Evidence locator。推理等级进入版本化 AgentDefinition，当前内置定义为 `medium`。旧 `requirement-point-extraction/v1` 仅作为历史数据语义保留，不再创建新运行。
 
 - 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
 - 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
 - Agent 定义、Prompt、Toolset、Skill、MCP 绑定、执行限制和内容 Hash 独立版本化并写入运行快照；内置定义解析器和工具注册表工厂均可替换，后续插件通过版本引用和受控适配器接入，不绕过 Tool Runtime；
 - 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与两个 Agent 定义，不在运行中漂移到最新资料；
-- `RequirementPointExtractionAgent` 开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `requirement-points.submit_result`；`RequirementReviewAgent` 只开放 `review.submit_result`，其输入直接包含已校验冻结的需求点提取结果，不继承第一段消息历史；
+- `RequirementPointExtractionAgent` 开放 `knowledge.search`、`knowledge.read_chunk`、`evidence.validate_batch` 和 `requirement-points.submit_result`；正文完整投递是主路径，前三个读取/校验工具仅用于定向复核；`RequirementReviewAgent` 只开放 `review.submit_result`，其输入直接包含已校验冻结的需求点提取结果，不继承第一段消息历史；
 - 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；重复调用默认拒绝，只有 `knowledge.read_chunk` 可在达到阈值后重放一次本次执行已成功读取的固定结果，且不触发底层读取或消耗额度；读取/证据工具不得耗尽提取 Agent 的全部额度，最后 3 次调用独立保留给当前阶段的结果提交工具；
-- `knowledge.read_asset` 对目录分页，并在指定行范围读取时默认不重复返回目录；`evidence.validate` 要求从固定 Chunk 连续逐字引用，失败时返回原因和修复动作，成功时返回可直接提交的精确标题与字符范围；
-- `requirement-points.submit_result` 只接受 `requirement-point-extraction/v1` 的需求点、Evidence 和 coverage；`review.submit_result` 只接受 `requirement-review/v2` 的 summary 和 findings。Finding 必须关联冻结需求点，原文依据通过需求点的 Evidence 间接追溯；第二个协议没有需求点、Evidence 或 coverage 字段，因此评审 Agent 无法增删或改写固定提取结果；
+- `RequirementInputPlan` 根据模型上下文、输出预留、修正预留、Prompt/工具 Schema 和安全余量计算输入预算；`full_context` 包含完整文档边界与 Chunk 目录，存在排除范围时只投递范围内 Chunk；`segmented_context` 按稳定 Chunk 顺序打包，单批超预算或超过 24 批会明确失败；
+- `evidence.validate_batch` 一次可校验最多 100 条引用：优先在声明 Chunk 精确匹配，随后把 Markdown 可见文本映射回连续原始字符范围；声明 chunkId 有误时，仅允许在同一固定资产的唯一绝对位置重定位。服务端返回规范原文 quote、chunkId 和 locator，不使用模糊语义或跨资产匹配；`requirement-points.submit_result` 只接受 `requirement-point-extraction/v2` 的 requirementPoints 和 evidenceDrafts；
 - ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试；
 - 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
 
-目标优化实现后，正常规模输入不再把 `knowledge.read_asset`、`knowledge.read_chunk` 和逐条 `evidence.validate` 作为必经读取链路；这些工具仅保留给旧运行兼容、定点补读或修复。上线前必须使用固定黄金集对新旧两种投递模式做 A/B，确认关键需求点召回不下降、正常规模正文读取工具调用降为 0，并通过正文投递覆盖、Evidence 定位和提示注入测试。
+当前自动化测试已覆盖正常规模正文首轮直传、读取工具调用为 0、服务端 Evidence/coverage 生成、投递清单缺批或哈希不一致拒绝、Evidence 草稿修复、原子性/归并约束，以及超长正文确定性切换 `segmented_context`。真实模型上线前仍应使用固定黄金集对新旧提示策略做 A/B，确认关键需求点召回不下降，并补充供应商级上下文上限与提示注入回归。
 
 运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；服务端先独立运行需求点提取并冻结结果，再用全新会话启动需求评审，最终合并为正式结果，页面通过 ReviewRun 接口恢复并轮询两个阶段：
 

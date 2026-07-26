@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { AgentDefinitionResolver, AgentDefinitionVersion, AgentExecutionEvent, AgentExecutionOutput, AgentRuntime, ReviewRunSnapshot } from '../domain/agent-types.js'
+import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionOutput, AgentRuntime, ReviewRunSnapshot } from '../domain/agent-types.js'
 import type { AgentExecutionRecord, ReviewRun } from '../domain/types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator, ReviewResultValidator } from '../agent/result-validator.js'
 import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
+import { buildRequirementInputPlan } from '../agent/requirement-context-assembler.js'
 
 export interface RequirementAnalysisRequest {
   projectVersionId: string
@@ -112,10 +113,17 @@ export class RequirementAnalysisService {
     const baseExtractionDefinition = await this.definitions.resolve('requirement-point-extraction')
     const reviewDefinition = await this.definitions.resolve('requirement-review')
     const extractionCoveragePlan = buildExtractionCoveragePlan(versions, request.excludedAreas)
-    const extractionToolBudget = buildExtractionToolBudget(extractionCoveragePlan)
-    const extractionDefinition = buildExtractionDefinition(baseExtractionDefinition, extractionToolBudget)
+    const extractionDefinition = baseExtractionDefinition
+    const extractionToolBudget = { directoryCalls: 0, chunkCalls: 0, evidenceCalls: 0, submissionCalls: 3, minimumToolCalls: 3 }
+    const requirementInputPlan = buildRequirementInputPlan({
+      assets: assets.map((asset, position) => ({ asset, version: versions[position] })),
+      coveragePlan: extractionCoveragePlan,
+      definition: extractionDefinition,
+      contextWindow: model.contextWindow,
+      maxOutputTokens: model.maxOutputTokens,
+    })
     const now = new Date().toISOString()
-    const snapshot = {
+    const snapshot: ReviewRunSnapshot = {
       runId: `review_run_${randomUUID()}`,
       projectId: project.id,
       projectName: project.name,
@@ -128,13 +136,25 @@ export class RequirementAnalysisService {
       indexVersionId: index.id,
       logicalPath: assets[0].logicalPath,
       assets: assets.map((asset, position) => ({ assetId: asset.id, assetVersionId: versions[position].id, assetContentHash: versions[position].contentHash, logicalPath: asset.logicalPath, displayName: asset.displayName })),
-      modelRef: { sourceId: source.id, modelId: model.id, providerType: source.providerType, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
+      modelRef: { sourceId: source.id, modelId: model.id, providerType: source.providerType, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') },
       focusAreas: cleanList(request.focusAreas),
       excludedAreas: cleanList(request.excludedAreas),
       agentDefinition: extractionDefinition,
       agentDefinitions: { requirementPointExtraction: extractionDefinition, requirementReview: reviewDefinition },
       extractionCoveragePlan,
       extractionToolBudget,
+      extractionInput: {
+        policyVersion: requirementInputPlan.policyVersion,
+        mode: requirementInputPlan.mode,
+        estimatedInputTokens: requirementInputPlan.estimatedInputTokens,
+        safeInputBudget: requirementInputPlan.safeInputBudget,
+        packageSha256: requirementInputPlan.packageSha256,
+        batches: requirementInputPlan.batches.map(batch => ({
+          batchId: batch.batchId, ordinal: batch.ordinal, tokenCount: batch.tokenCount,
+          contentSha256: createHash('sha256').update(batch.content).digest('hex'),
+          assetVersionIds: [...batch.assetVersionIds], chunkIds: [...batch.chunkIds],
+        })),
+      },
       createdAt: now,
     }
     const run: ReviewRun = {
@@ -160,11 +180,12 @@ export class RequirementAnalysisService {
     const extractionEvents: AgentExecutionEvent[] = []
     const reviewEvents: AgentExecutionEvent[] = []
     let activeAgentKey: 'requirement-point-extraction' | 'requirement-review' = 'requirement-point-extraction'
-    const modelConnection = { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens }
+    const modelConnection = { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') }
     try {
       const extractionOutput = await this.runtime.execute({
         snapshot,
         model: modelConnection,
+        requirementInputPlan,
         onEvent: async event => {
           extractionEvents.push(event)
           if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, extractionEvents, 'requirement-point-extraction')
@@ -172,12 +193,13 @@ export class RequirementAnalysisService {
       }, signal)
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
       const extraction = extractionOutput.candidate as CandidateRequirementPointExtraction
-      const extractionValidation = await this.extractionValidator.validate(extraction, snapshot)
+      const extractionValidation = await this.extractionValidator.validate(extraction, snapshot, extractionOutput.inputDeliveryManifest)
       if (!extractionValidation.valid) throw validationError(extractionValidation.issues)
       const extractionExecution = executionRecord(extractionOutput, 'requirement-point-extraction')
       await this.store.transaction(draft => {
         const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
         current.extractionResult = structuredClone(extraction)
+        current.inputDeliveryManifest = structuredClone(required(extractionOutput.inputDeliveryManifest, '输入投递证明不存在'))
         current.executions = { ...(current.executions ?? {}), requirementPointExtraction: extractionExecution }
         current.execution = extractionExecution
         current.step = 'reviewing_requirements'
@@ -286,6 +308,7 @@ function presentRun(run: ReviewRun) {
     status: 'candidate_validated' as const,
     snapshot: redactSnapshot(run.snapshot),
     result: run.result,
+    ...(run.inputDeliveryManifest ? { inputDeliveryManifest: run.inputDeliveryManifest } : {}),
     ...(run.execution ? { execution: run.execution } : {}),
     ...(run.executions ? { executions: run.executions } : {}),
   } : undefined
@@ -313,6 +336,7 @@ function presentRun(run: ReviewRun) {
     execution: response ? undefined : run.execution,
     executions: response ? undefined : run.executions,
     extractionResult: response ? undefined : run.extractionResult,
+    inputDeliveryManifest: response ? undefined : run.inputDeliveryManifest,
     response,
   }
 }
@@ -375,31 +399,9 @@ function buildExtractionCoveragePlan(versions: Array<{ id: string; chunks: Array
   }))
 }
 
-function buildExtractionToolBudget(plan: ReviewRunSnapshot['extractionCoveragePlan']) {
-  const chunkCalls = plan.reduce((total, asset) => total + asset.chunks.filter(chunk => !chunk.excludedReason).length, 0)
-  const directoryCalls = plan.reduce((total, asset) => total + Math.ceil(asset.chunks.length / 80), 0)
-  const evidenceCalls = chunkCalls
-  const submissionCalls = 3
-  const minimumToolCalls = directoryCalls + chunkCalls + evidenceCalls + submissionCalls
-  if (minimumToolCalls > 500) throw new Error(`需求文档规模超过单次提取工具预算：${plan.length} 份文档、${chunkCalls} 个正文 Chunk，至少需要 ${minimumToolCalls} 次调用；请拆分项目版本输入后再评审`)
-  return { directoryCalls, chunkCalls, evidenceCalls, submissionCalls, minimumToolCalls }
-}
-
-function buildExtractionDefinition(definition: AgentDefinitionVersion, budget: ReviewRunSnapshot['extractionToolBudget']) {
-  const maxToolCalls = Math.max(definition.limits.maxToolCalls, budget.minimumToolCalls)
-  const maxTurns = Math.max(definition.limits.maxTurns, Math.ceil(maxToolCalls / 2) + 6)
-  const value = { ...definition, limits: { ...definition.limits, maxToolCalls, maxTurns } }
-  return {
-    ...value,
-    contentSha256: createHash('sha256')
-      .update(JSON.stringify({ ...value, contentSha256: undefined }))
-      .digest('hex'),
-  }
-}
-
 function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }
 function cleanList(value: string[] | undefined) { return Array.isArray(value) ? [...new Set(value.map(item => String(item).trim()).filter(Boolean))].slice(0, 20) : [] }
-function shouldCheckpointExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry'].includes(event.type) }
+function shouldCheckpointExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry', 'input_package_built', 'input_batch_delivered', 'input_final_merge_started'].includes(event.type) }
 function executionProgress(events: AgentExecutionEvent[], agentKey?: AgentExecutionRecord['agentKey']): AgentExecutionRecord {
   const framework = events.find(event => event.framework)?.framework
   return {
@@ -415,7 +417,8 @@ function executionRecord(output: AgentExecutionOutput, agentKey: 'requirement-po
   return { agentKey, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, events: output.events }
 }
 function validationError(issues: Array<{ path: string; message: string }>) {
-  return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${issues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
+  const visible = issues.slice(0, 6).map(issue => `${issue.path} ${issue.message}`).join('；')
+  return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${visible}${issues.length > 6 ? `；另有 ${issues.length - 6} 项，请查看结果校验事件` : ''}`)
 }
 function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) {
   let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'

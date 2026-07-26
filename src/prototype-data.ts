@@ -70,7 +70,7 @@ export type GenerativeModelDraft = {
   displayName: string
   contextWindow: number
   maxOutputTokens: number
-  capabilities: ('structured_output' | 'tool_calling' | 'vision')[]
+  capabilities: ('structured_output' | 'tool_calling' | 'vision' | 'reasoning')[]
   enabled: boolean
   health: 'healthy' | 'degraded' | 'unknown'
 }

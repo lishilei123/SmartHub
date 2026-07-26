@@ -29,7 +29,7 @@ export class ReviewQaService {
       snapshot: run.snapshot,
       reviewResult: run.result,
       documentContent,
-      model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
+      model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') },
     }, signal)
     const evidenceIds = new Set(run.result.evidence.map(item => item.clientEvidenceId))
     const citations = [...new Set(candidate.citations.map(item => String(item).trim()).filter(Boolean))]

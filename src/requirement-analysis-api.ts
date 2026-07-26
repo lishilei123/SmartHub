@@ -53,8 +53,8 @@ export type RequirementAnalysisResult = {
   coverage: {
     assets: Array<{
       assetVersionId: string
-      reviewedChunkIds: string[]
-      skippedChunks: Array<{ chunkId: string; reason: string }>
+      deliveredChunkIds: string[]
+      excludedChunks: Array<{ chunkId: string; reason: string }>
     }>
     limitations: string[]
   }
@@ -104,6 +104,14 @@ export type AgentExecutions = {
   requirementReview?: AgentExecutionRecord
 }
 
+export type InputDeliveryManifest = {
+  policyVersion: string
+  mode: 'full_context' | 'segmented_context'
+  packageSha256: string
+  entries: Array<{ batchId: string; ordinal: number; assetVersionIds: string[]; chunkIds: string[]; contentSha256: string; tokenCount: number; modelCallSequence: number }>
+  finalMergeCompleted: boolean
+}
+
 export type RequirementAnalysisResponse = {
   runId: string
   status: 'candidate_validated'
@@ -119,9 +127,17 @@ export type RequirementAnalysisResponse = {
     indexVersionId: string
     logicalPath: string
     assets: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }[]
-    modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number }
+    modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
     focusAreas: string[]
     excludedAreas: string[]
+    extractionInput: {
+      policyVersion: string
+      mode: 'full_context' | 'segmented_context'
+      estimatedInputTokens: number
+      safeInputBudget: number
+      packageSha256: string
+      batches: Array<{ batchId: string; ordinal: number; tokenCount: number; contentSha256: string; assetVersionIds: string[]; chunkIds: string[] }>
+    }
     createdAt: string
     agentDefinition: AgentDefinitionSnapshot
     agentDefinitions?: {
@@ -132,6 +148,7 @@ export type RequirementAnalysisResponse = {
   result: RequirementAnalysisResult
   execution?: AgentExecutionRecord
   executions?: AgentExecutions
+  inputDeliveryManifest?: InputDeliveryManifest
 }
 
 export type RequirementReviewRun = {
@@ -156,6 +173,7 @@ export type RequirementReviewRun = {
   snapshot?: RequirementAnalysisResponse['snapshot']
   execution?: AgentExecutionRecord
   executions?: AgentExecutions
+  inputDeliveryManifest?: InputDeliveryManifest
   response?: RequirementAnalysisResponse
 }
 

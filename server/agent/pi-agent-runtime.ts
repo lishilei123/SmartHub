@@ -1,16 +1,18 @@
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from '@earendil-works/pi-agent-core'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { streamSimple as streamAnthropic } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as streamOpenAi } from '@earendil-works/pi-ai/api/openai-completions'
-import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime } from '../domain/agent-types.js'
+import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, InputDeliveryManifest, RequirementInputBatch } from '../domain/agent-types.js'
 import type { AgentCandidateResult, CandidateRequirementPointExtraction } from '../domain/review-types.js'
 import type { ToolDescriptor } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
+import { defaultTokenCodec } from '../application/content.js'
 import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
-import { RequirementPointExtractionValidator, RequirementReviewValidator, type ObservedAssetOutlinePage } from './result-validator.js'
-import { renderRequirementTask } from './requirement-analysis-agent.js'
+import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
+import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask } from './requirement-analysis-agent.js'
 
 const require = createRequire(import.meta.url)
 const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -32,18 +34,19 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let candidate: AgentCandidateResult | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     const stage = stageConfiguration(input)
-    const observedReadChunkIds = new Set<string>()
-    const observedOutlinePages = new Map<string, ObservedAssetOutlinePage[]>()
+    const inputPlan = stage.isExtraction ? required(input.requirementInputPlan, 'REQUIREMENT_INPUT_PLAN_REQUIRED: 提取 Agent 缺少服务端输入计划') : undefined
+    const deliveryManifest: InputDeliveryManifest | undefined = inputPlan ? {
+      policyVersion: inputPlan.policyVersion,
+      mode: inputPlan.mode,
+      packageSha256: inputPlan.packageSha256,
+      entries: [],
+      finalMergeCompleted: false,
+    } : undefined
     const registry = stage.isExtraction
       ? createRequirementPointExtractionToolRegistry(this.store, async value => {
-        const validation = await new RequirementPointExtractionValidator(this.store).validate(
-          value,
-          input.snapshot,
-          observedReadChunkIds,
-          observedOutlinePages
-        )
-        if (!validation.valid) { lastSubmissionIssues = validation.issues; return { accepted: false, issues: validation.issues } }
-        candidate = value
+        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV2(value, input.snapshot, required(deliveryManifest, '输入投递证明不存在'))
+        if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
+        candidate = normalized.result
         lastSubmissionIssues = []
         return { accepted: true }
       })
@@ -78,10 +81,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const model = this.bindings.model ?? createModel(input)
     const providerStreamFn = this.bindings.streamFn ?? createStreamFn(input)
     let forceResultSubmission = false
+    let inDraftStage = false
     let latestModelFailure: ModelFailure | undefined
+    let latestAssistantText = ''
     let resultSubmissionRequiredRecorded = false
     const resultSubmissionTurn = Math.max(1, limits.maxTurns - RESULT_SUBMISSION_TURN_RESERVE + 1)
-    const streamFn: StreamFn = (streamModel, context, options) => providerStreamFn(streamModel, context, forceResultSubmission ? {
+    const streamFn: StreamFn = (streamModel, context, options) => providerStreamFn(streamModel, context, forceResultSubmission && !inDraftStage ? {
       ...options,
       toolChoice: input.model.providerType === 'anthropic'
         ? { type: 'tool', name: stage.submitPiName }
@@ -95,17 +100,9 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         resultSubmissionRequiredRecorded = true
         await record({ type: 'result_submission_required', turn: turns, ...(content ? { content } : {}) })
       }
-      const tools = descriptors.map(descriptor => this.piTool(
-        descriptor,
-        toolRuntime,
-        input,
-        controller.signal,
-        requireResultSubmission,
-        observedReadChunkIds,
-        observedOutlinePages
-      ))
+      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission))
       agent = new Agent({
-        initialState: { systemPrompt: input.snapshot.agentDefinition.systemPrompt, model, tools, thinkingLevel: 'off' },
+        initialState: { systemPrompt: input.snapshot.agentDefinition.systemPrompt, model, tools, thinkingLevel: limits.reasoningEffort ?? 'medium' },
         streamFn,
         getApiKey: () => input.model.apiKey,
         sessionId: `${input.snapshot.runId}:${input.snapshot.agentDefinition.agentKey}`,
@@ -114,11 +111,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       })
       agent.subscribe(async (event, eventSignal) => {
         let resultSubmissionRequired = false
-        if (event.type === 'message_end' && event.message.role === 'assistant') latestModelFailure = modelFailure(event.message)
+        if (event.type === 'message_end' && event.message.role === 'assistant') {
+          latestModelFailure = modelFailure(event.message)
+          latestAssistantText = textFromContent((event.message as { content?: unknown }).content)
+        }
         if (event.type === 'turn_start') {
           turns += 1
           if (turns > limits.maxTurns) agent?.abort()
-          else if (turns >= resultSubmissionTurn && !forceResultSubmission) {
+          else if (!inDraftStage && turns >= resultSubmissionTurn && !forceResultSubmission) {
             forceResultSubmission = true
             resultSubmissionRequiredRecorded = true
             resultSubmissionRequired = true
@@ -130,8 +130,47 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       })
       controller.signal.addEventListener('abort', () => agent?.abort(), { once: true })
       await record({ type: 'runtime_initialized', turn: 0, framework: { name: 'pi-agent-core', version: piVersion } })
-      await agent.prompt(renderRequirementTask(input.snapshot, input.fixedRequirementPointExtraction))
-      await agent.waitForIdle()
+      if (stage.isExtraction) {
+        await record({ type: 'input_package_built', turn: 0, content: JSON.stringify({ mode: inputPlan!.mode, packageSha256: inputPlan!.packageSha256, batches: inputPlan!.batches.length, estimatedInputTokens: inputPlan!.estimatedInputTokens, safeInputBudget: inputPlan!.safeInputBudget }) })
+        if (inputPlan!.mode === 'full_context') {
+          const current = inputPlan!.batches[0]
+          deliveryManifest!.entries.push(manifestEntry(current, 1))
+          deliveryManifest!.finalMergeCompleted = true
+          await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
+          await agent.prompt(`${renderRequirementTask(input.snapshot)}\n\n${current.content}`)
+          await agent.waitForIdle()
+        } else {
+          const drafts: string[] = []
+          inDraftStage = true
+          agent.state.tools = []
+          for (const current of inputPlan!.batches) {
+            agent.state.messages = []
+            latestAssistantText = ''
+            latestModelFailure = undefined
+            deliveryManifest!.entries.push(manifestEntry(current, current.ordinal + 1))
+            await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
+            await agent.prompt(renderSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content))
+            await agent.waitForIdle()
+            if (latestModelFailure) throw modelProviderError(latestModelFailure)
+            if (!latestAssistantText.trim()) throw new Error(`SEGMENT_DRAFT_REQUIRED: 批次 ${current.batchId} 未返回可归并草稿`)
+            const draftBudget = Math.floor(inputPlan!.safeInputBudget * 0.75 / inputPlan!.batches.length)
+            if (draftBudget < 64) throw new Error(`SEGMENT_MERGE_BUDGET_EXCEEDED: ${inputPlan!.batches.length} 个批次无法在 ${inputPlan!.safeInputBudget} Token 安全预算内完成最终归并`)
+            const draftTokens = defaultTokenCodec.count(latestAssistantText)
+            if (draftTokens > draftBudget) throw new Error(`SEGMENT_DRAFT_TOO_LARGE: 批次 ${current.batchId} 草稿 ${draftTokens} Token 超过归并预算 ${draftBudget}`)
+            drafts.push(latestAssistantText)
+          }
+          agent.state.messages = []
+          agent.state.tools = tools
+          inDraftStage = false
+          deliveryManifest!.finalMergeCompleted = true
+          await record({ type: 'input_final_merge_started', turn: turns, content: JSON.stringify({ batchCount: drafts.length }) })
+          await agent.prompt(renderSegmentMergeTask(input.snapshot, drafts))
+          await agent.waitForIdle()
+        }
+      } else {
+        await agent.prompt(renderRequirementTask(input.snapshot, input.fixedRequirementPointExtraction))
+        await agent.waitForIdle()
+      }
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
       if (!candidate && latestModelFailure && !lastSubmissionIssues.length) throw modelProviderError(latestModelFailure)
       if (turns > limits.maxTurns) {
@@ -142,7 +181,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         await record({ type: 'result_validation_repair_required', turn: turns, content: formatValidationIssues(lastSubmissionIssues) })
         forceResultSubmission = false
         latestModelFailure = undefined
-        await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n你可以调用必要的普通工具修复这些问题：缺失覆盖必须读取列出的 Chunk；无效 Evidence 必须从已读取 Chunk 重新逐字复制 quote 并通过 evidence_validate。修复后通过 ${stage.submitPiName} 重新提交完整结果。不要仅原样重试提交，也不要把校验错误当作业务结论。`)
+        await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n正文投递覆盖由服务端负责；请只修正需求点或 evidenceDrafts。必要时可用 knowledge_read_chunk 或 evidence_validate_batch 复核引用，然后通过 ${stage.submitPiName} 重新提交完整结果。`)
         await agent.waitForIdle()
       }
       if (!candidate) {
@@ -182,6 +221,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         toolCalls: events.filter(event => event.type === 'tool_execution_start').length,
         toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
         framework: { name: 'pi-agent-core', version: piVersion },
+        ...(deliveryManifest ? { inputDeliveryManifest: deliveryManifest } : {}),
       }
     } finally {
       clearTimeout(deadline)
@@ -195,9 +235,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     runtime: GovernedToolRuntime,
     input: AgentExecutionInput,
     signal: AbortSignal,
-    requireResultSubmission: (content?: string) => Promise<void>,
-    observedReadChunkIds: Set<string>,
-    observedOutlinePages: Map<string, ObservedAssetOutlinePage[]>
+    requireResultSubmission: (content?: string) => Promise<void>
   ): AgentTool {
     return {
       name: descriptor.piName,
@@ -207,31 +245,6 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       executionMode: 'sequential',
       execute: async (toolCallId, args, toolSignal) => {
         const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: args, context: { snapshot: input.snapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
-        if (descriptor.id === 'knowledge.read_chunk') {
-          const chunkId = (result.data as { chunkId?: unknown }).chunkId
-          if (typeof chunkId === 'string') observedReadChunkIds.add(chunkId)
-        }
-        if (descriptor.id === 'knowledge.read_asset') {
-          const data = result.data as {
-            assetVersionId?: unknown
-            outline?: unknown
-            outlinePage?: { offset?: unknown; total?: unknown; hasMore?: unknown }
-          }
-          const assetVersionId = data.assetVersionId
-          const outline = Array.isArray(data.outline) ? data.outline : []
-          const page = data.outlinePage
-          if (
-            typeof assetVersionId === 'string'
-            && typeof page?.offset === 'number'
-            && typeof page.total === 'number'
-            && typeof page.hasMore === 'boolean'
-          ) {
-            observedOutlinePages.set(assetVersionId, [
-              ...(observedOutlinePages.get(assetVersionId) ?? []),
-              { offset: page.offset, count: outline.length, total: page.total, hasMore: page.hasMore },
-            ])
-          }
-        }
         const stage = stageConfiguration(input)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
@@ -253,11 +266,26 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
   }
 }
 
+function manifestEntry(batch: RequirementInputBatch, modelCallSequence: number) {
+  return {
+    batchId: batch.batchId,
+    ordinal: batch.ordinal,
+    assetVersionIds: [...batch.assetVersionIds],
+    chunkIds: [...batch.chunkIds],
+    contentSha256: sha256(batch.content),
+    tokenCount: batch.tokenCount,
+    modelCallSequence,
+  }
+}
+
+function sha256(value: string) { return createHash('sha256').update(value).digest('hex') }
+function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }
+
 type StageConfiguration = {
   isExtraction: true
   submitToolId: 'requirement-points.submit_result'
   submitPiName: 'requirement_points_submit_result'
-  schemaVersion: 'requirement-point-extraction/v1'
+  schemaVersion: 'requirement-point-extraction/v2'
   agentLabel: 'RequirementPointExtractionAgent'
 } | {
   isExtraction: false
@@ -273,7 +301,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: true,
     submitToolId: 'requirement-points.submit_result',
     submitPiName: 'requirement_points_submit_result',
-    schemaVersion: 'requirement-point-extraction/v1',
+    schemaVersion: 'requirement-point-extraction/v2',
     agentLabel: 'RequirementPointExtractionAgent',
   }
   if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
@@ -292,7 +320,8 @@ function formatValidationIssues(issues: Array<{ path: string; message: string }>
 }
 
 function resultValidationError(issues: Array<{ path: string; message: string }>) {
-  return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${issues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
+  const visible = issues.slice(0, 6).map(issue => `${issue.path} ${issue.message}`).join('；')
+  return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${visible}${issues.length > 6 ? `；另有 ${issues.length - 6} 项，请查看结果校验事件` : ''}`)
 }
 
 interface ModelFailure { kind: 'rate_limited' | 'authentication' | 'provider_unavailable' | 'request_failed'; retryable: boolean }
@@ -338,7 +367,7 @@ function createModel(input: AgentExecutionInput): Model<Api> {
     api,
     provider: input.model.sourceId,
     baseUrl: normalizeBaseUrl(input.model.baseUrl, api),
-    reasoning: false,
+    reasoning: input.model.supportsReasoning && (input.snapshot.agentDefinition.limits.reasoningEffort ?? 'medium') !== 'off',
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: input.model.contextWindow,

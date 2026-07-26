@@ -1,4 +1,4 @@
-import type { AgentExecutionEvent, ReviewRunSnapshot } from './agent-types.js'
+import type { AgentExecutionEvent, InputDeliveryManifest, ReviewRunSnapshot } from './agent-types.js'
 import type { CandidateRequirementPointExtraction, CandidateReviewResult } from './review-types.js'
 
 export type AssetType = string
@@ -8,7 +8,7 @@ export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancel
 export type TaskScope = 'asset' | 'directory_recursive' | 'knowledge_base'
 export type ModelHealth = 'healthy' | 'degraded' | 'unknown'
 export type GenerativeProviderType = 'openai' | 'anthropic' | 'openai_compatible'
-export type GenerativeCapability = 'structured_output' | 'tool_calling' | 'vision'
+export type GenerativeCapability = 'structured_output' | 'tool_calling' | 'vision' | 'reasoning'
 
 export interface GenerativeModel {
   id: string
@@ -124,6 +124,7 @@ export interface ReviewRun {
   finishedAt?: string
   snapshot: ReviewRunSnapshot
   extractionResult?: CandidateRequirementPointExtraction
+  inputDeliveryManifest?: InputDeliveryManifest
   result?: CandidateReviewResult
   execution?: AgentExecutionRecord
   executions?: {

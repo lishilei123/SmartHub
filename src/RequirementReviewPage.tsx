@@ -100,6 +100,7 @@ const agentEventLabels: Record<string, string> = {
   message_start: '消息开始', message_update: '消息流更新', message_end: '消息完成',
   tool_execution_start: '工具调用开始', tool_execution_update: '工具调用更新', tool_execution_end: '工具调用结束',
   result_submission_required: '进入结果提交窗口', result_submission_retry: '要求重新提交结果', model_retry_scheduled: '模型请求自动重试',
+  input_package_built: '正文输入包已生成', input_batch_delivered: '正文批次已投递', input_final_merge_started: '分段草稿开始归并',
 }
 
 function eventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
