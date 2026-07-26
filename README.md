@@ -37,7 +37,9 @@
 
 生产 API 注入 SmartHub 内置模型运行池。知识库配置先选择来源，再选择该来源中的生效模型；本地模式下上传解析、索引重建和向量/混合检索均路由到所选模型，发现模型未运行时会自动拉取并启动，同时不会停止池内其他模型。单元测试通过运行时接口注入轻量测试模型，不下载大模型。
 
-## 第二期双 Agent 需求分析流程
+## 当前已实现的第二期双 Agent 需求分析流程
+
+> 实现边界：当前代码仍是 `requirement-point-extraction/v1` 的“分页目录 + 逐 Chunk 工具读取 + Evidence 校验”链路，Pi Runtime 也仍固定 `thinkingLevel: 'off'`。需求文档 V1.8 与技术文档 V1.5 已将目标方案优化为：正常规模正文通过 `full_context` 首轮完整直传，超长正文通过 `segmented_context` 确定性分批直传并最终归并，服务端根据 `InputDeliveryManifest` 生成 coverage，使用 `requirement-point-extraction/v2` 规范化 Evidence，并把推理等级纳入版本化场景配置。该优化尚未实现，不能把以下当前能力描述当成新方案已交付。
 
 - 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
 - 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
@@ -49,6 +51,8 @@
 - `requirement-points.submit_result` 只接受 `requirement-point-extraction/v1` 的需求点、Evidence 和 coverage；`review.submit_result` 只接受 `requirement-review/v2` 的 summary 和 findings。Finding 必须关联冻结需求点，原文依据通过需求点的 Evidence 间接追溯；第二个协议没有需求点、Evidence 或 coverage 字段，因此评审 Agent 无法增删或改写固定提取结果；
 - ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试；
 - 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
+
+目标优化实现后，正常规模输入不再把 `knowledge.read_asset`、`knowledge.read_chunk` 和逐条 `evidence.validate` 作为必经读取链路；这些工具仅保留给旧运行兼容、定点补读或修复。上线前必须使用固定黄金集对新旧两种投递模式做 A/B，确认关键需求点召回不下降、正常规模正文读取工具调用降为 0，并通过正文投递覆盖、Evidence 定位和提示注入测试。
 
 运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；服务端先独立运行需求点提取并冻结结果，再用全新会话启动需求评审，最终合并为正式结果，页面通过 ReviewRun 接口恢复并轮询两个阶段：
 
