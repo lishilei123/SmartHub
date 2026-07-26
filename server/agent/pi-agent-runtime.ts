@@ -17,10 +17,13 @@ import { renderRequirementTask } from './requirement-analysis-agent.js'
 const require = createRequire(import.meta.url)
 const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
 const RESULT_SUBMISSION_TURN_RESERVE = 3
+const TRANSIENT_MODEL_RETRIES = 2
+const MODEL_RETRY_BASE_DELAY_MS = 1_000
 
 export interface PiRuntimeBindings {
   model?: Model<Api>
   streamFn?: StreamFn
+  retryBaseDelayMs?: number
 }
 
 export type RequirementToolRegistryFactory = (store: StateStore, submit: (candidate: CandidateReviewResult) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) => ToolRegistry
@@ -66,6 +69,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const model = this.bindings.model ?? createModel(input)
     const providerStreamFn = this.bindings.streamFn ?? createStreamFn(input)
     let forceResultSubmission = false
+    let latestModelFailure: ModelFailure | undefined
     const resultSubmissionTurn = Math.max(1, limits.maxTurns - RESULT_SUBMISSION_TURN_RESERVE + 1)
     const streamFn: StreamFn = (streamModel, context, options) => providerStreamFn(streamModel, context, forceResultSubmission ? {
       ...options,
@@ -86,6 +90,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       })
       agent.subscribe(async (event, eventSignal) => {
         let resultSubmissionRequired = false
+        if (event.type === 'message_end' && event.message.role === 'assistant') latestModelFailure = modelFailure(event.message)
         if (event.type === 'turn_start') {
           turns += 1
           if (turns > limits.maxTurns) agent?.abort()
@@ -103,6 +108,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       await agent.prompt(renderRequirementTask(input.snapshot))
       await agent.waitForIdle()
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
+      if (!candidate && latestModelFailure && !lastSubmissionIssues.length) throw modelProviderError(latestModelFailure)
       if (turns > limits.maxTurns) {
         if (lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
         throw new Error('AGENT_TURN_LIMIT_EXCEEDED')
@@ -110,8 +116,23 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (!candidate) {
         await record({ type: 'result_submission_retry', turn: turns })
         forceResultSubmission = true
-        await agent.prompt('现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 review_submit_result 提交完整的 review-result/v2。若参数校验失败，请按工具错误修正参数后再次提交。')
-        await agent.waitForIdle()
+        const submissionPrompt = '现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 review_submit_result 提交完整的 review-result/v2。若参数校验失败，请按工具错误修正参数后再次提交。'
+        for (let attempt = 0; attempt <= TRANSIENT_MODEL_RETRIES && !candidate; attempt += 1) {
+          if (attempt > 0) {
+            const retryDelayMs = modelRetryDelay(this.bindings.retryBaseDelayMs ?? MODEL_RETRY_BASE_DELAY_MS, attempt)
+            await record({ type: 'model_retry_scheduled', turn: turns, content: `模型服务临时不可用，${retryDelayMs}ms 后执行第 ${attempt}/${TRANSIENT_MODEL_RETRIES} 次结果提交重试。` })
+            await waitForRetry(retryDelayMs, controller.signal)
+          }
+          latestModelFailure = undefined
+          await agent.prompt(attempt === 0 ? submissionPrompt : `模型服务上一次请求临时失败。${submissionPrompt}`)
+          await agent.waitForIdle()
+          const submissionFailure = latestModelFailure as ModelFailure | undefined
+          if (!submissionFailure) break
+          if (!submissionFailure.retryable || attempt === TRANSIENT_MODEL_RETRIES) {
+            if (lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
+            throw modelProviderError(submissionFailure, attempt)
+          }
+        }
       }
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
       if (turns > limits.maxTurns) {
@@ -119,6 +140,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         throw new Error('AGENT_TURN_LIMIT_EXCEEDED')
       }
       if (!candidate && lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
+      if (!candidate && latestModelFailure) throw modelProviderError(latestModelFailure)
       if (!candidate) throw new Error('MODEL_TOOL_CALL_REQUIRED: 模型未调用 review_submit_result，实际工具调用能力不满足需求评审 Agent；请在模型管理中重新探测并选择通过工具调用检测的模型')
       if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > limits.maxCandidateBytes) throw new Error('AGENT_RESULT_TOO_LARGE')
       return {
@@ -153,6 +175,41 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
 
 function resultValidationError(issues: Array<{ path: string; message: string }>) {
   return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${issues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
+}
+
+interface ModelFailure { kind: 'rate_limited' | 'authentication' | 'provider_unavailable' | 'request_failed'; retryable: boolean }
+
+function modelFailure(message: AgentMessage): ModelFailure | undefined {
+  const value = message as AgentMessage & { stopReason?: string; errorMessage?: string; content?: unknown }
+  if (value.stopReason !== 'error') return undefined
+  const detail = `${value.errorMessage ?? ''}\n${textFromContent(value.content)}`.toLocaleLowerCase()
+  if (/\b429\b|rate[_ -]?limit|too_many_requests|exceeded rate limit/u.test(detail)) return { kind: 'rate_limited', retryable: true }
+  if (/\b(?:401|403)\b|unauthori[sz]ed|authentication|invalid api key|api key.*invalid/u.test(detail)) return { kind: 'authentication', retryable: false }
+  if (/\b5\d\d\b|timeout|timed out|econnreset|econnrefused|network|temporar(?:y|ily) unavailable/u.test(detail)) return { kind: 'provider_unavailable', retryable: true }
+  return { kind: 'request_failed', retryable: false }
+}
+
+function modelProviderError(failure: ModelFailure, retries = 0) {
+  if (failure.kind === 'rate_limited') return new Error(`MODEL_RATE_LIMITED: 模型服务触发限流（HTTP 429）${retries ? `，已自动重试 ${retries} 次` : ''}；请稍后重新评审或切换可用模型`)
+  if (failure.kind === 'authentication') return new Error('MODEL_AUTHENTICATION_FAILED: 模型服务认证失败；请检查模型来源凭据后重新探测')
+  if (failure.kind === 'provider_unavailable') return new Error(`MODEL_PROVIDER_UNAVAILABLE: 模型服务暂时不可用${retries ? `，已自动重试 ${retries} 次` : ''}；请稍后重新评审或切换可用模型`)
+  return new Error('MODEL_REQUEST_FAILED: 模型请求失败；请查看运行记录中的脱敏供应商错误后再重试')
+}
+
+function modelRetryDelay(baseDelayMs: number, attempt: number) {
+  if (baseDelayMs <= 0) return 0
+  const exponential = baseDelayMs * (2 ** Math.max(0, attempt - 1))
+  return exponential + Math.floor(Math.random() * Math.max(1, Math.floor(baseDelayMs / 2)))
+}
+
+async function waitForRetry(delayMs: number, signal: AbortSignal) {
+  if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
+  if (delayMs <= 0) return
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve() }, delayMs)
+    const abort = () => { clearTimeout(timer); reject(signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')) }
+    signal.addEventListener('abort', abort, { once: true })
+  })
 }
 
 function createModel(input: AgentExecutionInput): Model<Api> {

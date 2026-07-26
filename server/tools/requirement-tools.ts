@@ -25,8 +25,8 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
   })
 
   registry.register({
-    id: 'knowledge.read_asset', piName: 'knowledge_read_asset', version: '2.1.0', label: '读取固定需求资产', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '分页读取本次运行固定的输入资产版本。首次读取返回有限目录；后续指定行范围时默认不重复返回目录。多文档运行必须传 assetVersionId。',
+    id: 'knowledge.read_asset', piName: 'knowledge_read_asset', version: '2.2.0', label: '读取固定需求资产', risk: 'read', idempotent: true, timeoutMs: 30_000,
+    description: '分页读取本次运行固定的输入资产版本。首次读取最多返回 80 个目录节点；outlinePage.hasMore 为 true 时必须继续读取下一页，直至完整覆盖目录。后续指定行范围时默认不重复返回目录。多文档运行必须传 assetVersionId。',
     parameters: Type.Object({
       assetVersionId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
       startLine: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -47,7 +47,7 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
     const end = Math.min(Math.max(args.endLine ?? Math.min(start + 199, lines.length), start), lines.length)
     const includeOutline = args.includeOutline ?? (args.startLine === undefined && args.endLine === undefined)
     const outlineOffset = Math.min(args.outlineOffset ?? 0, version.chunks.length)
-    const outlineLimit = args.outlineLimit ?? 40
+    const outlineLimit = args.outlineLimit ?? 80
     const outline = includeOutline
       ? version.chunks.slice(outlineOffset, outlineOffset + outlineLimit).map(chunk => ({ chunkId: chunk.id, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine }))
       : []

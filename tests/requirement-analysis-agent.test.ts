@@ -76,9 +76,9 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   assert.equal(stored.items[0].status, 'succeeded')
   const storedDetail = await service.get(stored.items[0].id)
   assert.equal(storedDetail.response?.result.findings[0].clientFindingId, 'F-001')
-  assert.equal(storedDetail.response?.snapshot.agentDefinition.version, '2.1.0')
-  assert.equal(storedDetail.response?.snapshot.agentDefinition.promptRef.version, '2.1.0')
-  assert.equal(storedDetail.response?.snapshot.agentDefinition.toolsetVersion, '2.1.0')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.version, '2.2.0')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.promptRef.version, '2.2.0')
+  assert.equal(storedDetail.response?.snapshot.agentDefinition.toolsetVersion, '2.2.0')
   assert.match(storedDetail.response?.snapshot.agentDefinition.toolsetContentSha256 ?? '', /^[a-f0-9]{64}$/u)
   assert.equal(storedDetail.response?.snapshot.modelRef.modelId, 'model-1')
   assert.deepEqual(storedDetail.response?.snapshot.agentDefinition.skillBindings, [])
@@ -89,7 +89,8 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   assert.equal(executionEvents.find(event => event.type === 'message_end' && event.role === 'assistant' && event.content)?.content, '分析完成。')
   assert.equal(executionEvents.some(event => event.type === 'message_update' || event.type === 'tool_execution_update'), false)
   assert.deepEqual(executionEvents.find(event => event.type === 'tool_execution_start' && event.toolId === 'knowledge_read_asset')?.toolArguments, { assetVersionId: 'version-1' })
-  const readAssetResult = executionEvents.find(event => event.type === 'tool_execution_end' && event.toolId === 'knowledge_read_asset')?.toolResult as { details?: { data?: { outlinePage?: { total?: number; hasMore?: boolean } } } } | undefined
+  const readAssetResult = executionEvents.find(event => event.type === 'tool_execution_end' && event.toolId === 'knowledge_read_asset')?.toolResult as { details?: { data?: { outlinePage?: { limit?: number; total?: number; hasMore?: boolean } } } } | undefined
+  assert.equal(readAssetResult?.details?.data?.outlinePage?.limit, 80)
   assert.equal(readAssetResult?.details?.data?.outlinePage?.total, 1)
   assert.equal(readAssetResult?.details?.data?.outlinePage?.hasMore, false)
   assert.equal(Object.hasOwn(readAssetResult ?? {}, 'content'), false)
@@ -99,6 +100,8 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   assert.match(evidenceValidationResult?.details?.data?.guidance ?? '', /knowledge_read_chunk/u)
 
   const storedSnapshot = (await store.snapshot()).reviewRuns.find(run => run.id === output.runId)!.snapshot
+  assert.match(storedSnapshot.agentDefinition.systemPrompt, /可独立实现、测试或验收/u)
+  assert.match(storedSnapshot.agentDefinition.systemPrompt, /Finding 是评审问题，不是需求点的组成部分/u)
   const validator = new ReviewResultValidator(store)
   const missingDocumentEvidence = structuredClone(result)
   missingDocumentEvidence.requirementPoints = missingDocumentEvidence.requirementPoints.slice(0, 1)
@@ -172,6 +175,34 @@ test('RequirementAnalysisAgent 通过真实 Pi Agent 工具循环提交并校验
   assert.equal(forcedToolChoices[0], undefined)
   assert.deepEqual(forcedToolChoices[1], { type: 'function', function: { name: 'review_submit_result' } })
   assert.deepEqual(forcedToolChoices[2], { type: 'function', function: { name: 'review_submit_result' } })
+
+  const rateLimitedSubmission = fauxProvider()
+  rateLimitedSubmission.setResponses([
+    fauxAssistantMessage(fauxText('已完成分析，准备提交。')),
+    fauxAssistantMessage(fauxText('429 rate_limit_exceeded'), { stopReason: 'error', errorMessage: '429: too_many_requests rate_limit_exceeded' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', result), { stopReason: 'toolUse' }),
+  ])
+  const rateLimitedRuntime = new PiAgentRuntimeAdapter(store, { model: rateLimitedSubmission.getModel() as Model<Api>, streamFn: rateLimitedSubmission.provider.streamSimple.bind(rateLimitedSubmission.provider) as StreamFn, retryBaseDelayMs: 0 })
+  const rateLimitedRecovered = await new RequirementAnalysisService(store, rateLimitedRuntime).analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
+  assert.equal(rateLimitedRecovered.status, 'candidate_validated')
+  assert.ok(rateLimitedRecovered.execution.events.some(event => event.type === 'model_retry_scheduled'))
+
+  const persistentRateLimit = fauxProvider()
+  persistentRateLimit.setResponses([
+    fauxAssistantMessage(fauxText('已完成分析，准备提交。')),
+    ...Array.from({ length: 3 }, () => fauxAssistantMessage(fauxText('429 rate_limit_exceeded'), { stopReason: 'error', errorMessage: '429: too_many_requests rate_limit_exceeded' })),
+  ])
+  const persistentRateLimitRuntime = new PiAgentRuntimeAdapter(store, { model: persistentRateLimit.getModel() as Model<Api>, streamFn: persistentRateLimit.provider.streamSimple.bind(persistentRateLimit.provider) as StreamFn, retryBaseDelayMs: 0 })
+  const persistentRateLimitService = new RequirementAnalysisService(store, persistentRateLimitRuntime)
+  await assert.rejects(
+    () => persistentRateLimitService.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' }),
+    error => error instanceof Error && error.message.startsWith('MODEL_RATE_LIMITED:') && !error.message.includes('MODEL_TOOL_CALL_REQUIRED'),
+  )
+  const modelAfterRateLimit = (await store.snapshot()).modelSources.find(item => item.id === 'source-1')?.models.find(item => item.id === 'model-1')
+  assert.equal(modelAfterRateLimit?.health, 'healthy')
+  const persistentFailedRun = (await store.snapshot()).reviewRuns.filter(run => run.error?.startsWith('MODEL_RATE_LIMITED:')).at(-1)!
+  await store.transaction(state => { state.reviewRuns.find(run => run.id === persistentFailedRun.id)!.error = 'MODEL_TOOL_CALL_REQUIRED: legacy misclassification' })
+  assert.match((await persistentRateLimitService.get(persistentFailedRun.id)).error ?? '', /^MODEL_RATE_LIMITED:/u)
 
   const cancelledController = new AbortController()
   cancelledController.abort(new Error('AGENT_CANCELLED'))

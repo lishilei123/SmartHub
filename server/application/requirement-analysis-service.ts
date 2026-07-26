@@ -225,7 +225,7 @@ function presentRunSummary(run: ReviewRun) {
     createdAt: run.createdAt,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
-    error: run.error,
+    error: presentedRunError(run),
     snapshot: redactSnapshot(run.snapshot),
   }
 }
@@ -258,7 +258,7 @@ function presentRun(run: ReviewRun) {
     createdAt: run.createdAt,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
-    error: run.error,
+    error: presentedRunError(run),
     snapshot: redactSnapshot(run.snapshot),
     execution: response ? undefined : run.execution,
     response,
@@ -272,6 +272,16 @@ function redactSnapshot(snapshot: ReviewRun['snapshot']) {
 
 function snapshotAssets(run: ReviewRun) {
   return run.snapshot.assets ?? [{ assetId: run.assetId, assetVersionId: run.assetVersionId, assetContentHash: run.snapshot.assetContentHash, logicalPath: run.logicalPath, displayName: run.documentTitle }]
+}
+
+function presentedRunError(run: ReviewRun) {
+  if (!run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:')) return run.error
+  const lastAssistantError = [...(run.execution?.events ?? [])].reverse().find(event => event.type === 'message_end' && event.role === 'assistant' && event.stopReason === 'error')
+  const detail = lastAssistantError?.content?.toLocaleLowerCase() ?? ''
+  if (/\b429\b|rate[_ -]?limit|too_many_requests|exceeded rate limit/u.test(detail)) return 'MODEL_RATE_LIMITED: 模型服务触发限流（HTTP 429）；该历史运行已根据保存的供应商错误记录校正展示'
+  if (/\b(?:401|403)\b|unauthori[sz]ed|authentication|invalid api key|api key.*invalid/u.test(detail)) return 'MODEL_AUTHENTICATION_FAILED: 模型服务认证失败；该历史运行已根据保存的供应商错误记录校正展示'
+  if (lastAssistantError) return 'MODEL_REQUEST_FAILED: 模型请求失败；该历史运行已根据保存的供应商错误记录校正展示'
+  return run.error
 }
 
 function encodeCursor(run: ReviewRun) { return Buffer.from(JSON.stringify([run.createdAt, run.id])).toString('base64url') }
