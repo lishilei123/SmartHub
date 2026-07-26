@@ -8,6 +8,7 @@ import type { GenerativeSourceDraft, KnowledgeDocument } from './prototype-data'
 import { loadAssetVersion, loadGenerativeModelSources, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { emptyMarkdownOutline, parseMarkdownOutline } from './markdown-outline'
+import { persistedRunningReviewRunIds, resolveReviewRunId } from './requirement-review-run-state'
 import {
   askRequirementReviewQuestion,
   cancelRequirementReviewRun,
@@ -247,9 +248,10 @@ export function RequirementReviewPage({
     return () => { cancelled = true }
   }, [projectVersion?.id])
 
-  const hasRunningRuns = runs.some(run => run.status === 'running')
+  const runningRunIds = persistedRunningReviewRunIds(runs)
+  const runningRunKey = runningRunIds.join('\n')
   useEffect(() => {
-    if (!projectVersion || !hasRunningRuns) return
+    if (!projectVersion || !runningRunIds.length) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     const poll = async () => {
@@ -257,8 +259,17 @@ export function RequirementReviewPage({
         const page = await loadRequirementReviewRuns(projectVersion.id, { runningOnly: true })
         if (cancelled) return
         const active = new Map(page.items.map(run => [run.id, run]))
-        setRuns(current => current.map(run => active.get(run.id) ?? (run.status === 'running' ? { ...run, status: 'succeeded', step: 'completed', progress: 100 } : run)))
-        if (page.items.some(run => run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:'))) {
+        const finished = await Promise.all(runningRunIds
+          .filter(runId => !active.has(runId))
+          .map(runId => loadRequirementReviewRun(runId)))
+        if (cancelled) return
+        const refreshed = new Map([...page.items, ...finished].map(run => [run.id, run]))
+        setRuns(current => current.map(run => {
+          const runId = resolveReviewRunId(run)
+          const latest = refreshed.get(runId)
+          return latest ? { ...run, ...latest } : run
+        }))
+        if ([...refreshed.values()].some(run => run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:'))) {
           void loadGenerativeModelSources().then(setModels).catch(() => undefined)
         }
         if (page.items.length) timer = setTimeout(() => { void poll() }, 1_000)
@@ -268,7 +279,7 @@ export function RequirementReviewPage({
     }
     timer = setTimeout(() => { void poll() }, 500)
     return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [hasRunningRuns, projectVersion?.id])
+  }, [runningRunKey, projectVersion?.id])
 
   const selectedDocument = requirementDocuments.find(document => document.id === selectedAssetId) ?? requirementDocuments[0]
   const selectedRun = runs.find(run => run.id === selectedRunId)
@@ -312,7 +323,7 @@ export function RequirementReviewPage({
   }, [modelChoices, selectedModelKey])
 
   useEffect(() => {
-    if (!selectedRun?.id || selectedRun.response || selectedRun.status === 'running') return
+    if (!selectedRun?.id || selectedRun.id.startsWith('pending-') || selectedRun.response || selectedRun.status === 'running') return
     let cancelled = false
     void loadRequirementReviewRun(selectedRun.id).then(detail => {
       if (!cancelled) setRuns(current => current.map(run => run.id === detail.id ? { ...run, ...detail } : run))
@@ -494,9 +505,12 @@ export function RequirementReviewPage({
         modelId: selectedModel.modelId,
         focusAreas: ['功能完整性', '异常流程', '边界条件', '可测试性'],
       }, controller.signal)
-      setRuns(current => current.map(run => run.id === temporaryId ? started : run))
-      setSelectedRunId(started.id)
-      addAudit(`多文档需求点提取与评审已进入后台运行：${started.id}`)
+      const startedId = resolveReviewRunId(started)
+      if (!startedId) throw new Error('需求评审创建响应缺少运行 ID')
+      const persistedRun = { ...started, id: startedId }
+      setRuns(current => current.map(run => run.id === temporaryId ? persistedRun : run))
+      setSelectedRunId(startedId)
+      addAudit(`多文档需求点提取与评审已进入后台运行：${startedId}`)
       notify(`已固定 ${fixedDocuments.length} 份文档，正在提取需求点并评审。刷新或切换页面不会取消。`)
     } catch (error) {
       const message = controller.signal.aborted ? '评审启动响应已中断；若任务已创建，重新进入页面后仍可恢复查看' : error instanceof Error ? error.message : '需求评审启动失败'
