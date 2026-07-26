@@ -4,11 +4,20 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-work
 import type { Api, Model } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
+import { createRequirementPointExtractionAgentDefinition, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION } from '../server/agent/requirement-analysis-agent.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from '../server/agent/result-validator.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../server/domain/review-types.js'
 import { defaultConfig } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
+
+test('提取 Agent 提示词明确固定证据的提交常量与标识来源', () => {
+  const definition = createRequirementPointExtractionAgentDefinition()
+  assert.equal(REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, '3.0.1')
+  assert.match(definition.systemPrompt, /sourceType 必须且只能填写字符串 `knowledge_chunk`/u)
+  assert.match(definition.systemPrompt, /严禁填写 `ASSET`/u)
+  assert.match(definition.systemPrompt, /sourceRef\.chunkId 与 sourceRef\.assetVersionId 必须逐字复制 evidence_validate/u)
+})
 
 test('两个独立 Agent 串联提取固定需求点并生成评审结果', async () => {
   const store = await seededStore()
