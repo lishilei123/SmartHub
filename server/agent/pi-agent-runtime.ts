@@ -4,19 +4,18 @@ import type { Api, Model } from '@earendil-works/pi-ai'
 import { streamSimple as streamAnthropic } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as streamOpenAi } from '@earendil-works/pi-ai/api/openai-completions'
 import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime } from '../domain/agent-types.js'
-import type { CandidateReviewResult } from '../domain/review-types.js'
+import type { AgentCandidateResult, CandidateRequirementPointExtraction } from '../domain/review-types.js'
 import type { ToolDescriptor } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
-import { createRequirementToolRegistry } from '../tools/requirement-tools.js'
-import type { ReviewSubmissionFeedback } from '../tools/requirement-tools.js'
-import type { ToolRegistry } from '../tools/registry.js'
-import { ReviewResultValidator } from './result-validator.js'
+import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
+import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
 import { renderRequirementTask } from './requirement-analysis-agent.js'
 
 const require = createRequire(import.meta.url)
 const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
 const RESULT_SUBMISSION_TURN_RESERVE = 3
+const RESULT_SUBMISSION_TOOL_RESERVE = 3
 const TRANSIENT_MODEL_RETRIES = 2
 const MODEL_RETRY_BASE_DELAY_MS = 1_000
 
@@ -26,27 +25,30 @@ export interface PiRuntimeBindings {
   retryBaseDelayMs?: number
 }
 
-export type RequirementToolRegistryFactory = (store: StateStore, submit: (candidate: CandidateReviewResult) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) => ToolRegistry
-
 export class PiAgentRuntimeAdapter implements AgentRuntime {
-  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly toolRegistryFactory: RequirementToolRegistryFactory = createRequirementToolRegistry) {}
+  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}) {}
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
-    let candidate: CandidateReviewResult | undefined
+    let candidate: AgentCandidateResult | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
-    const validator = new ReviewResultValidator(this.store)
-    const registry = this.toolRegistryFactory(this.store, async value => {
-      const validation = await validator.validate(value, input.snapshot)
-      if (!validation.valid) {
-        lastSubmissionIssues = validation.issues
-        return { accepted: false, issues: validation.issues }
-      }
-      candidate = value
-      lastSubmissionIssues = []
-      return { accepted: true }
-    })
+    const stage = stageConfiguration(input)
+    const registry = stage.isExtraction
+      ? createRequirementPointExtractionToolRegistry(this.store, async value => {
+        const validation = await new RequirementPointExtractionValidator(this.store).validate(value, input.snapshot)
+        if (!validation.valid) { lastSubmissionIssues = validation.issues; return { accepted: false, issues: validation.issues } }
+        candidate = value
+        lastSubmissionIssues = []
+        return { accepted: true }
+      })
+      : createRequirementReviewToolRegistry(async value => {
+        const validation = await new RequirementReviewValidator().validate(value, stage.fixedExtraction, input.snapshot)
+        if (!validation.valid) { lastSubmissionIssues = validation.issues; return { accepted: false, issues: validation.issues } }
+        candidate = value
+        lastSubmissionIssues = []
+        return { accepted: true }
+      })
     const limits = input.snapshot.agentDefinition.limits
-    const toolRuntime = new GovernedToolRuntime(registry, limits)
+    const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE })
     const allowedToolIds = new Set(input.snapshot.agentDefinition.toolIds)
     const descriptors = registry.descriptors(allowedToolIds)
     const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))
@@ -70,21 +72,28 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const providerStreamFn = this.bindings.streamFn ?? createStreamFn(input)
     let forceResultSubmission = false
     let latestModelFailure: ModelFailure | undefined
+    let resultSubmissionRequiredRecorded = false
     const resultSubmissionTurn = Math.max(1, limits.maxTurns - RESULT_SUBMISSION_TURN_RESERVE + 1)
     const streamFn: StreamFn = (streamModel, context, options) => providerStreamFn(streamModel, context, forceResultSubmission ? {
       ...options,
       toolChoice: input.model.providerType === 'anthropic'
-        ? { type: 'tool', name: 'review_submit_result' }
-        : { type: 'function', function: { name: 'review_submit_result' } },
+        ? { type: 'tool', name: stage.submitPiName }
+        : { type: 'function', function: { name: stage.submitPiName } },
     } as Parameters<StreamFn>[2] : options)
     let agent: Agent | undefined
     try {
-      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal))
+      const requireResultSubmission = async (content?: string) => {
+        if (forceResultSubmission && resultSubmissionRequiredRecorded) return
+        forceResultSubmission = true
+        resultSubmissionRequiredRecorded = true
+        await record({ type: 'result_submission_required', turn: turns, ...(content ? { content } : {}) })
+      }
+      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission))
       agent = new Agent({
         initialState: { systemPrompt: input.snapshot.agentDefinition.systemPrompt, model, tools, thinkingLevel: 'off' },
         streamFn,
         getApiKey: () => input.model.apiKey,
-        sessionId: input.snapshot.runId,
+        sessionId: `${input.snapshot.runId}:${input.snapshot.agentDefinition.agentKey}`,
         toolExecution: 'sequential',
         beforeToolCall: async ({ toolCall }) => byPiName.has(toolCall.name) ? undefined : { block: true, reason: 'TOOL_NOT_ALLOWED' },
       })
@@ -96,6 +105,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           if (turns > limits.maxTurns) agent?.abort()
           else if (turns >= resultSubmissionTurn && !forceResultSubmission) {
             forceResultSubmission = true
+            resultSubmissionRequiredRecorded = true
             resultSubmissionRequired = true
           }
         }
@@ -105,7 +115,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       })
       controller.signal.addEventListener('abort', () => agent?.abort(), { once: true })
       await record({ type: 'runtime_initialized', turn: 0, framework: { name: 'pi-agent-core', version: piVersion } })
-      await agent.prompt(renderRequirementTask(input.snapshot))
+      await agent.prompt(renderRequirementTask(input.snapshot, input.fixedRequirementPointExtraction))
       await agent.waitForIdle()
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
       if (!candidate && latestModelFailure && !lastSubmissionIssues.length) throw modelProviderError(latestModelFailure)
@@ -116,7 +126,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (!candidate) {
         await record({ type: 'result_submission_retry', turn: turns })
         forceResultSubmission = true
-        const submissionPrompt = '现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 review_submit_result 提交完整的 review-result/v2。若参数校验失败，请按工具错误修正参数后再次提交。'
+        const submissionPrompt = `现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 ${stage.submitPiName} 提交完整的 ${stage.schemaVersion}。若参数校验失败，请按工具错误修正参数后再次提交。`
         for (let attempt = 0; attempt <= TRANSIENT_MODEL_RETRIES && !candidate; attempt += 1) {
           if (attempt > 0) {
             const retryDelayMs = modelRetryDelay(this.bindings.retryBaseDelayMs ?? MODEL_RETRY_BASE_DELAY_MS, attempt)
@@ -141,7 +151,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       }
       if (!candidate && lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
       if (!candidate && latestModelFailure) throw modelProviderError(latestModelFailure)
-      if (!candidate) throw new Error('MODEL_TOOL_CALL_REQUIRED: 模型未调用 review_submit_result，实际工具调用能力不满足需求评审 Agent；请在模型管理中重新探测并选择通过工具调用检测的模型')
+      if (!candidate) throw new Error(`MODEL_TOOL_CALL_REQUIRED: 模型未调用 ${stage.submitPiName}，实际工具调用能力不满足 ${stage.agentLabel}；请在模型管理中重新探测并选择通过工具调用检测的模型`)
       if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > limits.maxCandidateBytes) throw new Error('AGENT_RESULT_TOO_LARGE')
       return {
         candidate,
@@ -158,7 +168,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
   }
 
-  private piTool(descriptor: ToolDescriptor, runtime: GovernedToolRuntime, input: AgentExecutionInput, signal: AbortSignal): AgentTool {
+  private piTool(descriptor: ToolDescriptor, runtime: GovernedToolRuntime, input: AgentExecutionInput, signal: AbortSignal, requireResultSubmission: (content?: string) => Promise<void>): AgentTool {
     return {
       name: descriptor.piName,
       label: descriptor.label,
@@ -167,9 +177,45 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       executionMode: 'sequential',
       execute: async (toolCallId, args, toolSignal) => {
         const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: args, context: { snapshot: input.snapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        const stage = stageConfiguration(input)
+        if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         return { content: [{ type: 'text', text: JSON.stringify(result.data) }], details: { toolId: descriptor.id, version: descriptor.version, data: result.data }, terminate: result.terminate }
       },
     }
+  }
+}
+
+type StageConfiguration = {
+  isExtraction: true
+  submitToolId: 'requirement-points.submit_result'
+  submitPiName: 'requirement_points_submit_result'
+  schemaVersion: 'requirement-point-extraction/v1'
+  agentLabel: 'RequirementPointExtractionAgent'
+} | {
+  isExtraction: false
+  submitToolId: 'review.submit_result'
+  submitPiName: 'review_submit_result'
+  schemaVersion: 'requirement-review/v1'
+  agentLabel: 'RequirementReviewAgent'
+  fixedExtraction: CandidateRequirementPointExtraction
+}
+
+function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
+  if (input.snapshot.agentDefinition.agentKey === 'requirement-point-extraction') return {
+    isExtraction: true,
+    submitToolId: 'requirement-points.submit_result',
+    submitPiName: 'requirement_points_submit_result',
+    schemaVersion: 'requirement-point-extraction/v1',
+    agentLabel: 'RequirementPointExtractionAgent',
+  }
+  if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
+  return {
+    isExtraction: false,
+    submitToolId: 'review.submit_result',
+    submitPiName: 'review_submit_result',
+    schemaVersion: 'requirement-review/v1',
+    agentLabel: 'RequirementReviewAgent',
+    fixedExtraction: input.fixedRequirementPointExtraction,
   }
 }
 

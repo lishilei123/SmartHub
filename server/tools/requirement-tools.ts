@@ -1,11 +1,11 @@
 import { Type } from 'typebox'
-import type { CandidateReviewResult } from '../domain/review-types.js'
+import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { ToolRegistry } from './registry.js'
 
 export interface ReviewSubmissionFeedback { accepted: boolean; issues?: Array<{ path: string; message: string }> }
 
-export function createRequirementToolRegistry(store: StateStore, submit: (candidate: CandidateReviewResult) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
+export function createRequirementPointExtractionToolRegistry(store: StateStore, submit: (candidate: CandidateRequirementPointExtraction) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
   const registry = new ToolRegistry()
   registry.register({
     id: 'knowledge.search', piName: 'knowledge_search', version: '1.0.0', label: '固定索引检索', risk: 'read', idempotent: true, timeoutMs: 30_000,
@@ -99,11 +99,11 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
   })
 
   registry.register({
-    id: 'review.submit_result', piName: 'review_submit_result', version: '2.0.0', label: '提交候选评审结果', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
-    description: '提交 review-result/v2 候选结果并结束 Agent。候选结果仍由 SmartHub 独立校验，不直接写入正式需求点或 Finding。',
-    parameters: reviewResultSchema(),
+    id: 'requirement-points.submit_result', piName: 'requirement_points_submit_result', version: '1.0.0', label: '提交固定需求点提取结果', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
+    description: '提交 requirement-point-extraction/v1 候选结果并结束提取 Agent。结果只包含需求点、固定证据和覆盖范围。',
+    parameters: requirementPointExtractionSchema(),
   }, async request => {
-    const feedback = await submit(structuredClone(request.arguments) as CandidateReviewResult)
+    const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementPointExtraction)
     return feedback.accepted
       ? { data: { accepted: true, status: 'candidate_validated' }, terminate: true }
       : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] }, terminate: false }
@@ -111,25 +111,46 @@ export function createRequirementToolRegistry(store: StateStore, submit: (candid
   return registry
 }
 
-function reviewResultSchema() {
+export function createRequirementReviewToolRegistry(submit: (candidate: CandidateRequirementReview) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
+  const registry = new ToolRegistry()
+  registry.register({
+    id: 'review.submit_result', piName: 'review_submit_result', version: '3.0.0', label: '提交候选需求评审', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
+    description: '提交 requirement-review/v1 候选结果并结束评审 Agent。协议只接受 Finding 和评审摘要，不能提交需求点、证据或覆盖范围。',
+    parameters: requirementReviewSchema(),
+  }, async request => {
+    const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementReview)
+    return feedback.accepted
+      ? { data: { accepted: true, status: 'candidate_validated' }, terminate: true }
+      : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] }, terminate: false }
+  })
+  return registry
+}
+
+function requirementPointExtractionSchema() {
   const strings = Type.Array(Type.String({ minLength: 1, maxLength: 4000 }), { maxItems: 100 })
   return Type.Object({
-    summary: Type.Object({ overallAssessment: Type.Union(['pass', 'pass_with_notes', 'needs_revision', 'blocked'].map(value => Type.Literal(value))), score: Type.Number({ minimum: 0, maximum: 100 }), strengths: strings, risks: strings }),
     requirementPoints: Type.Array(Type.Object({
       clientRequirementPointId: Type.String({ minLength: 1, maxLength: 100 }),
       title: Type.String({ minLength: 1, maxLength: 300 }),
       description: Type.String({ minLength: 1, maxLength: 8000 }),
       evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }),
     }), { maxItems: 300 }),
+    evidence: Type.Array(Type.Object({ clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), sourceType: Type.Literal('knowledge_chunk'), sourceRef: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }) }), quote: Type.String({ minLength: 1, maxLength: 4000 }), locator: Type.Object({ heading: Type.String(), start: Type.Integer({ minimum: 0 }), end: Type.Integer({ minimum: 0 }) }) }), { maxItems: 300 }),
+    coverage: Type.Object({ reviewedAreas: strings, notReviewedAreas: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 100 }), limitations: Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 100 }) }),
+  }, { additionalProperties: false })
+}
+
+function requirementReviewSchema() {
+  const strings = Type.Array(Type.String({ minLength: 1, maxLength: 4000 }), { maxItems: 100 })
+  return Type.Object({
+    summary: Type.Object({ overallAssessment: Type.Union(['pass', 'pass_with_notes', 'needs_revision', 'blocked'].map(value => Type.Literal(value))), score: Type.Number({ minimum: 0, maximum: 100 }), strengths: strings, risks: strings }, { additionalProperties: false }),
     findings: Type.Array(Type.Object({
       clientFindingId: Type.String({ minLength: 1, maxLength: 100 }),
       type: Type.Union(['missing_requirement', 'ambiguity', 'conflict', 'boundary_gap', 'state_gap', 'exception_gap', 'security_risk', 'testability_gap', 'dependency_risk', 'other'].map(value => Type.Literal(value))),
       severity: Type.Union(['critical', 'high', 'medium', 'low', 'info'].map(value => Type.Literal(value))),
       confidence: Type.Number({ minimum: 0, maximum: 1 }), title: Type.String({ minLength: 1, maxLength: 300 }), description: Type.String({ minLength: 1, maxLength: 8000 }), impact: Type.String({ minLength: 1, maxLength: 4000 }), recommendation: Type.String({ minLength: 1, maxLength: 4000 }), requirementPointRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }), evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { maxItems: 20 }),
-    }), { maxItems: 100 }),
-    evidence: Type.Array(Type.Object({ clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), sourceType: Type.Literal('knowledge_chunk'), sourceRef: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }) }), quote: Type.String({ minLength: 1, maxLength: 4000 }), locator: Type.Object({ heading: Type.String(), start: Type.Integer({ minimum: 0 }), end: Type.Integer({ minimum: 0 }) }) }), { maxItems: 300 }),
-    coverage: Type.Object({ reviewedAreas: strings, notReviewedAreas: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 100 }), limitations: Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 100 }) }),
-  })
+    }, { additionalProperties: false }), { maxItems: 100 }),
+  }, { additionalProperties: false })
 }
 
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }

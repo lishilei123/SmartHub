@@ -3,16 +3,29 @@ import { ToolRegistry } from './registry.js'
 
 export class GovernedToolRuntime {
   private calls = 0
+  private standardCalls = 0
+  private reservedCalls = 0
   private readonly fingerprints = new Map<string, number>()
 
-  constructor(private readonly registry: ToolRegistry, private readonly limits: { maxToolCalls: number; maxRepeatedToolCall: number }) {}
+  constructor(
+    private readonly registry: ToolRegistry,
+    private readonly limits: { maxToolCalls: number; maxRepeatedToolCall: number },
+    private readonly reservation: { toolIds: ReadonlySet<string>; calls: number } = { toolIds: new Set(), calls: 0 },
+  ) {}
 
   async execute(request: ToolExecutionRequest, signal: AbortSignal): Promise<ToolExecutionResult> {
     if (!request.context.allowedToolIds.has(request.toolId)) throw new Error(`TOOL_NOT_ALLOWED: ${request.toolId}`)
     const registered = this.registry.get(request.toolId)
     if (!registered) throw new Error(`TOOL_NOT_REGISTERED: ${request.toolId}`)
+    const reserved = this.reservation.toolIds.has(request.toolId)
+    if (reserved) {
+      this.reservedCalls += 1
+      if (this.reservedCalls > this.reservation.calls) throw new Error('AGENT_RESULT_SUBMISSION_LIMIT_EXCEEDED')
+    } else {
+      this.standardCalls += 1
+      if (this.standardCalls > this.standardCallLimit) throw new Error('AGENT_TOOL_LIMIT_EXCEEDED')
+    }
     this.calls += 1
-    if (this.calls > this.limits.maxToolCalls) throw new Error('AGENT_TOOL_LIMIT_EXCEEDED')
     const fingerprint = `${request.toolId}:${stableStringify(request.arguments)}`
     const repeated = (this.fingerprints.get(fingerprint) ?? 0) + 1
     this.fingerprints.set(fingerprint, repeated)
@@ -28,6 +41,8 @@ export class GovernedToolRuntime {
   }
 
   get callCount() { return this.calls }
+  get remainingStandardCalls() { return Math.max(0, this.standardCallLimit - this.standardCalls) }
+  private get standardCallLimit() { return Math.max(0, this.limits.maxToolCalls - this.reservation.calls) }
 }
 
 function stableStringify(value: unknown): string {

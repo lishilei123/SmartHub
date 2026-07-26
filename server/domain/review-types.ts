@@ -30,22 +30,32 @@ export interface CandidateFinding {
   evidenceRefs: string[]
 }
 
-export interface CandidateReviewResult {
+export interface ReviewCoverage {
+  reviewedAreas: string[]
+  notReviewedAreas: string[]
+  limitations: string[]
+}
+
+export interface CandidateRequirementPointExtraction {
+  requirementPoints: CandidateRequirementPoint[]
+  evidence: CandidateEvidence[]
+  coverage: ReviewCoverage
+}
+
+export interface CandidateRequirementReview {
   summary: {
     overallAssessment: OverallAssessment
     score: number
     strengths: string[]
     risks: string[]
   }
-  requirementPoints: CandidateRequirementPoint[]
   findings: CandidateFinding[]
-  evidence: CandidateEvidence[]
-  coverage: {
-    reviewedAreas: string[]
-    notReviewedAreas: string[]
-    limitations: string[]
-  }
 }
+
+export interface CandidateReviewResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
+}
+
+export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementReview
 
 export interface ValidationIssue { path: string; message: string }
 export interface ValidationReport { valid: boolean; issues: ValidationIssue[] }

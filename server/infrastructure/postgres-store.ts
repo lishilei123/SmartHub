@@ -130,7 +130,7 @@ export class PostgresStore implements StateStore {
     const limit = Math.min(Math.max(1, options.limit), 100)
     const cursor = decodeReviewRunCursor(options.cursor)
     const result = await this.pool.query<{ data: ReviewRun }>(`
-      SELECT data - 'result' - 'execution' AS data
+      SELECT data - 'result' - 'extractionResult' - 'execution' - 'executions' AS data
       FROM smarthub.review_runs
       WHERE project_version_id = $1
         AND ($2::boolean = false OR status = 'running')

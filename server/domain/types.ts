@@ -1,5 +1,5 @@
 import type { AgentExecutionEvent, ReviewRunSnapshot } from './agent-types.js'
-import type { CandidateReviewResult } from './review-types.js'
+import type { CandidateRequirementPointExtraction, CandidateReviewResult } from './review-types.js'
 
 export type AssetType = string
 export type SourceType = 'upload'
@@ -98,6 +98,7 @@ export interface IndexVersion { id: string; knowledgeBaseId: string; number: num
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
 export type ReviewRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
 export interface AgentExecutionRecord {
+  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'requirement-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number
@@ -122,8 +123,13 @@ export interface ReviewRun {
   startedAt: string
   finishedAt?: string
   snapshot: ReviewRunSnapshot
+  extractionResult?: CandidateRequirementPointExtraction
   result?: CandidateReviewResult
   execution?: AgentExecutionRecord
+  executions?: {
+    requirementPointExtraction?: AgentExecutionRecord
+    requirementReview?: AgentExecutionRecord
+  }
   error?: string
 }
 

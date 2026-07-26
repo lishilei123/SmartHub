@@ -1,4 +1,4 @@
-import type { CandidateReviewResult } from './review-types.js'
+import type { AgentCandidateResult, CandidateRequirementPointExtraction } from './review-types.js'
 
 export interface AgentExecutionLimits {
   maxTurns: number
@@ -11,12 +11,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-analysis'
-  agentType: 'requirement_analysis'
+  agentKey: 'requirement-point-extraction' | 'requirement-review'
+  agentType: 'requirement_point_extraction' | 'requirement_review'
   version: string
   status: 'published'
   modelScene: 'requirement_analysis'
-  resultSchemaVersion: 'review-result/v2'
+  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-review/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -50,6 +50,10 @@ export interface ReviewRunSnapshot {
   focusAreas: string[]
   excludedAreas: string[]
   agentDefinition: AgentDefinitionVersion
+  agentDefinitions: {
+    requirementPointExtraction: AgentDefinitionVersion
+    requirementReview: AgentDefinitionVersion
+  }
   createdAt: string
 }
 
@@ -86,11 +90,12 @@ export interface AgentExecutionEvent {
 export interface AgentExecutionInput {
   snapshot: ReviewRunSnapshot
   model: AgentModelConnection
+  fixedRequirementPointExtraction?: CandidateRequirementPointExtraction
   onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
 }
 
 export interface AgentExecutionOutput {
-  candidate: CandidateReviewResult
+  candidate: AgentCandidateResult
   events: AgentExecutionEvent[]
   turns: number
   toolCalls: number

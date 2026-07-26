@@ -31,7 +31,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const loadProjectVersions = () => request<ProjectVersion[]>('/project-versions')
 export const createProjectVersion = (input: { name: string; description?: string; sourceProjectVersionId?: string; inheritRequirementBindings?: boolean }) => request<ProjectVersion>('/project-versions', { method: 'POST', body: JSON.stringify(input) })
 export const updateProjectVersionStatus = (id: string, status: ProjectVersionStatus) => request<ProjectVersion>(`/project-versions/${encodeURIComponent(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) })
-export const deleteProjectVersion = (id: string) => request<{ id: string; name: string; deletedBindings: number }>(`/project-versions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export const deleteProjectVersion = (id: string) => request<{ id: string; name: string; deletedBindings: number; deletedReviewRuns: number }>(`/project-versions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const loadRequirementBindings = (id: string) => request<RequirementBinding[]>(`/project-versions/${encodeURIComponent(id)}/requirement-bindings`)
 export const bindRequirementVersion = (id: string, assetVersionId: string) => request<RequirementBinding>(`/project-versions/${encodeURIComponent(id)}/requirement-bindings`, { method: 'POST', body: JSON.stringify({ assetVersionId }) })
 export const unbindRequirementVersion = (id: string, bindingId: string) => request<RequirementBinding>(`/project-versions/${encodeURIComponent(id)}/requirement-bindings/${encodeURIComponent(bindingId)}`, { method: 'DELETE' })

@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import type { AgentDefinitionResolver, AgentExecutionEvent, AgentRuntime } from '../domain/agent-types.js'
+import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionOutput, AgentRuntime } from '../domain/agent-types.js'
 import type { AgentExecutionRecord, ReviewRun } from '../domain/types.js'
+import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
-import { ReviewResultValidator } from '../agent/result-validator.js'
+import { RequirementPointExtractionValidator, RequirementReviewValidator, ReviewResultValidator } from '../agent/result-validator.js'
 import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
 
 export interface RequirementAnalysisRequest {
@@ -17,8 +18,13 @@ export interface RequirementAnalysisRequest {
 
 export class RequirementAnalysisService {
   private readonly validator: ReviewResultValidator
+  private readonly extractionValidator: RequirementPointExtractionValidator
+  private readonly reviewValidator = new RequirementReviewValidator()
   private readonly activeRuns = new Map<string, AbortController>()
-  constructor(private readonly store: StateStore, private readonly runtime: AgentRuntime, private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver()) { this.validator = new ReviewResultValidator(store) }
+  constructor(private readonly store: StateStore, private readonly runtime: AgentRuntime, private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver()) {
+    this.validator = new ReviewResultValidator(store)
+    this.extractionValidator = new RequirementPointExtractionValidator(store)
+  }
 
   async list(projectVersionId: string, options: { limit?: number; cursor?: string; runningOnly?: boolean } = {}) {
     const limit = Math.min(Math.max(1, Math.floor(options.limit ?? 50)), 100)
@@ -103,7 +109,8 @@ export class RequirementAnalysisService {
     const model = required(source.models.find(item => item.id === request.modelId && item.enabled), '生成式模型不可用')
     if (!model.capabilities.includes('tool_calling')) throw new Error('需求分析模型必须支持 tool_calling')
     if (model.health !== 'healthy') throw new Error('请先完成所选生成式模型的连通性探测并确保健康状态正常')
-    const definition = await this.definitions.resolve('requirement-analysis')
+    const extractionDefinition = await this.definitions.resolve('requirement-point-extraction')
+    const reviewDefinition = await this.definitions.resolve('requirement-review')
     const estimatedInputTokens = Math.ceil(versions.reduce((total, version) => total + version.content.length, 0) / 4) + 4_000
     if (estimatedInputTokens + model.maxOutputTokens > model.contextWindow) throw new Error('需求版本超过模型上下文预算，请选择更大上下文模型')
     const now = new Date().toISOString()
@@ -123,7 +130,8 @@ export class RequirementAnalysisService {
       modelRef: { sourceId: source.id, modelId: model.id, providerType: source.providerType, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
       focusAreas: cleanList(request.focusAreas),
       excludedAreas: cleanList(request.excludedAreas),
-      agentDefinition: definition,
+      agentDefinition: extractionDefinition,
+      agentDefinitions: { requirementPointExtraction: extractionDefinition, requirementReview: reviewDefinition },
       createdAt: now,
     }
     const run: ReviewRun = {
@@ -138,7 +146,7 @@ export class RequirementAnalysisService {
       modelId: model.id,
       modelLabel: `${source.name} · ${model.displayName}`,
       status: 'running',
-      step: 'agent_executing',
+      step: 'extracting_requirement_points',
       progress: 10,
       createdAt: now,
       startedAt: now,
@@ -146,23 +154,60 @@ export class RequirementAnalysisService {
     }
     await this.store.transaction(draft => { draft.reviewRuns.push(run) })
     onCreated?.(presentRun(run))
-    const observedEvents: AgentExecutionEvent[] = []
+    const extractionEvents: AgentExecutionEvent[] = []
+    const reviewEvents: AgentExecutionEvent[] = []
+    let activeAgentKey: 'requirement-point-extraction' | 'requirement-review' = 'requirement-point-extraction'
+    const modelConnection = { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens }
     try {
-      const output = await this.runtime.execute({
+      const extractionOutput = await this.runtime.execute({
         snapshot,
-        model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
+        model: modelConnection,
         onEvent: async event => {
-          observedEvents.push(event)
-          if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, observedEvents)
+          extractionEvents.push(event)
+          if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, extractionEvents, 'requirement-point-extraction')
         },
       }, signal)
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
-      const validation = await this.validator.validate(output.candidate, snapshot)
-      if (!validation.valid) throw new Error(`AGENT_RESULT_VALIDATION_FAILED: ${validation.issues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
+      const extraction = extractionOutput.candidate as CandidateRequirementPointExtraction
+      const extractionValidation = await this.extractionValidator.validate(extraction, snapshot)
+      if (!extractionValidation.valid) throw validationError(extractionValidation.issues)
+      const extractionExecution = executionRecord(extractionOutput, 'requirement-point-extraction')
+      await this.store.transaction(draft => {
+        const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
+        current.extractionResult = structuredClone(extraction)
+        current.executions = { ...(current.executions ?? {}), requirementPointExtraction: extractionExecution }
+        current.execution = extractionExecution
+        current.step = 'reviewing_requirements'
+        current.progress = 60
+      })
+
+      activeAgentKey = 'requirement-review'
+      const reviewSnapshot = { ...snapshot, agentDefinition: reviewDefinition }
+      const reviewOutput = await this.runtime.execute({
+        snapshot: reviewSnapshot,
+        model: modelConnection,
+        fixedRequirementPointExtraction: extraction,
+        onEvent: async event => {
+          reviewEvents.push(event)
+          if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, reviewEvents, 'requirement-review')
+        },
+      }, signal)
+      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
+      const review = reviewOutput.candidate as CandidateRequirementReview
+      const reviewValidation = await this.reviewValidator.validate(review, extraction, reviewSnapshot)
+      if (!reviewValidation.valid) throw validationError(reviewValidation.issues)
+      const result = { ...structuredClone(extraction), ...structuredClone(review) }
+      const validation = await this.validator.validate(result, reviewSnapshot)
+      if (!validation.valid) throw validationError(validation.issues)
+      const reviewExecution = executionRecord(reviewOutput, 'requirement-review')
       const finishedAt = new Date().toISOString()
       await this.store.transaction(draft => {
         const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
-        Object.assign(current, { status: 'succeeded', step: 'completed', progress: 100, finishedAt, result: output.candidate, execution: { turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, events: output.events }, error: undefined } satisfies Partial<ReviewRun>)
+        Object.assign(current, {
+          status: 'succeeded', step: 'completed', progress: 100, finishedAt, extractionResult: extraction, result,
+          execution: undefined,
+          executions: { requirementPointExtraction: extractionExecution, requirementReview: reviewExecution }, error: undefined,
+        } satisfies Partial<ReviewRun>)
       })
       const completed = await this.get(run.id)
       return required(completed.response, '需求评审结果不存在')
@@ -173,7 +218,8 @@ export class RequirementAnalysisService {
         const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
         Object.assign(current, {
           status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
-          ...(observedEvents.length ? { execution: executionProgress(observedEvents) } : {}),
+          ...(activeAgentKey === 'requirement-point-extraction' && extractionEvents.length ? { execution: executionProgress(extractionEvents, activeAgentKey) } : {}),
+          ...(activeAgentKey === 'requirement-review' && reviewEvents.length ? { execution: executionProgress(reviewEvents, activeAgentKey) } : {}),
         } satisfies Partial<ReviewRun>)
         if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
           const currentSource = draft.modelSources.find(item => item.id === source.id)
@@ -194,8 +240,8 @@ export class RequirementAnalysisService {
     }
   }
 
-  private async saveExecutionProgress(runId: string, events: AgentExecutionEvent[]) {
-    const execution = executionProgress(events)
+  private async saveExecutionProgress(runId: string, events: AgentExecutionEvent[], agentKey: 'requirement-point-extraction' | 'requirement-review') {
+    const execution = executionProgress(events, agentKey)
     if (this.store.saveReviewRunExecution) return this.store.saveReviewRunExecution(runId, execution)
     await this.store.transaction(draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
@@ -232,12 +278,13 @@ function presentRunSummary(run: ReviewRun) {
 
 function presentRun(run: ReviewRun) {
   const assets = snapshotAssets(run)
-  const response = run.result && run.execution ? {
+  const response = run.result && (run.executions || run.execution) ? {
     runId: run.id,
     status: 'candidate_validated' as const,
     snapshot: redactSnapshot(run.snapshot),
     result: run.result,
-    execution: run.execution,
+    ...(run.execution ? { execution: run.execution } : {}),
+    ...(run.executions ? { executions: run.executions } : {}),
   } : undefined
   return {
     id: run.id,
@@ -261,13 +308,24 @@ function presentRun(run: ReviewRun) {
     error: presentedRunError(run),
     snapshot: redactSnapshot(run.snapshot),
     execution: response ? undefined : run.execution,
+    executions: response ? undefined : run.executions,
+    extractionResult: response ? undefined : run.extractionResult,
     response,
   }
 }
 
 function redactSnapshot(snapshot: ReviewRun['snapshot']) {
   const definition = snapshot.agentDefinition
-  return { ...snapshot, assets: snapshot.assets ?? [{ assetId: snapshot.assetId, assetVersionId: snapshot.assetVersionId, assetContentHash: snapshot.assetContentHash, logicalPath: snapshot.logicalPath, displayName: snapshot.logicalPath }], agentDefinition: { ...definition, systemPrompt: undefined, taskTemplate: undefined } }
+  const definitions = snapshot.agentDefinitions
+  return {
+    ...snapshot,
+    assets: snapshot.assets ?? [{ assetId: snapshot.assetId, assetVersionId: snapshot.assetVersionId, assetContentHash: snapshot.assetContentHash, logicalPath: snapshot.logicalPath, displayName: snapshot.logicalPath }],
+    agentDefinition: { ...definition, systemPrompt: undefined, taskTemplate: undefined },
+    ...(definitions ? { agentDefinitions: {
+      requirementPointExtraction: { ...definitions.requirementPointExtraction, systemPrompt: undefined, taskTemplate: undefined },
+      requirementReview: { ...definitions.requirementReview, systemPrompt: undefined, taskTemplate: undefined },
+    } } : {}),
+  }
 }
 
 function snapshotAssets(run: ReviewRun) {
@@ -276,7 +334,12 @@ function snapshotAssets(run: ReviewRun) {
 
 function presentedRunError(run: ReviewRun) {
   if (!run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:')) return run.error
-  const lastAssistantError = [...(run.execution?.events ?? [])].reverse().find(event => event.type === 'message_end' && event.role === 'assistant' && event.stopReason === 'error')
+  const savedEvents = [
+    ...(run.executions?.requirementPointExtraction?.events ?? []),
+    ...(run.executions?.requirementReview?.events ?? []),
+    ...(run.execution?.events ?? []),
+  ]
+  const lastAssistantError = [...savedEvents].reverse().find(event => event.type === 'message_end' && event.role === 'assistant' && event.stopReason === 'error')
   const detail = lastAssistantError?.content?.toLocaleLowerCase() ?? ''
   if (/\b429\b|rate[_ -]?limit|too_many_requests|exceeded rate limit/u.test(detail)) return 'MODEL_RATE_LIMITED: 模型服务触发限流（HTTP 429）；该历史运行已根据保存的供应商错误记录校正展示'
   if (/\b(?:401|403)\b|unauthori[sz]ed|authentication|invalid api key|api key.*invalid/u.test(detail)) return 'MODEL_AUTHENTICATION_FAILED: 模型服务认证失败；该历史运行已根据保存的供应商错误记录校正展示'
@@ -300,15 +363,22 @@ function decodeCursor(cursor: string | undefined, runs: ReviewRun[]) {
 function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }
 function cleanList(value: string[] | undefined) { return Array.isArray(value) ? [...new Set(value.map(item => String(item).trim()).filter(Boolean))].slice(0, 20) : [] }
 function shouldCheckpointExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry'].includes(event.type) }
-function executionProgress(events: AgentExecutionEvent[]): AgentExecutionRecord {
+function executionProgress(events: AgentExecutionEvent[], agentKey?: AgentExecutionRecord['agentKey']): AgentExecutionRecord {
   const framework = events.find(event => event.framework)?.framework
   return {
+    ...(agentKey ? { agentKey } : {}),
     turns: events.reduce((maximum, event) => Math.max(maximum, event.turn ?? 0), 0),
     toolCalls: events.filter(event => event.type === 'tool_execution_start').length,
     toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
     ...(framework ? { framework } : {}),
     events: structuredClone(events),
   }
+}
+function executionRecord(output: AgentExecutionOutput, agentKey: 'requirement-point-extraction' | 'requirement-review'): AgentExecutionRecord {
+  return { agentKey, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, events: output.events }
+}
+function validationError(issues: Array<{ path: string; message: string }>) {
+  return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${issues.map(issue => `${issue.path} ${issue.message}`).join('；')}`)
 }
 function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) {
   let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'

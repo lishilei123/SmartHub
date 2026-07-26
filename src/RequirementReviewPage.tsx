@@ -16,6 +16,7 @@ import {
   loadRequirementReviewRuns,
   startRequirementAnalysis,
   type AgentExecutionEvent,
+  type AgentExecutionRecord,
   type RequirementAnalysisResponse,
   type ReviewEvidence,
   type ReviewFinding,
@@ -25,6 +26,7 @@ import {
   type ReviewQuestionQuote,
 } from './requirement-analysis-api'
 import { bindRequirementVersion, loadRequirementBindings, unbindRequirementVersion, type ProjectVersion, type RequirementBinding } from './project-version-api'
+import { versionDocumentDirectory, versionDocumentPath } from './version-document-path'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 type ViewKey = 'overview' | 'source' | 'diff' | 'tree' | 'evidence'
@@ -94,7 +96,12 @@ function eventTime(value: string) { return new Date(value).toLocaleTimeString('z
 function formatTraceValue(value: unknown) { return value === undefined ? '' : JSON.stringify(value, null, 2) }
 
 function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord; loading: boolean; tab: 'conversation' | 'events'; onTab: (tab: 'conversation' | 'events') => void; onClose: () => void }) {
-  const execution = run.response?.execution ?? run.execution
+  const stagedExecutions = run.response?.executions ?? run.executions
+  const initialAgentKey = run.step === 'extracting_requirement_points' ? 'requirement-point-extraction' : stagedExecutions?.requirementReview ? 'requirement-review' : 'requirement-point-extraction'
+  const [agentKey, setAgentKey] = useState<'requirement-point-extraction' | 'requirement-review'>(initialAgentKey)
+  const stagedExecution = agentKey === 'requirement-point-extraction' ? stagedExecutions?.requirementPointExtraction : stagedExecutions?.requirementReview
+  const currentExecution = run.execution?.agentKey === agentKey ? run.execution : undefined
+  const execution: AgentExecutionRecord | undefined = stagedExecution ?? currentExecution ?? (!stagedExecutions ? run.response?.execution ?? run.execution : undefined)
   const events = execution?.events ?? []
   const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
   const completedToolIds = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
@@ -106,6 +113,7 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
   const hasDetailedTrace = events.some(event => event.content || event.toolArguments !== undefined || event.toolResult !== undefined || event.toolCalls?.length)
 
   return <ReviewModal title="Agent 运行记录" className="rr-run-record-modal" onClose={onClose}><div className="rr-run-record">
+    {(stagedExecutions || run.execution?.agentKey === 'requirement-point-extraction' || run.execution?.agentKey === 'requirement-review') && <div className="rr-run-record-tabs"><button className={agentKey === 'requirement-point-extraction' ? 'active' : ''} onClick={() => setAgentKey('requirement-point-extraction')}><FileText />需求点提取 <span>{stagedExecutions?.requirementPointExtraction?.events.length ?? (run.execution?.agentKey === 'requirement-point-extraction' ? run.execution.events.length : 0)}</span></button><button className={agentKey === 'requirement-review' ? 'active' : ''} onClick={() => setAgentKey('requirement-review')}><Bot />需求评审 <span>{stagedExecutions?.requirementReview?.events.length ?? (run.execution?.agentKey === 'requirement-review' ? run.execution.events.length : 0)}</span></button></div>}
     <div className="rr-run-record-summary"><div><ReviewBadge tone={runTone(run.status)}>{runLabel(run.status)}</ReviewBadge><b>{run.id}</b><span>{run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(run.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? 0}</dd></div><div><dt>工具调用</dt><dd>{execution?.toolCalls ?? 0}{execution?.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : run.status === 'running' ? '运行中' : '未完成 / 旧记录'}</dd></div></dl></div>
     {run.error && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(run.error)}</span></div>}
     <div className="rr-run-record-notice"><ShieldCheck /><span>记录模型可见消息、工具参数与工具返回；API 凭据、签名、图片二进制和模型隐藏思维不会写入运行记录。</span></div>
@@ -196,6 +204,7 @@ export function RequirementReviewPage({
   const pendingSectionScroll = useRef<string | null>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
   const readOnly = projectVersion?.status !== 'open'
+  const requirementUploadDirectory = projectVersion ? versionDocumentDirectory(projectVersion.name, '需求文档') : ''
 
   useEffect(() => {
     if (uploadProgress?.stage !== 'completed') return
@@ -557,7 +566,7 @@ export function RequirementReviewPage({
         setUploadProgress({ stage: 'submitting', percent: Math.max(5, Math.round(fileIndex / files.length * 15)), detail: `正在提交 ${file.name}（${fileIndex + 1}/${files.length}）` })
         const extension = file.name.split('.').at(-1)?.toLowerCase()
         if (extension === 'zip') {
-          const result = await uploadKnowledgeArchive(knowledgeBaseId, file, '需求文档', 'requirement')
+          const result = await uploadKnowledgeArchive(knowledgeBaseId, file, requirementUploadDirectory, 'requirement')
           taskIds.push(...result.taskIds)
           assetVersionIds.push(...result.assetVersionIds)
           documentCount += result.documents
@@ -566,7 +575,7 @@ export function RequirementReviewPage({
           deduplicatedCount += result.deduplicated
           addAudit(`上传需求压缩包：${file.name} · ${result.documents} 篇文档`)
         } else if (extension === 'md' || extension === 'txt') {
-          const result = await uploadKnowledgeFile(knowledgeBaseId, file, `需求文档/${file.name}`, 'requirement')
+          const result = await uploadKnowledgeFile(knowledgeBaseId, file, versionDocumentPath(projectVersion.name, '需求文档', file.name), 'requirement')
           documentCount += 1
           if (result.task?.id) taskIds.push(result.task.id)
           assetVersionIds.push(result.version.id)
@@ -595,7 +604,7 @@ export function RequirementReviewPage({
       const taskFailures = [...taskResults.failed.map(task => task.error ?? `${task.id} 处理失败`), ...taskResults.cancelled.map(task => `${task.id} 已取消`), ...taskResults.pending.map(task => `${task.id} 仍在处理`)]
       const failures = [...taskFailures, ...bindingErrors]
       if (!boundCount) throw new Error(failures[0] ?? '需求资料未能完成入库和版本绑定')
-      const summary = `需求资料已入库并绑定：${boundCount} 篇${attachmentCount ? `、${attachmentCount} 个附件` : ''}${deduplicatedCount ? `，${deduplicatedCount} 篇内容已去重` : ''}${skippedCount ? `，跳过 ${skippedCount} 个不支持文件` : ''}`
+      const summary = `需求资料已入库并绑定：${boundCount} 篇${attachmentCount ? `、${attachmentCount} 个附件` : ''}${deduplicatedCount ? `，${deduplicatedCount} 篇内容已去重` : ''}${skippedCount ? `，跳过 ${skippedCount} 个不支持文件` : ''}；知识库目录：/${requirementUploadDirectory}`
       setUploadProgress({ stage: 'completed', percent: 100, detail: summary })
       if (failures.length) notify(`${summary}；另有 ${failures.length} 项未完成：${failures.slice(0, 3).join('；')}`, 'warning')
       else notify(`${summary}。`)
@@ -712,6 +721,12 @@ export function RequirementReviewPage({
   const exportReport = () => {
     if (!selectedRun?.response) return
     const response = selectedRun.response
+    const agentDefinitions = response.snapshot.agentDefinitions
+      ? [response.snapshot.agentDefinitions.requirementPointExtraction, response.snapshot.agentDefinitions.requirementReview]
+      : [response.snapshot.agentDefinition]
+    const agentExecutions = response.executions
+      ? [response.executions.requirementPointExtraction, response.executions.requirementReview].filter((item): item is AgentExecutionRecord => Boolean(item))
+      : response.execution ? [response.execution] : []
     const stateFor = (finding: ReviewFinding) => findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open'
     const lines = [
       `# ${projectVersion?.name ?? '当前版本'} · 需求点提取与评审报告`, '',
@@ -743,10 +758,11 @@ export function RequirementReviewPage({
         ]
       }),
       '## 执行摘要', '',
-      `- Agent：${response.snapshot.agentDefinition.agentKey} ${response.snapshot.agentDefinition.version}`,
-      `- Framework：${response.execution.framework.name} ${response.execution.framework.version}`,
-      `- 回合数：${response.execution.turns}`,
-      `- 工具调用数：${response.execution.toolCalls}`,
+      ...agentDefinitions.map(definition => `- Agent：${definition.agentKey} ${definition.version}`),
+      ...agentExecutions.flatMap(execution => [
+        `- ${execution.agentKey ?? 'legacy'} Framework：${execution.framework ? `${execution.framework.name} ${execution.framework.version}` : '未知'}`,
+        `- ${execution.agentKey ?? 'legacy'} 回合数：${execution.turns}；工具调用数：${execution.toolCalls}`,
+      ]),
     ]
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -828,7 +844,7 @@ export function RequirementReviewPage({
         <button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />导出报告</button>
         {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!selectedModel?.healthy ? '请先选择通过工具调用检测的健康模型' : undefined}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}
       </div>
-      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>输入文档</dt><dd>{(selectedRun.documents ?? selectedRun.snapshot?.assets ?? []).map(document => `${document.displayName} · ${document.assetVersionId}`).join('\n') || selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : 'RequirementAnalysisAgent'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
+      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>输入文档</dt><dd>{(selectedRun.documents ?? selectedRun.snapshot?.assets ?? []).map(document => `${document.displayName} · ${document.assetVersionId}`).join('\n') || selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.version}\n${selectedRun.snapshot.agentDefinitions.requirementReview.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementReview.version}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : '双 Agent 流程'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.promptRef.version} / ${selectedRun.snapshot.agentDefinitions.requirementReview.promptRef.version}` : selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.toolsetVersion} / ${selectedRun.snapshot.agentDefinitions.requirementReview.toolsetVersion}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
     </header>
 
     <div className="rr-workspace">
@@ -837,7 +853,7 @@ export function RequirementReviewPage({
         {!leftCollapsed && <>
           <div className="rr-list-meta"><span>{requirementDocuments.length} 份固定输入文档</span><button onClick={() => void refreshKnowledge()}><RefreshCw />刷新</button></div>
           <div className="rr-list-scroll">{requirementDocuments.map(document => <button className={`rr-review-row ${selectedDocument?.id === document.id ? 'active' : ''}`} key={document.id} onClick={() => { setSelectedAssetId(document.id); setView('source') }}><span className="rr-file-icon">MD</span><span><b>{document.title}</b><small>{document.version} · 固定输入</small><em>{document.logicalPath}</em></span></button>)}{!requirementDocuments.length && <div className="rr-empty compact"><FileText /><b>没有可分析的需求文档</b><p>仅展示当前项目版本已绑定且 ready 的 requirement 类型 Markdown/纯文本资产。</p></div>}</div>
-          <div className="rr-list-footer"><button className="rr-upload-button" disabled={readOnly || uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload />{readOnly ? '当前版本只读' : uploadState === 'running' ? '正在解析并入库…' : '上传需求 / ZIP'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={event => void uploadRequirements(event)} />{uploadProgress && <div className={`rr-upload-progress ${uploadProgress.stage}`} role="status" aria-live="polite"><div><span>{uploadProgress.stage === 'failed' ? '上传未完成' : uploadProgress.stage === 'completed' ? '上传完成' : '上传解析进度'}</span><b>{uploadProgress.percent}%</b></div><progress max="100" value={uploadProgress.percent} /><small>{uploadProgress.detail}</small></div>}<button onClick={() => setBindingManagerOpen(true)}><FileDiff />管理需求绑定</button><button onClick={onManageVersions}><GitBranch />切换 / 管理版本</button><button onClick={onOpenKnowledge}><BookOpen />前往知识库</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></div>
+          <div className="rr-list-footer"><button className="rr-upload-button" disabled={readOnly || uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload />{readOnly ? '当前版本只读' : uploadState === 'running' ? '正在解析并入库…' : '上传需求 / ZIP'}</button>{requirementUploadDirectory && <small className="rr-upload-target" title={`/${requirementUploadDirectory}`}>入库目录：/{requirementUploadDirectory}</small>}<input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={event => void uploadRequirements(event)} />{uploadProgress && <div className={`rr-upload-progress ${uploadProgress.stage}`} role="status" aria-live="polite"><div><span>{uploadProgress.stage === 'failed' ? '上传未完成' : uploadProgress.stage === 'completed' ? '上传完成' : '上传解析进度'}</span><b>{uploadProgress.percent}%</b></div><progress max="100" value={uploadProgress.percent} /><small>{uploadProgress.detail}</small></div>}<button onClick={() => setBindingManagerOpen(true)}><FileDiff />管理需求绑定</button><button onClick={onManageVersions}><GitBranch />切换 / 管理版本</button><button onClick={onOpenKnowledge}><BookOpen />前往知识库</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></div>
         </>}
       </aside>
 
@@ -847,7 +863,7 @@ export function RequirementReviewPage({
           <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button><ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
         </div>
 
-        {selectedRun?.status === 'running' && <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>RequirementAnalysisAgent 正在后台执行</b><span>页面每秒同步服务端状态；刷新、切换页面或关闭浏览器不会取消本次评审。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>}
+        {selectedRun?.status === 'running' && <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>{selectedRun.step === 'reviewing_requirements' ? 'RequirementReviewAgent 正在评审固定需求点' : 'RequirementPointExtractionAgent 正在提取需求点'}</b><span>两个 Agent 使用独立会话；页面每秒同步服务端状态，刷新或关闭浏览器不会取消本次运行。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>}
         {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>评审运行失败</b><span>{runErrorMessage(selectedRun.error)}</span>{!selectedModel?.healthy && <small>请在顶部切换到通过工具调用检测的健康模型后重新评审。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
         {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{!selectedModel?.healthy && <small>请先选择健康模型。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
 

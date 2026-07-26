@@ -1,7 +1,7 @@
 export { KnowledgeService } from './application/knowledge-service.js'
 export { RequirementAnalysisService } from './application/requirement-analysis-service.js'
 export { PiAgentRuntimeAdapter } from './agent/pi-agent-runtime.js'
-export { createRequirementAnalysisAgentDefinition } from './agent/requirement-analysis-agent.js'
+export { createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition } from './agent/requirement-analysis-agent.js'
 export { ReviewResultValidator } from './agent/result-validator.js'
 export { ToolRegistry } from './tools/registry.js'
 export { GovernedToolRuntime } from './tools/runtime.js'

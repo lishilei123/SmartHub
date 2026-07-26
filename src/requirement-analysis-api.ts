@@ -69,11 +69,28 @@ export type AgentExecutionEvent = {
 }
 
 export type AgentExecutionRecord = {
+  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'requirement-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number
   framework?: { name: string; version: string }
   events: AgentExecutionEvent[]
+}
+
+export type AgentDefinitionSnapshot = {
+  agentKey: string
+  version: string
+  promptRef: { promptKey: string; version: string; contentSha256: string }
+  toolsetVersion: string
+  toolsetContentSha256: string
+  skillBindings: { skillKey: string; version: string; enabled: boolean; configurationHash: string }[]
+  mcpBindings: { serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }[]
+  resultSchemaVersion: string
+}
+
+export type AgentExecutions = {
+  requirementPointExtraction?: AgentExecutionRecord
+  requirementReview?: AgentExecutionRecord
 }
 
 export type RequirementAnalysisResponse = {
@@ -95,19 +112,15 @@ export type RequirementAnalysisResponse = {
     focusAreas: string[]
     excludedAreas: string[]
     createdAt: string
-    agentDefinition: {
-      agentKey: string
-      version: string
-      promptRef: { promptKey: string; version: string; contentSha256: string }
-      toolsetVersion: string
-      toolsetContentSha256: string
-      skillBindings: { skillKey: string; version: string; enabled: boolean; configurationHash: string }[]
-      mcpBindings: { serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }[]
-      resultSchemaVersion: string
+    agentDefinition: AgentDefinitionSnapshot
+    agentDefinitions?: {
+      requirementPointExtraction: AgentDefinitionSnapshot
+      requirementReview: AgentDefinitionSnapshot
     }
   }
   result: RequirementAnalysisResult
-  execution: AgentExecutionRecord & { framework: { name: string; version: string } }
+  execution?: AgentExecutionRecord
+  executions?: AgentExecutions
 }
 
 export type RequirementReviewRun = {
@@ -131,6 +144,7 @@ export type RequirementReviewRun = {
   error?: string
   snapshot?: RequirementAnalysisResponse['snapshot']
   execution?: AgentExecutionRecord
+  executions?: AgentExecutions
   response?: RequirementAnalysisResponse
 }
 

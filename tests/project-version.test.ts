@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ProjectVersionService } from '../server/application/project-version-service.js'
 import { defaultConfig } from '../server/domain/types.js'
+import type { ReviewRun } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
 async function fixture() {
@@ -61,4 +62,32 @@ test('删除版本同时删除需求绑定并保护仍被继承的来源版本',
   const deletedSource = await service.delete(source.id)
   assert.equal(deletedSource.deletedBindings, 1)
   assert.deepEqual(await service.list(), [])
+})
+
+test('只有可编辑版本可删除，并级联已结束的需求评审运行', async () => {
+  const { store, service } = await fixture()
+  const version = await service.create({ name: 'V1.0' })
+  await service.bindRequirement(version.id, 'asset-version-1')
+  await store.transaction(state => {
+    state.reviewRuns.push({ id: 'review-run-finished', projectVersionId: version.id, status: 'succeeded' } as ReviewRun)
+  })
+  const deleted = await service.delete(version.id)
+  assert.equal(deleted.deletedBindings, 1)
+  assert.equal(deleted.deletedReviewRuns, 1)
+  assert.equal((await store.snapshot()).reviewRuns.length, 0)
+
+  const archived = await service.create({ name: 'V2.0' })
+  await service.updateStatus(archived.id, 'archived')
+  await assert.rejects(() => service.delete(archived.id), /只有可编辑状态/u)
+})
+
+test('可编辑版本存在运行中的评审时需先取消再删除', async () => {
+  const { store, service } = await fixture()
+  const version = await service.create({ name: 'V1.0' })
+  await store.transaction(state => {
+    state.reviewRuns.push({ id: 'review-run-running', projectVersionId: version.id, status: 'running' } as ReviewRun)
+  })
+  await assert.rejects(() => service.delete(version.id), /先取消运行/u)
+  assert.equal((await service.list()).length, 1)
+  assert.equal((await store.snapshot()).reviewRuns.length, 1)
 })

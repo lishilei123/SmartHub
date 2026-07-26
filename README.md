@@ -1,6 +1,6 @@
 # SmartHub Phase 1 + Phase 2 ReviewRun M3
 
-当前仓库已实现第一期资料接入与检索闭环，并按第二期技术方案完成可运行的 `RequirementAnalysisAgent`、多文档固定输入、原子需求点与固定 Evidence 对齐、独立 Finding 评审结果、受控工具底座、M3 `ReviewRun` 持久化首个闭环，以及绑定固定 ReviewRun 的真实评审问答。需求点视图只展示需求点与证据，不混入 Finding；Finding 人工处置和独立 Review Job/Worker 仍属于第二期后续 M3～M5，不由前端本地状态代替。
+当前仓库已实现第一期资料接入与检索闭环，并按第二期技术方案完成可运行的双 Agent 流程：`RequirementPointExtractionAgent` 只从多文档固定输入提取原子需求点、固定 Evidence 和覆盖范围，`RequirementReviewAgent` 只读取已校验冻结的提取结果并生成 Finding、风险、建议和评审摘要。两个 Agent 使用独立定义、Prompt、工具协议、Pi 会话和运行记录；需求点视图只展示需求点与证据，不混入 Finding。Finding 人工处置和独立 Review Job/Worker 仍属于第二期后续 M3～M5，不由前端本地状态代替。
 
 ## 阶段文档
 
@@ -28,29 +28,29 @@
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
 - “系统管理 → 模型管理”已接入独立的生成式模型注册表：前端直接维护 Base URL、API Key、模型、能力、启停与优先级；服务端将连接配置持久化到 PostgreSQL/JSON，读取和保存响应可回显 Base URL，但不回显 API Key；编辑时 API Key 留空会保留数据库中的旧值；
-- 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；RequirementAnalysisAgent 首次未提交结果时进入受控提交阶段，由运行时强制选择 `review_submit_result`；提交工具先执行固定证据和业务约束预校验，无效候选把具体问题返回模型并允许修正后重新提交，最终结果仍由应用服务独立复验；仍未调用提交工具时才以明确的模型兼容性错误终止并把该模型降级；
+- 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；两个 Agent 未提交结果时分别强制选择 `requirement_points_submit_result` 或 `review_submit_result`；提交工具先执行对应阶段的独立预校验，无效候选把具体问题返回模型并允许修正后重新提交，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
-- 需求分析上传支持 Markdown、TXT 和 ZIP；上传区展示文件读取、任务提交、解析/Embedding、向量索引发布和项目版本绑定的真实进度，成功结果展示 15 秒后自动收起，失败结果保留。等待窗口为 10 分钟，批量上传按资产独立绑定并反馈部分失败，避免后端仍在处理却被前端误报整体失败；上传完成的固定需求资产版本自动绑定到当前项目版本。评审接口按 `projectVersionId` 校验版本状态和需求绑定；正式 ReviewRun、固定快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON，页面刷新后按项目版本恢复真实历史；
+- 需求分析上传支持 Markdown、TXT 和 ZIP；当前项目版本的文件统一入库到 `版本文档/{项目版本名}/需求文档/`，ZIP 保留包内子目录和图片相对路径；上传区展示文件读取、任务提交、解析/Embedding、向量索引发布和项目版本绑定的真实进度，成功结果展示 15 秒后自动收起，失败结果保留。等待窗口为 10 分钟，批量上传按资产独立绑定并反馈部分失败，避免后端仍在处理却被前端误报整体失败；上传完成的固定需求资产版本自动绑定到当前项目版本。评审接口按 `projectVersionId` 校验版本状态和需求绑定；正式 ReviewRun、固定快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON，页面刷新后按项目版本恢复真实历史；
 - AC-001～AC-009 自动化验收场景。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、配置版本、资产、不可变版本、资产 Chunk、索引固定 Chunk、同步任务和需求评审运行分别写入 `smarthub` schema。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除，不再全库 `TRUNCATE + 重写`。Chunk 向量使用 pgvector 的 `vector` 类型，并为默认384维模型建立 HNSW 余弦索引。首次连接时会安装可用的 `vector`、`pg_trgm` 扩展、自动建表或迁移旧向量。未配置 `DATABASE_URL` 时回退到 JSON 文件和进程内精确检索。
 
 生产 API 注入 SmartHub 内置模型运行池。知识库配置先选择来源，再选择该来源中的生效模型；本地模式下上传解析、索引重建和向量/混合检索均路由到所选模型，发现模型未运行时会自动拉取并启动，同时不会停止池内其他模型。单元测试通过运行时接口注入轻量测试模型，不下载大模型。
 
-## 第二期 RequirementAnalysisAgent
+## 第二期双 Agent 需求分析流程
 
 - 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
 - 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
 - Agent 定义、Prompt、Toolset、Skill、MCP 绑定、执行限制和内容 Hash 独立版本化并写入运行快照；内置定义解析器和工具注册表工厂均可替换，后续插件通过版本引用和受控适配器接入，不绕过 Tool Runtime；
-- 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与 Agent 定义，不在运行中漂移到最新资料；
-- 默认开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `review.submit_result`。PI 层使用兼容模型协议的安全函数名，业务审计仍记录稳定工具 ID；
-- 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；
+- 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与两个 Agent 定义，不在运行中漂移到最新资料；
+- `RequirementPointExtractionAgent` 开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `requirement-points.submit_result`；`RequirementReviewAgent` 只开放 `review.submit_result`，其输入直接包含已校验冻结的需求点提取结果，不继承第一段消息历史；
+- 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；读取/证据工具不得耗尽提取 Agent 的全部额度，最后 3 次调用独立保留给当前阶段的结果提交工具；
 - `knowledge.read_asset` 对目录分页，并在指定行范围读取时默认不重复返回目录；`evidence.validate` 要求从固定 Chunk 连续逐字引用，失败时返回原因和修复动作，成功时返回可直接提交的精确标题与字符范围；
-- `review.submit_result` 只产生 `review-result/v2` 候选结果，框架外 `ReviewResultValidator` 再校验 Schema、每份输入文档的证据覆盖、需求点证据、Finding 到需求点及证据的关联、引用摘录与精确定位、严重度与证据门槛；
-- ReviewRun 按工具完成和 turn 结束边界持久化 Agent 运行记录，页面可查看模型可见对话、工具参数/返回和完整语义事件时间线；逐 Token 的 `message_update` 和无内容的工具增量事件不重复入库，工具尝试与异常数独立展示。API 凭据、签名、图片二进制和模型隐藏思维不写入记录。运行时支持外部 `AbortSignal`、截止时间、最大 turn 和最大工具调用限制；当前默认最多 32 turns，并预留最后 3 turns 强制提交或修正候选结果；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试，耗尽后返回 `MODEL_RATE_LIMITED` 或 `MODEL_PROVIDER_UNAVAILABLE`，不得误报为工具调用能力不足；
-- 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。已有 ReviewRun 的项目版本禁止物理删除，只能归档。
+- `requirement-points.submit_result` 只接受 `requirement-point-extraction/v1` 的需求点、Evidence 和 coverage；`review.submit_result` 只接受 `requirement-review/v1` 的 summary 和 findings。第二个协议没有需求点、Evidence 或 coverage 字段，因此评审 Agent 无法增删或改写固定提取结果；
+- ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试；
+- 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
 
-运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；Agent 在服务端后台先按可独立实现、测试或验收的粒度提取需求点，仅归并语义重复项，让每个需求点直接对齐 Evidence，再独立生成必要的 Finding，页面通过 ReviewRun 接口恢复并轮询状态：
+运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；服务端先独立运行需求点提取并冻结结果，再用全新会话启动需求评审，最终合并为正式结果，页面通过 ReviewRun 接口恢复并轮询两个阶段：
 
 ```powershell
 $ErrorActionPreference = 'Stop'

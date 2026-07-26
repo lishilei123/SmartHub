@@ -48,13 +48,16 @@ export class ProjectVersionService {
     return this.store.transaction(state => {
       const project = platformProject(state)
       const version = required(state.projectVersions.find(item => item.id === projectVersionId && item.projectId === project.id), '项目版本不存在')
+      if (version.status !== 'open') throw new Error('只有可编辑状态的项目版本可以物理删除')
       const dependent = state.projectVersions.find(item => item.sourceProjectVersionId === version.id)
       if (dependent) throw new Error(`版本正在被 ${dependent.name} 作为继承来源，不能删除`)
-      if (state.reviewRuns.some(item => item.projectVersionId === version.id)) throw new Error('项目版本已存在需求评审运行，只能归档，不能物理删除')
+      const reviewRuns = state.reviewRuns.filter(item => item.projectVersionId === version.id)
+      if (reviewRuns.some(item => item.status === 'running')) throw new Error('项目版本仍有正在执行的需求评审，请先取消运行后再删除')
       const deletedBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id).length
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
+      state.reviewRuns = state.reviewRuns.filter(item => item.projectVersionId !== version.id)
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
-      return { id: version.id, name: version.name, deletedBindings }
+      return { id: version.id, name: version.name, deletedBindings, deletedReviewRuns: reviewRuns.length }
     })
   }
 
