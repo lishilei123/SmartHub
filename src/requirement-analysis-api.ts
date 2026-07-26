@@ -16,7 +16,16 @@ export type RequirementPoint = {
   clientRequirementPointId: string
   title: string
   description: string
+  actor: string
+  action: string
+  object: string
+  conditions: string[]
+  businessRules: string[]
+  exceptions: string[]
+  acceptanceCriteria: string[]
   evidenceRefs: string[]
+  mergeGroupId?: string
+  mergeRationale?: string
 }
 
 export type ReviewFinding = {
@@ -29,7 +38,6 @@ export type ReviewFinding = {
   impact: string
   recommendation: string
   requirementPointRefs: string[]
-  evidenceRefs: string[]
 }
 
 export type RequirementAnalysisResult = {
@@ -43,8 +51,11 @@ export type RequirementAnalysisResult = {
   findings: ReviewFinding[]
   evidence: ReviewEvidence[]
   coverage: {
-    reviewedAreas: string[]
-    notReviewedAreas: string[]
+    assets: Array<{
+      assetVersionId: string
+      reviewedChunkIds: string[]
+      skippedChunks: Array<{ chunkId: string; reason: string }>
+    }>
     limitations: string[]
   }
 }

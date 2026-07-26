@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionOutput, AgentRuntime } from '../domain/agent-types.js'
+import { createHash, randomUUID } from 'node:crypto'
+import type { AgentDefinitionResolver, AgentDefinitionVersion, AgentExecutionEvent, AgentExecutionOutput, AgentRuntime, ReviewRunSnapshot } from '../domain/agent-types.js'
 import type { AgentExecutionRecord, ReviewRun } from '../domain/types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -109,10 +109,11 @@ export class RequirementAnalysisService {
     const model = required(source.models.find(item => item.id === request.modelId && item.enabled), '生成式模型不可用')
     if (!model.capabilities.includes('tool_calling')) throw new Error('需求分析模型必须支持 tool_calling')
     if (model.health !== 'healthy') throw new Error('请先完成所选生成式模型的连通性探测并确保健康状态正常')
-    const extractionDefinition = await this.definitions.resolve('requirement-point-extraction')
+    const baseExtractionDefinition = await this.definitions.resolve('requirement-point-extraction')
     const reviewDefinition = await this.definitions.resolve('requirement-review')
-    const estimatedInputTokens = Math.ceil(versions.reduce((total, version) => total + version.content.length, 0) / 4) + 4_000
-    if (estimatedInputTokens + model.maxOutputTokens > model.contextWindow) throw new Error('需求版本超过模型上下文预算，请选择更大上下文模型')
+    const extractionCoveragePlan = buildExtractionCoveragePlan(versions, request.excludedAreas)
+    const extractionToolBudget = buildExtractionToolBudget(extractionCoveragePlan)
+    const extractionDefinition = buildExtractionDefinition(baseExtractionDefinition, extractionToolBudget)
     const now = new Date().toISOString()
     const snapshot = {
       runId: `review_run_${randomUUID()}`,
@@ -132,6 +133,8 @@ export class RequirementAnalysisService {
       excludedAreas: cleanList(request.excludedAreas),
       agentDefinition: extractionDefinition,
       agentDefinitions: { requirementPointExtraction: extractionDefinition, requirementReview: reviewDefinition },
+      extractionCoveragePlan,
+      extractionToolBudget,
       createdAt: now,
     }
     const run: ReviewRun = {
@@ -360,6 +363,40 @@ function decodeCursor(cursor: string | undefined, runs: ReviewRun[]) {
     throw new Error('评审历史游标无效')
   }
 }
+function buildExtractionCoveragePlan(versions: Array<{ id: string; chunks: Array<{ id: string; contentHash: string; headingPath: string[]; startLine: number; endLine: number }> }>, excludedAreas: string[] | undefined) {
+  const excluded = cleanList(excludedAreas).map(value => value.toLocaleLowerCase())
+  return versions.map(version => ({
+    assetVersionId: version.id,
+    chunks: version.chunks.map(chunk => {
+      const heading = chunk.headingPath.join(' / ')
+      const excludedReason = excluded.find(area => heading.toLocaleLowerCase().includes(area))
+      return { chunkId: chunk.id, contentHash: chunk.contentHash, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, ...(excludedReason ? { excludedReason: `用户排除范围：${excludedReason}` } : {}) }
+    }),
+  }))
+}
+
+function buildExtractionToolBudget(plan: ReviewRunSnapshot['extractionCoveragePlan']) {
+  const chunkCalls = plan.reduce((total, asset) => total + asset.chunks.filter(chunk => !chunk.excludedReason).length, 0)
+  const directoryCalls = plan.reduce((total, asset) => total + Math.ceil(asset.chunks.length / 80), 0)
+  const evidenceCalls = chunkCalls
+  const submissionCalls = 3
+  const minimumToolCalls = directoryCalls + chunkCalls + evidenceCalls + submissionCalls
+  if (minimumToolCalls > 500) throw new Error(`需求文档规模超过单次提取工具预算：${plan.length} 份文档、${chunkCalls} 个正文 Chunk，至少需要 ${minimumToolCalls} 次调用；请拆分项目版本输入后再评审`)
+  return { directoryCalls, chunkCalls, evidenceCalls, submissionCalls, minimumToolCalls }
+}
+
+function buildExtractionDefinition(definition: AgentDefinitionVersion, budget: ReviewRunSnapshot['extractionToolBudget']) {
+  const maxToolCalls = Math.max(definition.limits.maxToolCalls, budget.minimumToolCalls)
+  const maxTurns = Math.max(definition.limits.maxTurns, Math.ceil(maxToolCalls / 2) + 6)
+  const value = { ...definition, limits: { ...definition.limits, maxToolCalls, maxTurns } }
+  return {
+    ...value,
+    contentSha256: createHash('sha256')
+      .update(JSON.stringify({ ...value, contentSha256: undefined }))
+      .digest('hex'),
+  }
+}
+
 function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }
 function cleanList(value: string[] | undefined) { return Array.isArray(value) ? [...new Set(value.map(item => String(item).trim()).filter(Boolean))].slice(0, 20) : [] }
 function shouldCheckpointExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry'].includes(event.type) }

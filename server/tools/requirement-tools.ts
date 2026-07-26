@@ -64,7 +64,7 @@ export function createRequirementPointExtractionToolRegistry(store: StateStore, 
   })
 
   registry.register({
-    id: 'knowledge.read_chunk', piName: 'knowledge_read_chunk', version: '1.0.0', label: '读取固定 Chunk', risk: 'read', idempotent: true, timeoutMs: 30_000,
+    id: 'knowledge.read_chunk', piName: 'knowledge_read_chunk', version: '1.0.0', label: '读取固定 Chunk', risk: 'read', idempotent: true, repeatPolicy: 'replay_success_once', timeoutMs: 30_000,
     description: '按 Chunk ID 读取固定索引中的完整内容与定位。',
     parameters: Type.Object({ chunkId: Type.String({ minLength: 1, maxLength: 200 }) }),
   }, async request => {
@@ -115,7 +115,7 @@ export function createRequirementReviewToolRegistry(submit: (candidate: Candidat
   const registry = new ToolRegistry()
   registry.register({
     id: 'review.submit_result', piName: 'review_submit_result', version: '3.0.0', label: '提交候选需求评审', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
-    description: '提交 requirement-review/v1 候选结果并结束评审 Agent。协议只接受 Finding 和评审摘要，不能提交需求点、证据或覆盖范围。',
+    description: '提交 requirement-review/v2 候选结果并结束评审 Agent。协议只接受 Finding 与评审摘要；Finding 必须关联需求点，不能提交需求点、Evidence 或覆盖范围。',
     parameters: requirementReviewSchema(),
   }, async request => {
     const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementReview)
@@ -128,15 +128,32 @@ export function createRequirementReviewToolRegistry(submit: (candidate: Candidat
 
 function requirementPointExtractionSchema() {
   const strings = Type.Array(Type.String({ minLength: 1, maxLength: 4000 }), { maxItems: 100 })
+  const evidenceRefs = Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 })
   return Type.Object({
     requirementPoints: Type.Array(Type.Object({
       clientRequirementPointId: Type.String({ minLength: 1, maxLength: 100 }),
       title: Type.String({ minLength: 1, maxLength: 300 }),
       description: Type.String({ minLength: 1, maxLength: 8000 }),
-      evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }),
-    }), { maxItems: 300 }),
-    evidence: Type.Array(Type.Object({ clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), sourceType: Type.Literal('knowledge_chunk'), sourceRef: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }) }), quote: Type.String({ minLength: 1, maxLength: 4000 }), locator: Type.Object({ heading: Type.String(), start: Type.Integer({ minimum: 0 }), end: Type.Integer({ minimum: 0 }) }) }), { maxItems: 300 }),
-    coverage: Type.Object({ reviewedAreas: strings, notReviewedAreas: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 100 }), limitations: Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 100 }) }),
+      actor: Type.String({ maxLength: 500 }),
+      action: Type.String({ maxLength: 500 }),
+      object: Type.String({ maxLength: 500 }),
+      conditions: strings,
+      businessRules: strings,
+      exceptions: strings,
+      acceptanceCriteria: strings,
+      evidenceRefs,
+      mergeGroupId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+      mergeRationale: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
+    }, { additionalProperties: false }), { maxItems: 500 }),
+    evidence: Type.Array(Type.Object({ clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), sourceType: Type.Literal('knowledge_chunk'), sourceRef: Type.Object({ chunkId: Type.String({ minLength: 1 }), assetVersionId: Type.String({ minLength: 1 }) }), quote: Type.String({ minLength: 4, maxLength: 4000 }), locator: Type.Object({ heading: Type.String(), start: Type.Integer({ minimum: 0 }), end: Type.Integer({ minimum: 0 }) }) }), { maxItems: 500 }),
+    coverage: Type.Object({
+      assets: Type.Array(Type.Object({
+        assetVersionId: Type.String({ minLength: 1 }),
+        reviewedChunkIds: Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true, maxItems: 2_000 }),
+        skippedChunks: Type.Array(Type.Object({ chunkId: Type.String({ minLength: 1 }), reason: Type.String({ minLength: 1, maxLength: 1_000 }) }, { additionalProperties: false }), { maxItems: 2_000 }),
+      }, { additionalProperties: false }), { minItems: 1, maxItems: 100 }),
+      limitations: Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 }),
+    }, { additionalProperties: false }),
   }, { additionalProperties: false })
 }
 
@@ -148,7 +165,7 @@ function requirementReviewSchema() {
       clientFindingId: Type.String({ minLength: 1, maxLength: 100 }),
       type: Type.Union(['missing_requirement', 'ambiguity', 'conflict', 'boundary_gap', 'state_gap', 'exception_gap', 'security_risk', 'testability_gap', 'dependency_risk', 'other'].map(value => Type.Literal(value))),
       severity: Type.Union(['critical', 'high', 'medium', 'low', 'info'].map(value => Type.Literal(value))),
-      confidence: Type.Number({ minimum: 0, maximum: 1 }), title: Type.String({ minLength: 1, maxLength: 300 }), description: Type.String({ minLength: 1, maxLength: 8000 }), impact: Type.String({ minLength: 1, maxLength: 4000 }), recommendation: Type.String({ minLength: 1, maxLength: 4000 }), requirementPointRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }), evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { maxItems: 20 }),
+      confidence: Type.Number({ minimum: 0, maximum: 1 }), title: Type.String({ minLength: 1, maxLength: 300 }), description: Type.String({ minLength: 1, maxLength: 8000 }), impact: Type.String({ minLength: 1, maxLength: 4000 }), recommendation: Type.String({ minLength: 1, maxLength: 4000 }), requirementPointRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }),
     }, { additionalProperties: false }), { maxItems: 100 }),
   }, { additionalProperties: false })
 }

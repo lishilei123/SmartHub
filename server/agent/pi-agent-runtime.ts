@@ -9,7 +9,7 @@ import type { ToolDescriptor } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
-import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
+import { RequirementPointExtractionValidator, RequirementReviewValidator, type ObservedAssetOutlinePage } from './result-validator.js'
 import { renderRequirementTask } from './requirement-analysis-agent.js'
 
 const require = createRequire(import.meta.url)
@@ -32,9 +32,16 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let candidate: AgentCandidateResult | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     const stage = stageConfiguration(input)
+    const observedReadChunkIds = new Set<string>()
+    const observedOutlinePages = new Map<string, ObservedAssetOutlinePage[]>()
     const registry = stage.isExtraction
       ? createRequirementPointExtractionToolRegistry(this.store, async value => {
-        const validation = await new RequirementPointExtractionValidator(this.store).validate(value, input.snapshot)
+        const validation = await new RequirementPointExtractionValidator(this.store).validate(
+          value,
+          input.snapshot,
+          observedReadChunkIds,
+          observedOutlinePages
+        )
         if (!validation.valid) { lastSubmissionIssues = validation.issues; return { accepted: false, issues: validation.issues } }
         candidate = value
         lastSubmissionIssues = []
@@ -88,7 +95,15 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         resultSubmissionRequiredRecorded = true
         await record({ type: 'result_submission_required', turn: turns, ...(content ? { content } : {}) })
       }
-      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission))
+      const tools = descriptors.map(descriptor => this.piTool(
+        descriptor,
+        toolRuntime,
+        input,
+        controller.signal,
+        requireResultSubmission,
+        observedReadChunkIds,
+        observedOutlinePages
+      ))
       agent = new Agent({
         initialState: { systemPrompt: input.snapshot.agentDefinition.systemPrompt, model, tools, thinkingLevel: 'off' },
         streamFn,
@@ -122,6 +137,13 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (turns > limits.maxTurns) {
         if (lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
         throw new Error('AGENT_TURN_LIMIT_EXCEEDED')
+      }
+      if (!candidate && lastSubmissionIssues.length) {
+        await record({ type: 'result_validation_repair_required', turn: turns, content: formatValidationIssues(lastSubmissionIssues) })
+        forceResultSubmission = false
+        latestModelFailure = undefined
+        await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n你可以调用必要的普通工具修复这些问题：缺失覆盖必须读取列出的 Chunk；无效 Evidence 必须从已读取 Chunk 重新逐字复制 quote 并通过 evidence_validate。修复后通过 ${stage.submitPiName} 重新提交完整结果。不要仅原样重试提交，也不要把校验错误当作业务结论。`)
+        await agent.waitForIdle()
       }
       if (!candidate) {
         await record({ type: 'result_submission_retry', turn: turns })
@@ -168,7 +190,15 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
   }
 
-  private piTool(descriptor: ToolDescriptor, runtime: GovernedToolRuntime, input: AgentExecutionInput, signal: AbortSignal, requireResultSubmission: (content?: string) => Promise<void>): AgentTool {
+  private piTool(
+    descriptor: ToolDescriptor,
+    runtime: GovernedToolRuntime,
+    input: AgentExecutionInput,
+    signal: AbortSignal,
+    requireResultSubmission: (content?: string) => Promise<void>,
+    observedReadChunkIds: Set<string>,
+    observedOutlinePages: Map<string, ObservedAssetOutlinePage[]>
+  ): AgentTool {
     return {
       name: descriptor.piName,
       label: descriptor.label,
@@ -177,9 +207,47 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       executionMode: 'sequential',
       execute: async (toolCallId, args, toolSignal) => {
         const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: args, context: { snapshot: input.snapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        if (descriptor.id === 'knowledge.read_chunk') {
+          const chunkId = (result.data as { chunkId?: unknown }).chunkId
+          if (typeof chunkId === 'string') observedReadChunkIds.add(chunkId)
+        }
+        if (descriptor.id === 'knowledge.read_asset') {
+          const data = result.data as {
+            assetVersionId?: unknown
+            outline?: unknown
+            outlinePage?: { offset?: unknown; total?: unknown; hasMore?: unknown }
+          }
+          const assetVersionId = data.assetVersionId
+          const outline = Array.isArray(data.outline) ? data.outline : []
+          const page = data.outlinePage
+          if (
+            typeof assetVersionId === 'string'
+            && typeof page?.offset === 'number'
+            && typeof page.total === 'number'
+            && typeof page.hasMore === 'boolean'
+          ) {
+            observedOutlinePages.set(assetVersionId, [
+              ...(observedOutlinePages.get(assetVersionId) ?? []),
+              { offset: page.offset, count: outline.length, total: page.total, hasMore: page.hasMore },
+            ])
+          }
+        }
         const stage = stageConfiguration(input)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
-        return { content: [{ type: 'text', text: JSON.stringify(result.data) }], details: { toolId: descriptor.id, version: descriptor.version, data: result.data }, terminate: result.terminate }
+        const modelResult = result.replayed
+          ? { ...asRecord(result.data), replayed: true, guidance: '这是本次运行已成功读取的固定结果重放；请直接使用返回内容，不要再次提交相同参数。' }
+          : result.data
+        return {
+          content: [{ type: 'text', text: JSON.stringify(modelResult) }],
+          details: {
+            toolId: descriptor.id,
+            version: descriptor.version,
+            data: result.data,
+            ...(result.replayed ? { replayed: true } : {}),
+            ...(result.policyError ? { policyError: result.policyError } : {}),
+          },
+          terminate: result.terminate,
+        }
       },
     }
   }
@@ -195,7 +263,7 @@ type StageConfiguration = {
   isExtraction: false
   submitToolId: 'review.submit_result'
   submitPiName: 'review_submit_result'
-  schemaVersion: 'requirement-review/v1'
+  schemaVersion: 'requirement-review/v2'
   agentLabel: 'RequirementReviewAgent'
   fixedExtraction: CandidateRequirementPointExtraction
 }
@@ -213,10 +281,14 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: false,
     submitToolId: 'review.submit_result',
     submitPiName: 'review_submit_result',
-    schemaVersion: 'requirement-review/v1',
+    schemaVersion: 'requirement-review/v2',
     agentLabel: 'RequirementReviewAgent',
     fixedExtraction: input.fixedRequirementPointExtraction,
   }
+}
+
+function formatValidationIssues(issues: Array<{ path: string; message: string }>) {
+  return issues.slice(0, 20).map(issue => `- ${issue.path}: ${issue.message}`).join('\n')
 }
 
 function resultValidationError(issues: Array<{ path: string; message: string }>) {
@@ -325,6 +397,12 @@ function messageTrace(message: AgentMessage, includeContent: boolean, endpoint: 
     role: 'assistant', stopReason: value.stopReason, model: value.model, usage,
     ...(includeContent ? { content: redactTraceText(textFromContent(value.content) || value.errorMessage || '', endpoint, credential), ...(toolCalls.length ? { toolCalls } : {}) } : {}),
   }
+}
+
+function asRecord(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : { data: value }
 }
 
 function textFromContent(content: unknown) {

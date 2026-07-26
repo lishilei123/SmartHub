@@ -13,10 +13,84 @@ import { JsonStore } from '../server/infrastructure/store.js'
 
 test('提取 Agent 提示词明确固定证据的提交常量与标识来源', () => {
   const definition = createRequirementPointExtractionAgentDefinition()
-  assert.equal(REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, '3.0.1')
+  assert.equal(REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, '3.2.0')
   assert.match(definition.systemPrompt, /sourceType 必须且只能填写字符串 `knowledge_chunk`/u)
   assert.match(definition.systemPrompt, /严禁填写 `ASSET`/u)
   assert.match(definition.systemPrompt, /sourceRef\.chunkId 与 sourceRef\.assetVersionId 必须逐字复制 evidence_validate/u)
+  assert.match(definition.systemPrompt, /reviewedChunkIds/u)
+  assert.match(definition.systemPrompt, /actor、action、object/u)
+  assert.match(definition.systemPrompt, /evidence_validate/u)
+})
+
+test('重复固定 Chunk 读取重放原结果并保留审计标记', async () => {
+  const store = await seededStore()
+  const faux = fauxProvider()
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-2' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-2' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionResult()), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', reviewResult()), { stopReason: 'toolUse' }),
+  ])
+  const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, {
+    model: faux.getModel() as Model<Api>,
+    streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn,
+  }))
+
+  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
+  const repeatedRead = output.executions.requirementPointExtraction.events.find(event =>
+    event.type === 'tool_execution_end'
+    && event.toolId === 'knowledge_read_chunk'
+    && JSON.stringify(event.toolResult).includes('replayed')
+  )
+
+  assert.equal(output.status, 'candidate_validated')
+  assert.ok(repeatedRead)
+  assert.match(JSON.stringify(repeatedRead.toolResult), /chunk-1/u)
+  assert.match(JSON.stringify(repeatedRead.toolResult), /replayed/u)
+})
+
+test('提取提交被证据和覆盖校验拒绝后允许补读并修复', async () => {
+  const store = await seededStore()
+  const invalid = structuredClone(extractionResult())
+  invalid.evidence[0].quote = '无效'
+  invalid.coverage.assets[1].reviewedChunkIds = []
+  const faux = fauxProvider()
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-2' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', invalid), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-2' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('evidence_validate', {
+      chunkId: 'chunk-1',
+      assetVersionId: 'version-1',
+      quote: '用户可以取消待支付订单。',
+    }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionResult()), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', reviewResult()), { stopReason: 'toolUse' }),
+  ])
+  const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, {
+    model: faux.getModel() as Model<Api>,
+    streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn,
+  }))
+
+  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' })
+
+  assert.equal(output.status, 'candidate_validated')
+  assert.ok(output.executions.requirementPointExtraction.events.some(event =>
+    event.type === 'tool_execution_start'
+    && event.toolId === 'knowledge_read_chunk'
+    && JSON.stringify(event.toolArguments).includes('chunk-2')
+  ))
+  assert.ok(output.executions.requirementPointExtraction.events.some(event =>
+    event.type === 'tool_execution_start'
+    && event.toolId === 'evidence_validate'
+  ))
 })
 
 test('两个独立 Agent 串联提取固定需求点并生成评审结果', async () => {
@@ -25,7 +99,7 @@ test('两个独立 Agent 串联提取固定需求点并生成评审结果', asyn
   const review = reviewResult()
   const faux = fauxProvider()
   faux.setResponses([
-    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extraction), { stopReason: 'toolUse' }),
+    ...extractionToolResponses(extraction),
     fauxAssistantMessage(fauxToolCall('review_submit_result', review), { stopReason: 'toolUse' }),
   ])
   const toolChoices: unknown[] = []
@@ -54,12 +128,12 @@ test('两个独立 Agent 串联提取固定需求点并生成评审结果', asyn
   assert.equal(output.executions.requirementReview.agentKey, 'requirement-review')
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.toolId === 'requirement_points_submit_result'))
   assert.ok(output.executions.requirementReview.events.some(event => event.toolId === 'review_submit_result'))
-  assert.equal(toolChoices[0], undefined)
-  assert.equal(toolChoices[1], undefined)
+  assert.ok(toolChoices.every(choice => choice === undefined))
   assert.match(prompts[0], /不得生成 Finding、评分或评审结论/u)
-  assert.match(prompts[1], /已由 SmartHub 校验并冻结/u)
-  assert.match(prompts[1], /RP-001/u)
-  assert.doesNotMatch(prompts[1], /knowledge_read_asset/u)
+  const reviewPrompt = prompts.find(prompt => /已由 SmartHub 校验并冻结/u.test(prompt))
+  assert.ok(reviewPrompt)
+  assert.match(reviewPrompt, /RP-001/u)
+  assert.doesNotMatch(reviewPrompt, /knowledge_read_asset/u)
 
   const stored = (await store.snapshot()).reviewRuns[0]
   assert.equal(stored.step, 'completed')
@@ -90,6 +164,11 @@ test('提取结果不接受 Finding，评审结果不接受需求点改写', asy
   const referenceReport = await reviewValidator.validate(wrongReference, extraction, snapshot)
   assert.equal(referenceReport.valid, false)
   assert.ok(referenceReport.issues.some(issue => issue.path.endsWith('requirementPointRefs')))
+
+  const directEvidence = { ...reviewResult(), findings: [{ ...reviewResult().findings[0], evidenceRefs: ['E-001'] }] }
+  const directEvidenceReport = await reviewValidator.validate(directEvidence, extraction, snapshot)
+  assert.equal(directEvidenceReport.valid, false)
+  assert.ok(directEvidenceReport.issues.some(issue => issue.message.includes('不得直接关联 Evidence')))
 })
 
 test('提取阶段固定证据仍由服务端独立校验', async () => {
@@ -102,10 +181,72 @@ test('提取阶段固定证据仍由服务端独立校验', async () => {
   assert.ok(report.issues.some(issue => issue.path === 'evidence[0].quote'))
 })
 
+test('提取覆盖缺少固定 Chunk 时不能冻结结果', async () => {
+  const store = await seededStore()
+  const snapshot = await snapshotForValidation(store)
+  const invalid = extractionResult()
+  invalid.coverage.assets[0].reviewedChunkIds = []
+  const report = await new RequirementPointExtractionValidator(store).validate(invalid, snapshot, new Set(['chunk-1', 'chunk-2']))
+  assert.equal(report.valid, false)
+  assert.ok(report.issues.some(issue => issue.message.includes('提取覆盖不完整')))
+})
+
+test('未实际读取的 Chunk 不能仅通过提交 coverage 宣称覆盖', async () => {
+  const store = await seededStore()
+  const snapshot = await snapshotForValidation(store)
+  const report = await new RequirementPointExtractionValidator(store).validate(extractionResult(), snapshot, new Set(['chunk-1']))
+  assert.equal(report.valid, false)
+  assert.ok(report.issues.some(issue => issue.message.includes('未被运行时读取')))
+})
+
+test('证据来源 Chunk 必须由提取运行实际读取', async () => {
+  const store = await seededStore()
+  const snapshot = await snapshotForValidation(store)
+  const report = await new RequirementPointExtractionValidator(store).validate(extractionResult(), snapshot, new Set(['chunk-1']))
+  assert.equal(report.valid, false)
+  assert.ok(report.issues.some(issue => issue.message.includes('证据来源 Chunk 未被运行时读取')))
+})
+
+test('未遍历固定资产目录时不能冻结提取结果', async () => {
+  const store = await seededStore()
+  const snapshot = await snapshotForValidation(store)
+  const report = await new RequirementPointExtractionValidator(store).validate(
+    extractionResult(),
+    snapshot,
+    new Set(['chunk-1', 'chunk-2']),
+    new Map()
+  )
+  assert.equal(report.valid, false)
+  assert.ok(report.issues.some(issue => issue.message.includes('未完整遍历资产')))
+})
+
+test('需求点缺少原子行为字段时被拒绝', async () => {
+  const store = await seededStore()
+  const snapshot = await snapshotForValidation(store)
+  const invalid = extractionResult()
+  invalid.requirementPoints[0] = { ...invalid.requirementPoints[0], action: '', businessRules: [], acceptanceCriteria: [] }
+  const report = await new RequirementPointExtractionValidator(store).validate(invalid, snapshot)
+  assert.equal(report.valid, false)
+  assert.ok(report.issues.some(issue => issue.path.endsWith('.action')))
+})
+
+test('重复主体、动作和对象必须声明一致的归并理由', async () => {
+  const store = await seededStore()
+  const snapshot = await snapshotForValidation(store)
+  const invalid = extractionResult()
+  invalid.requirementPoints.push({
+    ...invalid.requirementPoints[0],
+    clientRequirementPointId: 'RP-003',
+  })
+  const report = await new RequirementPointExtractionValidator(store).validate(invalid, snapshot)
+  assert.equal(report.valid, false)
+  assert.ok(report.issues.some(issue => issue.path.includes('mergeGroupId')))
+})
+
 async function snapshotForValidation(store: JsonStore) {
   const faux = fauxProvider()
   faux.setResponses([
-    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionResult()), { stopReason: 'toolUse' }),
+    ...extractionToolResponses(extractionResult()),
     fauxAssistantMessage(fauxToolCall('review_submit_result', reviewResult()), { stopReason: 'toolUse' }),
   ])
   const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn }))
@@ -113,24 +254,40 @@ async function snapshotForValidation(store: JsonStore) {
   return (await store.snapshot()).reviewRuns.find(run => run.id === output.runId)!.snapshot
 }
 
+function extractionToolResponses(extraction: CandidateRequirementPointExtraction) {
+  return [
+    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_asset', { assetVersionId: 'version-2' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-2' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extraction), { stopReason: 'toolUse' }),
+  ]
+}
+
 function extractionResult(): CandidateRequirementPointExtraction {
   return {
     requirementPoints: [
-      { clientRequirementPointId: 'RP-001', title: '取消待支付订单', description: '用户可以取消处于待支付状态的订单。', evidenceRefs: ['E-001'] },
-      { clientRequirementPointId: 'RP-002', title: '支付超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', evidenceRefs: ['E-002'] },
+      { clientRequirementPointId: 'RP-001', title: '取消待支付订单', description: '用户可以取消处于待支付状态的订单。', actor: '用户', action: '取消', object: '待支付订单', conditions: ['订单处于待支付状态'], businessRules: [], exceptions: [], acceptanceCriteria: ['用户提交取消后订单不再待支付'], evidenceRefs: ['E-001'] },
+      { clientRequirementPointId: 'RP-002', title: '支付超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', actor: '系统', action: '关闭', object: '超时未支付订单', conditions: ['超过十五分钟未支付'], businessRules: ['超时自动关闭'], exceptions: [], acceptanceCriteria: ['超时订单状态为已关闭'], evidenceRefs: ['E-002'] },
     ],
     evidence: [
       { clientEvidenceId: 'E-001', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-1', assetVersionId: 'version-1' }, quote: '用户可以取消待支付订单。', locator: { heading: '取消订单', start: 8, end: 20 } },
       { clientEvidenceId: 'E-002', sourceType: 'knowledge_chunk', sourceRef: { chunkId: 'chunk-2', assetVersionId: 'version-2' }, quote: '订单超过十五分钟未支付时自动关闭。', locator: { heading: '支付超时', start: 8, end: 25 } },
     ],
-    coverage: { reviewedAreas: ['全部固定需求文档'], notReviewedAreas: [], limitations: [] },
+    coverage: {
+      assets: [
+        { assetVersionId: 'version-1', reviewedChunkIds: ['chunk-1'], skippedChunks: [] },
+        { assetVersionId: 'version-2', reviewedChunkIds: ['chunk-2'], skippedChunks: [] },
+      ],
+      limitations: [],
+    },
   }
 }
 
 function reviewResult(): CandidateRequirementReview {
   return {
     summary: { overallAssessment: 'needs_revision', score: 65, strengths: ['目标明确'], risks: ['取消后的状态未定义'] },
-    findings: [{ clientFindingId: 'F-001', type: 'state_gap', severity: 'high', confidence: 0.9, title: '取消后状态缺失', description: '需求只定义可取消，未定义取消后的订单状态。', impact: '实现和验收口径可能不一致。', recommendation: '补充状态迁移、幂等与失败处理。', requirementPointRefs: ['RP-001'], evidenceRefs: ['E-001'] }],
+    findings: [{ clientFindingId: 'F-001', type: 'state_gap', severity: 'high', confidence: 0.9, title: '取消后状态缺失', description: '需求只定义可取消，未定义取消后的订单状态。', impact: '实现和验收口径可能不一致。', recommendation: '补充状态迁移、幂等与失败处理。', requirementPointRefs: ['RP-001'] }],
   }
 }
 

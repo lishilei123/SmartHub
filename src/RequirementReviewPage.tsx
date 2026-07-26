@@ -18,6 +18,7 @@ import {
   type AgentExecutionEvent,
   type AgentExecutionRecord,
   type RequirementAnalysisResponse,
+  type RequirementPoint,
   type ReviewEvidence,
   type ReviewFinding,
   type ReviewFindingType,
@@ -83,6 +84,15 @@ const runErrorMessage = (error?: string) => error === 'AGENT_TURN_LIMIT_EXCEEDED
 const formatTime = (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false })
 const taskStepLabel = (step: string) => ({ waiting: '等待 Worker', claimed: '任务已领取', embedding: '解析并生成 Embedding', vector_indexing: '构建向量索引', committing: '发布活动索引', completed: '索引发布完成', failed: '任务处理失败', cancelled: '任务已取消', superseded: '已被新版本替代' } as Record<string, string>)[step] ?? '正在处理知识资产'
 const completedUploadVisibleMs = 15_000
+
+function evidenceForFinding(
+  finding: ReviewFinding,
+  requirementPointsById: ReadonlyMap<string, RequirementPoint>,
+  evidenceById: ReadonlyMap<string, ReviewEvidence>
+) {
+  const evidenceRefs = new Set(finding.requirementPointRefs.flatMap(reference => requirementPointsById.get(reference)?.evidenceRefs ?? []))
+  return [...evidenceRefs].map(reference => evidenceById.get(reference)).filter((item): item is ReviewEvidence => Boolean(item))
+}
 
 const agentEventLabels: Record<string, string> = {
   runtime_initialized: 'Runtime 初始化',
@@ -180,7 +190,7 @@ export function RequirementReviewPage({
   const [outlineCollapsed, setOutlineCollapsed] = useState(false)
   const [findingTypeFilter, setFindingTypeFilter] = useState<'all' | ReviewFindingType>('all')
   const [severityFilter, setSeverityFilter] = useState<'all' | ReviewSeverity>('all')
-  const [basisFilter, setBasisFilter] = useState<'all' | 'evidence' | 'inference'>('all')
+  const [traceabilityFilter, setTraceabilityFilter] = useState<'all' | 'traceable' | 'untraceable'>('all')
   const [findingStateFilter, setFindingStateFilter] = useState<'all' | FindingState>('all')
   const [findingStates, setFindingStates] = useState<Record<string, FindingState>>({})
   const [snapshotOpen, setSnapshotOpen] = useState(false)
@@ -300,6 +310,8 @@ export function RequirementReviewPage({
   const selectedRun = runs.find(run => run.id === selectedRunId)
   const result = selectedRun?.response?.result
   const evidenceById = useMemo(() => new Map((result?.evidence ?? []).map(evidence => [evidence.clientEvidenceId, evidence])), [result])
+  const requirementPointsById = useMemo(() => new Map((result?.requirementPoints ?? []).map(point => [point.clientRequirementPointId, point])), [result])
+  const findingEvidence = (finding: ReviewFinding) => evidenceForFinding(finding, requirementPointsById, evidenceById)
   const documentContent = contentByVersion[selectedDocument?.assetVersionId ?? ''] ?? selectedDocument?.content ?? ''
   const documentVersionId = selectedDocument?.assetVersionId ?? ''
   const documentFormat = selectedDocument?.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
@@ -643,9 +655,9 @@ export function RequirementReviewPage({
 
   const locateFinding = (finding: ReviewFinding) => {
     setSelectedFindingId(finding.clientFindingId)
-    const evidence = finding.evidenceRefs.map(reference => evidenceById.get(reference)).find(Boolean)
+    const evidence = findingEvidence(finding).at(0)
     if (evidence) locateEvidence(evidence, finding.clientFindingId)
-    else notify('该 Finding 没有固定证据，已保持为模型推测，不生成原文高亮。', 'warning')
+    else notify('关联需求点没有固定证据，无法生成原文高亮。', 'warning')
   }
 
   const updateFindingState = (finding: ReviewFinding, state: FindingState) => {
@@ -656,7 +668,7 @@ export function RequirementReviewPage({
   }
 
   const quoteFinding = (finding: ReviewFinding) => {
-    const evidence = finding.evidenceRefs.map(reference => evidenceById.get(reference)).find(Boolean)
+    const evidence = findingEvidence(finding).at(0)
     setSourceQuote({
       text: evidence?.quote ?? finding.description,
       assetVersionId: evidence?.sourceRef.assetVersionId ?? documentVersionId,
@@ -743,7 +755,7 @@ export function RequirementReviewPage({
       ...(response.result.requirementPoints ?? []).flatMap(point => [`### ${point.clientRequirementPointId} · ${point.title}`, '', point.description, '', `- 证据：${point.evidenceRefs.join('、')}`, '']),
       '## Findings', '',
       ...response.result.findings.flatMap((finding, index) => {
-        const evidence = finding.evidenceRefs.map(reference => evidenceById.get(reference)).filter((item): item is ReviewEvidence => Boolean(item))
+        const evidence = findingEvidence(finding)
         return [
           `### ${index + 1}. ${finding.title}`, '',
           `- 类型：${findingTypeLabels[finding.type]}`,
@@ -776,10 +788,10 @@ export function RequirementReviewPage({
 
   const visibleFindings = (result?.findings ?? []).filter(finding => {
     const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open' : 'open'
-    const basis = finding.evidenceRefs.length ? 'evidence' : 'inference'
+    const traceability = findingEvidence(finding).length ? 'traceable' : 'untraceable'
     return (findingTypeFilter === 'all' || finding.type === findingTypeFilter)
       && (severityFilter === 'all' || finding.severity === severityFilter)
-      && (basisFilter === 'all' || basis === basisFilter)
+      && (traceabilityFilter === 'all' || traceability === traceabilityFilter)
       && (findingStateFilter === 'all' || state === findingStateFilter)
   })
 
@@ -787,8 +799,8 @@ export function RequirementReviewPage({
     requirements: result?.requirementPoints?.length ?? 0,
     findings: result?.findings.length ?? 0,
     high: result?.findings.filter(finding => finding.severity === 'critical' || finding.severity === 'high').length ?? 0,
-    pending: result?.findings.filter(finding => !finding.evidenceRefs.length).length ?? 0,
-    evidence: result?.findings.filter(finding => finding.evidenceRefs.length).length ?? 0,
+    pending: result?.findings.filter(finding => !findingEvidence(finding).length).length ?? 0,
+    evidence: result?.findings.filter(finding => findingEvidence(finding).length).length ?? 0,
   }
 
   const versionHistory = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
@@ -868,11 +880,11 @@ export function RequirementReviewPage({
         {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{!selectedModel?.healthy && <small>请先选择健康模型。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
 
         <div className={`rr-view-content ${view === 'source' ? 'rr-source-view' : ''}`}>
-          {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} basisFilter={basisFilter} setBasisFilter={setBasisFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
+          {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} traceabilityFilter={traceabilityFilter} setTraceabilityFilter={setTraceabilityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} findingEvidence={findingEvidence} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
           {view === 'source' && <SourceDocumentView document={selectedDocument} content={documentContent} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} />}
           {view === 'diff' && <DiffView versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
           {view === 'tree' && <RequirementPointsView requirementPoints={result?.requirementPoints ?? []} evidence={result?.evidence ?? []} onLocateEvidence={locateEvidence} />}
-          {view === 'evidence' && <EvidenceView evidence={result?.evidence ?? []} findings={result?.findings ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
+          {view === 'evidence' && <EvidenceView evidence={result?.evidence ?? []} findings={result?.findings ?? []} requirementPoints={result?.requirementPoints ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
         </div>
       </main>
 
@@ -892,20 +904,21 @@ export function RequirementReviewPage({
   })}{!availableRequirementDocuments.length && <div className="rr-empty compact"><FileText /><b>知识库暂无 ready 需求</b><p>可以先上传 Markdown、TXT 或 ZIP，入库完成后会自动绑定当前版本。</p></div>}</div><footer><button className="btn ghost" onClick={onOpenKnowledge}><BookOpen />打开全局知识库</button><button className="btn primary" onClick={() => setBindingManagerOpen(false)}>完成</button></footer></div></ReviewModal>}</>
 }
 
-function OverviewView({ result, stats, visibleFindings, selectedFindingId, selectedRun, findingStates, findingTypeFilter, setFindingTypeFilter, severityFilter, setSeverityFilter, basisFilter, setBasisFilter, findingStateFilter, setFindingStateFilter, onSelectFinding, onLocate, onQuote, onState, onStart, canRun }: {
+function OverviewView({ result, stats, visibleFindings, selectedFindingId, selectedRun, findingStates, findingTypeFilter, setFindingTypeFilter, severityFilter, setSeverityFilter, traceabilityFilter, setTraceabilityFilter, findingStateFilter, setFindingStateFilter, findingEvidence, onSelectFinding, onLocate, onQuote, onState, onStart, canRun }: {
   result?: RequirementAnalysisResponse['result']; stats: { requirements: number; findings: number; high: number; pending: number; evidence: number }; visibleFindings: ReviewFinding[]; selectedFindingId: string; selectedRun?: RunRecord; findingStates: Record<string, FindingState>;
-  findingTypeFilter: 'all' | ReviewFindingType; setFindingTypeFilter: (value: 'all' | ReviewFindingType) => void; severityFilter: 'all' | ReviewSeverity; setSeverityFilter: (value: 'all' | ReviewSeverity) => void; basisFilter: 'all' | 'evidence' | 'inference'; setBasisFilter: (value: 'all' | 'evidence' | 'inference') => void; findingStateFilter: 'all' | FindingState; setFindingStateFilter: (value: 'all' | FindingState) => void;
-  onSelectFinding: (id: string) => void; onLocate: (finding: ReviewFinding) => void; onQuote: (finding: ReviewFinding) => void; onState: (finding: ReviewFinding, state: FindingState) => void; onStart: () => void; canRun: boolean
+  findingTypeFilter: 'all' | ReviewFindingType; setFindingTypeFilter: (value: 'all' | ReviewFindingType) => void; severityFilter: 'all' | ReviewSeverity; setSeverityFilter: (value: 'all' | ReviewSeverity) => void; traceabilityFilter: 'all' | 'traceable' | 'untraceable'; setTraceabilityFilter: (value: 'all' | 'traceable' | 'untraceable') => void; findingStateFilter: 'all' | FindingState; setFindingStateFilter: (value: 'all' | FindingState) => void;
+  findingEvidence: (finding: ReviewFinding) => ReviewEvidence[]; onSelectFinding: (id: string) => void; onLocate: (finding: ReviewFinding) => void; onQuote: (finding: ReviewFinding) => void; onState: (finding: ReviewFinding, state: FindingState) => void; onStart: () => void; canRun: boolean
 }) {
   if (!result) return <div className="rr-empty"><Sparkles /><b>{selectedRun?.status === 'running' ? '正在提取需求点并执行评审' : selectedRun?.status === 'failed' ? '本次分析失败，可重新运行' : selectedRun?.status === 'cancelled' ? '本次分析已取消，可重新运行' : '尚未提取需求点'}</b><p>当前运行会固定左侧目录中的全部 ready 文档，按可独立实现、测试和验收的粒度提取需求点，并逐条校验固定证据。</p>{selectedRun?.status !== 'running' && <button className="btn primary" onClick={onStart} disabled={!canRun}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}</div>
   return <div className="rr-overview">
     <div className="rr-assessment"><div><span>AI 评审摘要</span><h2>{result.summary.overallAssessment === 'blocked' ? '存在阻断问题' : result.summary.overallAssessment === 'needs_revision' ? '建议修改后确认' : result.summary.overallAssessment === 'pass_with_notes' ? '附带关注项通过' : '评审通过'}</h2><p>{result.summary.risks[0] ?? result.summary.strengths[0] ?? '本次评审已完成结构化校验。'}</p></div><div className="rr-score"><strong>{result.summary.score}</strong><span>综合评分</span></div></div>
-    <div className="rr-stat-grid"><article><GitBranch /><span>需求点</span><strong>{stats.requirements}</strong><small>原子化提取并对齐证据</small></article><article><AlertTriangle /><span>Finding</span><strong>{stats.findings}</strong><small>独立评审问题</small></article><article className="danger"><ShieldCheck /><span>阻断/高风险</span><strong>{stats.high}</strong><small>优先人工确认</small></article><article className="warning"><CircleHelp /><span>待确认</span><strong>{stats.pending}</strong><small>证据不足项</small></article><article className="success"><CheckCircle2 /><span>有证据项</span><strong>{stats.evidence}</strong><small>可定位固定原文</small></article></div>
-    <div className="rr-finding-toolbar"><span><ListFilter />Finding 筛选</span><select value={findingTypeFilter} onChange={event => setFindingTypeFilter(event.target.value as 'all' | ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={severityFilter} onChange={event => setSeverityFilter(event.target.value as 'all' | ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={basisFilter} onChange={event => setBasisFilter(event.target.value as typeof basisFilter)}><option value="all">全部依据</option><option value="evidence">有固定证据</option><option value="inference">模型推测</option></select><select value={findingStateFilter} onChange={event => setFindingStateFilter(event.target.value as 'all' | FindingState)}><option value="all">全部处置</option>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>{visibleFindings.length} / {result.findings.length}</small></div>
+    <div className="rr-stat-grid"><article><GitBranch /><span>需求点</span><strong>{stats.requirements}</strong><small>原子化提取并对齐证据</small></article><article><AlertTriangle /><span>Finding</span><strong>{stats.findings}</strong><small>基于关联需求点分析</small></article><article className="danger"><ShieldCheck /><span>阻断/高风险</span><strong>{stats.high}</strong><small>优先人工确认</small></article><article className="warning"><CircleHelp /><span>待确认</span><strong>{stats.pending}</strong><small>关联需求点缺少证据</small></article><article className="success"><CheckCircle2 /><span>可追溯</span><strong>{stats.evidence}</strong><small>经需求点定位固定原文</small></article></div>
+    <div className="rr-finding-toolbar"><span><ListFilter />Finding 筛选</span><select value={findingTypeFilter} onChange={event => setFindingTypeFilter(event.target.value as 'all' | ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={severityFilter} onChange={event => setSeverityFilter(event.target.value as 'all' | ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={traceabilityFilter} onChange={event => setTraceabilityFilter(event.target.value as typeof traceabilityFilter)}><option value="all">全部可追溯性</option><option value="traceable">可经需求点追溯</option><option value="untraceable">关联需求点无证据</option></select><select value={findingStateFilter} onChange={event => setFindingStateFilter(event.target.value as 'all' | FindingState)}><option value="all">全部处置</option>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>{visibleFindings.length} / {result.findings.length}</small></div>
     <div className="rr-findings">{visibleFindings.map(finding => {
       const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open' : 'open'
-      const supported = finding.evidenceRefs.length > 0
-      return <article className={`rr-finding-card ${selectedFindingId === finding.clientFindingId ? 'selected' : ''}`} key={finding.clientFindingId} onClick={() => onSelectFinding(finding.clientFindingId)}><header><span className={`rr-risk-icon ${severityTone(finding.severity)}`}><AlertTriangle /></span><div><span>{findingTypeLabels[finding.type]} · {finding.clientFindingId}</span><h3>{finding.title}</h3></div><ReviewBadge tone={severityTone(finding.severity)}>{severityLabels[finding.severity]}风险</ReviewBadge><ReviewBadge tone={supported ? 'green' : 'orange'}>{supported ? `${finding.evidenceRefs.length} 条固定证据` : '模型推测'}</ReviewBadge></header><p>{finding.description}</p><dl><div><dt>影响</dt><dd>{finding.impact}</dd></div><div><dt>建议确认</dt><dd>{finding.recommendation}</dd></div></dl><footer><span>置信度 {Math.round(finding.confidence * 100)}% · <b>{findingStateLabels[state]}</b></span><div><button onClick={event => { event.stopPropagation(); onLocate(finding) }}><BookOpen />定位原文</button><button onClick={event => { event.stopPropagation(); onQuote(finding) }}><MessageSquareText />追问</button><select aria-label={`处置 ${finding.title}`} value={state} onClick={event => event.stopPropagation()} onChange={event => onState(finding, event.target.value as FindingState)}>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></div></footer></article>
+      const evidence = findingEvidence(finding)
+      const supported = evidence.length > 0
+      return <article className={`rr-finding-card ${selectedFindingId === finding.clientFindingId ? 'selected' : ''}`} key={finding.clientFindingId} onClick={() => onSelectFinding(finding.clientFindingId)}><header><span className={`rr-risk-icon ${severityTone(finding.severity)}`}><AlertTriangle /></span><div><span>{findingTypeLabels[finding.type]} · {finding.clientFindingId}</span><h3>{finding.title}</h3></div><ReviewBadge tone={severityTone(finding.severity)}>{severityLabels[finding.severity]}风险</ReviewBadge><ReviewBadge tone={supported ? 'green' : 'orange'}>{supported ? `${evidence.length} 条需求点证据` : '关联需求点无证据'}</ReviewBadge></header><p>{finding.description}</p><dl><div><dt>影响</dt><dd>{finding.impact}</dd></div><div><dt>建议确认</dt><dd>{finding.recommendation}</dd></div></dl><footer><span>置信度 {Math.round(finding.confidence * 100)}% · <b>{findingStateLabels[state]}</b></span><div><button onClick={event => { event.stopPropagation(); onLocate(finding) }}><BookOpen />定位原文</button><button onClick={event => { event.stopPropagation(); onQuote(finding) }}><MessageSquareText />追问</button><select aria-label={`处置 ${finding.title}`} value={state} onClick={event => event.stopPropagation()} onChange={event => onState(finding, event.target.value as FindingState)}>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></div></footer></article>
     })}{!visibleFindings.length && <div className="rr-empty compact"><ListFilter /><b>没有匹配的 Finding</b><p>调整筛选条件后重试。</p></div>}</div>
   </div>
 }
@@ -925,14 +938,25 @@ function RequirementPointsView({ requirementPoints, evidence, onLocateEvidence }
   if (!requirementPoints.length) return <div className="rr-empty"><GitBranch /><b>暂无已验证需求点</b><p>完成多文档提取后，需求点与固定证据的逐条关系会显示在这里。</p></div>
   return <div className="rr-tree"><header><GitBranch /><div><h2>需求点</h2><p>按可独立实现、测试和验收的粒度提取；仅对语义重复项去重，每个需求点只对齐固定证据。</p></div><ReviewBadge tone="green">{requirementPoints.length} 个需求点</ReviewBadge></header><div className="rr-tree-root"><span><FileText /></span><div><b>本次固定输入</b><small>{new Set(evidence.map(item => item.sourceRef.assetVersionId)).size} 份文档 · {evidence.length} 条固定证据</small></div></div>{requirementPoints.map(point => {
     const linkedEvidence = point.evidenceRefs.map(reference => evidenceById.get(reference)).filter((item): item is ReviewEvidence => Boolean(item))
-    return <article className="rr-requirement-point" key={point.clientRequirementPointId}><header><span className="rr-requirement-id">{point.clientRequirementPointId}</span><div><h3>{point.title}</h3><p>{point.description}</p></div><ReviewBadge tone="green">{linkedEvidence.length} 条证据</ReviewBadge></header><div className="rr-requirement-relations"><section><b>固定证据对齐</b>{linkedEvidence.map(item => <button key={item.clientEvidenceId} onClick={() => onLocateEvidence(item)}><Quote /><span><strong>{item.clientEvidenceId} · {item.locator.heading}</strong><p>“{item.quote}”</p><small>{item.sourceRef.assetVersionId} · {item.sourceRef.chunkId}</small></span></button>)}</section></div></article>
+    const details = [
+      ['主体', point.actor],
+      ['动作', point.action],
+      ['对象', point.object],
+      ['条件', point.conditions.join('；')],
+      ['业务规则', point.businessRules.join('；')],
+      ['异常', point.exceptions.join('；')],
+      ['验收标准', point.acceptanceCriteria.join('；')],
+    ].filter(([, value]) => value)
+    return <article className="rr-requirement-point" key={point.clientRequirementPointId}><header><span className="rr-requirement-id">{point.clientRequirementPointId}</span><div><h3>{point.title}</h3><p>{point.description}</p></div><ReviewBadge tone="green">{linkedEvidence.length} 条证据</ReviewBadge></header><dl className="rr-requirement-details">{details.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{point.mergeGroupId && <div className="rr-requirement-merge"><GitBranch /><span><b>归并组：{point.mergeGroupId}</b><small>{point.mergeRationale}</small></span></div>}<div className="rr-requirement-relations"><section><b>固定证据对齐</b>{linkedEvidence.map(item => <button key={item.clientEvidenceId} onClick={() => onLocateEvidence(item)}><Quote /><span><strong>{item.clientEvidenceId} · {item.locator.heading}</strong><p>“{item.quote}”</p><small>{item.sourceRef.assetVersionId} · {item.sourceRef.chunkId}</small></span></button>)}</section></div></article>
   })}</div>
 }
 
-function EvidenceView({ evidence, findings, selectedEvidenceId, onLocate }: { evidence: ReviewEvidence[]; findings: ReviewFinding[]; selectedEvidenceId: string; onLocate: (evidence: ReviewEvidence, findingId?: string) => void }) {
+function EvidenceView({ evidence, findings, requirementPoints, selectedEvidenceId, onLocate }: { evidence: ReviewEvidence[]; findings: ReviewFinding[]; requirementPoints: RequirementPoint[]; selectedEvidenceId: string; onLocate: (evidence: ReviewEvidence, findingId?: string) => void }) {
+  const evidenceById = new Map(evidence.map(item => [item.clientEvidenceId, item]))
+  const requirementPointsById = new Map(requirementPoints.map(point => [point.clientRequirementPointId, point]))
   if (!evidence.length) return <div className="rr-empty"><ShieldCheck /><b>暂无固定证据</b><p>只有通过服务端引用校验的 Evidence 才会出现在这里。</p></div>
   return <div className="rr-evidence-list"><header><div><ShieldCheck /><span><h2>固定证据引用</h2><p>点击后始终打开 Evidence 指定的资产版本，不跳转 latest。</p></span></div><ReviewBadge tone="green">{evidence.length} 条已校验证据</ReviewBadge></header>{evidence.map(item => {
-    const linked = findings.filter(finding => finding.evidenceRefs.includes(item.clientEvidenceId))
+    const linked = findings.filter(finding => evidenceForFinding(finding, requirementPointsById, evidenceById).some(candidate => candidate.clientEvidenceId === item.clientEvidenceId))
     return <button className={selectedEvidenceId === item.clientEvidenceId ? 'active' : ''} key={item.clientEvidenceId} onClick={() => onLocate(item, linked[0]?.clientFindingId)}><span className="rr-evidence-number">{item.clientEvidenceId}</span><span><b>{item.locator.heading}</b><p>“{item.quote}”</p><small>{item.sourceRef.assetVersionId} · {item.sourceRef.chunkId} · 定位 {item.locator.start}–{item.locator.end}</small></span><span className="rr-evidence-links">{linked.map(finding => <ReviewBadge tone={severityTone(finding.severity)} key={finding.clientFindingId}>{finding.clientFindingId}</ReviewBadge>)}</span><ChevronRight /></button>
   })}</div>
 }

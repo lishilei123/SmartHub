@@ -44,9 +44,9 @@
 - Agent 定义、Prompt、Toolset、Skill、MCP 绑定、执行限制和内容 Hash 独立版本化并写入运行快照；内置定义解析器和工具注册表工厂均可替换，后续插件通过版本引用和受控适配器接入，不绕过 Tool Runtime；
 - 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与两个 Agent 定义，不在运行中漂移到最新资料；
 - `RequirementPointExtractionAgent` 开放 `knowledge.search`、`knowledge.read_asset`、`knowledge.read_chunk`、`evidence.validate` 和 `requirement-points.submit_result`；`RequirementReviewAgent` 只开放 `review.submit_result`，其输入直接包含已校验冻结的需求点提取结果，不继承第一段消息历史；
-- 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；读取/证据工具不得耗尽提取 Agent 的全部额度，最后 3 次调用独立保留给当前阶段的结果提交工具；
+- 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；重复调用默认拒绝，只有 `knowledge.read_chunk` 可在达到阈值后重放一次本次执行已成功读取的固定结果，且不触发底层读取或消耗额度；读取/证据工具不得耗尽提取 Agent 的全部额度，最后 3 次调用独立保留给当前阶段的结果提交工具；
 - `knowledge.read_asset` 对目录分页，并在指定行范围读取时默认不重复返回目录；`evidence.validate` 要求从固定 Chunk 连续逐字引用，失败时返回原因和修复动作，成功时返回可直接提交的精确标题与字符范围；
-- `requirement-points.submit_result` 只接受 `requirement-point-extraction/v1` 的需求点、Evidence 和 coverage；`review.submit_result` 只接受 `requirement-review/v1` 的 summary 和 findings。第二个协议没有需求点、Evidence 或 coverage 字段，因此评审 Agent 无法增删或改写固定提取结果；
+- `requirement-points.submit_result` 只接受 `requirement-point-extraction/v1` 的需求点、Evidence 和 coverage；`review.submit_result` 只接受 `requirement-review/v2` 的 summary 和 findings。Finding 必须关联冻结需求点，原文依据通过需求点的 Evidence 间接追溯；第二个协议没有需求点、Evidence 或 coverage 字段，因此评审 Agent 无法增删或改写固定提取结果；
 - ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试；
 - 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
 

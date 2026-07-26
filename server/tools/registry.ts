@@ -5,6 +5,9 @@ export class ToolRegistry {
 
   register(descriptor: ToolDescriptor, handler: ToolHandler) {
     if (this.tools.has(descriptor.id) || [...this.tools.values()].some(item => item.descriptor.piName === descriptor.piName)) throw new Error(`工具重复注册：${descriptor.id}`)
+    if (descriptor.repeatPolicy && (descriptor.repeatPolicy !== 'replay_success_once' || descriptor.risk !== 'read' || !descriptor.idempotent)) {
+      throw new Error(`工具重复调用策略无效：${descriptor.id}`)
+    }
     this.tools.set(descriptor.id, { descriptor: structuredClone(descriptor), handler })
     return this
   }

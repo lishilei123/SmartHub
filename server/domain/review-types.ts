@@ -14,7 +14,16 @@ export interface CandidateRequirementPoint {
   clientRequirementPointId: string
   title: string
   description: string
+  actor: string
+  action: string
+  object: string
+  conditions: string[]
+  businessRules: string[]
+  exceptions: string[]
+  acceptanceCriteria: string[]
   evidenceRefs: string[]
+  mergeGroupId?: string
+  mergeRationale?: string
 }
 
 export interface CandidateFinding {
@@ -27,12 +36,16 @@ export interface CandidateFinding {
   impact: string
   recommendation: string
   requirementPointRefs: string[]
-  evidenceRefs: string[]
+}
+
+export interface AssetCoverage {
+  assetVersionId: string
+  reviewedChunkIds: string[]
+  skippedChunks: Array<{ chunkId: string; reason: string }>
 }
 
 export interface ReviewCoverage {
-  reviewedAreas: string[]
-  notReviewedAreas: string[]
+  assets: AssetCoverage[]
   limitations: string[]
 }
 

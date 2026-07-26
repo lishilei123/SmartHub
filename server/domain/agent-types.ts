@@ -16,7 +16,7 @@ export interface AgentDefinitionVersion {
   version: string
   status: 'published'
   modelScene: 'requirement_analysis'
-  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-review/v1'
+  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-review/v2'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -54,6 +54,11 @@ export interface ReviewRunSnapshot {
     requirementPointExtraction: AgentDefinitionVersion
     requirementReview: AgentDefinitionVersion
   }
+  extractionCoveragePlan: Array<{
+    assetVersionId: string
+    chunks: Array<{ chunkId: string; contentHash: string; headingPath: string[]; startLine: number; endLine: number; excludedReason?: string }>
+  }>
+  extractionToolBudget: { directoryCalls: number; chunkCalls: number; evidenceCalls: number; submissionCalls: number; minimumToolCalls: number }
   createdAt: string
 }
 
