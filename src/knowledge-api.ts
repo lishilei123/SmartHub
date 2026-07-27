@@ -21,7 +21,7 @@ export async function ensureKnowledgeBase() {
   return result.knowledgeBase.id
 }
 
-export type ApiVersion = { id: string; number: number; content: string; status: string; createdAt: string; readyAt?: string; chunks: { headingPath: string[] }[] }
+export type ApiVersion = { id: string; number: number; content: string; status: string; createdAt: string; readyAt?: string; chunks?: { headingPath: string[] }[] }
 const assetVersionRequests = new Map<string, Promise<ApiVersion>>()
 type ApiAsset = { id: string; displayName: string; logicalPath: string; assetType: string; sourceType: string; activeVersionId: string | null; activeVersion: (Omit<ApiVersion, 'content'> & { content?: string }) | null; versions: { id: string; number: number; status: string; createdAt: string }[]; operationTaskId?: string; task?: KnowledgeTask | null }
 type ApiDirectory = { id: string; knowledgeBaseId: string; name: string; parentId: string | null; operationTaskId?: string; task?: KnowledgeTask | null }

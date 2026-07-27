@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
-import type { ChunkSearchInput, RequirementBindingMetadata, ReviewRunPage, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
+import type { ChunkSearchInput, ConfigurationTransactionScope, DefaultKnowledgeBase, KnowledgeReadState, RequirementBindingMetadata, ReviewRunPage, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
 const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [] })
@@ -20,7 +20,7 @@ export class PostgresStore implements StateStore {
     const client = await this.pool.connect()
     try {
       await verifyMigrations(client)
-      this.state = await loadState(client)
+      this.state = emptyState()
     } finally { client.release() }
   }
 
@@ -38,6 +38,111 @@ export class PostgresStore implements StateStore {
       await client.query('ROLLBACK')
       throw error
     } finally { client.release() }
+  }
+
+  async getDefaultKnowledgeBase(projectName: string): Promise<DefaultKnowledgeBase | null> {
+    const result = await this.pool.query<{ project: DatabaseState['projects'][number]; knowledge_base: DatabaseState['knowledgeBases'][number] }>(`
+      SELECT project.data AS project, base.data AS knowledge_base
+      FROM smarthub.projects project
+      JOIN smarthub.knowledge_bases base ON base.project_id = project.id
+      LEFT JOIN LATERAL (
+        SELECT count(*) FILTER (WHERE asset.active_version_id IS NOT NULL)::int AS assets
+        FROM smarthub.knowledge_assets asset
+        WHERE asset.knowledge_base_id = base.id
+      ) asset_count ON true
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS directories
+        FROM smarthub.knowledge_directories directory
+        WHERE directory.knowledge_base_id = base.id
+      ) directory_count ON true
+      WHERE project.name = $1
+      ORDER BY asset_count.assets DESC, directory_count.directories DESC, base.created_at, base.id
+      LIMIT 1
+    `, [projectName])
+    const row = result.rows[0]
+    return row ? { project: row.project, knowledgeBase: row.knowledge_base } : null
+  }
+
+  async listProjectVersions(): Promise<ProjectVersion[]> {
+    const projects = await this.pool.query<{ id: string; name: string; created_at: Date | string; active_assets: number }>(`
+      SELECT project.id, project.name, project.created_at,
+        count(asset.id) FILTER (WHERE asset.active_version_id IS NOT NULL)::int AS active_assets
+      FROM smarthub.projects project
+      LEFT JOIN smarthub.knowledge_bases base ON base.project_id = project.id
+      LEFT JOIN smarthub.knowledge_assets asset ON asset.knowledge_base_id = base.id
+      GROUP BY project.id, project.name, project.created_at
+      ORDER BY project.created_at, project.id
+    `)
+    const matching = projects.rows.filter(project => project.name === 'SmartHub')
+      .sort((left, right) => right.active_assets - left.active_assets || String(left.created_at).localeCompare(String(right.created_at)))
+    const project = matching[0] ?? (projects.rows.length === 1 ? projects.rows[0] : null)
+    if (!project) return []
+    const versions = await this.pool.query<{ data: ProjectVersion }>('SELECT data FROM smarthub.project_versions WHERE project_id=$1 ORDER BY created_at DESC, id DESC', [project.id])
+    return versions.rows.map(row => row.data)
+  }
+
+  async getKnowledgeReadState(knowledgeBaseId: string, options: { includeVersionContent?: boolean; includeIndexes?: boolean } = {}): Promise<KnowledgeReadState | null> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const base = await client.query<{ data: DatabaseState['knowledgeBases'][number] }>('SELECT data FROM smarthub.knowledge_bases WHERE id=$1', [knowledgeBaseId])
+      if (!base.rows[0]) { await client.query('COMMIT'); return null }
+      const [directories, configs, assets, versions, indexes, taskRows, chunkCounts] = await Promise.all([
+        client.query<{ data: DatabaseState['directories'][number] }>('SELECT data FROM smarthub.knowledge_directories WHERE knowledge_base_id=$1 ORDER BY created_at, id', [knowledgeBaseId]),
+        client.query<{ data: DatabaseState['configs'][number] }>('SELECT data FROM smarthub.config_versions WHERE knowledge_base_id=$1 ORDER BY version, id', [knowledgeBaseId]),
+        client.query<{ data: DatabaseState['assets'][number] }>('SELECT data FROM smarthub.knowledge_assets WHERE knowledge_base_id=$1 ORDER BY created_at, id', [knowledgeBaseId]),
+        client.query<{ data: Omit<DatabaseState['versions'][number], 'chunks'> & { content?: string } }>(`
+          SELECT CASE WHEN $2::boolean THEN version.data ELSE version.data - 'content' END AS data
+          FROM smarthub.asset_versions version
+          JOIN smarthub.knowledge_assets asset ON asset.id = version.asset_id
+          WHERE asset.knowledge_base_id=$1
+          ORDER BY version.created_at, version.id
+        `, [knowledgeBaseId, Boolean(options.includeVersionContent)]),
+        options.includeIndexes
+          ? client.query<{ data: DatabaseState['indexes'][number] }>("SELECT data - 'indexedChunks' AS data FROM smarthub.index_versions WHERE knowledge_base_id=$1 ORDER BY created_at, id", [knowledgeBaseId])
+          : Promise.resolve({ rows: [] as Array<{ data: DatabaseState['indexes'][number] }> }),
+        client.query<SyncTaskRow>(`${syncTaskSelect} WHERE knowledge_base_id=$1 ORDER BY created_at, id`, [knowledgeBaseId]),
+        options.includeIndexes
+          ? client.query<{ index_version_id: string; chunks: number }>(`
+              SELECT chunk.index_version_id, count(*)::int AS chunks
+              FROM smarthub.index_chunks chunk
+              JOIN smarthub.index_versions version ON version.id = chunk.index_version_id
+              WHERE version.knowledge_base_id=$1
+              GROUP BY chunk.index_version_id
+            `, [knowledgeBaseId])
+          : Promise.resolve({ rows: [] as Array<{ index_version_id: string; chunks: number }> }),
+      ])
+      await client.query('COMMIT')
+      return {
+        state: {
+          ...emptyState(),
+          knowledgeBases: [base.rows[0].data],
+          directories: directories.rows.map(row => row.data),
+          configs: configs.rows.map(row => row.data),
+          assets: assets.rows.map(row => row.data),
+          versions: versions.rows.map(row => ({ ...row.data, content: row.data.content ?? '', chunks: [] })) as DatabaseState['versions'],
+          indexes: indexes.rows.map(row => ({ ...row.data, indexedChunks: [] })),
+          tasks: taskRows.rows.map(syncTaskFromRow),
+        },
+        indexChunkCounts: Object.fromEntries(chunkCounts.rows.map(row => [row.index_version_id, Number(row.chunks)])),
+      }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
+  async getAssetVersion(versionId: string, includeChunks: boolean): Promise<DatabaseState['versions'][number] | null> {
+    const version = await this.pool.query<{ data: Omit<DatabaseState['versions'][number], 'chunks'> }>('SELECT data FROM smarthub.asset_versions WHERE id=$1', [versionId])
+    if (!version.rows[0]) return null
+    if (!includeChunks) return { ...version.rows[0].data, chunks: [] }
+    const chunks = await this.pool.query<{ embedding: string; data: Chunk }>('SELECT embedding::text AS embedding, data FROM smarthub.asset_chunks WHERE asset_version_id=$1 ORDER BY ordinal, id', [versionId])
+    return { ...version.rows[0].data, chunks: chunks.rows.map(row => ({ ...row.data, embedding: decodeVector(row.embedding) })) }
+  }
+
+  async getSyncTask(taskId: string): Promise<DatabaseState['tasks'][number] | null> {
+    const result = await this.pool.query<SyncTaskRow>(`${syncTaskSelect} WHERE id=$1`, [taskId])
+    return result.rows[0] ? syncTaskFromRow(result.rows[0]) : null
   }
 
   async getActiveKnowledgeConfig(knowledgeBaseId: string): Promise<ConfigVersion | null> {
@@ -176,6 +281,16 @@ export class PostgresStore implements StateStore {
   async getReviewRun(runId: string): Promise<ReviewRun | null> {
     const result = await this.pool.query<{ data: ReviewRun }>('SELECT data FROM smarthub.review_runs WHERE id=$1', [runId])
     return result.rows[0]?.data ?? null
+  }
+
+  async recoverInterruptedReviewRuns(finishedAt: string, error: string): Promise<number> {
+    const result = await this.pool.query(`
+      UPDATE smarthub.review_runs
+      SET status='failed', finished_at=$1::text::timestamptz,
+        data = data || jsonb_build_object('status', 'failed', 'step', 'failed', 'finishedAt', $1::text, 'error', $2::text)
+      WHERE status='running'
+    `, [finishedAt, error])
+    return result.rowCount ?? 0
   }
 
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
@@ -417,6 +532,29 @@ export class PostgresStore implements StateStore {
     return await this.runTransaction(operation) as T
   }
 
+  async transactionScope<T>(scope: ConfigurationTransactionScope, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T> {
+    let result!: T
+    let failure: unknown
+    this.queue = this.queue.then(async () => {
+      const client = await this.pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('smarthub_state'))")
+        const before = await loadConfigurationState(client, scope)
+        const draft = structuredClone(before)
+        result = await operation(draft)
+        await persistConfigurationChanges(client, scope, before, draft)
+        await client.query('COMMIT')
+      } catch (error) {
+        failure = error
+        await client.query('ROLLBACK')
+      } finally { client.release() }
+    })
+    await this.queue
+    if (failure) throw failure
+    return result
+  }
+
   async transactionWithTaskLease<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
     return this.runTransaction(operation, { taskId, lease })
   }
@@ -468,6 +606,101 @@ type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>
 
 export function toIsoTimestamp(value: Date | string | null | undefined) {
   return value == null ? undefined : value instanceof Date ? value.toISOString() : value
+}
+
+type SyncTaskRow = {
+  data: SyncTask
+  status: SyncTask['status']
+  step: string
+  progress: number
+  created_at: Date | string
+  available_at: Date | string
+  attempt_count: number
+  max_attempts: number
+  dedupe_key: string | null
+  target_id: string | null
+  scope: SyncTask['scope']
+  lease_owner: string | null
+  run_token: string | null
+  lease_expires_at: Date | string | null
+  heartbeat_at: Date | string | null
+  cancel_requested_at: Date | string | null
+  started_at: Date | string | null
+  finished_at: Date | string | null
+  updated_at: Date | string
+}
+
+const syncTaskSelect = `SELECT data, status, step, progress, created_at, available_at, attempt_count, max_attempts, dedupe_key, target_id, scope, lease_owner, run_token::text AS run_token, lease_expires_at, heartbeat_at, cancel_requested_at, started_at, finished_at, updated_at FROM smarthub.sync_tasks`
+
+function syncTaskFromRow(row: SyncTaskRow): SyncTask {
+  return {
+    ...row.data,
+    status: row.status,
+    step: row.step,
+    progress: row.progress,
+    createdAt: toIsoTimestamp(row.created_at)!,
+    attempts: row.attempt_count || row.data.attempts,
+    availableAt: toIsoTimestamp(row.available_at)!,
+    maxAttempts: row.max_attempts,
+    dedupeKey: row.dedupe_key ?? undefined,
+    targetId: row.target_id ?? undefined,
+    scope: row.scope ?? undefined,
+    leaseOwner: row.lease_owner ?? undefined,
+    runToken: row.run_token ?? undefined,
+    leaseExpiresAt: toIsoTimestamp(row.lease_expires_at),
+    heartbeatAt: toIsoTimestamp(row.heartbeat_at),
+    cancelRequestedAt: toIsoTimestamp(row.cancel_requested_at),
+    startedAt: toIsoTimestamp(row.started_at),
+    finishedAt: toIsoTimestamp(row.finished_at),
+    updatedAt: toIsoTimestamp(row.updated_at)!,
+  }
+}
+
+async function loadConfigurationState(client: Queryable, scope: ConfigurationTransactionScope): Promise<DatabaseState> {
+  const state = emptyState()
+  if (scope === 'ai_configuration') {
+    const [modelSources, aiResources, drafts, versions] = await Promise.all([
+      client.query<{ data: DatabaseState['modelSources'][number] }>('SELECT data FROM smarthub.model_sources ORDER BY priority, created_at, id'),
+      client.query<{ data: DatabaseState['aiResources'][number] }>('SELECT data FROM smarthub.ai_resources ORDER BY kind, resource_key, id'),
+      client.query<{ data: DatabaseState['agentConfigurationDrafts'][number] }>('SELECT data FROM smarthub.agent_configuration_drafts ORDER BY scene'),
+      client.query<{ data: DatabaseState['agentConfigurationVersions'][number] }>('SELECT data FROM smarthub.agent_configuration_versions ORDER BY scene, agent_key, version'),
+    ])
+    state.modelSources = modelSources.rows.map(row => row.data)
+    state.aiResources = aiResources.rows.map(row => row.data)
+    state.agentConfigurationDrafts = drafts.rows.map(row => row.data)
+    state.agentConfigurationVersions = versions.rows.map(row => row.data)
+    return state
+  }
+  const [knowledgeBases, configs, indexes] = await Promise.all([
+    client.query<{ data: DatabaseState['knowledgeBases'][number] }>('SELECT data FROM smarthub.knowledge_bases ORDER BY created_at, id'),
+    client.query<{ data: DatabaseState['configs'][number] }>('SELECT data FROM smarthub.config_versions ORDER BY created_at, id'),
+    client.query<{ data: DatabaseState['indexes'][number] }>("SELECT data - 'indexedChunks' AS data FROM smarthub.index_versions ORDER BY created_at, id"),
+  ])
+  state.knowledgeBases = knowledgeBases.rows.map(row => row.data)
+  state.configs = configs.rows.map(row => row.data)
+  state.indexes = indexes.rows.map(row => ({ ...row.data, indexedChunks: [] }))
+  return state
+}
+
+async function persistConfigurationChanges(client: PoolClient, scope: ConfigurationTransactionScope, before: DatabaseState, state: DatabaseState) {
+  if (scope === 'ai_configuration') {
+    await deleteMissing(client, 'model_sources', before.modelSources, state.modelSources)
+    await deleteMissing(client, 'ai_resources', before.aiResources, state.aiResources)
+    await deleteMissing(client, 'agent_configuration_versions', before.agentConfigurationVersions, state.agentConfigurationVersions)
+    await deleteMissingScenes(client, 'agent_configuration_drafts', before.agentConfigurationDrafts, state.agentConfigurationDrafts)
+    for (const item of changed(before.modelSources, state.modelSources)) await client.query('INSERT INTO smarthub.model_sources (id, display_name, provider_type, enabled, priority, created_at, updated_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, provider_type=EXCLUDED.provider_type, enabled=EXCLUDED.enabled, priority=EXCLUDED.priority, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.name, item.providerType, item.enabled, item.priority, item.createdAt, item.updatedAt, JSON.stringify(item)])
+    for (const item of changed(before.aiResources, state.aiResources)) await client.query('INSERT INTO smarthub.ai_resources (id, kind, resource_key, enabled, built_in, created_at, updated_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET kind=EXCLUDED.kind, resource_key=EXCLUDED.resource_key, enabled=EXCLUDED.enabled, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.kind, item.key, item.enabled, item.builtIn, item.createdAt, item.updatedAt, JSON.stringify(item)])
+    for (const item of changedScenes(before.agentConfigurationDrafts, state.agentConfigurationDrafts)) {
+      const revision = Math.max(...Object.values(item.agents).map(agent => agent.revision))
+      const updatedAt = Object.values(item.agents).map(agent => agent.updatedAt).sort().at(-1)!
+      await client.query('INSERT INTO smarthub.agent_configuration_drafts (scene, revision, updated_at, data) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (scene) DO UPDATE SET revision=EXCLUDED.revision, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.scene, revision, updatedAt, JSON.stringify(item)])
+    }
+    for (const item of changed(before.agentConfigurationVersions, state.agentConfigurationVersions)) await client.query('INSERT INTO smarthub.agent_configuration_versions (id, scene, agent_key, version, status, created_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, data=EXCLUDED.data', [item.id, item.scene, item.agentKey, item.version, item.status, item.createdAt, JSON.stringify(item)])
+    return
+  }
+  await deleteMissing(client, 'config_versions', before.configs, state.configs)
+  for (const item of changed(before.knowledgeBases, state.knowledgeBases)) await client.query('INSERT INTO smarthub.knowledge_bases VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET project_id=EXCLUDED.project_id, name=EXCLUDED.name, active_index_version_id=EXCLUDED.active_index_version_id, active_config_version_id=EXCLUDED.active_config_version_id, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.projectId, item.name, item.activeIndexVersionId, item.activeConfigVersionId, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.configs, state.configs)) await client.query('INSERT INTO smarthub.config_versions VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET requires_rebuild=EXCLUDED.requires_rebuild, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.version, item.requiresRebuild, item.createdAt, JSON.stringify(item)])
 }
 
 async function loadState(client: Queryable): Promise<DatabaseState> {

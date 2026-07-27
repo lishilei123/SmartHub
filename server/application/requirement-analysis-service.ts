@@ -29,6 +29,8 @@ export class RequirementAnalysisService {
 
   async recoverInterruptedRuns() {
     const finishedAt = new Date().toISOString()
+    const error = 'REVIEW_RUN_INTERRUPTED: 服务进程在 Agent 执行期间重启，本次运行已终止；请重新发起评审'
+    if (this.store.recoverInterruptedReviewRuns) return this.store.recoverInterruptedReviewRuns(finishedAt, error)
     let recovered = 0
     await this.store.transaction(state => {
       state.reviewRuns.forEach(run => {
@@ -38,7 +40,7 @@ export class RequirementAnalysisService {
           status: 'failed',
           step: 'failed',
           finishedAt,
-          error: 'REVIEW_RUN_INTERRUPTED: 服务进程在 Agent 执行期间重启，本次运行已终止；请重新发起评审',
+          error,
         } satisfies Partial<ReviewRun>)
       })
     })

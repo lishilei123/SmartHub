@@ -47,6 +47,8 @@ test('知识资产列表可省略正文并保留固定版本元数据', async ()
   assert.equal(metadata.activeVersion?.content, undefined)
   assert.equal(metadata.activeVersion?.id, ready.version.id)
   assert.equal(metadata.activeVersion?.status, 'ready')
+  assert.equal('chunks' in metadata.activeVersion!, false)
+  assert.ok(metadata.versions.every(version => !('content' in version) && !('chunks' in version)))
 })
 
 test('默认知识库由后端稳定复用且并发初始化不创建空库', async () => {

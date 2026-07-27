@@ -827,9 +827,9 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
     }
   }, [])
   useEffect(() => {
-    if (!knowledgeBaseId || (selected !== 0 && selected !== 1) || modelSourcesState !== 'idle') return
+    if ((selected !== 0 && selected !== 1) || modelSourcesState !== 'idle') return
     void loadModelSources().catch(() => undefined)
-  }, [knowledgeBaseId, loadModelSources, modelSourcesState, selected])
+  }, [loadModelSources, modelSourcesState, selected])
   useEffect(() => {
     if (!knowledgeBaseId || selected !== 2 || configLoaded) return
     void loadConfig(knowledgeBaseId).then(value => {
@@ -841,9 +841,9 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
     }).catch(error => notify(error instanceof Error ? error.message : '知识库配置 API 未连接。', 'error'))
   }, [configLoaded, knowledgeBaseId, notify, selected])
   useEffect(() => {
-    if (!knowledgeBaseId || selected !== 1 || agentConfigState !== 'idle') return
+    if (selected !== 1 || agentConfigState !== 'idle') return
     void loadCurrentAgentConfiguration().catch(() => undefined)
-  }, [agentConfigState, knowledgeBaseId, loadCurrentAgentConfiguration, selected])
+  }, [agentConfigState, loadCurrentAgentConfiguration, selected])
   const current = items[selected]
   const CurrentIcon = current.icon
   const settingsDirty = JSON.stringify(saved) !== JSON.stringify(draft)
@@ -1223,7 +1223,10 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
       throw error
     })
   }, [])
-  useEffect(() => { void loadResourceCatalog().catch(() => undefined) }, [loadResourceCatalog])
+  useEffect(() => {
+    if (tab !== 'tools' || resourceCatalog || resourceCatalogError) return
+    void loadResourceCatalog().catch(() => undefined)
+  }, [loadResourceCatalog, resourceCatalog, resourceCatalogError, tab])
   const openVersion = async (id: string) => {
     setVersionLoading(id)
     try { setVersionSnapshot(await loadAgentConfigurationVersion(id)) }
@@ -1469,7 +1472,7 @@ function RetrievalIndexConfig({ knowledgeBaseId, requiresRebuild, onRebuilt, dra
     }
     void refreshRebuild()
     return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
-  }, [knowledgeBaseId, rebuildTaskId, rebuildPollVersion, onRebuilt, notify])
+  }, [knowledgeBaseId, rebuildTaskId, rebuildPollVersion])
 
   const startRebuild = async () => {
     if (rebuild === 'running') return

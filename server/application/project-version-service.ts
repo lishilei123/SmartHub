@@ -9,6 +9,7 @@ export class ProjectVersionService {
   constructor(private readonly store: StateStore) {}
 
   async list() {
+    if (this.store.listProjectVersions) return this.store.listProjectVersions()
     const state = await this.store.snapshot()
     const project = platformProject(state)
     return state.projectVersions.filter(item => item.projectId === project.id).sort((left, right) => right.createdAt.localeCompare(left.createdAt))

@@ -27,8 +27,11 @@ export class AiResourceService {
   constructor(private readonly store: StateStore, private readonly skillPackages?: SkillPackageStore) {}
 
   async list(): Promise<AiResourceCatalog> {
-    await this.ensureBuiltIns()
-    const resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
+    let resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
+    if (builtInsNeedSync(resources)) {
+      await this.ensureBuiltIns()
+      resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
+    }
     return catalog(resources)
   }
 
@@ -37,7 +40,7 @@ export class AiResourceService {
       const value = object(input)
       if ('package' in value || String(value.entrypoint ?? '').startsWith('skill-package://')) throw new Error('Skill 包元数据和受控入口只能由 ZIP 上传生成')
     }
-    return this.store.transaction(state => {
+    return this.transaction(state => {
       const now = new Date().toISOString()
       const resource = normalizeResource(kind, input, { id: `ai_resource_${randomUUID()}`, builtIn: false, createdAt: now, updatedAt: now })
       validateUnique(state.aiResources, resource)
@@ -53,7 +56,7 @@ export class AiResourceService {
     const archive = decodeBase64(value.contentBase64)
     const installed = await this.skillPackages.install({ key: key(value.key), version: version(value.version), fileName: text(value.fileName, 'ZIP 文件名', 200), archive })
     try {
-      return await this.store.transaction(state => {
+      return await this.transaction(state => {
         const now = new Date().toISOString()
         const resource = normalizeResource('skill', { ...value, entrypoint: installed.entrypoint, package: installed.package }, { id: `ai_resource_${randomUUID()}`, builtIn: false, createdAt: now, updatedAt: now }) as SkillResource
         resource.status = 'ready'
@@ -69,7 +72,7 @@ export class AiResourceService {
   }
 
   async update(kind: AiResourceKind, id: string, input: unknown): Promise<AiResource> {
-    return this.store.transaction(state => {
+    return this.transaction(state => {
       const index = state.aiResources.findIndex(item => item.id === id && item.kind === kind)
       if (index < 0) throw new Error('AI 资源不存在')
       const previous = state.aiResources[index]
@@ -87,7 +90,7 @@ export class AiResourceService {
   }
 
   async delete(kind: AiResourceKind, id: string): Promise<{ id: string; deleted: true }> {
-    const result = await this.store.transaction(state => {
+    const result = await this.transaction(state => {
       const resource = state.aiResources.find(item => item.id === id && item.kind === kind)
       if (!resource) throw new Error('AI 资源不存在')
       if (resource.builtIn) throw new Error('内置工具不可删除，只能停用')
@@ -107,8 +110,8 @@ export class AiResourceService {
   }
 
   async source(id: string) {
-    await this.ensureBuiltIns()
-    const resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
+    const current = await this.list()
+    const resources: AiResource[] = [...current.mcpServers, ...current.skills, ...current.tools]
     const tool = resources.find((item): item is ToolResource => item.id === id && item.kind === 'tool')
     if (!tool) throw new Error('工具不存在')
     if (!['builtin', 'local'].includes(tool.source)) throw new Error('只有内置或本地工具可以查看源码')
@@ -128,7 +131,7 @@ export class AiResourceService {
   }
 
   private async ensureBuiltIns() {
-    await this.store.transaction(state => {
+    await this.transaction(state => {
       state.aiResources = state.aiResources.filter(item => !(item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key)))
       for (const builtIn of builtInTools) {
         const index = state.aiResources.findIndex(item => item.kind === 'tool' && item.key === builtIn.key)
@@ -136,6 +139,12 @@ export class AiResourceService {
         else if (state.aiResources[index].builtIn) state.aiResources[index] = { ...structuredClone(builtIn), enabled: state.aiResources[index].enabled, createdAt: state.aiResources[index].createdAt, updatedAt: state.aiResources[index].updatedAt }
       }
     })
+  }
+
+  private transaction<T>(operation: (draft: Awaited<ReturnType<StateStore['snapshot']>>) => T | Promise<T>): Promise<T> {
+    return (this.store.transactionScope
+      ? this.store.transactionScope('ai_configuration', operation)
+      : this.store.transaction(operation)) as Promise<T>
   }
 }
 
@@ -146,6 +155,15 @@ function catalog(resources: AiResource[]): AiResourceCatalog {
     skills: sorted.filter((item): item is SkillResource => item.kind === 'skill'),
     tools: sorted.filter((item): item is ToolResource => item.kind === 'tool'),
   }
+}
+
+function builtInsNeedSync(resources: AiResource[]) {
+  if (resources.some(item => item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key))) return true
+  return builtInTools.some(expected => {
+    const actual = resources.find((item): item is ToolResource => item.kind === 'tool' && item.key === expected.key)
+    if (!actual?.builtIn) return true
+    return JSON.stringify({ ...actual, enabled: true, createdAt: expected.createdAt, updatedAt: expected.updatedAt }) !== JSON.stringify(expected)
+  })
 }
 
 function builtInTool(key: string, name: string, description: string, version: string, risk: ToolResource['risk'], timeoutMs: number, sourcePath: string): ToolResource {

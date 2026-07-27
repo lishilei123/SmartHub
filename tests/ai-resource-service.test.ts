@@ -22,6 +22,9 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
     'requirement-points.submit_result': 'server/tools/requirement-points-submit-result.ts',
     'review.submit_result': 'server/tools/review-submit-result.ts',
   })
+  store.transaction = async () => { throw new Error('内置资源已同步时不应再次启动写事务') }
+  assert.equal((await service.list()).tools.length, 4)
+  store.transaction = JsonStore.prototype.transaction.bind(store)
   const searchTool = initial.tools.find(tool => tool.key === 'knowledge.search')!
   const builtInSource = await service.source(searchTool.id)
   assert.equal(builtInSource.path, 'server/tools/knowledge-search.ts')

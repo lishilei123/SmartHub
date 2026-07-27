@@ -138,9 +138,9 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const assets = /^\/api\/knowledge-bases\/([^/]+)\/assets$/.exec(url.pathname)
   if (method === 'GET' && assets) return send(response, 200, await service.assets(assets[1], Object.fromEntries(url.searchParams)))
   const tasks = /^\/api\/knowledge-bases\/([^/]+)\/tasks$/.exec(url.pathname)
-  if (method === 'GET' && tasks) return send(response, 200, await service.tasks(tasks[1]))
+  if (method === 'GET' && tasks) return send(response, 200, (await service.tasks(tasks[1])).map(presentTask))
   const task = /^\/api\/tasks\/([^/]+)$/.exec(url.pathname)
-  if (method === 'GET' && task) return send(response, 200, await service.task(task[1]))
+  if (method === 'GET' && task) return send(response, 200, presentTask(await service.task(task[1])))
   const retry = /^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname)
   if (method === 'POST' && retry) { const retried = await service.retry(retry[1]); await notifyTask(retried.id); return send(response, 202, retried) }
   const cancel = /^\/api\/tasks\/([^/]+)\/cancel$/.exec(url.pathname)
@@ -149,7 +149,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   if (method === 'PUT' && asset) { const body = await json(request); const patch: { displayName?: string; targetDirectoryId?: string | null } = {}; if ('displayName' in body) patch.displayName = String(body.displayName ?? ''); if ('targetDirectoryId' in body) patch.targetDirectoryId = body.targetDirectoryId ? String(body.targetDirectoryId) : null; return send(response, 200, await service.updateAsset(asset[1], patch)) }
   if (method === 'DELETE' && asset) { const result = await service.deleteAsset(asset[1]); await notifyTask(result.task.id); return send(response, 202, result) }
   const version = /^\/api\/asset-versions\/([^/]+)$/.exec(url.pathname)
-  if (method === 'GET' && version) return send(response, 200, await service.version(version[1]))
+  if (method === 'GET' && version) return send(response, 200, await service.version(version[1], false))
   const search = /^\/api\/knowledge-bases\/([^/]+)\/search$/.exec(url.pathname)
   if (method === 'POST' && search) { const body = await json(request); return send(response, 200, await service.search(search[1], { query: String(body.query ?? ''), mode: body.mode as 'keyword' | 'vector' | 'hybrid' | undefined, logicalPath: body.logicalPath as string | undefined })) }
   const rebuild = /^\/api\/knowledge-bases\/([^/]+)\/rebuild$/.exec(url.pathname)
@@ -163,6 +163,26 @@ function optionalPositiveInteger(value: string | null) {
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('limit 必须是正整数')
   return parsed
+}
+function presentTask(task: Awaited<ReturnType<typeof service.task>>) {
+  return {
+    id: task.id,
+    knowledgeBaseId: task.knowledgeBaseId,
+    type: task.type,
+    trigger: task.trigger,
+    status: task.status,
+    step: task.step,
+    progress: task.progress,
+    attempts: task.attempts,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    startedAt: task.startedAt,
+    finishedAt: task.finishedAt,
+    error: task.error,
+    metrics: task.metrics,
+    scope: task.scope,
+    targetId: task.targetId,
+  }
 }
 async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) {
   const declared = Number(request.headers['content-length'] ?? 0)

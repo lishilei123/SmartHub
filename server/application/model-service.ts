@@ -17,17 +17,19 @@ export class ModelService {
 
   async replaceSources(input: unknown) {
     if (!Array.isArray(input)) throw new Error('模型来源必须是数组')
-    const previous = new Map((await this.store.snapshot()).modelSources.map(source => [source.id, source]))
-    const now = new Date().toISOString()
-    const sources = input.map((value, index) => this.normalizeSource(value, index + 1, previous, now))
-    this.validateUniqueSources(sources)
-    await this.store.transaction(draft => { draft.modelSources = sources })
-    return sources.map(source => this.publicSource(source))
+    return this.transaction(draft => {
+      const previous = new Map(draft.modelSources.map(source => [source.id, source]))
+      const now = new Date().toISOString()
+      const sources = input.map((value, index) => this.normalizeSource(value, index + 1, previous, now))
+      this.validateUniqueSources(sources)
+      draft.modelSources = sources
+      return sources.map(source => this.publicSource(source))
+    })
   }
 
   async createSource(input: unknown) {
     const now = new Date().toISOString()
-    const source = await this.store.transaction(draft => {
+    const source = await this.transaction(draft => {
       const source = this.normalizeSource(input, draft.modelSources.length + 1, new Map(), now)
       this.validateUniqueSources([...draft.modelSources, source])
       draft.modelSources.push(source)
@@ -38,7 +40,7 @@ export class ModelService {
 
   async updateSource(id: string, input: unknown) {
     const now = new Date().toISOString()
-    return this.store.transaction(draft => {
+    return this.transaction(draft => {
       const index = draft.modelSources.findIndex(source => source.id === id)
       if (index < 0) throw new Error('模型来源不存在')
       const merged = { ...this.publicSource(draft.modelSources[index]), ...object(input), id }
@@ -52,7 +54,7 @@ export class ModelService {
   }
 
   async deleteSource(id: string) {
-    const source = await this.store.transaction(draft => {
+    const source = await this.transaction(draft => {
       const index = draft.modelSources.findIndex(source => source.id === id)
       if (index < 0) throw new Error('模型来源不存在')
       const [removed] = draft.modelSources.splice(index, 1)
@@ -65,7 +67,7 @@ export class ModelService {
   async discover(input: unknown) {
     const value = object(input)
     const sourceId = cleanId(value.id)
-    const saved = sourceId ? (await this.store.snapshot()).modelSources.find(source => source.id === sourceId) : undefined
+    const saved = sourceId ? (this.store.listModelSources ? await this.store.listModelSources() : (await this.store.snapshot()).modelSources).find(source => source.id === sourceId) : undefined
     const providerType = String(value.providerType ?? saved?.providerType ?? '') as GenerativeProviderType
     if (!providerTypes.has(providerType)) throw new Error('不支持的模型协议类型')
     if (providerType === 'anthropic') throw new Error('Anthropic 不提供标准模型列表接口，请手动注册已获授权的模型')
@@ -83,8 +85,8 @@ export class ModelService {
   }
 
   async probe(sourceId: string, modelId: string) {
-    const state = await this.store.snapshot()
-    const source = state.modelSources.find(item => item.id === sourceId)
+    const sources = this.store.listModelSources ? await this.store.listModelSources() : (await this.store.snapshot()).modelSources
+    const source = sources.find(item => item.id === sourceId)
     if (!source) throw new Error('模型来源不存在')
     const model = source.models.find(item => item.id === modelId)
     if (!model) throw new Error('模型不存在')
@@ -111,7 +113,7 @@ export class ModelService {
       message = error instanceof Error ? error.message : '连通性探测失败'
     }
 
-    const updated = await this.store.transaction(draft => {
+    const updated = await this.transaction(draft => {
       const storedSource = draft.modelSources.find(item => item.id === sourceId)
       const storedModel = storedSource?.models.find(item => item.id === modelId)
       if (!storedSource || !storedModel) throw new Error('探测期间模型配置已被删除')
@@ -125,6 +127,12 @@ export class ModelService {
       return structuredClone(storedSource)
     })
     return { ok: health === 'healthy', message, checkedAt, source: this.publicSource(updated) }
+  }
+
+  private transaction<T>(operation: (draft: Awaited<ReturnType<StateStore['snapshot']>>) => T | Promise<T>): Promise<T> {
+    return (this.store.transactionScope
+      ? this.store.transactionScope('ai_configuration', operation)
+      : this.store.transaction(operation)) as Promise<T>
   }
 
   private normalizeSource(input: unknown, priority: number, previous: Map<string, GenerativeModelSource>, now: string): GenerativeModelSource {

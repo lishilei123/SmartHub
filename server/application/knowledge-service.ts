@@ -19,6 +19,7 @@ export class KnowledgeService {
   constructor(readonly store: StateStore, private readonly rawDocuments?: RawDocumentStore, private readonly localModels?: LocalModelRuntime, private readonly remoteEmbeddings = new RemoteEmbeddingClient()) {}
   async initialize() {
     await this.store.load()
+    if (this.store.getKnowledgeReadState) return
     await this.store.transaction(state => {
       state.projectVersions ??= []
       state.projectVersionRequirementBindings ??= []
@@ -87,7 +88,9 @@ export class KnowledgeService {
 
   async ensureDefaultKnowledgeBase(projectName = 'SmartHub') {
     const normalizedName = projectName.trim() || 'SmartHub'
-    const existing = selectDefaultKnowledgeBase(await this.store.snapshot(), normalizedName)
+    const existing = this.store.getDefaultKnowledgeBase
+      ? await this.store.getDefaultKnowledgeBase(normalizedName)
+      : selectDefaultKnowledgeBase(await this.store.snapshot(), normalizedName)
     if (existing) return existing
     return this.store.transaction(async state => {
       const concurrent = selectDefaultKnowledgeBase(state, normalizedName)
@@ -142,7 +145,8 @@ export class KnowledgeService {
   }
 
   async overview(knowledgeBaseId: string) {
-    const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    const read = await this.readKnowledgeState(knowledgeBaseId, { includeIndexes: true })
+    const state = read.state; const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
     const assets = state.assets.filter(item => item.knowledgeBaseId === knowledgeBaseId)
     const versions = state.versions.filter(item => assets.some(asset => asset.id === item.assetId))
     const tasks = state.tasks.filter(item => item.knowledgeBaseId === knowledgeBaseId)
@@ -157,9 +161,9 @@ export class KnowledgeService {
     return {
       knowledgeBase: kb,
       counts: { assets: assets.length, ready: versions.filter(item => item.status === 'ready').length, syncing: versions.filter(item => item.status === 'syncing' || item.status === 'pending').length, failed: versions.filter(item => item.status === 'failed').length },
-      byAssetType: countBy('assetType'), bySource: countBy('sourceType'), activeIndex, latestTask: tasks.at(-1) ?? null, latestFailure: tasks.filter(item => item.status === 'failed').at(-1) ?? null,
-      indexSummary: activeIndex && indexConfig ? { id: activeIndex.id, number: activeIndex.number, dimensions: indexConfig.embeddingDimensions, chunks: activeIndex.indexedChunks?.length ?? 0, hnswReady } : null,
-      candidateSummary: candidateTask ? { task: taskSummary(candidateTask), index: candidateIndex ? { id: candidateIndex.id, number: candidateIndex.number, chunks: candidateIndex.indexedChunks?.length ?? 0 } : null } : null,
+      byAssetType: countBy('assetType'), bySource: countBy('sourceType'), activeIndex: activeIndex ? { ...activeIndex, indexedChunks: undefined } : null, latestTask: taskSummary(tasks.at(-1)), latestFailure: taskSummary(tasks.filter(item => item.status === 'failed').at(-1)),
+      indexSummary: activeIndex && indexConfig ? { id: activeIndex.id, number: activeIndex.number, dimensions: indexConfig.embeddingDimensions, chunks: read.indexChunkCounts[activeIndex.id] ?? activeIndex.indexedChunks?.length ?? 0, hnswReady } : null,
+      candidateSummary: candidateTask ? { task: taskSummary(candidateTask), index: candidateIndex ? { id: candidateIndex.id, number: candidateIndex.number, chunks: read.indexChunkCounts[candidateIndex.id] ?? candidateIndex.indexedChunks?.length ?? 0 } : null } : null,
     }
   }
 
@@ -174,7 +178,7 @@ export class KnowledgeService {
   }
 
   async saveConfig(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
-    return this.store.transaction(async state => {
+    return this.configurationTransaction(async state => {
       const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
       const current = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
       const config = normalizeEmbeddingSources(mergeConfigPatch(current.config, patch))
@@ -193,9 +197,12 @@ export class KnowledgeService {
   }
 
   async testEmbeddingConfig(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
-    const state = await this.store.snapshot()
-    const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
-    const saved = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
+    const saved = this.store.getActiveKnowledgeConfig
+      ? required(await this.store.getActiveKnowledgeConfig(knowledgeBaseId), '知识库不存在')
+      : await this.store.snapshot().then(state => {
+        const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+        return required(state.configs.find(item => item.id === kb.activeConfigVersionId), '配置不存在')
+      })
     const config = normalizeEmbeddingSources(mergeConfigPatch(saved.config, patch))
     validateEmbeddingProbe(config)
     if (config.embeddingMode === 'remote_api') return { ok: true as const, model: config.embeddingModel, dimensions: await this.remoteEmbeddings.detectDimensions(remoteRoute(config, config.embeddingSourceId, config.embeddingModel), config) }
@@ -205,8 +212,7 @@ export class KnowledgeService {
   }
 
   async directories(knowledgeBaseId: string) {
-    const state = await this.store.snapshot()
-    required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    const { state } = await this.readKnowledgeState(knowledgeBaseId)
     return state.directories
       .filter(item => item.knowledgeBaseId === knowledgeBaseId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
@@ -318,7 +324,7 @@ export class KnowledgeService {
   async processTask(taskId: string, lease?: TaskLease, signal?: AbortSignal) {
     throwIfAborted(signal)
     if (lease && this.store.ownsTask && !await this.store.ownsTask(taskId, lease)) return null
-    const task = required((await this.store.snapshot()).tasks.find(item => item.id === taskId), '任务不存在')
+    const task = required(this.store.getSyncTask ? await this.store.getSyncTask(taskId) : (await this.store.snapshot()).tasks.find(item => item.id === taskId), '任务不存在')
     if (task.type === 'sync') return this.processQueuedSync(taskId, lease, signal)
     if (task.type === 'rebuild') return this.processQueuedRebuild(taskId, lease, signal)
     if (task.type === 'delete') return this.processQueuedDelete(taskId, lease, signal)
@@ -401,24 +407,28 @@ export class KnowledgeService {
   }
 
   async assets(knowledgeBaseId: string, filters: { status?: string; path?: string; includeDeleted?: boolean | string; includeContent?: boolean | string; query?: string } = {}) {
-    const state = await this.store.snapshot()
     const includeContent = filters.includeContent !== false && filters.includeContent !== 'false'
+    const { state } = await this.readKnowledgeState(knowledgeBaseId, { includeVersionContent: includeContent })
     return state.assets
       .filter(asset => asset.knowledgeBaseId === knowledgeBaseId)
       .map(asset => ({
         ...asset,
-        activeVersion: state.versions.find(version => version.id === asset.activeVersionId) ?? null,
-        versions: state.versions.filter(version => version.assetId === asset.id).map(version => ({ ...version, content: undefined })),
+        activeVersion: presentAssetVersion(state.versions.find(version => version.id === asset.activeVersionId) ?? null, includeContent),
+        versions: state.versions.filter(version => version.assetId === asset.id).map(versionSummary),
         task: taskSummary(activeTaskForAsset(state.tasks, asset)),
       }))
       .filter(asset => (!filters.status || asset.activeVersion?.status === filters.status) && (!filters.path || asset.logicalPath.includes(filters.path)) && (filters.includeDeleted || Boolean(asset.activeVersion) || Boolean(asset.task)) && (!filters.query || `${asset.displayName} ${asset.logicalPath} ${asset.activeVersion?.content}`.toLocaleLowerCase().includes(filters.query.toLocaleLowerCase())))
-      .map(asset => includeContent || !asset.activeVersion ? asset : { ...asset, activeVersion: { ...asset.activeVersion, content: undefined } })
   }
 
-  async version(versionId: string) { return required((await this.store.snapshot()).versions.find(item => item.id === versionId), '资产版本不存在') }
+  async version(versionId: string, includeChunks = true) {
+    const version = this.store.getAssetVersion
+      ? await this.store.getAssetVersion(versionId, includeChunks)
+      : (await this.store.snapshot()).versions.find(item => item.id === versionId)
+    return required(version, '资产版本不存在')
+  }
 
-  async tasks(knowledgeBaseId: string) { return (await this.store.snapshot()).tasks.filter(item => item.knowledgeBaseId === knowledgeBaseId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) }
-  async task(taskId: string) { return required((await this.store.snapshot()).tasks.find(item => item.id === taskId), '任务不存在') }
+  async tasks(knowledgeBaseId: string) { return (await this.readKnowledgeState(knowledgeBaseId)).state.tasks.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) }
+  async task(taskId: string) { return required(this.store.getSyncTask ? await this.store.getSyncTask(taskId) : (await this.store.snapshot()).tasks.find(item => item.id === taskId), '任务不存在') }
 
   async retry(taskId: string) {
     return this.store.transaction(state => {
@@ -647,7 +657,7 @@ export class KnowledgeService {
   }
 
   async search(knowledgeBaseId: string, input: { query: string; mode?: 'keyword' | 'vector' | 'hybrid'; logicalPath?: string }) {
-    const state = await this.store.snapshot(); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    const { state } = await this.readKnowledgeState(knowledgeBaseId, { includeIndexes: true }); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
     const query = input.query.trim()
     if (!query) throw new Error('检索内容不能为空')
     if (!state.versions.some(item => item.status === 'ready' && state.assets.some(asset => asset.knowledgeBaseId === knowledgeBaseId && asset.activeVersionId === item.id))) {
@@ -660,7 +670,7 @@ export class KnowledgeService {
     const latestConfig = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '当前查询配置不存在').config
     const config = withLatestQueryConfig(indexConfig, latestConfig)
     const requestedMode = input.mode ?? (config.hybridSearch ? 'hybrid' : 'keyword')
-    const hasFilterMatch = index.indexedChunks?.some(chunk => !input.logicalPath || chunk.assetMetadata?.logicalPath.includes(input.logicalPath)) ?? false
+    const hasFilterMatch = this.store.searchChunks ? true : index.indexedChunks?.some(chunk => !input.logicalPath || chunk.assetMetadata?.logicalPath.includes(input.logicalPath)) ?? false
     if (input.logicalPath && !hasFilterMatch) return { status: 'filter_empty', results: [] }
     let mode = requestedMode
     let queryVector: number[] | undefined
@@ -834,6 +844,22 @@ export class KnowledgeService {
     return (this.localModels ? await this.localModels.tokenCodec(config.embeddingModel) : null) ?? defaultTokenCodec
   }
 
+  private async readKnowledgeState(knowledgeBaseId: string, options: { includeVersionContent?: boolean; includeIndexes?: boolean } = {}) {
+    if (this.store.getKnowledgeReadState) return required(await this.store.getKnowledgeReadState(knowledgeBaseId, options), '知识库不存在')
+    const state = await this.store.snapshot()
+    required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    return {
+      state,
+      indexChunkCounts: Object.fromEntries(state.indexes.map(index => [index.id, index.indexedChunks?.length ?? 0])),
+    }
+  }
+
+  private configurationTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T> {
+    return (this.store.transactionScope
+      ? this.store.transactionScope('knowledge_configuration', operation)
+      : this.store.transaction(operation)) as Promise<T>
+  }
+
   private async embedTexts(config: KnowledgeConfig, texts: string[], model = config.embeddingModel, signal?: AbortSignal) {
     throwIfAborted(signal)
     if (!texts.length) return []
@@ -901,6 +927,28 @@ function taskSummary(task: SyncTask | null | undefined) {
     id: task.id, type: task.type, status: task.status, step: task.step, progress: task.progress,
     error: task.error, canRetry: task.status === 'failed', canCancel: ['queued', 'running'].includes(task.status) && task.input.fileCleanupOnly !== true,
   }
+}
+
+function presentAssetVersion(version: AssetVersion | null, includeContent: boolean) {
+  if (!version) return null
+  return {
+    id: version.id,
+    assetId: version.assetId,
+    number: version.number,
+    ...(includeContent ? { content: version.content } : {}),
+    contentHash: version.contentHash,
+    status: version.status,
+    configVersionId: version.configVersionId,
+    createdAt: version.createdAt,
+    readyAt: version.readyAt,
+    error: version.error,
+    storagePath: version.storagePath,
+    snapshotPath: version.snapshotPath,
+  }
+}
+
+function versionSummary(version: AssetVersion) {
+  return { id: version.id, number: version.number, status: version.status, createdAt: version.createdAt, readyAt: version.readyAt }
 }
 
 function activeTaskForAsset(tasks: SyncTask[], asset: DatabaseState['assets'][number]) {

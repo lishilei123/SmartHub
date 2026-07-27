@@ -34,12 +34,29 @@ export type ReviewRunPage = {
   nextCursor?: string
 }
 
+export type ConfigurationTransactionScope = 'ai_configuration' | 'knowledge_configuration'
+
+export type KnowledgeReadState = {
+  state: DatabaseState
+  indexChunkCounts: Record<string, number>
+}
+
+export type DefaultKnowledgeBase = {
+  project: DatabaseState['projects'][number]
+  knowledgeBase: DatabaseState['knowledgeBases'][number]
+}
+
 const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [] })
 
 export interface StateStore {
   load(): Promise<void>
   read(): DatabaseState
   snapshot(): Promise<DatabaseState>
+  getDefaultKnowledgeBase?(projectName: string): Promise<DefaultKnowledgeBase | null>
+  listProjectVersions?(): Promise<ProjectVersion[]>
+  getKnowledgeReadState?(knowledgeBaseId: string, options?: { includeVersionContent?: boolean; includeIndexes?: boolean }): Promise<KnowledgeReadState | null>
+  getAssetVersion?(versionId: string, includeChunks: boolean): Promise<DatabaseState['versions'][number] | null>
+  getSyncTask?(taskId: string): Promise<DatabaseState['tasks'][number] | null>
   getActiveKnowledgeConfig?(knowledgeBaseId: string): Promise<ConfigVersion | null>
   listModelSources?(): Promise<GenerativeModelSource[]>
   listAiResources?(): Promise<AiResource[]>
@@ -49,8 +66,10 @@ export interface StateStore {
   listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
   listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
   getReviewRun?(runId: string): Promise<ReviewRun | null>
+  recoverInterruptedReviewRuns?(finishedAt: string, error: string): Promise<number>
   saveReviewRunExecution?(runId: string, execution: AgentExecutionRecord): Promise<void>
   transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
+  transactionScope?<T>(scope: ConfigurationTransactionScope, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
   transactionWithTaskLease?<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   searchChunks?(input: ChunkSearchInput): Promise<StoredChunkCandidate[]>
   claimTask?(workerId: string, leaseMs: number): Promise<DatabaseState['tasks'][number] | null>

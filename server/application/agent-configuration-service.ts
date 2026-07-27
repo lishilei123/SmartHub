@@ -48,14 +48,16 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
   }
 
   async getVersion(id: string) {
-    const state = await this.store.snapshot()
-    const versions = expandStoredVersions(state.agentConfigurationVersions.filter(item => item.scene === SCENE))
+    const configuration = this.store.getAgentConfigurationState
+      ? await this.store.getAgentConfigurationState(SCENE)
+      : await this.store.snapshot().then(state => ({ draft: null, versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE) }))
+    const versions = expandStoredVersions(configuration.versions)
     return structuredClone(required(versions.find(item => item.id === id), 'Agent 配置版本不存在'))
   }
 
   async save(input: AgentConfigurationInput) {
     const agentKey = normalizeAgentKey(input.agentKey)
-    return await this.store.transaction(state => {
+    return await this.transaction(state => {
       migrateState(state)
       const normalized = normalizeAgentDraft(agentKey, input, state)
       const index = state.agentConfigurationDrafts.findIndex(item => item.scene === SCENE)
@@ -72,7 +74,7 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
 
   async publish(input: { agentKey: AgentConfigurationAgentKey; revision: number; publishedBy?: string }) {
     const agentKey = normalizeAgentKey(input.agentKey)
-    return await this.store.transaction(state => {
+    return await this.transaction(state => {
       migrateState(state)
       const draft = required(state.agentConfigurationDrafts.find(item => item.scene === SCENE), `请先保存${agentLabel(agentKey)}草稿`)
       const agentDraft = draft.agents[agentKey]
@@ -117,6 +119,12 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
     const active = await this.resolveActive(agentKey)
     if (!active) return builtInDefinition(configurationKey(agentKey))
     return structuredClone(active.agentDefinition)
+  }
+
+  private transaction<T>(operation: (draft: Awaited<ReturnType<StateStore['snapshot']>>) => T | Promise<T>): Promise<T> {
+    return (this.store.transactionScope
+      ? this.store.transactionScope('ai_configuration', operation)
+      : this.store.transaction(operation)) as Promise<T>
   }
 }
 
