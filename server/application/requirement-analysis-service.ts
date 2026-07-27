@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionOutput, AgentRuntime, ReviewRunSnapshot } from '../domain/agent-types.js'
-import type { AgentExecutionRecord, ReviewRun } from '../domain/types.js'
+import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, ReviewRun } from '../domain/types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator, ReviewResultValidator } from '../agent/result-validator.js'
@@ -11,8 +11,8 @@ export interface RequirementAnalysisRequest {
   projectVersionId: string
   assetVersionIds?: string[]
   assetVersionId?: string
-  sourceId: string
-  modelId: string
+  sourceId?: string
+  modelId?: string
   focusAreas?: string[]
   excludedAreas?: string[]
 }
@@ -124,21 +124,25 @@ export class RequirementAnalysisService {
     versions.forEach((version, index) => required(state.projectVersionRequirementBindings.find(item => item.projectVersionId === projectVersion.id && item.assetId === assets[index].id && item.assetVersionId === version.id), `需求资产版本未绑定到当前项目版本：${version.id}`))
     const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), '知识库没有活动索引')
     if (versions.some(version => !index.assetVersionIds.includes(version.id))) throw new Error('存在不属于当前活动索引的需求资产版本')
-    const source = required(state.modelSources.find(item => item.id === request.sourceId && item.enabled), '生成式模型来源不可用')
-    const model = required(source.models.find(item => item.id === request.modelId && item.enabled), '生成式模型不可用')
-    if (!model.capabilities.includes('tool_calling')) throw new Error('需求分析模型必须支持 tool_calling')
-    if (model.health !== 'healthy') throw new Error('请先完成所选生成式模型的连通性探测并确保健康状态正常')
-    const baseExtractionDefinition = await this.definitions.resolve('requirement-point-extraction')
-    const reviewDefinition = await this.definitions.resolve('requirement-review')
+    const [extractionConfiguration, reviewConfiguration] = this.definitions.resolveActive
+      ? await Promise.all([this.definitions.resolveActive('requirement-point-extraction'), this.definitions.resolveActive('requirement-review')])
+      : [null, null]
+    if (this.definitions.resolveActive && (!extractionConfiguration || !reviewConfiguration)) throw new Error('请先在系统管理的 Agent 配置中分别发布需求点提取 Agent 和需求评审 Agent，再发起需求评审')
+    const requestModel = request.sourceId && request.modelId ? { sourceId: request.sourceId, modelId: request.modelId } : null
+    const extractionModel = selectAgentModel(state, extractionConfiguration, requestModel, '需求点提取 Agent')
+    const reviewModel = selectAgentModel(state, reviewConfiguration, requestModel, '需求评审 Agent')
+    const baseExtractionDefinition = extractionConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-point-extraction')
+    const reviewDefinition = reviewConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-review')
     const extractionCoveragePlan = buildExtractionCoveragePlan(versions, request.excludedAreas)
     const extractionDefinition = baseExtractionDefinition
     const extractionToolBudget = { directoryCalls: 0, chunkCalls: 0, evidenceCalls: 0, submissionCalls: 3, minimumToolCalls: 3 }
+    const effectiveMaxOutputTokens = Math.min(extractionModel.model.maxOutputTokens, extractionConfiguration?.routing.maxOutputTokens ?? extractionModel.model.maxOutputTokens)
     const requirementInputPlan = buildRequirementInputPlan({
       assets: assets.map((asset, position) => ({ asset, version: versions[position] })),
       coveragePlan: extractionCoveragePlan,
       definition: extractionDefinition,
-      contextWindow: model.contextWindow,
-      maxOutputTokens: model.maxOutputTokens,
+      contextWindow: extractionModel.model.contextWindow,
+      maxOutputTokens: effectiveMaxOutputTokens,
     })
     const now = new Date().toISOString()
     const snapshot: ReviewRunSnapshot = {
@@ -154,7 +158,15 @@ export class RequirementAnalysisService {
       indexVersionId: index.id,
       logicalPath: assets[0].logicalPath,
       assets: assets.map((asset, position) => ({ assetId: asset.id, assetVersionId: versions[position].id, assetContentHash: versions[position].contentHash, logicalPath: asset.logicalPath, displayName: asset.displayName })),
-      modelRef: { sourceId: source.id, modelId: model.id, providerType: source.providerType, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') },
+      modelRef: modelSnapshot(extractionModel, effectiveMaxOutputTokens),
+      agentModelRefs: {
+        requirementPointExtraction: modelSnapshot(extractionModel, effectiveMaxOutputTokens),
+        requirementReview: modelSnapshot(reviewModel, Math.min(reviewModel.model.maxOutputTokens, reviewConfiguration?.routing.maxOutputTokens ?? reviewModel.model.maxOutputTokens)),
+      },
+      ...(extractionConfiguration && reviewConfiguration ? { agentConfigurationRefs: {
+        requirementPointExtraction: configurationRef(extractionConfiguration),
+        requirementReview: configurationRef(reviewConfiguration),
+      } } : {}),
       focusAreas: cleanList(request.focusAreas),
       excludedAreas: cleanList(request.excludedAreas),
       agentDefinition: extractionDefinition,
@@ -183,9 +195,9 @@ export class RequirementAnalysisService {
       documentTitle: `${assets.length} 份需求文档`,
       documentVersion: versions[0].number,
       logicalPath: assets.map(asset => asset.logicalPath).join('；'),
-      sourceId: source.id,
-      modelId: model.id,
-      modelLabel: `${source.name} · ${model.displayName}`,
+      sourceId: extractionModel.source.id,
+      modelId: extractionModel.model.id,
+      modelLabel: `需求点提取：${extractionModel.source.name} · ${extractionModel.model.displayName}；需求评审：${reviewModel.source.name} · ${reviewModel.model.displayName}`,
       status: 'running',
       step: 'extracting_requirement_points',
       progress: 10,
@@ -198,11 +210,12 @@ export class RequirementAnalysisService {
     const extractionEvents: AgentExecutionEvent[] = []
     const reviewEvents: AgentExecutionEvent[] = []
     let activeAgentKey: 'requirement-point-extraction' | 'requirement-review' = 'requirement-point-extraction'
-    const modelConnection = { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') }
+    const extractionModelConnection = modelConnection(extractionModel, snapshot.agentModelRefs!.requirementPointExtraction, extractionConfiguration)
+    const reviewModelConnection = modelConnection(reviewModel, snapshot.agentModelRefs!.requirementReview, reviewConfiguration)
     try {
       const extractionOutput = await this.runtime.execute({
         snapshot,
-        model: modelConnection,
+        model: extractionModelConnection,
         requirementInputPlan,
         onEvent: async event => {
           extractionEvents.push(event)
@@ -228,7 +241,7 @@ export class RequirementAnalysisService {
       const reviewSnapshot = { ...snapshot, agentDefinition: reviewDefinition }
       const reviewOutput = await this.runtime.execute({
         snapshot: reviewSnapshot,
-        model: modelConnection,
+        model: reviewModelConnection,
         fixedRequirementPointExtraction: extraction,
         onEvent: async event => {
           reviewEvents.push(event)
@@ -255,7 +268,8 @@ export class RequirementAnalysisService {
       const completed = await this.get(run.id)
       return required(completed.response, '需求评审结果不存在')
     } catch (error) {
-      const message = sanitizeRuntimeError(error, source.baseUrl, source.apiKey)
+      const failedModel = activeAgentKey === 'requirement-point-extraction' ? extractionModel : reviewModel
+      const message = sanitizeRuntimeError(error, failedModel.source.baseUrl, failedModel.source.apiKey)
       const status = signal.aborted || /AGENT_CANCELLED|客户端已中断/u.test(message) ? 'cancelled' : 'failed'
       await this.store.transaction(draft => {
         const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
@@ -265,8 +279,8 @@ export class RequirementAnalysisService {
           ...(activeAgentKey === 'requirement-review' && reviewEvents.length ? { execution: executionProgress(reviewEvents, activeAgentKey) } : {}),
         } satisfies Partial<ReviewRun>)
         if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
-          const currentSource = draft.modelSources.find(item => item.id === source.id)
-          const currentModel = currentSource?.models.find(item => item.id === model.id)
+          const currentSource = draft.modelSources.find(item => item.id === failedModel.source.id)
+          const currentModel = currentSource?.models.find(item => item.id === failedModel.model.id)
           if (currentSource && currentModel) {
             const checkedAt = new Date().toISOString()
             currentModel.health = 'degraded'
@@ -357,6 +371,42 @@ function presentRun(run: ReviewRun) {
     inputDeliveryManifest: response ? undefined : run.inputDeliveryManifest,
     response,
   }
+}
+
+type AgentModelSelection = {
+  source: DatabaseState['modelSources'][number]
+  model: DatabaseState['modelSources'][number]['models'][number]
+}
+
+function selectAgentModel(state: DatabaseState, configuration: AgentConfigurationVersion | null, requestModel: { sourceId: string; modelId: string } | null, label: string): AgentModelSelection {
+  const configuredModels = configuration?.routing.primaryModel
+    ? [configuration.routing.primaryModel, ...(configuration.routing.fallbackEnabled ? configuration.routing.fallbackModels : [])]
+    : []
+  const selectedReference = configuredModels.find(reference => {
+    const candidateSource = state.modelSources.find(item => item.id === reference.sourceId && item.enabled)
+    const candidateModel = candidateSource?.models.find(item => item.id === reference.modelId && item.enabled)
+    return Boolean(candidateModel && candidateModel.health === 'healthy' && candidateModel.capabilities.includes('tool_calling'))
+  }) ?? (configuration ? null : requestModel)
+  if (!selectedReference && configuration) throw new Error(`${label}已发布配置中的默认和回退模型当前均不可用`)
+  const source = required(state.modelSources.find(item => item.id === selectedReference?.sourceId && item.enabled), configuration ? `${label}已发布配置的生成式模型来源不可用` : '生成式模型来源不可用')
+  const model = required(source.models.find(item => item.id === selectedReference?.modelId && item.enabled), configuration ? `${label}已发布配置的生成式模型不可用` : '生成式模型不可用')
+  if (!model.capabilities.includes('tool_calling')) throw new Error(`${label}模型必须支持 tool_calling`)
+  if (model.health !== 'healthy') throw new Error(`请先完成${label}模型的连通性探测并确保健康状态正常`)
+  return { source, model }
+}
+
+function modelSnapshot(selection: AgentModelSelection, maxOutputTokens: number): ReviewRunSnapshot['modelRef'] {
+  const { source, model } = selection
+  return { sourceId: source.id, modelId: model.id, providerType: source.providerType, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') }
+}
+
+function modelConnection(selection: AgentModelSelection, snapshot: ReviewRunSnapshot['modelRef'], configuration: AgentConfigurationVersion | null) {
+  const { source, model } = selection
+  return { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: snapshot.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning'), temperature: configuration?.routing.temperature, requestTimeoutMs: configuration ? configuration.routing.requestTimeoutSeconds * 1_000 : undefined, retryCount: configuration?.routing.retryCount }
+}
+
+function configurationRef(configuration: AgentConfigurationVersion) {
+  return { id: configuration.id, version: configuration.version, contentSha256: configuration.contentSha256 }
 }
 
 function redactSnapshot(snapshot: ReviewRun['snapshot']) {

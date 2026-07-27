@@ -49,7 +49,7 @@ export class KnowledgeService {
         item.compatibilityFingerprint = compatibilityFingerprint(item.config)
       })
       state.versions.forEach(version => version.chunks.forEach(chunk => { chunk.tokenCount ??= defaultTokenCodec.count(chunk.content) }))
-      state.assets.forEach(asset => ensureDirectoryPath(state, asset.knowledgeBaseId, asset.logicalPath.replaceAll('\\', '/').split('/').slice(0, -1)))
+      state.assets.filter(asset => asset.activeVersionId).forEach(asset => ensureDirectoryPath(state, asset.knowledgeBaseId, asset.logicalPath.replaceAll('\\', '/').split('/').slice(0, -1)))
       state.indexes.forEach(index => {
         index.indexedChunks?.forEach(chunk => {
           if (!chunk.assetMetadata) {

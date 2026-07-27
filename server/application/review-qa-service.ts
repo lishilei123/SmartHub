@@ -31,14 +31,34 @@ export class ReviewQaService {
       documentContent,
       model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') },
     }, signal)
-    const evidenceIds = new Set(run.result.evidence.map(item => item.clientEvidenceId))
-    const citations = [...new Set(candidate.citations.map(item => String(item).trim()).filter(Boolean))]
-    const invalid = citations.filter(item => !evidenceIds.has(item))
-    if (invalid.length) throw new Error(`REVIEW_QA_INVALID_CITATION: ${invalid.join(', ')}`)
+    const citations = normalizeCitations(candidate.citations, run.result)
     const answer = String(candidate.answer ?? '').trim()
     if (!answer) throw new Error('REVIEW_QA_EMPTY_ANSWER')
     return { id: `review_qa_${crypto.randomUUID()}`, runId, question, answer, citations, limitations: candidate.limitations.map(item => String(item).trim()).filter(Boolean), quote, modelLabel: run.modelLabel, createdAt: new Date().toISOString() }
   }
+}
+
+function normalizeCitations(value: string[], result: NonNullable<ReviewRun['result']>) {
+  const evidenceIds = new Set(result.evidence.map(item => item.clientEvidenceId))
+  const pointsById = new Map(result.requirementPoints.map(point => [point.clientRequirementPointId, point]))
+  const findingsById = new Map(result.findings.map(finding => [finding.clientFindingId, finding]))
+  const citations: string[] = []
+  const invalid: string[] = []
+
+  for (const citation of value.map(item => String(item).trim()).filter(Boolean)) {
+    const evidence = evidenceIds.has(citation)
+      ? [citation]
+      : pointsById.get(citation)?.evidenceRefs
+        ?? findingsById.get(citation)?.requirementPointRefs.flatMap(reference => pointsById.get(reference)?.evidenceRefs ?? [])
+    const resolvedEvidence = evidence?.filter(evidenceId => evidenceIds.has(evidenceId)) ?? []
+    if (!resolvedEvidence.length) {
+      invalid.push(citation)
+      continue
+    }
+    for (const evidenceId of resolvedEvidence) if (!citations.includes(evidenceId)) citations.push(evidenceId)
+  }
+  if (invalid.length) throw new Error(`REVIEW_QA_INVALID_CITATION: ${invalid.join(', ')}`)
+  return citations
 }
 
 function normalizeQuote(value: ReviewQuestionQuote | undefined, assetVersionIds: Set<string>, versions: Array<{ id: string; content: string }>, result: NonNullable<ReviewRun['result']>) {

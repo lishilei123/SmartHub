@@ -4,8 +4,8 @@ import {
   FileText, GitBranch, ListFilter, LoaderCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen,
   PanelRightClose, PanelRightOpen, Play, Quote, RefreshCw, Send, ShieldCheck, Sparkles, Upload, Wrench, XCircle,
 } from 'lucide-react'
-import type { GenerativeSourceDraft, KnowledgeDocument } from './prototype-data'
-import { loadAssetVersion, loadGenerativeModelSources, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
+import type { KnowledgeDocument } from './prototype-data'
+import { loadAssetVersion, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import { emptyMarkdownOutline, parseMarkdownOutline } from './markdown-outline'
 import { persistedRunningReviewRunIds, resolveReviewRunId } from './requirement-review-run-state'
@@ -28,6 +28,7 @@ import {
 } from './requirement-analysis-api'
 import { bindRequirementVersion, loadRequirementBindings, unbindRequirementVersion, type ProjectVersion, type RequirementBinding } from './project-version-api'
 import { versionDocumentDirectory, versionDocumentPath } from './version-document-path'
+import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 type ViewKey = 'overview' | 'source' | 'diff' | 'tree' | 'evidence'
@@ -38,14 +39,6 @@ type ChatMessage = { role: 'user' | 'assistant' | 'system'; text: string; quote?
 type UploadProgress = { stage: 'reading' | 'submitting' | 'processing' | 'binding' | 'completed' | 'failed'; percent: number; detail: string }
 
 type RunRecord = RequirementReviewRun & { content?: string }
-
-type ModelChoice = {
-  key: string
-  sourceId: string
-  modelId: string
-  label: string
-  healthy: boolean
-}
 
 const findingTypeLabels: Record<ReviewFindingType, string> = {
   missing_requirement: '需求缺口', ambiguity: '需求歧义', conflict: '逻辑冲突', boundary_gap: '边界条件', state_gap: '状态缺口',
@@ -130,7 +123,6 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
     {(stagedExecutions || run.execution?.agentKey === 'requirement-point-extraction' || run.execution?.agentKey === 'requirement-review') && <div className="rr-run-record-tabs"><button className={agentKey === 'requirement-point-extraction' ? 'active' : ''} onClick={() => setAgentKey('requirement-point-extraction')}><FileText />需求点提取 <span>{stagedExecutions?.requirementPointExtraction?.events.length ?? (run.execution?.agentKey === 'requirement-point-extraction' ? run.execution.events.length : 0)}</span></button><button className={agentKey === 'requirement-review' ? 'active' : ''} onClick={() => setAgentKey('requirement-review')}><Bot />需求评审 <span>{stagedExecutions?.requirementReview?.events.length ?? (run.execution?.agentKey === 'requirement-review' ? run.execution.events.length : 0)}</span></button></div>}
     <div className="rr-run-record-summary"><div><ReviewBadge tone={runTone(run.status)}>{runLabel(run.status)}</ReviewBadge><b>{run.id}</b><span>{run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(run.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? 0}</dd></div><div><dt>工具调用</dt><dd>{execution?.toolCalls ?? 0}{execution?.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : run.status === 'running' ? '运行中' : '未完成 / 旧记录'}</dd></div></dl></div>
     {run.error && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(run.error)}</span></div>}
-    <div className="rr-run-record-notice"><ShieldCheck /><span>记录模型可见消息、工具参数与工具返回；API 凭据、签名、图片二进制和模型隐藏思维不会写入运行记录。</span></div>
     <div className="rr-run-record-tabs"><button className={tab === 'conversation' ? 'active' : ''} onClick={() => onTab('conversation')}><MessageSquareText />Agent 对话 <span>{conversation.length}</span></button><button className={tab === 'events' ? 'active' : ''} onClick={() => onTab('events')}><Activity />事件时间线 <span>{events.length}</span></button></div>
     <div className="rr-run-record-body">{loading ? <div className="rr-trace-empty"><LoaderCircle className="rotating" /><b>正在读取运行记录</b></div> : tab === 'conversation' ? <div className="rr-agent-conversation">
       {conversation.map(event => {
@@ -185,9 +177,8 @@ export function RequirementReviewPage({
   const [runsLoadingMore, setRunsLoadingMore] = useState(false)
   const [contentByVersion, setContentByVersion] = useState<Record<string, string>>({})
   const [selectedRunId, setSelectedRunId] = useState('')
-  const [models, setModels] = useState<GenerativeSourceDraft[]>([])
-  const [modelsState, setModelsState] = useState<'loading' | 'ready' | 'failed'>('loading')
-  const [selectedModelKey, setSelectedModelKey] = useState('')
+  const [agentConfiguration, setAgentConfiguration] = useState<AgentConfigurationState | null>(null)
+  const [agentConfigurationState, setAgentConfigurationState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [selectedFindingId, setSelectedFindingId] = useState('')
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('')
   const [activeSectionKey, setActiveSectionKey] = useState<string | null>(null)
@@ -298,9 +289,6 @@ export function RequirementReviewPage({
           const latest = refreshed.get(runId)
           return latest ? { ...run, ...latest } : run
         }))
-        if ([...refreshed.values()].some(run => run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:'))) {
-          void loadGenerativeModelSources().then(setModels).catch(() => undefined)
-        }
         if (page.items.length) timer = setTimeout(() => { void poll() }, 1_000)
       } catch {
         if (!cancelled) timer = setTimeout(() => { void poll() }, 2_000)
@@ -321,11 +309,6 @@ export function RequirementReviewPage({
   const documentFormat = selectedDocument?.name.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
   const outline = useMemo(() => documentFormat === 'markdown' && documentContent ? parseMarkdownOutline(documentContent) : emptyMarkdownOutline, [documentContent, documentFormat])
 
-  const modelChoices = useMemo<ModelChoice[]>(() => models.flatMap(source => source.models
-    .filter(model => source.enabled && model.enabled && model.capabilities.includes('tool_calling'))
-    .map(model => ({ key: `${source.id}::${model.id}`, sourceId: source.id, modelId: model.id, label: `${source.name} · ${model.displayName}`, healthy: model.health === 'healthy' }))), [models])
-  const selectedModel = modelChoices.find(model => model.key === selectedModelKey)
-
   useEffect(() => {
     if (!selectedAssetId || !requirementDocuments.some(document => document.id === selectedAssetId)) setSelectedAssetId(requirementDocuments[0]?.id ?? '')
   }, [requirementDocuments, selectedAssetId])
@@ -341,17 +324,13 @@ export function RequirementReviewPage({
 
   useEffect(() => {
     let cancelled = false
-    loadGenerativeModelSources().then(items => {
+    loadAgentConfiguration().then(configuration => {
       if (cancelled) return
-      setModels(items)
-      setModelsState('ready')
-    }).catch(() => { if (!cancelled) setModelsState('failed') })
+      setAgentConfiguration(configuration)
+      setAgentConfigurationState('ready')
+    }).catch(() => { if (!cancelled) setAgentConfigurationState('failed') })
     return () => { cancelled = true }
   }, [])
-
-  useEffect(() => {
-    if (!modelChoices.some(model => model.key === selectedModelKey)) setSelectedModelKey(modelChoices.find(model => model.healthy)?.key ?? modelChoices[0]?.key ?? '')
-  }, [modelChoices, selectedModelKey])
 
   useEffect(() => {
     if (!selectedRun?.id || selectedRun.id.startsWith('pending-') || selectedRun.response || selectedRun.status === 'running') return
@@ -502,7 +481,9 @@ export function RequirementReviewPage({
 
   const startAnalysis = async () => {
     const fixedDocuments = requirementDocuments.filter(document => document.assetVersionId)
-    if (!fixedDocuments.length || !selectedModel || !selectedModel.healthy || requestController.current) return
+    const extractionConfiguration = agentConfiguration?.agents.requirementPointExtraction.activeVersion
+    const reviewConfiguration = agentConfiguration?.agents.requirementReview.activeVersion
+    if (!fixedDocuments.length || !extractionConfiguration || !reviewConfiguration || requestController.current) return
     const controller = new AbortController()
     requestController.current = controller
     const temporaryId = `pending-${Date.now()}`
@@ -522,7 +503,7 @@ export function RequirementReviewPage({
       status: 'running',
       step: 'agent_executing',
       progress: 10,
-      modelLabel: selectedModel.label,
+      modelLabel: `需求点提取 V${extractionConfiguration.version} · ${extractionConfiguration.routing.primaryModel?.modelId ?? '已发布模型'}；需求评审 V${reviewConfiguration.version} · ${reviewConfiguration.routing.primaryModel?.modelId ?? '已发布模型'}`,
       startedAt,
     }
     setRuns(current => [pendingRun, ...current])
@@ -532,8 +513,6 @@ export function RequirementReviewPage({
     try {
       const started = await startRequirementAnalysis(projectVersion!.id, {
         assetVersionIds: fixedDocuments.map(document => document.assetVersionId!),
-        sourceId: selectedModel.sourceId,
-        modelId: selectedModel.modelId,
         focusAreas: ['功能完整性', '异常流程', '边界条件', '可测试性'],
       }, controller.signal)
       const startedId = resolveReviewRunId(started)
@@ -813,7 +792,8 @@ export function RequirementReviewPage({
   const removedLines = leftLines.filter(line => !rightLines.includes(line))
   const addedLines = rightLines.filter(line => !leftLines.includes(line))
   const currentMessages = selectedRun ? chatMessages[selectedRun.id] ?? [] : []
-  const canRun = Boolean(projectVersion && !readOnly && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && selectedModel?.healthy && apiState === 'ready' && bindingsState === 'ready' && !requestController.current)
+  const agentConfigurationsReady = Boolean(agentConfiguration?.agents.requirementPointExtraction.activeVersion && agentConfiguration?.agents.requirementReview.activeVersion)
+  const canRun = Boolean(projectVersion && !readOnly && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && agentConfigurationsReady && apiState === 'ready' && bindingsState === 'ready' && !requestController.current)
 
   const bindDocument = async (document: KnowledgeDocument) => {
     if (!projectVersion || readOnly || !document.assetVersionId || bindingActionId) return
@@ -855,12 +835,12 @@ export function RequirementReviewPage({
       </div>
       <div className="rr-header-actions">
         <ReviewBadge tone={readOnly ? 'orange' : 'green'}>{readOnly ? projectVersion.status === 'locked' ? '版本已锁定 · 只读' : '版本已归档 · 只读' : '版本可编辑'}</ReviewBadge>
-        <label className="rr-model-select"><span>评审模型</span><select value={selectedModelKey} onChange={event => setSelectedModelKey(event.target.value)} disabled={modelsState !== 'ready' || selectedRun?.status === 'running'}><option value="">选择支持工具调用的模型</option>{modelChoices.map(model => <option value={model.key} key={model.key}>{model.healthy ? '●' : '○'} {model.label}</option>)}</select></label>
+        <div className="rr-model-select rr-agent-config-lock"><span>Agent 配置</span><b>{agentConfigurationsReady ? `提取 V${agentConfiguration!.agents.requirementPointExtraction.activeVersion!.version} / 评审 V${agentConfiguration!.agents.requirementReview.activeVersion!.version}` : agentConfigurationState === 'loading' ? '正在读取…' : agentConfigurationState === 'failed' ? '配置读取失败' : '尚未完整发布'}</b></div>
         <button className="btn ghost" onClick={() => setSnapshotOpen(value => !value)} disabled={!selectedRun}><ShieldCheck />固定快照</button>
         <button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />导出报告</button>
-        {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!selectedModel?.healthy ? '请先选择通过工具调用检测的健康模型' : undefined}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}
+        {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!agentConfigurationsReady ? '请先分别发布需求点提取 Agent 和需求评审 Agent' : undefined}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}
       </div>
-      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>输入文档</dt><dd>{(selectedRun.documents ?? selectedRun.snapshot?.assets ?? []).map(document => `${document.displayName} · ${document.assetVersionId}`).join('\n') || selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.version}\n${selectedRun.snapshot.agentDefinitions.requirementReview.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementReview.version}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : '双 Agent 流程'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.promptRef.version} / ${selectedRun.snapshot.agentDefinitions.requirementReview.promptRef.version}` : selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.toolsetVersion} / ${selectedRun.snapshot.agentDefinitions.requirementReview.toolsetVersion}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
+      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>输入文档</dt><dd>{(selectedRun.documents ?? selectedRun.snapshot?.assets ?? []).map(document => `${document.displayName} · ${document.assetVersionId}`).join('\n') || selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>Agent 配置</dt><dd>{selectedRun.snapshot?.agentConfigurationRefs ? `需求点提取 V${selectedRun.snapshot.agentConfigurationRefs.requirementPointExtraction.version} · ${selectedRun.snapshot.agentConfigurationRefs.requirementPointExtraction.id}\n需求评审 V${selectedRun.snapshot.agentConfigurationRefs.requirementReview.version} · ${selectedRun.snapshot.agentConfigurationRefs.requirementReview.id}` : selectedRun.snapshot?.agentConfigurationRef ? `历史统一配置 V${selectedRun.snapshot.agentConfigurationRef.version} · ${selectedRun.snapshot.agentConfigurationRef.id}` : '历史运行未记录发布配置'}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.version}\n${selectedRun.snapshot.agentDefinitions.requirementReview.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementReview.version}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : '双 Agent 流程'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.promptRef.version} / ${selectedRun.snapshot.agentDefinitions.requirementReview.promptRef.version}` : selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.toolsetVersion} / ${selectedRun.snapshot.agentDefinitions.requirementReview.toolsetVersion}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
     </header>
 
     <div className="rr-workspace">
@@ -880,8 +860,8 @@ export function RequirementReviewPage({
         </div>
 
         {selectedRun?.status === 'running' && <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>{selectedRun.step === 'reviewing_requirements' ? 'RequirementReviewAgent 正在评审固定需求点' : 'RequirementPointExtractionAgent 正在提取需求点'}</b><span>两个 Agent 使用独立会话；页面每秒同步服务端状态，刷新或关闭浏览器不会取消本次运行。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>}
-        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>评审运行失败</b><span>{runErrorMessage(selectedRun.error)}</span>{!selectedModel?.healthy && <small>请在顶部切换到通过工具调用检测的健康模型后重新评审。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
-        {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{!selectedModel?.healthy && <small>请先选择健康模型。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
+        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>评审运行失败</b><span>{runErrorMessage(selectedRun.error)}</span>{!agentConfigurationsReady && <small>请先分别发布两个 Agent 配置。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
+        {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{!agentConfigurationsReady && <small>请先分别发布两个 Agent 配置。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
 
         <div className={`rr-view-content ${view === 'source' ? 'rr-source-view' : ''}`}>
           {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} traceabilityFilter={traceabilityFilter} setTraceabilityFilter={setTraceabilityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} findingEvidence={findingEvidence} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}

@@ -15,6 +15,8 @@ import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 import { createProjectVersion, deleteProjectVersion, loadProjectVersions, updateProjectVersionStatus, type ProjectVersion, type ProjectVersionStatus } from './project-version-api'
+import { loadAgentConfiguration, loadAgentConfigurationVersion, publishAgentConfiguration, saveAgentConfigurationDraft, type AgentConfigurationAgentDraft, type AgentConfigurationAgentKey, type AgentConfigurationState, type AgentConfigurationVersion, type AgentRoutingConfiguration } from './agent-configuration-api'
+import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, updateAiResource, uploadSkillPackage, type AiResource, type AiResourceCatalog, type AiResourceKind, type McpServerResource, type SkillPackageMetadata, type SkillResource, type ToolResource, type ToolSource } from './ai-resource-api'
 
 const RequirementReviewPage = lazy(() => import('./RequirementReviewPage').then(module => ({ default: module.RequirementReviewPage })))
 
@@ -752,8 +754,8 @@ function ImageLightbox({ onClose }: { onClose: () => void }) {
 
 function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId: string; notify: Notify; addAudit: (entry: string) => void }) {
   const items = [
-    { name: '模型管理', desc: '通用模型来源、模型与能力管理', icon: Bot, group: 'AI 能力' },
-    { name: 'Prompt 与 Agent', desc: 'Agent 模型、Prompt、工具和版本', icon: Sparkles, group: 'AI 能力' },
+    { name: '模型管理', desc: '模型、MCP、Skill 与工具资源管理', icon: Bot, group: 'AI 能力' },
+    { name: 'Agent 配置', desc: '模型、提示词、工具和版本', icon: Sparkles, group: 'AI 能力' },
     { name: '知识库配置', desc: '同步、切分与检索策略', icon: BookOpen, group: '资源与集成' },
     { name: '代码与流水线', desc: 'Git、CI/CD 与执行器', icon: GitBranch, group: '资源与集成' },
     { name: '用户与权限', desc: '成员、角色与审批流程', icon: Users, group: '安全与治理' },
@@ -765,17 +767,69 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
   const [draft, setDraft] = useState<SettingsDraft>(initialSettings)
   const [configVersion, setConfigVersion] = useState<number | null>(null)
   const [requiresRebuild, setRequiresRebuild] = useState(false)
-  const [modelsLoaded, setModelsLoaded] = useState(false)
+  const [modelSourcesState, setModelSourcesState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle')
+  const [modelSourcesError, setModelSourcesError] = useState<string | null>(null)
   const [configLoaded, setConfigLoaded] = useState(false)
+  const [agentConfiguration, setAgentConfiguration] = useState<AgentConfigurationState | null>(null)
+  const [savedAgentDraft, setSavedAgentDraft] = useState<Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft> | null>(null)
+  const [agentDraft, setAgentDraft] = useState<Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft> | null>(null)
+  const [agentConfigState, setAgentConfigState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle')
+  const [agentConfigError, setAgentConfigError] = useState<string | null>(null)
+  const [agentPublishing, setAgentPublishing] = useState(false)
   const editorScrollRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!knowledgeBaseId || selected !== 0 || modelsLoaded) return
-    void loadGenerativeModelSources().then(generativeSources => {
+  const modelSourcesRequestRef = useRef(0)
+  const agentConfigRequestRef = useRef(0)
+  useEffect(() => () => {
+    modelSourcesRequestRef.current += 1
+    agentConfigRequestRef.current += 1
+  }, [])
+  const loadModelSources = useCallback(async () => {
+    const requestId = ++modelSourcesRequestRef.current
+    setModelSourcesState('loading')
+    setModelSourcesError(null)
+    try {
+      const generativeSources = await loadGenerativeModelSources()
+      if (requestId !== modelSourcesRequestRef.current) return generativeSources
       setSaved(current => ({ ...current, generativeSources, ...repairGenerativeRouting(generativeSources, new Set(), current) }))
       setDraft(current => ({ ...current, generativeSources, ...repairGenerativeRouting(generativeSources, new Set(), current) }))
-      setModelsLoaded(true)
-    }).catch(error => notify(error instanceof Error ? error.message : '模型管理 API 未连接。', 'error'))
-  }, [knowledgeBaseId, modelsLoaded, notify, selected])
+      setModelSourcesState('ready')
+      return generativeSources
+    } catch (error) {
+      if (requestId !== modelSourcesRequestRef.current) throw error
+      const message = error instanceof Error ? error.message : '模型来源读取失败。'
+      setModelSourcesState('failed')
+      setModelSourcesError(message)
+      throw error
+    }
+  }, [])
+  const loadCurrentAgentConfiguration = useCallback(async () => {
+    const requestId = ++agentConfigRequestRef.current
+    setAgentConfigState('loading')
+    setAgentConfigError(null)
+    try {
+      const configuration = await loadAgentConfiguration()
+      if (requestId !== agentConfigRequestRef.current) return configuration
+      const agentDrafts = {
+        requirementPointExtraction: configuration.agents.requirementPointExtraction.draft,
+        requirementReview: configuration.agents.requirementReview.draft,
+      }
+      setAgentConfiguration(configuration)
+      setSavedAgentDraft(agentDrafts)
+      setAgentDraft(agentDrafts)
+      setAgentConfigState('ready')
+      return configuration
+    } catch (error) {
+      if (requestId !== agentConfigRequestRef.current) throw error
+      const message = error instanceof Error ? error.message : 'Agent 配置读取失败。'
+      setAgentConfigState('failed')
+      setAgentConfigError(message)
+      throw error
+    }
+  }, [])
+  useEffect(() => {
+    if (!knowledgeBaseId || (selected !== 0 && selected !== 1) || modelSourcesState !== 'idle') return
+    void loadModelSources().catch(() => undefined)
+  }, [knowledgeBaseId, loadModelSources, modelSourcesState, selected])
   useEffect(() => {
     if (!knowledgeBaseId || selected !== 2 || configLoaded) return
     void loadConfig(knowledgeBaseId).then(value => {
@@ -786,20 +840,19 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
       setConfigVersion(value.version); setRequiresRebuild(value.requiresRebuild); setConfigLoaded(true)
     }).catch(error => notify(error instanceof Error ? error.message : '知识库配置 API 未连接。', 'error'))
   }, [configLoaded, knowledgeBaseId, notify, selected])
+  useEffect(() => {
+    if (!knowledgeBaseId || selected !== 1 || agentConfigState !== 'idle') return
+    void loadCurrentAgentConfiguration().catch(() => undefined)
+  }, [agentConfigState, knowledgeBaseId, loadCurrentAgentConfiguration, selected])
   const current = items[selected]
   const CurrentIcon = current.icon
-  const dirty = JSON.stringify(saved) !== JSON.stringify(draft)
+  const settingsDirty = JSON.stringify(saved) !== JSON.stringify(draft)
+  const agentDefinitionDirty = JSON.stringify(savedAgentDraft) !== JSON.stringify(agentDraft)
+  const dirty = selected === 1 ? agentDefinitionDirty : settingsDirty
   useEffect(() => { editorScrollRef.current?.scrollTo({ top: 0 }) }, [selected])
   useEffect(() => { const warn = (event: BeforeUnloadEvent) => { if (!dirty) return; event.preventDefault(); event.returnValue = '' }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn) }, [dirty])
   const update = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => setDraft(currentDraft => ({ ...currentDraft, [key]: value }))
   const save = async () => {
-    if (selected === 0) {
-      try {
-        const generativeSources = await saveGenerativeModelSources(draft.generativeSources)
-        const next = { ...draft, generativeSources, ...repairGenerativeRouting(generativeSources, new Set(), draft) }
-        setSaved(next); setDraft(next); addAudit('保存生成式模型来源和模型配置'); notify('模型来源和模型配置已持久化。'); return
-      } catch (error) { notify(error instanceof Error ? error.message : '模型配置保存失败', 'error'); return }
-    }
     if (selected === 2 && knowledgeBaseId) {
       if (draft.embeddingModel && Number(draft.embeddingDimensions) <= 0) { notify('请先运行本地模型，或测试远程模型，以自动检测向量维度。'); return }
       const rerankerSource = draft.embeddingSources.find(source => source.id === draft.rerankerSourceId)
@@ -813,9 +866,17 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
     }
     setSaved(draft); addAudit(`保存系统设置草稿：${current.name}`); notify('此模块尚未接入服务端，配置仅保存在当前会话。', 'warning')
   }
+  const persistModelSources = async (nextSources: GenerativeSourceDraft[], removedModelIds: Set<string>) => {
+    const generativeSources = await saveGenerativeModelSources(nextSources)
+    const synchronize = (currentDraft: SettingsDraft) => ({ ...currentDraft, generativeSources, ...repairGenerativeRouting(generativeSources, removedModelIds, currentDraft) })
+    setSaved(synchronize)
+    setDraft(synchronize)
+    addAudit('即时保存生成式模型来源和模型配置')
+    return generativeSources
+  }
   return <div className={`settings-layout ${collapsed ? 'directory-collapsed' : ''}`}><aside className={`card settings-directory ${collapsed ? 'collapsed' : ''}`}><div className="settings-dir-head"><b>配置目录</b><button className="icon-btn" title={collapsed ? '展开配置目录' : '收起配置目录'} aria-label={collapsed ? '展开配置目录' : '收起配置目录'} onClick={() => setCollapsed(value => !value)}>{collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{['AI 能力', '资源与集成', '安全与治理'].map(group => <div className="settings-group" key={group}><p>{group}</p>{items.map((item, index) => item.group === group && <button key={item.name} className={selected === index ? 'active' : ''} onClick={() => setSelected(index)}><item.icon /><span><b>{item.name}</b><small>{item.desc}</small></span><ChevronRight /></button>)}</div>)}</aside>
-    <section className="card settings-editor"><div className="settings-editor-head"><div className="setting-symbol"><CurrentIcon /></div><div><h2>{current.name}</h2><p>{current.desc}{selected === 2 && configVersion ? ` · 配置 V${configVersion}` : ''}</p></div><Badge tone={dirty ? 'orange' : requiresRebuild && selected === 2 ? 'orange' : 'green'}>{dirty ? '有未保存更改' : requiresRebuild && selected === 2 ? '待重建' : '已保存'}</Badge><button className="btn primary" disabled={!dirty} onClick={() => void save()}><Check />保存配置</button></div><div className="settings-editor-scroll" ref={editorScrollRef}>
-      {selected === 0 && <ModelManagementSettings draft={draft} update={update} notify={notify} onHealthUpdated={source => {
+    <section className="card settings-editor">{selected !== 1 && <div className="settings-editor-head"><div className="setting-symbol"><CurrentIcon /></div><div><h2>{current.name}</h2><p>{current.desc}{selected === 2 && configVersion ? ` · 配置 V${configVersion}` : ''}</p></div>{selected !== 0 && <><Badge tone={dirty ? 'orange' : requiresRebuild && selected === 2 ? 'orange' : 'green'}>{dirty ? '有未保存更改' : requiresRebuild && selected === 2 ? '待重建' : '已保存'}</Badge><button className="btn primary" disabled={!dirty} onClick={() => void save()}><Check />保存配置</button></>}</div>}<div className="settings-editor-scroll" ref={editorScrollRef}>
+      {selected === 0 && <ModelManagementSettings draft={draft} notify={notify} onPersistSources={persistModelSources} onHealthUpdated={source => {
         const mergeHealth = (sources: GenerativeSourceDraft[]) => sources.map(item => item.id !== source.id ? item : { ...item, health: source.health, models: item.models.map(model => {
           const checked = source.models.find(candidate => candidate.id === model.id)
           return checked ? { ...model, health: checked.health } : model
@@ -823,7 +884,24 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
         setDraft(current => ({ ...current, generativeSources: mergeHealth(current.generativeSources) }))
         setSaved(current => ({ ...current, generativeSources: mergeHealth(current.generativeSources) }))
       }} />}
-      {selected === 1 && <PromptAgentSettings draft={draft} update={update} notify={notify} />}
+      {selected === 1 && agentDraft && agentConfiguration && <PromptAgentSettings draft={draft} notify={notify} agentDraft={agentDraft} updateAgent={value => setAgentDraft(current => typeof value === 'function' ? current ? value(current) : current : value)} configuration={agentConfiguration} configurationError={agentConfigError} modelSourcesState={modelSourcesState} modelSourcesError={modelSourcesError} onRetryConfiguration={() => void loadCurrentAgentConfiguration().catch(() => undefined)} onRetryModelSources={() => void loadModelSources().catch(() => undefined)} publishing={agentPublishing} onPublish={async agentKey => {
+        setAgentPublishing(true)
+        try {
+          const nextDraft = agentDraft[agentKey]
+          const persisted = await saveAgentConfigurationDraft(agentKey, nextDraft)
+          setAgentDraft(current => current ? { ...current, [agentKey]: persisted } : current)
+          setSavedAgentDraft(current => current ? { ...current, [agentKey]: persisted } : current)
+          setAgentConfiguration(current => current ? { ...current, agents: { ...current.agents, [agentKey]: { ...current.agents[agentKey], draft: persisted } } } : current)
+          const published = await publishAgentConfiguration(agentKey, persisted.revision)
+          const label = agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : '需求评审 Agent'
+          addAudit(`发布${label}配置 V${published.version}`)
+          notify(`${label} V${published.version} 已发布，新评审将固定使用该版本。`)
+          void loadCurrentAgentConfiguration().catch(error => notify(error instanceof Error ? `版本已发布，但配置刷新失败：${error.message}` : '版本已发布，但配置刷新失败。', 'warning'))
+        } catch (error) { notify(error instanceof Error ? error.message : 'Agent 配置发布失败', 'error') }
+        finally { setAgentPublishing(false) }
+      }} />}
+      {selected === 1 && !agentDraft && agentConfigState !== 'failed' && <AgentConfigurationLoading />}
+      {selected === 1 && !agentDraft && agentConfigState === 'failed' && <AgentConfigurationFailure error={agentConfigError} onRetry={() => void loadCurrentAgentConfiguration().catch(() => undefined)} />}
       {selected === 2 && <div className="settings-form">
         <FormSection title="向量模型配置" desc="集中管理多个来源和模型，再选择知识库实际使用的来源与模型"><EmbeddingModelPrototype knowledgeBaseId={knowledgeBaseId} draft={draft} update={update} notify={notify} /></FormSection>
         <FormSection title="Markdown 切分" desc="按模型 tokenizer 计数；修改后需要重建索引"><FormRow label="目标 Chunk 大小" help="默认 400 tokens，达到目标后优先在 Markdown 结构边界切分"><select value={draft.chunkSize} onChange={event => { const value = event.target.value; const target = Number.parseInt(value); update('chunkSize', value); if (target > Number(draft.chunkMaxSize)) update('chunkMaxSize', String(target === 600 ? 800 : target)) }}><option>300 tokens</option><option>400 tokens</option><option>600 tokens</option><option>800 tokens</option></select></FormRow><FormRow label="最大 Chunk 大小" help="普通文本不会超过该值；代码块和表格优先保持完整"><select value={draft.chunkMaxSize} onChange={event => { const value = event.target.value; update('chunkMaxSize', value); if (Number.parseInt(draft.chunkSize) > Number(value)) update('chunkSize', `${Math.min(Number(value), 400)} tokens`) }}><option>400</option><option>480</option><option>800</option><option>1200</option></select></FormRow><FormRow label="Chunk 重叠" help="仅在同一标题内切出相邻块时保留尾部上下文"><select value={draft.chunkOverlap} onChange={event => update('chunkOverlap', event.target.value)}><option>0 tokens</option><option>50 tokens</option><option>80 tokens</option><option>120 tokens</option></select></FormRow></FormSection>
@@ -836,6 +914,12 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
 }
 
 function StaticSettings({ title, text }: { title: string; text: string }) { return <div className="settings-form"><FormSection title={title} desc={text}><p className="readonly-notice">此项没有后端支撑，因此不伪造成功、连接或持久化状态。</p></FormSection></div> }
+
+function AgentConfigurationLoading() { return <div className="page-loading" role="status"><RefreshCw /><span>正在读取服务端 Agent 配置…</span></div> }
+
+function AgentConfigurationFailure({ error, onRetry }: { error: string | null; onRetry: () => void }) {
+  return <div className="agent-configuration-status failed" role="alert"><AlertTriangle /><div><b>Agent 配置读取失败</b><span>{error ?? '请确认服务端已启动后重新加载。'}</span></div><button className="btn ghost" onClick={onRetry}><RefreshCw />重新加载</button></div>
+}
 
 type GenerativeSourceEditor = { id?: string; name: string; providerType: GenerativeSourceDraft['providerType']; baseUrl: string; apiKey: string; models: GenerativeModelDraft[] }
 
@@ -851,19 +935,28 @@ const repairGenerativeRouting = (nextSources: GenerativeSourceDraft[], removedMo
   return { mainModel, fallbackModelIds }
 }
 
-function ModelManagementSettings({ draft, update, notify, onHealthUpdated }: { draft: SettingsDraft; update: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void; notify: Notify; onHealthUpdated: (source: GenerativeSourceDraft) => void }) {
+function ModelManagementSettings({ draft, notify, onPersistSources, onHealthUpdated }: { draft: SettingsDraft; notify: Notify; onPersistSources: (sources: GenerativeSourceDraft[], removedModelIds: Set<string>) => Promise<GenerativeSourceDraft[]>; onHealthUpdated: (source: GenerativeSourceDraft) => void }) {
+  const [catalogTab, setCatalogTab] = useState<'model' | AiResourceKind>('model')
   const [sourceEditor, setSourceEditor] = useState<GenerativeSourceEditor | null>(null)
   const [sourceEditorErrors, setSourceEditorErrors] = useState<GenerativeSourceEditorErrors>({})
   const [testingModelId, setTestingModelId] = useState('')
+  const [savingSourceId, setSavingSourceId] = useState('')
   const sources = draft.generativeSources
   const providerLabel = (type: GenerativeSourceDraft['providerType']) => type === 'openai' ? 'OpenAI' : type === 'anthropic' ? 'Anthropic' : 'OpenAI Compatible'
-  const setSources = (next: GenerativeSourceDraft[]) => update('generativeSources', next)
-  const updateSource = (id: string, patch: Partial<GenerativeSourceDraft>) => setSources(sources.map(source => source.id === id ? { ...source, ...patch } : source))
-  const deleteSource = (source: GenerativeSourceDraft) => {
-    if (!window.confirm(`移除模型来源“${source.name}”？点击页面“保存配置”后将从服务端删除。`)) return
+  const persistSources = async (nextSources: GenerativeSourceDraft[], removedModelIds: Set<string>, operationId: string, message: string) => {
+    setSavingSourceId(operationId)
+    try { await onPersistSources(nextSources, removedModelIds); notify(message); return true }
+    catch (error) { notify(error instanceof Error ? error.message : '模型来源保存失败', 'error'); return false }
+    finally { setSavingSourceId('') }
+  }
+  const updateSource = async (id: string, patch: Partial<GenerativeSourceDraft>) => {
+    const nextSources = sources.map(source => source.id === id ? { ...source, ...patch } : source)
+    await persistSources(nextSources, new Set(), id, patch.enabled === false ? '模型来源已停用。' : '模型来源已启用。')
+  }
+  const deleteSource = async (source: GenerativeSourceDraft) => {
+    if (!window.confirm(`移除模型来源“${source.name}”？该操作会立即写入服务端。`)) return
     const removedIds = new Set(source.models.map(model => model.id)); const remaining = sources.filter(item => item.id !== source.id)
-    const routing = repairGenerativeRouting(remaining, removedIds, draft)
-    setSources(remaining); update('mainModel', routing.mainModel); update('fallbackModelIds', routing.fallbackModelIds)
+    await persistSources(remaining, removedIds, source.id, `模型来源“${source.name}”已删除。`)
   }
   const openSourceEditor = (source?: GenerativeSourceDraft) => {
     setSourceEditorErrors({})
@@ -896,7 +989,7 @@ function ModelManagementSettings({ draft, update, notify, onHealthUpdated }: { d
     } catch (error) { notify(error instanceof Error ? error.message : '模型连通性测试失败', 'error') }
     finally { setTestingModelId('') }
   }
-  const saveSource = () => {
+  const saveSource = async () => {
     if (!sourceEditor) return
     const name = sourceEditor.name.trim(); const baseUrl = sourceEditor.baseUrl.trim(); const apiKey = sourceEditor.apiKey.trim()
     const normalizedModels = sourceEditor.models.map(model => ({ ...model, name: model.name.trim(), displayName: model.displayName.trim(), capabilities: [...new Set(model.capabilities)] }))
@@ -919,42 +1012,234 @@ function ModelManagementSettings({ draft, update, notify, onHealthUpdated }: { d
     const existing = sources.find(item => item.id === source.id)
     const removedIds = new Set(existing ? existing.models.filter(model => !source.models.some(next => next.id === model.id)).map(model => model.id) : [])
     const nextSources = existing ? sources.map(item => item.id === source.id ? source : item) : [...sources, source]
-    const routing = repairGenerativeRouting(nextSources, removedIds, draft)
-    setSources(nextSources); update('mainModel', routing.mainModel); update('fallbackModelIds', routing.fallbackModelIds)
-    setSourceEditor(null); setSourceEditorErrors({}); notify(existing ? '修改已加入草稿，请点击“保存配置”持久化。' : '来源已加入草稿，请点击“保存配置”持久化。', 'warning')
+    const saved = await persistSources(nextSources, removedIds, source.id, existing ? '模型来源修改已保存。' : '模型来源已添加。')
+    if (saved) { setSourceEditor(null); setSourceEditorErrors({}) }
   }
   return <div className="model-config-page">
-    <div className="model-config-panel"><ModelPanelHead title="模型来源" desc="统一维护可供各 Agent 使用的生成式模型渠道；连接信息由服务端保存。"><button className="btn primary" onClick={() => openSourceEditor()}><Plus />添加来源</button></ModelPanelHead><div className="generative-source-grid">{sources.map(source => <article className={`generative-source-card ${source.enabled ? '' : 'disabled'}`} key={source.id} aria-label={`${source.name} 模型来源`}><header><div className="source-logo"><Server /></div><div><b>{source.name}</b><small>{providerLabel(source.providerType)}</small></div><Badge tone={source.enabled ? modelHealthTone(source.health) : 'gray'}>{source.enabled ? modelHealthLabel(source.health) : '已停用'}</Badge><label className="switch"><input type="checkbox" checked={source.enabled} onChange={event => updateSource(source.id, { enabled: event.target.checked })} aria-label={`启用 ${source.name}`} /><i /></label></header><div className="source-reference"><span>Base URL<b>{source.baseUrl}</b></span></div><div className="source-model-chips">{source.models.map(model => <button type="button" key={model.id} disabled={!source.enabled || !model.enabled || testingModelId === model.id} onClick={() => testModelConnection(source, model)} title={`测试 ${model.displayName} 连通性`} aria-label={`测试 ${model.displayName} 连通性`}><i className={model.health} aria-hidden="true" /><span>{testingModelId === model.id ? '测试中…' : model.displayName}</span></button>)}</div><footer><span>{source.models.length} 个模型</span><div><button className="icon-btn" onClick={() => openSourceEditor(source)} title={`编辑来源 ${source.name}`} aria-label={`编辑来源 ${source.name}`}><Pencil /></button><button className="icon-btn danger-text" onClick={() => deleteSource(source)} title={`移除来源 ${source.name}`} aria-label={`移除来源 ${source.name}`}><Trash2 /></button></div></footer></article>)}</div></div>
-    {sources.length === 0 && <div className="model-source-empty"><Server /><b>尚未配置生成式模型来源</b><span>填写 Base URL、API Key 和模型后保存，即可进行真实发现与连通性探测。</span></div>}
-    {sourceEditor && <Modal title={sourceEditor.id ? '编辑生成式模型来源' : '添加生成式模型来源'} className="model-source-modal" onClose={() => { setSourceEditor(null); setSourceEditorErrors({}) }}><div className="modal-form"><div className="model-source-modal-content"><p>Base URL 和 API Key 由服务端保存；读取配置时不会回显 API Key。</p><label>来源名称<input value={sourceEditor.name} onChange={event => setSourceEditor(current => current && { ...current, name: event.target.value })} placeholder="例如：OpenAI 灾备渠道" /></label><label>协议类型<select value={sourceEditor.providerType} onChange={event => setSourceEditor(current => current && { ...current, providerType: event.target.value as GenerativeSourceDraft['providerType'] })}><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="openai_compatible">OpenAI Compatible</option></select></label><label>Base URL<input value={sourceEditor.baseUrl} onChange={event => setSourceEditor(current => current && { ...current, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" /></label><label>API Key（可选）<input type="password" value={sourceEditor.apiKey} onChange={event => setSourceEditor(current => current && { ...current, apiKey: event.target.value })} placeholder={sourceEditor.id ? '留空保留已保存的 API Key' : '无需鉴权时可留空'} /></label>{sourceEditorErrors.source && <span className="field-error">{sourceEditorErrors.source}</span>}<section className="generative-model-editor"><header><div><b>模型配置</b><small>可获取当前配置模型，也可手动填写并维护模型。</small></div><div className="generative-model-editor-actions"><button type="button" className="btn ghost" onClick={discoverModels}><RefreshCw />获取当前配置模型</button><button type="button" className="btn ghost" onClick={addEditorModel}><Plus />手动添加模型</button></div></header>{sourceEditorErrors.modelList && <span className="field-error">{sourceEditorErrors.modelList}</span>}<div>{sourceEditor.models.map((model, index) => <article key={model.id}><header><div><b>模型 {index + 1}</b>{model.id === draft.mainModel && <Badge tone="green">默认模型</Badge>}{draft.fallbackModelIds.includes(model.id) && <Badge tone="purple">回退模型</Badge>}</div><button type="button" className="icon-btn danger-text" title={`移除模型 ${model.displayName || model.name || index + 1}`} aria-label={`移除模型 ${model.displayName || model.name || index + 1}`} onClick={() => removeEditorModel(model.id)}><Trash2 /></button></header><div className="generative-model-fields"><label>模型标识<input value={model.name} onChange={event => updateEditorModel(model.id, { name: event.target.value })} placeholder="gpt-5.1-mini" /></label><label>展示名称<input value={model.displayName} onChange={event => updateEditorModel(model.id, { displayName: event.target.value })} placeholder="GPT-5.1 Mini" /></label></div><div className="generative-model-options"><span>能力</span>{(['structured_output', 'tool_calling', 'reasoning', 'vision'] as const).map(capability => <label key={capability}><input type="checkbox" checked={model.capabilities.includes(capability)} onChange={event => updateEditorModel(model.id, { capabilities: event.target.checked ? [...model.capabilities, capability] : model.capabilities.filter(item => item !== capability) })} />{capability === 'structured_output' ? '结构化输出' : capability === 'tool_calling' ? '工具调用' : capability === 'reasoning' ? '推理' : '视觉'}</label>)}<label className="model-enabled"><input type="checkbox" checked={model.enabled} onChange={event => updateEditorModel(model.id, { enabled: event.target.checked })} />启用模型</label></div>{sourceEditorErrors.models?.[model.id] && <span className="field-error">{sourceEditorErrors.models[model.id]}</span>}</article>)}</div></section></div><div className="modal-actions"><button className="btn ghost" onClick={() => { setSourceEditor(null); setSourceEditorErrors({}) }}>取消</button><button className="btn primary" onClick={saveSource}>{sourceEditor.id ? <Check /> : <Plus />}{sourceEditor.id ? '保存修改' : '加入草稿'}</button></div></div></Modal>}
+    <nav className="ai-catalog-tabs" aria-label="AI 资源管理类型">
+      <button className={catalogTab === 'model' ? 'active' : ''} onClick={() => setCatalogTab('model')}><Bot /><span><b>模型</b><small>来源与能力</small></span></button>
+      <button className={catalogTab === 'mcp' ? 'active' : ''} onClick={() => setCatalogTab('mcp')}><Server /><span><b>MCP</b><small>远程工具服务</small></span></button>
+      <button className={catalogTab === 'skill' ? 'active' : ''} onClick={() => setCatalogTab('skill')}><Sparkles /><span><b>Skill</b><small>可复用工作流</small></span></button>
+      <button className={catalogTab === 'tool' ? 'active' : ''} onClick={() => setCatalogTab('tool')}><ShieldCheck /><span><b>工具</b><small>确定性动作</small></span></button>
+    </nav>
+    {catalogTab === 'model' ? <>
+    <div className="model-config-panel"><ModelPanelHead title="模型来源" desc="统一维护可供各 Agent 使用的生成式模型渠道；所有变更即时保存到服务端。"><button className="btn primary" disabled={Boolean(savingSourceId)} onClick={() => openSourceEditor()}><Plus />添加来源</button></ModelPanelHead><div className="generative-source-grid">{sources.map(source => <article className={`generative-source-card ${source.enabled ? '' : 'disabled'}`} key={source.id} aria-label={`${source.name} 模型来源`}><header><div className="source-logo"><Server /></div><div><b>{source.name}</b><small>{providerLabel(source.providerType)}</small></div><Badge tone={source.enabled ? modelHealthTone(source.health) : 'gray'}>{savingSourceId === source.id ? '保存中' : source.enabled ? modelHealthLabel(source.health) : '已停用'}</Badge><label className="switch"><input type="checkbox" checked={source.enabled} disabled={Boolean(savingSourceId)} onChange={event => void updateSource(source.id, { enabled: event.target.checked })} aria-label={`启用 ${source.name}`} /><i /></label></header><div className="source-reference"><span>Base URL<b>{source.baseUrl}</b></span></div><div className="source-model-chips">{source.models.map(model => <button type="button" key={model.id} disabled={Boolean(savingSourceId) || !source.enabled || !model.enabled || testingModelId === model.id} onClick={() => testModelConnection(source, model)} title={`测试 ${model.displayName} 连通性`} aria-label={`测试 ${model.displayName} 连通性`}><i className={model.health} aria-hidden="true" /><span>{testingModelId === model.id ? '测试中…' : model.displayName}</span></button>)}</div><footer><span>{source.models.length} 个模型</span><div><button className="icon-btn" disabled={Boolean(savingSourceId)} onClick={() => openSourceEditor(source)} title={`编辑来源 ${source.name}`} aria-label={`编辑来源 ${source.name}`}><Pencil /></button><button className="icon-btn danger-text" disabled={Boolean(savingSourceId)} onClick={() => void deleteSource(source)} title={`移除来源 ${source.name}`} aria-label={`移除来源 ${source.name}`}><Trash2 /></button></div></footer></article>)}</div></div>
+    {sources.length === 0 && <div className="model-source-empty"><Server /><b>尚未配置生成式模型来源</b><span>填写 Base URL、API Key 和模型并提交，即可进行真实发现与连通性探测。</span></div>}
+    {sourceEditor && <Modal title={sourceEditor.id ? '编辑生成式模型来源' : '添加生成式模型来源'} className="model-source-modal" onClose={() => { setSourceEditor(null); setSourceEditorErrors({}) }}><div className="modal-form"><div className="model-source-modal-content"><p>Base URL 和 API Key 由服务端保存；读取配置时不会回显 API Key。</p><label>来源名称<input value={sourceEditor.name} onChange={event => setSourceEditor(current => current && { ...current, name: event.target.value })} placeholder="例如：OpenAI 灾备渠道" /></label><label>协议类型<select value={sourceEditor.providerType} onChange={event => setSourceEditor(current => current && { ...current, providerType: event.target.value as GenerativeSourceDraft['providerType'] })}><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="openai_compatible">OpenAI Compatible</option></select></label><label>Base URL<input value={sourceEditor.baseUrl} onChange={event => setSourceEditor(current => current && { ...current, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" /></label><label>API Key（可选）<input type="password" value={sourceEditor.apiKey} onChange={event => setSourceEditor(current => current && { ...current, apiKey: event.target.value })} placeholder={sourceEditor.id ? '留空保留已保存的 API Key' : '无需鉴权时可留空'} /></label>{sourceEditorErrors.source && <span className="field-error">{sourceEditorErrors.source}</span>}<section className="generative-model-editor"><header><div><b>模型配置</b><small>可获取当前配置模型，也可手动填写并维护模型。</small></div><div className="generative-model-editor-actions"><button type="button" className="btn ghost" onClick={discoverModels}><RefreshCw />获取当前配置模型</button><button type="button" className="btn ghost" onClick={addEditorModel}><Plus />手动添加模型</button></div></header>{sourceEditorErrors.modelList && <span className="field-error">{sourceEditorErrors.modelList}</span>}<div>{sourceEditor.models.map((model, index) => <article key={model.id}><header><div><b>模型 {index + 1}</b>{model.id === draft.mainModel && <Badge tone="green">默认模型</Badge>}{draft.fallbackModelIds.includes(model.id) && <Badge tone="purple">回退模型</Badge>}</div><button type="button" className="icon-btn danger-text" title={`移除模型 ${model.displayName || model.name || index + 1}`} aria-label={`移除模型 ${model.displayName || model.name || index + 1}`} onClick={() => removeEditorModel(model.id)}><Trash2 /></button></header><div className="generative-model-fields"><label>模型标识<input value={model.name} onChange={event => updateEditorModel(model.id, { name: event.target.value })} placeholder="gpt-5.1-mini" /></label><label>展示名称<input value={model.displayName} onChange={event => updateEditorModel(model.id, { displayName: event.target.value })} placeholder="GPT-5.1 Mini" /></label></div><div className="generative-model-options"><span>能力</span>{(['structured_output', 'tool_calling', 'reasoning', 'vision'] as const).map(capability => <label key={capability}><input type="checkbox" checked={model.capabilities.includes(capability)} onChange={event => updateEditorModel(model.id, { capabilities: event.target.checked ? [...model.capabilities, capability] : model.capabilities.filter(item => item !== capability) })} />{capability === 'structured_output' ? '结构化输出' : capability === 'tool_calling' ? '工具调用' : capability === 'reasoning' ? '推理' : '视觉'}</label>)}<label className="model-enabled"><input type="checkbox" checked={model.enabled} onChange={event => updateEditorModel(model.id, { enabled: event.target.checked })} />启用模型</label></div>{sourceEditorErrors.models?.[model.id] && <span className="field-error">{sourceEditorErrors.models[model.id]}</span>}</article>)}</div></section></div><div className="modal-actions"><button className="btn ghost" disabled={Boolean(savingSourceId)} onClick={() => { setSourceEditor(null); setSourceEditorErrors({}) }}>取消</button><button className="btn primary" disabled={Boolean(savingSourceId)} onClick={() => void saveSource()}>{sourceEditor.id ? <Check /> : <Plus />}{savingSourceId ? '保存中…' : sourceEditor.id ? '保存修改' : '添加来源'}</button></div></div></Modal>}
+    </> : <AiResourceManagement kind={catalogTab} notify={notify} />}
   </div>
 }
+
+type AiResourceEditor = {
+  id?: string
+  kind: AiResourceKind
+  key: string
+  name: string
+  description: string
+  version: string
+  enabled: boolean
+  transport: McpServerResource['transport']
+  endpoint: string
+  authType: McpServerResource['authType']
+  entrypoint: string
+  skillMode: 'zip' | 'entrypoint'
+  packageFile: File | null
+  package?: SkillPackageMetadata
+  toolIds: string[]
+  tags: string
+  source: ToolResource['source']
+  risk: ToolResource['risk']
+  timeoutMs: number
+  sourcePath: string
+  mcpServerId: string
+}
+
+function AiResourceManagement({ kind, notify }: { kind: AiResourceKind; notify: Notify }) {
+  const [catalog, setCatalog] = useState<AiResourceCatalog | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busyId, setBusyId] = useState('')
+  const [editor, setEditor] = useState<AiResourceEditor | null>(null)
+  const [sourceViewer, setSourceViewer] = useState<ToolSource | null>(null)
+  const [sourceLoadingId, setSourceLoadingId] = useState('')
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { setCatalog(await loadAiResources()) }
+    catch (loadError) { setError(loadError instanceof Error ? loadError.message : 'AI 资源目录读取失败') }
+    finally { setLoading(false) }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  const resources: AiResource[] = catalog ? kind === 'mcp' ? catalog.mcpServers : kind === 'skill' ? catalog.skills : catalog.tools : []
+  const title = kind === 'mcp' ? 'MCP 服务' : kind === 'skill' ? 'Skill' : '工具'
+  const description = kind === 'mcp' ? '注册远程 MCP 服务及其暴露的工具范围；当前只允许 HTTP/S 传输。' : kind === 'skill' ? '维护可复用工作流及其依赖工具，供 Agent 发布版本时绑定。' : '统一治理内置、本地、HTTP 与 MCP 工具；工具不是 MCP 的同义词。'
+  const openCreate = () => setEditor({ kind, key: '', name: '', description: '', version: '1.0.0', enabled: true, transport: 'streamable_http', endpoint: '', authType: 'none', entrypoint: '', skillMode: kind === 'skill' ? 'zip' : 'entrypoint', packageFile: null, toolIds: [], tags: '', source: kind === 'tool' ? 'local' : 'builtin', risk: 'read', timeoutMs: 30_000, sourcePath: '', mcpServerId: '' })
+  const openEdit = (resource: AiResource) => setEditor({
+    id: resource.id, kind: resource.kind, key: resource.key, name: resource.name, description: resource.description, version: resource.version, enabled: resource.enabled,
+    transport: resource.kind === 'mcp' ? resource.transport : 'streamable_http', endpoint: resource.kind === 'mcp' ? resource.endpoint : '', authType: resource.kind === 'mcp' ? resource.authType : 'none',
+    entrypoint: resource.kind === 'skill' ? resource.entrypoint : '', skillMode: resource.kind === 'skill' && resource.package ? 'zip' : 'entrypoint', packageFile: null, package: resource.kind === 'skill' ? resource.package : undefined, toolIds: resource.kind === 'tool' ? [] : [...resource.toolIds], tags: resource.kind === 'skill' ? resource.tags.join(', ') : '',
+    source: resource.kind === 'tool' ? resource.source : 'local', risk: resource.kind === 'tool' ? resource.risk : 'read', timeoutMs: resource.kind === 'tool' ? resource.timeoutMs : 30_000, sourcePath: resource.kind === 'tool' ? resource.sourcePath ?? '' : '', mcpServerId: resource.kind === 'tool' ? resource.mcpServerId ?? '' : '',
+  })
+  const persist = async () => {
+    if (!editor) return
+    const common = { key: editor.key, name: editor.name, description: editor.description, version: editor.version, enabled: editor.enabled, status: 'draft' }
+    const payload = editor.kind === 'mcp'
+      ? { ...common, transport: editor.transport, endpoint: editor.endpoint, authType: editor.authType, toolIds: editor.toolIds }
+      : editor.kind === 'skill'
+        ? { ...common, entrypoint: editor.entrypoint, toolIds: editor.toolIds, tags: editor.tags.split(',').map(item => item.trim()).filter(Boolean) }
+        : { ...common, source: editor.source, risk: editor.risk, timeoutMs: editor.timeoutMs, sourcePath: editor.source === 'local' ? editor.sourcePath : undefined, mcpServerId: editor.source === 'mcp' ? editor.mcpServerId : undefined }
+    setBusyId(editor.id ?? 'new')
+    try {
+      if (editor.id) await updateAiResource(editor.kind, editor.id, payload)
+      else if (editor.kind === 'skill' && editor.skillMode === 'zip') {
+        if (!editor.packageFile) throw new Error('请选择 Skill ZIP 包')
+        if (editor.packageFile.size > 20 * 1024 * 1024) throw new Error('Skill ZIP 不能超过 20 MB')
+        await uploadSkillPackage(payload, editor.packageFile)
+      } else await createAiResource(editor.kind, payload)
+      setEditor(null); await load(); notify(`${title}${editor.id ? '已更新' : '已添加'}并持久化。`)
+    } catch (saveError) { notify(saveError instanceof Error ? saveError.message : `${title}保存失败`, 'error') }
+    finally { setBusyId('') }
+  }
+  const toggle = async (resource: AiResource) => {
+    setBusyId(resource.id)
+    try { await updateAiResource(resource.kind, resource.id, { enabled: !resource.enabled }); await load(); notify(`${resource.name} 已${resource.enabled ? '停用' : '启用'}。`) }
+    catch (toggleError) { notify(toggleError instanceof Error ? toggleError.message : '状态更新失败', 'error') }
+    finally { setBusyId('') }
+  }
+  const remove = async (resource: AiResource) => {
+    if (!window.confirm(`删除${title}“${resource.name}”？该操作将立即写入服务端。`)) return
+    setBusyId(resource.id)
+    try { await deleteAiResource(resource.kind, resource.id); await load(); notify(`${resource.name} 已删除。`) }
+    catch (deleteError) { notify(deleteError instanceof Error ? deleteError.message : '资源删除失败', 'error') }
+    finally { setBusyId('') }
+  }
+  const viewSource = async (resource: ToolResource) => {
+    setSourceLoadingId(resource.id)
+    try { setSourceViewer(await loadToolSource(resource.id)) }
+    catch (sourceError) { notify(sourceError instanceof Error ? sourceError.message : '工具源码读取失败', 'error') }
+    finally { setSourceLoadingId('') }
+  }
+  return <section className="model-config-panel ai-resource-panel">
+    <ModelPanelHead title={title} desc={description}><span className="ai-resource-head-actions"><Badge tone="purple">{resources.length} 项</Badge><button className="btn primary" onClick={openCreate}><Plus />添加{title}</button></span></ModelPanelHead>
+    {loading && <div className="ai-resource-state"><RefreshCw className="document-loading-icon" /><span>正在读取 AI 资源目录…</span></div>}
+    {!loading && error && <div className="ai-resource-state failed"><AlertTriangle /><span><b>读取失败</b><small>{error}</small></span><button className="btn ghost" onClick={() => void load()}><RefreshCw />重试</button></div>}
+    {!loading && !error && resources.length === 0 && <div className="ai-resource-empty"><CurrentAiResourceIcon kind={kind} /><b>尚未注册{title}</b><span>点击“添加{title}”创建首个服务端资源记录。</span></div>}
+    {!loading && !error && resources.length > 0 && <div className="ai-resource-list">{resources.map(resource => <article className={resource.enabled ? '' : 'disabled'} key={resource.id}>
+      <div className="ai-resource-icon"><CurrentAiResourceIcon kind={resource.kind} /></div><div className="ai-resource-main"><header><b>{resource.name}</b><Badge tone={resource.status === 'ready' ? 'green' : 'orange'}>{resource.status === 'ready' ? '可用' : '待接入'}</Badge>{resource.builtIn && <Badge tone="blue">内置</Badge>}</header><code>{resource.key}@{resource.version}</code><p>{resource.description || '暂无描述'}</p><ResourceMetadata resource={resource} catalog={catalog} /></div>
+      <div className="ai-resource-actions"><label className="switch"><input type="checkbox" checked={resource.enabled} disabled={busyId === resource.id} onChange={() => void toggle(resource)} aria-label={`${resource.enabled ? '停用' : '启用'} ${resource.name}`} /><i /></label>{resource.kind === 'tool' && ['builtin', 'local'].includes(resource.source) && resource.sourcePath && <button className="icon-btn source-code-button" disabled={sourceLoadingId === resource.id} title="查看源码" aria-label={`查看 ${resource.name} 源码`} onClick={() => void viewSource(resource)}>{sourceLoadingId === resource.id ? <RefreshCw className="document-loading-icon" /> : <Code2 />}</button>}{!resource.builtIn && <button className="icon-btn" disabled={busyId === resource.id} onClick={() => openEdit(resource)} aria-label={`编辑 ${resource.name}`}><Pencil /></button>}{!resource.builtIn && <button className="icon-btn danger-text" disabled={busyId === resource.id} onClick={() => void remove(resource)} aria-label={`删除 ${resource.name}`}><Trash2 /></button>}</div>
+    </article>)}</div>}
+    {editor && <Modal title={`${editor.id ? '编辑' : '添加'}${title}`} className="ai-resource-modal" onClose={() => setEditor(null)}><div className="modal-form ai-resource-form"><div className="ai-resource-common-fields"><label>资源标识<input value={editor.key} disabled={Boolean(editor.id)} onChange={event => setEditor(current => current && { ...current, key: event.target.value })} placeholder={kind === 'mcp' ? 'github.mcp' : kind === 'skill' ? 'requirement.review' : 'quality.check'} /></label><label>名称<input value={editor.name} onChange={event => setEditor(current => current && { ...current, name: event.target.value })} placeholder={`${title}展示名称`} /></label><label>版本<input value={editor.version} disabled={Boolean(editor.package)} onChange={event => setEditor(current => current && { ...current, version: event.target.value })} placeholder="1.0.0" />{editor.package && <small>ZIP 包版本不可原位覆盖，请以新版本重新上传。</small>}</label><label className="wide">描述<textarea value={editor.description} onChange={event => setEditor(current => current && { ...current, description: event.target.value })} placeholder="说明用途、数据边界与适用场景" /></label></div>
+      {editor.kind === 'mcp' && <div className="ai-resource-specific-fields"><label>传输协议<select value={editor.transport} onChange={event => setEditor(current => current && { ...current, transport: event.target.value as McpServerResource['transport'] })}><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option></select></label><label>鉴权类型<select value={editor.authType} onChange={event => setEditor(current => current && { ...current, authType: event.target.value as McpServerResource['authType'] })}><option value="none">无鉴权</option><option value="bearer">Bearer Token</option><option value="oauth2">OAuth 2.0</option></select></label><label className="wide">Endpoint<input value={editor.endpoint} onChange={event => setEditor(current => current && { ...current, endpoint: event.target.value })} placeholder="https://mcp.example.com/mcp" /></label><label className="wide">暴露工具标识（逗号分隔）<input value={editor.toolIds.join(', ')} onChange={event => setEditor(current => current && { ...current, toolIds: event.target.value.split(',').map(item => item.trim()).filter(Boolean) })} placeholder="issues.list, issues.create" /></label></div>}
+      {editor.kind === 'skill' && <div className="ai-resource-specific-fields"><div className="skill-source-choice wide"><button type="button" className={editor.skillMode === 'zip' ? 'active' : ''} disabled={Boolean(editor.package)} onClick={() => setEditor(current => current && { ...current, skillMode: 'zip' })}>ZIP 包上传</button><button type="button" className={editor.skillMode === 'entrypoint' ? 'active' : ''} disabled={Boolean(editor.package)} onClick={() => setEditor(current => current && { ...current, skillMode: 'entrypoint' })}>手动入口</button></div>{editor.skillMode === 'zip' ? editor.package ? <div className="skill-package-summary wide"><b>{editor.package.uploadedFileName}</b><span>{editor.package.fileCount} 个文件 · {formatBytes(editor.package.unpackedBytes)}</span><code>SHA-256 {editor.package.contentSha256}</code><small>{editor.package.entrypointPath}</small></div> : <label className="skill-zip-picker wide"><span>Skill ZIP 包</span><input type="file" accept=".zip,application/zip" onChange={event => setEditor(current => current && { ...current, packageFile: event.target.files?.[0] ?? null })} /><small>{editor.packageFile ? `${editor.packageFile.name} · ${formatBytes(editor.packageFile.size)}` : '最多 20 MB、200 个文件；必须且只能包含一个 SKILL.md。'}</small></label> : <label className="wide">Skill 入口<input value={editor.entrypoint} onChange={event => setEditor(current => current && { ...current, entrypoint: event.target.value })} placeholder="ai/skills/requirement-review/SKILL.md" /></label>}<label className="wide">标签（逗号分隔）<input value={editor.tags} onChange={event => setEditor(current => current && { ...current, tags: event.target.value })} placeholder="需求, 评审, 证据" /></label><fieldset className="wide"><legend>依赖工具</legend><div className="ai-tool-options">{catalog?.tools.map(tool => <label key={tool.id}><input type="checkbox" checked={editor.toolIds.includes(tool.key)} onChange={event => setEditor(current => current && { ...current, toolIds: event.target.checked ? [...current.toolIds, tool.key] : current.toolIds.filter(id => id !== tool.key) })} /><span><b>{tool.name}</b><small>{tool.key}</small></span></label>)}</div></fieldset></div>}
+      {editor.kind === 'tool' && <div className="ai-resource-specific-fields"><label>工具来源<select value={editor.source} onChange={event => setEditor(current => current && { ...current, source: event.target.value as ToolResource['source'], mcpServerId: event.target.value === 'mcp' ? current.mcpServerId : '', sourcePath: event.target.value === 'local' ? current.sourcePath : '' })}><option value="local">本地注册</option><option value="http">HTTP API</option><option value="mcp">MCP 服务</option></select></label><label>风险等级<select value={editor.risk} onChange={event => setEditor(current => current && { ...current, risk: event.target.value as ToolResource['risk'] })}><option value="read">只读</option><option value="network_read">网络只读</option><option value="internal_write">内部写入</option></select></label><label>超时（毫秒）<input type="number" min="1000" max="300000" step="1000" value={editor.timeoutMs} onChange={event => setEditor(current => current && { ...current, timeoutMs: Number(event.target.value) })} /></label>{editor.source === 'local' && <label className="wide">源码路径<input value={editor.sourcePath} onChange={event => setEditor(current => current && { ...current, sourcePath: event.target.value })} placeholder="server/tools/my-tool.ts" /><small>仅允许 server/tools 或 ai/tools 下的 TypeScript/JavaScript 文件</small></label>}{editor.source === 'mcp' && <label>MCP 服务<select value={editor.mcpServerId} onChange={event => setEditor(current => current && { ...current, mcpServerId: event.target.value })}><option value="">请选择 MCP 服务</option>{catalog?.mcpServers.map(server => <option value={server.id} key={server.id}>{server.name}</option>)}</select></label>}</div>}
+      <label className="ai-resource-enabled"><input type="checkbox" checked={editor.enabled} onChange={event => setEditor(current => current && { ...current, enabled: event.target.checked })} />保存后立即启用该资源</label><div className="modal-actions"><button className="btn ghost" onClick={() => setEditor(null)}>取消</button><button className="btn primary" disabled={busyId === (editor.id ?? 'new')} onClick={() => void persist()}><Check />{busyId ? '保存中…' : '保存资源'}</button></div></div></Modal>}
+    {sourceViewer && <Modal title={`${sourceViewer.toolKey} · 源码`} className="tool-source-modal" onClose={() => setSourceViewer(null)}><div className="tool-source-viewer"><header><span><Code2 /><b>{sourceViewer.path}</b></span><Badge tone="blue">只读</Badge></header><pre><code>{sourceViewer.content}</code></pre></div></Modal>}
+  </section>
+}
+
+function CurrentAiResourceIcon({ kind }: { kind: AiResourceKind }) { return kind === 'mcp' ? <Server /> : kind === 'skill' ? <Sparkles /> : <ShieldCheck /> }
+
+function ResourceMetadata({ resource, catalog }: { resource: AiResource; catalog: AiResourceCatalog | null }) {
+  if (resource.kind === 'mcp') return <footer><span>{resource.transport === 'streamable_http' ? 'Streamable HTTP' : 'SSE'}</span><span>{resource.authType === 'none' ? '无鉴权' : resource.authType === 'bearer' ? 'Bearer' : 'OAuth 2.0'}</span><span>{resource.toolIds.length} 个远程工具</span><span title={resource.endpoint}>{resource.endpoint}</span></footer>
+  if (resource.kind === 'skill') return <footer><span>{resource.package ? `ZIP · ${resource.package.fileCount} 个文件 · ${formatBytes(resource.package.unpackedBytes)}` : '手动入口'}</span><span>{resource.toolIds.length} 个依赖工具</span><span>{resource.tags.join(' · ') || '未设置标签'}</span><span title={resource.package?.contentSha256 ?? resource.entrypoint}>{resource.package ? `SHA-256 ${resource.package.contentSha256.slice(0, 12)}…` : resource.entrypoint}</span></footer>
+  const mcp = resource.mcpServerId ? catalog?.mcpServers.find(server => server.id === resource.mcpServerId) : null
+  return <footer><span>{resource.source === 'builtin' ? '内置' : resource.source === 'local' ? '本地' : resource.source === 'http' ? 'HTTP' : `MCP · ${mcp?.name ?? '未解析'}`}</span><span>{resource.risk === 'read' ? '只读' : resource.risk === 'network_read' ? '网络只读' : '内部写入'}</span><span>{(resource.timeoutMs / 1000).toLocaleString()} 秒超时</span>{resource.sourcePath && <span title={resource.sourcePath}>{resource.sourcePath}</span>}</footer>
+}
+
+function formatBytes(value: number) { return value < 1024 ? `${value} B` : value < 1024 * 1024 ? `${(value / 1024).toFixed(1)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB` }
 
 const modelHealthLabel = (health: GenerativeSourceDraft['health']) => health === 'healthy' ? '健康' : health === 'degraded' ? '降级' : '待探测'
 const modelHealthTone = (health: GenerativeSourceDraft['health']) => health === 'healthy' ? 'green' : health === 'degraded' ? 'orange' : 'gray'
 
-function PromptAgentSettings({ draft, update, notify }: { draft: SettingsDraft; update: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void; notify: Notify }) {
+function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configuration, configurationError, modelSourcesState, modelSourcesError, onRetryConfiguration, onRetryModelSources, publishing, onPublish }: {
+  draft: SettingsDraft
+  notify: Notify
+  agentDraft: Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft>
+  updateAgent: (value: Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft> | ((current: Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft>) => Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft>)) => void
+  configuration: AgentConfigurationState
+  configurationError: string | null
+  modelSourcesState: 'idle' | 'loading' | 'ready' | 'failed'
+  modelSourcesError: string | null
+  onRetryConfiguration: () => void
+  onRetryModelSources: () => void
+  publishing: boolean
+  onPublish: (agentKey: AgentConfigurationAgentKey) => Promise<void>
+}) {
+  const [selectedAgent, setSelectedAgent] = useState<AgentConfigurationAgentKey>('requirementPointExtraction')
   const [tab, setTab] = useState<'model' | 'prompt' | 'tools' | 'versions'>('model')
+  const [versionSnapshot, setVersionSnapshot] = useState<AgentConfigurationVersion | null>(null)
+  const [versionLoading, setVersionLoading] = useState('')
+  const [resourceCatalog, setResourceCatalog] = useState<AiResourceCatalog | null>(null)
+  const [resourceCatalogError, setResourceCatalogError] = useState('')
+  const currentDraft = agentDraft[selectedAgent]
+  const currentState = configuration.agents[selectedAgent]
+  const routing = currentDraft.routing
+  const definition = currentDraft.definition
+  const isExtraction = selectedAgent === 'requirementPointExtraction'
+  const agentLabel = isExtraction ? '需求点提取 Agent' : '需求评审 Agent'
+  const agentIdentifier = isExtraction ? 'RequirementPointExtractionAgent' : 'RequirementReviewAgent'
   const allModels = draft.generativeSources.flatMap(source => source.models.map(model => ({ ...model, source })))
-  const availableModels = allModels.filter(model => model.source.enabled && model.enabled)
-  const defaultModel = allModels.find(model => model.id === draft.mainModel)
+  const modelSourcesReady = modelSourcesState === 'ready'
+  const availableModels = modelSourcesReady ? allModels.filter(model => model.source.enabled && model.enabled) : []
+  const modelValue = (sourceId: string, modelId: string) => `${sourceId}\u0000${modelId}`
+  const resolveModel = (reference: { sourceId: string; modelId: string } | null) => reference ? allModels.find(model => model.source.id === reference.sourceId && model.id === reference.modelId) : undefined
+  const defaultModel = resolveModel(routing.primaryModel)
+  const updateCurrent = (value: AgentConfigurationAgentDraft) => updateAgent(current => ({ ...current, [selectedAgent]: value }))
+  const updateRouting = <K extends keyof AgentRoutingConfiguration>(key: K, value: AgentRoutingConfiguration[K]) => updateCurrent({ ...currentDraft, routing: { ...routing, [key]: value } })
+  const updateDefinition = (patch: Partial<AgentConfigurationAgentDraft['definition']>) => updateCurrent({ ...currentDraft, definition: { ...definition, ...patch } })
+  const updateLimit = (limit: keyof AgentConfigurationAgentDraft['definition']['limits'], value: number | string) => updateDefinition({ limits: { ...definition.limits, [limit]: value } })
   const moveFallback = (index: number, offset: number) => {
     const target = index + offset
-    if (target < 0 || target >= draft.fallbackModelIds.length) return
-    const next = [...draft.fallbackModelIds]; [next[index], next[target]] = [next[target], next[index]]; update('fallbackModelIds', next)
+    if (target < 0 || target >= routing.fallbackModels.length) return
+    const next = [...routing.fallbackModels]; [next[index], next[target]] = [next[target], next[index]]
+    updateRouting('fallbackModels', next)
   }
   const addFallback = () => {
-    const model = availableModels.find(item => item.id !== draft.mainModel && !draft.fallbackModelIds.includes(item.id))
-    if (model) update('fallbackModelIds', [...draft.fallbackModelIds, model.id])
+    const model = availableModels.find(item => (!routing.primaryModel || modelValue(item.source.id, item.id) !== modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId)) && !routing.fallbackModels.some(reference => modelValue(reference.sourceId, reference.modelId) === modelValue(item.source.id, item.id)))
+    if (model) updateRouting('fallbackModels', [...routing.fallbackModels, { sourceId: model.source.id, modelId: model.id }])
   }
-  return <div className="agent-settings-page">
-    <section className="agent-config-header"><div className="agent-symbol"><BrainCircuit /></div><div><span>业务 Agent 流程</span><h3>RequirementPointExtractionAgent → RequirementReviewAgent</h3><p>需求点提取与需求评审 · 独立会话串联 · 配置草稿 V7</p></div><Badge tone="green">已启用</Badge></section>
-    <nav className="agent-config-tabs"><button className={tab === 'model' ? 'active' : ''} onClick={() => setTab('model')}><Bot />模型与路由</button><button className={tab === 'prompt' ? 'active' : ''} onClick={() => setTab('prompt')}><FileText />Prompt</button><button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}><ShieldCheck />工具与权限</button><button className={tab === 'versions' ? 'active' : ''} onClick={() => setTab('versions')}><Clock3 />版本记录</button></nav>
-    {tab === 'model' && <div className="model-routing-grid"><section className="model-config-panel"><ModelPanelHead title="双 Agent 模型参数" desc="从通用模型库选择模型，两段 Agent 分别固定自己的 Prompt、工具与独立会话。"><Badge tone="purple">requirement_analysis</Badge></ModelPanelHead><div className="routing-form"><FormRow label="默认模型" help="智能路由关闭时固定使用该模型"><select value={draft.mainModel} onChange={event => update('mainModel', event.target.value)}>{availableModels.map(model => <option value={model.id} key={model.id}>{model.displayName} · {model.source.name}</option>)}</select></FormRow><FormRow label="模型温度" help="数值越低，评审结论越稳定"><div className="range-field"><input type="range" min="0" max="10" value={Math.round(draft.temperature * 10)} onChange={event => update('temperature', Number(event.target.value) / 10)} /><b>{draft.temperature.toFixed(1)}</b></div></FormRow><FormRow label="最大输出 Token" help={`不得超过 ${defaultModel?.displayName ?? '默认模型'} 的能力上限`}><div className="input-unit"><input type="number" min="1024" step="1024" value={draft.maxOutputTokens} onChange={event => update('maxOutputTokens', Number(event.target.value))} /><span>tokens</span></div></FormRow><FormRow label="请求超时" help="单次模型请求的服务端超时"><div className="input-unit"><input type="number" min="10" value={draft.requestTimeoutSeconds} onChange={event => update('requestTimeoutSeconds', Number(event.target.value))} /><span>秒</span></div></FormRow><FormRow label="失败重试" help="仅对限流、超时等错误生效"><select value={draft.retryCount} onChange={event => update('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option></select></FormRow><SwitchRow title="强制结构化输出" desc="提交结果必须通过服务端 Schema 校验" checked={draft.structuredOutput} onChange={value => update('structuredOutput', value)} /></div></section><section className="model-config-panel route-policy-panel"><ModelPanelHead title="路由与降级" desc="作用于需求点提取与需求评审两个独立 Agent。" /><SwitchRow title="启用智能模型路由" desc="按能力、上下文、启用和健康状态选择模型" checked={draft.intelligentRouting} onChange={value => update('intelligentRouting', value)} /><SwitchRow title="允许模型降级" desc="默认模型不可用时按顺序尝试备用模型" checked={draft.fallbackEnabled} onChange={value => update('fallbackEnabled', value)} /><div className={`fallback-route ${draft.fallbackEnabled ? '' : 'disabled'}`}><div className="fallback-primary"><span>主</span><div><b>{defaultModel?.displayName ?? '未选择默认模型'}</b><small>{defaultModel?.source.name ?? '请先在模型管理中启用模型'}</small></div><Badge tone="green">默认</Badge></div>{draft.fallbackModelIds.map((modelId, index) => { const model = allModels.find(item => item.id === modelId); return model && <div className="fallback-item" key={modelId}><span>{index + 1}</span><div><b>{model.displayName}</b><small>{model.source.name}</small></div><div><button className="icon-btn" disabled={index === 0} onClick={() => moveFallback(index, -1)}><ArrowUp /></button><button className="icon-btn" disabled={index === draft.fallbackModelIds.length - 1} onClick={() => moveFallback(index, 1)}><ArrowDown /></button><button className="icon-btn danger-text" onClick={() => update('fallbackModelIds', draft.fallbackModelIds.filter(id => id !== modelId))}><Trash2 /></button></div></div>})}<button className="add-fallback" disabled={!draft.fallbackEnabled || !availableModels.some(model => model.id !== draft.mainModel && !draft.fallbackModelIds.includes(model.id))} onClick={addFallback}><Plus />添加回退模型</button></div><div className="route-note"><ShieldCheck /><span><b>Agent 级配置</b><small>模型来源仍由通用模型库管理，此处只保存选择和路由策略。</small></span></div></section></div>}
-    {tab === 'prompt' && <div className="model-config-panel agent-static-panel"><ModelPanelHead title="双 Agent Prompt" desc="提取与评审分别使用独立系统指令、任务模板和输出协议。"><Badge tone="green">Prompt V7.1 / Review V4.0</Badge></ModelPanelHead><div className="agent-static-grid"><article><span>RequirementPointExtractionAgent</span><b>生成标题、描述与原文线索</b><p>模型正常生成简洁 title，并提交 description 和 sourceTexts；标题缺失时服务端兜底，其他结构字段、Evidence、定位和 coverage 由服务端生成。</p></article><article><span>RequirementReviewAgent</span><b>分析结果逐条对应需求点</b><p>模型输出总体摘要以及标题、类型、严重度、置信度、影响和建议；每条分析只关联一个真实 requirementPointRef。</p></article></div><p className="readonly-notice">当前为前端结构示例，不会发布或覆盖正式 Prompt。</p></div>}
-    {tab === 'tools' && <div className="model-config-panel agent-static-panel"><ModelPanelHead title="工具与权限" desc="正文由服务端直接投递，工具只承担定向复核与结果提交。"><Badge tone="purple">工具集 V7.1 / Review V4.0</Badge></ModelPanelHead><div className="agent-static-grid"><article><span>提取工具</span><b>requirement_points_submit_result</b><p>提交 v5 的可选 title、description 和 sourceTexts；服务端选取置信区间内全部 Evidence，仅在整个需求点无 Evidence 时开放定点修复。</p></article><article><span>评审工具</span><b>review_submit_result</b><p>提交 v3 summary 与 analyses；服务端校验需求点关联并生成 Finding ID。</p></article></div></div>}
-    {tab === 'versions' && <div className="model-config-panel"><ModelPanelHead title="Agent 配置版本" desc="模型选择、Prompt、工具与权限共同形成不可变版本。"><button className="btn ghost" onClick={() => notify('当前仅展示 Agent 版本前端原型。', 'warning')}><RefreshCw />刷新</button></ModelPanelHead><div className="model-version-list">{[{ version: 'V7.1', status: '当前生效', model: 'GPT-5.2', author: '李磊', time: '2026-07-26 20:40' }, { version: 'V7', status: '已停用', model: 'GPT-5.2', author: '李磊', time: '2026-07-26 20:20' }, { version: 'V6', status: '已停用', model: 'GPT-5.2', author: '李磊', time: '2026-07-22 16:40' }].map((item, index) => <div key={item.version}><span className="version-node"><i /></span><div><b>{item.version} · 双 Agent 流程</b><small>{item.time} · {item.author}</small></div><span><b>{item.model}</b><small>默认模型</small></span><Badge tone={index === 0 ? 'green' : 'gray'}>{item.status}</Badge><button className="btn ghost" onClick={() => notify(`${item.version} 为前端版本快照示例。`, 'warning')}>查看快照</button></div>)}</div></div>}
-  </div>
+  const requiredToolIds = currentState.requiredToolIds
+  const requiredSkillKeys = currentState.requiredSkillKeys
+  const requiredMcpServerKeys = currentState.requiredMcpServerKeys
+  const stageRuntimeToolIds = new Set(isExtraction ? ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result'] : ['review.submit_result'])
+  const toggleTool = (tool: ToolResource) => {
+    if (requiredToolIds.includes(tool.key)) return
+    const selected = definition.toolIds.includes(tool.key)
+    updateDefinition({ toolIds: selected ? definition.toolIds.filter(item => item !== tool.key) : [...definition.toolIds, tool.key] })
+  }
+  const toggleSkill = (skill: SkillResource) => {
+    if (requiredSkillKeys.includes(skill.key)) return
+    const selected = definition.skillKeys.includes(skill.key)
+    updateDefinition({ skillKeys: selected ? definition.skillKeys.filter(item => item !== skill.key) : [...definition.skillKeys, skill.key] })
+  }
+  const toggleMcp = (server: McpServerResource) => {
+    if (requiredMcpServerKeys.includes(server.key)) return
+    const selected = definition.mcpServerKeys.includes(server.key)
+    updateDefinition({ mcpServerKeys: selected ? definition.mcpServerKeys.filter(item => item !== server.key) : [...definition.mcpServerKeys, server.key] })
+  }
+  const loadResourceCatalog = useCallback(() => {
+    setResourceCatalogError('')
+    return loadAiResources().then(setResourceCatalog).catch(error => {
+      setResourceCatalogError(error instanceof Error ? error.message : 'AI 资源目录读取失败')
+      throw error
+    })
+  }, [])
+  useEffect(() => { void loadResourceCatalog().catch(() => undefined) }, [loadResourceCatalog])
+  const openVersion = async (id: string) => {
+    setVersionLoading(id)
+    try { setVersionSnapshot(await loadAgentConfigurationVersion(id)) }
+    catch (error) { notify(error instanceof Error ? error.message : 'Agent 配置版本读取失败', 'error') }
+    finally { setVersionLoading('') }
+  }
+  const selectAgent = (value: AgentConfigurationAgentKey) => { setSelectedAgent(value); setVersionSnapshot(null) }
+  return <><div className="agent-settings-page">
+    <section className="agent-config-header"><div className="agent-symbol"><BrainCircuit /></div><div className="agent-selector"><span>配置 Agent</span><select value={selectedAgent} onChange={event => selectAgent(event.target.value as AgentConfigurationAgentKey)} aria-label="选择要配置的 Agent"><option value="requirementPointExtraction">需求点提取 Agent（RequirementPointExtractionAgent）</option><option value="requirementReview">需求评审 Agent（RequirementReviewAgent）</option></select><p>需求分析 / {agentIdentifier} · 草稿 revision {currentDraft.revision}</p></div><Badge tone={currentState.activeVersion ? 'green' : 'orange'}>{currentState.activeVersion ? `V${currentState.activeVersion.version} 生效中` : '尚未发布'}</Badge><button className="btn primary agent-publish-button" disabled={publishing || !routing.primaryModel || !modelSourcesReady} onClick={() => void onPublish(selectedAgent)}><Play />{publishing ? '发布中…' : `发布${agentLabel}新版本`}</button></section>
+    {configurationError && <div className="agent-configuration-status failed"><AlertTriangle /><div><b>版本已发布，但配置刷新失败</b><span>{configurationError}</span></div><button className="btn ghost" onClick={onRetryConfiguration}><RefreshCw />重新加载</button></div>}
+    <nav className="agent-config-tabs"><button className={tab === 'model' ? 'active' : ''} onClick={() => setTab('model')}><Bot />模型与路由</button><button className={tab === 'prompt' ? 'active' : ''} onClick={() => setTab('prompt')}><FileText />提示词</button><button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}><ShieldCheck />Tool、MCP、Skill</button><button className={tab === 'versions' ? 'active' : ''} onClick={() => setTab('versions')}><Clock3 />版本记录</button></nav>
+    {tab === 'model' && <div className="model-routing-grid"><section className="model-config-panel"><ModelPanelHead title={`${agentLabel}模型参数`} desc={`仅作用于${agentLabel}，不会影响另一个 Agent。`}><Badge tone="purple">需求分析</Badge></ModelPanelHead>{!modelSourcesReady && <div className={`agent-configuration-status ${modelSourcesState === 'failed' ? 'failed' : ''}`}><RefreshCw /><div><b>{modelSourcesState === 'failed' ? '模型来源读取失败' : '正在读取模型来源'}</b><span>{modelSourcesState === 'failed' ? modelSourcesError ?? '模型与路由暂不可编辑。' : '提示词、工具和版本记录仍可使用。'}</span></div>{modelSourcesState === 'failed' && <button className="btn ghost" onClick={onRetryModelSources}><RefreshCw />重新加载</button>}</div>}<div className="routing-form"><FormRow label="默认模型" help="智能路由关闭时固定使用该模型"><select disabled={!modelSourcesReady} value={routing.primaryModel ? modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId) : ''} onChange={event => { const [sourceId, modelId] = event.target.value.split('\u0000'); updateRouting('primaryModel', sourceId && modelId ? { sourceId, modelId } : null) }}><option value="">{modelSourcesReady ? '请选择模型' : '模型来源读取中…'}</option>{availableModels.map(model => <option value={modelValue(model.source.id, model.id)} key={modelValue(model.source.id, model.id)}>{model.displayName} · {model.source.name}</option>)}</select></FormRow><FormRow label="模型温度" help="数值越低，输出结论越稳定"><div className="range-field"><input type="range" min="0" max="10" value={Math.round(routing.temperature * 10)} onChange={event => updateRouting('temperature', Number(event.target.value) / 10)} /><b>{routing.temperature.toFixed(1)}</b></div></FormRow><FormRow label="最大输出 Token" help={`不得超过 ${defaultModel?.displayName ?? '默认模型'} 的能力上限`}><div className="input-unit"><input type="number" min="1024" step="1024" value={routing.maxOutputTokens} onChange={event => updateRouting('maxOutputTokens', Number(event.target.value))} /><span>tokens</span></div></FormRow><FormRow label="请求超时" help="单次模型请求的服务端超时"><div className="input-unit"><input type="number" min="10" value={routing.requestTimeoutSeconds} onChange={event => updateRouting('requestTimeoutSeconds', Number(event.target.value))} /><span>秒</span></div></FormRow><FormRow label="失败重试" help="仅对限流、超时等错误生效"><select value={routing.retryCount} onChange={event => updateRouting('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option></select></FormRow><SwitchRow title="强制结构化输出" desc="提交结果必须通过服务端 Schema 校验" checked={routing.structuredOutput} onChange={value => updateRouting('structuredOutput', value)} /></div></section><section className="model-config-panel route-policy-panel"><ModelPanelHead title="路由与降级" desc={`仅保存到${agentLabel}的独立版本快照。`} /><SwitchRow title="启用智能模型路由" desc="按能力、上下文、启用和健康状态选择模型" checked={routing.intelligentRouting} onChange={value => updateRouting('intelligentRouting', value)} /><SwitchRow title="允许模型降级" desc="默认模型不可用时按顺序尝试备用模型" checked={routing.fallbackEnabled} onChange={value => updateRouting('fallbackEnabled', value)} /><div className={`fallback-route ${routing.fallbackEnabled ? '' : 'disabled'}`}><div className="fallback-primary"><span>主</span><div><b>{defaultModel?.displayName ?? '未选择默认模型'}</b><small>{defaultModel?.source.name ?? '请先在模型管理中启用模型'}</small></div><Badge tone="green">默认</Badge></div>{routing.fallbackModels.map((reference, index) => { const model = resolveModel(reference); return model && <div className="fallback-item" key={modelValue(reference.sourceId, reference.modelId)}><span>{index + 1}</span><div><b>{model.displayName}</b><small>{model.source.name}</small></div><div><button className="icon-btn" disabled={!modelSourcesReady || index === 0} onClick={() => moveFallback(index, -1)}><ArrowUp /></button><button className="icon-btn" disabled={!modelSourcesReady || index === routing.fallbackModels.length - 1} onClick={() => moveFallback(index, 1)}><ArrowDown /></button><button className="icon-btn danger-text" disabled={!modelSourcesReady} onClick={() => updateRouting('fallbackModels', routing.fallbackModels.filter((_, position) => position !== index))}><Trash2 /></button></div></div>})}<button className="add-fallback" disabled={!modelSourcesReady || !routing.fallbackEnabled || !availableModels.some(model => (!routing.primaryModel || modelValue(model.source.id, model.id) !== modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId)) && !routing.fallbackModels.some(reference => modelValue(reference.sourceId, reference.modelId) === modelValue(model.source.id, model.id)))} onClick={addFallback}><Plus />添加回退模型</button></div><div className="route-note"><ShieldCheck /><span><b>{agentLabel}独立配置</b><small>模型来源由通用模型库管理；模型选择和路由策略随当前 Agent 版本发布。</small></span></div></section></div>}
+    {tab === 'prompt' && <section className="model-config-panel agent-prompt-editor"><ModelPanelHead title={`${agentLabel}提示词`} desc={`配置${agentLabel}的系统指令与任务模板。`}><Badge tone="purple">{isExtraction ? '提取协议 v5' : '评审协议 v3'}</Badge></ModelPanelHead><label><span>系统提示词</span><textarea value={definition.systemPrompt} onChange={event => updateDefinition({ systemPrompt: event.target.value })} /><small>{definition.systemPrompt.length.toLocaleString()} 字符</small></label><label><span>任务模板</span><textarea className="task-template" value={definition.taskTemplate} onChange={event => updateDefinition({ taskTemplate: event.target.value })} /><small>{definition.taskTemplate.length.toLocaleString()} 字符</small></label></section>}
+    {tab === 'tools' && <section className="model-config-panel agent-tool-editor"><ModelPanelHead title={`${agentLabel} Tool、MCP、Skill 与运行限制`} desc="直接读取模型管理的完整资源目录；必需项固定，其余启用项均可按 Agent 选择。"><Badge tone="green">服务端强校验</Badge></ModelPanelHead>{resourceCatalog === null && !resourceCatalogError && <div className="agent-capability-state"><RefreshCw className="document-loading-icon" />正在读取完整 AI 资源目录…</div>}{resourceCatalogError && <div className="agent-capability-state failed"><AlertTriangle /><span>{resourceCatalogError}</span><button className="btn ghost" onClick={() => void loadResourceCatalog().catch(() => undefined)}><RefreshCw />重试</button></div>}{resourceCatalog && <><div className="agent-capability-section"><header><div><b>Tool</b><small>展示工具目录中的全部资源；必需提交工具不可移除，停用项不能新增。</small></div><Badge tone="purple">{resourceCatalog.tools.filter(tool => definition.toolIds.includes(tool.key) || requiredToolIds.includes(tool.key)).length} / {resourceCatalog.tools.length} 已选择</Badge></header>{resourceCatalog.tools.length === 0 ? <div className="agent-capability-state"><ShieldCheck />暂无 Tool，请先到模型管理添加。</div> : <div className="agent-skill-list">{resourceCatalog.tools.map(tool => { const required = requiredToolIds.includes(tool.key); const selected = definition.toolIds.includes(tool.key) || required; const runtimeReady = stageRuntimeToolIds.has(tool.key); return <label className={!tool.enabled ? 'disabled' : ''} key={tool.id}><input type="checkbox" checked={selected} disabled={required || (!tool.enabled && !selected)} onChange={() => toggleTool(tool)} /><span><b>{tool.name}</b><code>{tool.key}@{tool.version}</code><small>{tool.description || '暂无描述'}</small></span><Badge tone={required || runtimeReady ? 'green' : tool.status === 'ready' ? 'blue' : 'gray'}>{required ? '必需' : runtimeReady ? '可运行' : tool.status === 'ready' ? '可绑定' : '待接入'}</Badge></label>})}</div>}</div><div className="agent-capability-section"><header><div><b>MCP</b><small>展示 MCP 目录中的全部服务，选择结果随 Agent 版本固化。</small></div><Badge tone="purple">{resourceCatalog.mcpServers.filter(server => definition.mcpServerKeys.includes(server.key) || requiredMcpServerKeys.includes(server.key)).length} / {resourceCatalog.mcpServers.length} 已选择</Badge></header>{resourceCatalog.mcpServers.length === 0 ? <div className="agent-capability-state"><Server />暂无 MCP，请先到模型管理添加。</div> : <div className="agent-skill-list">{resourceCatalog.mcpServers.map(server => { const required = requiredMcpServerKeys.includes(server.key); const selected = definition.mcpServerKeys.includes(server.key) || required; return <label className={!server.enabled ? 'disabled' : ''} key={server.id}><input type="checkbox" checked={selected} disabled={required || (!server.enabled && !selected)} onChange={() => toggleMcp(server)} /><span><b>{server.name}</b><code>{server.key}@{server.version}</code><small>{required ? '必需 MCP，不可移除' : !server.enabled ? '已停用，可取消但不能新增' : `${server.transport === 'streamable_http' ? 'Streamable HTTP' : 'SSE'} · ${server.toolIds.length} 个远程工具`}</small></span><Badge tone={required ? 'green' : server.status === 'ready' ? 'blue' : 'gray'}>{required ? '必需' : server.status === 'ready' ? '可绑定' : '待接入'}</Badge></label>})}</div>}</div><div className="agent-capability-section"><header><div><b>Skill</b><small>展示 Skill 目录中的全部工作流；停用项不能新增，必需项不可移除。</small></div><Badge tone="purple">{resourceCatalog.skills.filter(skill => definition.skillKeys.includes(skill.key) || requiredSkillKeys.includes(skill.key)).length} / {resourceCatalog.skills.length} 已选择</Badge></header>{resourceCatalog.skills.length === 0 ? <div className="agent-capability-state"><Sparkles />暂无 Skill，请先到模型管理添加。</div> : <div className="agent-skill-list">{resourceCatalog.skills.map(skill => { const required = requiredSkillKeys.includes(skill.key); const selected = definition.skillKeys.includes(skill.key) || required; return <label className={!skill.enabled ? 'disabled' : ''} key={skill.id}><input type="checkbox" checked={selected} disabled={required || (!skill.enabled && !selected)} onChange={() => toggleSkill(skill)} /><span><b>{skill.name}</b><code>{skill.key}@{skill.version}</code><small>{required ? '必需 Skill，不可移除' : !skill.enabled ? '已停用，可取消但不能新增' : skill.toolIds.length ? `依赖工具：${skill.toolIds.join('、')}` : '无额外工具依赖'}</small></span><Badge tone={required ? 'green' : skill.status === 'ready' ? 'blue' : 'gray'}>{required ? '必需' : skill.status === 'ready' ? '可绑定' : '待接入'}</Badge></label>})}</div>}</div></>}<div className="agent-limit-grid"><label>最大轮次<input type="number" min="4" max="100" value={definition.limits.maxTurns} onChange={event => updateLimit('maxTurns', Number(event.target.value))} /></label><label>最大工具调用<input type="number" min="1" max="200" value={definition.limits.maxToolCalls} onChange={event => updateLimit('maxToolCalls', Number(event.target.value))} /></label><label>总截止时间（秒）<input type="number" min="30" max="3600" value={definition.limits.deadlineMs / 1000} onChange={event => updateLimit('deadlineMs', Number(event.target.value) * 1000)} /></label><label>推理强度<select value={definition.limits.reasoningEffort ?? 'medium'} onChange={event => updateLimit('reasoningEffort', event.target.value)}><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">超高</option></select></label></div></section>}
+    {tab === 'versions' && <div className="model-config-panel"><ModelPanelHead title={`${agentLabel}版本记录`} desc={`每次发布只生成${agentLabel}的不可变快照；两个 Agent 的版本号互不影响。`}><Badge tone={currentState.activeVersion ? 'green' : 'orange'}>{currentState.versions.length ? `${currentState.versions.length} 个版本` : '暂无版本'}</Badge></ModelPanelHead><div className="model-version-list">{currentState.versions.map(item => { const model = resolveModel(item.primaryModel); return <div key={item.id}><span className="version-node"><i /></span><div><b>V{item.version} · {agentLabel}</b><small>{new Date(item.createdAt).toLocaleString('zh-CN')} · {item.publishedBy}</small></div><span><b>{model?.displayName ?? item.primaryModel?.modelId ?? '未记录模型'}</b><small>{model?.source.name ?? item.primaryModel?.sourceId ?? '默认模型'}</small></span><Badge tone={item.status === 'active' ? 'green' : 'gray'}>{item.status === 'active' ? '当前生效' : '已停用'}</Badge><button className="btn ghost" disabled={versionLoading === item.id} onClick={() => void openVersion(item.id)}>{versionLoading === item.id ? '读取中…' : '查看快照'}</button></div>})}{!currentState.versions.length && <div className="model-search-empty"><Clock3 /><b>{agentLabel}尚未发布</b><span>完成模型健康探测后，点击“发布新版本”生成该 Agent 的首个不可变快照。</span></div>}</div></div>}
+  </div>{versionSnapshot && <Modal title={`${agentLabel} V${versionSnapshot.version} 快照`} onClose={() => setVersionSnapshot(null)}><div className="agent-version-snapshot"><dl><div><dt>状态</dt><dd>{versionSnapshot.status === 'active' ? '当前生效' : '已停用'}</dd></div><div><dt>发布时间</dt><dd>{new Date(versionSnapshot.createdAt).toLocaleString('zh-CN')}</dd></div><div><dt>发布人</dt><dd>{versionSnapshot.publishedBy}</dd></div><div><dt>内容哈希</dt><dd>{versionSnapshot.contentSha256}</dd></div><div><dt>默认模型</dt><dd>{versionSnapshot.routing.primaryModel ? `${versionSnapshot.routing.primaryModel.sourceId} / ${versionSnapshot.routing.primaryModel.modelId}` : '未配置'}</dd></div><div><dt>回退模型</dt><dd>{versionSnapshot.routing.fallbackModels.map(item => `${item.sourceId} / ${item.modelId}`).join('\n') || '无'}</dd></div></dl><section><b>{agentLabel}</b><p>{versionSnapshot.agentDefinition.version}</p><small>Tool：{versionSnapshot.agentDefinition.toolIds.join('、')}{`\n`}MCP：{versionSnapshot.agentDefinition.mcpBindings.map(item => `${item.serverKey}@${item.version}`).join('、') || '无'}{`\n`}Skill：{versionSnapshot.agentDefinition.skillBindings.map(item => `${item.skillKey}@${item.version}`).join('、') || '无'}</small></section></div></Modal>}</>
 }
 
 function ModelPanelHead({ title, desc, children }: { title: string; desc: string; children?: ReactNode }) { return <div className="model-panel-head"><div><h3>{title}</h3><p>{desc}</p></div>{children}</div> }

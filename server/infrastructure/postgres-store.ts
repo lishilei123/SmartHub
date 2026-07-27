@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import type { AgentExecutionRecord, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
+import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
 import type { ChunkSearchInput, RequirementBindingMetadata, ReviewRunPage, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], reviewRuns: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [] })
 
 export class PostgresStore implements StateStore {
   private state: DatabaseState = emptyState()
@@ -50,9 +50,35 @@ export class PostgresStore implements StateStore {
     return result.rows[0]?.data ?? null
   }
 
+  async getAgentConfigurationState(scene: 'requirement_analysis'): Promise<{ draft: AgentConfigurationDraft | null; versions: AgentConfigurationVersion[] }> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const [draft, versions] = await Promise.all([
+        client.query<{ data: AgentConfigurationDraft }>('SELECT data FROM smarthub.agent_configuration_drafts WHERE scene=$1', [scene]),
+        client.query<{ data: AgentConfigurationVersion }>('SELECT data FROM smarthub.agent_configuration_versions WHERE scene=$1 ORDER BY agent_key, version DESC', [scene]),
+      ])
+      await client.query('COMMIT')
+      return { draft: draft.rows[0]?.data ?? null, versions: versions.rows.map(row => row.data) }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
   async listModelSources(): Promise<GenerativeModelSource[]> {
     const result = await this.pool.query<{ data: GenerativeModelSource }>('SELECT data FROM smarthub.model_sources ORDER BY priority, created_at, id')
     return result.rows.map(row => row.data)
+  }
+
+  async listAiResources(): Promise<AiResource[]> {
+    const result = await this.pool.query<{ data: AiResource }>('SELECT data FROM smarthub.ai_resources ORDER BY kind, resource_key, id')
+    return result.rows.map(row => row.data)
+  }
+
+  async getActiveAgentConfiguration(scene: 'requirement_analysis', agentKey: AgentConfigurationAgentKey): Promise<AgentConfigurationVersion | null> {
+    const result = await this.pool.query<{ data: AgentConfigurationVersion }>("SELECT data FROM smarthub.agent_configuration_versions WHERE scene=$1 AND agent_key=$2 AND status='active'", [scene, agentKey])
+    return result.rows[0]?.data ?? null
   }
 
   async getProjectVersion(projectVersionId: string): Promise<ProjectVersion | null> {
@@ -479,16 +505,22 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
     updatedAt: toIsoTimestamp(row.updated_at)!,
   })) as DatabaseState['tasks']
   const modelSources = await client.query<{ data: DatabaseState['modelSources'][number] }>('SELECT data FROM smarthub.model_sources ORDER BY priority, created_at, id')
+  const aiResources = await client.query<{ data: DatabaseState['aiResources'][number] }>('SELECT data FROM smarthub.ai_resources ORDER BY kind, resource_key, id')
+  const agentConfigurationDrafts = await client.query<{ data: DatabaseState['agentConfigurationDrafts'][number] }>('SELECT data FROM smarthub.agent_configuration_drafts ORDER BY scene')
+  const agentConfigurationVersions = await client.query<{ data: DatabaseState['agentConfigurationVersions'][number] }>('SELECT data FROM smarthub.agent_configuration_versions ORDER BY scene, agent_key, version')
   const projectVersions = await client.query<{ data: DatabaseState['projectVersions'][number] }>('SELECT data FROM smarthub.project_versions ORDER BY created_at, id')
   const projectVersionRequirementBindings = await client.query<{ data: DatabaseState['projectVersionRequirementBindings'][number] }>('SELECT data FROM smarthub.project_version_requirement_bindings ORDER BY created_at, id')
   const reviewRuns = await client.query<{ data: DatabaseState['reviewRuns'][number] }>('SELECT data FROM smarthub.review_runs ORDER BY created_at DESC, id')
-  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data) }
+  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data) }
 }
 
 async function persistChanges(client: PoolClient, before: DatabaseState, state: DatabaseState) {
   await deleteMissing(client, 'review_runs', before.reviewRuns, state.reviewRuns)
   await deleteMissing(client, 'project_version_requirement_bindings', before.projectVersionRequirementBindings, state.projectVersionRequirementBindings)
   await deleteMissing(client, 'model_sources', before.modelSources, state.modelSources)
+  await deleteMissing(client, 'ai_resources', before.aiResources, state.aiResources)
+  await deleteMissing(client, 'agent_configuration_versions', before.agentConfigurationVersions, state.agentConfigurationVersions)
+  await deleteMissingScenes(client, 'agent_configuration_drafts', before.agentConfigurationDrafts, state.agentConfigurationDrafts)
   await deleteMissing(client, 'sync_tasks', before.tasks, state.tasks)
   await deleteMissing(client, 'index_versions', before.indexes, state.indexes)
   await deleteMissing(client, 'asset_versions', before.versions, state.versions)
@@ -502,6 +534,13 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   for (const item of changed(before.projects, state.projects)) await client.query('INSERT INTO smarthub.projects VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.name, item.createdAt, JSON.stringify(item)])
   for (const item of changed(before.projectVersions, state.projectVersions)) await client.query('INSERT INTO smarthub.project_versions (id, project_id, name, status, source_project_version_id, created_at, updated_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.projectId, item.name, item.status, item.sourceProjectVersionId ?? null, item.createdAt, item.updatedAt, JSON.stringify(item)])
   for (const item of changed(before.modelSources, state.modelSources)) await client.query('INSERT INTO smarthub.model_sources (id, display_name, provider_type, enabled, priority, created_at, updated_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, provider_type=EXCLUDED.provider_type, enabled=EXCLUDED.enabled, priority=EXCLUDED.priority, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.name, item.providerType, item.enabled, item.priority, item.createdAt, item.updatedAt, JSON.stringify(item)])
+  for (const item of changed(before.aiResources, state.aiResources)) await client.query('INSERT INTO smarthub.ai_resources (id, kind, resource_key, enabled, built_in, created_at, updated_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET kind=EXCLUDED.kind, resource_key=EXCLUDED.resource_key, enabled=EXCLUDED.enabled, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.kind, item.key, item.enabled, item.builtIn, item.createdAt, item.updatedAt, JSON.stringify(item)])
+  for (const item of changedScenes(before.agentConfigurationDrafts, state.agentConfigurationDrafts)) {
+    const revision = Math.max(...Object.values(item.agents).map(agent => agent.revision))
+    const updatedAt = Object.values(item.agents).map(agent => agent.updatedAt).sort().at(-1)!
+    await client.query('INSERT INTO smarthub.agent_configuration_drafts (scene, revision, updated_at, data) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (scene) DO UPDATE SET revision=EXCLUDED.revision, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.scene, revision, updatedAt, JSON.stringify(item)])
+  }
+  for (const item of changed(before.agentConfigurationVersions, state.agentConfigurationVersions)) await client.query('INSERT INTO smarthub.agent_configuration_versions (id, scene, agent_key, version, status, created_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, data=EXCLUDED.data', [item.id, item.scene, item.agentKey, item.version, item.status, item.createdAt, JSON.stringify(item)])
   for (const item of changed(before.knowledgeBases, state.knowledgeBases)) await client.query('INSERT INTO smarthub.knowledge_bases VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET project_id=EXCLUDED.project_id, name=EXCLUDED.name, active_index_version_id=EXCLUDED.active_index_version_id, active_config_version_id=EXCLUDED.active_config_version_id, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.projectId, item.name, item.activeIndexVersionId, item.activeConfigVersionId, item.createdAt, JSON.stringify(item)])
   for (const item of orderDirectories(changed(before.directories, state.directories))) await client.query('INSERT INTO smarthub.knowledge_directories VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET knowledge_base_id=EXCLUDED.knowledge_base_id, parent_id=EXCLUDED.parent_id, name=EXCLUDED.name, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.parentId, item.name, item.createdAt, item.updatedAt, JSON.stringify(item)])
   for (const item of changed(before.configs, state.configs)) await client.query('INSERT INTO smarthub.config_versions VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET requires_rebuild=EXCLUDED.requires_rebuild, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.version, item.requiresRebuild, item.createdAt, JSON.stringify(item)])
@@ -557,6 +596,17 @@ async function deleteMissing<T extends { id: string }>(client: PoolClient, table
 function changed<T extends { id: string }>(before: T[], after: T[]) {
   const previous = new Map(before.map(item => [item.id, JSON.stringify(item)]))
   return after.filter(item => previous.get(item.id) !== JSON.stringify(item))
+}
+
+async function deleteMissingScenes(client: PoolClient, table: string, before: DatabaseState['agentConfigurationDrafts'], after: DatabaseState['agentConfigurationDrafts']) {
+  const retained = new Set(after.map(item => item.scene))
+  const missing = before.filter(item => !retained.has(item.scene)).map(item => item.scene)
+  if (missing.length) await client.query(`DELETE FROM smarthub.${table} WHERE scene = ANY($1::text[])`, [missing])
+}
+
+function changedScenes(before: DatabaseState['agentConfigurationDrafts'], after: DatabaseState['agentConfigurationDrafts']) {
+  const previous = new Map(before.map(item => [item.scene, JSON.stringify(item)]))
+  return after.filter(item => previous.get(item.scene) !== JSON.stringify(item))
 }
 
 function quoteIdentifier(value: string) {

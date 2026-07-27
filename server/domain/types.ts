@@ -40,6 +40,109 @@ export interface GenerativeModelSource {
   healthMessage?: string
 }
 
+export type AiResourceKind = 'mcp' | 'skill' | 'tool'
+export type AiResourceStatus = 'ready' | 'draft'
+
+interface AiResourceBase {
+  id: string
+  key: string
+  name: string
+  description: string
+  version: string
+  enabled: boolean
+  status: AiResourceStatus
+  builtIn: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface McpServerResource extends AiResourceBase {
+  kind: 'mcp'
+  transport: 'streamable_http' | 'sse'
+  endpoint: string
+  authType: 'none' | 'bearer' | 'oauth2'
+  toolIds: string[]
+}
+
+export interface SkillResource extends AiResourceBase {
+  kind: 'skill'
+  entrypoint: string
+  toolIds: string[]
+  tags: string[]
+  package?: SkillPackageMetadata
+}
+
+export interface SkillPackageMetadata {
+  storageKey: string
+  entrypointPath: string
+  uploadedFileName: string
+  archiveSha256: string
+  contentSha256: string
+  fileCount: number
+  unpackedBytes: number
+  files: string[]
+}
+
+export interface ToolResource extends AiResourceBase {
+  kind: 'tool'
+  source: 'builtin' | 'local' | 'http' | 'mcp'
+  risk: 'read' | 'network_read' | 'internal_write'
+  timeoutMs: number
+  sourcePath?: string
+  mcpServerId?: string
+}
+
+export type AiResource = McpServerResource | SkillResource | ToolResource
+
+export type AgentConfigurationScene = 'requirement_analysis'
+export type AgentConfigurationStatus = 'active' | 'superseded'
+export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview'
+export interface AgentModelReference { sourceId: string; modelId: string }
+export interface AgentRoutingConfiguration {
+  primaryModel: AgentModelReference | null
+  fallbackModels: AgentModelReference[]
+  intelligentRouting: boolean
+  fallbackEnabled: boolean
+  temperature: number
+  maxOutputTokens: number
+  requestTimeoutSeconds: number
+  retryCount: number
+  structuredOutput: boolean
+}
+export interface AgentDefinitionDraft {
+  systemPrompt: string
+  taskTemplate: string
+  skillKeys: string[]
+  mcpServerKeys: string[]
+  toolIds: string[]
+  limits: import('./agent-types.js').AgentExecutionLimits
+}
+export interface AgentConfigurationAgentDraft {
+  revision: number
+  routing: AgentRoutingConfiguration
+  definition: AgentDefinitionDraft
+  updatedAt: string
+}
+export interface AgentConfigurationDraft {
+  scene: AgentConfigurationScene
+  agents: {
+    requirementPointExtraction: AgentConfigurationAgentDraft
+    requirementReview: AgentConfigurationAgentDraft
+  }
+}
+export interface AgentConfigurationVersion {
+  id: string
+  scene: AgentConfigurationScene
+  agentKey: AgentConfigurationAgentKey
+  version: number
+  status: AgentConfigurationStatus
+  routing: AgentRoutingConfiguration
+  agentDefinition: import('./agent-types.js').AgentDefinitionVersion
+  contentSha256: string
+  createdAt: string
+  publishedBy: string
+}
+
 export interface EmbeddingSourceModel {
   name: string
   dimensions: number
@@ -134,7 +237,7 @@ export interface ReviewRun {
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; reviewRuns: ReviewRun[] }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[] }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

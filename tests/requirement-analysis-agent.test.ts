@@ -5,12 +5,16 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-work
 import type { Api, Model } from '@earendil-works/pi-ai'
 import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
+import { PiReviewQaRuntimeAdapter } from '../server/agent/pi-review-qa-runtime.js'
 import { resolveEvidenceQuote, resolveEvidenceSourceText, searchEvidenceCandidates } from '../server/agent/evidence-locator.js'
 import { buildRequirementInputPlan } from '../server/agent/requirement-context-assembler.js'
 import { createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, REQUIREMENT_REVIEW_AGENT_VERSION } from '../server/agent/requirement-analysis-agent.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from '../server/agent/result-validator.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
+import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
+import { ReviewQaService } from '../server/application/review-qa-service.js'
 import type { InputDeliveryManifest, RequirementInputPlan, ReviewRunSnapshot } from '../server/domain/agent-types.js'
+import type { ReviewQaRuntime } from '../server/domain/review-qa-types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementPointExtractionV4, CandidateRequirementPointExtractionV5, CandidateRequirementReview, CandidateRequirementReviewV3 } from '../server/domain/review-types.js'
 import { defaultConfig } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
@@ -163,6 +167,39 @@ test('Evidence 跨 Chunk 重定位存在多个不同原文位置时保持拒绝'
   assert.equal(resolveEvidenceQuote({ assetVersionId: 'version-a', chunkId: 'missing', quote: '相同需求文本。' }, chunks), undefined)
 })
 
+test('评审问答将同一冻结运行的 Finding 和需求点引用归一化为 Evidence', async () => {
+  const { store, runId } = await completedReviewRun()
+  const service = new ReviewQaService(store, qaRuntime(['F-001', 'RP-001', 'E-002', 'E-001']))
+  const answer = await service.ask(runId, { question: '取消订单的风险是什么？' })
+  assert.deepEqual(answer.citations, ['E-001', 'E-002'])
+})
+
+test('评审问答拒绝无法解析为当前冻结 Evidence 的引用', async () => {
+  const { store, runId } = await completedReviewRun()
+  const service = new ReviewQaService(store, qaRuntime(['F-404', 'RP-404', 'E-404']))
+  await assert.rejects(() => service.ask(runId, { question: '未知引用是否有效？' }), /REVIEW_QA_INVALID_CITATION: F-404, RP-404, E-404/u)
+})
+
+test('评审问答提示将 Evidence 白名单与 Finding、需求点 ID 区分开', async () => {
+  const { output } = await successfulRun()
+  const faux = fauxProvider()
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('review_answer_submit', { answer: '取消后状态尚未定义。', citations: ['E-001'], limitations: [] }), { stopReason: 'toolUse' }),
+  ])
+  const prompts: string[] = []
+  const stream: StreamFn = (model, context, options) => {
+    prompts.push(context.messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content)).join('\n'))
+    return (faux.provider.streamSimple.bind(faux.provider) as StreamFn)(model, context, options)
+  }
+  const runtime = new PiReviewQaRuntimeAdapter({ model: faux.getModel() as Model<Api>, streamFn: stream })
+  await runtime.answer({
+    question: '请说明取消订单的风险。', snapshot: output.snapshot, reviewResult: output.result,
+    documentContent: '用户可以取消待支付订单。', model: { sourceId: 'source-1', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', modelId: 'model-1', modelName: 'review-model', contextWindow: 32_768, maxOutputTokens: 4_096, supportsReasoning: false },
+  }, new AbortController().signal)
+  assert.match(prompts[0], /allowedCitationEvidence/u)
+  assert.match(prompts[0], /F-\* Finding ID 和 RP-\* 需求点 ID/u)
+})
+
 test('普通文档正文在首轮直接进入上下文，模型无需逐 Chunk 读取', async () => {
   const store = await seededStore()
   const faux = fauxProvider()
@@ -188,6 +225,56 @@ test('普通文档正文在首轮直接进入上下文，模型无需逐 Chunk �
   assert.ok(!output.executions.requirementPointExtraction.events.some(event => event.toolId === 'knowledge_read_chunk'))
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'input_package_built'))
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'input_batch_delivered'))
+})
+
+test('新评审固定使用已发布 Agent 配置中的模型、Prompt、工具与配置版本', async () => {
+  const store = await seededStore()
+  await store.transaction(state => {
+    state.modelSources[0].models.push({ ...state.modelSources[0].models[0], id: 'model-2', name: 'review-model', displayName: '评审模型', maxOutputTokens: 8_192 })
+  })
+  const configurations = new AgentConfigurationService(store)
+  const initial = await configurations.get()
+  const extractionDraftState = initial.agents.requirementPointExtraction.draft
+  const reviewDraftState = initial.agents.requirementReview.draft
+  const extractionSaved = await configurations.save({
+    agentKey: 'requirementPointExtraction',
+    revision: extractionDraftState.revision,
+    routing: { ...extractionDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 4_096, temperature: 0.1, retryCount: 1 },
+    definition: extractionDraftState.definition,
+  })
+  const extractionPublished = await configurations.publish({ agentKey: 'requirementPointExtraction', revision: extractionSaved.revision })
+  const reviewSaved = await configurations.save({
+    agentKey: 'requirementReview',
+    revision: reviewDraftState.revision,
+    routing: { ...reviewDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-2' }, maxOutputTokens: 8_192, temperature: 0.3, retryCount: 2 },
+    definition: { ...reviewDraftState.definition, systemPrompt: `${reviewDraftState.definition.systemPrompt}\n已发布配置标记。` },
+  })
+  const reviewPublished = await configurations.publish({ agentKey: 'requirementReview', revision: reviewSaved.revision })
+  const faux = fauxProvider()
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionDraft()), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
+  ])
+  const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn }), configurations)
+  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'] })
+  assert.equal(output.snapshot.agentConfigurationRefs?.requirementPointExtraction.id, extractionPublished.id)
+  assert.equal(output.snapshot.agentConfigurationRefs?.requirementReview.id, reviewPublished.id)
+  assert.equal(output.snapshot.agentConfigurationRefs?.requirementPointExtraction.version, 1)
+  assert.equal(output.snapshot.agentConfigurationRefs?.requirementReview.version, 1)
+  assert.equal(output.snapshot.modelRef.modelId, 'model-1')
+  assert.equal(output.snapshot.modelRef.maxOutputTokens, 4_096)
+  assert.equal(output.snapshot.agentModelRefs?.requirementReview.modelId, 'model-2')
+  assert.equal(output.snapshot.agentModelRefs?.requirementReview.maxOutputTokens, 8_192)
+  assert.match((await configurations.getVersion(reviewPublished.id)).agentDefinition.systemPrompt, /已发布配置标记/u)
+  assert.match(output.snapshot.agentDefinitions.requirementReview.version, /\+config\.1$/u)
+})
+
+test('生产配置解析器拒绝通过请求参数绕过未发布的 Agent 配置', async () => {
+  const store = await seededStore()
+  const configurations = new AgentConfigurationService(store)
+  const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store), configurations)
+  await assert.rejects(() => service.analyze(request()), /分别发布需求点提取 Agent 和需求评审 Agent/u)
+  assert.equal(store.read().reviewRuns.length, 0)
 })
 
 test('服务端从固定 Chunk 规范化 Evidence 与覆盖，忽略模型对定位和覆盖的声明能力', async () => {
@@ -244,7 +331,6 @@ test('需求点完全检索不到原文时才开放定点补读工具并允许�
   assert.ok(execution.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'requirement_points_submit_result' && JSON.stringify(event.toolResult).includes('validation_failed')))
   assert.ok(execution.events.some(event => event.type === 'evidence_repair_tools_enabled'))
   assert.ok(execution.events.some(event => event.toolId === 'knowledge_read_chunk'))
-  assert.ok(!execution.events.some(event => event.toolId === 'evidence_validate_batch'))
 })
 
 test('v5 重复需求点由服务端自动去重且不要求模型维护归并字段', async () => {
@@ -264,7 +350,7 @@ test('v5 重复需求点由服务端自动去重且不要求模型维护归并�
   assert.equal((output.result as CandidateRequirementPointExtraction).requirementPoints.length, 2)
   assert.ok(!execution.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'requirement_points_submit_result' && JSON.stringify(event.toolResult).includes('validation_failed')))
   assert.ok(!execution.events.some(event => event.type === 'evidence_repair_tools_enabled'))
-  assert.ok(!execution.events.some(event => event.toolId === 'knowledge_read_chunk' || event.toolId === 'evidence_validate_batch'))
+  assert.ok(!execution.events.some(event => event.toolId === 'knowledge_read_chunk'))
 })
 
 test('输入投递清单缺批或哈希不一致时不能冻结结果', async () => {
@@ -446,7 +532,7 @@ test('segmented_context 逐批隔离草稿后恢复提交工具并完成最终�
   const extractionSnapshot: ReviewRunSnapshot = {
     ...snapshot,
     runId: 'segmented-runtime-test',
-    agentDefinition: snapshot.agentDefinitions.requirementPointExtraction,
+    agentDefinition: { ...snapshot.agentDefinitions.requirementPointExtraction, toolIds: [...snapshot.agentDefinitions.requirementPointExtraction.toolIds, 'catalog.tool.pending-runtime'] },
     extractionInput: {
       policyVersion: plan.policyVersion, mode: plan.mode, estimatedInputTokens: plan.estimatedInputTokens, safeInputBudget: plan.safeInputBudget, packageSha256: plan.packageSha256,
       batches: batches.map(batch => ({ ...batch, contentSha256: createHash('sha256').update(batch.content).digest('hex'), content: undefined })).map(({ content: _content, ...batch }) => batch),
@@ -467,6 +553,7 @@ test('segmented_context 逐批隔离草稿后恢复提交工具并完成最终�
   assert.equal(output.inputDeliveryManifest?.finalMergeCompleted, true)
   assert.equal(output.inputDeliveryManifest?.entries.length, 2)
   assert.ok(output.events.some(event => event.type === 'input_final_merge_started'))
+  assert.ok(output.events.some(event => event.type === 'tool_bindings_unavailable' && event.content?.includes('catalog.tool.pending-runtime')))
   assert.deepEqual((output.candidate as CandidateRequirementPointExtraction).coverage.assets.map(asset => asset.deliveredChunkIds), [['chunk-1'], ['chunk-2']])
 })
 
@@ -480,6 +567,15 @@ async function successfulRun() {
   const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn }))
   const output = await service.analyze(request())
   return { output, store }
+}
+
+async function completedReviewRun() {
+  const { output, store } = await successfulRun()
+  return { store, runId: output.runId }
+}
+
+function qaRuntime(citations: string[]): ReviewQaRuntime {
+  return { answer: async () => ({ answer: '基于固定评审结果的回答。', citations, limitations: [] }) }
 }
 
 async function snapshotForValidation() {

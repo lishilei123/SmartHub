@@ -1,7 +1,7 @@
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
-import type { AgentExecutionRecord, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
+import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
 
 export interface TaskLease { workerId: string; runToken: string }
 
@@ -34,7 +34,7 @@ export type ReviewRunPage = {
   nextCursor?: string
 }
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], reviewRuns: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -42,6 +42,9 @@ export interface StateStore {
   snapshot(): Promise<DatabaseState>
   getActiveKnowledgeConfig?(knowledgeBaseId: string): Promise<ConfigVersion | null>
   listModelSources?(): Promise<GenerativeModelSource[]>
+  listAiResources?(): Promise<AiResource[]>
+  getAgentConfigurationState?(scene: 'requirement_analysis'): Promise<{ draft: AgentConfigurationDraft | null; versions: AgentConfigurationVersion[] }>
+  getActiveAgentConfiguration?(scene: 'requirement_analysis', agentKey: AgentConfigurationAgentKey): Promise<AgentConfigurationVersion | null>
   getProjectVersion?(projectVersionId: string): Promise<ProjectVersion | null>
   listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
   listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
@@ -85,11 +88,19 @@ export class JsonStore implements StateStore {
   constructor(private readonly file: string | null) {}
   async load() {
     if (!this.file) return
-    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.reviewRuns ??= [] }
+    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= [] }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   read() { return structuredClone(this.state) }
   async snapshot() { return this.read() }
+  async listAiResources() { return structuredClone(this.state.aiResources) }
+  async getAgentConfigurationState(scene: 'requirement_analysis') {
+    return structuredClone({
+      draft: this.state.agentConfigurationDrafts.find(item => item.scene === scene) ?? null,
+      versions: this.state.agentConfigurationVersions.filter(item => item.scene === scene),
+    })
+  }
+  async getActiveAgentConfiguration(scene: 'requirement_analysis', agentKey: AgentConfigurationAgentKey) { return structuredClone(this.state.agentConfigurationVersions.find(item => item.scene === scene && item.agentKey === agentKey && item.status === 'active') ?? null) }
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
     await this.transaction(state => {
       const run = state.reviewRuns.find(item => item.id === runId)

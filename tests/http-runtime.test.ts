@@ -1,9 +1,22 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
+const httpTestRoot = await mkdtemp(join(tmpdir(), 'smarthub-http-test-'))
 process.env.SMARTHUB_FORCE_JSON_STORE = 'true'
+process.env.SMARTHUB_DATA_FILE = join(httpTestRoot, 'smarthub.json')
+process.env.SMARTHUB_DOCUMENT_ROOT = join(httpTestRoot, 'knowledge-bases')
+process.env.SMARTHUB_MODEL_ROOT = join(httpTestRoot, 'models')
+process.env.SMARTHUB_SKILL_ROOT = join(httpTestRoot, 'skills')
 const { start } = await import('../server/http/server.js')
 delete process.env.SMARTHUB_FORCE_JSON_STORE
+delete process.env.SMARTHUB_DATA_FILE
+delete process.env.SMARTHUB_DOCUMENT_ROOT
+delete process.env.SMARTHUB_MODEL_ROOT
+delete process.env.SMARTHUB_SKILL_ROOT
+test.after(async () => { await rm(httpTestRoot, { recursive: true, force: true }) })
 
 async function withServer(run: (baseUrl: string) => Promise<void>) {
   const server = await start(0)
@@ -23,13 +36,63 @@ async function createKnowledgeBase(baseUrl: string) {
   return value.knowledgeBase.id
 }
 
-test('本地模型运行状态接口返回系统默认缓存目录', async () => {
+test('Agent 配置接口返回两类 Agent 的可编辑草稿', async () => {
+  await withServer(async baseUrl => {
+    const response = await fetch(`${baseUrl}/agent-configurations/requirement-analysis`)
+    assert.equal(response.status, 200)
+    const body = await response.json() as {
+      scene: string
+      agents: Record<string, { draft: { revision: number; routing: unknown; definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }; requiredToolIds: string[]; requiredSkillKeys: string[]; requiredMcpServerKeys: string[]; versions: unknown[] }>
+    }
+    assert.equal(body.scene, 'requirement_analysis')
+    assert.equal(body.agents.requirementPointExtraction.draft.revision, 0)
+    assert.equal(body.agents.requirementReview.draft.revision, 0)
+    assert.deepEqual(body.agents.requirementPointExtraction.requiredSkillKeys, [])
+    assert.deepEqual(body.agents.requirementReview.requiredToolIds, ['review.submit_result'])
+    assert.deepEqual(body.agents.requirementReview.requiredMcpServerKeys, [])
+    assert.deepEqual(body.agents.requirementReview.draft.definition.skillKeys, [])
+    assert.deepEqual(body.agents.requirementReview.draft.definition.mcpServerKeys, [])
+    assert.deepEqual(body.agents.requirementPointExtraction.versions, [])
+    assert.deepEqual(body.agents.requirementReview.versions, [])
+
+    const skillResponse = await fetch(`${baseUrl}/ai-resources/skill`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: 'http.agent.skill', name: 'HTTP Agent Skill', version: '1.0.0', enabled: true, entrypoint: 'ai/skills/http-agent/SKILL.md', toolIds: [], tags: ['agent'] }),
+    })
+    assert.equal(skillResponse.status, 201)
+    const mcpResponse = await fetch(`${baseUrl}/ai-resources/mcp`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: 'http.agent.mcp', name: 'HTTP Agent MCP', version: '1.0.0', enabled: true, transport: 'streamable_http', endpoint: 'https://agent.example.com/mcp', authType: 'none', toolIds: ['http.agent.tool'] }),
+    })
+    assert.equal(mcpResponse.status, 201)
+    const mcp = await mcpResponse.json() as { id: string }
+    const toolResponse = await fetch(`${baseUrl}/ai-resources/tool`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: 'http.agent.tool', name: 'HTTP Agent Tool', version: '1.0.0', enabled: true, source: 'mcp', risk: 'network_read', timeoutMs: 30_000, mcpServerId: mcp.id }),
+    })
+    assert.equal(toolResponse.status, 201)
+    const draft = body.agents.requirementReview.draft
+    const savedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentKey: 'requirementReview', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: ['http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
+    })
+    assert.equal(savedResponse.status, 200)
+    const saved = await savedResponse.json() as { definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }
+    assert.deepEqual(saved.definition.skillKeys, ['http.agent.skill'])
+    assert.deepEqual(saved.definition.mcpServerKeys, ['http.agent.mcp'])
+    assert.deepEqual(saved.definition.toolIds, ['review.submit_result', 'http.agent.tool'])
+  })
+})
+
+test('本地模型运行状态接口返回隔离的缓存目录', async () => {
   await withServer(async baseUrl => {
     const response = await fetch(`${baseUrl}/local-model/status`)
     assert.equal(response.status, 200)
     const status = await response.json() as { phase: string; cacheDirectory: string }
     assert.equal(status.phase, 'idle')
-    assert.match(status.cacheDirectory.replaceAll('\\', '/'), /data\/models\/cache$/)
+    assert.match(status.cacheDirectory.replaceAll('\\', '/'), /models\/cache$/)
   })
 })
 

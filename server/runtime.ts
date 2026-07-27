@@ -12,6 +12,9 @@ import { RawDocumentStore } from './infrastructure/raw-document-store.js'
 import { JsonStore, type StateStore } from './infrastructure/store.js'
 import { ProjectVersionService } from './application/project-version-service.js'
 import { ReviewQaService } from './application/review-qa-service.js'
+import { AgentConfigurationService } from './application/agent-configuration-service.js'
+import { AiResourceService } from './application/ai-resource-service.js'
+import { SkillPackageStore } from './infrastructure/skill-package-store.js'
 
 const envFile = resolve(fileURLToPath(new URL('../.env.local', import.meta.url)))
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -19,6 +22,7 @@ if (existsSync(envFile)) process.loadEnvFile(envFile)
 const dataFile = process.env.SMARTHUB_DATA_FILE ?? resolve(fileURLToPath(new URL('../data/smarthub.json', import.meta.url)))
 const documentRoot = process.env.SMARTHUB_DOCUMENT_ROOT ?? resolve(fileURLToPath(new URL('../data/knowledge-bases', import.meta.url)))
 const modelRoot = process.env.SMARTHUB_MODEL_ROOT ?? resolve(fileURLToPath(new URL('../data/models', import.meta.url)))
+const skillRoot = process.env.SMARTHUB_SKILL_ROOT ?? resolve(fileURLToPath(new URL('../data/skills', import.meta.url)))
 const production = process.env.NODE_ENV === 'production'
 const databaseUrl = process.env.SMARTHUB_FORCE_JSON_STORE === 'true' ? undefined : process.env.DATABASE_URL
 
@@ -29,8 +33,11 @@ export const stateStore: StateStore = databaseUrl ? new PostgresStore(databaseUr
 export const rawDocumentStore = new RawDocumentStore(documentRoot)
 export const service = new KnowledgeService(stateStore, rawDocumentStore, localModelRuntime)
 export const modelService = new ModelService(stateStore)
+export const skillPackageStore = new SkillPackageStore(skillRoot)
+export const aiResourceService = new AiResourceService(stateStore, skillPackageStore)
+export const agentConfigurationService = new AgentConfigurationService(stateStore)
 export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore)
-export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime)
+export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService)
 export const reviewQaRuntime = new PiReviewQaRuntimeAdapter()
 export const reviewQaService = new ReviewQaService(stateStore, reviewQaRuntime)
 export const projectVersionService = new ProjectVersionService(stateStore)

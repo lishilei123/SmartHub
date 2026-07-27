@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { AssetType, KnowledgeConfig } from '../domain/types.js'
+import type { AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import type { ReviewQuestionQuote } from '../domain/review-qa-types.js'
-import { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
+import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
+import { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
+import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 
-export { localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore }
+export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore }
 
 export async function start(port = Number(process.env.PORT ?? 8787)) {
   await service.initialize()
@@ -48,10 +50,27 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     const sourceId = url.searchParams.get('sourceId')
     return send(response, 200, sources.filter(source => !sourceId || source.id === sourceId).flatMap(source => source.models.map(model => ({ ...model, sourceId: source.id, sourceName: source.name, providerType: source.providerType }))))
   }
+  if (method === 'GET' && url.pathname === '/api/ai-resources') return send(response, 200, await aiResourceService.list())
+  if (method === 'POST' && url.pathname === '/api/ai-resources/skill-package') return send(response, 201, await aiResourceService.createSkillPackage(await json(request, Math.ceil(MAX_SKILL_ARCHIVE_BYTES * 4 / 3) + 1024 * 1024)))
+  const aiResourceCollection = /^\/api\/ai-resources\/(mcp|skill|tool)$/.exec(url.pathname)
+  if (method === 'POST' && aiResourceCollection) return send(response, 201, await aiResourceService.create(aiResourceCollection[1] as AiResourceKind, await json(request)))
+  const aiResource = /^\/api\/ai-resources\/(mcp|skill|tool)\/([^/]+)$/.exec(url.pathname)
+  if (method === 'PUT' && aiResource) return send(response, 200, await aiResourceService.update(aiResource[1] as AiResourceKind, aiResource[2], await json(request)))
+  if (method === 'DELETE' && aiResource) return send(response, 200, await aiResourceService.delete(aiResource[1] as AiResourceKind, aiResource[2]))
+  const toolSource = /^\/api\/ai-resources\/tool\/([^/]+)\/source$/.exec(url.pathname)
+  if (method === 'GET' && toolSource) return send(response, 200, await aiResourceService.source(toolSource[1]))
+  if (method === 'GET' && url.pathname === '/api/agent-configurations/requirement-analysis') return send(response, 200, await agentConfigurationService.get())
+  if (method === 'PUT' && url.pathname === '/api/agent-configurations/requirement-analysis/draft') return send(response, 200, await agentConfigurationService.save(await json(request) as unknown as AgentConfigurationInput))
+  if (method === 'POST' && url.pathname === '/api/agent-configurations/requirement-analysis/publish') {
+    const body = await json(request)
+    return send(response, 201, await agentConfigurationService.publish({ agentKey: String(body.agentKey) as AgentConfigurationInput['agentKey'], revision: Number(body.revision), publishedBy: body.publishedBy ? String(body.publishedBy) : undefined }))
+  }
+  const agentConfigurationVersion = /^\/api\/agent-configuration-versions\/([^/]+)$/.exec(url.pathname)
+  if (method === 'GET' && agentConfigurationVersion) return send(response, 200, await agentConfigurationService.getVersion(agentConfigurationVersion[1]))
   const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
   if (method === 'POST' && projectVersionRun) {
     const body = await json(request)
-    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionIds: stringList(body.assetVersionIds), assetVersionId: body.assetVersionId ? String(body.assetVersionId) : undefined, sourceId: String(body.sourceId ?? ''), modelId: String(body.modelId ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
+    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionIds: stringList(body.assetVersionIds), assetVersionId: body.assetVersionId ? String(body.assetVersionId) : undefined, focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
   }
   const projectVersionReviewRuns = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs$/.exec(url.pathname)
   if (method === 'GET' && projectVersionReviewRuns) return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1], {
@@ -145,7 +164,19 @@ function optionalPositiveInteger(value: string | null) {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('limit 必须是正整数')
   return parsed
 }
-async function json(request: IncomingMessage) { const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk)); return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {} }
+async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) {
+  const declared = Number(request.headers['content-length'] ?? 0)
+  if (Number.isFinite(declared) && declared > maximumBytes) throw new Error(`请求体不能超过 ${Math.ceil(maximumBytes / 1024 / 1024)} MB`)
+  const chunks: Buffer[] = []
+  let received = 0
+  for await (const chunk of request) {
+    const buffer = Buffer.from(chunk)
+    received += buffer.length
+    if (received > maximumBytes) throw new Error(`请求体不能超过 ${Math.ceil(maximumBytes / 1024 / 1024)} MB`)
+    chunks.push(buffer)
+  }
+  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {}
+}
 function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type' }); response.end(body == null ? '' : JSON.stringify(body)) }
 function sendBinary(response: ServerResponse, status: number, body: Buffer, type: string) { response.writeHead(status, { 'content-type': type, 'content-length': body.length, 'cache-control': 'private, max-age=3600', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' }); response.end(body) }
 function contentType(path: string) { const extension = path.toLowerCase().split('.').at(-1); return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml; charset=utf-8' } as Record<string, string>)[extension ?? ''] ?? 'application/octet-stream' }

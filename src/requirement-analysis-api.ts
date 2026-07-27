@@ -128,6 +128,15 @@ export type RequirementAnalysisResponse = {
     logicalPath: string
     assets: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }[]
     modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
+    agentModelRefs?: {
+      requirementPointExtraction: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
+      requirementReview: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
+    }
+    agentConfigurationRef?: { id: string; version: number; contentSha256: string }
+    agentConfigurationRefs?: {
+      requirementPointExtraction: { id: string; version: number; contentSha256: string }
+      requirementReview: { id: string; version: number; contentSha256: string }
+    }
     focusAreas: string[]
     excludedAreas: string[]
     extractionInput: {
@@ -195,7 +204,7 @@ export type ReviewQuestionResponse = {
   createdAt: string
 }
 
-export async function startRequirementAnalysis(projectVersionId: string, input: { assetVersionIds: string[]; sourceId: string; modelId: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
+export async function startRequirementAnalysis(projectVersionId: string, input: { assetVersionIds: string[]; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
   const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-reviews/run`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

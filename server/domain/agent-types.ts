@@ -37,6 +37,7 @@ export interface AgentDefinitionVersion {
 
 export interface AgentDefinitionResolver {
   resolve(agentKey: AgentDefinitionVersion['agentKey']): AgentDefinitionVersion | Promise<AgentDefinitionVersion>
+  resolveActive?(agentKey: AgentDefinitionVersion['agentKey']): import('./types.js').AgentConfigurationVersion | null | Promise<import('./types.js').AgentConfigurationVersion | null>
 }
 
 export interface ReviewRunSnapshot {
@@ -53,6 +54,15 @@ export interface ReviewRunSnapshot {
   logicalPath: string
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }>
   modelRef: { sourceId: string; modelId: string; providerType: 'openai' | 'anthropic' | 'openai_compatible'; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
+  agentModelRefs?: {
+    requirementPointExtraction: ReviewRunSnapshot['modelRef']
+    requirementReview: ReviewRunSnapshot['modelRef']
+  }
+  agentConfigurationRef?: { id: string; version: number; contentSha256: string }
+  agentConfigurationRefs?: {
+    requirementPointExtraction: { id: string; version: number; contentSha256: string }
+    requirementReview: { id: string; version: number; contentSha256: string }
+  }
   focusAreas: string[]
   excludedAreas: string[]
   agentDefinition: AgentDefinitionVersion
@@ -122,6 +132,9 @@ export interface AgentModelConnection {
   contextWindow: number
   maxOutputTokens: number
   supportsReasoning: boolean
+  temperature?: number
+  requestTimeoutMs?: number
+  retryCount?: number
 }
 
 export interface AgentExecutionEvent {

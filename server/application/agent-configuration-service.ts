@@ -1,0 +1,440 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { createAgentDefinitionVersion, createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition } from '../agent/requirement-analysis-agent.js'
+import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/agent-types.js'
+import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
+import type { StateStore } from '../infrastructure/store.js'
+
+const SCENE = 'requirement_analysis' as const
+const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview'] as const
+const BUILT_IN_TOOL_KEYS = ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result', 'review.submit_result'] as const
+const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch'])
+const REQUIRED_EXTRACTION_TOOL = 'requirement-points.submit_result'
+const REQUIRED_REVIEW_TOOL = 'review.submit_result'
+const REQUIRED_SKILLS: Record<AgentConfigurationAgentKey, readonly string[]> = {
+  requirementPointExtraction: [],
+  requirementReview: [],
+}
+const REQUIRED_MCPS: Record<AgentConfigurationAgentKey, readonly string[]> = {
+  requirementPointExtraction: [],
+  requirementReview: [],
+}
+
+export type AgentConfigurationInput = {
+  agentKey: AgentConfigurationAgentKey
+  revision: number
+  routing: AgentRoutingConfiguration
+  definition: AgentDefinitionDraft
+}
+
+export class AgentConfigurationService implements AgentDefinitionResolver {
+  constructor(private readonly store: StateStore) {}
+
+  async get() {
+    const configuration = this.store.getAgentConfigurationState
+      ? await this.store.getAgentConfigurationState(SCENE)
+      : await this.store.snapshot().then(state => ({
+        draft: state.agentConfigurationDrafts.find(item => item.scene === SCENE) ?? null,
+        versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE),
+      }))
+    const draft = normalizeStoredDraft(configuration.draft ?? undefined)
+    const versions = expandStoredVersions(configuration.versions)
+    return {
+      scene: SCENE,
+      agents: {
+        requirementPointExtraction: agentState('requirementPointExtraction', draft, versions),
+        requirementReview: agentState('requirementReview', draft, versions),
+      },
+    }
+  }
+
+  async getVersion(id: string) {
+    const state = await this.store.snapshot()
+    const versions = expandStoredVersions(state.agentConfigurationVersions.filter(item => item.scene === SCENE))
+    return structuredClone(required(versions.find(item => item.id === id), 'Agent 配置版本不存在'))
+  }
+
+  async save(input: AgentConfigurationInput) {
+    const agentKey = normalizeAgentKey(input.agentKey)
+    return await this.store.transaction(state => {
+      migrateState(state)
+      const normalized = normalizeAgentDraft(agentKey, input, state)
+      const index = state.agentConfigurationDrafts.findIndex(item => item.scene === SCENE)
+      const draft = index < 0 ? defaultDraft() : state.agentConfigurationDrafts[index]
+      const current = draft.agents[agentKey]
+      if (input.revision !== current.revision) throw new Error(`${agentLabel(agentKey)}草稿已被其他操作更新，请刷新后重试`)
+      const value: AgentConfigurationAgentDraft = { ...normalized, revision: current.revision + 1, updatedAt: new Date().toISOString() }
+      const next: AgentConfigurationDraft = { ...draft, agents: { ...draft.agents, [agentKey]: value } }
+      if (index < 0) state.agentConfigurationDrafts.push(next)
+      else state.agentConfigurationDrafts[index] = next
+      return structuredClone(value)
+    })
+  }
+
+  async publish(input: { agentKey: AgentConfigurationAgentKey; revision: number; publishedBy?: string }) {
+    const agentKey = normalizeAgentKey(input.agentKey)
+    return await this.store.transaction(state => {
+      migrateState(state)
+      const draft = required(state.agentConfigurationDrafts.find(item => item.scene === SCENE), `请先保存${agentLabel(agentKey)}草稿`)
+      const agentDraft = draft.agents[agentKey]
+      if (agentDraft.revision !== input.revision) throw new Error(`${agentLabel(agentKey)}草稿已更新，请刷新后再发布`)
+      validatePublishable(agentKey, agentDraft, state)
+      const version = Math.max(0, ...state.agentConfigurationVersions.filter(item => item.scene === SCENE && item.agentKey === agentKey).map(item => item.version)) + 1
+      const agentDefinition = publishedDefinition(agentKey, agentDraft.definition, version, state)
+      state.agentConfigurationVersions.forEach(item => { if (item.scene === SCENE && item.agentKey === agentKey && item.status === 'active') item.status = 'superseded' })
+      const createdAt = new Date().toISOString()
+      const valueWithoutHash = {
+        id: `agent_config_${randomUUID()}`,
+        scene: SCENE,
+        agentKey,
+        version,
+        status: 'active' as const,
+        routing: structuredClone(agentDraft.routing),
+        agentDefinition,
+        createdAt,
+        publishedBy: cleanText(input.publishedBy, 80) || '系统管理员',
+      }
+      const value: AgentConfigurationVersion = {
+        ...valueWithoutHash,
+        contentSha256: createHash('sha256').update(JSON.stringify(valueWithoutHash)).digest('hex'),
+      }
+      state.agentConfigurationVersions.push(value)
+      return structuredClone(value)
+    })
+  }
+
+  async resolveActive(agentKey: AgentDefinitionVersion['agentKey']) {
+    const key = configurationKey(agentKey)
+    if (this.store.getActiveAgentConfiguration) {
+      const value = await this.store.getActiveAgentConfiguration(SCENE, key)
+      return value ? normalizeStoredVersion(value, key) : null
+    }
+    const state = await this.store.snapshot()
+    const versions = expandStoredVersions(state.agentConfigurationVersions.filter(item => item.scene === SCENE))
+    return structuredClone(versions.find(item => item.agentKey === key && item.status === 'active') ?? null)
+  }
+
+  async resolve(agentKey: AgentDefinitionVersion['agentKey']) {
+    const active = await this.resolveActive(agentKey)
+    if (!active) return builtInDefinition(configurationKey(agentKey))
+    return structuredClone(active.agentDefinition)
+  }
+}
+
+function agentState(agentKey: AgentConfigurationAgentKey, draft: AgentConfigurationDraft, versions: AgentConfigurationVersion[]) {
+  const agentVersions = versions.filter(item => item.agentKey === agentKey).sort((left, right) => right.version - left.version)
+  return {
+    draft: structuredClone(draft.agents[agentKey]),
+    requiredToolIds: [agentKey === 'requirementPointExtraction' ? REQUIRED_EXTRACTION_TOOL : REQUIRED_REVIEW_TOOL],
+    requiredSkillKeys: [...REQUIRED_SKILLS[agentKey]],
+    requiredMcpServerKeys: [...REQUIRED_MCPS[agentKey]],
+    activeVersion: structuredClone(agentVersions.find(item => item.status === 'active') ?? null),
+    versions: agentVersions.map(versionSummary),
+  }
+}
+
+function defaultDraft(): AgentConfigurationDraft {
+  return {
+    scene: SCENE,
+    agents: {
+      requirementPointExtraction: defaultAgentDraft('requirementPointExtraction'),
+      requirementReview: defaultAgentDraft('requirementReview'),
+    },
+  }
+}
+
+function defaultAgentDraft(agentKey: AgentConfigurationAgentKey): AgentConfigurationAgentDraft {
+  return {
+    revision: 0,
+    routing: defaultRouting(),
+    definition: definitionDraft(builtInDefinition(agentKey)),
+    updatedAt: new Date(0).toISOString(),
+  }
+}
+
+function defaultRouting(): AgentRoutingConfiguration {
+  return {
+    primaryModel: null,
+    fallbackModels: [],
+    intelligentRouting: true,
+    fallbackEnabled: true,
+    temperature: 0.2,
+    maxOutputTokens: 8_192,
+    requestTimeoutSeconds: 120,
+    retryCount: 2,
+    structuredOutput: true,
+  }
+}
+
+function definitionDraft(value: AgentDefinitionVersion): AgentDefinitionDraft {
+  return { systemPrompt: value.systemPrompt, taskTemplate: value.taskTemplate, skillKeys: value.skillBindings.filter(item => item.enabled).map(item => item.skillKey), mcpServerKeys: value.mcpBindings.filter(item => item.enabled).map(item => item.serverKey), toolIds: [...value.toolIds], limits: structuredClone(value.limits) }
+}
+
+function normalizeAgentDraft(agentKey: AgentConfigurationAgentKey, input: AgentConfigurationInput, state: DatabaseState): Omit<AgentConfigurationAgentDraft, 'revision' | 'updatedAt'> {
+  if (!Number.isInteger(input.revision) || input.revision < 0) throw new Error(`${agentLabel(agentKey)}草稿 revision 无效`)
+  const extraction = agentKey === 'requirementPointExtraction'
+  return {
+    routing: normalizeRouting(input.routing),
+    definition: normalizeAgent(input.definition, agentLabel(agentKey), extraction ? REQUIRED_EXTRACTION_TOOL : REQUIRED_REVIEW_TOOL, REQUIRED_SKILLS[agentKey], REQUIRED_MCPS[agentKey], state),
+  }
+}
+
+function normalizeRouting(value: AgentRoutingConfiguration): AgentRoutingConfiguration {
+  if (!value || typeof value !== 'object') throw new Error('模型与路由配置不能为空')
+  const temperature = finiteNumber(value.temperature, '模型温度', 0, 2)
+  const maxOutputTokens = integer(value.maxOutputTokens, '最大输出 Token', 1_024, 262_144)
+  const requestTimeoutSeconds = integer(value.requestTimeoutSeconds, '请求超时', 10, 3_600)
+  const retryCount = integer(value.retryCount, '失败重试次数', 0, 5)
+  const primaryModel = modelReference(value.primaryModel)
+  const fallbackModels = uniqueModelReferences(Array.isArray(value.fallbackModels) ? value.fallbackModels.map(modelReference).filter((item): item is AgentModelReference => Boolean(item)) : [])
+    .filter(item => !primaryModel || modelKey(item) !== modelKey(primaryModel))
+  return {
+    primaryModel,
+    fallbackModels,
+    intelligentRouting: value.intelligentRouting === true,
+    fallbackEnabled: value.fallbackEnabled === true,
+    temperature,
+    maxOutputTokens,
+    requestTimeoutSeconds,
+    retryCount,
+    structuredOutput: value.structuredOutput !== false,
+  }
+}
+
+function normalizeAgent(value: AgentDefinitionDraft | undefined, label: string, requiredTool: string, requiredSkillKeys: readonly string[], requiredMcpServerKeys: readonly string[], state: DatabaseState): AgentDefinitionDraft {
+  if (!value) throw new Error(`${label}配置不能为空`)
+  const systemPrompt = cleanRequired(value.systemPrompt, `${label}系统 Prompt`, 100_000)
+  const taskTemplate = cleanRequired(value.taskTemplate, `${label}任务模板`, 50_000)
+  const toolIds = normalizeToolIds(value.toolIds, label, state)
+  if (!toolIds.includes(requiredTool)) throw new Error(`${label}必须保留结果提交工具 ${requiredTool}`)
+  const skillKeys = normalizeSkillKeys(value.skillKeys, requiredSkillKeys, label, state)
+  const mcpServerKeys = normalizeMcpServerKeys(value.mcpServerKeys, requiredMcpServerKeys, label, state)
+  const limits = value.limits
+  if (!limits || typeof limits !== 'object') throw new Error(`${label}运行限制不能为空`)
+  return {
+    systemPrompt,
+    taskTemplate,
+    skillKeys,
+    mcpServerKeys,
+    toolIds,
+    limits: {
+      maxTurns: integer(limits.maxTurns, `${label}最大轮次`, 4, 100),
+      maxToolCalls: integer(limits.maxToolCalls, `${label}最大工具调用`, 1, 200),
+      deadlineMs: integer(limits.deadlineMs, `${label}总截止时间`, 30_000, 3_600_000),
+      toolTimeoutMs: integer(limits.toolTimeoutMs, `${label}工具超时`, 1_000, 300_000),
+      maxCandidateBytes: integer(limits.maxCandidateBytes, `${label}最大结果字节`, 16_384, 2_097_152),
+      maxFindings: integer(limits.maxFindings, `${label}最大分析数`, 0, 1_000),
+      maxRepeatedToolCall: integer(limits.maxRepeatedToolCall, `${label}重复工具调用限制`, 1, 20),
+      reasoningEffort: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(limits.reasoningEffort)) ? limits.reasoningEffort : 'medium',
+      ...(limits.reservedOutputTokens == null ? {} : { reservedOutputTokens: integer(limits.reservedOutputTokens, `${label}预留输出 Token`, 1_024, 262_144) }),
+      ...(limits.correctionReserveTokens == null ? {} : { correctionReserveTokens: integer(limits.correctionReserveTokens, `${label}修正预留 Token`, 1_024, 262_144) }),
+    },
+  }
+}
+
+function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentConfigurationAgentDraft, state: DatabaseState) {
+  normalizeToolIds(draft.definition.toolIds, agentLabel(agentKey), state)
+  normalizeSkillKeys(draft.definition.skillKeys, REQUIRED_SKILLS[agentKey], agentLabel(agentKey), state)
+  normalizeMcpServerKeys(draft.definition.mcpServerKeys, REQUIRED_MCPS[agentKey], agentLabel(agentKey), state)
+  const primary = required(draft.routing.primaryModel, `发布${agentLabel(agentKey)}前必须选择默认模型`)
+  const references = [primary, ...(draft.routing.fallbackEnabled ? draft.routing.fallbackModels : [])]
+  references.forEach((reference, index) => {
+    const source = required(state.modelSources.find(item => item.id === reference.sourceId), `${agentLabel(agentKey)}${index ? '回退' : '默认'}模型来源不存在`)
+    const model = required(source.models.find(item => item.id === reference.modelId), `${agentLabel(agentKey)}${index ? '回退' : '默认'}模型不存在`)
+    if (!source.enabled || !model.enabled) throw new Error(`${source.name} · ${model.displayName} 未启用`)
+    if (model.health !== 'healthy') throw new Error(`${source.name} · ${model.displayName} 尚未通过健康探测`)
+    if (!model.capabilities.includes('tool_calling')) throw new Error(`${source.name} · ${model.displayName} 不支持工具调用`)
+    if (draft.routing.structuredOutput && !model.capabilities.includes('structured_output')) throw new Error(`${source.name} · ${model.displayName} 不支持结构化输出`)
+    if (draft.routing.maxOutputTokens > model.maxOutputTokens) throw new Error(`配置的最大输出 Token 超过 ${model.displayName} 的能力上限`)
+  })
+}
+
+function publishedDefinition(agentKey: AgentConfigurationAgentKey, value: AgentDefinitionDraft, configurationVersion: number, state: DatabaseState) {
+  const builtIn = builtInDefinition(agentKey)
+  const skills = resolveSkills(value.skillKeys, state).map(skill => ({
+    skillKey: skill.key,
+    version: skill.version,
+    enabled: true,
+    configurationHash: skillConfigurationHash(skill),
+  }))
+  const mcps = resolveMcps(value.mcpServerKeys, state).map(server => ({
+    serverKey: server.key,
+    version: server.version,
+    enabled: true,
+    toolIds: [...server.toolIds],
+    policyHash: mcpPolicyHash(server),
+  }))
+  const tools = resolveTools(value.toolIds, state).map(tool => `${tool.key}@${tool.version}`)
+  return createAgentDefinitionVersion({
+    agentKey: builtIn.agentKey,
+    agentType: builtIn.agentType,
+    resultSchemaVersion: builtIn.resultSchemaVersion,
+    version: `${builtIn.version}+config.${configurationVersion}`,
+    systemPrompt: value.systemPrompt,
+    taskTemplate: value.taskTemplate,
+    promptKey: builtIn.promptRef.promptKey,
+    tools,
+    skills,
+    mcps,
+    limits: value.limits,
+  })
+}
+
+function versionSummary(value: AgentConfigurationVersion) {
+  return { id: value.id, agentKey: value.agentKey, version: value.version, status: value.status, createdAt: value.createdAt, publishedBy: value.publishedBy, contentSha256: value.contentSha256, primaryModel: value.routing.primaryModel }
+}
+
+function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): AgentConfigurationDraft {
+  if (!value) return defaultDraft()
+  const raw = value as unknown as { scene?: string; revision?: number; routing?: AgentRoutingConfiguration; updatedAt?: string; agents?: Record<string, unknown> }
+  const extraction = raw.agents?.requirementPointExtraction as Partial<AgentConfigurationAgentDraft> | AgentDefinitionDraft | undefined
+  if (extraction && 'definition' in extraction && 'routing' in extraction) {
+    return {
+      ...structuredClone(value),
+      agents: {
+        requirementPointExtraction: normalizeStoredAgentDraft(value.agents.requirementPointExtraction, 'requirementPointExtraction'),
+        requirementReview: normalizeStoredAgentDraft(value.agents.requirementReview, 'requirementReview'),
+      },
+    }
+  }
+  const sharedRouting = normalizeRouting(raw.routing ?? defaultRouting())
+  const revision = Number.isInteger(raw.revision) ? Number(raw.revision) : 0
+  const updatedAt = String(raw.updatedAt ?? new Date(0).toISOString())
+  return {
+    scene: SCENE,
+    agents: {
+      requirementPointExtraction: { revision, routing: structuredClone(sharedRouting), definition: normalizeLegacyDefinition(raw.agents?.requirementPointExtraction, 'requirementPointExtraction'), updatedAt },
+      requirementReview: { revision, routing: structuredClone(sharedRouting), definition: normalizeLegacyDefinition(raw.agents?.requirementReview, 'requirementReview'), updatedAt },
+    },
+  }
+}
+
+function normalizeLegacyDefinition(value: unknown, agentKey: AgentConfigurationAgentKey) {
+  if (value && typeof value === 'object' && 'systemPrompt' in value) {
+    const definition = structuredClone(value as AgentDefinitionDraft)
+    return { ...definition, skillKeys: stringKeys(definition.skillKeys), mcpServerKeys: stringKeys(definition.mcpServerKeys), toolIds: activeToolKeys(definition.toolIds) }
+  }
+  return definitionDraft(builtInDefinition(agentKey))
+}
+
+function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft, agentKey: AgentConfigurationAgentKey): AgentConfigurationAgentDraft {
+  const fallback = defaultAgentDraft(agentKey)
+  const definition = value?.definition ?? fallback.definition
+  return {
+    ...fallback,
+    ...structuredClone(value),
+    definition: {
+      ...fallback.definition,
+      ...structuredClone(definition),
+      skillKeys: stringKeys(definition.skillKeys),
+      mcpServerKeys: stringKeys(definition.mcpServerKeys),
+      toolIds: activeToolKeys(definition.toolIds),
+    },
+  }
+}
+
+function expandStoredVersions(values: AgentConfigurationVersion[]): AgentConfigurationVersion[] {
+  return values.flatMap(value => {
+    const raw = value as unknown as { agentKey?: AgentConfigurationAgentKey; agentDefinition?: AgentDefinitionVersion; agentDefinitions?: Record<string, AgentDefinitionVersion> }
+    if (raw.agentKey && raw.agentDefinition) return [normalizeStoredVersion(value, raw.agentKey)]
+    return AGENT_KEYS.map(agentKey => legacyVersion(value, raw, agentKey))
+  })
+}
+
+function normalizeStoredVersion(value: AgentConfigurationVersion, agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion {
+  return { ...structuredClone(value), agentKey }
+}
+
+function legacyVersion(value: AgentConfigurationVersion, raw: { agentDefinitions?: Record<string, AgentDefinitionVersion> }, agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion {
+  const legacy = value as unknown as { id: string; scene: typeof SCENE; version: number; status: 'active' | 'superseded'; routing: AgentRoutingConfiguration; contentSha256: string; createdAt: string; publishedBy: string }
+  return {
+    id: `${legacy.id}:${agentKey}`,
+    scene: SCENE,
+    agentKey,
+    version: legacy.version,
+    status: legacy.status,
+    routing: structuredClone(legacy.routing),
+    agentDefinition: structuredClone(raw.agentDefinitions?.[agentKey] ?? builtInDefinition(agentKey)),
+    contentSha256: legacy.contentSha256,
+    createdAt: legacy.createdAt,
+    publishedBy: legacy.publishedBy,
+  }
+}
+
+function migrateState(state: DatabaseState) {
+  const draftIndex = state.agentConfigurationDrafts.findIndex(item => item.scene === SCENE)
+  if (draftIndex >= 0) state.agentConfigurationDrafts[draftIndex] = normalizeStoredDraft(state.agentConfigurationDrafts[draftIndex])
+  const current = state.agentConfigurationVersions.filter(item => item.scene === SCENE)
+  const expanded = expandStoredVersions(current)
+  if (expanded.length !== current.length || current.some(item => !(item as unknown as { agentKey?: string }).agentKey)) {
+    state.agentConfigurationVersions = [...state.agentConfigurationVersions.filter(item => item.scene !== SCENE), ...expanded]
+  }
+}
+
+function builtInDefinition(agentKey: AgentConfigurationAgentKey) {
+  return agentKey === 'requirementPointExtraction' ? createRequirementPointExtractionAgentDefinition() : createRequirementReviewAgentDefinition()
+}
+function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : 'requirementReview' }
+function normalizeAgentKey(value: AgentConfigurationAgentKey) { if (!AGENT_KEYS.includes(value)) throw new Error('Agent 标识无效'); return value }
+function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : '需求评审 Agent' }
+function modelReference(value: AgentModelReference | null | undefined) { if (!value) return null; const sourceId = cleanText(value.sourceId, 200); const modelId = cleanText(value.modelId, 200); return sourceId && modelId ? { sourceId, modelId } : null }
+function uniqueModelReferences(values: AgentModelReference[]) { return [...new Map(values.map(item => [modelKey(item), item])).values()] }
+function modelKey(value: AgentModelReference) { return `${value.sourceId}\u0000${value.modelId}` }
+function normalizeSkillKeys(value: unknown, requiredKeys: readonly string[], label: string, state: DatabaseState) {
+  const selected = stringKeys(value)
+  const skills = state.aiResources.filter((item): item is SkillResource => item.kind === 'skill')
+  const skillKeys = [...new Set([...requiredKeys, ...selected])]
+  const unknown = skillKeys.filter(key => !skills.some(skill => skill.key === key))
+  if (unknown.length) throw new Error(`${label}包含未注册 Skill：${unknown.join('、')}`)
+  const unavailable = skillKeys.filter(key => skills.some(skill => skill.key === key && !skill.enabled))
+  if (unavailable.length) throw new Error(`${label}包含未启用 Skill：${unavailable.join('、')}`)
+  return skillKeys
+}
+function resolveSkills(skillKeys: string[], state: DatabaseState) {
+  const skills = state.aiResources.filter((item): item is SkillResource => item.kind === 'skill')
+  return skillKeys.map(key => required(skills.find(skill => skill.key === key && skill.enabled), `Skill ${key} 不存在或未启用`))
+}
+function normalizeMcpServerKeys(value: unknown, requiredKeys: readonly string[], label: string, state: DatabaseState) {
+  const selected = stringKeys(value)
+  const servers = state.aiResources.filter((item): item is McpServerResource => item.kind === 'mcp')
+  const serverKeys = [...new Set([...requiredKeys, ...selected])]
+  const unknown = serverKeys.filter(key => !servers.some(server => server.key === key))
+  if (unknown.length) throw new Error(`${label}包含未注册 MCP：${unknown.join('、')}`)
+  const unavailable = serverKeys.filter(key => servers.some(server => server.key === key && !server.enabled))
+  if (unavailable.length) throw new Error(`${label}包含未启用 MCP：${unavailable.join('、')}`)
+  return serverKeys
+}
+function resolveMcps(serverKeys: string[], state: DatabaseState) {
+  const servers = state.aiResources.filter((item): item is McpServerResource => item.kind === 'mcp')
+  return serverKeys.map(key => required(servers.find(server => server.key === key && server.enabled), `MCP ${key} 不存在或未启用`))
+}
+function normalizeToolIds(value: unknown, label: string, state: DatabaseState) {
+  const toolIds = stringKeys(value)
+  const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
+  const known = new Set<string>([...BUILT_IN_TOOL_KEYS, ...tools.map(tool => tool.key)])
+  const unknown = toolIds.filter(key => !known.has(key))
+  if (unknown.length) throw new Error(`${label}包含未注册工具：${unknown.join('、')}`)
+  const unavailable = toolIds.filter(key => tools.some(tool => tool.key === key && !tool.enabled))
+  if (unavailable.length) throw new Error(`${label}包含未启用工具：${unavailable.join('、')}`)
+  return toolIds
+}
+function resolveTools(toolIds: string[], state: DatabaseState): Array<Pick<ToolResource, 'key' | 'version'>> {
+  const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
+  return toolIds.map(key => tools.find(tool => tool.key === key && tool.enabled) ?? builtInToolReference(key))
+}
+function builtInToolReference(key: string): Pick<ToolResource, 'key' | 'version'> {
+  const versions: Record<string, string> = { 'knowledge.search': '1.0.0', 'knowledge.read_chunk': '1.0.0', 'requirement-points.submit_result': '5.1.0', 'review.submit_result': '4.0.0' }
+  return { key, version: required(versions[key], `工具 ${key} 不存在或未启用`) }
+}
+function skillConfigurationHash(skill: SkillResource) {
+  return createHash('sha256').update(JSON.stringify({ key: skill.key, version: skill.version, entrypoint: skill.entrypoint, contentSha256: skill.package?.contentSha256, toolIds: skill.toolIds, tags: skill.tags })).digest('hex')
+}
+function mcpPolicyHash(server: McpServerResource) {
+  return createHash('sha256').update(JSON.stringify({ key: server.key, version: server.version, transport: server.transport, endpoint: server.endpoint, authType: server.authType, toolIds: server.toolIds })).digest('hex')
+}
+function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ? value : []).map(item => String(item).trim()).filter(Boolean))] }
+function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key)) }
+function cleanRequired(value: unknown, name: string, max: number) { const result = cleanText(value, max); if (!result) throw new Error(`${name}不能为空`); return result }
+function cleanText(value: unknown, max: number) { const result = String(value ?? '').trim(); if (result.length > max) throw new Error(`文本长度不能超过 ${max}`); return result }
+function finiteNumber(value: unknown, name: string, min: number, max: number) { const result = Number(value); if (!Number.isFinite(result) || result < min || result > max) throw new Error(`${name}必须在 ${min} 到 ${max} 之间`); return result }
+function integer(value: unknown, name: string, min: number, max: number) { const result = Number(value); if (!Number.isInteger(result) || result < min || result > max) throw new Error(`${name}必须是 ${min} 到 ${max} 之间的整数`); return result }
+function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }

@@ -204,6 +204,111 @@ const migrations: Migration[] = [{
     CREATE INDEX IF NOT EXISTS review_runs_project_version_created_idx ON smarthub.review_runs (project_version_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS review_runs_asset_created_idx ON smarthub.review_runs (project_version_id, asset_id, created_at DESC);
   `,
+}, {
+  version: 7,
+  name: 'agent-configuration-drafts-and-versions',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.agent_configuration_drafts (
+      scene text PRIMARY KEY,
+      revision integer NOT NULL,
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.agent_configuration_versions (
+      id text PRIMARY KEY,
+      scene text NOT NULL,
+      version integer NOT NULL,
+      status text NOT NULL,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (scene, version)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS agent_configuration_one_active_idx ON smarthub.agent_configuration_versions (scene) WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS agent_configuration_versions_scene_idx ON smarthub.agent_configuration_versions (scene, version DESC);
+  `,
+}, {
+  version: 8,
+  name: 'independent-agent-configuration-versions',
+  sql: `
+    UPDATE smarthub.agent_configuration_drafts
+    SET data = jsonb_build_object(
+      'scene', data->'scene',
+      'agents', jsonb_build_object(
+        'requirementPointExtraction', jsonb_build_object(
+          'revision', data->'revision',
+          'routing', data->'routing',
+          'definition', data->'agents'->'requirementPointExtraction',
+          'updatedAt', data->'updatedAt'
+        ),
+        'requirementReview', jsonb_build_object(
+          'revision', data->'revision',
+          'routing', data->'routing',
+          'definition', data->'agents'->'requirementReview',
+          'updatedAt', data->'updatedAt'
+        )
+      )
+    )
+    WHERE data ? 'routing';
+
+    ALTER TABLE smarthub.agent_configuration_versions ADD COLUMN IF NOT EXISTS agent_key text;
+    DROP INDEX IF EXISTS smarthub.agent_configuration_one_active_idx;
+    ALTER TABLE smarthub.agent_configuration_versions DROP CONSTRAINT IF EXISTS agent_configuration_versions_scene_version_key;
+
+    CREATE TEMP TABLE legacy_agent_configuration_versions ON COMMIT DROP AS
+      SELECT * FROM smarthub.agent_configuration_versions WHERE agent_key IS NULL;
+    DELETE FROM smarthub.agent_configuration_versions WHERE agent_key IS NULL;
+
+    INSERT INTO smarthub.agent_configuration_versions (id, scene, agent_key, version, status, created_at, data)
+    SELECT
+      id,
+      scene,
+      'requirementPointExtraction',
+      version,
+      status,
+      created_at,
+      (data - 'agentDefinitions') || jsonb_build_object(
+        'agentKey', 'requirementPointExtraction',
+        'agentDefinition', data->'agentDefinitions'->'requirementPointExtraction'
+      )
+    FROM legacy_agent_configuration_versions;
+
+    INSERT INTO smarthub.agent_configuration_versions (id, scene, agent_key, version, status, created_at, data)
+    SELECT
+      id || ':requirementReview',
+      scene,
+      'requirementReview',
+      version,
+      status,
+      created_at,
+      (data - 'agentDefinitions') || jsonb_build_object(
+        'id', id || ':requirementReview',
+        'agentKey', 'requirementReview',
+        'agentDefinition', data->'agentDefinitions'->'requirementReview'
+      )
+    FROM legacy_agent_configuration_versions;
+
+    ALTER TABLE smarthub.agent_configuration_versions ALTER COLUMN agent_key SET NOT NULL;
+    ALTER TABLE smarthub.agent_configuration_versions ADD CONSTRAINT agent_configuration_versions_scene_agent_version_key UNIQUE (scene, agent_key, version);
+    CREATE UNIQUE INDEX agent_configuration_one_active_idx ON smarthub.agent_configuration_versions (scene, agent_key) WHERE status = 'active';
+    CREATE INDEX agent_configuration_versions_scene_agent_idx ON smarthub.agent_configuration_versions (scene, agent_key, version DESC);
+  `,
+}, {
+  version: 9,
+  name: 'ai-resource-catalog',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.ai_resources (
+      id text PRIMARY KEY,
+      kind text NOT NULL,
+      resource_key text NOT NULL,
+      enabled boolean NOT NULL,
+      built_in boolean NOT NULL,
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (kind, resource_key)
+    );
+    CREATE INDEX IF NOT EXISTS ai_resources_kind_enabled_idx ON smarthub.ai_resources (kind, enabled, resource_key);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

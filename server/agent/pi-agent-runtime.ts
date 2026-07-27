@@ -63,7 +63,6 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const descriptors = registry.descriptors(allowedToolIds)
     const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))
     const unavailableToolIds = input.snapshot.agentDefinition.toolIds.filter(toolId => !registeredToolIds.has(toolId))
-    if (unavailableToolIds.length) throw new Error(`AGENT_TOOLS_UNAVAILABLE: ${unavailableToolIds.join(', ')}`)
     const byPiName = new Map(descriptors.map(descriptor => [descriptor.piName, descriptor]))
     const events: AgentExecutionEvent[] = []
     let sequence = 0
@@ -73,6 +72,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       events.push(value)
       await input.onEvent?.(value)
     }
+    if (unavailableToolIds.length) await record({ type: 'tool_bindings_unavailable', content: `以下目录绑定尚未注册到当前 Agent 运行时，因此不会暴露给模型：${unavailableToolIds.join('、')}` })
     const controller = new AbortController()
     const deadline = setTimeout(() => controller.abort(new Error('AGENT_DEADLINE_EXCEEDED')), limits.deadlineMs)
     const abort = () => controller.abort(signal.reason ?? new Error('AGENT_CANCELLED'))
@@ -86,12 +86,23 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let latestAssistantText = ''
     let resultSubmissionRequiredRecorded = false
     const resultSubmissionTurn = Math.max(1, limits.maxTurns - RESULT_SUBMISSION_TURN_RESERVE + 1)
-    const streamFn: StreamFn = (streamModel, context, options) => providerStreamFn(streamModel, context, forceResultSubmission && !inDraftStage ? {
-      ...options,
-      toolChoice: input.model.providerType === 'anthropic'
-        ? { type: 'tool', name: stage.submitPiName }
-        : { type: 'function', function: { name: stage.submitPiName } },
-    } as Parameters<StreamFn>[2] : options)
+    const streamFn: StreamFn = (streamModel, context, options) => {
+      const requestSignal = input.model.requestTimeoutMs
+        ? AbortSignal.any([options?.signal ?? controller.signal, AbortSignal.timeout(input.model.requestTimeoutMs)])
+        : options?.signal
+      const configuredOptions = {
+        ...options,
+        ...(input.model.temperature == null ? {} : { temperature: input.model.temperature }),
+        maxTokens: input.model.maxOutputTokens,
+        ...(requestSignal ? { signal: requestSignal } : {}),
+      }
+      return providerStreamFn(streamModel, context, forceResultSubmission && !inDraftStage ? {
+        ...configuredOptions,
+        toolChoice: input.model.providerType === 'anthropic'
+          ? { type: 'tool', name: stage.submitPiName }
+          : { type: 'function', function: { name: stage.submitPiName } },
+      } as Parameters<StreamFn>[2] : configuredOptions)
+    }
     let agent: Agent | undefined
     try {
       const requireResultSubmission = async (content?: string) => {
@@ -102,7 +113,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       }
       const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission))
       const primaryToolNames = new Set(stage.isExtraction
-        ? descriptors.filter(descriptor => descriptor.id === 'evidence.validate_batch' || descriptor.id === stage.submitToolId).map(descriptor => descriptor.piName)
+        ? descriptors.filter(descriptor => descriptor.id === stage.submitToolId).map(descriptor => descriptor.piName)
         : descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
@@ -204,10 +215,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         await record({ type: 'result_submission_retry', turn: turns })
         forceResultSubmission = true
         const submissionPrompt = `现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 ${stage.submitPiName} 提交完整的 ${stage.schemaVersion}。若参数校验失败，请按工具错误修正参数后再次提交。`
-        for (let attempt = 0; attempt <= TRANSIENT_MODEL_RETRIES && !candidate; attempt += 1) {
+        const transientModelRetries = input.model.retryCount ?? TRANSIENT_MODEL_RETRIES
+        for (let attempt = 0; attempt <= transientModelRetries && !candidate; attempt += 1) {
           if (attempt > 0) {
             const retryDelayMs = modelRetryDelay(this.bindings.retryBaseDelayMs ?? MODEL_RETRY_BASE_DELAY_MS, attempt)
-            await record({ type: 'model_retry_scheduled', turn: turns, content: `模型服务临时不可用，${retryDelayMs}ms 后执行第 ${attempt}/${TRANSIENT_MODEL_RETRIES} 次结果提交重试。` })
+            await record({ type: 'model_retry_scheduled', turn: turns, content: `模型服务临时不可用，${retryDelayMs}ms 后执行第 ${attempt}/${transientModelRetries} 次结果提交重试。` })
             await waitForRetry(retryDelayMs, controller.signal)
           }
           latestModelFailure = undefined
@@ -215,7 +227,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           await agent.waitForIdle()
           const submissionFailure = latestModelFailure as ModelFailure | undefined
           if (!submissionFailure) break
-          if (!submissionFailure.retryable || attempt === TRANSIENT_MODEL_RETRIES) {
+          if (!submissionFailure.retryable || attempt === transientModelRetries) {
             if (lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
             throw modelProviderError(submissionFailure, attempt)
           }

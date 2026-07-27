@@ -38,7 +38,7 @@ const extractionTools = ['knowledge.search@1.0.0', 'knowledge.read_chunk@1.0.0',
 const reviewTools = ['review.submit_result@4.0.0']
 
 export function createRequirementPointExtractionAgentDefinition(): AgentDefinitionVersion {
-  return definition({
+  return createAgentDefinitionVersion({
     agentKey: 'requirement-point-extraction', agentType: 'requirement_point_extraction', resultSchemaVersion: 'requirement-point-extraction/v5',
     version: REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, systemPrompt: extractionSystemPrompt, taskTemplate: extractionTaskTemplate,
     promptKey: 'requirement-point-extraction-default', tools: extractionTools,
@@ -47,7 +47,7 @@ export function createRequirementPointExtractionAgentDefinition(): AgentDefiniti
 }
 
 export function createRequirementReviewAgentDefinition(): AgentDefinitionVersion {
-  return definition({
+  return createAgentDefinitionVersion({
     agentKey: 'requirement-review', agentType: 'requirement_review', resultSchemaVersion: 'requirement-review/v3',
     version: REQUIREMENT_REVIEW_AGENT_VERSION, systemPrompt: reviewSystemPrompt, taskTemplate: reviewTaskTemplate,
     promptKey: 'requirement-review-default', tools: reviewTools,
@@ -88,7 +88,7 @@ export function renderSegmentMergeTask(snapshot: ReviewRunSnapshot, drafts: stri
   return `${renderRequirementTask(snapshot)}\n这是 segmented_context 最终跨批归并阶段。以下批次草稿都来自已成功投递的固定正文。跨批去重并检查主体、条件、状态、异常、权限、数据约束和验收标准是否遗漏；语义完全相同的重复点只保留一个并合并全部 sourceTexts。最终每条需求点生成简洁 title，并提交 description 和 sourceTexts，然后通过 requirement_points_submit_result 提交 requirement-point-extraction/v5。\n\n${drafts.map((draft, index) => `<<<BATCH_DRAFT ${index + 1}>>>\n${draft}\n<<<END_BATCH_DRAFT ${index + 1}>>>`).join('\n\n')}`
 }
 
-function definition(input: {
+export function createAgentDefinitionVersion(input: {
   agentKey: AgentDefinitionVersion['agentKey']
   agentType: AgentDefinitionVersion['agentType']
   resultSchemaVersion: AgentDefinitionVersion['resultSchemaVersion']
@@ -97,6 +97,8 @@ function definition(input: {
   taskTemplate: string
   promptKey: string
   tools: string[]
+  skills?: AgentDefinitionVersion['skillBindings']
+  mcps?: AgentDefinitionVersion['mcpBindings']
   limits: AgentDefinitionVersion['limits']
 }): AgentDefinitionVersion {
   const promptContentSha256 = createHash('sha256').update(`${input.systemPrompt}\n${input.taskTemplate}`).digest('hex')
@@ -107,7 +109,7 @@ function definition(input: {
     promptRef: { promptKey: input.promptKey, version: input.version, contentSha256: promptContentSha256 },
     toolsetVersion: input.version,
     toolsetContentSha256: createHash('sha256').update(JSON.stringify(input.tools)).digest('hex'),
-    skillBindings: [], mcpBindings: [], toolIds: input.tools.map(item => item.split('@')[0]), limits: input.limits,
+    skillBindings: structuredClone(input.skills ?? []), mcpBindings: structuredClone(input.mcps ?? []), toolIds: input.tools.map(item => item.split('@')[0]), limits: input.limits,
   }
   return { ...value, contentSha256: createHash('sha256').update(JSON.stringify(value)).digest('hex') }
 }
