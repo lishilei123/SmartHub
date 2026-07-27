@@ -22,7 +22,7 @@ export interface AgentDefinitionVersion {
   version: string
   status: 'published'
   modelScene: 'requirement_analysis'
-  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-review/v2'
+  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-review/v2'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }

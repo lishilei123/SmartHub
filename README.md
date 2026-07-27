@@ -39,20 +39,20 @@
 
 ## 当前已实现的第二期双 Agent 需求分析流程
 
-> 实现边界：`requirement-point-extraction/v2` 正文直传优化已实现。正常规模正文通过 `full_context` 在首轮完整投递；超长正文通过 `segmented_context` 确定性分批投递、隔离批次消息并最终跨批归并。服务端持久化输入包 Hash、批次 Hash 和 `InputDeliveryManifest`，独立生成 coverage 与 Evidence locator。推理等级进入版本化 AgentDefinition，当前内置定义为 `medium`。旧 `requirement-point-extraction/v1` 仅作为历史数据语义保留，不再创建新运行。
+> 实现边界：`requirement-point-extraction/v3` 正文直传与需求点内嵌 Evidence 草稿协议已实现。正常规模正文通过 `full_context` 在首轮完整投递；超长正文通过 `segmented_context` 确定性分批投递、隔离批次消息并最终跨批归并。服务端持久化输入包 Hash、批次 Hash 和 `InputDeliveryManifest`，根据嵌套归属生成需求点 ID、Evidence ID、`evidenceRefs`、coverage 与 Evidence locator。旧 v1/v2 仅作为历史数据语义保留，不再创建新运行。
 
 - 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
 - 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
 - Agent 定义、Prompt、Toolset、Skill、MCP 绑定、执行限制和内容 Hash 独立版本化并写入运行快照；内置定义解析器和工具注册表工厂均可替换，后续插件通过版本引用和受控适配器接入，不绕过 Tool Runtime；
 - 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与两个 Agent 定义，不在运行中漂移到最新资料；
-- `RequirementPointExtractionAgent` 开放 `knowledge.search`、`knowledge.read_chunk`、`evidence.validate_batch` 和 `requirement-points.submit_result`；正文完整投递是主路径，前三个读取/校验工具仅用于定向复核；`RequirementReviewAgent` 只开放 `review.submit_result`，其输入直接包含已校验冻结的需求点提取结果，不继承第一段消息历史；
+- `RequirementPointExtractionAgent` 注册 `knowledge.search`、`knowledge.read_chunk`、`evidence.validate_batch` 和 `requirement-points.submit_result`，但按阶段收紧权限：首次全文提取只向模型开放批量证据校验和结果提交，防止模型把全文理解重新退化为逐 Chunk 读取；仅在服务端明确拒绝 Evidence 后，才开放 search/read_chunk 进入定点修复窗口。`RequirementReviewAgent` 只开放 `review.submit_result`；
 - 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；重复调用默认拒绝，只有 `knowledge.read_chunk` 可在达到阈值后重放一次本次执行已成功读取的固定结果，且不触发底层读取或消耗额度；读取/证据工具不得耗尽提取 Agent 的全部额度，最后 3 次调用独立保留给当前阶段的结果提交工具；
 - `RequirementInputPlan` 根据模型上下文、输出预留、修正预留、Prompt/工具 Schema 和安全余量计算输入预算；`full_context` 包含完整文档边界与 Chunk 目录，存在排除范围时只投递范围内 Chunk；`segmented_context` 按稳定 Chunk 顺序打包，单批超预算或超过 24 批会明确失败；
-- `evidence.validate_batch` 一次可校验最多 100 条引用：优先在声明 Chunk 精确匹配，随后把 Markdown 可见文本映射回连续原始字符范围；声明 chunkId 有误时，仅允许在同一固定资产的唯一绝对位置重定位。服务端返回规范原文 quote、chunkId 和 locator，不使用模糊语义或跨资产匹配；`requirement-points.submit_result` 只接受 `requirement-point-extraction/v2` 的 requirementPoints 和 evidenceDrafts；
+- `evidence.validate_batch` 一次可校验最多 100 条引用：优先在声明 Chunk 精确匹配，随后把 Markdown 可见文本映射回连续原始字符范围；声明 chunkId 有误时，仅允许在同一固定资产的唯一绝对位置重定位。末尾误用 `...`/`…` 的草稿可在连续前缀仍可唯一定位时被规范化，服务端始终保存连续规范原文，不使用模糊语义或跨资产匹配；`requirement-points.submit_result` 只接受 `requirement-point-extraction/v3`，每条需求点直接内嵌自己的 `evidenceDrafts`，模型不再手工维护需求点/Evidence ID 和 `evidenceRefs`；
 - ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试；
-- 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
+- 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。API 服务成功监听后会把上一个服务进程遗留的 `running` ReviewRun 收口为 `REVIEW_RUN_INTERRUPTED` 失败态，避免热重载或进程重启后永久停在运行中。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
 
-当前自动化测试已覆盖正常规模正文首轮直传、读取工具调用为 0、服务端 Evidence/coverage 生成、投递清单缺批或哈希不一致拒绝、Evidence 草稿修复、原子性/归并约束，以及超长正文确定性切换 `segmented_context`。真实模型上线前仍应使用固定黄金集对新旧提示策略做 A/B，确认关键需求点召回不下降，并补充供应商级上下文上限与提示注入回归。
+当前自动化测试已覆盖正常规模正文首轮直传、读取工具调用为 0、需求点内嵌 Evidence 的服务端 ID/引用生成与共享证据去重、coverage 生成、投递清单缺批或哈希不一致拒绝、Evidence 草稿修复、原子性/归并约束，以及超长正文确定性切换 `segmented_context`。真实模型上线前仍应使用固定黄金集对新旧提示策略做 A/B，确认关键需求点召回不下降，并补充供应商级上下文上限与提示注入回归。
 
 运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；服务端先独立运行需求点提取并冻结结果，再用全新会话启动需求评审，最终合并为正式结果，页面通过 ReviewRun 接口恢复并轮询两个阶段：
 
@@ -157,6 +157,6 @@ npm run build
 
 当前 Agent 交付不包含技术方案生成、多 Agent 协作、Git/代码分析、测试执行，以及 PDF/Word/Excel/图片等专用解析能力。
 
-需求评审采用服务端后台运行：启动接口创建 `ReviewRun` 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将该运行标记为 `cancelled` 并中断当前执行。
+需求评审采用服务端后台运行：启动接口创建 `ReviewRun` 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将该运行标记为 `cancelled` 并中断当前执行。当前 Agent 执行仍驻留在 API 服务进程内，服务热重载或进程重启会把遗留运行标记为可重新发起的明确失败态；持久化 Worker 租约恢复属于后续交付，当前不伪装为断点续跑。
 
 评审问答只接受成功完成的 ReviewRun，固定使用该运行的资产版本、评审结果、Evidence 白名单和模型连接。问答模型必须通过 `review_answer_submit` 返回答案、Evidence ID 引用和限制项；服务端拒绝不属于该 ReviewRun 的引用。`ReviewQaRuntime` 与 Pi 适配器分离，为后续独立 Prompt、Skill、MCP 和工具策略保留替换边界。

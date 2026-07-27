@@ -74,6 +74,8 @@ const runTone = (status?: RunStatus) => status === 'succeeded' ? 'green' : statu
 const runLabel = (status?: RunStatus) => status === 'succeeded' ? '评审完成' : status === 'running' ? '分析中' : status === 'failed' ? '运行失败' : status === 'cancelled' ? '已取消' : '待评审'
 const runErrorMessage = (error?: string) => error === 'AGENT_TURN_LIMIT_EXCEEDED'
   ? 'Agent 达到本次运行轮次上限，仍未提交有效评审结果。请重新评审；若持续出现，请调整当前项目版本的需求范围或更换模型。'
+  : error?.startsWith('REVIEW_RUN_INTERRUPTED:')
+    ? '服务在 Agent 执行期间发生重启，本次运行已安全终止。请点击“重新评审”创建新运行。'
   : error?.startsWith('MODEL_RATE_LIMITED:')
     ? '模型服务触发限流（HTTP 429），系统已完成有限重试但仍未恢复。模型工具能力正常，请稍后重新评审或切换可用模型。'
     : error?.startsWith('MODEL_PROVIDER_UNAVAILABLE:')
@@ -101,6 +103,7 @@ const agentEventLabels: Record<string, string> = {
   tool_execution_start: '工具调用开始', tool_execution_update: '工具调用更新', tool_execution_end: '工具调用结束',
   result_submission_required: '进入结果提交窗口', result_submission_retry: '要求重新提交结果', model_retry_scheduled: '模型请求自动重试',
   input_package_built: '正文输入包已生成', input_batch_delivered: '正文批次已投递', input_final_merge_started: '分段草稿开始归并',
+  evidence_repair_tools_enabled: '证据定点修复工具已开放',
 }
 
 function eventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }

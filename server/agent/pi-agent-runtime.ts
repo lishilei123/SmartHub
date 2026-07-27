@@ -44,7 +44,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     } : undefined
     const registry = stage.isExtraction
       ? createRequirementPointExtractionToolRegistry(this.store, async value => {
-        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV2(value, input.snapshot, required(deliveryManifest, '输入投递证明不存在'))
+        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV3(value, input.snapshot, required(deliveryManifest, '输入投递证明不存在'))
         if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
         candidate = normalized.result
         lastSubmissionIssues = []
@@ -101,13 +101,18 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         await record({ type: 'result_submission_required', turn: turns, ...(content ? { content } : {}) })
       }
       const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission))
+      const primaryToolNames = new Set(stage.isExtraction
+        ? descriptors.filter(descriptor => descriptor.id === 'evidence.validate_batch' || descriptor.id === stage.submitToolId).map(descriptor => descriptor.piName)
+        : descriptors.map(descriptor => descriptor.piName))
+      const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
+      let activeToolNames = new Set(primaryToolNames)
       agent = new Agent({
-        initialState: { systemPrompt: input.snapshot.agentDefinition.systemPrompt, model, tools, thinkingLevel: limits.reasoningEffort ?? 'medium' },
+        initialState: { systemPrompt: input.snapshot.agentDefinition.systemPrompt, model, tools: primaryTools, thinkingLevel: limits.reasoningEffort ?? 'medium' },
         streamFn,
         getApiKey: () => input.model.apiKey,
         sessionId: `${input.snapshot.runId}:${input.snapshot.agentDefinition.agentKey}`,
         toolExecution: 'sequential',
-        beforeToolCall: async ({ toolCall }) => byPiName.has(toolCall.name) ? undefined : { block: true, reason: 'TOOL_NOT_ALLOWED' },
+        beforeToolCall: async ({ toolCall }) => byPiName.has(toolCall.name) && activeToolNames.has(toolCall.name) ? undefined : { block: true, reason: 'TOOL_NOT_ALLOWED_IN_CURRENT_PHASE' },
       })
       agent.subscribe(async (event, eventSignal) => {
         let resultSubmissionRequired = false
@@ -143,6 +148,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           const drafts: string[] = []
           inDraftStage = true
           agent.state.tools = []
+          activeToolNames = new Set()
           for (const current of inputPlan!.batches) {
             agent.state.messages = []
             latestAssistantText = ''
@@ -160,7 +166,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
             drafts.push(latestAssistantText)
           }
           agent.state.messages = []
-          agent.state.tools = tools
+          agent.state.tools = primaryTools
+          activeToolNames = new Set(primaryToolNames)
           inDraftStage = false
           deliveryManifest!.finalMergeCompleted = true
           await record({ type: 'input_final_merge_started', turn: turns, content: JSON.stringify({ batchCount: drafts.length }) })
@@ -181,7 +188,16 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         await record({ type: 'result_validation_repair_required', turn: turns, content: formatValidationIssues(lastSubmissionIssues) })
         forceResultSubmission = false
         latestModelFailure = undefined
-        await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n正文投递覆盖由服务端负责；请只修正需求点或 evidenceDrafts。必要时可用 knowledge_read_chunk 或 evidence_validate_batch 复核引用，然后通过 ${stage.submitPiName} 重新提交完整结果。`)
+        const evidenceRepairRequired = stage.isExtraction && hasEvidenceValidationIssue(lastSubmissionIssues)
+        if (evidenceRepairRequired) {
+          agent.state.tools = tools
+          activeToolNames = new Set(tools.map(tool => tool.name))
+          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: 'Evidence 校验失败后开放 knowledge_search、knowledge_read_chunk 与 evidence_validate_batch，用于失败 Evidence 的定点修复。' })
+        }
+        const repairGuidance = evidenceRepairRequired
+          ? '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请只修正需求点内部的 evidenceDrafts。必要时可用 knowledge_read_chunk 或 evidence_validate_batch 复核引用。'
+          : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
+        await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
         await agent.waitForIdle()
       }
       if (!candidate) {
@@ -285,7 +301,7 @@ type StageConfiguration = {
   isExtraction: true
   submitToolId: 'requirement-points.submit_result'
   submitPiName: 'requirement_points_submit_result'
-  schemaVersion: 'requirement-point-extraction/v2'
+  schemaVersion: 'requirement-point-extraction/v3'
   agentLabel: 'RequirementPointExtractionAgent'
 } | {
   isExtraction: false
@@ -301,7 +317,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: true,
     submitToolId: 'requirement-points.submit_result',
     submitPiName: 'requirement_points_submit_result',
-    schemaVersion: 'requirement-point-extraction/v2',
+    schemaVersion: 'requirement-point-extraction/v3',
     agentLabel: 'RequirementPointExtractionAgent',
   }
   if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
@@ -313,6 +329,10 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     agentLabel: 'RequirementReviewAgent',
     fixedExtraction: input.fixedRequirementPointExtraction,
   }
+}
+
+function hasEvidenceValidationIssue(issues: Array<{ path: string; message: string }>) {
+  return issues.some(issue => issue.path.includes('.evidenceDrafts[') || issue.path.endsWith('.evidenceDrafts') || issue.path.startsWith('evidence['))
 }
 
 function formatValidationIssues(issues: Array<{ path: string; message: string }>) {

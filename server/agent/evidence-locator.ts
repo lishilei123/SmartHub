@@ -12,7 +12,7 @@ export interface ResolvedEvidenceQuote {
   chunk: LocatableEvidenceChunk
   quote: string
   offset: number
-  strategy: 'exact' | 'markdown_visible' | 'asset_rebound_exact' | 'asset_rebound_markdown_visible'
+  strategy: 'exact' | 'markdown_visible' | 'trailing_ellipsis' | 'asset_rebound_exact' | 'asset_rebound_markdown_visible' | 'asset_rebound_trailing_ellipsis'
 }
 
 export function resolveEvidenceQuote(input: {
@@ -30,6 +30,21 @@ export function resolveEvidenceQuote(input: {
     if (direct) return { ...direct, strategy: direct.strategy === 'exact' ? 'exact' : 'markdown_visible' }
   }
 
+  const rebound = uniqueAssetMatch(assetChunks, quote, visibleQuote)
+  if (rebound) return { ...rebound, strategy: rebound.strategy === 'exact' ? 'asset_rebound_exact' : 'asset_rebound_markdown_visible' }
+
+  const repairedQuote = withoutTrailingEllipsis(quote)
+  if (repairedQuote === quote || projectVisibleText(repairedQuote).text.length < 4) return undefined
+  const repairedVisibleQuote = projectVisibleText(repairedQuote).text
+  if (claimed) {
+    const direct = locateInChunk(claimed, repairedQuote, repairedVisibleQuote)
+    if (direct) return { chunk: direct.chunk, quote: direct.quote, offset: direct.offset, strategy: 'trailing_ellipsis' }
+  }
+  const repairedRebound = uniqueAssetMatch(assetChunks, repairedQuote, repairedVisibleQuote)
+  return repairedRebound ? { chunk: repairedRebound.chunk, quote: repairedRebound.quote, offset: repairedRebound.offset, strategy: 'asset_rebound_trailing_ellipsis' } : undefined
+}
+
+function uniqueAssetMatch(assetChunks: readonly LocatableEvidenceChunk[], quote: string, visibleQuote: string) {
   const candidates = assetChunks.flatMap(chunk => {
     const match = locateInChunk(chunk, quote, visibleQuote)
     return match ? [{ ...match, absoluteStart: chunk.startChar + match.offset, absoluteEnd: chunk.startChar + match.offset + match.quote.length }] : []
@@ -37,13 +52,11 @@ export function resolveEvidenceQuote(input: {
   if (!candidates.length) return undefined
   const locations = new Set(candidates.map(candidate => `${candidate.absoluteStart}:${candidate.absoluteEnd}`))
   if (locations.size > 1) return undefined
-  const selected = candidates.sort((left, right) => Number(left.strategy !== 'exact') - Number(right.strategy !== 'exact') || left.chunk.ordinal - right.chunk.ordinal)[0]
-  return {
-    chunk: selected.chunk,
-    quote: selected.quote,
-    offset: selected.offset,
-    strategy: selected.strategy === 'exact' ? 'asset_rebound_exact' : 'asset_rebound_markdown_visible',
-  }
+  return candidates.sort((left, right) => Number(left.strategy !== 'exact') - Number(right.strategy !== 'exact') || left.chunk.ordinal - right.chunk.ordinal)[0]
+}
+
+function withoutTrailingEllipsis(value: string) {
+  return value.replace(/(?:\.{3,}|…+)\s*$/u, '').trimEnd()
 }
 
 function locateInChunk(chunk: LocatableEvidenceChunk, rawQuote: string, visibleQuote: string) {

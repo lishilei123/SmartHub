@@ -27,6 +27,24 @@ export class RequirementAnalysisService {
     this.extractionValidator = new RequirementPointExtractionValidator(store)
   }
 
+  async recoverInterruptedRuns() {
+    const finishedAt = new Date().toISOString()
+    let recovered = 0
+    await this.store.transaction(state => {
+      state.reviewRuns.forEach(run => {
+        if (run.status !== 'running') return
+        recovered += 1
+        Object.assign(run, {
+          status: 'failed',
+          step: 'failed',
+          finishedAt,
+          error: 'REVIEW_RUN_INTERRUPTED: 服务进程在 Agent 执行期间重启，本次运行已终止；请重新发起评审',
+        } satisfies Partial<ReviewRun>)
+      })
+    })
+    return recovered
+  }
+
   async list(projectVersionId: string, options: { limit?: number; cursor?: string; runningOnly?: boolean } = {}) {
     const limit = Math.min(Math.max(1, Math.floor(options.limit ?? 50)), 100)
     const projectVersion = this.store.getProjectVersion

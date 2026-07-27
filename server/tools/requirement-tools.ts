@@ -1,12 +1,12 @@
 import { Type } from 'typebox'
-import type { CandidateRequirementPointExtractionV2, CandidateRequirementReview } from '../domain/review-types.js'
+import type { CandidateRequirementPointExtractionV3, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { ToolRegistry } from './registry.js'
 import { resolveEvidenceQuote } from '../agent/evidence-locator.js'
 
 export interface ReviewSubmissionFeedback { accepted: boolean; issues?: Array<{ path: string; message: string }> }
 
-export function createRequirementPointExtractionToolRegistry(store: StateStore, submit: (candidate: CandidateRequirementPointExtractionV2) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
+export function createRequirementPointExtractionToolRegistry(store: StateStore, submit: (candidate: CandidateRequirementPointExtractionV3) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
   const registry = new ToolRegistry()
   registry.register({
     id: 'knowledge.search', piName: 'knowledge_search', version: '1.0.0', label: '固定索引检索', risk: 'read', idempotent: true, timeoutMs: 30_000,
@@ -41,34 +41,33 @@ export function createRequirementPointExtractionToolRegistry(store: StateStore, 
 
   registry.register({
     id: 'evidence.validate_batch', piName: 'evidence_validate_batch', version: '1.0.0', label: '批量校验证据草稿', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '批量校验引用是否能通过精确原文或 Markdown 可见文本映射到固定输入的唯一连续位置，并返回规范 quote、chunkId 与 locator；最终提交仍只需 evidenceDrafts。',
+    description: '批量校验引用是否能通过精确原文或 Markdown 可见文本映射到固定输入的唯一连续位置，并按 itemIndex 返回规范 quote、chunkId 与 locator；无需创建 Evidence ID。',
     parameters: Type.Object({ items: Type.Array(Type.Object({
-      clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }),
       assetVersionId: Type.String({ minLength: 1, maxLength: 200 }),
       chunkId: Type.String({ minLength: 1, maxLength: 200 }),
       quote: Type.String({ minLength: 1, maxLength: 4000 }),
     }, { additionalProperties: false }), { minItems: 1, maxItems: 100 }) }),
   }, async request => {
-    const args = request.arguments as { items: Array<{ clientEvidenceId: string; assetVersionId: string; chunkId: string; quote: string }> }
+    const args = request.arguments as { items: Array<{ assetVersionId: string; chunkId: string; quote: string }> }
     const state = await store.snapshot()
     const index = required(state.indexes.find(item => item.id === request.context.snapshot.indexVersionId), '固定索引不存在')
     const allowedVersions = new Set(request.context.snapshot.assets.map(item => item.assetVersionId))
     const chunks = (index.indexedChunks ?? []).filter(chunk => allowedVersions.has(chunk.assetVersionId))
-    return { data: { results: args.items.map(item => {
-      if (!allowedVersions.has(item.assetVersionId)) return { clientEvidenceId: item.clientEvidenceId, valid: false, reason: 'asset_not_in_fixed_snapshot' }
+    return { data: { results: args.items.map((item, itemIndex) => {
+      if (!allowedVersions.has(item.assetVersionId)) return { itemIndex, valid: false, reason: 'asset_not_in_fixed_snapshot' }
       const resolved = resolveEvidenceQuote(item, chunks)
-      if (!resolved) return { clientEvidenceId: item.clientEvidenceId, valid: false, reason: 'quote_not_uniquely_locatable' }
+      if (!resolved) return { itemIndex, valid: false, reason: 'quote_not_uniquely_locatable' }
       const { chunk, quote, offset, strategy } = resolved
-      return { clientEvidenceId: item.clientEvidenceId, valid: true, assetVersionId: chunk.assetVersionId, chunkId: chunk.id, contentHash: chunk.contentHash, quote, locator: { heading: chunk.headingPath.at(-1) ?? '', start: chunk.startChar + offset, end: chunk.startChar + offset + quote.length }, strategy }
+      return { itemIndex, valid: true, assetVersionId: chunk.assetVersionId, chunkId: chunk.id, contentHash: chunk.contentHash, quote, locator: { heading: chunk.headingPath.at(-1) ?? '', start: chunk.startChar + offset, end: chunk.startChar + offset + quote.length }, strategy }
     }) } }
   })
 
   registry.register({
-    id: 'requirement-points.submit_result', piName: 'requirement_points_submit_result', version: '2.0.0', label: '提交需求点提取草稿', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
-    description: '提交 requirement-point-extraction/v2。模型只提交需求点和 evidenceDrafts；服务端独立生成规范 Evidence、定位与覆盖清单。',
-    parameters: requirementPointExtractionSchemaV2(),
+    id: 'requirement-points.submit_result', piName: 'requirement_points_submit_result', version: '3.0.0', label: '提交需求点提取草稿', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
+    description: '提交 requirement-point-extraction/v3。每条需求点把自己的 evidenceDrafts 直接放在该需求点内；不要提交 clientRequirementPointId、clientEvidenceId、evidenceRef 或 evidenceRefs。服务端生成需求点 ID、Evidence ID、evidenceRefs、规范定位与覆盖清单。',
+    parameters: requirementPointExtractionSchemaV3(),
   }, async request => {
-    const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementPointExtractionV2)
+    const feedback = await submit(structuredClone(request.arguments) as CandidateRequirementPointExtractionV3)
     return feedback.accepted
       ? { data: { accepted: true, status: 'candidate_validated' }, terminate: true }
       : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] }, terminate: false }
@@ -91,19 +90,29 @@ export function createRequirementReviewToolRegistry(submit: (candidate: Candidat
   return registry
 }
 
-function requirementPointExtractionSchemaV2() {
+function requirementPointExtractionSchemaV3() {
   const strings = Type.Array(Type.String({ minLength: 1, maxLength: 4000 }), { maxItems: 100 })
-  return Type.Object({
-    requirementPoints: Type.Array(Type.Object({
-      clientRequirementPointId: Type.String({ minLength: 1, maxLength: 100 }), title: Type.String({ minLength: 1, maxLength: 300 }), description: Type.String({ minLength: 1, maxLength: 8000 }),
-      actor: Type.String({ maxLength: 500 }), action: Type.String({ maxLength: 500 }), object: Type.String({ maxLength: 500 }),
-      conditions: strings, businessRules: strings, exceptions: strings, acceptanceCriteria: strings,
-      evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }),
-      mergeGroupId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })), mergeRationale: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
-    }, { additionalProperties: false }), { maxItems: 500 }),
+  const requirementPointFields = {
+    title: Type.Optional(Type.String({ minLength: 1, maxLength: 300, description: '可选短标题；省略时由服务端根据 actor、action、object 或 description 生成。' })),
+    description: Type.String({ minLength: 1, maxLength: 8000 }),
+    actor: Type.String({ maxLength: 500 }), action: Type.String({ maxLength: 500 }), object: Type.String({ maxLength: 500 }),
+    conditions: strings, businessRules: strings, exceptions: strings, acceptanceCriteria: strings,
     evidenceDrafts: Type.Array(Type.Object({
-      clientEvidenceId: Type.String({ minLength: 1, maxLength: 100 }), assetVersionId: Type.String({ minLength: 1, maxLength: 200 }), chunkId: Type.String({ minLength: 1, maxLength: 200 }), quote: Type.String({ minLength: 4, maxLength: 4000 }),
-    }, { additionalProperties: false }), { maxItems: 500 }),
+      assetVersionId: Type.String({ minLength: 1, maxLength: 200 }),
+      chunkId: Type.String({ minLength: 1, maxLength: 200 }),
+      quote: Type.String({ minLength: 4, maxLength: 4000, description: '从该 Chunk 连续复制的原文，不得改写，不得使用 ... 或 … 省略。' }),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: 20, description: '只放属于当前需求点的证据草稿。' }),
+  }
+  const requirementPoint = Type.Union([
+    Type.Object(requirementPointFields, { additionalProperties: false }),
+    Type.Object({
+      ...requirementPointFields,
+      mergeGroupId: Type.String({ minLength: 1, maxLength: 100, pattern: '.*\\S.*' }),
+      mergeRationale: Type.String({ minLength: 1, maxLength: 2000, pattern: '.*\\S.*' }),
+    }, { additionalProperties: false }),
+  ])
+  return Type.Object({
+    requirementPoints: Type.Array(requirementPoint, { maxItems: 500 }),
   }, { additionalProperties: false })
 }
 

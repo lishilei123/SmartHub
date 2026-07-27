@@ -14,7 +14,21 @@ export async function start(port = Number(process.env.PORT ?? 8787)) {
     catch (error) { send(response, 400, { error: error instanceof Error ? error.message : '未知错误' }) }
   })
   server.once('close', () => { void stateStore.close?.() })
-  return new Promise<typeof server>(resolvePromise => server.listen(port, '127.0.0.1', () => resolvePromise(server)))
+  return new Promise<typeof server>((resolvePromise, reject) => {
+    const onError = (error: Error) => reject(error)
+    server.once('error', onError)
+    server.listen(port, '127.0.0.1', async () => {
+      server.off('error', onError)
+      try {
+        const recovered = await requirementAnalysisService.recoverInterruptedRuns()
+        if (recovered) console.warn(`已将 ${recovered} 个因服务重启中断的需求评审运行标记为失败`)
+        resolvePromise(server)
+      } catch (error) {
+        server.close()
+        reject(error)
+      }
+    })
+  })
 }
 
 async function route(request: IncomingMessage, response: ServerResponse) {
