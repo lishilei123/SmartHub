@@ -104,12 +104,10 @@ test('知识库目录创建、重命名和删除均持久化', async () => {
   await reloaded.processTask(deletion.task.id)
   assert.equal((await reloaded.directories(kbId)).length, 0)
   assert.equal((await reloaded.assets(kbId)).length, 0)
-  const deleted = (await reloaded.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id)
-  assert.equal(deleted?.activeVersionId, null)
-  assert.equal(deleted?.versions.at(-1)?.status, 'deleted')
+  assert.equal((await reloaded.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id), undefined)
   const restarted = new KnowledgeService(new JsonStore(dataFile), new RawDocumentStore(documentsRoot)); await restarted.initialize()
   assert.equal((await restarted.directories(kbId)).length, 0)
-  assert.equal((await restarted.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id)?.activeVersionId, null)
+  assert.equal((await restarted.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id), undefined)
 })
 
 test('目录清理失败仅重试文件清理并保持删除范围锁', async () => {
@@ -140,7 +138,7 @@ test('目录清理失败仅重试文件清理并保持删除范围锁', async ()
   assert.notEqual((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, activeBefore)
   assert.equal((await service.directories(kbId)).some(item => item.id === directory.id), true)
   assert.equal((await service.directories(kbId)).find(item => item.id === directory.id)?.task?.status, 'failed')
-  assert.equal((await service.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id)?.operationTaskId, deletion.task.id)
+  assert.equal((await service.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id), undefined)
   await assert.rejects(() => service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'browser:待删除/new.md', assetType: '需求', displayName: 'new.md', logicalPath: '待删除/new.md', content: document() }), /后台删除/)
   await assert.rejects(() => service.cancelTask(deletion.task.id), /只能重试/)
   const candidateId = failed.input.candidateIndexVersionId
@@ -152,7 +150,7 @@ test('目录清理失败仅重试文件清理并保持删除范围锁', async ()
   assert.equal(completed.status, 'succeeded')
   assert.equal(completed.step, 'completed')
   assert.equal((await service.directories(kbId)).some(item => item.id === directory.id), false)
-  assert.equal((await service.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id)?.operationTaskId, undefined)
+  assert.equal((await service.assets(kbId, { includeDeleted: true })).find(item => item.id === synced.asset!.id), undefined)
   await assert.rejects(() => readFile(resolve(documentsRoot, kbId, 'files', '待删除', 'a.md'), 'utf8'), /ENOENT/)
 })
 
@@ -171,8 +169,8 @@ test('知识文件移动、重命名和删除同步数据库状态与默认目�
   const deletion = await service.deleteAsset(synced.asset!.id); await service.processTask(deletion.task.id)
   await assert.rejects(() => readFile(resolve(root, 'knowledge-bases', kbId, 'files', '已归档', '退款规则.md'), 'utf8'), /ENOENT/)
   assert.equal((await service.assets(kbId)).length, 0)
-  assert.equal((await service.version(synced.version.id)).status, 'deleted')
-  assert.equal(await readFile(resolve(root, 'knowledge-bases', synced.version.snapshotPath!), 'utf8'), document())
+  await assert.rejects(() => service.version(synced.version.id), /资产版本不存在/)
+  await assert.rejects(() => readFile(resolve(root, 'knowledge-bases', synced.version.snapshotPath!), 'utf8'), /ENOENT/)
 })
 
 test('AC-006 新版本失败不会破坏旧活动索引', async () => {
@@ -317,7 +315,29 @@ test('FR-020/021 异步重建可观察、可取消且取消不切换活动索引
   const queued = await service.queueRebuild(kbId); await service.processQueuedRebuild(queued.id); assert.equal((await service.tasks(kbId)).find(task => task.id === queued.id)?.status, 'succeeded'); assert.notEqual((await service.overview(kbId)).knowledgeBase.activeIndexVersionId, oldIndex)
 })
 
-test('删除资产先发布新索引并保留 deleted 历史版本', async () => {
-  const { service, kbId } = await fixture(); const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() }); const deletion = await service.deleteAsset(synced.asset!.id); await service.processTask(deletion.task.id)
-  assert.equal((await service.search(kbId, { query: '幂等' })).status, 'no_ready_assets'); assert.equal((await service.version(synced.version.id)).status, 'deleted'); assert.equal((await service.assets(kbId)).length, 0); assert.equal((await service.assets(kbId, { includeDeleted: true })).length, 1)
+test('删除资产先发布新索引并物理清理历史版本、索引、绑定和评审', async () => {
+  const { service, kbId } = await fixture(); const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'a.md', assetType: 'requirement', displayName: '需求', logicalPath: 'a.md', content: document() })
+  await service.store.transaction(state => {
+    const project = state.projects[0]
+    state.projectVersions.push({ id: 'pv-delete', projectId: project.id, name: '待删除关联', status: 'open', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+    state.projectVersionRequirementBindings.push({ id: 'binding-delete', projectVersionId: 'pv-delete', assetId: synced.asset!.id, assetVersionId: synced.version.id, createdAt: new Date().toISOString() })
+    state.reviewRuns.push({ id: 'review-delete', projectVersionId: 'pv-delete', assetId: synced.asset!.id, assetVersionId: synced.version.id, status: 'succeeded', snapshot: { assetId: synced.asset!.id, assetVersionId: synced.version.id, assets: [{ assetId: synced.asset!.id, assetVersionId: synced.version.id }] } } as typeof state.reviewRuns[number])
+  })
+  const deletion = await service.deleteAsset(synced.asset!.id); await service.processTask(deletion.task.id)
+  const state = await service.store.snapshot()
+  assert.equal((await service.search(kbId, { query: '幂等' })).status, 'no_ready_assets')
+  await assert.rejects(() => service.version(synced.version.id), /资产版本不存在/)
+  assert.equal((await service.assets(kbId, { includeDeleted: true })).length, 0)
+  assert.equal(state.versions.some(version => version.assetId === synced.asset!.id), false)
+  assert.equal(state.indexes.some(index => index.assetVersionIds.includes(synced.version.id) || index.indexedChunks?.some(chunk => chunk.assetVersionId === synced.version.id)), false)
+  assert.equal(state.projectVersionRequirementBindings.some(binding => binding.assetId === synced.asset!.id), false)
+  assert.equal(state.reviewRuns.some(run => run.id === 'review-delete'), false)
+  assert.equal((await service.task(deletion.task.id)).metrics?.reviewRuns, 1)
+})
+
+test('原文档仍有关联评审运行时阻止物理删除', async () => {
+  const { service, kbId } = await fixture(); const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'running.md', assetType: 'requirement', displayName: '运行中需求', logicalPath: 'running.md', content: document() })
+  await service.store.transaction(state => { state.reviewRuns.push({ id: 'review-running', assetId: synced.asset!.id, assetVersionId: synced.version.id, status: 'running', snapshot: { assetId: synced.asset!.id, assetVersionId: synced.version.id, assets: [] } } as typeof state.reviewRuns[number]) })
+  await assert.rejects(() => service.deleteAsset(synced.asset!.id), /请先取消评审再删除/)
+  assert.equal((await service.assets(kbId)).length, 1)
 })

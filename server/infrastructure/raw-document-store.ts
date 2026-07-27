@@ -46,6 +46,16 @@ export class RawDocumentStore {
     await rm(this.activePath(knowledgeBaseId, logicalPath), { force: true })
   }
 
+  async deleteVersionSnapshots(knowledgeBaseId: string, assetVersionIds: string[]) {
+    const knowledgeRoot = resolve(this.root, knowledgeBaseId)
+    for (const assetVersionId of [...new Set(assetVersionIds)]) {
+      if (!assetVersionId || assetVersionId === '.' || assetVersionId === '..' || /[\\/]/.test(assetVersionId)) throw new Error('资产版本 ID 不合法')
+      const target = resolve(knowledgeRoot, 'versions', assetVersionId)
+      if (!target.startsWith(`${knowledgeRoot}${sep}`)) throw new Error('资产版本路径越过知识库默认目录')
+      await rm(target, { recursive: true, force: true })
+    }
+  }
+
   async deleteActiveDirectory(knowledgeBaseId: string, logicalPrefix: string) {
     const normalized = logicalPrefix.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '')
     if (!normalized || normalized.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('目录路径不合法')

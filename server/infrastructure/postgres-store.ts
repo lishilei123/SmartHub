@@ -87,31 +87,29 @@ export class PostgresStore implements StateStore {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
       const base = await client.query<{ data: DatabaseState['knowledgeBases'][number] }>('SELECT data FROM smarthub.knowledge_bases WHERE id=$1', [knowledgeBaseId])
       if (!base.rows[0]) { await client.query('COMMIT'); return null }
-      const [directories, configs, assets, versions, indexes, taskRows, chunkCounts] = await Promise.all([
-        client.query<{ data: DatabaseState['directories'][number] }>('SELECT data FROM smarthub.knowledge_directories WHERE knowledge_base_id=$1 ORDER BY created_at, id', [knowledgeBaseId]),
-        client.query<{ data: DatabaseState['configs'][number] }>('SELECT data FROM smarthub.config_versions WHERE knowledge_base_id=$1 ORDER BY version, id', [knowledgeBaseId]),
-        client.query<{ data: DatabaseState['assets'][number] }>('SELECT data FROM smarthub.knowledge_assets WHERE knowledge_base_id=$1 ORDER BY created_at, id', [knowledgeBaseId]),
-        client.query<{ data: Omit<DatabaseState['versions'][number], 'chunks'> & { content?: string } }>(`
-          SELECT CASE WHEN $2::boolean THEN version.data ELSE version.data - 'content' END AS data
-          FROM smarthub.asset_versions version
-          JOIN smarthub.knowledge_assets asset ON asset.id = version.asset_id
-          WHERE asset.knowledge_base_id=$1
-          ORDER BY version.created_at, version.id
-        `, [knowledgeBaseId, Boolean(options.includeVersionContent)]),
-        options.includeIndexes
-          ? client.query<{ data: DatabaseState['indexes'][number] }>("SELECT data - 'indexedChunks' AS data FROM smarthub.index_versions WHERE knowledge_base_id=$1 ORDER BY created_at, id", [knowledgeBaseId])
-          : Promise.resolve({ rows: [] as Array<{ data: DatabaseState['indexes'][number] }> }),
-        client.query<SyncTaskRow>(`${syncTaskSelect} WHERE knowledge_base_id=$1 ORDER BY created_at, id`, [knowledgeBaseId]),
-        options.includeIndexes
-          ? client.query<{ index_version_id: string; chunks: number }>(`
-              SELECT chunk.index_version_id, count(*)::int AS chunks
-              FROM smarthub.index_chunks chunk
-              JOIN smarthub.index_versions version ON version.id = chunk.index_version_id
-              WHERE version.knowledge_base_id=$1
-              GROUP BY chunk.index_version_id
-            `, [knowledgeBaseId])
-          : Promise.resolve({ rows: [] as Array<{ index_version_id: string; chunks: number }> }),
-      ])
+      const directories = await client.query<{ data: DatabaseState['directories'][number] }>('SELECT data FROM smarthub.knowledge_directories WHERE knowledge_base_id=$1 ORDER BY created_at, id', [knowledgeBaseId])
+      const configs = await client.query<{ data: DatabaseState['configs'][number] }>('SELECT data FROM smarthub.config_versions WHERE knowledge_base_id=$1 ORDER BY version, id', [knowledgeBaseId])
+      const assets = await client.query<{ data: DatabaseState['assets'][number] }>('SELECT data FROM smarthub.knowledge_assets WHERE knowledge_base_id=$1 ORDER BY created_at, id', [knowledgeBaseId])
+      const versions = await client.query<{ data: Omit<DatabaseState['versions'][number], 'chunks'> & { content?: string } }>(`
+        SELECT CASE WHEN $2::boolean THEN version.data ELSE version.data - 'content' END AS data
+        FROM smarthub.asset_versions version
+        JOIN smarthub.knowledge_assets asset ON asset.id = version.asset_id
+        WHERE asset.knowledge_base_id=$1
+        ORDER BY version.created_at, version.id
+      `, [knowledgeBaseId, Boolean(options.includeVersionContent)])
+      const indexes = options.includeIndexes
+        ? await client.query<{ data: DatabaseState['indexes'][number] }>("SELECT data - 'indexedChunks' AS data FROM smarthub.index_versions WHERE knowledge_base_id=$1 ORDER BY created_at, id", [knowledgeBaseId])
+        : { rows: [] as Array<{ data: DatabaseState['indexes'][number] }> }
+      const taskRows = await client.query<SyncTaskRow>(`${syncTaskSelect} WHERE knowledge_base_id=$1 ORDER BY created_at, id`, [knowledgeBaseId])
+      const chunkCounts = options.includeIndexes
+        ? await client.query<{ index_version_id: string; chunks: number }>(`
+            SELECT chunk.index_version_id, count(*)::int AS chunks
+            FROM smarthub.index_chunks chunk
+            JOIN smarthub.index_versions version ON version.id = chunk.index_version_id
+            WHERE version.knowledge_base_id=$1
+            GROUP BY chunk.index_version_id
+          `, [knowledgeBaseId])
+        : { rows: [] as Array<{ index_version_id: string; chunks: number }> }
       await client.query('COMMIT')
       return {
         state: {
@@ -159,10 +157,8 @@ export class PostgresStore implements StateStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-      const [draft, versions] = await Promise.all([
-        client.query<{ data: AgentConfigurationDraft }>('SELECT data FROM smarthub.agent_configuration_drafts WHERE scene=$1', [scene]),
-        client.query<{ data: AgentConfigurationVersion }>('SELECT data FROM smarthub.agent_configuration_versions WHERE scene=$1 ORDER BY agent_key, version DESC', [scene]),
-      ])
+      const draft = await client.query<{ data: AgentConfigurationDraft }>('SELECT data FROM smarthub.agent_configuration_drafts WHERE scene=$1', [scene])
+      const versions = await client.query<{ data: AgentConfigurationVersion }>('SELECT data FROM smarthub.agent_configuration_versions WHERE scene=$1 ORDER BY agent_key, version DESC', [scene])
       await client.query('COMMIT')
       return { draft: draft.rows[0]?.data ?? null, versions: versions.rows.map(row => row.data) }
     } catch (error) {
@@ -659,23 +655,19 @@ function syncTaskFromRow(row: SyncTaskRow): SyncTask {
 async function loadConfigurationState(client: Queryable, scope: ConfigurationTransactionScope): Promise<DatabaseState> {
   const state = emptyState()
   if (scope === 'ai_configuration') {
-    const [modelSources, aiResources, drafts, versions] = await Promise.all([
-      client.query<{ data: DatabaseState['modelSources'][number] }>('SELECT data FROM smarthub.model_sources ORDER BY priority, created_at, id'),
-      client.query<{ data: DatabaseState['aiResources'][number] }>('SELECT data FROM smarthub.ai_resources ORDER BY kind, resource_key, id'),
-      client.query<{ data: DatabaseState['agentConfigurationDrafts'][number] }>('SELECT data FROM smarthub.agent_configuration_drafts ORDER BY scene'),
-      client.query<{ data: DatabaseState['agentConfigurationVersions'][number] }>('SELECT data FROM smarthub.agent_configuration_versions ORDER BY scene, agent_key, version'),
-    ])
+    const modelSources = await client.query<{ data: DatabaseState['modelSources'][number] }>('SELECT data FROM smarthub.model_sources ORDER BY priority, created_at, id')
+    const aiResources = await client.query<{ data: DatabaseState['aiResources'][number] }>('SELECT data FROM smarthub.ai_resources ORDER BY kind, resource_key, id')
+    const drafts = await client.query<{ data: DatabaseState['agentConfigurationDrafts'][number] }>('SELECT data FROM smarthub.agent_configuration_drafts ORDER BY scene')
+    const versions = await client.query<{ data: DatabaseState['agentConfigurationVersions'][number] }>('SELECT data FROM smarthub.agent_configuration_versions ORDER BY scene, agent_key, version')
     state.modelSources = modelSources.rows.map(row => row.data)
     state.aiResources = aiResources.rows.map(row => row.data)
     state.agentConfigurationDrafts = drafts.rows.map(row => row.data)
     state.agentConfigurationVersions = versions.rows.map(row => row.data)
     return state
   }
-  const [knowledgeBases, configs, indexes] = await Promise.all([
-    client.query<{ data: DatabaseState['knowledgeBases'][number] }>('SELECT data FROM smarthub.knowledge_bases ORDER BY created_at, id'),
-    client.query<{ data: DatabaseState['configs'][number] }>('SELECT data FROM smarthub.config_versions ORDER BY created_at, id'),
-    client.query<{ data: DatabaseState['indexes'][number] }>("SELECT data - 'indexedChunks' AS data FROM smarthub.index_versions ORDER BY created_at, id"),
-  ])
+  const knowledgeBases = await client.query<{ data: DatabaseState['knowledgeBases'][number] }>('SELECT data FROM smarthub.knowledge_bases ORDER BY created_at, id')
+  const configs = await client.query<{ data: DatabaseState['configs'][number] }>('SELECT data FROM smarthub.config_versions ORDER BY created_at, id')
+  const indexes = await client.query<{ data: DatabaseState['indexes'][number] }>("SELECT data - 'indexedChunks' AS data FROM smarthub.index_versions ORDER BY created_at, id")
   state.knowledgeBases = knowledgeBases.rows.map(row => row.data)
   state.configs = configs.rows.map(row => row.data)
   state.indexes = indexes.rows.map(row => ({ ...row.data, indexedChunks: [] }))
@@ -756,6 +748,9 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   await deleteMissingScenes(client, 'agent_configuration_drafts', before.agentConfigurationDrafts, state.agentConfigurationDrafts)
   await deleteMissing(client, 'sync_tasks', before.tasks, state.tasks)
   await deleteMissing(client, 'index_versions', before.indexes, state.indexes)
+  const retainedVersionIds = new Set(state.versions.map(version => version.id))
+  const removedVersionIds = before.versions.filter(version => !retainedVersionIds.has(version.id)).map(version => version.id)
+  if (removedVersionIds.length) await client.query('DELETE FROM smarthub.index_chunks WHERE asset_version_id = ANY($1::text[])', [removedVersionIds])
   await deleteMissing(client, 'asset_versions', before.versions, state.versions)
   await deleteMissing(client, 'knowledge_assets', before.assets, state.assets)
   await deleteMissing(client, 'config_versions', before.configs, state.configs)

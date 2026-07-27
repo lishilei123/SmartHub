@@ -9,6 +9,7 @@
     "dev:api": "node --watch --import tsx server/http/server.ts",
     "start:api": "tsx server/http/server.ts",
     "migrate": "tsx server/migrate.ts",
+    "maintenance:purge-deleted-assets": "tsx server/maintenance/purge-deleted-asset-data.ts",
     "start:worker": "tsx server/worker.ts",
     "dev:worker": "node --watch --import tsx server/worker.ts",
     "test": "tsx --test tests/**/*.test.ts",

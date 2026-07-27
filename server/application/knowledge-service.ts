@@ -74,6 +74,27 @@ export class KnowledgeService {
     }))
   }
 
+  async purgeDeletedAssetData() {
+    return this.store.transaction(async state => {
+      const assetIds = new Set(state.assets.filter(asset => {
+        if (asset.activeVersionId) return false
+        const versions = state.versions.filter(version => version.assetId === asset.id)
+        return versions.some(version => version.status === 'deleted') && !versions.some(version => ['pending', 'syncing'].includes(version.status))
+      }).map(asset => asset.id))
+      assertNoRunningAssetReviews(state, assetIds)
+      if (this.rawDocuments) {
+        for (const asset of state.assets.filter(item => assetIds.has(item.id))) await this.rawDocuments.deleteActive(asset.knowledgeBaseId, asset.logicalPath)
+        const versionsByKnowledgeBase = new Map<string, string[]>()
+        for (const asset of state.assets.filter(item => assetIds.has(item.id))) {
+          const versionIds = state.versions.filter(version => version.assetId === asset.id).map(version => version.id)
+          versionsByKnowledgeBase.set(asset.knowledgeBaseId, [...(versionsByKnowledgeBase.get(asset.knowledgeBaseId) ?? []), ...versionIds])
+        }
+        for (const [knowledgeBaseId, versionIds] of versionsByKnowledgeBase) await this.rawDocuments.deleteVersionSnapshots(knowledgeBaseId, versionIds)
+      }
+      return purgeAssetData(state, assetIds)
+    })
+  }
+
   async createProject(name: string) {
     if (!name.trim()) throw new Error('项目名称不能为空')
     return this.store.transaction(async state => {
@@ -265,6 +286,7 @@ export class KnowledgeService {
       if (existing) return { mode, task: existing, scopeSummary: directoryDeleteSummary(existing.input) }
       const affectedAssets = state.assets.filter(asset => asset.knowledgeBaseId === directory.knowledgeBaseId && isWithinPath(asset.logicalPath, oldPrefix))
       if (affectedAssets.some(asset => asset.operationTaskId)) throw new Error('目录内资料正在执行后台操作')
+      assertNoRunningAssetReviews(state, new Set(affectedAssets.map(asset => asset.id)))
       const kb = required(state.knowledgeBases.find(item => item.id === directory.knowledgeBaseId), '知识库不存在')
       const activeIndex = state.indexes.find(item => item.id === kb.activeIndexVersionId)
       const task: SyncTask = {
@@ -461,6 +483,7 @@ export class KnowledgeService {
   async deleteAsset(assetId: string) {
     return this.store.transaction(state => {
       const asset = required(state.assets.find(item => item.id === assetId), '知识资产不存在'); const active = required(state.versions.find(item => item.id === asset.activeVersionId), '活动版本不存在'); const kb = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId), '知识库不存在')
+      assertNoRunningAssetReviews(state, new Set([asset.id]))
       const existing = state.tasks.find(task => task.type === 'delete' && task.input.assetId === assetId && ['queued', 'running'].includes(task.status))
       if (existing) return { asset, task: existing }
       const activeIndex = state.indexes.find(item => item.id === kb.activeIndexVersionId)
@@ -508,9 +531,16 @@ export class KnowledgeService {
         if (kb.activeIndexVersionId !== task.input.baseIndexVersionId) { candidate.status = 'failed'; task.status = 'failed'; task.step = 'failed'; task.error = '活动索引已变化，任务将重新构建'; task.finishedAt = now(); task.updatedAt = now(); return task }
         const current = state.indexes.find(item => item.id === kb.activeIndexVersionId)
         validateCandidate(candidate, task, state)
-        if (this.rawDocuments) await this.rawDocuments.deleteActive(kb.id, asset.logicalPath)
+        const assetIds = new Set([asset.id])
+        assertNoRunningAssetReviews(state, assetIds)
+        const versionIds = state.versions.filter(version => version.assetId === asset.id).map(version => version.id)
+        if (this.rawDocuments) {
+          await this.rawDocuments.deleteActive(kb.id, asset.logicalPath)
+          await this.rawDocuments.deleteVersionSnapshots(kb.id, versionIds)
+        }
         activateCandidateIndex(state, candidate, current)
-        active.status = 'deleted'; asset.activeVersionId = null; asset.updatedAt = now(); task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.updatedAt = now()
+        const purged = purgeAssetData(state, assetIds)
+        task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.updatedAt = now(); task.metrics = { ...task.metrics, ...purged }
         return task
       })
     } catch (error) {
@@ -535,7 +565,8 @@ export class KnowledgeService {
         const config = required(state.configs.find(item => item.id === task.configVersionId), '配置不存在').config
         const current = state.indexes.find(item => item.id === kb.activeIndexVersionId)
         const targetAssetIds = new Set(targets.map(item => item.assetId))
-        const targetVersionIds = new Set(targets.map(item => item.activeVersionId).filter(Boolean))
+        const targetVersionIds = new Set(state.versions.filter(version => targetAssetIds.has(version.assetId)).map(version => version.id))
+        assertNoRunningAssetReviews(state, targetAssetIds)
         const blocked = targets.some(target => {
           const asset = state.assets.find(item => item.id === target.assetId)
           return !asset || asset.operationTaskId !== task.id || asset.activeVersionId !== target.activeVersionId
@@ -568,20 +599,23 @@ export class KnowledgeService {
           return !asset || asset.operationTaskId !== task.id || asset.activeVersionId !== target.activeVersionId
         })
         if (blocked) { candidate.status = 'failed'; task.status = 'cancelled'; task.step = 'superseded'; task.finishedAt = now(); task.updatedAt = now(); releaseDirectoryDeleteScope(state, task); return null }
+        const targetAssetIds = new Set(targets.map(target => target.assetId))
+        assertNoRunningAssetReviews(state, targetAssetIds)
         validateCandidate(candidate, task, state)
         task.step = 'committing'; task.progress = 90
         activateCandidateIndex(state, candidate, current)
-        for (const target of targets) {
-          const asset = state.assets.find(item => item.id === target.assetId)
-          const version = state.versions.find(item => item.id === target.activeVersionId)
-          if (asset && version) { version.status = 'deleted'; asset.activeVersionId = null; asset.updatedAt = now() }
-        }
-        task.status = 'running'; task.step = 'file_cleanup'; task.progress = 95; task.input.fileCleanupOnly = true; task.updatedAt = now(); task.metrics = { directories: directoryIds.size, assets: targets.length }
+        const deletedAssetVersionIds = state.versions.filter(version => targetAssetIds.has(version.assetId)).map(version => version.id)
+        task.input.deletedAssetVersionIds = deletedAssetVersionIds
+        const purged = purgeAssetData(state, targetAssetIds)
+        task.status = 'running'; task.step = 'file_cleanup'; task.progress = 95; task.input.fileCleanupOnly = true; task.updatedAt = now(); task.metrics = { directories: directoryIds.size, ...purged }
         return { knowledgeBaseId: kb.id, logicalPrefix: String(input.logicalPrefix ?? ''), task }
       })
       if (!committed) return await this.task(taskId)
       try {
-        if (this.rawDocuments) await this.rawDocuments.deleteActiveDirectory(committed.knowledgeBaseId, committed.logicalPrefix)
+        if (this.rawDocuments) {
+          await this.rawDocuments.deleteActiveDirectory(committed.knowledgeBaseId, committed.logicalPrefix)
+          await this.rawDocuments.deleteVersionSnapshots(committed.knowledgeBaseId, stringArray(committed.task.input.deletedAssetVersionIds))
+        }
         return await this.taskTransaction(taskId, lease, state => {
           const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
           if (task.status === 'running' && task.input.fileCleanupOnly === true) { finalizeDirectoryDeleteScope(state, task); task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.updatedAt = now(); delete task.input.fileCleanupOnly }
@@ -613,12 +647,15 @@ export class KnowledgeService {
       const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
       if (!canRunTask(task, lease) || task.input.fileCleanupOnly !== true) return null
       task.status = 'running'; task.step = 'file_cleanup'; task.progress = 95; task.startedAt ??= now(); task.updatedAt = now()
-      return { knowledgeBaseId: task.knowledgeBaseId, logicalPrefix: String(task.input.logicalPrefix ?? '') }
+      return { knowledgeBaseId: task.knowledgeBaseId, logicalPrefix: String(task.input.logicalPrefix ?? ''), assetVersionIds: stringArray(task.input.deletedAssetVersionIds) }
     })
     if (!work) return await this.task(taskId)
     try {
       throwIfAborted(signal)
-      if (this.rawDocuments) await this.rawDocuments.deleteActiveDirectory(work.knowledgeBaseId, work.logicalPrefix)
+      if (this.rawDocuments) {
+        await this.rawDocuments.deleteActiveDirectory(work.knowledgeBaseId, work.logicalPrefix)
+        await this.rawDocuments.deleteVersionSnapshots(work.knowledgeBaseId, work.assetVersionIds)
+      }
       throwIfAborted(signal)
       return await this.taskTransaction(taskId, lease, state => {
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
@@ -970,6 +1007,51 @@ function activeTaskForDirectory(tasks: SyncTask[], directory: DatabaseState['dir
 function throwIfAborted(signal?: AbortSignal) { if (signal?.aborted) throw signal.reason ?? new Error('任务执行已中止') }
 
 function stringArray(value: unknown) { return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [] }
+
+function reviewRunReferencesAssets(state: DatabaseState, run: DatabaseState['reviewRuns'][number], assetIds: Set<string>) {
+  const versionIds = new Set(state.versions.filter(version => assetIds.has(version.assetId)).map(version => version.id))
+  if (assetIds.has(run.assetId) || versionIds.has(run.assetVersionId)) return true
+  if (assetIds.has(run.snapshot?.assetId) || versionIds.has(run.snapshot?.assetVersionId)) return true
+  return (Array.isArray(run.snapshot?.assets) ? run.snapshot.assets : []).some(asset => assetIds.has(asset.assetId) || versionIds.has(asset.assetVersionId))
+}
+
+function assertNoRunningAssetReviews(state: DatabaseState, assetIds: Set<string>) {
+  if (assetIds.size && state.reviewRuns.some(run => run.status === 'running' && reviewRunReferencesAssets(state, run, assetIds))) throw new Error('原文档仍有关联的需求评审正在运行，请先取消评审再删除')
+}
+
+function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
+  const versions = state.versions.filter(version => assetIds.has(version.assetId))
+  const versionIds = new Set(versions.map(version => version.id))
+  const bindingCount = state.projectVersionRequirementBindings.filter(binding => assetIds.has(binding.assetId) || versionIds.has(binding.assetVersionId)).length
+  const reviewRunCount = state.reviewRuns.filter(run => reviewRunReferencesAssets(state, run, assetIds)).length
+  const activeIndexIds = new Set(state.knowledgeBases.map(knowledgeBase => knowledgeBase.activeIndexVersionId).filter((value): value is string => Boolean(value)))
+  let indexChunkCount = 0
+  let indexVersionCount = 0
+  state.indexes = state.indexes.flatMap(index => {
+    const indexedChunks = index.indexedChunks ?? []
+    const removedChunks = indexedChunks.filter(chunk => versionIds.has(chunk.assetVersionId)).length
+    const removedMembers = index.assetVersionIds.filter(versionId => versionIds.has(versionId)).length
+    indexChunkCount += removedChunks
+    if (!removedChunks && !removedMembers) return [index]
+    index.assetVersionIds = index.assetVersionIds.filter(versionId => !versionIds.has(versionId))
+    index.indexedChunks = indexedChunks.filter(chunk => !versionIds.has(chunk.assetVersionId))
+    if (!index.assetVersionIds.length && !activeIndexIds.has(index.id) && ['superseded', 'failed'].includes(index.status)) { indexVersionCount += 1; return [] }
+    return [index]
+  })
+  state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(binding => !assetIds.has(binding.assetId) && !versionIds.has(binding.assetVersionId))
+  state.reviewRuns = state.reviewRuns.filter(run => !reviewRunReferencesAssets(state, run, assetIds))
+  state.versions = state.versions.filter(version => !assetIds.has(version.assetId))
+  state.assets = state.assets.filter(asset => !assetIds.has(asset.id))
+  return {
+    assets: assetIds.size,
+    versions: versions.length,
+    assetChunks: versions.reduce((total, version) => total + version.chunks.length, 0),
+    indexChunks: indexChunkCount,
+    indexVersions: indexVersionCount,
+    bindings: bindingCount,
+    reviewRuns: reviewRunCount,
+  }
+}
 
 function directoryDeleteTargets(input: Record<string, unknown>) {
   const raw = Array.isArray(input.targets) ? input.targets : []
