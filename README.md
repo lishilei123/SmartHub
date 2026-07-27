@@ -39,20 +39,21 @@
 
 ## 当前已实现的第二期双 Agent 需求分析流程
 
-> 实现边界：`requirement-point-extraction/v3` 正文直传与需求点内嵌 Evidence 草稿协议已实现。正常规模正文通过 `full_context` 在首轮完整投递；超长正文通过 `segmented_context` 确定性分批投递、隔离批次消息并最终跨批归并。服务端持久化输入包 Hash、批次 Hash 和 `InputDeliveryManifest`，根据嵌套归属生成需求点 ID、Evidence ID、`evidenceRefs`、coverage 与 Evidence locator。旧 v1/v2 仅作为历史数据语义保留，不再创建新运行。
+> 实现边界：`requirement-point-extraction/v5` 正文直传与“可选 `title` + `description` + `sourceTexts`”协议已实现。模型正常生成简洁标题，标题缺失或空白时服务端根据描述兜底；正常规模正文通过 `full_context` 在首轮完整投递，超长正文通过 `segmented_context` 确定性分批投递、隔离批次消息并最终跨批归并。模型不再维护其他结构化槽位、归并字段、资产版本、Chunk 或 Evidence 字段；服务端持久化输入包 Hash、批次 Hash 和 `InputDeliveryManifest`，跨全部固定输入检索原文并生成需求点 ID、Evidence ID、`evidenceRefs`、coverage 与 locator。旧 v1～v4 仅作为历史数据语义保留，不再创建新运行。
 
 - 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
 - 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
 - Agent 定义、Prompt、Toolset、Skill、MCP 绑定、执行限制和内容 Hash 独立版本化并写入运行快照；内置定义解析器和工具注册表工厂均可替换，后续插件通过版本引用和受控适配器接入，不绕过 Tool Runtime；
 - 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、模型与两个 Agent 定义，不在运行中漂移到最新资料；
-- `RequirementPointExtractionAgent` 注册 `knowledge.search`、`knowledge.read_chunk`、`evidence.validate_batch` 和 `requirement-points.submit_result`，但按阶段收紧权限：首次全文提取只向模型开放批量证据校验和结果提交，防止模型把全文理解重新退化为逐 Chunk 读取；仅在服务端明确拒绝 Evidence 后，才开放 search/read_chunk 进入定点修复窗口。`RequirementReviewAgent` 只开放 `review.submit_result`；
+- `RequirementPointExtractionAgent` 注册 `knowledge.search`、`knowledge.read_chunk` 和 `requirement-points.submit_result`，但正常全文提取只向模型开放结果提交工具，防止模型把全文理解退化为逐 Chunk 读取；仅当某个需求点完全无法从 `sourceTexts` 建立 Evidence 时，才开放 search/read_chunk 进入定点修复窗口。`RequirementReviewAgent` 只开放 `review.submit_result`；
 - 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；重复调用默认拒绝，只有 `knowledge.read_chunk` 可在达到阈值后重放一次本次执行已成功读取的固定结果，且不触发底层读取或消耗额度；读取/证据工具不得耗尽提取 Agent 的全部额度，最后 3 次调用独立保留给当前阶段的结果提交工具；
 - `RequirementInputPlan` 根据模型上下文、输出预留、修正预留、Prompt/工具 Schema 和安全余量计算输入预算；`full_context` 包含完整文档边界与 Chunk 目录，存在排除范围时只投递范围内 Chunk；`segmented_context` 按稳定 Chunk 顺序打包，单批超预算或超过 24 批会明确失败；
-- `evidence.validate_batch` 一次可校验最多 100 条引用：优先在声明 Chunk 精确匹配，随后把 Markdown 可见文本映射回连续原始字符范围；声明 chunkId 有误时，仅允许在同一固定资产的唯一绝对位置重定位。末尾误用 `...`/`…` 的草稿可在连续前缀仍可唯一定位时被规范化，服务端始终保存连续规范原文，不使用模糊语义或跨资产匹配；`requirement-points.submit_result` 只接受 `requirement-point-extraction/v3`，每条需求点直接内嵌自己的 `evidenceDrafts`，模型不再手工维护需求点/Evidence ID 和 `evidenceRefs`；
+- `requirement-points.submit_result` 接受 `requirement-point-extraction/v5`：每条需求点包含模型生成的可选 `title`、必填 `description` 和 `sourceTexts`。标题仅用于展示且具有服务端兜底，不参与失败门禁；服务端在本次全部固定输入中依次执行精确匹配、Markdown 可见文本映射、忽略 Markdown/空白/标点的规范检索、省略片段检索和候选召回；模糊召回保留 `[max(0.45, 最高分 - 0.08), 最高分]` 置信区间内的全部证据位置，同一原文存在多个固定位置时也全部保留。一条线索失败不会拖垮已有有效 Evidence，只有整个需求点完全无可用原文时才要求修复；
+- `review.submit_result` 使用 `requirement-review/v3`：模型提交总体摘要和逐条 `analyses`，每条分析只通过一个 `requirementPointRef` 对应冻结需求点，并给出标题、类型、严重度、置信度、分析、影响和建议。服务端校验引用、去重并生成 Finding ID；展示字段偶发缺失或枚举不规范时使用确定性兜底，不反复退回，只有需求点引用不存在或分析内容为空才拒绝；
 - ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试；
 - 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。API 服务成功监听后会把上一个服务进程遗留的 `running` ReviewRun 收口为 `REVIEW_RUN_INTERRUPTED` 失败态，避免热重载或进程重启后永久停在运行中。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
 
-当前自动化测试已覆盖正常规模正文首轮直传、读取工具调用为 0、需求点内嵌 Evidence 的服务端 ID/引用生成与共享证据去重、coverage 生成、投递清单缺批或哈希不一致拒绝、Evidence 草稿修复、原子性/归并约束，以及超长正文确定性切换 `segmented_context`。真实模型上线前仍应使用固定黄金集对新旧提示策略做 A/B，确认关键需求点召回不下降，并补充供应商级上下文上限与提示注入回归。
+当前自动化测试已覆盖正常规模正文首轮直传、读取工具调用为 0、`sourceTexts` 跨固定输入检索、置信区间多证据召回、无效线索局部忽略、服务端需求点去重、Evidence ID/引用生成与共享证据去重、coverage 生成、投递清单校验、评审分析与需求点对应、模型字段保留和容错兜底，以及超长正文确定性切换 `segmented_context`。
 
 运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”配置并探测一个启用 `tool_calling` 能力的生成式模型。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun 后立即返回；服务端先独立运行需求点提取并冻结结果，再用全新会话启动需求评审，最终合并为正式结果，页面通过 ReviewRun 接口恢复并轮询两个阶段：
 

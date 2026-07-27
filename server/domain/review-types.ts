@@ -80,6 +80,22 @@ export interface CandidateRequirementPointExtractionV3 {
   requirementPoints: CandidateRequirementPointDraft[]
 }
 
+export interface CandidateRequirementPointSourceDraft extends Omit<CandidateRequirementPointDraft, 'evidenceDrafts'> {
+  sourceTexts: string[]
+}
+
+export interface CandidateRequirementPointExtractionV4 {
+  requirementPoints: CandidateRequirementPointSourceDraft[]
+}
+
+export interface CandidateRequirementPointExtractionV5 {
+  requirementPoints: Array<{
+    title?: string
+    description: string
+    sourceTexts: string[]
+  }>
+}
+
 export interface CandidateRequirementReview {
   summary: {
     overallAssessment: OverallAssessment
@@ -90,10 +106,29 @@ export interface CandidateRequirementReview {
   findings: CandidateFinding[]
 }
 
+export interface CandidateRequirementReviewV3 {
+  summary?: {
+    overallAssessment?: OverallAssessment
+    score?: number
+    strengths?: string[]
+    risks?: string[]
+  }
+  analyses: Array<{
+    requirementPointRef: string
+    analysis: string
+    title?: string
+    type?: ReviewFindingType
+    severity?: ReviewSeverity
+    confidence?: number
+    impact?: string
+    recommendation?: string
+  }>
+}
+
 export interface CandidateReviewResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
 }
 
-export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementReview
+export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementPointExtractionV4 | CandidateRequirementPointExtractionV5 | CandidateRequirementReview | CandidateRequirementReviewV3
 
 export interface ValidationIssue { path: string; message: string }
 export interface ValidationReport { valid: boolean; issues: ValidationIssue[] }

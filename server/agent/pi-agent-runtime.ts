@@ -44,16 +44,16 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     } : undefined
     const registry = stage.isExtraction
       ? createRequirementPointExtractionToolRegistry(this.store, async value => {
-        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV3(value, input.snapshot, required(deliveryManifest, '输入投递证明不存在'))
+        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV5(value, input.snapshot, required(deliveryManifest, '输入投递证明不存在'))
         if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
         candidate = normalized.result
         lastSubmissionIssues = []
         return { accepted: true }
       })
       : createRequirementReviewToolRegistry(async value => {
-        const validation = await new RequirementReviewValidator().validate(value, stage.fixedExtraction, input.snapshot)
-        if (!validation.valid) { lastSubmissionIssues = validation.issues; return { accepted: false, issues: validation.issues } }
-        candidate = value
+        const normalized = new RequirementReviewValidator().normalizeV3(value, stage.fixedExtraction, input.snapshot)
+        if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
+        candidate = normalized.result
         lastSubmissionIssues = []
         return { accepted: true }
       })
@@ -192,10 +192,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         if (evidenceRepairRequired) {
           agent.state.tools = tools
           activeToolNames = new Set(tools.map(tool => tool.name))
-          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: 'Evidence 校验失败后开放 knowledge_search、knowledge_read_chunk 与 evidence_validate_batch，用于失败 Evidence 的定点修复。' })
+          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: '原文检索未能为需求点建立 Evidence 后开放 knowledge_search 与 knowledge_read_chunk，用于补充更准确的 sourceTexts。' })
         }
         const repairGuidance = evidenceRepairRequired
-          ? '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请只修正需求点内部的 evidenceDrafts。必要时可用 knowledge_read_chunk 或 evidence_validate_batch 复核引用。'
+          ? '正文投递覆盖、资产版本、Chunk、需求点 ID、Evidence ID、定位和 evidenceRefs 均由服务端负责；请只修正需求点内部的 sourceTexts，必要时可用 knowledge_read_chunk 核对原文。'
           : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
         await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
         await agent.waitForIdle()
@@ -301,13 +301,13 @@ type StageConfiguration = {
   isExtraction: true
   submitToolId: 'requirement-points.submit_result'
   submitPiName: 'requirement_points_submit_result'
-  schemaVersion: 'requirement-point-extraction/v3'
+  schemaVersion: 'requirement-point-extraction/v5'
   agentLabel: 'RequirementPointExtractionAgent'
 } | {
   isExtraction: false
   submitToolId: 'review.submit_result'
   submitPiName: 'review_submit_result'
-  schemaVersion: 'requirement-review/v2'
+  schemaVersion: 'requirement-review/v3'
   agentLabel: 'RequirementReviewAgent'
   fixedExtraction: CandidateRequirementPointExtraction
 }
@@ -317,7 +317,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: true,
     submitToolId: 'requirement-points.submit_result',
     submitPiName: 'requirement_points_submit_result',
-    schemaVersion: 'requirement-point-extraction/v3',
+    schemaVersion: 'requirement-point-extraction/v5',
     agentLabel: 'RequirementPointExtractionAgent',
   }
   if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
@@ -325,14 +325,14 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: false,
     submitToolId: 'review.submit_result',
     submitPiName: 'review_submit_result',
-    schemaVersion: 'requirement-review/v2',
+    schemaVersion: 'requirement-review/v3',
     agentLabel: 'RequirementReviewAgent',
     fixedExtraction: input.fixedRequirementPointExtraction,
   }
 }
 
 function hasEvidenceValidationIssue(issues: Array<{ path: string; message: string }>) {
-  return issues.some(issue => issue.path.includes('.evidenceDrafts[') || issue.path.endsWith('.evidenceDrafts') || issue.path.startsWith('evidence['))
+  return issues.some(issue => issue.path.includes('.sourceTexts') || issue.path.includes('.evidenceDrafts[') || issue.path.endsWith('.evidenceDrafts') || issue.path.startsWith('evidence['))
 }
 
 function formatValidationIssues(issues: Array<{ path: string; message: string }>) {
