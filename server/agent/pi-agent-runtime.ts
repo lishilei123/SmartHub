@@ -8,11 +8,14 @@ import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, Ag
 import type { AgentCandidateResult, CandidateRequirementPointExtraction } from '../domain/review-types.js'
 import type { ToolDescriptor } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
+import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
+import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { defaultTokenCodec } from '../application/content.js'
 import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
 import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask } from './requirement-analysis-agent.js'
+import { AgentSkillRuntime } from './skill-runtime.js'
 
 const require = createRequire(import.meta.url)
 const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -28,7 +31,7 @@ export interface PiRuntimeBindings {
 }
 
 export class PiAgentRuntimeAdapter implements AgentRuntime {
-  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}) {}
+  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore) {}
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
     let candidate: AgentCandidateResult | undefined
@@ -57,6 +60,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         lastSubmissionIssues = []
         return { accepted: true }
       })
+    const skillPrompt = await new AgentSkillRuntime(this.store, this.skillPackages).render(input.snapshot.agentDefinition)
+    const capabilityLoad = await new AgentCapabilityLoader(this.store).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE })
     const allowedToolIds = new Set(input.snapshot.agentDefinition.toolIds)
@@ -72,7 +77,9 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       events.push(value)
       await input.onEvent?.(value)
     }
+    for (const warning of capabilityLoad.warnings) await record({ type: 'capability_binding_unavailable', content: warning })
     if (unavailableToolIds.length) await record({ type: 'tool_bindings_unavailable', content: `以下目录绑定尚未注册到当前 Agent 运行时，因此不会暴露给模型：${unavailableToolIds.join('、')}` })
+    if (skillPrompt) await record({ type: 'skill_bindings_loaded', content: `${input.snapshot.agentDefinition.skillBindings.filter(binding => binding.enabled).length} 个 Skill 已按发布快照加载。` })
     const controller = new AbortController()
     const deadline = setTimeout(() => controller.abort(new Error('AGENT_DEADLINE_EXCEEDED')), limits.deadlineMs)
     const abort = () => controller.abort(signal.reason ?? new Error('AGENT_CANCELLED'))
@@ -113,12 +120,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       }
       const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission))
       const primaryToolNames = new Set(stage.isExtraction
-        ? descriptors.filter(descriptor => descriptor.id === stage.submitToolId).map(descriptor => descriptor.piName)
+        ? descriptors.filter(descriptor => descriptor.id === stage.submitToolId || !['knowledge.search', 'knowledge.read_chunk'].includes(descriptor.id)).map(descriptor => descriptor.piName)
         : descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
       agent = new Agent({
-        initialState: { systemPrompt: input.snapshot.agentDefinition.systemPrompt, model, tools: primaryTools, thinkingLevel: limits.reasoningEffort ?? 'medium' },
+        initialState: { systemPrompt: [input.snapshot.agentDefinition.systemPrompt, skillPrompt].filter(Boolean).join('\n\n'), model, tools: primaryTools, thinkingLevel: limits.reasoningEffort ?? 'medium' },
         streamFn,
         getApiKey: () => input.model.apiKey,
         sessionId: `${input.snapshot.runId}:${input.snapshot.agentDefinition.agentKey}`,
@@ -255,6 +262,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       clearTimeout(deadline)
       signal.removeEventListener('abort', abort)
       if (agent?.state.isStreaming) agent.abort()
+      await capabilityLoad.close()
     }
   }
 

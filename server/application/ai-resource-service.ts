@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { AiResource, AiResourceKind, McpServerResource, SkillPackageMetadata, SkillResource, ToolResource } from '../domain/types.js'
 import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import type { StateStore } from '../infrastructure/store.js'
+import { applicationRoot, codeRoot, deployedModuleCandidates } from '../infrastructure/runtime-paths.js'
 
 export type AiResourceCatalog = {
   mcpServers: McpServerResource[]
@@ -19,7 +19,6 @@ const builtInTools: ToolResource[] = [
   builtInTool('review.submit_result', '提交评审分析', '提交需求点评审候选结果，由服务端校验并发布。', '4.0.0', 'internal_write', 30_000, 'server/tools/review-submit-result.ts'),
 ]
 const retiredBuiltInToolKeys = new Set(['evidence.validate_batch'])
-const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url))
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 
@@ -28,7 +27,7 @@ export class AiResourceService {
 
   async list(): Promise<AiResourceCatalog> {
     let resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
-    if (builtInsNeedSync(resources)) {
+    if (builtInsNeedSync(resources) || catalogMetadataNeedsSync(resources)) {
       await this.ensureBuiltIns()
       resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
     }
@@ -116,11 +115,9 @@ export class AiResourceService {
     if (!tool) throw new Error('工具不存在')
     if (!['builtin', 'local'].includes(tool.source)) throw new Error('只有内置或本地工具可以查看源码')
     const sourcePath = normalizeSourcePath(tool.sourcePath)
-    const candidate = resolve(workspaceRoot, ...sourcePath.split('/'))
-    const [actualPath, allowedRoots] = await Promise.all([
-      realpath(candidate).catch(() => { throw new Error('工具源码文件不存在') }),
-      Promise.all(allowedSourceRoots.map(root => realpath(resolve(workspaceRoot, ...root.split('/'))).catch(() => null))),
-    ])
+    const candidates = deployedModuleCandidates(sourcePath)
+    const actualPath = await firstRealPath(candidates)
+    const allowedRoots = await Promise.all([...new Set([applicationRoot, codeRoot])].flatMap(base => allowedSourceRoots.map(root => resolve(base, ...root.split('/')))).map(root => realpath(root).catch(() => null)))
     const insideAllowedRoot = allowedRoots.some(root => root && (actualPath === root || actualPath.startsWith(`${root}${sep}`)))
     if (!insideAllowedRoot) throw new Error('工具源码路径超出允许目录')
     const sourceStat = await stat(actualPath)
@@ -133,6 +130,12 @@ export class AiResourceService {
   private async ensureBuiltIns() {
     await this.transaction(state => {
       state.aiResources = state.aiResources.filter(item => !(item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key)))
+      state.aiResources = state.aiResources.map(item => {
+        if (item.builtIn) return item
+        if (item.kind === 'mcp') return { ...item, status: 'ready', ...(item.authType === 'none' || item.credentialEnv ? {} : { credentialEnv: defaultCredentialEnv('MCP', item.key) }) }
+        if (item.kind === 'skill') return { ...item, status: 'ready' }
+        return { ...item, status: item.source !== 'http' || item.endpoint ? 'ready' : 'draft' }
+      })
       for (const builtIn of builtInTools) {
         const index = state.aiResources.findIndex(item => item.kind === 'tool' && item.key === builtIn.key)
         if (index < 0) state.aiResources.push(structuredClone(builtIn))
@@ -146,6 +149,22 @@ export class AiResourceService {
       ? this.store.transactionScope('ai_configuration', operation)
       : this.store.transaction(operation)) as Promise<T>
   }
+}
+
+function catalogMetadataNeedsSync(resources: AiResource[]) {
+  return resources.some(item => !item.builtIn && (
+    (item.kind === 'mcp' && (item.status !== 'ready' || (item.authType !== 'none' && !item.credentialEnv)))
+    || (item.kind === 'skill' && item.status !== 'ready')
+    || (item.kind === 'tool' && item.status !== (item.source !== 'http' || item.endpoint ? 'ready' : 'draft'))
+  ))
+}
+
+async function firstRealPath(candidates: string[]) {
+  for (const candidate of candidates) {
+    const actual = await realpath(candidate).catch(() => null)
+    if (actual) return actual
+  }
+  throw new Error('工具源码文件不存在')
 }
 
 function catalog(resources: AiResource[]): AiResourceCatalog {
@@ -180,13 +199,14 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
     description: optionalText(value.description, 1000),
     version: version(value.version),
     enabled: value.enabled !== false,
-    status: fixed.builtIn ? 'ready' as const : 'draft' as const,
+    status: 'ready' as const,
   }
   if (kind === 'mcp') {
     const transport = oneOf(value.transport, ['streamable_http', 'sse'] as const, 'MCP 传输类型')
     const endpoint = httpUrl(value.endpoint, 'MCP Endpoint')
     const authType = oneOf(value.authType ?? 'none', ['none', 'bearer', 'oauth2'] as const, 'MCP 鉴权类型')
-    return { ...base, kind, transport, endpoint, authType, toolIds: keys(value.toolIds) }
+    const credentialEnv = authType === 'none' ? undefined : environmentName(value.credentialEnv ?? defaultCredentialEnv('MCP', String(value.key ?? '')))
+    return { ...base, kind, transport, endpoint, authType, credentialEnv, toolIds: keys(value.toolIds) }
   }
   if (kind === 'skill') return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds: keys(value.toolIds), tags: stringList(value.tags, 20, 50), package: value.package === undefined ? undefined : skillPackage(value.package) }
   const source = oneOf(value.source ?? 'local', ['builtin', 'local', 'http', 'mcp'] as const, '工具来源')
@@ -195,7 +215,11 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
   const timeoutMs = integer(value.timeoutMs ?? 30_000, '工具超时', 1_000, 300_000)
   const sourcePath = source === 'builtin' || source === 'local' ? normalizeSourcePath(value.sourcePath) : undefined
   const mcpServerId = source === 'mcp' ? text(value.mcpServerId, 'MCP 服务', 200) : undefined
-  return { ...base, kind, source, risk, timeoutMs, sourcePath, mcpServerId }
+  const endpoint = source === 'http' ? httpUrl(value.endpoint, 'HTTP 工具 Endpoint') : undefined
+  const authType = source === 'http' ? oneOf(value.authType ?? 'none', ['none', 'bearer'] as const, 'HTTP 工具鉴权类型') : undefined
+  const credentialEnv = source === 'http' && authType === 'bearer' ? environmentName(value.credentialEnv ?? defaultCredentialEnv('HTTP_TOOL', String(value.key ?? ''))) : undefined
+  const parameters = source === 'http' ? jsonObjectSchema(value.parameters) : undefined
+  return { ...base, kind, source, risk, timeoutMs, sourcePath, mcpServerId, endpoint, authType, credentialEnv, parameters }
 }
 
 function validateUnique(resources: AiResource[], candidate: AiResource) {
@@ -221,6 +245,14 @@ function stringList(value: unknown, maxItems: number, maxLength: number) { if (v
 function integer(value: unknown, label: string, min: number, max: number) { const result = Number(value); if (!Number.isInteger(result) || result < min || result > max) throw new Error(`${label}必须是 ${min} 到 ${max} 之间的整数`); return result }
 function oneOf<T extends readonly string[]>(value: unknown, allowed: T, label: string): T[number] { if (!allowed.includes(value as T[number])) throw new Error(`${label}无效`); return value as T[number] }
 function httpUrl(value: unknown, label: string) { const result = text(value, label, 2000); let parsed: URL; try { parsed = new URL(result) } catch { throw new Error(`${label}必须是有效 URL`) }; if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(`${label}仅支持 HTTP/HTTPS`); return parsed.toString().replace(/\/$/u, '') }
+function environmentName(value: unknown) { const result = text(value, '凭据环境变量', 200); if (!/^[A-Z_][A-Z0-9_]*$/u.test(result)) throw new Error('凭据环境变量只能使用大写字母、数字和下划线'); return result }
+function defaultCredentialEnv(prefix: string, resourceKey: string) { return `SMARTHUB_${prefix}_${resourceKey.toLocaleUpperCase().replace(/[^A-Z0-9]+/gu, '_')}_TOKEN` }
+function jsonObjectSchema(value: unknown): Record<string, unknown> {
+  const schema = value === undefined ? { type: 'object', additionalProperties: true } : object(value)
+  if (schema.type !== 'object') throw new Error('工具参数 Schema 的 type 必须是 object')
+  if (Buffer.byteLength(JSON.stringify(schema), 'utf8') > 64 * 1024) throw new Error('工具参数 Schema 不能超过 64 KB')
+  return structuredClone(schema)
+}
 function kindLabel(kind: AiResourceKind) { return kind === 'mcp' ? ' MCP ' : kind === 'skill' ? ' Skill ' : '工具' }
 function skillPackage(value: unknown): SkillPackageMetadata {
   const input = object(value)

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { AgentDefinitionVersion, ReviewRunSnapshot } from '../domain/agent-types.js'
+import { toolsetContentHash } from '../application/ai-resource-hash.js'
 import type { CandidateRequirementPointExtraction } from '../domain/review-types.js'
 
 export const REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION = '7.1.0'
@@ -108,7 +109,7 @@ export function createAgentDefinitionVersion(input: {
     systemPrompt: input.systemPrompt, taskTemplate: input.taskTemplate,
     promptRef: { promptKey: input.promptKey, version: input.version, contentSha256: promptContentSha256 },
     toolsetVersion: input.version,
-    toolsetContentSha256: createHash('sha256').update(JSON.stringify(input.tools)).digest('hex'),
+    toolsetContentSha256: toolsetContentHash(input.tools),
     skillBindings: structuredClone(input.skills ?? []), mcpBindings: structuredClone(input.mcps ?? []), toolIds: input.tools.map(item => item.split('@')[0]), limits: input.limits,
   }
   return { ...value, contentSha256: createHash('sha256').update(JSON.stringify(value)).digest('hex') }

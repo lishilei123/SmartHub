@@ -135,7 +135,7 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
       status: 'draft',
       builtIn: false,
       entrypoint: 'ai/skills/quality-review/SKILL.md',
-      toolIds: ['review.submit_result'],
+      toolIds: ['review.submit_result', 'quality.lookup'],
       tags: ['质量', '评审'],
       createdAt: '2026-07-27T00:00:00.000Z',
       updatedAt: '2026-07-27T00:00:00.000Z',
@@ -147,6 +147,15 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
   assert.deepEqual(initial.requiredMcpServerKeys, [])
   assert.deepEqual(initial.draft.definition.skillKeys, [])
   assert.deepEqual(initial.draft.definition.mcpServerKeys, [])
+
+  await assert.rejects(() => service.save({
+    agentKey: 'requirementReview', revision: initial.draft.revision, routing: initial.draft.routing,
+    definition: { ...initial.draft.definition, skillKeys: ['quality.review'] },
+  }), /依赖未选择工具/u)
+  await assert.rejects(() => service.save({
+    agentKey: 'requirementReview', revision: initial.draft.revision, routing: initial.draft.routing,
+    definition: { ...initial.draft.definition, toolIds: [...initial.draft.definition.toolIds, 'quality.lookup'] },
+  }), /必须同时选择其 MCP 服务/u)
 
   const saved = await service.save({
     agentKey: 'requirementReview',
@@ -169,7 +178,7 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
   assert.deepEqual(published.agentDefinition.toolIds, ['review.submit_result', 'knowledge.search', 'quality.lookup'])
   await assert.rejects(() => new AiResourceService(store).delete('skill', 'skill-quality-review'), /仍被 Agent 草稿引用/)
   await assert.rejects(() => new AiResourceService(store).delete('mcp', 'mcp-quality-review'), /仍被工具引用/)
-  await assert.rejects(() => new AiResourceService(store).delete('tool', 'tool-quality-lookup'), /仍被 Agent 草稿引用/)
+  await assert.rejects(() => new AiResourceService(store).delete('tool', 'tool-quality-lookup'), /仍被 Skill 引用/)
 
   await store.transaction(state => {
     const skill = state.aiResources.find(item => item.kind === 'skill' && item.key === 'quality.review')!

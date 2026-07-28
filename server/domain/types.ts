@@ -61,6 +61,7 @@ export interface McpServerResource extends AiResourceBase {
   transport: 'streamable_http' | 'sse'
   endpoint: string
   authType: 'none' | 'bearer' | 'oauth2'
+  credentialEnv?: string
   toolIds: string[]
 }
 
@@ -90,6 +91,10 @@ export interface ToolResource extends AiResourceBase {
   timeoutMs: number
   sourcePath?: string
   mcpServerId?: string
+  endpoint?: string
+  authType?: 'none' | 'bearer'
+  credentialEnv?: string
+  parameters?: Record<string, unknown>
 }
 
 export type AiResource = McpServerResource | SkillResource | ToolResource

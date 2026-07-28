@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { KnowledgeService } from './application/knowledge-service.js'
 import { ModelService } from './application/model-service.js'
 import { RequirementAnalysisService } from './application/requirement-analysis-service.js'
@@ -15,14 +14,15 @@ import { ReviewQaService } from './application/review-qa-service.js'
 import { AgentConfigurationService } from './application/agent-configuration-service.js'
 import { AiResourceService } from './application/ai-resource-service.js'
 import { SkillPackageStore } from './infrastructure/skill-package-store.js'
+import { applicationRoot, dataRoot } from './infrastructure/runtime-paths.js'
 
-const envFile = resolve(fileURLToPath(new URL('../.env.local', import.meta.url)))
+const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
 
-const dataFile = process.env.SMARTHUB_DATA_FILE ?? resolve(fileURLToPath(new URL('../data/smarthub.json', import.meta.url)))
-const documentRoot = process.env.SMARTHUB_DOCUMENT_ROOT ?? resolve(fileURLToPath(new URL('../data/knowledge-bases', import.meta.url)))
-const modelRoot = process.env.SMARTHUB_MODEL_ROOT ?? resolve(fileURLToPath(new URL('../data/models', import.meta.url)))
-const skillRoot = process.env.SMARTHUB_SKILL_ROOT ?? resolve(fileURLToPath(new URL('../data/skills', import.meta.url)))
+const dataFile = process.env.SMARTHUB_DATA_FILE ?? resolve(dataRoot, 'smarthub.json')
+const documentRoot = process.env.SMARTHUB_DOCUMENT_ROOT ?? resolve(dataRoot, 'knowledge-bases')
+const modelRoot = process.env.SMARTHUB_MODEL_ROOT ?? resolve(dataRoot, 'models')
+const skillRoot = process.env.SMARTHUB_SKILL_ROOT ?? resolve(dataRoot, 'skills')
 const production = process.env.NODE_ENV === 'production'
 const databaseUrl = process.env.SMARTHUB_FORCE_JSON_STORE === 'true' ? undefined : process.env.DATABASE_URL
 
@@ -36,7 +36,7 @@ export const modelService = new ModelService(stateStore)
 export const skillPackageStore = new SkillPackageStore(skillRoot)
 export const aiResourceService = new AiResourceService(stateStore, skillPackageStore)
 export const agentConfigurationService = new AgentConfigurationService(stateStore)
-export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore)
+export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore, {}, skillPackageStore)
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService)
 export const reviewQaRuntime = new PiReviewQaRuntimeAdapter()
 export const reviewQaService = new ReviewQaService(stateStore, reviewQaRuntime)

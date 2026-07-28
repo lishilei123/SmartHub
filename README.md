@@ -27,8 +27,8 @@
 - 本地模型添加框提供经过 Transformers.js 模型页核对的推荐模型，可搜索并一键填入，同时保留任意 Hugging Face 模型名称的自由输入；
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
-- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存，不再使用页面级“保存配置”；MCP、Skill、工具页同样可即时新增、编辑、启停和删除资源。MCP 仅登记 HTTP/S 服务、传输/鉴权类型和远程工具范围，Skill 可受控上传 ZIP 或兼容登记手动入口并显式选择依赖工具，工具按内置/本地/HTTP/MCP 来源、风险与超时独立治理；内置和本地工具可在页面中只读查看真实源码，本地工具源码路径只允许指向仓库内 `server/tools` 或 `ai/tools` 下的 TypeScript/JavaScript 文件。现有四个需求评审工具自动登记为不可删除的内置工具，并分别维护独立实现文件；`requirement-tools.ts` 只负责按 Agent 阶段组装注册表。资源目录持久化到 PostgreSQL/JSON，但登记 MCP、自定义工具或上传 Skill 包不等于已接入运行时；Agent 仍只能使用服务端实际注册并授权的能力；模型连接读取和保存响应可回显 Base URL，但不回显 API Key，编辑时 API Key 留空会保留数据库中的旧值；
-- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent 与需求评审 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision、生效版本和版本历史。Agent 配置直接列出模型管理中的完整 Tool、MCP、Skill 目录，不再按 Agent 使用硬编码的局部工具列表；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。发布时固定 Toolset 版本 Hash、MCP 版本与策略 Hash、Skill 版本与配置 Hash；发布前校验全部选择仍存在且启用、模型健康/能力、必需提交工具和参数上限；
+- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。Skill ZIP 或 `ai/skills` 手动入口会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent，包内脚本不会自动执行。自定义 Tool 支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；本地模块必须导出 `parameters` 与 `execute(arguments, context, signal)`，HTTP Tool 固定使用 POST JSON、JSON Schema、响应大小限制与可选 Bearer 环境变量。所有能力仍经过 Agent Tool 白名单、风险、超时、调用次数与重复调用策略治理；
+- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent 与需求评审 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision、生效版本和版本历史。Agent 配置直接列出模型管理中的完整 Tool、MCP、Skill 目录；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前校验 Skill 依赖工具、MCP Tool 与所属 MCP 服务同时被选择，以及全部资源、模型能力和参数上限。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；两个 Agent 未提交结果时分别强制选择 `requirement_points_submit_result` 或 `review_submit_result`；提交工具先执行对应阶段的独立预校验，无效候选把具体问题返回模型并允许修正后重新提交，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
 - 需求分析上传支持 Markdown、TXT 和 ZIP；当前项目版本的文件统一入库到 `版本文档/{项目版本名}/需求文档/`，ZIP 保留包内子目录和图片相对路径；上传区展示文件读取、任务提交、解析/Embedding、向量索引发布和项目版本绑定的真实进度，成功结果展示 15 秒后自动收起，失败结果保留。等待窗口为 10 分钟，批量上传按资产独立绑定并反馈部分失败，避免后端仍在处理却被前端误报整体失败；上传完成的固定需求资产版本自动绑定到当前项目版本。评审接口按 `projectVersionId` 校验版本状态和需求绑定；正式 ReviewRun、固定快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON，页面刷新后按项目版本恢复真实历史；
@@ -109,7 +109,31 @@ Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文�
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
-进入“系统管理 → Agent 配置”后，使用顶部中文下拉框选择“需求点提取 Agent”或“需求评审 Agent”。模型与路由、提示词、Tool/MCP/Skill、版本记录均随当前选中的 Agent 切换；资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布新版本”会先保存当前 Agent 草稿，再只发布该 Agent 的下一不可变版本。两个 Agent 的版本号和生效状态互不影响；发布会校验所选资源仍存在且启用、当前 Agent 的默认及启用回退模型已经健康探测、具备工具调用/所选结构化输出能力，且输出 Token 不超过模型上限。目录绑定不会绕过运行时：只有已注册 Handler 的 Tool 才会暴露给模型，尚未接入的 Tool/MCP 会保留在版本快照中并显示“待接入”，不会导致整个 Agent 运行失败。
+进入“系统管理 → Agent 配置”后，使用顶部中文下拉框选择“需求点提取 Agent”或“需求评审 Agent”。模型与路由、提示词、Tool/MCP/Skill、版本记录均随当前选中的 Agent 切换；资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布新版本”会先保存当前 Agent 草稿，再只发布该 Agent 的下一不可变版本。两个 Agent 的版本号和生效状态互不影响；发布会校验资源依赖、模型健康与工具调用/结构化输出能力。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；无法连接、未发现或发生漂移的扩展 Tool 会记录 `capability_binding_unavailable`，不会被暴露给模型；固定结果提交工具仍保持可用。
+
+## 生产构建与运行
+
+`npm run build` 同时生成前端 `dist/` 和可直接由 Node.js 运行的服务端 `dist-server/`。生产 API 会从 `dist/` 提供前端与 SPA 回退，因此不再依赖 Vite 开发服务器；API 和 Worker 使用相同代码产物启动：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+npm ci --omit=dev
+npm run start:api:dist
+npm run start:worker:dist
+```
+
+生产模式必须配置 `DATABASE_URL`。应用程序目录可通过 `SMARTHUB_APP_ROOT` 指定；所有可写运行数据默认位于其 `data/`，正式部署应通过 `SMARTHUB_DATA_ROOT` 指向应用包外的持久化目录，也可继续分别覆盖 `SMARTHUB_MODEL_ROOT`、`SMARTHUB_DOCUMENT_ROOT`、`SMARTHUB_SKILL_ROOT` 和 `SMARTHUB_DATA_FILE`。升级或替换应用包时必须保留数据库与该外部数据目录。
+
+MCP/HTTP 凭据使用资源页面展示的环境变量名称注入，例如：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$env:SMARTHUB_MCP_ISSUES_MCP_TOKEN = '<access-token>'
+$env:SMARTHUB_HTTP_TOOL_ISSUES_LOOKUP_TOKEN = '<bearer-token>'
+npm run start:api:dist
+```
+
+本地扩展模块应在构建前放到 `ai/tools` 或 `server/tools`，TypeScript 会输出到 `dist-server`；安装后扩展则应部署为同一允许目录下的 JavaScript 模块。示例契约见 `ai/tools/example-echo.ts`。
 
 ## 验证
 

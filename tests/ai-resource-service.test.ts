@@ -37,7 +37,8 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
   })
   assert.equal(mcp.kind, 'mcp')
   assert.equal(mcp.endpoint, 'https://mcp.example.com/mcp')
-  assert.equal(mcp.status, 'draft')
+  assert.equal(mcp.status, 'ready')
+  assert.equal(mcp.credentialEnv, 'SMARTHUB_MCP_ISSUES_MCP_TOKEN')
 
   const tool = await service.create('tool', {
     key: 'issues.list', name: '查询缺陷', description: '查询缺陷列表', version: '1.0.0', enabled: true,
@@ -52,7 +53,7 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
   })
   assert.equal(skill.kind, 'skill')
   assert.deepEqual(skill.toolIds, ['issues.list', 'knowledge.search'])
-  assert.equal(skill.status, 'draft')
+  assert.equal(skill.status, 'ready')
 
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
@@ -92,6 +93,9 @@ test('AI 资源目录校验标识、引用和内置工具保护', async () => {
   await assert.rejects(() => service.create('mcp', { key: 'Bad Key', name: '错误', endpoint: 'file:///tmp/mcp', transport: 'sse', authType: 'none' }), /资源标识/)
   await assert.rejects(() => service.create('skill', { key: 'bad.skill', name: '错误 Skill', entrypoint: 'SKILL.md', toolIds: ['missing.tool'] }), /未注册工具/)
   await assert.rejects(() => service.create('tool', { key: 'remote.tool', name: '远程工具', source: 'mcp', risk: 'read', timeoutMs: 1000, mcpServerId: 'missing' }), /MCP 服务/)
+  await assert.rejects(() => service.create('tool', { key: 'http.missing', name: '错误 HTTP 工具', source: 'http', risk: 'network_read', timeoutMs: 1000 }), /HTTP 工具 Endpoint/)
+  const http = await service.create('tool', { key: 'http.lookup', name: 'HTTP 查询', source: 'http', risk: 'network_read', timeoutMs: 1000, endpoint: 'https://tools.example.com/invoke', authType: 'bearer', parameters: { type: 'object', properties: { query: { type: 'string' } } } })
+  assert.equal(http.kind === 'tool' ? http.credentialEnv : '', 'SMARTHUB_HTTP_TOOL_HTTP_LOOKUP_TOKEN')
   await assert.rejects(() => service.create('tool', { key: 'unsafe.local', name: '越界本地工具', source: 'local', sourcePath: 'server/tools/../runtime.ts', risk: 'read', timeoutMs: 1000 }), /相对文件路径/)
   const local = await service.create('tool', { key: 'safe.local', name: '安全本地工具', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 })
   const localSource = await service.source(local.id)

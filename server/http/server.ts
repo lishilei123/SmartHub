@@ -1,11 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { resolve } from 'node:path'
+import { readFile, stat } from 'node:fs/promises'
+import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import type { ReviewQuestionQuote } from '../domain/review-qa-types.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
 import { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
+import { applicationRoot } from '../infrastructure/runtime-paths.js'
+
+const webRoot = resolve(applicationRoot, 'dist')
 
 export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore }
 
@@ -154,7 +158,27 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   if (method === 'POST' && search) { const body = await json(request); return send(response, 200, await service.search(search[1], { query: String(body.query ?? ''), mode: body.mode as 'keyword' | 'vector' | 'hybrid' | undefined, logicalPath: body.logicalPath as string | undefined })) }
   const rebuild = /^\/api\/knowledge-bases\/([^/]+)\/rebuild$/.exec(url.pathname)
   if (method === 'POST' && rebuild) { const body = await json(request); if (body.outcome) return send(response, 202, await service.rebuild(rebuild[1], body.outcome as 'success' | 'failure' | 'cancel')); const task = await service.queueRebuild(rebuild[1]); if (task.status === 'queued') await notifyTask(task.id); return send(response, 202, { task }) }
+  if (method === 'GET' && !url.pathname.startsWith('/api/') && await sendWeb(response, url.pathname)) return
   send(response, 404, { error: '接口不存在' })
+}
+
+async function sendWeb(response: ServerResponse, pathname: string) {
+  const relative = decodeURIComponent(pathname).replace(/^\/+|\\/gu, '/')
+  const requested = resolve(webRoot, ...relative.split('/').filter(Boolean))
+  if (requested !== webRoot && !requested.startsWith(`${webRoot}${sep}`)) return false
+  const requestedStat = await stat(requested).catch(() => null)
+  if (!requestedStat?.isFile() && extname(requested)) return false
+  const target = requestedStat?.isFile() ? requested : resolve(webRoot, 'index.html')
+  const targetStat = await stat(target).catch(() => null)
+  if (!targetStat?.isFile()) return false
+  const body = await readFile(target)
+  response.writeHead(200, { 'content-type': webContentType(target), 'content-length': body.length, 'cache-control': target.endsWith('index.html') ? 'no-cache' : 'public, max-age=31536000, immutable', 'x-content-type-options': 'nosniff' })
+  response.end(body)
+  return true
+}
+
+function webContentType(path: string) {
+  return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon' } as Record<string, string>)[extname(path).toLocaleLowerCase()] ?? 'application/octet-stream'
 }
 
 function stringList(value: unknown) { return Array.isArray(value) ? value.map(String) : undefined }

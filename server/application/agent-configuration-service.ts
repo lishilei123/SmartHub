@@ -3,6 +3,7 @@ import { createAgentDefinitionVersion, createRequirementPointExtractionAgentDefi
 import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
+import { mcpPolicyHash, skillConfigurationHash, toolBindingToken } from './ai-resource-hash.js'
 
 const SCENE = 'requirement_analysis' as const
 const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview'] as const
@@ -216,6 +217,7 @@ function normalizeAgent(value: AgentDefinitionDraft | undefined, label: string, 
   if (!toolIds.includes(requiredTool)) throw new Error(`${label}必须保留结果提交工具 ${requiredTool}`)
   const skillKeys = normalizeSkillKeys(value.skillKeys, requiredSkillKeys, label, state)
   const mcpServerKeys = normalizeMcpServerKeys(value.mcpServerKeys, requiredMcpServerKeys, label, state)
+  validateCapabilityDependencies(toolIds, skillKeys, mcpServerKeys, label, state)
   const limits = value.limits
   if (!limits || typeof limits !== 'object') throw new Error(`${label}运行限制不能为空`)
   return {
@@ -236,6 +238,24 @@ function normalizeAgent(value: AgentDefinitionDraft | undefined, label: string, 
       ...(limits.reservedOutputTokens == null ? {} : { reservedOutputTokens: integer(limits.reservedOutputTokens, `${label}预留输出 Token`, 1_024, 262_144) }),
       ...(limits.correctionReserveTokens == null ? {} : { correctionReserveTokens: integer(limits.correctionReserveTokens, `${label}修正预留 Token`, 1_024, 262_144) }),
     },
+  }
+}
+
+function validateCapabilityDependencies(toolIds: string[], skillKeys: string[], mcpServerKeys: string[], label: string, state: DatabaseState) {
+  const selectedTools = new Set(toolIds)
+  for (const skill of resolveSkills(skillKeys, state)) {
+    const missing = skill.toolIds.filter(toolId => !selectedTools.has(toolId))
+    if (missing.length) throw new Error(`${label}选择的 Skill ${skill.key} 依赖未选择工具：${missing.join('、')}`)
+  }
+  const selectedMcps = new Set(mcpServerKeys)
+  const mcps = state.aiResources.filter((item): item is McpServerResource => item.kind === 'mcp')
+  const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
+  for (const toolId of toolIds) {
+    const tool = tools.find(item => item.key === toolId && item.source === 'mcp')
+    if (!tool) continue
+    const server = mcps.find(item => item.id === tool.mcpServerId)
+    if (!server || !selectedMcps.has(server.key)) throw new Error(`${label}选择的 MCP 工具 ${tool.key} 必须同时选择其 MCP 服务`)
+    if (!server.toolIds.includes(tool.key)) throw new Error(`${label}选择的工具 ${tool.key} 不在 MCP ${server.key} 的允许范围内`)
   }
 }
 
@@ -271,7 +291,7 @@ function publishedDefinition(agentKey: AgentConfigurationAgentKey, value: AgentD
     toolIds: [...server.toolIds],
     policyHash: mcpPolicyHash(server),
   }))
-  const tools = resolveTools(value.toolIds, state).map(tool => `${tool.key}@${tool.version}`)
+  const tools = resolveTools(value.toolIds, state).map(tool => toolBindingToken(tool))
   return createAgentDefinitionVersion({
     agentKey: builtIn.agentKey,
     agentType: builtIn.agentType,
@@ -425,19 +445,13 @@ function normalizeToolIds(value: unknown, label: string, state: DatabaseState) {
   if (unavailable.length) throw new Error(`${label}包含未启用工具：${unavailable.join('、')}`)
   return toolIds
 }
-function resolveTools(toolIds: string[], state: DatabaseState): Array<Pick<ToolResource, 'key' | 'version'>> {
+function resolveTools(toolIds: string[], state: DatabaseState): Array<ToolResource> {
   const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
   return toolIds.map(key => tools.find(tool => tool.key === key && tool.enabled) ?? builtInToolReference(key))
 }
-function builtInToolReference(key: string): Pick<ToolResource, 'key' | 'version'> {
+function builtInToolReference(key: string): ToolResource {
   const versions: Record<string, string> = { 'knowledge.search': '1.0.0', 'knowledge.read_chunk': '1.0.0', 'requirement-points.submit_result': '5.1.0', 'review.submit_result': '4.0.0' }
-  return { key, version: required(versions[key], `工具 ${key} 不存在或未启用`) }
-}
-function skillConfigurationHash(skill: SkillResource) {
-  return createHash('sha256').update(JSON.stringify({ key: skill.key, version: skill.version, entrypoint: skill.entrypoint, contentSha256: skill.package?.contentSha256, toolIds: skill.toolIds, tags: skill.tags })).digest('hex')
-}
-function mcpPolicyHash(server: McpServerResource) {
-  return createHash('sha256').update(JSON.stringify({ key: server.key, version: server.version, transport: server.transport, endpoint: server.endpoint, authType: server.authType, toolIds: server.toolIds })).digest('hex')
+  return { id: `builtin_tool_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'tool', key, name: key, description: '', version: required(versions[key], `工具 ${key} 不存在或未启用`), enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk: 'read', timeoutMs: 30_000, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
 }
 function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ? value : []).map(item => String(item).trim()).filter(Boolean))] }
 function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key)) }
