@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import JSZip from 'jszip'
+import { normalizeSkillRuntimePolicy, SKILL_RUNTIME_MANIFEST } from '../application/skill-runtime-policy.js'
 import type { SkillPackageMetadata } from '../domain/types.js'
 
 export const MAX_SKILL_ARCHIVE_BYTES = 20 * 1024 * 1024
@@ -14,7 +15,7 @@ export class SkillPackageStore {
 
   constructor(root: string) { this.root = resolve(root) }
 
-  async install(input: { key: string; version: string; fileName: string; archive: Buffer }): Promise<{ entrypoint: string; package: SkillPackageMetadata }> {
+  async install(input: { key: string; version: string; fileName: string; archive: Buffer }): Promise<{ entrypoint: string; package: SkillPackageMetadata; runtime?: import('../domain/types.js').SkillRuntimePolicy }> {
     if (!input.fileName.toLocaleLowerCase().endsWith('.zip')) throw new Error('Skill 包必须是 ZIP 文件')
     if (!input.archive.length) throw new Error('Skill ZIP 不能为空')
     if (input.archive.length > MAX_SKILL_ARCHIVE_BYTES) throw new Error('Skill ZIP 不能超过 20 MB')
@@ -53,6 +54,18 @@ export class SkillPackageStore {
       const content = new TextDecoder('utf-8', { fatal: true }).decode(entrypoints[0].data)
       if (!content.trim()) throw new Error('empty')
     } catch { throw new Error('SKILL.md 必须是非空 UTF-8 文本') }
+    const entrypointDirectory = dirname(entrypoints[0].path).replaceAll('\\', '/')
+    const manifestPath = entrypointDirectory === '.' ? SKILL_RUNTIME_MANIFEST : `${entrypointDirectory}/${SKILL_RUNTIME_MANIFEST}`
+    const manifestEntry = entries.find(entry => entry.path.toLocaleLowerCase() === manifestPath.toLocaleLowerCase())
+    let runtime: import('../domain/types.js').SkillRuntimePolicy | undefined
+    if (manifestEntry) {
+      let manifest: unknown
+      try { manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(manifestEntry.data)) }
+      catch { throw new Error(`${SKILL_RUNTIME_MANIFEST} 必须是有效的 UTF-8 JSON`) }
+      const prefix = entrypointDirectory === '.' ? '' : `${entrypointDirectory}/`
+      const relativeFiles = new Set(entries.filter(entry => entry.path.startsWith(prefix)).map(entry => entry.path.slice(prefix.length).toLocaleLowerCase()))
+      runtime = normalizeSkillRuntimePolicy(manifest, relativeFiles)
+    }
 
     const unpackedBytes = entries.reduce((sum, entry) => sum + entry.data.length, 0)
     if (unpackedBytes > MAX_SKILL_UNPACKED_BYTES) throw new Error('Skill ZIP 解压后不能超过 50 MB')
@@ -90,7 +103,7 @@ export class SkillPackageStore {
       unpackedBytes,
       files,
     }
-    return { entrypoint: `skill-package://${storageKey}/${metadata.entrypointPath}`, package: metadata }
+    return { entrypoint: `skill-package://${storageKey}/${metadata.entrypointPath}`, package: metadata, runtime }
   }
 
   async read(storageKey: string, relativePath: string) {
@@ -99,6 +112,18 @@ export class SkillPackageStore {
     const target = resolve(root, ...path.split('/'))
     assertInside(root, target)
     return readFile(target)
+  }
+
+  async resolveFile(storageKey: string, relativePath: string) {
+    const root = this.resolveStorageKey(storageKey)
+    const path = safeArchivePath(relativePath)
+    const target = resolve(root, ...path.split('/'))
+    assertInside(root, target)
+    const actualRoot = await realpath(root)
+    const actual = await realpath(target)
+    assertInside(actualRoot, actual)
+    if (!(await stat(actual)).isFile()) throw new Error(`Skill 文件不是普通文件：${path}`)
+    return actual
   }
 
   async remove(storageKey: string) {

@@ -7,8 +7,10 @@ import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { McpServerResource, ToolResource } from '../domain/types.js'
 import type { ToolExecutionContext, ToolExecutionResult } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
+import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import { applicationRoot, codeRoot, deployedModuleCandidates, moduleUrl } from '../infrastructure/runtime-paths.js'
 import { ToolRegistry } from './registry.js'
+import { SkillCapabilityRuntime } from './skill-capability.js'
 
 const MAX_REMOTE_RESULT_BYTES = 256 * 1024
 const MCP_CONNECT_TIMEOUT_MS = 20_000
@@ -17,12 +19,15 @@ const BUILT_IN_VERSIONS: Record<string, string> = {
   'knowledge.read_chunk': '1.0.0',
   'requirement-points.submit_result': '5.1.0',
   'review.submit_result': '4.0.0',
+  'review.answer_submit': '1.0.0',
+  'skill.execute_script': '1.0.0',
+  'skill.http_request': '1.0.0',
 }
 
 export interface CapabilityLoadResult { warnings: string[]; close(): Promise<void> }
 
 export class AgentCapabilityLoader {
-  constructor(private readonly store: StateStore) {}
+  constructor(private readonly store: StateStore, private readonly skillPackages?: SkillPackageStore) {}
 
   async load(definition: AgentDefinitionVersion, registry: ToolRegistry, signal: AbortSignal): Promise<CapabilityLoadResult> {
     const state = await this.store.snapshot()
@@ -38,6 +43,8 @@ export class AgentCapabilityLoader {
       warnings.push('Toolset 目录内容与发布快照不一致；自定义 Tool 已拒绝加载，请重新发布 Agent 配置。')
       return { warnings, close: async () => undefined }
     }
+
+    new SkillCapabilityRuntime(definition, state, this.skillPackages).register(definition, registry)
 
     const selected = resources.filter(tool => definition.toolIds.includes(tool.key) && !tool.builtIn)
     const mcpServers = state.aiResources.filter((item): item is McpServerResource => item.kind === 'mcp')

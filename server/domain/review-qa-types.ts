@@ -1,4 +1,4 @@
-import type { AgentModelConnection, ReviewRunSnapshot } from './agent-types.js'
+import type { AgentDefinitionVersion, AgentExecutionEvent, AgentModelConnection, ReviewRunSnapshot } from './agent-types.js'
 import type { CandidateReviewResult } from './review-types.js'
 
 export interface ReviewQuestionQuote {
@@ -23,9 +23,22 @@ export interface ReviewQaExecutionInput {
   reviewResult: CandidateReviewResult
   documentContent: string
   model: AgentModelConnection
+  agentDefinition: AgentDefinitionVersion
+  onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
+}
+
+export interface ReviewQaExecutionOutput {
+  candidate: ReviewAnswerCandidate
+  execution: {
+    agentKey: 'review-qa'
+    turns: number
+    toolCalls: number
+    toolErrors: number
+    framework: { name: 'pi-agent-core'; version: string }
+    events: AgentExecutionEvent[]
+  }
 }
 
 export interface ReviewQaRuntime {
-  answer(input: ReviewQaExecutionInput, signal: AbortSignal): Promise<ReviewAnswerCandidate>
+  answer(input: ReviewQaExecutionInput, signal: AbortSignal): Promise<ReviewQaExecutionOutput>
 }
-

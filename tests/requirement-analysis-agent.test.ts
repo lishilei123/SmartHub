@@ -8,13 +8,14 @@ import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
 import { PiReviewQaRuntimeAdapter } from '../server/agent/pi-review-qa-runtime.js'
 import { resolveEvidenceQuote, resolveEvidenceSourceText, searchEvidenceCandidates } from '../server/agent/evidence-locator.js'
 import { buildRequirementInputPlan } from '../server/agent/requirement-context-assembler.js'
-import { createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, REQUIREMENT_REVIEW_AGENT_VERSION } from '../server/agent/requirement-analysis-agent.js'
+import { createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition, createReviewQaAgentDefinition, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, REQUIREMENT_REVIEW_AGENT_VERSION } from '../server/agent/requirement-analysis-agent.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from '../server/agent/result-validator.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
 import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
+import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { ReviewQaService } from '../server/application/review-qa-service.js'
 import type { InputDeliveryManifest, RequirementInputPlan, ReviewRunSnapshot } from '../server/domain/agent-types.js'
-import type { ReviewQaRuntime } from '../server/domain/review-qa-types.js'
+import type { ReviewQaExecutionInput, ReviewQaRuntime } from '../server/domain/review-qa-types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementPointExtractionV4, CandidateRequirementPointExtractionV5, CandidateRequirementReview, CandidateRequirementReviewV3 } from '../server/domain/review-types.js'
 import { defaultConfig } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
@@ -180,6 +181,62 @@ test('评审问答拒绝无法解析为当前冻结 Evidence 的引用', async (
   await assert.rejects(() => service.ask(runId, { question: '未知引用是否有效？' }), /REVIEW_QA_INVALID_CITATION: F-404, RP-404, E-404/u)
 })
 
+test('评审问答使用独立发布的 Agent 模型、Prompt 与能力快照', async () => {
+  const { store, runId } = await completedReviewRun()
+  const configurations = new AgentConfigurationService(store)
+  const initial = (await configurations.get()).agents.reviewQa.draft
+  const saved = await configurations.save({
+    agentKey: 'reviewQa',
+    revision: initial.revision,
+    routing: { ...initial.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 2_048 },
+    definition: { ...initial.definition, systemPrompt: `${initial.definition.systemPrompt}\n这是已发布的问答专用 Prompt。` },
+  })
+  const published = await configurations.publish({ agentKey: 'reviewQa', revision: saved.revision })
+  let captured: ReviewQaExecutionInput | undefined
+  const runtime: ReviewQaRuntime = { answer: async input => { captured = input; return qaOutput({ answer: '问答 Agent 回答。', citations: ['E-001'], limitations: [] }) } }
+  const answer = await new ReviewQaService(store, runtime, configurations).ask(runId, { question: '取消订单有哪些边界？' })
+
+  assert.equal(captured?.agentDefinition.contentSha256, published.agentDefinition.contentSha256)
+  assert.match(captured?.agentDefinition.systemPrompt ?? '', /问答专用 Prompt/u)
+  assert.equal(captured?.model.maxOutputTokens, 2_048)
+  assert.equal(answer.agentConfigurationRef?.id, published.id)
+  assert.equal(answer.execution.agentKey, 'review-qa')
+})
+
+test('评审问答运行时加载已发布 Agent 绑定的 Skill 与脚本工具', async () => {
+  const { store, runId } = await completedReviewRun()
+  await new AiResourceService(store).list()
+  const configurations = new AgentConfigurationService(store)
+  const initial = (await configurations.get()).agents.reviewQa.draft
+  const saved = await configurations.save({
+    agentKey: 'reviewQa',
+    revision: initial.revision,
+    routing: { ...initial.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 2_048 },
+    definition: { ...initial.definition, skillKeys: ['system.query-local-ip'], toolIds: [...initial.definition.toolIds, 'skill.execute_script'] },
+  })
+  await configurations.publish({ agentKey: 'reviewQa', revision: saved.revision })
+  const faux = fauxProvider()
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('skill_execute_script', { script: 'scripts/get-local-ip.ps1', args: [] }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_answer_submit', { answer: '已通过受控 Skill 查询本机 IP。', citations: [], limitations: [] }), { stopReason: 'toolUse' }),
+  ])
+  const toolSets: string[][] = []
+  const systemPrompts: string[] = []
+  const stream: StreamFn = (model, context, options) => {
+    toolSets.push((context.tools ?? []).map(tool => tool.name))
+    systemPrompts.push(context.systemPrompt ?? '')
+    return (faux.provider.streamSimple.bind(faux.provider) as StreamFn)(model, context, options)
+  }
+  const runtime = new PiReviewQaRuntimeAdapter({ model: faux.getModel() as Model<Api>, streamFn: stream }, store)
+  const answer = await new ReviewQaService(store, runtime, configurations).ask(runId, { question: '可以查询本机 IP 吗？' })
+
+  assert.ok(toolSets[0].includes('review_answer_submit'))
+  assert.ok(toolSets[0].includes('skill_execute_script'))
+  assert.match(systemPrompts[0], /TRUSTED_SKILL key="system\.query-local-ip"/u)
+  assert.ok(answer.execution.events.some(event => event.type === 'tool_execution_start' && event.toolId === 'skill_execute_script' && !JSON.stringify(event.toolArguments).includes('skillKey')))
+  assert.ok(answer.execution.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'skill_execute_script' && !event.isError))
+})
+
 test('评审问答提示将 Evidence 白名单与 Finding、需求点 ID 区分开', async () => {
   const { output } = await successfulRun()
   const faux = fauxProvider()
@@ -192,12 +249,17 @@ test('评审问答提示将 Evidence 白名单与 Finding、需求点 ID 区分�
     return (faux.provider.streamSimple.bind(faux.provider) as StreamFn)(model, context, options)
   }
   const runtime = new PiReviewQaRuntimeAdapter({ model: faux.getModel() as Model<Api>, streamFn: stream })
-  await runtime.answer({
+  const executionOutput = await runtime.answer({
     question: '请说明取消订单的风险。', snapshot: output.snapshot, reviewResult: output.result,
     documentContent: '用户可以取消待支付订单。', model: { sourceId: 'source-1', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', modelId: 'model-1', modelName: 'review-model', contextWindow: 32_768, maxOutputTokens: 4_096, supportsReasoning: false },
+    agentDefinition: createReviewQaAgentDefinition(),
   }, new AbortController().signal)
   assert.match(prompts[0], /allowedCitationEvidence/u)
   assert.match(prompts[0], /F-\* Finding ID 和 RP-\* 需求点 ID/u)
+  assert.ok(executionOutput.execution.events.some(event => event.type === 'tool_execution_start' && event.toolId === 'review_answer_submit' && JSON.stringify(event.toolArguments).includes('取消后状态尚未定义')))
+  assert.ok(executionOutput.execution.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'review_answer_submit'))
+  assert.ok(executionOutput.execution.events.some(event => event.type === 'message_end' && event.role === 'user' && event.content?.includes('输入详情不写入问答轨迹')))
+  assert.ok(!executionOutput.execution.events.some(event => event.content?.includes('用户可以取消待支付订单。')))
 })
 
 test('普通文档正文在首轮直接进入上下文，模型无需逐 Chunk 读取', async () => {
@@ -575,7 +637,11 @@ async function completedReviewRun() {
 }
 
 function qaRuntime(citations: string[]): ReviewQaRuntime {
-  return { answer: async () => ({ answer: '基于固定评审结果的回答。', citations, limitations: [] }) }
+  return { answer: async () => qaOutput({ answer: '基于固定评审结果的回答。', citations, limitations: [] }) }
+}
+
+function qaOutput(candidate: { answer: string; citations: string[]; limitations: string[] }) {
+  return { candidate, execution: { agentKey: 'review-qa' as const, turns: 0, toolCalls: 0, toolErrors: 0, framework: { name: 'pi-agent-core' as const, version: 'test' }, events: [] } }
 }
 
 async function snapshotForValidation() {

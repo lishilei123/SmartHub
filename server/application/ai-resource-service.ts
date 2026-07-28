@@ -5,6 +5,7 @@ import type { AiResource, AiResourceKind, McpServerResource, SkillPackageMetadat
 import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { applicationRoot, codeRoot, deployedModuleCandidates } from '../infrastructure/runtime-paths.js'
+import { normalizeSkillRuntimePolicy, requiredSkillRuntimeToolIds, SKILL_EXECUTE_SCRIPT_TOOL_ID, SKILL_HTTP_REQUEST_TOOL_ID } from './skill-runtime-policy.js'
 
 export type AiResourceCatalog = {
   mcpServers: McpServerResource[]
@@ -17,7 +18,16 @@ const builtInTools: ToolResource[] = [
   builtInTool('knowledge.read_chunk', '读取固定 Chunk', '按 Chunk ID 读取本次固定输入的完整内容与定位。', '1.0.0', 'read', 30_000, 'server/tools/knowledge-read-chunk.ts'),
   builtInTool('requirement-points.submit_result', '提交需求点', '提交需求点提取候选结果，由服务端生成 ID 和证据关联。', '5.1.0', 'internal_write', 30_000, 'server/tools/requirement-points-submit-result.ts'),
   builtInTool('review.submit_result', '提交评审分析', '提交需求点评审候选结果，由服务端校验并发布。', '4.0.0', 'internal_write', 30_000, 'server/tools/review-submit-result.ts'),
+  builtInTool('review.answer_submit', '提交评审问答答案', '提交基于固定 ReviewRun 的问答答案、Evidence 引用和限制项。', '1.0.0', 'internal_write', 30_000, 'server/tools/review-answer-submit.ts'),
+  builtInTool(SKILL_EXECUTE_SCRIPT_TOOL_ID, '执行 Skill 脚本', '执行已绑定 Skill 在运行权限清单中声明的 PowerShell 脚本。', '1.0.0', 'code_execution', 120_000, 'server/tools/skill-capability.ts'),
+  builtInTool(SKILL_HTTP_REQUEST_TOOL_ID, 'Skill 网络只读访问', '访问已绑定 Skill 在运行权限清单中声明的 HTTP/HTTPS Origin。', '1.0.0', 'network_read', 60_000, 'server/tools/skill-capability.ts'),
 ]
+const builtInSkills: SkillResource[] = [
+  builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.0.0', 'ai/skills/query-local-ip/SKILL.md', [SKILL_EXECUTE_SCRIPT_TOOL_ID], ['系统', '网络', 'IP'], {
+    scripts: [{ path: 'scripts/get-local-ip.ps1', runner: 'powershell', timeoutMs: 15_000 }],
+  }),
+]
+const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
 const retiredBuiltInToolKeys = new Set(['evidence.validate_batch'])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
@@ -57,7 +67,7 @@ export class AiResourceService {
     try {
       return await this.transaction(state => {
         const now = new Date().toISOString()
-        const resource = normalizeResource('skill', { ...value, entrypoint: installed.entrypoint, package: installed.package }, { id: `ai_resource_${randomUUID()}`, builtIn: false, createdAt: now, updatedAt: now }) as SkillResource
+        const resource = normalizeResource('skill', { ...value, entrypoint: installed.entrypoint, package: installed.package, runtime: installed.runtime }, { id: `ai_resource_${randomUUID()}`, builtIn: false, createdAt: now, updatedAt: now }) as SkillResource
         resource.status = 'ready'
         validateUnique(state.aiResources, resource)
         validateReferences(state.aiResources, resource)
@@ -78,7 +88,7 @@ export class AiResourceService {
       const update = object(input)
       if (previous.kind === 'skill' && !previous.package && ('package' in update || String(update.entrypoint ?? '').startsWith('skill-package://'))) throw new Error('Skill 包元数据和受控入口只能由 ZIP 上传生成')
       const merged = { ...previous, ...update, id: previous.id, kind: previous.kind, builtIn: previous.builtIn, createdAt: previous.createdAt, updatedAt: new Date().toISOString() }
-      if (previous.kind === 'skill' && previous.package) Object.assign(merged, { key: previous.key, version: previous.version, entrypoint: previous.entrypoint, package: previous.package, status: previous.status })
+      if (previous.kind === 'skill' && previous.package) Object.assign(merged, { key: previous.key, version: previous.version, entrypoint: previous.entrypoint, package: previous.package, runtime: previous.runtime, status: previous.status })
       if (previous.builtIn) Object.assign(merged, previous, { enabled: typeof update.enabled === 'boolean' ? update.enabled : previous.enabled, updatedAt: new Date().toISOString() })
       const resource = normalizeResource(kind, merged, { id: previous.id, builtIn: previous.builtIn, createdAt: previous.createdAt, updatedAt: merged.updatedAt })
       validateUnique(state.aiResources.filter(item => item.id !== id), resource)
@@ -92,7 +102,7 @@ export class AiResourceService {
     const result = await this.transaction(state => {
       const resource = state.aiResources.find(item => item.id === id && item.kind === kind)
       if (!resource) throw new Error('AI 资源不存在')
-      if (resource.builtIn) throw new Error('内置工具不可删除，只能停用')
+      if (resource.builtIn) throw new Error('内置资源不可删除，只能停用')
       if (resource.kind === 'mcp' && state.aiResources.some(item => item.kind === 'tool' && item.mcpServerId === resource.id)) throw new Error('MCP 服务仍被工具引用，无法删除')
       if (resource.kind === 'tool' && state.aiResources.some(item => item.kind === 'skill' && item.toolIds.includes(resource.key))) throw new Error('工具仍被 Skill 引用，无法删除')
       if (resource.kind === 'tool' && state.agentConfigurationDrafts.some(draft => Object.values(draft.agents).some(agent => agent.definition.toolIds?.includes(resource.key)))) throw new Error('工具仍被 Agent 草稿引用，请先从 Agent 配置移除')
@@ -136,8 +146,8 @@ export class AiResourceService {
         if (item.kind === 'skill') return { ...item, status: 'ready' }
         return { ...item, status: item.source !== 'http' || item.endpoint ? 'ready' : 'draft' }
       })
-      for (const builtIn of builtInTools) {
-        const index = state.aiResources.findIndex(item => item.kind === 'tool' && item.key === builtIn.key)
+      for (const builtIn of builtInResources) {
+        const index = state.aiResources.findIndex(item => item.kind === builtIn.kind && item.key === builtIn.key)
         if (index < 0) state.aiResources.push(structuredClone(builtIn))
         else if (state.aiResources[index].builtIn) state.aiResources[index] = { ...structuredClone(builtIn), enabled: state.aiResources[index].enabled, createdAt: state.aiResources[index].createdAt, updatedAt: state.aiResources[index].updatedAt }
       }
@@ -178,8 +188,8 @@ function catalog(resources: AiResource[]): AiResourceCatalog {
 
 function builtInsNeedSync(resources: AiResource[]) {
   if (resources.some(item => item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key))) return true
-  return builtInTools.some(expected => {
-    const actual = resources.find((item): item is ToolResource => item.kind === 'tool' && item.key === expected.key)
+  return builtInResources.some(expected => {
+    const actual = resources.find(item => item.kind === expected.kind && item.key === expected.key)
     if (!actual?.builtIn) return true
     return JSON.stringify({ ...actual, enabled: true, createdAt: expected.createdAt, updatedAt: expected.updatedAt }) !== JSON.stringify(expected)
   })
@@ -187,6 +197,10 @@ function builtInsNeedSync(resources: AiResource[]) {
 
 function builtInTool(key: string, name: string, description: string, version: string, risk: ToolResource['risk'], timeoutMs: number, sourcePath: string): ToolResource {
   return { id: `builtin_tool_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'tool', key, name, description, version, enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk, timeoutMs, sourcePath, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
+}
+
+function builtInSkill(key: string, name: string, description: string, version: string, entrypoint: string, toolIds: string[], tags: string[], runtime: SkillResource['runtime']): SkillResource {
+  return { id: `builtin_skill_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'skill', key, name, description, version, enabled: true, status: 'ready', builtIn: true, entrypoint, toolIds, tags, runtime, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
 }
 
 function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiResource, 'id' | 'builtIn' | 'createdAt' | 'updatedAt'>): AiResource {
@@ -208,10 +222,14 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
     const credentialEnv = authType === 'none' ? undefined : environmentName(value.credentialEnv ?? defaultCredentialEnv('MCP', String(value.key ?? '')))
     return { ...base, kind, transport, endpoint, authType, credentialEnv, toolIds: keys(value.toolIds) }
   }
-  if (kind === 'skill') return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds: keys(value.toolIds), tags: stringList(value.tags, 20, 50), package: value.package === undefined ? undefined : skillPackage(value.package) }
+  if (kind === 'skill') {
+    const runtime = normalizeSkillRuntimePolicy(value.runtime)
+    const toolIds = [...new Set([...keys(value.toolIds), ...requiredSkillRuntimeToolIds(runtime)])]
+    return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds, tags: stringList(value.tags, 20, 50), runtime, package: value.package === undefined ? undefined : skillPackage(value.package) }
+  }
   const source = oneOf(value.source ?? 'local', ['builtin', 'local', 'http', 'mcp'] as const, '工具来源')
   if (source === 'builtin' && !fixed.builtIn) throw new Error('不能创建自定义内置工具')
-  const risk = oneOf(value.risk ?? 'read', ['read', 'network_read', 'internal_write'] as const, '工具风险')
+  const risk = oneOf(value.risk ?? 'read', ['read', 'network_read', 'code_execution', 'internal_write'] as const, '工具风险')
   const timeoutMs = integer(value.timeoutMs ?? 30_000, '工具超时', 1_000, 300_000)
   const sourcePath = source === 'builtin' || source === 'local' ? normalizeSourcePath(value.sourcePath) : undefined
   const mcpServerId = source === 'mcp' ? text(value.mcpServerId, 'MCP 服务', 200) : undefined
@@ -227,7 +245,7 @@ function validateUnique(resources: AiResource[], candidate: AiResource) {
 }
 
 function validateReferences(resources: AiResource[], candidate: AiResource) {
-  const tools = new Set(resources.filter(item => item.kind === 'tool').map(item => item.key))
+  const tools = new Set([...builtInTools.map(item => item.key), ...resources.filter(item => item.kind === 'tool').map(item => item.key)])
   if (candidate.kind === 'skill') {
     const unknown = candidate.toolIds.filter(id => !tools.has(id))
     if (unknown.length) throw new Error(`Skill 引用了未注册工具：${unknown.join('、')}`)

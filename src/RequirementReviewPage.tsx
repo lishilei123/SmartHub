@@ -35,7 +35,7 @@ type ViewKey = 'overview' | 'source' | 'diff' | 'tree' | 'evidence'
 type RunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
 type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
 type SourceQuote = ReviewQuestionQuote
-type ChatMessage = { role: 'user' | 'assistant' | 'system'; text: string; quote?: SourceQuote; citations?: string[]; limitations?: string[]; modelLabel?: string }
+type ChatMessage = { id: string; role: 'user' | 'assistant' | 'system'; text: string; quote?: SourceQuote; citations?: string[]; limitations?: string[]; modelLabel?: string; agentConfigurationVersion?: number; execution?: AgentExecutionRecord }
 type UploadProgress = { stage: 'reading' | 'submitting' | 'processing' | 'binding' | 'completed' | 'failed'; percent: number; detail: string }
 
 type RunRecord = RequirementReviewRun & { content?: string }
@@ -139,6 +139,46 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
   </div></ReviewModal>
 }
 
+function executionFromEvents(events: AgentExecutionEvent[]): AgentExecutionRecord {
+  return {
+    agentKey: 'review-qa',
+    turns: Math.max(0, ...events.map(event => event.turn ?? 0)),
+    toolCalls: events.filter(event => event.type === 'tool_execution_start').length,
+    toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
+    framework: events.find(event => event.framework)?.framework,
+    events,
+  }
+}
+
+function qaTraceStep(event: AgentExecutionEvent) {
+  if (event.type === 'runtime_initialized') return '问答 Agent Runtime 已初始化'
+  if (event.type === 'turn_start') return `开始第 ${event.turn ?? 0} 个 Turn`
+  if (event.type === 'message_end' && event.role === 'user') return '固定 ReviewRun 上下文与当前问题已交付'
+  if (event.type === 'message_end' && event.role === 'assistant') return event.toolCalls?.length ? `模型决定请求 ${event.toolCalls.map(call => call.name).join('、')}` : '模型完成一段可公开输出'
+  if (event.type === 'tool_execution_start') return `开始调用工具 ${event.toolId ?? '未知工具'}`
+  if (event.type === 'tool_execution_end') return `${event.toolId ?? '工具'}调用${event.isError ? '失败' : '完成'}`
+  if (event.type === 'result_submission_retry') return '进入答案强制提交阶段'
+  if (event.type === 'agent_end') return '问答 Agent 执行结束'
+  return agentEventLabels[event.type] ?? event.type
+}
+
+function QaExecutionModal({ question, modelLabel, execution, running, failed, onClose }: { question: string; modelLabel?: string; execution: AgentExecutionRecord; running: boolean; failed?: boolean; onClose: () => void }) {
+  const events = execution.events
+  const toolEnds = new Map(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => [event.toolCallId!, event]))
+  const toolCalls = events.filter(event => event.type === 'tool_execution_start')
+  const summaryEvents = events.filter(event => event.type === 'runtime_initialized' || event.type === 'turn_start' || event.type === 'message_end' || event.type === 'tool_execution_start' || event.type === 'tool_execution_end' || event.type === 'result_submission_retry' || event.type === 'agent_end')
+  const publicOutputs = events.filter(event => event.type === 'message_end' && event.role === 'assistant' && event.content)
+  return <ReviewModal title="评审问答执行详情" className="rr-run-record-modal rr-qa-trace-modal" onClose={onClose}><div className="rr-run-record">
+    <div className="rr-run-record-summary"><div><ReviewBadge tone={running ? 'purple' : failed ? 'red' : 'green'}>{running ? '生成中' : failed ? '执行失败' : '回答完成'}</ReviewBadge><b>{question}</b><span>{modelLabel ?? '评审问答 Agent'}</span></div><dl><div><dt>Turn</dt><dd>{execution.turns}</dd></div><div><dt>工具调用</dt><dd>{execution.toolCalls}{execution.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution.framework ? `${execution.framework.name} ${execution.framework.version}` : running ? '连接中' : '未知'}</dd></div></dl></div>
+    <div className="rr-run-record-notice"><ShieldCheck /><span><b>推理与执行摘要</b>这里展示可安全公开的模型输出、事件和脱敏工具轨迹；不展示模型隐藏思维链，也不复制整份固定需求正文。</span></div>
+    <div className="rr-run-record-body"><div className="rr-qa-trace-content">
+      <section><header><Sparkles /><span><b>推理与执行摘要</b><small>按实际事件生成，不补写模型未公开的思考</small></span></header><div className="rr-qa-trace-steps">{summaryEvents.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : ''} /><span><b>{qaTraceStep(event)}</b><small>#{event.sequence} · Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></span></article>)}{!summaryEvents.length && <div className="rr-trace-empty"><LoaderCircle className={running ? 'rotating' : ''} /><b>{running ? '正在建立问答执行上下文' : '没有可展示的执行事件'}</b></div>}</div></section>
+      <section><header><Wrench /><span><b>工具调用详情</b><small>调用参数和返回均经过服务端脱敏</small></span></header><div className="rr-qa-tool-list">{toolCalls.map(start => { const end = start.toolCallId ? toolEnds.get(start.toolCallId) : undefined; return <article className={`rr-agent-tool ${end?.isError ? 'failed' : ''}`} key={start.sequence}><header><span><Wrench />{start.toolId ?? '未知工具'}</span><ReviewBadge tone={!end ? 'orange' : end.isError ? 'red' : 'green'}>{!end ? '执行中' : end.isError ? '失败' : '完成'}</ReviewBadge><small>Turn {start.turn ?? 0}</small></header><div><details open><summary>调用参数</summary><pre>{formatTraceValue(start.toolArguments) || '未保存参数'}</pre></details><details><summary>工具返回</summary><pre>{formatTraceValue(end?.toolResult) || (!end ? '等待工具返回…' : '未保存返回内容')}</pre></details></div><footer>{start.toolCallId}</footer></article> })}{!toolCalls.length && <div className="rr-trace-empty"><Wrench /><b>{running ? '等待首个工具调用' : '本轮没有工具调用记录'}</b></div>}</div></section>
+      {publicOutputs.length > 0 && <section><header><MessageSquareText /><span><b>模型公开输出</b><small>仅展示模型公开文本，不包含隐藏 reasoning 块</small></span></header><div className="rr-qa-public-output">{publicOutputs.map(event => <article key={event.sequence}><small>Turn {event.turn ?? 0}</small><p>{event.content}</p></article>)}</div></section>}
+    </div></div>
+  </div></ReviewModal>
+}
+
 export function RequirementReviewPage({
   projectVersion,
   documents,
@@ -193,6 +233,8 @@ export function RequirementReviewPage({
   const [chatDraft, setChatDraft] = useState('')
   const [chatMessages, setChatMessages] = useState<Record<string, ChatMessage[]>>({})
   const [chatSendingRunId, setChatSendingRunId] = useState('')
+  const [pendingQaEvents, setPendingQaEvents] = useState<Record<string, AgentExecutionEvent[]>>({})
+  const [qaTraceSelection, setQaTraceSelection] = useState<{ runId: string; messageId: string; question: string } | null>(null)
   const [diffVersionIds, setDiffVersionIds] = useState<[string, string]>(['', ''])
   const [diffContents, setDiffContents] = useState<Record<string, string>>({})
   const [diffLoading, setDiffLoading] = useState(false)
@@ -687,26 +729,35 @@ export function RequirementReviewPage({
 
   const sendChat = async () => {
     const text = chatDraft.trim()
-    if (!selectedRun || selectedRun.status !== 'succeeded' || !text || chatSendingRunId) return
+    if (!selectedRun || selectedRun.status !== 'succeeded' || !reviewQaReady || !text || chatSendingRunId) return
     const key = selectedRun.id
     const quote = sourceQuote ?? undefined
+    const userMessageId = `review_qa_user_${crypto.randomUUID()}`
+    const streamedEvents: AgentExecutionEvent[] = []
     setChatMessages(current => ({
       ...current,
-      [key]: [...(current[key] ?? []), { role: 'user', text, quote }],
+      [key]: [...(current[key] ?? []), { id: userMessageId, role: 'user', text, quote }],
     }))
+    setPendingQaEvents(current => ({ ...current, [key]: [] }))
     setChatDraft('')
     setSourceQuote(null)
     setChatSendingRunId(key)
     try {
-      const response = await askRequirementReviewQuestion(key, { question: text, quote })
+      const response = await askRequirementReviewQuestion(key, { question: text, quote }, undefined, event => {
+        streamedEvents.push(event)
+        setPendingQaEvents(current => ({ ...current, [key]: [...streamedEvents] }))
+      })
       setChatMessages(current => ({
         ...current,
-        [key]: [...(current[key] ?? []), { role: 'assistant', text: response.answer, citations: response.citations, limitations: response.limitations, modelLabel: response.modelLabel }],
+        [key]: [...(current[key] ?? []), { id: response.id, role: 'assistant', text: response.answer, citations: response.citations, limitations: response.limitations, modelLabel: response.modelLabel, agentConfigurationVersion: response.agentConfigurationRef?.version, execution: response.execution }],
       }))
+      setQaTraceSelection(current => current?.runId === key && current.messageId === 'pending' ? { ...current, messageId: response.id } : current)
       addAudit(`评审问答：${key} · ${text.slice(0, 60)}`)
     } catch (error) {
       const message = error instanceof Error ? error.message : '评审问答失败'
-      setChatMessages(current => ({ ...current, [key]: [...(current[key] ?? []), { role: 'system', text: message }] }))
+      const errorMessageId = `review_qa_error_${crypto.randomUUID()}`
+      setChatMessages(current => ({ ...current, [key]: [...(current[key] ?? []), { id: errorMessageId, role: 'system', text: message, execution: executionFromEvents(streamedEvents) }] }))
+      setQaTraceSelection(current => current?.runId === key && current.messageId === 'pending' ? { ...current, messageId: errorMessageId } : current)
       notify(message, 'error')
     } finally {
       setChatSendingRunId('')
@@ -792,7 +843,12 @@ export function RequirementReviewPage({
   const removedLines = leftLines.filter(line => !rightLines.includes(line))
   const addedLines = rightLines.filter(line => !leftLines.includes(line))
   const currentMessages = selectedRun ? chatMessages[selectedRun.id] ?? [] : []
+  const selectedQaTraceMessage = qaTraceSelection?.messageId === 'pending' ? undefined : chatMessages[qaTraceSelection?.runId ?? '']?.find(message => message.id === qaTraceSelection?.messageId)
+  const selectedQaTraceExecution = qaTraceSelection?.messageId === 'pending'
+    ? executionFromEvents(pendingQaEvents[qaTraceSelection.runId] ?? [])
+    : selectedQaTraceMessage?.execution
   const agentConfigurationsReady = Boolean(agentConfiguration?.agents.requirementPointExtraction.activeVersion && agentConfiguration?.agents.requirementReview.activeVersion)
+  const reviewQaReady = Boolean(agentConfiguration?.agents.reviewQa.activeVersion)
   const canRun = Boolean(projectVersion && !readOnly && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && agentConfigurationsReady && apiState === 'ready' && bindingsState === 'ready' && !requestController.current)
 
   const bindDocument = async (document: KnowledgeDocument) => {
@@ -874,13 +930,13 @@ export function RequirementReviewPage({
 
       <aside className="rr-chat">
         <div className="rr-panel-head"><span><MessageSquareText /><b>评审问答</b></span><button onClick={() => setChatCollapsed(value => !value)} aria-label={chatCollapsed ? '展开评审问答' : '收起评审问答'}>{chatCollapsed ? <PanelRightOpen /> : <PanelRightClose />}</button></div>
-        {!chatCollapsed && <><div className="rr-chat-context"><ShieldCheck /><span><b>{selectedRun?.status === 'succeeded' ? '已绑定固定评审运行' : '等待成功评审运行'}</b><small>{selectedRun?.response ? `${selectedRun.response.snapshot.assetVersionId} · ${selectedRun.response.result.evidence.length} 条证据` : '问答不会自动切换到最新需求版本'}</small></span><ReviewBadge tone={selectedRun?.status === 'succeeded' ? 'green' : 'gray'}>{selectedRun?.status === 'succeeded' ? '只读上下文' : '不可用'}</ReviewBadge></div>
-          <div className="rr-chat-scroll">{currentMessages.length ? currentMessages.map((message, index) => <div className={`rr-message ${message.role}`} key={`${message.role}-${index}`}>{message.quote && <blockquote><Quote />{message.quote.findingId ? `Finding ${message.quote.findingId}` : `${message.quote.heading}${message.quote.startLine ? ` · L${message.quote.startLine}` : ''}`}<span>{message.quote.text}</span></blockquote>}<b>{message.role === 'user' ? '你' : message.role === 'assistant' ? message.modelLabel ?? 'AI 评审助手' : '系统状态'}</b><p>{message.text}</p>{message.citations?.length ? <div className="rr-message-citations">{message.citations.map(citation => <button key={citation} onClick={() => { const evidence = evidenceById.get(citation); if (evidence) locateEvidence(evidence) }}><ShieldCheck />{citation}</button>)}</div> : null}{message.limitations?.length ? <small className="rr-message-limitations">限制：{message.limitations.join('；')}</small> : null}</div>) : <div className="rr-chat-empty"><Bot /><h3>基于本次评审继续追问</h3><p>回答绑定本次 ReviewRun、固定需求版本和已校验证据；不会自动切换到最新版本。</p>{result?.findings.slice(0, 3).map(finding => <button key={finding.clientFindingId} onClick={() => quoteFinding(finding)}><Quote />引用：{finding.title}</button>)}</div>}{chatSendingRunId === selectedRun?.id && <div className="rr-message assistant"><b>AI 评审助手</b><p><LoaderCircle className="rotating" /> 正在基于固定评审上下文生成答案…</p></div>}</div>
+        {!chatCollapsed && <><div className="rr-chat-context"><ShieldCheck /><span><b>{selectedRun?.status === 'succeeded' && reviewQaReady ? '已绑定固定评审运行与问答 Agent' : selectedRun?.status === 'succeeded' ? '评审问答 Agent 尚未发布' : '等待成功评审运行'}</b><small>{selectedRun?.response ? `${selectedRun.response.snapshot.assetVersionId} · ${selectedRun.response.result.evidence.length} 条证据${reviewQaReady ? ` · 问答 Agent V${agentConfiguration!.agents.reviewQa.activeVersion!.version}` : ''}` : '问答不会自动切换到最新需求版本'}</small></span><ReviewBadge tone={selectedRun?.status === 'succeeded' && reviewQaReady ? 'green' : 'gray'}>{selectedRun?.status === 'succeeded' && reviewQaReady ? '固定上下文' : '不可用'}</ReviewBadge></div>
+          <div className="rr-chat-scroll">{currentMessages.length ? currentMessages.map((message, index) => <div className={`rr-message ${message.role}`} key={message.id}>{message.quote && <blockquote><Quote />{message.quote.findingId ? `Finding ${message.quote.findingId}` : `${message.quote.heading}${message.quote.startLine ? ` · L${message.quote.startLine}` : ''}`}<span>{message.quote.text}</span></blockquote>}<b>{message.role === 'user' ? '你' : message.role === 'assistant' ? message.modelLabel ?? 'AI 评审助手' : '系统状态'}</b><p>{message.text}</p>{message.citations?.length ? <div className="rr-message-citations">{message.citations.map(citation => <button key={citation} onClick={() => { const evidence = evidenceById.get(citation); if (evidence) locateEvidence(evidence) }}><ShieldCheck />{citation}</button>)}</div> : null}{message.limitations?.length ? <small className="rr-message-limitations">限制：{message.limitations.join('；')}</small> : null}{message.execution && <button className="rr-message-trace-button" onClick={() => setQaTraceSelection({ runId: selectedRun!.id, messageId: message.id, question: [...currentMessages.slice(0, index)].reverse().find(item => item.role === 'user')?.text ?? '评审问答' })}><Activity />查看执行详情<span>{message.execution.turns} Turn · {message.execution.toolCalls} 次工具调用</span></button>}</div>) : <div className="rr-chat-empty"><Bot /><h3>基于本次评审继续追问</h3><p>回答绑定本次 ReviewRun、固定需求版本和已校验证据；不会自动切换到最新版本。</p>{result?.findings.slice(0, 3).map(finding => <button key={finding.clientFindingId} onClick={() => quoteFinding(finding)}><Quote />引用：{finding.title}</button>)}</div>}{chatSendingRunId === selectedRun?.id && <div className="rr-message assistant rr-message-running"><b>AI 评审助手</b><p><LoaderCircle className="rotating" /> 正在基于固定评审上下文生成答案…</p><button className="rr-message-trace-button" onClick={() => setQaTraceSelection({ runId: selectedRun.id, messageId: 'pending', question: currentMessages.at(-1)?.text ?? '评审问答' })}><Activity />查看实时执行详情<span>{executionFromEvents(pendingQaEvents[selectedRun.id] ?? []).turns} Turn · {executionFromEvents(pendingQaEvents[selectedRun.id] ?? []).toolCalls} 次工具调用</span></button></div>}</div>
           {sourceQuote && <div className="rr-quote-preview"><Quote /><span><b>{sourceQuote.findingId ? `Finding ${sourceQuote.findingId}` : sourceQuote.heading}</b><small>{sourceQuote.text}</small></span><button onClick={() => setSourceQuote(null)} aria-label="移除引用"><XCircle /></button></div>}
-          <div className="rr-chat-input"><textarea value={chatDraft} onChange={event => setChatDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat() } }} disabled={selectedRun?.status !== 'succeeded' || Boolean(chatSendingRunId)} placeholder={selectedRun?.status === 'succeeded' ? '基于固定评审运行提问…' : '完成一次真实评审后可引用提问'} /><div><span><ShieldCheck />固定 ReviewRun · 真实模型</span><button onClick={() => void sendChat()} disabled={!chatDraft.trim() || selectedRun?.status !== 'succeeded' || Boolean(chatSendingRunId)} aria-label="发送评审问题">{chatSendingRunId ? <LoaderCircle className="rotating" /> : <Send />}</button></div></div></>}
+          <div className="rr-chat-input"><textarea value={chatDraft} onChange={event => setChatDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat() } }} disabled={selectedRun?.status !== 'succeeded' || !reviewQaReady || Boolean(chatSendingRunId)} placeholder={selectedRun?.status === 'succeeded' ? reviewQaReady ? '基于固定评审运行提问…' : '请先发布评审问答 Agent' : '完成一次真实评审后可引用提问'} /><div><span><ShieldCheck />固定 ReviewRun · 独立问答 Agent</span><button onClick={() => void sendChat()} disabled={!chatDraft.trim() || selectedRun?.status !== 'succeeded' || !reviewQaReady || Boolean(chatSendingRunId)} aria-label="发送评审问题">{chatSendingRunId ? <LoaderCircle className="rotating" /> : <Send />}</button></div></div></>}
       </aside>
     </div>
-  </section>{runRecordOpen && selectedRun && <RunRecordModal run={selectedRun} loading={runRecordLoading} tab={runRecordTab} onTab={setRunRecordTab} onClose={() => setRunRecordOpen(false)} />}{bindingManagerOpen && <ReviewModal title={`${projectVersion.name} · 需求绑定`} onClose={() => setBindingManagerOpen(false)}><div className="rr-binding-manager"><header><div><b>{readOnly ? '当前版本只读' : '维护当前版本的需求范围'}</b><span>继承得到的是独立固定绑定。加入、替换或移除只影响 {projectVersion.name}，不会修改来源版本或删除知识库文件。</span></div><ReviewBadge tone={readOnly ? 'orange' : 'green'}>{bindings.length} 条绑定</ReviewBadge></header><div className="rr-binding-list">{availableRequirementDocuments.map(document => {
+  </section>{runRecordOpen && selectedRun && <RunRecordModal run={selectedRun} loading={runRecordLoading} tab={runRecordTab} onTab={setRunRecordTab} onClose={() => setRunRecordOpen(false)} />}{qaTraceSelection && selectedQaTraceExecution && <QaExecutionModal question={qaTraceSelection.question} modelLabel={selectedQaTraceMessage?.modelLabel} execution={selectedQaTraceExecution} running={qaTraceSelection.messageId === 'pending' && chatSendingRunId === qaTraceSelection.runId} failed={selectedQaTraceMessage?.role === 'system'} onClose={() => setQaTraceSelection(null)} />}{bindingManagerOpen && <ReviewModal title={`${projectVersion.name} · 需求绑定`} onClose={() => setBindingManagerOpen(false)}><div className="rr-binding-manager"><header><div><b>{readOnly ? '当前版本只读' : '维护当前版本的需求范围'}</b><span>继承得到的是独立固定绑定。加入、替换或移除只影响 {projectVersion.name}，不会修改来源版本或删除知识库文件。</span></div><ReviewBadge tone={readOnly ? 'orange' : 'green'}>{bindings.length} 条绑定</ReviewBadge></header><div className="rr-binding-list">{availableRequirementDocuments.map(document => {
     const binding = bindings.find(item => item.assetId === document.id)
     const boundDocument = boundDocuments.find(item => item.id === document.id)
     const isLatest = binding?.assetVersionId === document.assetVersionId

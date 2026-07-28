@@ -1,13 +1,19 @@
+import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
+import type { AgentDefinitionResolver, AgentExecutionEvent } from '../domain/agent-types.js'
 import type { ReviewQaRuntime, ReviewQuestionQuote } from '../domain/review-qa-types.js'
-import type { ReviewRun } from '../domain/types.js'
+import type { AgentConfigurationVersion, DatabaseState, GenerativeModel, GenerativeModelSource, ReviewRun } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 
 export interface ReviewQuestionRequest { question: string; quote?: ReviewQuestionQuote }
 
 export class ReviewQaService {
-  constructor(private readonly store: StateStore, private readonly runtime: ReviewQaRuntime) {}
+  constructor(
+    private readonly store: StateStore,
+    private readonly runtime: ReviewQaRuntime,
+    private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver(),
+  ) {}
 
-  async ask(runId: string, request: ReviewQuestionRequest, signal = new AbortController().signal) {
+  async ask(runId: string, request: ReviewQuestionRequest, signal = new AbortController().signal, onEvent?: (event: AgentExecutionEvent) => void | Promise<void>) {
     const question = String(request.question ?? '').trim()
     if (!question) throw new Error('评审问题不能为空')
     if (question.length > 2_000) throw new Error('评审问题不能超过 2000 个字符')
@@ -17,25 +23,47 @@ export class ReviewQaService {
     const fixedAssetVersionIds = new Set((run.snapshot.assets ?? [{ assetVersionId: run.assetVersionId }]).map(item => item.assetVersionId))
     const versions = [...fixedAssetVersionIds].map(versionId => required(state.versions.find(item => item.id === versionId && item.status === 'ready'), '评审绑定的固定资产版本不可用'))
     const documentContent = versions.map(version => version.content).join('\n\n')
-    const source = required(state.modelSources.find(item => item.id === run.sourceId && item.enabled), '评审模型来源不可用')
-    const model = required(source.models.find(item => item.id === run.modelId && item.enabled), '评审模型不可用')
-    if (model.health !== 'healthy') throw new Error('评审模型当前不健康，请重新探测后再问答')
+    const configuration = this.definitions.resolveActive ? await this.definitions.resolveActive('review-qa') : null
+    if (this.definitions.resolveActive && !configuration) throw new Error('请先在系统管理的 Agent 配置中发布评审问答 Agent，再继续问答')
+    const definition = configuration?.agentDefinition ?? await this.definitions.resolve('review-qa')
+    const { source, model } = selectModel(state, run, configuration)
     const quote = normalizeQuote(request.quote, fixedAssetVersionIds, versions, run.result)
     const estimatedTokens = Math.ceil((documentContent.length + JSON.stringify(run.result).length + question.length) / 4) + 2_000
-    if (estimatedTokens + Math.min(model.maxOutputTokens, 4_096) > model.contextWindow) throw new Error('固定评审上下文超过模型窗口，暂时无法继续问答')
-    const candidate = await this.runtime.answer({
+    const maxOutputTokens = Math.min(model.maxOutputTokens, configuration?.routing.maxOutputTokens ?? 4_096)
+    if (estimatedTokens + maxOutputTokens > model.contextWindow) throw new Error('固定评审上下文超过模型窗口，暂时无法继续问答')
+    const output = await this.runtime.answer({
       question,
       quote,
       snapshot: run.snapshot,
       reviewResult: run.result,
       documentContent,
-      model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning') },
+      model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning'), temperature: configuration?.routing.temperature, requestTimeoutMs: configuration ? configuration.routing.requestTimeoutSeconds * 1_000 : undefined, retryCount: configuration?.routing.retryCount },
+      agentDefinition: definition,
+      onEvent,
     }, signal)
+    const { candidate, execution } = output
     const citations = normalizeCitations(candidate.citations, run.result)
     const answer = String(candidate.answer ?? '').trim()
     if (!answer) throw new Error('REVIEW_QA_EMPTY_ANSWER')
-    return { id: `review_qa_${crypto.randomUUID()}`, runId, question, answer, citations, limitations: candidate.limitations.map(item => String(item).trim()).filter(Boolean), quote, modelLabel: run.modelLabel, createdAt: new Date().toISOString() }
+    return { id: `review_qa_${crypto.randomUUID()}`, runId, question, answer, citations, limitations: candidate.limitations.map(item => String(item).trim()).filter(Boolean), quote, modelLabel: `${source.name} · ${model.displayName}`, execution, ...(configuration ? { agentConfigurationRef: { id: configuration.id, version: configuration.version, contentSha256: configuration.contentSha256 } } : {}), createdAt: new Date().toISOString() }
   }
+}
+
+function selectModel(state: DatabaseState, run: ReviewRun, configuration: AgentConfigurationVersion | null) {
+  const references = configuration?.routing.primaryModel
+    ? [configuration.routing.primaryModel, ...(configuration.routing.fallbackEnabled ? configuration.routing.fallbackModels : [])]
+    : [{ sourceId: run.sourceId, modelId: run.modelId }]
+  let lastError = '评审问答模型不可用'
+  for (const reference of references) {
+    const source = state.modelSources.find(item => item.id === reference.sourceId)
+    const model = source?.models.find(item => item.id === reference.modelId)
+    if (!source || !model) { lastError = '评审问答模型或来源不存在'; continue }
+    if (!source.enabled || !model.enabled) { lastError = `${source.name} · ${model.displayName} 未启用`; continue }
+    if (model.health !== 'healthy') { lastError = `${source.name} · ${model.displayName} 当前不健康`; continue }
+    if (!model.capabilities.includes('tool_calling')) { lastError = `${source.name} · ${model.displayName} 不支持工具调用`; continue }
+    return { source: source as GenerativeModelSource, model: model as GenerativeModel }
+  }
+  throw new Error(`${lastError}，请重新探测或调整评审问答 Agent 路由`)
 }
 
 function normalizeCitations(value: string[], result: NonNullable<ReviewRun['result']>) {

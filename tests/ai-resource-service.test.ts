@@ -13,17 +13,25 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
     'knowledge.read_chunk',
     'knowledge.search',
     'requirement-points.submit_result',
+    'review.answer_submit',
     'review.submit_result',
+    'skill.execute_script',
+    'skill.http_request',
   ])
+  assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip'])
+  assert.equal(initial.skills[0].runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
   assert.ok(initial.tools.every(tool => tool.builtIn && tool.status === 'ready'))
   assert.deepEqual(Object.fromEntries(initial.tools.map(tool => [tool.key, tool.sourcePath])), {
     'knowledge.search': 'server/tools/knowledge-search.ts',
     'knowledge.read_chunk': 'server/tools/knowledge-read-chunk.ts',
     'requirement-points.submit_result': 'server/tools/requirement-points-submit-result.ts',
+    'review.answer_submit': 'server/tools/review-answer-submit.ts',
     'review.submit_result': 'server/tools/review-submit-result.ts',
+    'skill.execute_script': 'server/tools/skill-capability.ts',
+    'skill.http_request': 'server/tools/skill-capability.ts',
   })
   store.transaction = async () => { throw new Error('内置资源已同步时不应再次启动写事务') }
-  assert.equal((await service.list()).tools.length, 4)
+  assert.equal((await service.list()).tools.length, 7)
   store.transaction = JsonStore.prototype.transaction.bind(store)
   const searchTool = initial.tools.find(tool => tool.key === 'knowledge.search')!
   const builtInSource = await service.source(searchTool.id)
@@ -57,15 +65,15 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
 
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
-  assert.equal(catalog.skills.length, 1)
-  assert.equal(catalog.tools.length, 5)
+  assert.equal(catalog.skills.length, 2)
+  assert.equal(catalog.tools.length, 8)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)
   await assert.rejects(() => service.delete('mcp', mcp.id), /工具引用/)
   await service.delete('skill', skill.id)
   await service.delete('tool', tool.id)
   await service.delete('mcp', mcp.id)
-  assert.equal((await service.list()).tools.length, 4)
+  assert.equal((await service.list()).tools.length, 7)
 })
 
 test('AI 资源目录清理已退役的批量校验证据工具', async () => {
@@ -89,7 +97,7 @@ test('AI 资源目录校验标识、引用和内置工具保护', async () => {
   const disabled = (await service.list()).tools.find(tool => tool.id === builtIn.id)
   assert.equal(disabled?.enabled, false)
   assert.equal(disabled?.key, builtIn.key)
-  await assert.rejects(() => service.delete('tool', builtIn.id), /内置工具不可删除/)
+  await assert.rejects(() => service.delete('tool', builtIn.id), /内置资源不可删除/)
   await assert.rejects(() => service.create('mcp', { key: 'Bad Key', name: '错误', endpoint: 'file:///tmp/mcp', transport: 'sse', authType: 'none' }), /资源标识/)
   await assert.rejects(() => service.create('skill', { key: 'bad.skill', name: '错误 Skill', entrypoint: 'SKILL.md', toolIds: ['missing.tool'] }), /未注册工具/)
   await assert.rejects(() => service.create('tool', { key: 'remote.tool', name: '远程工具', source: 'mcp', risk: 'read', timeoutMs: 1000, mcpServerId: 'missing' }), /MCP 服务/)

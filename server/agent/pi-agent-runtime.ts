@@ -18,7 +18,7 @@ import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask }
 import { AgentSkillRuntime } from './skill-runtime.js'
 
 const require = createRequire(import.meta.url)
-const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
+export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
 const RESULT_SUBMISSION_TURN_RESERVE = 3
 const RESULT_SUBMISSION_TOOL_RESERVE = 3
 const TRANSIENT_MODEL_RETRIES = 2
@@ -61,7 +61,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         return { accepted: true }
       })
     const skillPrompt = await new AgentSkillRuntime(this.store, this.skillPackages).render(input.snapshot.agentDefinition)
-    const capabilityLoad = await new AgentCapabilityLoader(this.store).load(input.snapshot.agentDefinition, registry, signal)
+    const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE })
     const allowedToolIds = new Set(input.snapshot.agentDefinition.toolIds)
@@ -424,9 +424,9 @@ function normalizeBaseUrl(value: string, api: Api) {
   return api === 'anthropic-messages' ? withoutSlash.replace(/\/messages$/iu, '') : withoutSlash.replace(/\/chat\/completions$/iu, '')
 }
 
-function isTransientAgentEvent(event: AgentEvent) { return event.type === 'message_update' || event.type === 'tool_execution_update' }
+export function isTransientAgentEvent(event: AgentEvent) { return event.type === 'message_update' || event.type === 'tool_execution_update' }
 
-function toAuditEvent(event: AgentEvent, turn: number, endpoint: string, credential: string): Omit<AgentExecutionEvent, 'sequence' | 'occurredAt'> {
+export function toAuditEvent(event: AgentEvent, turn: number, endpoint: string, credential: string): Omit<AgentExecutionEvent, 'sequence' | 'occurredAt'> {
   if (event.type === 'tool_execution_start') return { type: event.type, turn, toolCallId: event.toolCallId, toolId: event.toolName, toolArguments: traceValue(event.args, endpoint, credential) }
   if (event.type === 'tool_execution_end') return { type: event.type, turn, toolCallId: event.toolCallId, toolId: event.toolName, isError: event.isError, toolResult: toolResultTrace(event.result, endpoint, credential) }
   if (event.type === 'message_start') return { type: event.type, turn, ...messageTrace(event.message, false, endpoint, credential) }

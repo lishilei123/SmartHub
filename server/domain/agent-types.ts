@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-point-extraction' | 'requirement-review'
-  agentType: 'requirement_point_extraction' | 'requirement_review'
+  agentKey: 'requirement-point-extraction' | 'requirement-review' | 'review-qa'
+  agentType: 'requirement_point_extraction' | 'requirement_review' | 'review_qa'
   version: string
   status: 'published'
   modelScene: 'requirement_analysis'
-  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3'
+  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }

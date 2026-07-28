@@ -34,13 +34,16 @@ async function fixture() {
   return { store, service: new AgentConfigurationService(store) }
 }
 
-test('两个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
+test('三个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
   const { store, service } = await fixture()
   const initial = await service.get()
   const extractionInitial = initial.agents.requirementPointExtraction.draft
   const reviewInitial = initial.agents.requirementReview.draft
+  const qaInitial = initial.agents.reviewQa.draft
   assert.equal(extractionInitial.revision, 0)
   assert.equal(reviewInitial.revision, 0)
+  assert.equal(qaInitial.revision, 0)
+  assert.deepEqual(initial.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
 
   const extractionSaved = await service.save({
     agentKey: 'requirementPointExtraction',
@@ -64,6 +67,18 @@ test('两个 Agent 分别持久化草稿并发布独立不可变版本', async (
   assert.equal(reviewPublished.version, 1)
   assert.match(reviewPublished.agentDefinition.systemPrompt, /固定证据支撑/)
   assert.equal((await service.resolve('requirement-review')).contentSha256, reviewPublished.agentDefinition.contentSha256)
+
+  const qaSaved = await service.save({
+    agentKey: 'reviewQa',
+    revision: qaInitial.revision,
+    routing: { ...qaInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 4_096 },
+    definition: { ...qaInitial.definition, systemPrompt: `${qaInitial.definition.systemPrompt}\n回答时明确列出限制。` },
+  })
+  const qaPublished = await service.publish({ agentKey: 'reviewQa', revision: qaSaved.revision, publishedBy: '问答管理员' })
+  assert.equal(qaPublished.agentKey, 'reviewQa')
+  assert.equal(qaPublished.agentDefinition.agentKey, 'review-qa')
+  assert.deepEqual(qaPublished.agentDefinition.toolIds, ['review.answer_submit'])
+  assert.equal((await service.resolveActive('review-qa'))?.id, qaPublished.id)
 
   const secondReviewDraft = await service.save({
     agentKey: 'requirementReview',
@@ -90,6 +105,7 @@ test('Agent 配置读取使用窄查询而不加载完整状态快照', async ()
   assert.equal(configuration.scene, 'requirement_analysis')
   assert.equal(configuration.agents.requirementPointExtraction.draft.revision, 0)
   assert.equal(configuration.agents.requirementReview.draft.revision, 0)
+  assert.equal(configuration.agents.reviewQa.draft.revision, 0)
 })
 
 test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用模型', async () => {

@@ -1,7 +1,7 @@
 import type { TSchema } from 'typebox'
 import type { ReviewRunSnapshot } from './agent-types.js'
 
-export type ToolRisk = 'read' | 'network_read' | 'internal_write'
+export type ToolRisk = 'read' | 'network_read' | 'code_execution' | 'internal_write'
 export type ToolRepeatPolicy = 'replay_success_once'
 
 export interface ToolDescriptor {

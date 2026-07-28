@@ -19,8 +19,9 @@ type AiResourceBase = {
 
 export type McpServerResource = AiResourceBase & { kind: 'mcp'; transport: 'streamable_http' | 'sse'; endpoint: string; authType: 'none' | 'bearer' | 'oauth2'; credentialEnv?: string; toolIds: string[] }
 export type SkillPackageMetadata = { storageKey: string; entrypointPath: string; uploadedFileName: string; archiveSha256: string; contentSha256: string; fileCount: number; unpackedBytes: number; files: string[] }
-export type SkillResource = AiResourceBase & { kind: 'skill'; entrypoint: string; toolIds: string[]; tags: string[]; package?: SkillPackageMetadata }
-export type ToolResource = AiResourceBase & { kind: 'tool'; source: 'builtin' | 'local' | 'http' | 'mcp'; risk: 'read' | 'network_read' | 'internal_write'; timeoutMs: number; sourcePath?: string; mcpServerId?: string; endpoint?: string; authType?: 'none' | 'bearer'; credentialEnv?: string; parameters?: Record<string, unknown> }
+export type SkillRuntimePolicy = { scripts: Array<{ path: string; runner: 'powershell'; timeoutMs: number }>; network?: { allowedOrigins: string[]; allowedMethods: Array<'GET' | 'HEAD'>; timeoutMs: number } }
+export type SkillResource = AiResourceBase & { kind: 'skill'; entrypoint: string; toolIds: string[]; tags: string[]; runtime?: SkillRuntimePolicy; package?: SkillPackageMetadata }
+export type ToolResource = AiResourceBase & { kind: 'tool'; source: 'builtin' | 'local' | 'http' | 'mcp'; risk: 'read' | 'network_read' | 'code_execution' | 'internal_write'; timeoutMs: number; sourcePath?: string; mcpServerId?: string; endpoint?: string; authType?: 'none' | 'bearer'; credentialEnv?: string; parameters?: Record<string, unknown> }
 export type ToolSource = { toolId: string; toolKey: string; path: string; language: string; content: string; readOnly: true }
 export type AiResource = McpServerResource | SkillResource | ToolResource
 export type AiResourceCatalog = { mcpServers: McpServerResource[]; skills: SkillResource[]; tools: ToolResource[] }

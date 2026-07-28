@@ -91,7 +91,21 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     const body = await json(request)
     const controller = new AbortController()
     request.once('aborted', () => controller.abort(new Error('REVIEW_QA_CANCELLED')))
-    return send(response, 200, await reviewQaService.ask(requirementReviewQuestions[1], { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined }, controller.signal))
+    response.once('close', () => { if (!response.writableEnded) controller.abort(new Error('REVIEW_QA_CANCELLED')) })
+    const question = { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined }
+    if (url.searchParams.get('stream') === 'true') {
+      response.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' })
+      try {
+        const result = await reviewQaService.ask(requirementReviewQuestions[1], question, controller.signal, event => writeNdjson(response, { type: 'event', event }))
+        writeNdjson(response, { type: 'result', result })
+      } catch (error) {
+        writeNdjson(response, { type: 'error', error: error instanceof Error ? error.message : '未知错误' })
+      } finally {
+        response.end()
+      }
+      return
+    }
+    return send(response, 200, await reviewQaService.ask(requirementReviewQuestions[1], question, controller.signal))
   }
   const modelSource = /^\/api\/model-sources\/([^/]+)$/.exec(url.pathname)
   if (method === 'PATCH' && modelSource) return send(response, 200, await modelService.updateSource(modelSource[1], await json(request)))
@@ -222,6 +236,7 @@ async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) 
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {}
 }
 function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type' }); response.end(body == null ? '' : JSON.stringify(body)) }
+function writeNdjson(response: ServerResponse, body: unknown) { if (!response.writableEnded && !response.destroyed) response.write(`${JSON.stringify(body)}\n`) }
 function sendBinary(response: ServerResponse, status: number, body: Buffer, type: string) { response.writeHead(status, { 'content-type': type, 'content-length': body.length, 'cache-control': 'private, max-age=3600', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' }); response.end(body) }
 function contentType(path: string) { const extension = path.toLowerCase().split('.').at(-1); return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml; charset=utf-8' } as Record<string, string>)[extension ?? ''] ?? 'application/octet-stream' }
 async function notifyTask(_taskId: string) {

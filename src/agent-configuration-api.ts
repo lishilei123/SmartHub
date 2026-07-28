@@ -1,7 +1,7 @@
 const apiBase = 'http://127.0.0.1:8787/api'
 
 export type AgentModelReference = { sourceId: string; modelId: string }
-export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview'
+export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview' | 'reviewQa'
 export type AgentExecutionLimits = {
   maxTurns: number
   maxToolCalls: number

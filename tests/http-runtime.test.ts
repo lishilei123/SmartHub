@@ -36,7 +36,7 @@ async function createKnowledgeBase(baseUrl: string) {
   return value.knowledgeBase.id
 }
 
-test('Agent 配置接口返回两类 Agent 的可编辑草稿', async () => {
+test('Agent 配置接口返回三类 Agent 的可编辑草稿', async () => {
   await withServer(async baseUrl => {
     const response = await fetch(`${baseUrl}/agent-configurations/requirement-analysis`)
     assert.equal(response.status, 200)
@@ -47,13 +47,16 @@ test('Agent 配置接口返回两类 Agent 的可编辑草稿', async () => {
     assert.equal(body.scene, 'requirement_analysis')
     assert.equal(body.agents.requirementPointExtraction.draft.revision, 0)
     assert.equal(body.agents.requirementReview.draft.revision, 0)
+    assert.equal(body.agents.reviewQa.draft.revision, 0)
     assert.deepEqual(body.agents.requirementPointExtraction.requiredSkillKeys, [])
     assert.deepEqual(body.agents.requirementReview.requiredToolIds, ['review.submit_result'])
+    assert.deepEqual(body.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
     assert.deepEqual(body.agents.requirementReview.requiredMcpServerKeys, [])
     assert.deepEqual(body.agents.requirementReview.draft.definition.skillKeys, [])
     assert.deepEqual(body.agents.requirementReview.draft.definition.mcpServerKeys, [])
     assert.deepEqual(body.agents.requirementPointExtraction.versions, [])
     assert.deepEqual(body.agents.requirementReview.versions, [])
+    assert.deepEqual(body.agents.reviewQa.versions, [])
 
     const skillResponse = await fetch(`${baseUrl}/ai-resources/skill`, {
       method: 'POST',

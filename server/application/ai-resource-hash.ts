@@ -3,7 +3,7 @@ import type { McpServerResource, SkillResource } from '../domain/types.js'
 import type { ToolResource } from '../domain/types.js'
 
 export function skillConfigurationHash(skill: SkillResource) {
-  return sha256({ key: skill.key, version: skill.version, entrypoint: skill.entrypoint, contentSha256: skill.package?.contentSha256, toolIds: skill.toolIds, tags: skill.tags })
+  return sha256({ key: skill.key, version: skill.version, entrypoint: skill.entrypoint, contentSha256: skill.package?.contentSha256, toolIds: skill.toolIds, tags: skill.tags, runtime: skill.runtime })
 }
 
 export function mcpPolicyHash(server: McpServerResource) {

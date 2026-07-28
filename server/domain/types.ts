@@ -70,7 +70,21 @@ export interface SkillResource extends AiResourceBase {
   entrypoint: string
   toolIds: string[]
   tags: string[]
+  runtime?: SkillRuntimePolicy
   package?: SkillPackageMetadata
+}
+
+export interface SkillRuntimePolicy {
+  scripts: Array<{
+    path: string
+    runner: 'powershell'
+    timeoutMs: number
+  }>
+  network?: {
+    allowedOrigins: string[]
+    allowedMethods: Array<'GET' | 'HEAD'>
+    timeoutMs: number
+  }
 }
 
 export interface SkillPackageMetadata {
@@ -87,7 +101,7 @@ export interface SkillPackageMetadata {
 export interface ToolResource extends AiResourceBase {
   kind: 'tool'
   source: 'builtin' | 'local' | 'http' | 'mcp'
-  risk: 'read' | 'network_read' | 'internal_write'
+  risk: 'read' | 'network_read' | 'code_execution' | 'internal_write'
   timeoutMs: number
   sourcePath?: string
   mcpServerId?: string
@@ -101,7 +115,7 @@ export type AiResource = McpServerResource | SkillResource | ToolResource
 
 export type AgentConfigurationScene = 'requirement_analysis'
 export type AgentConfigurationStatus = 'active' | 'superseded'
-export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview'
+export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview' | 'reviewQa'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
   primaryModel: AgentModelReference | null
@@ -133,6 +147,7 @@ export interface AgentConfigurationDraft {
   agents: {
     requirementPointExtraction: AgentConfigurationAgentDraft
     requirementReview: AgentConfigurationAgentDraft
+    reviewQa: AgentConfigurationAgentDraft
   }
 }
 export interface AgentConfigurationVersion {
@@ -206,7 +221,7 @@ export interface IndexVersion { id: string; knowledgeBaseId: string; number: num
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
 export type ReviewRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
 export interface AgentExecutionRecord {
-  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'requirement-analysis'
+  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number

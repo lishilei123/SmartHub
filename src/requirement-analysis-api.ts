@@ -80,7 +80,7 @@ export type AgentExecutionEvent = {
 }
 
 export type AgentExecutionRecord = {
-  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'requirement-analysis'
+  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number
@@ -201,6 +201,8 @@ export type ReviewQuestionResponse = {
   limitations: string[]
   quote?: ReviewQuestionQuote
   modelLabel: string
+  execution: AgentExecutionRecord
+  agentConfigurationRef?: { id: string; version: number; contentSha256: string }
   createdAt: string
 }
 
@@ -242,14 +244,39 @@ export async function cancelRequirementReviewRun(runId: string) {
   return body as RequirementReviewRun
 }
 
-export async function askRequirementReviewQuestion(runId: string, input: { question: string; quote?: ReviewQuestionQuote }, signal?: AbortSignal) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/questions`, {
+export async function askRequirementReviewQuestion(runId: string, input: { question: string; quote?: ReviewQuestionQuote }, signal?: AbortSignal, onEvent?: (event: AgentExecutionEvent) => void) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/questions${onEvent ? '?stream=true' : ''}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
     signal,
   })
-  const body = await response.json() as ReviewQuestionResponse | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '评审问答失败')
-  return body as ReviewQuestionResponse
+  if (!onEvent) {
+    const body = await response.json() as ReviewQuestionResponse | { error?: string }
+    if (!response.ok) throw new Error('error' in body && body.error ? body.error : '评审问答失败')
+    return body as ReviewQuestionResponse
+  }
+  if (!response.ok || !response.body) throw new Error('评审问答流式连接失败')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: ReviewQuestionResponse | undefined
+  const consume = (line: string) => {
+    if (!line.trim()) return
+    const item = JSON.parse(line) as { type: 'event'; event: AgentExecutionEvent } | { type: 'result'; result: ReviewQuestionResponse } | { type: 'error'; error: string }
+    if (item.type === 'event') onEvent(item.event)
+    else if (item.type === 'result') result = item.result
+    else throw new Error(item.error || '评审问答失败')
+  }
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) consume(line)
+    if (done) break
+  }
+  consume(buffer)
+  if (!result) throw new Error('评审问答未返回最终答案')
+  return result
 }
