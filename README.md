@@ -27,8 +27,8 @@
 - 本地模型添加框提供经过 Transformers.js 模型页核对的推荐模型，可搜索并一键填入，同时保留任意 Hugging Face 模型名称的自由输入；
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
-- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。Skill ZIP 或 `ai/skills` 手动入口会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent；可执行 ZIP 还可在入口同目录提供 `skill-runtime.json`，显式声明包内 PowerShell 脚本及 GET/HEAD 网络 Origin。脚本和网络能力分别通过 `skill.execute_script`、`skill.http_request` 受治理 Tool 暴露，要求 Skill 与 Tool 同时进入 Agent 发布快照，并实施相对路径、参数、精确 Origin、无重定向、超时、取消、受限环境和 256 KB 结果上限。内置 `system.query-local-ip` Skill 使用声明脚本查询 SmartHub 服务主机的本地 IPv4/IPv6。自定义 Tool 仍支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
-- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent、需求评审 Agent 与评审问答 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision、生效版本和版本历史。Agent 配置直接列出模型管理中的完整 Tool、MCP、Skill 目录；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前校验 Skill 依赖工具、MCP Tool 与所属 MCP 服务同时被选择，以及全部资源、模型能力和参数上限。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
+- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。Skill ZIP 或 `ai/skills` 手动入口会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent；可执行 ZIP 还可在入口同目录提供 `skill-runtime.json`，显式声明包内 PowerShell 脚本及 GET/HEAD 网络 Origin。脚本和网络权限归属 Skill，不出现在可独立管理的 Tool 目录；选择 Skill 发布时服务端自动派生内部调用协议，并实施相对路径、参数、精确 Origin、无重定向、超时、取消、受限环境和 256 KB 结果上限。内置 `system.query-local-ip` Skill 使用声明脚本查询 SmartHub 服务主机的本地 IPv4/IPv6。自定义 Tool 仍支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
+- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent、需求评审 Agent 与评审问答 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。页面不提供版本记录入口，历史不可变快照仅由服务端保留用于运行追溯。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前校验 Skill 外部依赖工具、MCP Tool 与所属 MCP 服务同时被选择，以及全部资源、模型能力和参数上限。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；三个 Agent 分别通过 `requirement_points_submit_result`、`review_submit_result` 或 `review_answer_submit` 提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
 - 需求分析上传支持 Markdown、TXT 和 ZIP；当前项目版本的文件统一入库到 `版本文档/{项目版本名}/需求文档/`，ZIP 保留包内子目录和图片相对路径；上传区展示文件读取、任务提交、解析/Embedding、向量索引发布和项目版本绑定的真实进度，成功结果展示 15 秒后自动收起，失败结果保留。等待窗口为 10 分钟，批量上传按资产独立绑定并反馈部分失败，避免后端仍在处理却被前端误报整体失败；上传完成的固定需求资产版本自动绑定到当前项目版本。评审接口按 `projectVersionId` 校验版本状态和需求绑定；正式 ReviewRun、固定快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON，页面刷新后按项目版本恢复真实历史；
@@ -53,6 +53,7 @@
 - `review.submit_result` 使用 `requirement-review/v3`：模型提交总体摘要和逐条 `analyses`，每条分析只通过一个 `requirementPointRef` 对应冻结需求点，并给出标题、类型、严重度、置信度、分析、影响和建议。服务端校验引用、去重并生成 Finding ID；展示字段偶发缺失或枚举不规范时使用确定性兜底，不反复退回，只有需求点引用不存在或分析内容为空才拒绝；
 - ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；结果提交请求遇到 429 或临时供应商错误时执行最多两次指数退避重试；
 - 调用评审接口时先创建 `running` ReviewRun，独立校验通过后保存正式结果；模型、工具或校验失败以及客户端取消均保留终态和脱敏错误。API 服务成功监听后会把上一个服务进程遗留的 `running` ReviewRun 收口为 `REVIEW_RUN_INTERRUPTED` 失败态，避免热重载或进程重启后永久停在运行中。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、结果和双 Agent 运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
+- 提取结果通过独立校验后立即作为冻结阶段检查点持久化。若随后需求评审失败或取消，页面同时提供“重新需求评审”和“全部重跑”：前者创建新 ReviewRun，复用并重新校验原需求点、Evidence、coverage 与正文投递证明，只使用当前已发布的需求评审 Agent 执行评审；后者按当前项目版本的全部有效绑定和两个当前 Agent 配置，从需求点提取开始创建完整新运行。提取阶段失败时没有可复用检查点，只允许全部重跑；任何重跑都不覆盖原运行。
 
 当前自动化测试已覆盖正常规模正文首轮直传、读取工具调用为 0、`sourceTexts` 跨固定输入检索、置信区间多证据召回、无效线索局部忽略、服务端需求点去重、Evidence ID/引用生成与共享证据去重、coverage 生成、投递清单校验、评审分析与需求点对应、模型字段保留和容错兜底，以及超长正文确定性切换 `segmented_context`。
 
@@ -109,7 +110,7 @@ Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文�
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
-进入“系统管理 → Agent 配置”后，使用顶部中文下拉框选择“需求点提取 Agent”“需求评审 Agent”或“评审问答 Agent”。模型与路由、提示词、Tool/MCP/Skill、版本记录均随当前选中的 Agent 切换；资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布新版本”会先保存当前 Agent 草稿，再只发布该 Agent 的下一不可变版本。三个 Agent 的版本号和生效状态互不影响；发布会校验资源依赖、模型健康与工具调用/结构化输出能力。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；无法连接、未发现或发生漂移的扩展 Tool 不会被暴露给模型；固定结果提交工具仍保持可用。
+进入“系统管理 → Agent 配置”后，使用顶部中文下拉框选择“需求点提取 Agent”“需求评审 Agent”或“评审问答 Agent”。页面只提供模型与路由、提示词、Tool/MCP/Skill 三类配置；Tool/MCP/Skill 页面按截图在资源清单底部集中维护最大轮次、最大工具调用、总截止时间和推理强度。资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布新版本”会先保存当前 Agent 草稿，再只发布该 Agent 的下一不可变版本。三个 Agent 的版本号和生效状态互不影响；发布会校验资源依赖、模型健康与工具调用/结构化输出能力。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；无法连接、未发现或发生漂移的扩展 Tool 不会被暴露给模型；固定结果提交工具仍保持可用。
 
 ## 生产构建与运行
 

@@ -60,6 +60,8 @@ export type RequirementAnalysisResult = {
   }
 }
 
+export type RequirementPointExtractionResult = Pick<RequirementAnalysisResult, 'requirementPoints' | 'evidence' | 'coverage'>
+
 export type AgentExecutionEvent = {
   sequence: number
   type: string
@@ -162,6 +164,10 @@ export type RequirementAnalysisResponse = {
 
 export type RequirementReviewRun = {
   id: string
+  retryOfRunId?: string
+  retryMode?: 'full' | 'review_only'
+  reusedExtractionFromRunId?: string
+  hasFrozenExtraction: boolean
   projectVersionId: string
   assetId: string
   assetVersionId: string
@@ -183,6 +189,7 @@ export type RequirementReviewRun = {
   execution?: AgentExecutionRecord
   executions?: AgentExecutions
   inputDeliveryManifest?: InputDeliveryManifest
+  extractionResult?: RequirementPointExtractionResult
   response?: RequirementAnalysisResponse
 }
 
@@ -241,6 +248,17 @@ export async function cancelRequirementReviewRun(runId: string) {
   const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
   const body = await response.json() as RequirementReviewRun | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审取消失败')
+  return body as RequirementReviewRun
+}
+
+export async function retryRequirementReviewRun(runId: string, mode: 'full' | 'review_only') {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/retry`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  })
+  const body = await response.json() as RequirementReviewRun | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审重跑失败')
   return body as RequirementReviewRun
 }
 

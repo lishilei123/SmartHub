@@ -230,6 +230,9 @@ export interface AgentExecutionRecord {
 }
 export interface ReviewRun {
   id: string
+  retryOfRunId?: string
+  retryMode?: 'full' | 'review_only'
+  reusedExtractionFromRunId?: string
   projectVersionId: string
   assetId: string
   assetVersionId: string

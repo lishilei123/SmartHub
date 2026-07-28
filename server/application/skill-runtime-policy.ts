@@ -4,6 +4,7 @@ import type { SkillRuntimePolicy } from '../domain/types.js'
 export const SKILL_EXECUTE_SCRIPT_TOOL_ID = 'skill.execute_script'
 export const SKILL_HTTP_REQUEST_TOOL_ID = 'skill.http_request'
 export const SKILL_RUNTIME_MANIFEST = 'skill-runtime.json'
+export const SKILL_RUNTIME_TOOL_IDS = new Set<string>([SKILL_EXECUTE_SCRIPT_TOOL_ID, SKILL_HTTP_REQUEST_TOOL_ID])
 
 const MAX_SCRIPTS = 20
 const MAX_NETWORK_ORIGINS = 20
@@ -46,6 +47,8 @@ export function requiredSkillRuntimeToolIds(runtime: SkillRuntimePolicy | undefi
     ...(runtime?.network ? [SKILL_HTTP_REQUEST_TOOL_ID] : []),
   ]
 }
+
+export function isSkillRuntimeToolId(value: string) { return SKILL_RUNTIME_TOOL_IDS.has(value) }
 
 function object(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(message)

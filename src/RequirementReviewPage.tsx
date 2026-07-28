@@ -14,6 +14,7 @@ import {
   cancelRequirementReviewRun,
   loadRequirementReviewRun,
   loadRequirementReviewRuns,
+  retryRequirementReviewRun,
   startRequirementAnalysis,
   type AgentExecutionEvent,
   type AgentExecutionRecord,
@@ -104,7 +105,7 @@ function formatTraceValue(value: unknown) { return value === undefined ? '' : JS
 
 function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord; loading: boolean; tab: 'conversation' | 'events'; onTab: (tab: 'conversation' | 'events') => void; onClose: () => void }) {
   const stagedExecutions = run.response?.executions ?? run.executions
-  const initialAgentKey = run.step === 'extracting_requirement_points' ? 'requirement-point-extraction' : stagedExecutions?.requirementReview ? 'requirement-review' : 'requirement-point-extraction'
+  const initialAgentKey = run.step === 'extracting_requirement_points' ? 'requirement-point-extraction' : run.step === 'reviewing_requirements' || stagedExecutions?.requirementReview ? 'requirement-review' : 'requirement-point-extraction'
   const [agentKey, setAgentKey] = useState<'requirement-point-extraction' | 'requirement-review'>(initialAgentKey)
   const stagedExecution = agentKey === 'requirement-point-extraction' ? stagedExecutions?.requirementPointExtraction : stagedExecutions?.requirementReview
   const currentExecution = run.execution?.agentKey === agentKey ? run.execution : undefined
@@ -170,7 +171,6 @@ function QaExecutionModal({ question, modelLabel, execution, running, failed, on
   const publicOutputs = events.filter(event => event.type === 'message_end' && event.role === 'assistant' && event.content)
   return <ReviewModal title="评审问答执行详情" className="rr-run-record-modal rr-qa-trace-modal" onClose={onClose}><div className="rr-run-record">
     <div className="rr-run-record-summary"><div><ReviewBadge tone={running ? 'purple' : failed ? 'red' : 'green'}>{running ? '生成中' : failed ? '执行失败' : '回答完成'}</ReviewBadge><b>{question}</b><span>{modelLabel ?? '评审问答 Agent'}</span></div><dl><div><dt>Turn</dt><dd>{execution.turns}</dd></div><div><dt>工具调用</dt><dd>{execution.toolCalls}{execution.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution.framework ? `${execution.framework.name} ${execution.framework.version}` : running ? '连接中' : '未知'}</dd></div></dl></div>
-    <div className="rr-run-record-notice"><ShieldCheck /><span><b>推理与执行摘要</b>这里展示可安全公开的模型输出、事件和脱敏工具轨迹；不展示模型隐藏思维链，也不复制整份固定需求正文。</span></div>
     <div className="rr-run-record-body"><div className="rr-qa-trace-content">
       <section><header><Sparkles /><span><b>推理与执行摘要</b><small>按实际事件生成，不补写模型未公开的思考</small></span></header><div className="rr-qa-trace-steps">{summaryEvents.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : ''} /><span><b>{qaTraceStep(event)}</b><small>#{event.sequence} · Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></span></article>)}{!summaryEvents.length && <div className="rr-trace-empty"><LoaderCircle className={running ? 'rotating' : ''} /><b>{running ? '正在建立问答执行上下文' : '没有可展示的执行事件'}</b></div>}</div></section>
       <section><header><Wrench /><span><b>工具调用详情</b><small>调用参数和返回均经过服务端脱敏</small></span></header><div className="rr-qa-tool-list">{toolCalls.map(start => { const end = start.toolCallId ? toolEnds.get(start.toolCallId) : undefined; return <article className={`rr-agent-tool ${end?.isError ? 'failed' : ''}`} key={start.sequence}><header><span><Wrench />{start.toolId ?? '未知工具'}</span><ReviewBadge tone={!end ? 'orange' : end.isError ? 'red' : 'green'}>{!end ? '执行中' : end.isError ? '失败' : '完成'}</ReviewBadge><small>Turn {start.turn ?? 0}</small></header><div><details open><summary>调用参数</summary><pre>{formatTraceValue(start.toolArguments) || '未保存参数'}</pre></details><details><summary>工具返回</summary><pre>{formatTraceValue(end?.toolResult) || (!end ? '等待工具返回…' : '未保存返回内容')}</pre></details></div><footer>{start.toolCallId}</footer></article> })}{!toolCalls.length && <div className="rr-trace-empty"><Wrench /><b>{running ? '等待首个工具调用' : '本轮没有工具调用记录'}</b></div>}</div></section>
@@ -217,6 +217,7 @@ export function RequirementReviewPage({
   const [runsLoadingMore, setRunsLoadingMore] = useState(false)
   const [contentByVersion, setContentByVersion] = useState<Record<string, string>>({})
   const [selectedRunId, setSelectedRunId] = useState('')
+  const [retryingMode, setRetryingMode] = useState<'full' | 'review_only' | null>(null)
   const [agentConfiguration, setAgentConfiguration] = useState<AgentConfigurationState | null>(null)
   const [agentConfigurationState, setAgentConfigurationState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [selectedFindingId, setSelectedFindingId] = useState('')
@@ -343,8 +344,9 @@ export function RequirementReviewPage({
   const selectedDocument = requirementDocuments.find(document => document.id === selectedAssetId) ?? requirementDocuments[0]
   const selectedRun = runs.find(run => run.id === selectedRunId)
   const result = selectedRun?.response?.result
-  const evidenceById = useMemo(() => new Map((result?.evidence ?? []).map(evidence => [evidence.clientEvidenceId, evidence])), [result])
-  const requirementPointsById = useMemo(() => new Map((result?.requirementPoints ?? []).map(point => [point.clientRequirementPointId, point])), [result])
+  const extractionResult = result ?? selectedRun?.extractionResult
+  const evidenceById = useMemo(() => new Map((extractionResult?.evidence ?? []).map(evidence => [evidence.clientEvidenceId, evidence])), [extractionResult])
+  const requirementPointsById = useMemo(() => new Map((extractionResult?.requirementPoints ?? []).map(point => [point.clientRequirementPointId, point])), [extractionResult])
   const findingEvidence = (finding: ReviewFinding) => evidenceForFinding(finding, requirementPointsById, evidenceById)
   const documentContent = contentByVersion[selectedDocument?.assetVersionId ?? ''] ?? selectedDocument?.content ?? ''
   const documentVersionId = selectedDocument?.assetVersionId ?? ''
@@ -545,6 +547,7 @@ export function RequirementReviewPage({
       status: 'running',
       step: 'agent_executing',
       progress: 10,
+      hasFrozenExtraction: false,
       modelLabel: `需求点提取 V${extractionConfiguration.version} · ${extractionConfiguration.routing.primaryModel?.modelId ?? '已发布模型'}；需求评审 V${reviewConfiguration.version} · ${reviewConfiguration.routing.primaryModel?.modelId ?? '已发布模型'}`,
       startedAt,
     }
@@ -583,6 +586,23 @@ export function RequirementReviewPage({
       notify('已取消本次需求评审。', 'warning')
     } catch (error) {
       notify(error instanceof Error ? error.message : '需求评审取消失败', 'error')
+    }
+  }
+
+  const retryAnalysis = async (mode: 'full' | 'review_only') => {
+    if (!selectedRun || selectedRun.status === 'running' || selectedRun.status === 'succeeded' || selectedRun.id.startsWith('pending-') || retryingMode) return
+    setRetryingMode(mode)
+    try {
+      const started = await retryRequirementReviewRun(selectedRun.id, mode)
+      setRuns(current => [started, ...current.filter(run => run.id !== started.id)])
+      setSelectedRunId(started.id)
+      setView('overview')
+      addAudit(mode === 'review_only' ? `复用冻结需求点重新需求评审：${selectedRun.id} → ${started.id}` : `全部重跑需求点提取与评审：${selectedRun.id} → ${started.id}`)
+      notify(mode === 'review_only' ? '已复用冻结需求点和 Evidence，只重新执行需求评审。' : '已创建新的完整运行，正在重新提取需求点并评审。')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '需求评审重跑失败', 'error')
+    } finally {
+      setRetryingMode(null)
     }
   }
 
@@ -830,7 +850,7 @@ export function RequirementReviewPage({
   })
 
   const stats = {
-    requirements: result?.requirementPoints?.length ?? 0,
+    requirements: extractionResult?.requirementPoints?.length ?? 0,
     findings: result?.findings.length ?? 0,
     high: result?.findings.filter(finding => finding.severity === 'critical' || finding.severity === 'high').length ?? 0,
     pending: result?.findings.filter(finding => !findingEvidence(finding).length).length ?? 0,
@@ -848,8 +868,10 @@ export function RequirementReviewPage({
     ? executionFromEvents(pendingQaEvents[qaTraceSelection.runId] ?? [])
     : selectedQaTraceMessage?.execution
   const agentConfigurationsReady = Boolean(agentConfiguration?.agents.requirementPointExtraction.activeVersion && agentConfiguration?.agents.requirementReview.activeVersion)
+  const reviewAgentReady = Boolean(agentConfiguration?.agents.requirementReview.activeVersion)
   const reviewQaReady = Boolean(agentConfiguration?.agents.reviewQa.activeVersion)
-  const canRun = Boolean(projectVersion && !readOnly && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && agentConfigurationsReady && apiState === 'ready' && bindingsState === 'ready' && !requestController.current)
+  const canRun = Boolean(projectVersion && !readOnly && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && agentConfigurationsReady && apiState === 'ready' && bindingsState === 'ready' && !requestController.current && !retryingMode)
+  const canRetryReview = Boolean(selectedRun && !readOnly && (selectedRun.status === 'failed' || selectedRun.status === 'cancelled') && selectedRun.hasFrozenExtraction && reviewAgentReady && apiState === 'ready' && !retryingMode)
 
   const bindDocument = async (document: KnowledgeDocument) => {
     if (!projectVersion || readOnly || !document.assetVersionId || bindingActionId) return
@@ -882,7 +904,7 @@ export function RequirementReviewPage({
     <header className="rr-header">
       <div className="rr-title-block">
         <div className="rr-title-icon"><Sparkles /></div>
-        <div><span>需求点提取与评审 · {projectVersion.name}</span><h1>{requirementDocuments.length ? `${requirementDocuments.length} 份文档联合分析` : '需求分析'}</h1><p>{requirementDocuments.length ? `先按可独立实现与验收的粒度提取需求点，并逐条对齐固定证据` : bindingsState === 'loading' ? '正在加载当前版本的需求绑定' : '当前版本尚未绑定 ready 的需求资产'}</p></div>
+        <div><h1>需求点提取与评审 · {projectVersion.name}</h1><p>{requirementDocuments.length ? `先按可独立实现与验收的粒度提取需求点，并逐条对齐固定证据` : bindingsState === 'loading' ? '正在加载当前版本的需求绑定' : '当前版本尚未绑定 ready 的需求资产'}</p></div>
       </div>
       <div className="rr-run-summary">
         <ReviewBadge tone={runTone(selectedRun?.status)}>{runLabel(selectedRun?.status)}</ReviewBadge>
@@ -912,19 +934,19 @@ export function RequirementReviewPage({
       <main className="rr-main">
         <div className="rr-main-toolbar">
           <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
-          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button><ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
+          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {run.retryMode === 'review_only' ? '仅评审 · ' : run.retryMode === 'full' ? '全部重跑 · ' : ''}{runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button><ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
         </div>
 
         {selectedRun?.status === 'running' && <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>{selectedRun.step === 'reviewing_requirements' ? 'RequirementReviewAgent 正在评审固定需求点' : 'RequirementPointExtractionAgent 正在提取需求点'}</b><span>两个 Agent 使用独立会话；页面每秒同步服务端状态，刷新或关闭浏览器不会取消本次运行。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>}
-        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>评审运行失败</b><span>{runErrorMessage(selectedRun.error)}</span>{!agentConfigurationsReady && <small>请先分别发布两个 Agent 配置。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
-        {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{!agentConfigurationsReady && <small>请先分别发布两个 Agent 配置。</small>}</div><button className="btn primary" onClick={startAnalysis} disabled={!canRun}><RefreshCw />重新评审</button></div>}
+        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>{selectedRun.hasFrozenExtraction ? '需求评审失败，需求点提取结果已保留' : '需求点提取或运行启动失败'}</b><span>{runErrorMessage(selectedRun.error)}</span>{selectedRun.hasFrozenExtraction && !reviewAgentReady && <small>请先发布需求评审 Agent，再单独重跑评审。</small>}{!selectedRun.hasFrozenExtraction && !agentConfigurationsReady && <small>请先分别发布两个 Agent 配置。</small>}</div><div className="rr-retry-actions">{selectedRun.hasFrozenExtraction && <button className="btn primary" onClick={() => void retryAnalysis('review_only')} disabled={!canRetryReview}><RefreshCw />{retryingMode === 'review_only' ? '启动中…' : '重新需求评审'}</button>}<button className="btn ghost" onClick={() => void retryAnalysis('full')} disabled={!canRun}><Play />{retryingMode === 'full' ? '启动中…' : '全部重跑'}</button></div></div>}
+        {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{selectedRun.hasFrozenExtraction && !reviewAgentReady && <small>请先发布需求评审 Agent，再单独重跑评审。</small>}</div><div className="rr-retry-actions">{selectedRun.hasFrozenExtraction && <button className="btn primary" onClick={() => void retryAnalysis('review_only')} disabled={!canRetryReview}><RefreshCw />重新需求评审</button>}<button className="btn ghost" onClick={() => void retryAnalysis('full')} disabled={!canRun}><Play />全部重跑</button></div></div>}
 
         <div className={`rr-view-content ${view === 'source' ? 'rr-source-view' : ''}`}>
           {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} traceabilityFilter={traceabilityFilter} setTraceabilityFilter={setTraceabilityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} findingEvidence={findingEvidence} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
           {view === 'source' && <SourceDocumentView document={selectedDocument} content={documentContent} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} />}
           {view === 'diff' && <DiffView versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
-          {view === 'tree' && <RequirementPointsView requirementPoints={result?.requirementPoints ?? []} evidence={result?.evidence ?? []} onLocateEvidence={locateEvidence} />}
-          {view === 'evidence' && <EvidenceView evidence={result?.evidence ?? []} findings={result?.findings ?? []} requirementPoints={result?.requirementPoints ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
+          {view === 'tree' && <RequirementPointsView requirementPoints={extractionResult?.requirementPoints ?? []} evidence={extractionResult?.evidence ?? []} onLocateEvidence={locateEvidence} />}
+          {view === 'evidence' && <EvidenceView evidence={extractionResult?.evidence ?? []} findings={result?.findings ?? []} requirementPoints={extractionResult?.requirementPoints ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
         </div>
       </main>
 

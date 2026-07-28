@@ -4,11 +4,12 @@ import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/
 import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { mcpPolicyHash, skillConfigurationHash, toolBindingToken } from './ai-resource-hash.js'
+import { isSkillRuntimeToolId, requiredSkillRuntimeToolIds } from './skill-runtime-policy.js'
 
 const SCENE = 'requirement_analysis' as const
 const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview', 'reviewQa'] as const
 const LEGACY_AGENT_KEYS = ['requirementPointExtraction', 'requirementReview'] as const
-const BUILT_IN_TOOL_KEYS = ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result', 'review.submit_result', 'review.answer_submit', 'skill.execute_script', 'skill.http_request'] as const
+const BUILT_IN_TOOL_KEYS = ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result', 'review.submit_result', 'review.answer_submit'] as const
 const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch'])
 const REQUIRED_EXTRACTION_TOOL = 'requirement-points.submit_result'
 const REQUIRED_REVIEW_TOOL = 'review.submit_result'
@@ -249,7 +250,7 @@ function normalizeAgent(value: AgentDefinitionDraft | undefined, label: string, 
 function validateCapabilityDependencies(toolIds: string[], skillKeys: string[], mcpServerKeys: string[], label: string, state: DatabaseState) {
   const selectedTools = new Set(toolIds)
   for (const skill of resolveSkills(skillKeys, state)) {
-    const missing = skill.toolIds.filter(toolId => !selectedTools.has(toolId))
+    const missing = skill.toolIds.filter(toolId => !isSkillRuntimeToolId(toolId) && !selectedTools.has(toolId))
     if (missing.length) throw new Error(`${label}选择的 Skill ${skill.key} 依赖未选择工具：${missing.join('、')}`)
   }
   const selectedMcps = new Set(mcpServerKeys)
@@ -283,7 +284,8 @@ function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentC
 
 function publishedDefinition(agentKey: AgentConfigurationAgentKey, value: AgentDefinitionDraft, configurationVersion: number, state: DatabaseState) {
   const builtIn = builtInDefinition(agentKey)
-  const skills = resolveSkills(value.skillKeys, state).map(skill => ({
+  const selectedSkills = resolveSkills(value.skillKeys, state)
+  const skills = selectedSkills.map(skill => ({
     skillKey: skill.key,
     version: skill.version,
     enabled: true,
@@ -296,7 +298,8 @@ function publishedDefinition(agentKey: AgentConfigurationAgentKey, value: AgentD
     toolIds: [...server.toolIds],
     policyHash: mcpPolicyHash(server),
   }))
-  const tools = resolveTools(value.toolIds, state).map(tool => toolBindingToken(tool))
+  const runtimeToolIds = selectedSkills.flatMap(skill => requiredSkillRuntimeToolIds(skill.runtime))
+  const tools = resolveTools([...new Set([...value.toolIds, ...runtimeToolIds])], state).map(tool => toolBindingToken(tool))
   return createAgentDefinitionVersion({
     agentKey: builtIn.agentKey,
     agentType: builtIn.agentType,
@@ -446,7 +449,7 @@ function resolveMcps(serverKeys: string[], state: DatabaseState) {
   return serverKeys.map(key => required(servers.find(server => server.key === key && server.enabled), `MCP ${key} 不存在或未启用`))
 }
 function normalizeToolIds(value: unknown, label: string, state: DatabaseState) {
-  const toolIds = stringKeys(value)
+  const toolIds = stringKeys(value).filter(key => !isSkillRuntimeToolId(key))
   const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
   const known = new Set<string>([...BUILT_IN_TOOL_KEYS, ...tools.map(tool => tool.key)])
   const unknown = toolIds.filter(key => !known.has(key))
@@ -473,7 +476,7 @@ function builtInToolReference(key: string): ToolResource {
   return { id: `builtin_tool_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'tool', key, name: key, description: '', version: definition.version, enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk: definition.risk, timeoutMs: definition.timeoutMs, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
 }
 function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ? value : []).map(item => String(item).trim()).filter(Boolean))] }
-function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key)) }
+function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key) && !isSkillRuntimeToolId(key)) }
 function cleanRequired(value: unknown, name: string, max: number) { const result = cleanText(value, max); if (!result) throw new Error(`${name}不能为空`); return result }
 function cleanText(value: unknown, max: number) { const result = String(value ?? '').trim(); if (result.length > max) throw new Error(`文本长度不能超过 ${max}`); return result }
 function finiteNumber(value: unknown, name: string, min: number, max: number) { const result = Number(value); if (!Number.isFinite(result) || result < min || result > max) throw new Error(`${name}必须在 ${min} 到 ${max} 之间`); return result }

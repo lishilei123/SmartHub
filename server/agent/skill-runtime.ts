@@ -4,7 +4,7 @@ import type { SkillResource } from '../domain/types.js'
 import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { resolveManualSkillEntrypoint } from '../infrastructure/manual-skill-files.js'
-import { skillConfigurationHash } from '../application/ai-resource-hash.js'
+import { matchesSkillConfigurationHash } from '../application/ai-resource-hash.js'
 
 const MAX_SKILL_BYTES = 256 * 1024
 const MAX_ALL_SKILLS_BYTES = 512 * 1024
@@ -21,7 +21,7 @@ export class AgentSkillRuntime {
     for (const binding of bindings) {
       const skill = state.aiResources.find((item): item is SkillResource => item.kind === 'skill' && item.key === binding.skillKey)
       if (!skill || !skill.enabled || skill.version !== binding.version) throw new Error(`SKILL_BINDING_UNAVAILABLE: ${binding.skillKey}@${binding.version}`)
-      if (skillConfigurationHash(skill) !== binding.configurationHash) throw new Error(`SKILL_BINDING_CHANGED: ${binding.skillKey}@${binding.version}`)
+      if (!matchesSkillConfigurationHash(skill, binding.configurationHash)) throw new Error(`SKILL_BINDING_CHANGED: ${binding.skillKey}@${binding.version}`)
       const content = await this.read(skill)
       const bytes = Buffer.byteLength(content, 'utf8')
       if (bytes > MAX_SKILL_BYTES) throw new Error(`SKILL_CONTENT_TOO_LARGE: ${skill.key}`)

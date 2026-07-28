@@ -212,9 +212,11 @@ test('评审问答运行时加载已发布 Agent 绑定的 Skill 与脚本工具
     agentKey: 'reviewQa',
     revision: initial.revision,
     routing: { ...initial.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 2_048 },
-    definition: { ...initial.definition, skillKeys: ['system.query-local-ip'], toolIds: [...initial.definition.toolIds, 'skill.execute_script'] },
+    definition: { ...initial.definition, skillKeys: ['system.query-local-ip'] },
   })
-  await configurations.publish({ agentKey: 'reviewQa', revision: saved.revision })
+  const published = await configurations.publish({ agentKey: 'reviewQa', revision: saved.revision })
+  assert.deepEqual(saved.definition.toolIds, ['review.answer_submit'])
+  assert.deepEqual(published.agentDefinition.toolIds, ['review.answer_submit', 'skill.execute_script'])
   const faux = fauxProvider()
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall('skill_execute_script', { script: 'scripts/get-local-ip.ps1', args: [] }), { stopReason: 'toolUse' }),
@@ -287,6 +289,66 @@ test('普通文档正文在首轮直接进入上下文，模型无需逐 Chunk �
   assert.ok(!output.executions.requirementPointExtraction.events.some(event => event.toolId === 'knowledge_read_chunk'))
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'input_package_built'))
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'input_batch_delivered'))
+})
+
+test('需求评审失败后可复用冻结需求点只重跑评审，并保留原运行与提取执行', async () => {
+  const { output: firstOutput, store } = await successfulRun()
+  await store.transaction(state => {
+    const run = state.reviewRuns.find(item => item.id === firstOutput.runId)!
+    const extractionExecution = run.executions?.requirementPointExtraction
+    run.status = 'failed'
+    run.step = 'failed'
+    run.progress = 60
+    run.finishedAt = '2026-07-28T01:00:00.000Z'
+    run.error = 'MODEL_REQUEST_FAILED: 需求评审模型调用失败'
+    run.result = undefined
+    run.execution = undefined
+    run.executions = extractionExecution ? { requirementPointExtraction: extractionExecution } : undefined
+  })
+
+  const faux = fauxProvider()
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
+  ])
+  let modelCalls = 0
+  const stream: StreamFn = (model, context, options) => {
+    modelCalls += 1
+    return (faux.provider.streamSimple.bind(faux.provider) as StreamFn)(model, context, options)
+  }
+  const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: stream }))
+  const retried = await service.retryReview(firstOutput.runId)
+
+  assert.notEqual(retried.runId, firstOutput.runId)
+  assert.equal(retried.status, 'candidate_validated')
+  assert.equal(modelCalls, 1)
+  const runs = (await store.snapshot()).reviewRuns
+  const sourceRun = runs.find(item => item.id === firstOutput.runId)!
+  const retryRun = runs.find(item => item.id === retried.runId)!
+  assert.equal(sourceRun.status, 'failed')
+  assert.equal(sourceRun.result, undefined)
+  assert.equal(retryRun.status, 'succeeded')
+  assert.equal(retryRun.retryOfRunId, sourceRun.id)
+  assert.equal(retryRun.retryMode, 'review_only')
+  assert.equal(retryRun.reusedExtractionFromRunId, sourceRun.id)
+  assert.deepEqual(retryRun.extractionResult, sourceRun.extractionResult)
+  assert.deepEqual(retryRun.inputDeliveryManifest, sourceRun.inputDeliveryManifest)
+  assert.deepEqual(retryRun.executions?.requirementPointExtraction, sourceRun.executions?.requirementPointExtraction)
+  assert.ok(retryRun.executions?.requirementReview)
+})
+
+test('没有冻结需求点的失败运行只能全部重跑', async () => {
+  const store = await seededStore()
+  await store.transaction(state => {
+    state.reviewRuns.push({
+      id: 'review-run-extraction-failed', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-1',
+      documentTitle: '提取失败运行', documentVersion: 1, logicalPath: 'requirements/cancel.md', sourceId: 'source-1', modelId: 'model-1', modelLabel: '测试模型',
+      status: 'failed', step: 'failed', progress: 10, createdAt: '2026-07-28T00:00:00.000Z', startedAt: '2026-07-28T00:00:00.000Z', finishedAt: '2026-07-28T00:00:01.000Z',
+      snapshot: {} as (typeof state.reviewRuns)[number]['snapshot'], error: '需求点提取失败',
+    })
+  })
+  const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store))
+  await assert.rejects(() => service.retryReview('review-run-extraction-failed'), /没有已冻结的需求点提取结果，只能全部重跑/u)
+  assert.equal((await store.snapshot()).reviewRuns.length, 1)
 })
 
 test('新评审固定使用已发布 Agent 配置中的模型、Prompt、工具与配置版本', async () => {

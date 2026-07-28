@@ -3,7 +3,7 @@ import test from 'node:test'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
-test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', async () => {
+test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和工具', async () => {
   const store = new JsonStore(null)
   await store.load()
   const service = new AiResourceService(store)
@@ -15,11 +15,10 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
     'requirement-points.submit_result',
     'review.answer_submit',
     'review.submit_result',
-    'skill.execute_script',
-    'skill.http_request',
   ])
   assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip'])
   assert.equal(initial.skills[0].runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
+  assert.deepEqual(initial.skills[0].toolIds, [])
   assert.ok(initial.tools.every(tool => tool.builtIn && tool.status === 'ready'))
   assert.deepEqual(Object.fromEntries(initial.tools.map(tool => [tool.key, tool.sourcePath])), {
     'knowledge.search': 'server/tools/knowledge-search.ts',
@@ -27,11 +26,9 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
     'requirement-points.submit_result': 'server/tools/requirement-points-submit-result.ts',
     'review.answer_submit': 'server/tools/review-answer-submit.ts',
     'review.submit_result': 'server/tools/review-submit-result.ts',
-    'skill.execute_script': 'server/tools/skill-capability.ts',
-    'skill.http_request': 'server/tools/skill-capability.ts',
   })
   store.transaction = async () => { throw new Error('内置资源已同步时不应再次启动写事务') }
-  assert.equal((await service.list()).tools.length, 7)
+  assert.equal((await service.list()).tools.length, 5)
   store.transaction = JsonStore.prototype.transaction.bind(store)
   const searchTool = initial.tools.find(tool => tool.key === 'knowledge.search')!
   const builtInSource = await service.source(searchTool.id)
@@ -66,14 +63,14 @@ test('AI 资源目录登记内置工具并持久化 MCP、Skill 和工具', asyn
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
   assert.equal(catalog.skills.length, 2)
-  assert.equal(catalog.tools.length, 8)
+  assert.equal(catalog.tools.length, 6)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)
   await assert.rejects(() => service.delete('mcp', mcp.id), /工具引用/)
   await service.delete('skill', skill.id)
   await service.delete('tool', tool.id)
   await service.delete('mcp', mcp.id)
-  assert.equal((await service.list()).tools.length, 7)
+  assert.equal((await service.list()).tools.length, 5)
 })
 
 test('AI 资源目录清理已退役的批量校验证据工具', async () => {
@@ -101,6 +98,7 @@ test('AI 资源目录校验标识、引用和内置工具保护', async () => {
   await assert.rejects(() => service.create('mcp', { key: 'Bad Key', name: '错误', endpoint: 'file:///tmp/mcp', transport: 'sse', authType: 'none' }), /资源标识/)
   await assert.rejects(() => service.create('skill', { key: 'bad.skill', name: '错误 Skill', entrypoint: 'SKILL.md', toolIds: ['missing.tool'] }), /未注册工具/)
   await assert.rejects(() => service.create('tool', { key: 'remote.tool', name: '远程工具', source: 'mcp', risk: 'read', timeoutMs: 1000, mcpServerId: 'missing' }), /MCP 服务/)
+  await assert.rejects(() => service.create('tool', { key: 'skill.execute_script', name: '伪造 Skill 网关', source: 'local', sourcePath: 'server/tools/skill-capability.ts', risk: 'code_execution', timeoutMs: 1000 }), /运行权限清单/)
   await assert.rejects(() => service.create('tool', { key: 'http.missing', name: '错误 HTTP 工具', source: 'http', risk: 'network_read', timeoutMs: 1000 }), /HTTP 工具 Endpoint/)
   const http = await service.create('tool', { key: 'http.lookup', name: 'HTTP 查询', source: 'http', risk: 'network_read', timeoutMs: 1000, endpoint: 'https://tools.example.com/invoke', authType: 'bearer', parameters: { type: 'object', properties: { query: { type: 'string' } } } })
   assert.equal(http.kind === 'tool' ? http.credentialEnv : '', 'SMARTHUB_HTTP_TOOL_HTTP_LOOKUP_TOKEN')

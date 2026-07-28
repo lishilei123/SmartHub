@@ -15,7 +15,11 @@ export interface RequirementAnalysisRequest {
   modelId?: string
   focusAreas?: string[]
   excludedAreas?: string[]
+  retryOfRunId?: string
+  retryMode?: 'full'
 }
+
+export type RequirementReviewRetryMode = 'full' | 'review_only'
 
 export class RequirementAnalysisService {
   private readonly validator: ReviewResultValidator
@@ -92,6 +96,34 @@ export class RequirementAnalysisService {
     })
   }
 
+  async retry(runId: string, mode: RequirementReviewRetryMode) {
+    const sourceRun = await this.loadStoredRun(runId)
+    if (sourceRun.status === 'running') throw new Error('正在执行的需求评审不能重跑，请先取消运行')
+    if (sourceRun.status === 'succeeded') throw new Error('已成功的需求评审不能作为失败重试来源，请直接发起新的完整运行')
+    if (mode === 'full') {
+      return this.start({
+        projectVersionId: sourceRun.projectVersionId,
+        focusAreas: sourceRun.snapshot.focusAreas,
+        excludedAreas: sourceRun.snapshot.excludedAreas,
+        retryOfRunId: sourceRun.id,
+        retryMode: 'full',
+      })
+    }
+    const controller = new AbortController()
+    let retryRunId = ''
+    return await new Promise<ReturnType<typeof presentRun>>((resolve, reject) => {
+      void this.retryReview(runId, controller.signal, run => {
+        retryRunId = run.id
+        this.activeRuns.set(retryRunId, controller)
+        resolve(run)
+      }).catch(error => {
+        if (!retryRunId) reject(error)
+      }).finally(() => {
+        if (retryRunId && this.activeRuns.get(retryRunId) === controller) this.activeRuns.delete(retryRunId)
+      })
+    })
+  }
+
   async cancel(runId: string) {
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
@@ -102,6 +134,81 @@ export class RequirementAnalysisService {
     })
     this.activeRuns.get(runId)?.abort(new Error('AGENT_CANCELLED_BY_USER'))
     return await this.get(runId)
+  }
+
+  async retryReview(sourceRunId: string, signal = new AbortController().signal, onCreated?: (run: ReturnType<typeof presentRun>) => void) {
+    const state = await this.store.snapshot()
+    const sourceRun = required(state.reviewRuns.find(item => item.id === sourceRunId), '需求评审运行不存在')
+    if (sourceRun.status === 'running') throw new Error('正在执行的需求评审不能重跑，请先取消运行')
+    if (sourceRun.status === 'succeeded') throw new Error('已成功的需求评审不能作为失败重试来源')
+    const projectVersion = required(state.projectVersions.find(item => item.id === sourceRun.projectVersionId), '项目版本不存在')
+    if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能重新需求评审')
+    const extraction = structuredClone(required(sourceRun.extractionResult, '该运行没有已冻结的需求点提取结果，只能全部重跑'))
+    const inputDeliveryManifest = structuredClone(required(sourceRun.inputDeliveryManifest, '该运行缺少需求点正文投递证明，只能全部重跑'))
+    const extractionValidation = await this.extractionValidator.validate(extraction, sourceRun.snapshot, inputDeliveryManifest)
+    if (!extractionValidation.valid) throw new Error(`冻结需求点提取结果已无法通过校验，只能全部重跑：${validationIssueSummary(extractionValidation.issues)}`)
+
+    const reviewConfiguration = this.definitions.resolveActive ? await this.definitions.resolveActive('requirement-review') : null
+    if (this.definitions.resolveActive && !reviewConfiguration) throw new Error('请先在系统管理的 Agent 配置中发布需求评审 Agent，再重新需求评审')
+    const previousReviewModel = sourceRun.snapshot.agentModelRefs?.requirementReview ?? sourceRun.snapshot.modelRef
+    const reviewModel = selectAgentModel(state, reviewConfiguration, { sourceId: previousReviewModel.sourceId, modelId: previousReviewModel.modelId }, '需求评审 Agent')
+    const reviewDefinition = reviewConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-review')
+    const extractionDefinition = sourceRun.snapshot.agentDefinitions?.requirementPointExtraction ?? sourceRun.snapshot.agentDefinition
+    const extractionModelRef = sourceRun.snapshot.agentModelRefs?.requirementPointExtraction ?? sourceRun.snapshot.modelRef
+    const extractionConfigurationRef = sourceRun.snapshot.agentConfigurationRefs?.requirementPointExtraction ?? sourceRun.snapshot.agentConfigurationRef
+    const now = new Date().toISOString()
+    const newRunId = `review_run_${randomUUID()}`
+    const snapshot: ReviewRunSnapshot = {
+      ...structuredClone(sourceRun.snapshot),
+      runId: newRunId,
+      modelRef: structuredClone(extractionModelRef),
+      agentModelRefs: {
+        requirementPointExtraction: structuredClone(extractionModelRef),
+        requirementReview: modelSnapshot(reviewModel, Math.min(reviewModel.model.maxOutputTokens, reviewConfiguration?.routing.maxOutputTokens ?? reviewModel.model.maxOutputTokens)),
+      },
+      ...(extractionConfigurationRef && reviewConfiguration ? { agentConfigurationRefs: {
+        requirementPointExtraction: structuredClone(extractionConfigurationRef),
+        requirementReview: configurationRef(reviewConfiguration),
+      } } : {}),
+      agentDefinition: structuredClone(extractionDefinition),
+      agentDefinitions: { requirementPointExtraction: structuredClone(extractionDefinition), requirementReview: reviewDefinition },
+      createdAt: now,
+    }
+    const extractionExecution = sourceRun.executions?.requirementPointExtraction
+      ?? (sourceRun.execution?.agentKey === 'requirement-point-extraction' ? sourceRun.execution : undefined)
+    const run: ReviewRun = {
+      id: newRunId,
+      retryOfRunId: sourceRun.id,
+      retryMode: 'review_only',
+      reusedExtractionFromRunId: sourceRun.id,
+      projectVersionId: sourceRun.projectVersionId,
+      assetId: sourceRun.assetId,
+      assetVersionId: sourceRun.assetVersionId,
+      documentTitle: sourceRun.documentTitle,
+      documentVersion: sourceRun.documentVersion,
+      logicalPath: sourceRun.logicalPath,
+      sourceId: extractionModelRef.sourceId,
+      modelId: extractionModelRef.modelId,
+      modelLabel: `复用需求点提取：${sourceRun.id}；需求评审：${reviewModel.source.name} · ${reviewModel.model.displayName}`,
+      status: 'running',
+      step: 'reviewing_requirements',
+      progress: 60,
+      createdAt: now,
+      startedAt: now,
+      snapshot,
+      extractionResult: extraction,
+      inputDeliveryManifest,
+      ...(extractionExecution ? { executions: { requirementPointExtraction: structuredClone(extractionExecution) } } : {}),
+    }
+    await this.store.transaction(draft => { draft.reviewRuns.push(run) })
+    onCreated?.(presentRun(run))
+    const reviewEvents: AgentExecutionEvent[] = []
+    try {
+      return await this.executeReviewStage({ run, extraction, snapshot, reviewDefinition, reviewModel, reviewConfiguration, extractionExecution, reviewEvents, signal })
+    } catch (error) {
+      const message = await this.failRun(run.id, error, signal, reviewModel, 'requirement-review', reviewEvents)
+      throw new Error(message)
+    }
   }
 
   async analyze(request: RequirementAnalysisRequest, signal = new AbortController().signal, onCreated?: (run: ReturnType<typeof presentRun>) => void) {
@@ -191,6 +298,7 @@ export class RequirementAnalysisService {
     }
     const run: ReviewRun = {
       id: snapshot.runId,
+      ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId, retryMode: request.retryMode ?? 'full' } : {}),
       projectVersionId: projectVersion.id,
       assetId: assets[0].id,
       assetVersionId: versions[0].id,
@@ -240,63 +348,94 @@ export class RequirementAnalysisService {
       })
 
       activeAgentKey = 'requirement-review'
-      const reviewSnapshot = { ...snapshot, agentDefinition: reviewDefinition }
-      const reviewOutput = await this.runtime.execute({
-        snapshot: reviewSnapshot,
-        model: reviewModelConnection,
-        fixedRequirementPointExtraction: extraction,
-        onEvent: async event => {
-          reviewEvents.push(event)
-          if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, reviewEvents, 'requirement-review')
-        },
-      }, signal)
-      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
-      const review = reviewOutput.candidate as CandidateRequirementReview
-      const reviewValidation = await this.reviewValidator.validate(review, extraction, reviewSnapshot)
-      if (!reviewValidation.valid) throw validationError(reviewValidation.issues)
-      const result = { ...structuredClone(extraction), ...structuredClone(review) }
-      const validation = await this.validator.validate(result, reviewSnapshot)
-      if (!validation.valid) throw validationError(validation.issues)
-      const reviewExecution = executionRecord(reviewOutput, 'requirement-review')
-      const finishedAt = new Date().toISOString()
-      await this.store.transaction(draft => {
-        const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
-        Object.assign(current, {
-          status: 'succeeded', step: 'completed', progress: 100, finishedAt, extractionResult: extraction, result,
-          execution: undefined,
-          executions: { requirementPointExtraction: extractionExecution, requirementReview: reviewExecution }, error: undefined,
-        } satisfies Partial<ReviewRun>)
-      })
-      const completed = await this.get(run.id)
-      return required(completed.response, '需求评审结果不存在')
+      return await this.executeReviewStage({ run, extraction, snapshot, reviewDefinition, reviewModel, reviewConfiguration, extractionExecution, reviewEvents, signal, reviewModelConnection })
     } catch (error) {
       const failedModel = activeAgentKey === 'requirement-point-extraction' ? extractionModel : reviewModel
-      const message = sanitizeRuntimeError(error, failedModel.source.baseUrl, failedModel.source.apiKey)
-      const status = signal.aborted || /AGENT_CANCELLED|客户端已中断/u.test(message) ? 'cancelled' : 'failed'
-      await this.store.transaction(draft => {
-        const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
-        Object.assign(current, {
-          status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
-          ...(activeAgentKey === 'requirement-point-extraction' && extractionEvents.length ? { execution: executionProgress(extractionEvents, activeAgentKey) } : {}),
-          ...(activeAgentKey === 'requirement-review' && reviewEvents.length ? { execution: executionProgress(reviewEvents, activeAgentKey) } : {}),
-        } satisfies Partial<ReviewRun>)
-        if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
-          const currentSource = draft.modelSources.find(item => item.id === failedModel.source.id)
-          const currentModel = currentSource?.models.find(item => item.id === failedModel.model.id)
-          if (currentSource && currentModel) {
-            const checkedAt = new Date().toISOString()
-            currentModel.health = 'degraded'
-            currentModel.lastCheckedAt = checkedAt
-            currentModel.healthMessage = '需求评审兼容性验证失败：未能提交结构化评审结果'
-            currentSource.health = 'degraded'
-            currentSource.healthMessage = currentModel.healthMessage
-            currentSource.lastCheckedAt = checkedAt
-            currentSource.updatedAt = checkedAt
-          }
-        }
-      })
+      const events = activeAgentKey === 'requirement-point-extraction' ? extractionEvents : reviewEvents
+      const message = await this.failRun(run.id, error, signal, failedModel, activeAgentKey, events)
       throw new Error(message)
     }
+  }
+
+  private async executeReviewStage(input: {
+    run: ReviewRun
+    extraction: CandidateRequirementPointExtraction
+    snapshot: ReviewRunSnapshot
+    reviewDefinition: ReviewRunSnapshot['agentDefinitions']['requirementReview']
+    reviewModel: AgentModelSelection
+    reviewConfiguration: AgentConfigurationVersion | null
+    extractionExecution?: AgentExecutionRecord
+    reviewEvents: AgentExecutionEvent[]
+    signal: AbortSignal
+    reviewModelConnection?: ReturnType<typeof modelConnection>
+  }) {
+    const reviewSnapshot = { ...input.snapshot, agentDefinition: input.reviewDefinition }
+    const reviewOutput = await this.runtime.execute({
+      snapshot: reviewSnapshot,
+      model: input.reviewModelConnection ?? modelConnection(input.reviewModel, input.snapshot.agentModelRefs!.requirementReview, input.reviewConfiguration),
+      fixedRequirementPointExtraction: input.extraction,
+      onEvent: async event => {
+        input.reviewEvents.push(event)
+        if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(input.run.id, input.reviewEvents, 'requirement-review')
+      },
+    }, input.signal)
+    if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error('AGENT_CANCELLED')
+    const review = reviewOutput.candidate as CandidateRequirementReview
+    const reviewValidation = await this.reviewValidator.validate(review, input.extraction, reviewSnapshot)
+    if (!reviewValidation.valid) throw validationError(reviewValidation.issues)
+    const result = { ...structuredClone(input.extraction), ...structuredClone(review) }
+    const validation = await this.validator.validate(result, reviewSnapshot)
+    if (!validation.valid) throw validationError(validation.issues)
+    const reviewExecution = executionRecord(reviewOutput, 'requirement-review')
+    const finishedAt = new Date().toISOString()
+    await this.store.transaction(draft => {
+      const current = required(draft.reviewRuns.find(item => item.id === input.run.id), '需求评审运行不存在')
+      Object.assign(current, {
+        status: 'succeeded', step: 'completed', progress: 100, finishedAt, extractionResult: input.extraction, result,
+        execution: undefined,
+        executions: {
+          ...(input.extractionExecution ? { requirementPointExtraction: input.extractionExecution } : {}),
+          requirementReview: reviewExecution,
+        },
+        error: undefined,
+      } satisfies Partial<ReviewRun>)
+    })
+    const completed = await this.get(input.run.id)
+    return required(completed.response, '需求评审结果不存在')
+  }
+
+  private async failRun(runId: string, error: unknown, signal: AbortSignal, failedModel: AgentModelSelection, agentKey: 'requirement-point-extraction' | 'requirement-review', events: AgentExecutionEvent[]) {
+    const message = sanitizeRuntimeError(error, failedModel.source.baseUrl, failedModel.source.apiKey)
+    const status = signal.aborted || /AGENT_CANCELLED|客户端已中断/u.test(message) ? 'cancelled' : 'failed'
+    await this.store.transaction(draft => {
+      const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+      Object.assign(current, {
+        status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
+        ...(events.length ? { execution: executionProgress(events, agentKey) } : {}),
+      } satisfies Partial<ReviewRun>)
+      if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
+        const currentSource = draft.modelSources.find(item => item.id === failedModel.source.id)
+        const currentModel = currentSource?.models.find(item => item.id === failedModel.model.id)
+        if (currentSource && currentModel) {
+          const checkedAt = new Date().toISOString()
+          currentModel.health = 'degraded'
+          currentModel.lastCheckedAt = checkedAt
+          currentModel.healthMessage = '需求评审兼容性验证失败：未能提交结构化评审结果'
+          currentSource.health = 'degraded'
+          currentSource.healthMessage = currentModel.healthMessage
+          currentSource.lastCheckedAt = checkedAt
+          currentSource.updatedAt = checkedAt
+        }
+      }
+    })
+    return message
+  }
+
+  private async loadStoredRun(runId: string) {
+    const run = this.store.getReviewRun
+      ? await this.store.getReviewRun(runId)
+      : (await this.store.snapshot()).reviewRuns.find(item => item.id === runId)
+    return required(run, '需求评审运行不存在')
   }
 
   private async saveExecutionProgress(runId: string, events: AgentExecutionEvent[], agentKey: 'requirement-point-extraction' | 'requirement-review') {
@@ -314,6 +453,10 @@ function presentRunSummary(run: ReviewRun) {
   return {
     id: run.id,
     runId: run.id,
+    retryOfRunId: run.retryOfRunId,
+    retryMode: run.retryMode,
+    reusedExtractionFromRunId: run.reusedExtractionFromRunId,
+    hasFrozenExtraction: Boolean(run.extractionResult && run.inputDeliveryManifest),
     projectVersionId: run.projectVersionId,
     assetId: run.assetId,
     assetVersionId: run.assetVersionId,
@@ -349,6 +492,10 @@ function presentRun(run: ReviewRun) {
   return {
     id: run.id,
     runId: run.id,
+    retryOfRunId: run.retryOfRunId,
+    retryMode: run.retryMode,
+    reusedExtractionFromRunId: run.reusedExtractionFromRunId,
+    hasFrozenExtraction: Boolean(run.extractionResult && run.inputDeliveryManifest),
     projectVersionId: run.projectVersionId,
     assetId: run.assetId,
     assetVersionId: run.assetVersionId,
@@ -489,6 +636,9 @@ function executionRecord(output: AgentExecutionOutput, agentKey: 'requirement-po
 function validationError(issues: Array<{ path: string; message: string }>) {
   const visible = issues.slice(0, 6).map(issue => `${issue.path} ${issue.message}`).join('；')
   return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${visible}${issues.length > 6 ? `；另有 ${issues.length - 6} 项，请查看结果校验事件` : ''}`)
+}
+function validationIssueSummary(issues: Array<{ path: string; message: string }>) {
+  return issues.slice(0, 3).map(issue => `${issue.path} ${issue.message}`).join('；')
 }
 function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) {
   let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'

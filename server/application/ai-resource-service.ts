@@ -5,7 +5,7 @@ import type { AiResource, AiResourceKind, McpServerResource, SkillPackageMetadat
 import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { applicationRoot, codeRoot, deployedModuleCandidates } from '../infrastructure/runtime-paths.js'
-import { normalizeSkillRuntimePolicy, requiredSkillRuntimeToolIds, SKILL_EXECUTE_SCRIPT_TOOL_ID, SKILL_HTTP_REQUEST_TOOL_ID } from './skill-runtime-policy.js'
+import { isSkillRuntimeToolId, normalizeSkillRuntimePolicy, SKILL_RUNTIME_TOOL_IDS } from './skill-runtime-policy.js'
 
 export type AiResourceCatalog = {
   mcpServers: McpServerResource[]
@@ -19,16 +19,14 @@ const builtInTools: ToolResource[] = [
   builtInTool('requirement-points.submit_result', '提交需求点', '提交需求点提取候选结果，由服务端生成 ID 和证据关联。', '5.1.0', 'internal_write', 30_000, 'server/tools/requirement-points-submit-result.ts'),
   builtInTool('review.submit_result', '提交评审分析', '提交需求点评审候选结果，由服务端校验并发布。', '4.0.0', 'internal_write', 30_000, 'server/tools/review-submit-result.ts'),
   builtInTool('review.answer_submit', '提交评审问答答案', '提交基于固定 ReviewRun 的问答答案、Evidence 引用和限制项。', '1.0.0', 'internal_write', 30_000, 'server/tools/review-answer-submit.ts'),
-  builtInTool(SKILL_EXECUTE_SCRIPT_TOOL_ID, '执行 Skill 脚本', '执行已绑定 Skill 在运行权限清单中声明的 PowerShell 脚本。', '1.0.0', 'code_execution', 120_000, 'server/tools/skill-capability.ts'),
-  builtInTool(SKILL_HTTP_REQUEST_TOOL_ID, 'Skill 网络只读访问', '访问已绑定 Skill 在运行权限清单中声明的 HTTP/HTTPS Origin。', '1.0.0', 'network_read', 60_000, 'server/tools/skill-capability.ts'),
 ]
 const builtInSkills: SkillResource[] = [
-  builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.0.0', 'ai/skills/query-local-ip/SKILL.md', [SKILL_EXECUTE_SCRIPT_TOOL_ID], ['系统', '网络', 'IP'], {
+  builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.0.0', 'ai/skills/query-local-ip/SKILL.md', [], ['系统', '网络', 'IP'], {
     scripts: [{ path: 'scripts/get-local-ip.ps1', runner: 'powershell', timeoutMs: 15_000 }],
   }),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
-const retiredBuiltInToolKeys = new Set(['evidence.validate_batch'])
+const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', ...SKILL_RUNTIME_TOOL_IDS])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 
@@ -143,7 +141,7 @@ export class AiResourceService {
       state.aiResources = state.aiResources.map(item => {
         if (item.builtIn) return item
         if (item.kind === 'mcp') return { ...item, status: 'ready', ...(item.authType === 'none' || item.credentialEnv ? {} : { credentialEnv: defaultCredentialEnv('MCP', item.key) }) }
-        if (item.kind === 'skill') return { ...item, status: 'ready' }
+        if (item.kind === 'skill') return { ...item, status: 'ready', toolIds: item.toolIds.filter(toolId => !isSkillRuntimeToolId(toolId)) }
         return { ...item, status: item.source !== 'http' || item.endpoint ? 'ready' : 'draft' }
       })
       for (const builtIn of builtInResources) {
@@ -164,7 +162,7 @@ export class AiResourceService {
 function catalogMetadataNeedsSync(resources: AiResource[]) {
   return resources.some(item => !item.builtIn && (
     (item.kind === 'mcp' && (item.status !== 'ready' || (item.authType !== 'none' && !item.credentialEnv)))
-    || (item.kind === 'skill' && item.status !== 'ready')
+    || (item.kind === 'skill' && (item.status !== 'ready' || item.toolIds.some(isSkillRuntimeToolId)))
     || (item.kind === 'tool' && item.status !== (item.source !== 'http' || item.endpoint ? 'ready' : 'draft'))
   ))
 }
@@ -224,7 +222,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
   }
   if (kind === 'skill') {
     const runtime = normalizeSkillRuntimePolicy(value.runtime)
-    const toolIds = [...new Set([...keys(value.toolIds), ...requiredSkillRuntimeToolIds(runtime)])]
+    const toolIds = keys(value.toolIds).filter(toolId => !isSkillRuntimeToolId(toolId))
     return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds, tags: stringList(value.tags, 20, 50), runtime, package: value.package === undefined ? undefined : skillPackage(value.package) }
   }
   const source = oneOf(value.source ?? 'local', ['builtin', 'local', 'http', 'mcp'] as const, '工具来源')
@@ -241,6 +239,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
 }
 
 function validateUnique(resources: AiResource[], candidate: AiResource) {
+  if (candidate.kind === 'tool' && isSkillRuntimeToolId(candidate.key)) throw new Error('Skill 运行能力由运行权限清单管理，不能注册为独立工具')
   if (resources.some(item => item.kind === candidate.kind && item.key.toLocaleLowerCase() === candidate.key.toLocaleLowerCase())) throw new Error(`已存在相同标识的${kindLabel(candidate.kind)}资源`)
 }
 

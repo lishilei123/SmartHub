@@ -24,8 +24,8 @@ test('AI 资源 HTTP API 完成 MCP、工具、Skill 的管理闭环', async con
     const initial = await fetch(`${baseUrl}/ai-resources`)
     assert.equal(initial.status, 200)
     const initialCatalog = await initial.json() as { tools: Array<{ id: string; key: string; sourcePath: string }>; skills: Array<{ key: string }> }
-    assert.equal(initialCatalog.tools.length, 7)
-    assert.equal(new Set(initialCatalog.tools.map(tool => tool.sourcePath)).size, 6)
+    assert.equal(initialCatalog.tools.length, 5)
+    assert.equal(new Set(initialCatalog.tools.map(tool => tool.sourcePath)).size, 5)
     assert.deepEqual(initialCatalog.skills.map(skill => skill.key), ['system.query-local-ip'])
     const searchTool = initialCatalog.tools.find(tool => tool.key === 'knowledge.search')!
     const sourceResponse = await fetch(`${baseUrl}/ai-resources/tool/${searchTool.id}/source`)
@@ -49,7 +49,7 @@ test('AI 资源 HTTP API 完成 MCP、工具、Skill 的管理闭环', async con
     assert.equal(packagedSkill.package.storageKey, 'http.zip.skill/1.0.0')
     assert.equal(packagedSkill.package.entrypointPath, 'workflow/SKILL.md')
     assert.equal(packagedSkill.package.fileCount, 4)
-    assert.deepEqual(packagedSkill.toolIds, ['skill.execute_script'])
+    assert.deepEqual(packagedSkill.toolIds, [])
     assert.equal(packagedSkill.runtime.scripts[0].path, 'scripts/check.ps1')
     assert.match(packagedSkill.package.contentSha256, /^[a-f0-9]{64}$/u)
     assert.equal(packagedSkill.entrypoint, 'skill-package://http.zip.skill/1.0.0/workflow/SKILL.md')

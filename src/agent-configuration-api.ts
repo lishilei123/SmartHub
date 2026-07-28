@@ -80,10 +80,6 @@ export async function publishAgentConfiguration(agentKey: AgentConfigurationAgen
   })
 }
 
-export async function loadAgentConfigurationVersion(id: string) {
-  return request<AgentConfigurationVersion>(`/agent-configuration-versions/${encodeURIComponent(id)}`)
-}
-
 async function request<T>(path: string, init?: RequestInit) {
   const response = await fetch(`${apiBase}${path}`, init)
   const value = await response.json().catch(() => ({}))

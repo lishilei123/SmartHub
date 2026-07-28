@@ -11,7 +11,7 @@ import JSZip from 'jszip'
 import { createAgentDefinitionVersion } from '../server/agent/requirement-analysis-agent.js'
 import { AgentSkillRuntime } from '../server/agent/skill-runtime.js'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
-import { mcpPolicyHash, skillConfigurationHash, toolBindingToken } from '../server/application/ai-resource-hash.js'
+import { legacySkillConfigurationHash, mcpPolicyHash, skillConfigurationHash, toolBindingToken } from '../server/application/ai-resource-hash.js'
 import type { AgentDefinitionVersion, ReviewRunSnapshot } from '../server/domain/agent-types.js'
 import type { McpServerResource, SkillResource, ToolResource } from '../server/domain/types.js'
 import { SkillPackageStore } from '../server/infrastructure/skill-package-store.js'
@@ -19,14 +19,15 @@ import { JsonStore } from '../server/infrastructure/store.js'
 import { AgentCapabilityLoader } from '../server/tools/capability-loader.js'
 import { ToolRegistry } from '../server/tools/registry.js'
 
-test('内置查询本机 IP Skill 通过发布绑定加载并执行项目内脚本', async () => {
+test('内置查询本机 IP Skill 自动派生内部脚本能力并执行项目内脚本', async () => {
   const store = new JsonStore(null)
   await store.load()
   const catalog = await new AiResourceService(store).list()
   const skill = catalog.skills.find(item => item.key === 'system.query-local-ip')!
-  const tool = catalog.tools.find(item => item.key === 'skill.execute_script')!
-  assert.ok(skill && tool)
-  const binding = { skillKey: skill.key, version: skill.version, enabled: true, configurationHash: skillConfigurationHash(skill) }
+  const tool = builtInTool('skill.execute_script', 'code_execution', 120_000)
+  assert.ok(skill)
+  assert.ok(!catalog.tools.some(item => item.key === tool.key))
+  const binding = { skillKey: skill.key, version: skill.version, enabled: true, configurationHash: legacySkillConfigurationHash(skill) }
   const agentDefinition = definition([tool], [binding])
   assert.match(await new AgentSkillRuntime(store).render(agentDefinition), /查询本机 IP/u)
   const registry = new ToolRegistry()
@@ -63,7 +64,7 @@ test('绑定 Skill 只能执行运行清单声明的 PowerShell 脚本并剥离�
       .file('workflow/scripts/run.ps1', "param([string]$Value)\n$ErrorActionPreference = 'Stop'\n[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n[pscustomobject]@{ value = $Value; secretVisible = [bool]$env:SMARTHUB_TEST_SECRET } | ConvertTo-Json -Compress")
       .generateAsync({ type: 'nodebuffer' })
     const installed = await packages.install({ key: 'script.skill', version: '1.0.0', fileName: 'script.zip', archive })
-    const skill = skillResource({ key: 'script.skill', entrypoint: installed.entrypoint, package: installed.package, runtime: installed.runtime, toolIds: ['skill.execute_script'] })
+    const skill = skillResource({ key: 'script.skill', entrypoint: installed.entrypoint, package: installed.package, runtime: installed.runtime })
     const scriptTool = builtInTool('skill.execute_script', 'code_execution', 120_000)
     const binding = { skillKey: skill.key, version: skill.version, enabled: true, configurationHash: skillConfigurationHash(skill) }
     const registry = new ToolRegistry()
@@ -87,7 +88,7 @@ test('绑定 Skill 的网络访问仅允许清单中的 Origin、只读方法且
   const port = await listen(server)
   try {
     const origin = `http://127.0.0.1:${port}`
-    const skill = skillResource({ key: 'network.skill', runtime: { scripts: [], network: { allowedOrigins: [origin], allowedMethods: ['GET'], timeoutMs: 5000 } }, toolIds: ['skill.http_request'] })
+    const skill = skillResource({ key: 'network.skill', runtime: { scripts: [], network: { allowedOrigins: [origin], allowedMethods: ['GET'], timeoutMs: 5000 } } })
     const networkTool = builtInTool('skill.http_request', 'network_read', 60_000)
     const binding = { skillKey: skill.key, version: skill.version, enabled: true, configurationHash: skillConfigurationHash(skill) }
     const registry = new ToolRegistry()

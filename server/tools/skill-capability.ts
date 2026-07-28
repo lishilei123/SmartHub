@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { dirname } from 'node:path'
 import { Type } from 'typebox'
 import { SKILL_EXECUTE_SCRIPT_TOOL_ID, SKILL_HTTP_REQUEST_TOOL_ID } from '../application/skill-runtime-policy.js'
-import { skillConfigurationHash } from '../application/ai-resource-hash.js'
+import { matchesSkillConfigurationHash } from '../application/ai-resource-hash.js'
 import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { DatabaseState, SkillResource } from '../domain/types.js'
 import type { ToolExecutionContext } from '../domain/tool-types.js'
@@ -20,7 +20,7 @@ export class SkillCapabilityRuntime {
   constructor(definition: AgentDefinitionVersion, state: DatabaseState, private readonly packages?: SkillPackageStore) {
     for (const binding of definition.skillBindings.filter(item => item.enabled)) {
       const skill = state.aiResources.find((item): item is SkillResource => item.kind === 'skill' && item.key === binding.skillKey)
-      if (!skill || !skill.enabled || skill.version !== binding.version || skillConfigurationHash(skill) !== binding.configurationHash) continue
+      if (!skill || !skill.enabled || skill.version !== binding.version || !matchesSkillConfigurationHash(skill, binding.configurationHash)) continue
       this.skills.set(skill.key, skill)
     }
   }

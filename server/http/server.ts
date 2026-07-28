@@ -86,6 +86,13 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   if (method === 'GET' && requirementReviewRun) return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1]))
   const requirementReviewRunCancel = /^\/api\/requirement-review-runs\/([^/]+)\/cancel$/.exec(url.pathname)
   if (method === 'POST' && requirementReviewRunCancel) return send(response, 202, await requirementAnalysisService.cancel(requirementReviewRunCancel[1]))
+  const requirementReviewRunRetry = /^\/api\/requirement-review-runs\/([^/]+)\/retry$/.exec(url.pathname)
+  if (method === 'POST' && requirementReviewRunRetry) {
+    const body = await json(request)
+    const mode = String(body.mode ?? '')
+    if (mode !== 'full' && mode !== 'review_only') throw new Error('重跑模式必须是 full 或 review_only')
+    return send(response, 202, await requirementAnalysisService.retry(requirementReviewRunRetry[1], mode))
+  }
   const requirementReviewQuestions = /^\/api\/requirement-review-runs\/([^/]+)\/questions$/.exec(url.pathname)
   if (method === 'POST' && requirementReviewQuestions) {
     const body = await json(request)
