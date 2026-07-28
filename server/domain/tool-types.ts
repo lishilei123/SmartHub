@@ -1,7 +1,7 @@
 import type { TSchema } from 'typebox'
 import type { ReviewRunSnapshot } from './agent-types.js'
 
-export type ToolRisk = 'read' | 'network_read' | 'code_execution' | 'internal_write'
+export type ToolRisk = 'read' | 'network_read' | 'code_execution' | 'internal_write' | 'write_reversible' | 'write_high_risk'
 export type ToolRepeatPolicy = 'replay_success_once'
 
 export interface ToolDescriptor {
@@ -20,6 +20,17 @@ export interface ToolDescriptor {
 export interface ToolExecutionContext {
   snapshot: ReviewRunSnapshot
   allowedToolIds: ReadonlySet<string>
+}
+
+export interface ToolApprovalGate {
+  authorize(input: {
+    runId: string
+    toolId: string
+    toolVersion: string
+    risk: 'write_reversible' | 'write_high_risk'
+    arguments: unknown
+    signal: AbortSignal
+  }): Promise<void>
 }
 
 export interface ToolExecutionRequest {

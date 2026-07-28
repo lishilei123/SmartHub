@@ -55,7 +55,12 @@ export class ProjectVersionService {
       const reviewRuns = state.reviewRuns.filter(item => item.projectVersionId === version.id)
       if (reviewRuns.some(item => item.status === 'running')) throw new Error('项目版本仍有正在执行的需求评审，请先取消运行后再删除')
       const deletedBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id).length
+      const deletedRunIds = new Set(reviewRuns.map(item => item.id))
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
+      state.findingActions = state.findingActions.filter(item => !deletedRunIds.has(item.runId))
+      state.reviewQaTurns = state.reviewQaTurns.filter(item => !deletedRunIds.has(item.runId))
+      state.reviewQaSessions = state.reviewQaSessions.filter(item => !deletedRunIds.has(item.runId))
+      state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
       state.reviewRuns = state.reviewRuns.filter(item => item.projectVersionId !== version.id)
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
       return { id: version.id, name: version.name, deletedBindings, deletedReviewRuns: reviewRuns.length }

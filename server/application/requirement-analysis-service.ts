@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionOutput, AgentRuntime, ReviewRunSnapshot } from '../domain/agent-types.js'
+import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, ReviewRunSnapshot } from '../domain/agent-types.js'
 import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, ReviewRun } from '../domain/types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
-import type { StateStore } from '../infrastructure/store.js'
+import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator, ReviewResultValidator } from '../agent/result-validator.js'
 import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
 import { buildRequirementInputPlan } from '../agent/requirement-context-assembler.js'
 
 export interface RequirementAnalysisRequest {
   projectVersionId: string
+  reviewId?: string
   assetVersionIds?: string[]
   assetVersionId?: string
   sourceId?: string
@@ -32,6 +33,7 @@ export class RequirementAnalysisService {
   }
 
   async recoverInterruptedRuns() {
+    if (this.store.claimReviewJob) return 0
     const finishedAt = new Date().toISOString()
     const error = 'REVIEW_RUN_INTERRUPTED: 服务进程在 Agent 执行期间重启，本次运行已终止；请重新发起评审'
     if (this.store.recoverInterruptedReviewRuns) return this.store.recoverInterruptedReviewRuns(finishedAt, error)
@@ -81,6 +83,13 @@ export class RequirementAnalysisService {
   }
 
   async start(request: RequirementAnalysisRequest) {
+    if (this.store.enqueueReviewJob) {
+      const created = await this.analyze(request, new AbortController().signal, undefined, true)
+      const createdRunId = 'id' in created ? created.id : created.runId
+      const timestamp = new Date().toISOString()
+      await this.store.enqueueReviewJob({ id: `review_job_${randomUUID()}`, runId: createdRunId, projectVersionId: request.projectVersionId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: timestamp, createdAt: timestamp, updatedAt: timestamp })
+      return created
+    }
     const controller = new AbortController()
     let runId = ''
     return await new Promise<ReturnType<typeof presentRun>>((resolve, reject) => {
@@ -103,11 +112,19 @@ export class RequirementAnalysisService {
     if (mode === 'full') {
       return this.start({
         projectVersionId: sourceRun.projectVersionId,
+        reviewId: reviewIdFor(sourceRun),
         focusAreas: sourceRun.snapshot.focusAreas,
         excludedAreas: sourceRun.snapshot.excludedAreas,
         retryOfRunId: sourceRun.id,
         retryMode: 'full',
       })
+    }
+    if (this.store.enqueueReviewJob) {
+      const created = await this.retryReview(runId, new AbortController().signal, undefined, true)
+      const createdRunId = 'id' in created ? created.id : created.runId
+      const timestamp = new Date().toISOString()
+      await this.store.enqueueReviewJob({ id: `review_job_${randomUUID()}`, runId: createdRunId, projectVersionId: sourceRun.projectVersionId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: timestamp, createdAt: timestamp, updatedAt: timestamp })
+      return created
     }
     const controller = new AbortController()
     let retryRunId = ''
@@ -132,11 +149,12 @@ export class RequirementAnalysisService {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       if (current.status === 'running') Object.assign(current, { status: 'cancelled', step: 'cancelled', finishedAt: new Date().toISOString(), error: '用户已取消本次评审' } satisfies Partial<ReviewRun>)
     })
+    await this.store.cancelReviewJob?.(runId)
     this.activeRuns.get(runId)?.abort(new Error('AGENT_CANCELLED_BY_USER'))
     return await this.get(runId)
   }
 
-  async retryReview(sourceRunId: string, signal = new AbortController().signal, onCreated?: (run: ReturnType<typeof presentRun>) => void) {
+  async retryReview(sourceRunId: string, signal = new AbortController().signal, onCreated?: (run: ReturnType<typeof presentRun>) => void, deferExecution = false) {
     const state = await this.store.snapshot()
     const sourceRun = required(state.reviewRuns.find(item => item.id === sourceRunId), '需求评审运行不存在')
     if (sourceRun.status === 'running') throw new Error('正在执行的需求评审不能重跑，请先取消运行')
@@ -151,7 +169,8 @@ export class RequirementAnalysisService {
     const reviewConfiguration = this.definitions.resolveActive ? await this.definitions.resolveActive('requirement-review') : null
     if (this.definitions.resolveActive && !reviewConfiguration) throw new Error('请先在系统管理的 Agent 配置中发布需求评审 Agent，再重新需求评审')
     const previousReviewModel = sourceRun.snapshot.agentModelRefs?.requirementReview ?? sourceRun.snapshot.modelRef
-    const reviewModel = selectAgentModel(state, reviewConfiguration, { sourceId: previousReviewModel.sourceId, modelId: previousReviewModel.modelId }, '需求评审 Agent')
+    const reviewModels = selectAgentModels(state, reviewConfiguration, { sourceId: previousReviewModel.sourceId, modelId: previousReviewModel.modelId }, '需求评审 Agent')
+    const reviewModel = reviewModels[0]
     const reviewDefinition = reviewConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-review')
     const extractionDefinition = sourceRun.snapshot.agentDefinitions?.requirementPointExtraction ?? sourceRun.snapshot.agentDefinition
     const extractionModelRef = sourceRun.snapshot.agentModelRefs?.requirementPointExtraction ?? sourceRun.snapshot.modelRef
@@ -161,6 +180,7 @@ export class RequirementAnalysisService {
     const snapshot: ReviewRunSnapshot = {
       ...structuredClone(sourceRun.snapshot),
       runId: newRunId,
+      reviewId: reviewIdFor(sourceRun),
       modelRef: structuredClone(extractionModelRef),
       agentModelRefs: {
         requirementPointExtraction: structuredClone(extractionModelRef),
@@ -178,6 +198,7 @@ export class RequirementAnalysisService {
       ?? (sourceRun.execution?.agentKey === 'requirement-point-extraction' ? sourceRun.execution : undefined)
     const run: ReviewRun = {
       id: newRunId,
+      reviewId: reviewIdFor(sourceRun),
       retryOfRunId: sourceRun.id,
       retryMode: 'review_only',
       reusedExtractionFromRunId: sourceRun.id,
@@ -191,8 +212,8 @@ export class RequirementAnalysisService {
       modelId: extractionModelRef.modelId,
       modelLabel: `复用需求点提取：${sourceRun.id}；需求评审：${reviewModel.source.name} · ${reviewModel.model.displayName}`,
       status: 'running',
-      step: 'reviewing_requirements',
-      progress: 60,
+      step: deferExecution ? 'waiting_worker' : 'reviewing_requirements',
+      progress: deferExecution ? 1 : 60,
       createdAt: now,
       startedAt: now,
       snapshot,
@@ -202,16 +223,18 @@ export class RequirementAnalysisService {
     }
     await this.store.transaction(draft => { draft.reviewRuns.push(run) })
     onCreated?.(presentRun(run))
+    if (deferExecution) return presentRun(run)
     const reviewEvents: AgentExecutionEvent[] = []
+    let activeReviewModel = reviewModel
     try {
-      return await this.executeReviewStage({ run, extraction, snapshot, reviewDefinition, reviewModel, reviewConfiguration, extractionExecution, reviewEvents, signal })
+      return await this.executeReviewStage({ run, extraction, snapshot, reviewDefinition, reviewModel, reviewModels, reviewConfiguration, extractionExecution, reviewEvents, signal, onModelAttempt: selection => { activeReviewModel = selection } })
     } catch (error) {
-      const message = await this.failRun(run.id, error, signal, reviewModel, 'requirement-review', reviewEvents)
+      const message = await this.failRun(run.id, error, signal, activeReviewModel, 'requirement-review', reviewEvents)
       throw new Error(message)
     }
   }
 
-  async analyze(request: RequirementAnalysisRequest, signal = new AbortController().signal, onCreated?: (run: ReturnType<typeof presentRun>) => void) {
+  async analyze(request: RequirementAnalysisRequest, signal = new AbortController().signal, onCreated?: (run: ReturnType<typeof presentRun>) => void, deferExecution = false) {
     const state = await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求评审')
@@ -238,8 +261,10 @@ export class RequirementAnalysisService {
       : [null, null]
     if (this.definitions.resolveActive && (!extractionConfiguration || !reviewConfiguration)) throw new Error('请先在系统管理的 Agent 配置中分别发布需求点提取 Agent 和需求评审 Agent，再发起需求评审')
     const requestModel = request.sourceId && request.modelId ? { sourceId: request.sourceId, modelId: request.modelId } : null
-    const extractionModel = selectAgentModel(state, extractionConfiguration, requestModel, '需求点提取 Agent')
-    const reviewModel = selectAgentModel(state, reviewConfiguration, requestModel, '需求评审 Agent')
+    const extractionModels = selectAgentModels(state, extractionConfiguration, requestModel, '需求点提取 Agent')
+    const reviewModels = selectAgentModels(state, reviewConfiguration, requestModel, '需求评审 Agent')
+    const extractionModel = extractionModels[0]
+    const reviewModel = reviewModels[0]
     const baseExtractionDefinition = extractionConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-point-extraction')
     const reviewDefinition = reviewConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-review')
     const extractionCoveragePlan = buildExtractionCoveragePlan(versions, request.excludedAreas)
@@ -254,8 +279,10 @@ export class RequirementAnalysisService {
       maxOutputTokens: effectiveMaxOutputTokens,
     })
     const now = new Date().toISOString()
+    const reviewId = request.reviewId ?? `review_${randomUUID()}`
     const snapshot: ReviewRunSnapshot = {
       runId: `review_run_${randomUUID()}`,
+      reviewId,
       projectId: project.id,
       projectName: project.name,
       projectVersionId: projectVersion.id,
@@ -298,6 +325,7 @@ export class RequirementAnalysisService {
     }
     const run: ReviewRun = {
       id: snapshot.runId,
+      reviewId,
       ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId, retryMode: request.retryMode ?? 'full' } : {}),
       projectVersionId: projectVersion.id,
       assetId: assets[0].id,
@@ -309,35 +337,126 @@ export class RequirementAnalysisService {
       modelId: extractionModel.model.id,
       modelLabel: `需求点提取：${extractionModel.source.name} · ${extractionModel.model.displayName}；需求评审：${reviewModel.source.name} · ${reviewModel.model.displayName}`,
       status: 'running',
-      step: 'extracting_requirement_points',
-      progress: 10,
+      step: deferExecution ? 'waiting_worker' : 'extracting_requirement_points',
+      progress: deferExecution ? 1 : 10,
       createdAt: now,
       startedAt: now,
       snapshot,
     }
     await this.store.transaction(draft => { draft.reviewRuns.push(run) })
     onCreated?.(presentRun(run))
+    if (deferExecution) return presentRun(run)
+    return this.executeStages({ run, snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition, signal })
+  }
+
+  async processPreparedRun(runId: string, lease: TaskLease, signal = new AbortController().signal) {
+    const state = await this.store.snapshot()
+    const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+    if (run.status !== 'running') throw new Error('需求评审运行已结束，不能由 Worker 重复执行')
+    const extractionConfigurationRef = run.snapshot.agentConfigurationRefs?.requirementPointExtraction ?? run.snapshot.agentConfigurationRef
+    const reviewConfigurationRef = run.snapshot.agentConfigurationRefs?.requirementReview ?? run.snapshot.agentConfigurationRef
+    const extractionConfiguration = extractionConfigurationRef ? required(state.agentConfigurationVersions.find(item => item.id === extractionConfigurationRef.id), '需求点提取 Agent 固定配置版本不存在') : null
+    const reviewConfiguration = reviewConfigurationRef ? required(state.agentConfigurationVersions.find(item => item.id === reviewConfigurationRef.id), '需求评审 Agent 固定配置版本不存在') : null
+    const extractionModels = selectAgentModels(state, extractionConfiguration, { sourceId: run.snapshot.agentModelRefs?.requirementPointExtraction.sourceId ?? run.snapshot.modelRef.sourceId, modelId: run.snapshot.agentModelRefs?.requirementPointExtraction.modelId ?? run.snapshot.modelRef.modelId }, '需求点提取 Agent')
+    const reviewReference = run.snapshot.agentModelRefs?.requirementReview ?? run.snapshot.modelRef
+    const reviewModels = selectAgentModels(state, reviewConfiguration, { sourceId: reviewReference.sourceId, modelId: reviewReference.modelId }, '需求评审 Agent')
+    if (run.retryMode === 'review_only') {
+      const extraction = structuredClone(required(run.extractionResult, '仅评审任务缺少冻结需求点提取结果'))
+      const extractionExecution = run.executions?.requirementPointExtraction
+      const reviewEvents: AgentExecutionEvent[] = []
+      let activeReviewModel = reviewModels[0]
+      await this.reviewTransaction(run.id, lease, draft => {
+        const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
+        current.step = 'reviewing_requirements'
+        current.progress = 60
+      })
+      try {
+        return await this.executeReviewStage({ run, extraction, snapshot: run.snapshot, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, reviewModel: reviewModels[0], reviewModels, reviewConfiguration, extractionExecution, reviewEvents, signal, lease, onModelAttempt: selection => { activeReviewModel = selection } })
+      } catch (error) {
+        const message = await this.failRun(run.id, error, signal, activeReviewModel, 'requirement-review', reviewEvents, lease)
+        throw new Error(message)
+      }
+    }
+    const versions = run.snapshot.assets.map(item => {
+      const version = required(state.versions.find(candidate => candidate.id === item.assetVersionId && candidate.status === 'ready'), '固定需求资产版本不可用')
+      if (version.contentHash !== item.assetContentHash) throw new Error('固定需求资产内容 Hash 已漂移')
+      return version
+    })
+    const assets = run.snapshot.assets.map(item => required(state.assets.find(candidate => candidate.id === item.assetId), '固定需求资产不存在'))
+    const requirementInputPlan = buildRequirementInputPlan({
+      assets: assets.map((asset, index) => ({ asset, version: versions[index] })),
+      coveragePlan: run.snapshot.extractionCoveragePlan,
+      definition: run.snapshot.agentDefinitions.requirementPointExtraction,
+      contextWindow: extractionModels[0].model.contextWindow,
+      maxOutputTokens: Math.min(extractionModels[0].model.maxOutputTokens, extractionConfiguration?.routing.maxOutputTokens ?? extractionModels[0].model.maxOutputTokens),
+    })
+    if (requirementInputPlan.packageSha256 !== run.snapshot.extractionInput.packageSha256) throw new Error('固定正文输入包 Hash 已漂移')
+    await this.reviewTransaction(run.id, lease, draft => {
+      const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
+      current.step = 'extracting_requirement_points'
+      current.progress = 10
+    })
+    return this.executeStages({ run, snapshot: run.snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, signal, lease })
+  }
+
+  async failPreparedRun(runId: string, lease: TaskLease, error: unknown, cancelled = false) {
+    const message = String(error instanceof Error ? error.message : error).replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').slice(0, 500)
+    await this.reviewTransaction(runId, lease, state => {
+      const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+      if (run.status !== 'running') return
+      run.status = cancelled ? 'cancelled' : 'failed'
+      run.step = cancelled ? 'cancelled' : 'failed'
+      run.finishedAt = new Date().toISOString()
+      run.error = message
+    })
+  }
+
+  private async executeStages(input: {
+    run: ReviewRun
+    snapshot: ReviewRunSnapshot
+    requirementInputPlan: ReturnType<typeof buildRequirementInputPlan>
+    extractionModels: AgentModelSelection[]
+    reviewModels: AgentModelSelection[]
+    extractionConfiguration: AgentConfigurationVersion | null
+    reviewConfiguration: AgentConfigurationVersion | null
+    reviewDefinition: ReviewRunSnapshot['agentDefinitions']['requirementReview']
+    signal: AbortSignal
+    lease?: TaskLease
+  }) {
+    const { run, snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition, signal, lease } = input
+    const extractionModel = extractionModels[0]
+    const reviewModel = reviewModels[0]
     const extractionEvents: AgentExecutionEvent[] = []
     const reviewEvents: AgentExecutionEvent[] = []
     let activeAgentKey: 'requirement-point-extraction' | 'requirement-review' = 'requirement-point-extraction'
-    const extractionModelConnection = modelConnection(extractionModel, snapshot.agentModelRefs!.requirementPointExtraction, extractionConfiguration)
-    const reviewModelConnection = modelConnection(reviewModel, snapshot.agentModelRefs!.requirementReview, reviewConfiguration)
+    let activeModel = extractionModel
     try {
-      const extractionOutput = await this.runtime.execute({
+      const routedExtraction = await this.executeWithFallback({
+        runId: run.id,
+        agentKey: 'requirement-point-extraction',
         snapshot,
-        model: extractionModelConnection,
-        requirementInputPlan,
-        onEvent: async event => {
-          extractionEvents.push(event)
-          if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, extractionEvents, 'requirement-point-extraction')
-        },
-      }, signal)
+        models: extractionModels.filter(selection => supportsInputPlan(selection, requirementInputPlan, extractionConfiguration)),
+        configuration: extractionConfiguration,
+        signal,
+        lease,
+        onAttempt: selection => { activeModel = selection },
+        createInput: (selection, modelRef) => ({
+          snapshot,
+          model: modelConnection(selection, modelRef, extractionConfiguration),
+          requirementInputPlan,
+          onEvent: async event => {
+            extractionEvents.push(event)
+            if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(run.id, extractionEvents, 'requirement-point-extraction', lease)
+          },
+        }),
+      })
+      const extractionOutput = routedExtraction.output
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED')
       const extraction = extractionOutput.candidate as CandidateRequirementPointExtraction
       const extractionValidation = await this.extractionValidator.validate(extraction, snapshot, extractionOutput.inputDeliveryManifest)
       if (!extractionValidation.valid) throw validationError(extractionValidation.issues)
       const extractionExecution = executionRecord(extractionOutput, 'requirement-point-extraction')
-      await this.store.transaction(draft => {
+      await this.reviewTransaction(run.id, lease, draft => {
         const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
         current.extractionResult = structuredClone(extraction)
         current.inputDeliveryManifest = structuredClone(required(extractionOutput.inputDeliveryManifest, '输入投递证明不存在'))
@@ -348,11 +467,11 @@ export class RequirementAnalysisService {
       })
 
       activeAgentKey = 'requirement-review'
-      return await this.executeReviewStage({ run, extraction, snapshot, reviewDefinition, reviewModel, reviewConfiguration, extractionExecution, reviewEvents, signal, reviewModelConnection })
+      return await this.executeReviewStage({ run, extraction, snapshot, reviewDefinition, reviewModel, reviewModels, reviewConfiguration, extractionExecution, reviewEvents, signal, lease, onModelAttempt: selection => { activeModel = selection } })
     } catch (error) {
-      const failedModel = activeAgentKey === 'requirement-point-extraction' ? extractionModel : reviewModel
+      const failedModel = activeModel
       const events = activeAgentKey === 'requirement-point-extraction' ? extractionEvents : reviewEvents
-      const message = await this.failRun(run.id, error, signal, failedModel, activeAgentKey, events)
+      const message = await this.failRun(run.id, error, signal, failedModel, activeAgentKey, events, lease)
       throw new Error(message)
     }
   }
@@ -363,22 +482,36 @@ export class RequirementAnalysisService {
     snapshot: ReviewRunSnapshot
     reviewDefinition: ReviewRunSnapshot['agentDefinitions']['requirementReview']
     reviewModel: AgentModelSelection
+    reviewModels?: AgentModelSelection[]
     reviewConfiguration: AgentConfigurationVersion | null
     extractionExecution?: AgentExecutionRecord
     reviewEvents: AgentExecutionEvent[]
     signal: AbortSignal
+    lease?: TaskLease
     reviewModelConnection?: ReturnType<typeof modelConnection>
+    onModelAttempt?: (selection: AgentModelSelection) => void
   }) {
     const reviewSnapshot = { ...input.snapshot, agentDefinition: input.reviewDefinition }
-    const reviewOutput = await this.runtime.execute({
-      snapshot: reviewSnapshot,
-      model: input.reviewModelConnection ?? modelConnection(input.reviewModel, input.snapshot.agentModelRefs!.requirementReview, input.reviewConfiguration),
-      fixedRequirementPointExtraction: input.extraction,
-      onEvent: async event => {
-        input.reviewEvents.push(event)
-        if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(input.run.id, input.reviewEvents, 'requirement-review')
-      },
-    }, input.signal)
+    const routedReview = await this.executeWithFallback({
+      runId: input.run.id,
+      agentKey: 'requirement-review',
+      snapshot: input.snapshot,
+      models: input.reviewModels ?? [input.reviewModel],
+      configuration: input.reviewConfiguration,
+      signal: input.signal,
+      lease: input.lease,
+      onAttempt: input.onModelAttempt,
+      createInput: (selection, modelRef) => ({
+        snapshot: { ...reviewSnapshot, agentModelRefs: { ...reviewSnapshot.agentModelRefs!, requirementReview: modelRef } },
+        model: input.reviewModelConnection && selection === input.reviewModel ? input.reviewModelConnection : modelConnection(selection, modelRef, input.reviewConfiguration),
+        fixedRequirementPointExtraction: input.extraction,
+        onEvent: async event => {
+          input.reviewEvents.push(event)
+          if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(input.run.id, input.reviewEvents, 'requirement-review', input.lease)
+        },
+      }),
+    })
+    const reviewOutput = routedReview.output
     if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error('AGENT_CANCELLED')
     const review = reviewOutput.candidate as CandidateRequirementReview
     const reviewValidation = await this.reviewValidator.validate(review, input.extraction, reviewSnapshot)
@@ -388,7 +521,7 @@ export class RequirementAnalysisService {
     if (!validation.valid) throw validationError(validation.issues)
     const reviewExecution = executionRecord(reviewOutput, 'requirement-review')
     const finishedAt = new Date().toISOString()
-    await this.store.transaction(draft => {
+    await this.reviewTransaction(input.run.id, input.lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === input.run.id), '需求评审运行不存在')
       Object.assign(current, {
         status: 'succeeded', step: 'completed', progress: 100, finishedAt, extractionResult: input.extraction, result,
@@ -404,10 +537,10 @@ export class RequirementAnalysisService {
     return required(completed.response, '需求评审结果不存在')
   }
 
-  private async failRun(runId: string, error: unknown, signal: AbortSignal, failedModel: AgentModelSelection, agentKey: 'requirement-point-extraction' | 'requirement-review', events: AgentExecutionEvent[]) {
+  private async failRun(runId: string, error: unknown, signal: AbortSignal, failedModel: AgentModelSelection, agentKey: 'requirement-point-extraction' | 'requirement-review', events: AgentExecutionEvent[], lease?: TaskLease) {
     const message = sanitizeRuntimeError(error, failedModel.source.baseUrl, failedModel.source.apiKey)
     const status = signal.aborted || /AGENT_CANCELLED|客户端已中断/u.test(message) ? 'cancelled' : 'failed'
-    await this.store.transaction(draft => {
+    await this.reviewTransaction(runId, lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       Object.assign(current, {
         status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
@@ -431,6 +564,77 @@ export class RequirementAnalysisService {
     return message
   }
 
+  private async executeWithFallback(input: {
+    runId: string
+    agentKey: 'requirement-point-extraction' | 'requirement-review'
+    snapshot: ReviewRunSnapshot
+    models: AgentModelSelection[]
+    configuration: AgentConfigurationVersion | null
+    signal: AbortSignal
+    lease?: TaskLease
+    createInput: (selection: AgentModelSelection, modelRef: ReviewRunSnapshot['modelRef']) => AgentExecutionInput
+    onAttempt?: (selection: AgentModelSelection) => void
+  }) {
+    if (!input.models.length) throw new Error(`${input.agentKey === 'requirement-point-extraction' ? '需求点提取' : '需求评审'} Agent 没有满足固定输入上下文和工具能力的可用模型`)
+    let previousFailure: { selection: AgentModelSelection; message: string } | undefined
+    for (let index = 0; index < input.models.length; index += 1) {
+      const selection = input.models[index]
+      input.onAttempt?.(selection)
+      const maxOutputTokens = Math.min(selection.model.maxOutputTokens, input.configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens)
+      const modelRef = modelSnapshot(selection, maxOutputTokens)
+      const attemptId = `model_attempt_${randomUUID()}`
+      const startedAt = new Date().toISOString()
+      await this.reviewTransaction(input.runId, input.lease, state => {
+        const run = required(state.reviewRuns.find(item => item.id === input.runId), '需求评审运行不存在')
+        run.modelRouteAttempts ??= []
+        run.modelRouteAttempts.push({ id: attemptId, agentKey: input.agentKey, sourceId: selection.source.id, modelId: selection.model.id, modelLabel: `${selection.source.name} · ${selection.model.displayName}`, status: 'running', startedAt })
+        run.snapshot.agentModelRefs = { ...run.snapshot.agentModelRefs!, [input.agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : 'requirementReview']: modelRef }
+        if (input.agentKey === 'requirement-point-extraction') run.snapshot.modelRef = modelRef
+        if (previousFailure) {
+          run.degradations ??= []
+          run.degradations.push({ agentKey: input.agentKey, fromSourceId: previousFailure.selection.source.id, fromModelId: previousFailure.selection.model.id, toSourceId: selection.source.id, toModelId: selection.model.id, reason: previousFailure.message, occurredAt: startedAt })
+        }
+        const extractionRef = run.snapshot.agentModelRefs.requirementPointExtraction
+        const reviewRef = run.snapshot.agentModelRefs.requirementReview
+        run.sourceId = extractionRef.sourceId
+        run.modelId = extractionRef.modelId
+        run.modelLabel = `需求点提取：${modelDisplay(state, extractionRef)}；需求评审：${modelDisplay(state, reviewRef)}`
+      })
+      input.snapshot.agentModelRefs = { ...input.snapshot.agentModelRefs!, [input.agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : 'requirementReview']: modelRef }
+      if (input.agentKey === 'requirement-point-extraction') input.snapshot.modelRef = modelRef
+      try {
+        const output = await this.runtime.execute(input.createInput(selection, modelRef), input.signal)
+        await this.finishModelAttempt(input.runId, attemptId, 'succeeded', undefined, input.lease)
+        return { output, selection }
+      } catch (error) {
+        const message = sanitizeRuntimeError(error, selection.source.baseUrl, selection.source.apiKey)
+        const status = input.signal.aborted ? 'cancelled' : 'failed'
+        await this.finishModelAttempt(input.runId, attemptId, status, message, input.lease)
+        const canFallback = Boolean(input.configuration?.routing.fallbackEnabled && index + 1 < input.models.length && isFallbackEligible(message) && !input.signal.aborted)
+        if (!canFallback) throw error
+        previousFailure = { selection, message }
+      }
+    }
+    throw new Error(previousFailure?.message ?? '模型路由失败')
+  }
+
+  private async finishModelAttempt(runId: string, attemptId: string, status: 'succeeded' | 'failed' | 'cancelled', error?: string, lease?: TaskLease) {
+    await this.reviewTransaction(runId, lease, state => {
+      const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+      const attempt = required(run.modelRouteAttempts?.find(item => item.id === attemptId), '模型调用记录不存在')
+      attempt.status = status
+      attempt.finishedAt = new Date().toISOString()
+      if (error) attempt.error = error
+    })
+  }
+
+  private async reviewTransaction<T>(runId: string, lease: TaskLease | undefined, operation: (draft: DatabaseState) => T | Promise<T>) {
+    if (!lease || !this.store.transactionWithReviewLease) return this.store.transaction(operation)
+    const result = await this.store.transactionWithReviewLease(runId, lease, operation)
+    if (result === null) throw new Error('REVIEW_JOB_FENCING_REJECTED: Worker 租约已失效，晚到结果不得发布')
+    return result
+  }
+
   private async loadStoredRun(runId: string) {
     const run = this.store.getReviewRun
       ? await this.store.getReviewRun(runId)
@@ -438,10 +642,10 @@ export class RequirementAnalysisService {
     return required(run, '需求评审运行不存在')
   }
 
-  private async saveExecutionProgress(runId: string, events: AgentExecutionEvent[], agentKey: 'requirement-point-extraction' | 'requirement-review') {
+  private async saveExecutionProgress(runId: string, events: AgentExecutionEvent[], agentKey: 'requirement-point-extraction' | 'requirement-review', lease?: TaskLease) {
     const execution = executionProgress(events, agentKey)
-    if (this.store.saveReviewRunExecution) return this.store.saveReviewRunExecution(runId, execution)
-    await this.store.transaction(draft => {
+    if (!lease && this.store.saveReviewRunExecution) return this.store.saveReviewRunExecution(runId, execution)
+    await this.reviewTransaction(runId, lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       current.execution = execution
     })
@@ -452,6 +656,7 @@ function presentRunSummary(run: ReviewRun) {
   const assets = snapshotAssets(run)
   return {
     id: run.id,
+    reviewId: reviewIdFor(run),
     runId: run.id,
     retryOfRunId: run.retryOfRunId,
     retryMode: run.retryMode,
@@ -474,6 +679,8 @@ function presentRunSummary(run: ReviewRun) {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     error: presentedRunError(run),
+    modelRouteAttempts: run.modelRouteAttempts,
+    degradations: run.degradations,
     snapshot: redactSnapshot(run.snapshot),
   }
 }
@@ -491,6 +698,7 @@ function presentRun(run: ReviewRun) {
   } : undefined
   return {
     id: run.id,
+    reviewId: reviewIdFor(run),
     runId: run.id,
     retryOfRunId: run.retryOfRunId,
     retryMode: run.retryMode,
@@ -513,6 +721,8 @@ function presentRun(run: ReviewRun) {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     error: presentedRunError(run),
+    modelRouteAttempts: run.modelRouteAttempts,
+    degradations: run.degradations,
     snapshot: redactSnapshot(run.snapshot),
     execution: response ? undefined : run.execution,
     executions: response ? undefined : run.executions,
@@ -522,26 +732,48 @@ function presentRun(run: ReviewRun) {
   }
 }
 
+function reviewIdFor(run: ReviewRun) {
+  return run.reviewId ?? run.snapshot.reviewId ?? `review_${run.retryOfRunId ?? run.id}`
+}
+
 type AgentModelSelection = {
   source: DatabaseState['modelSources'][number]
   model: DatabaseState['modelSources'][number]['models'][number]
 }
 
-function selectAgentModel(state: DatabaseState, configuration: AgentConfigurationVersion | null, requestModel: { sourceId: string; modelId: string } | null, label: string): AgentModelSelection {
+function selectAgentModels(state: DatabaseState, configuration: AgentConfigurationVersion | null, requestModel: { sourceId: string; modelId: string } | null, label: string): AgentModelSelection[] {
   const configuredModels = configuration?.routing.primaryModel
     ? [configuration.routing.primaryModel, ...(configuration.routing.fallbackEnabled ? configuration.routing.fallbackModels : [])]
     : []
-  const selectedReference = configuredModels.find(reference => {
+  const selectedReferences = (configuration ? configuredModels : requestModel ? [requestModel] : []).filter(reference => {
     const candidateSource = state.modelSources.find(item => item.id === reference.sourceId && item.enabled)
     const candidateModel = candidateSource?.models.find(item => item.id === reference.modelId && item.enabled)
     return Boolean(candidateModel && candidateModel.health === 'healthy' && candidateModel.capabilities.includes('tool_calling'))
-  }) ?? (configuration ? null : requestModel)
-  if (!selectedReference && configuration) throw new Error(`${label}已发布配置中的默认和回退模型当前均不可用`)
-  const source = required(state.modelSources.find(item => item.id === selectedReference?.sourceId && item.enabled), configuration ? `${label}已发布配置的生成式模型来源不可用` : '生成式模型来源不可用')
-  const model = required(source.models.find(item => item.id === selectedReference?.modelId && item.enabled), configuration ? `${label}已发布配置的生成式模型不可用` : '生成式模型不可用')
-  if (!model.capabilities.includes('tool_calling')) throw new Error(`${label}模型必须支持 tool_calling`)
-  if (model.health !== 'healthy') throw new Error(`请先完成${label}模型的连通性探测并确保健康状态正常`)
-  return { source, model }
+  })
+  if (!selectedReferences.length && configuration) throw new Error(`${label}已发布配置中的默认和回退模型当前均不可用`)
+  if (!selectedReferences.length) throw new Error(`请先完成${label}模型的连通性探测并确保健康状态正常`)
+  return selectedReferences.map(reference => {
+    const source = required(state.modelSources.find(item => item.id === reference.sourceId && item.enabled), configuration ? `${label}已发布配置的生成式模型来源不可用` : '生成式模型来源不可用')
+    const model = required(source.models.find(item => item.id === reference.modelId && item.enabled), configuration ? `${label}已发布配置的生成式模型不可用` : '生成式模型不可用')
+    return { source, model }
+  })
+}
+
+function supportsInputPlan(selection: AgentModelSelection, plan: ReturnType<typeof buildRequirementInputPlan>, configuration: AgentConfigurationVersion | null) {
+  const output = Math.min(selection.model.maxOutputTokens, configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens)
+  const largestBatch = Math.max(...plan.batches.map(batch => batch.tokenCount), 0)
+  const requiredInput = plan.mode === 'full_context' ? plan.estimatedInputTokens : largestBatch + 4_000
+  return selection.model.contextWindow >= requiredInput + output
+}
+
+function isFallbackEligible(message: string) {
+  return /^(MODEL_RATE_LIMITED|MODEL_PROVIDER_UNAVAILABLE|MODEL_REQUEST_FAILED|MODEL_AUTHENTICATION_FAILED|MODEL_TOOL_CALL_REQUIRED|MODEL_TIMEOUT):/u.test(message)
+}
+
+function modelDisplay(state: DatabaseState, reference: ReviewRunSnapshot['modelRef']) {
+  const source = state.modelSources.find(item => item.id === reference.sourceId)
+  const model = source?.models.find(item => item.id === reference.modelId)
+  return source && model ? `${source.name} · ${model.displayName}` : `${reference.sourceId} · ${reference.modelId}`
 }
 
 function modelSnapshot(selection: AgentModelSelection, maxOutputTokens: number): ReviewRunSnapshot['modelRef'] {

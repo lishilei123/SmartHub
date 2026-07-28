@@ -5,7 +5,7 @@ import { resolveEvidenceQuote, resolveEvidenceSourceText, searchEvidenceCandidat
 
 const assessments = new Set(['pass', 'pass_with_notes', 'needs_revision', 'blocked'])
 const findingTypes = new Set(['missing_requirement', 'ambiguity', 'conflict', 'boundary_gap', 'state_gap', 'exception_gap', 'security_risk', 'testability_gap', 'dependency_risk', 'other'])
-const severities = new Set(['critical', 'high', 'medium', 'low', 'info'])
+const severities = new Set(['blocker', 'high', 'medium', 'low'])
 
 export class RequirementPointExtractionValidator {
   constructor(private readonly store: StateStore) {}
@@ -438,7 +438,8 @@ function inferFindingType(analysis: string): ReviewFindingType {
 }
 
 function inferFindingSeverity(analysis: string): ReviewSeverity {
-  if (/阻断|无法实现|严重|高风险|数据丢失|越权|泄露/u.test(analysis)) return 'high'
+  if (/阻断|无法实现|数据丢失|越权|泄露/u.test(analysis)) return 'blocker'
+  if (/严重|高风险/u.test(analysis)) return 'high'
   if (/提示|轻微|低风险/u.test(analysis)) return 'low'
   return 'medium'
 }

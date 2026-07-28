@@ -1,5 +1,5 @@
 export type ReviewFindingType = 'missing_requirement' | 'ambiguity' | 'conflict' | 'boundary_gap' | 'state_gap' | 'exception_gap' | 'security_risk' | 'testability_gap' | 'dependency_risk' | 'other'
-export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info'
+export type ReviewSeverity = 'blocker' | 'high' | 'medium' | 'low'
 export type OverallAssessment = 'pass' | 'pass_with_notes' | 'needs_revision' | 'blocked'
 
 export interface CandidateEvidence {

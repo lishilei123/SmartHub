@@ -15,6 +15,7 @@ import { AgentConfigurationService } from './application/agent-configuration-ser
 import { AiResourceService } from './application/ai-resource-service.js'
 import { SkillPackageStore } from './infrastructure/skill-package-store.js'
 import { applicationRoot, dataRoot } from './infrastructure/runtime-paths.js'
+import { ReviewGovernanceService } from './application/review-governance-service.js'
 
 const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -36,7 +37,8 @@ export const modelService = new ModelService(stateStore)
 export const skillPackageStore = new SkillPackageStore(skillRoot)
 export const aiResourceService = new AiResourceService(stateStore, skillPackageStore)
 export const agentConfigurationService = new AgentConfigurationService(stateStore)
-export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore, {}, skillPackageStore)
+export const reviewGovernanceService = new ReviewGovernanceService(stateStore)
+export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore, {}, skillPackageStore, reviewGovernanceService)
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService)
 export const reviewQaRuntime = new PiReviewQaRuntimeAdapter({}, stateStore, skillPackageStore)
 export const reviewQaService = new ReviewQaService(stateStore, reviewQaRuntime, agentConfigurationService)

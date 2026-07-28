@@ -276,6 +276,7 @@ function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentC
     const model = required(source.models.find(item => item.id === reference.modelId), `${agentLabel(agentKey)}${index ? '回退' : '默认'}模型不存在`)
     if (!source.enabled || !model.enabled) throw new Error(`${source.name} · ${model.displayName} 未启用`)
     if (model.health !== 'healthy') throw new Error(`${source.name} · ${model.displayName} 尚未通过健康探测`)
+    if (!model.qualityGate?.passed || model.qualityGate.version !== 'model-probe/v2') throw new Error(`${source.name} · ${model.displayName} 尚未通过 model-probe/v2 质量门禁`)
     if (!model.capabilities.includes('tool_calling')) throw new Error(`${source.name} · ${model.displayName} 不支持工具调用`)
     if (draft.routing.structuredOutput && !model.capabilities.includes('structured_output')) throw new Error(`${source.name} · ${model.displayName} 不支持结构化输出`)
     if (draft.routing.maxOutputTokens > model.maxOutputTokens) throw new Error(`配置的最大输出 Token 超过 ${model.displayName} 的能力上限`)

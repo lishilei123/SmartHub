@@ -42,6 +42,7 @@ export interface AgentDefinitionResolver {
 
 export interface ReviewRunSnapshot {
   runId: string
+  reviewId?: string
   projectId: string
   projectName: string
   projectVersionId: string

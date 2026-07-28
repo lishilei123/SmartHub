@@ -227,7 +227,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
   }
   const source = oneOf(value.source ?? 'local', ['builtin', 'local', 'http', 'mcp'] as const, '工具来源')
   if (source === 'builtin' && !fixed.builtIn) throw new Error('不能创建自定义内置工具')
-  const risk = oneOf(value.risk ?? 'read', ['read', 'network_read', 'code_execution', 'internal_write'] as const, '工具风险')
+  const risk = oneOf(value.risk ?? 'read', ['read', 'network_read', 'code_execution', 'internal_write', 'write_reversible', 'write_high_risk'] as const, '工具风险')
   const timeoutMs = integer(value.timeoutMs ?? 30_000, '工具超时', 1_000, 300_000)
   const sourcePath = source === 'builtin' || source === 'local' ? normalizeSourcePath(value.sourcePath) : undefined
   const mcpServerId = source === 'mcp' ? text(value.mcpServerId, 'MCP 服务', 200) : undefined

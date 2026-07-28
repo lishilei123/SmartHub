@@ -21,6 +21,15 @@ export interface GenerativeModel {
   health: ModelHealth
   lastCheckedAt?: string
   healthMessage?: string
+  qualityGate?: {
+    version: 'model-probe/v2'
+    checkedAt: string
+    passed: boolean
+    sampleSha256: string
+    inputCharacters: number
+    checks: { connectivity: boolean; longContext: boolean; structuredSubmission: boolean; toolCalling: boolean }
+    failureSummary?: string
+  }
 }
 
 export interface GenerativeModelSource {
@@ -101,7 +110,7 @@ export interface SkillPackageMetadata {
 export interface ToolResource extends AiResourceBase {
   kind: 'tool'
   source: 'builtin' | 'local' | 'http' | 'mcp'
-  risk: 'read' | 'network_read' | 'code_execution' | 'internal_write'
+  risk: 'read' | 'network_read' | 'code_execution' | 'internal_write' | 'write_reversible' | 'write_high_risk'
   timeoutMs: number
   sourcePath?: string
   mcpServerId?: string
@@ -220,6 +229,69 @@ export interface IndexChunk extends Chunk { assetMetadata: IndexAssetMetadata }
 export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: IndexChunk[]; createdAt: string; activatedAt?: string }
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
 export type ReviewRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
+export type FindingActionType = 'confirm' | 'dismiss' | 'resolve' | 'request_follow_up' | 'reopen'
+export interface FindingAction {
+  id: string
+  projectVersionId: string
+  runId: string
+  findingId: string
+  action: FindingActionType
+  fromState: FindingState
+  toState: FindingState
+  comment?: string
+  actorId: string
+  actorDisplayName: string
+  version: number
+  createdAt: string
+}
+export interface ReviewQaSession {
+  id: string
+  projectVersionId: string
+  runId: string
+  createdAt: string
+  createdBy: string
+}
+export interface ReviewQaTurn {
+  id: string
+  sessionId: string
+  projectVersionId: string
+  runId: string
+  question: string
+  quote?: import('./review-qa-types.js').ReviewQuestionQuote
+  answer?: string
+  citations: string[]
+  limitations: string[]
+  status: 'succeeded' | 'failed' | 'cancelled'
+  modelRef?: { sourceId: string; modelId: string; label: string }
+  agentConfigurationRef?: { id: string; version: number; contentSha256: string }
+  agentDefinitionRef?: { agentKey: string; version: string; contentSha256: string; promptRef: { promptKey: string; version: string; contentSha256: string }; toolsetContentSha256: string }
+  execution?: AgentExecutionRecord
+  usage?: { input: number; output: number; totalTokens: number }
+  error?: string
+  createdBy: string
+  createdAt: string
+  finishedAt: string
+}
+export interface ToolApproval {
+  id: string
+  projectVersionId: string
+  runId: string
+  toolId: string
+  toolVersion: string
+  risk: 'write_reversible' | 'write_high_risk'
+  parameterSummary: string
+  parameterHash: string
+  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'
+  requestedAt: string
+  expiresAt: string
+  requestedBy: string
+  decidedAt?: string
+  decidedBy?: string
+  decidedByDisplayName?: string
+  decisionComment?: string
+  consumedAt?: string
+}
 export interface AgentExecutionRecord {
   agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis'
   turns: number
@@ -230,6 +302,7 @@ export interface AgentExecutionRecord {
 }
 export interface ReviewRun {
   id: string
+  reviewId?: string
   retryOfRunId?: string
   retryMode?: 'full' | 'review_only'
   reusedExtractionFromRunId?: string
@@ -257,10 +330,30 @@ export interface ReviewRun {
     requirementPointExtraction?: AgentExecutionRecord
     requirementReview?: AgentExecutionRecord
   }
+  modelRouteAttempts?: Array<{
+    id: string
+    agentKey: 'requirement-point-extraction' | 'requirement-review'
+    sourceId: string
+    modelId: string
+    modelLabel: string
+    status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+    startedAt: string
+    finishedAt?: string
+    error?: string
+  }>
+  degradations?: Array<{
+    agentKey: 'requirement-point-extraction' | 'requirement-review'
+    fromSourceId: string
+    fromModelId: string
+    toSourceId: string
+    toModelId: string
+    reason: string
+    occurredAt: string
+  }>
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[] }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; reviewQaSessions: ReviewQaSession[]; reviewQaTurns: ReviewQaTurn[]; toolApprovals: ToolApproval[] }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
-import type { ChunkSearchInput, ConfigurationTransactionScope, DefaultKnowledgeBase, KnowledgeReadState, RequirementBindingMetadata, ReviewRunPage, StateStore, StoredChunkCandidate, TaskLease } from './store.js'
+import { normalizeReviewSeverities, type ChunkSearchInput, type ConfigurationTransactionScope, type DefaultKnowledgeBase, type KnowledgeReadState, type RequirementBindingMetadata, type ReviewJob, type ReviewRunPage, type StateStore, type StoredChunkCandidate, type TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], reviewQaSessions: [], reviewQaTurns: [], toolApprovals: [] })
 
 export class PostgresStore implements StateStore {
   private state: DatabaseState = emptyState()
@@ -391,6 +391,20 @@ export class PostgresStore implements StateStore {
     try {
       await client.query('BEGIN')
       await client.query(`
+        WITH exhausted AS (
+          UPDATE smarthub.review_jobs
+          SET status=CASE WHEN cancel_requested_at IS NULL THEN 'failed' ELSE 'cancelled' END,
+              finished_at=now(), updated_at=now(), lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL,
+              error=CASE WHEN cancel_requested_at IS NULL THEN 'REVIEW_JOB_LEASE_EXHAUSTED: Worker 租约多次失效' ELSE '用户已取消本次评审' END
+          WHERE status='running' AND lease_expires_at < now() AND (cancel_requested_at IS NOT NULL OR attempt_count >= max_attempts)
+          RETURNING run_id, status, error
+        )
+        UPDATE smarthub.review_runs run
+        SET status=exhausted.status, finished_at=now(),
+            data=jsonb_set(jsonb_set(jsonb_set(run.data, '{status}', to_jsonb(exhausted.status)), '{step}', to_jsonb(exhausted.status)), '{error}', to_jsonb(exhausted.error))
+        FROM exhausted WHERE run.id=exhausted.run_id AND run.status='running'
+      `)
+      await client.query(`
         WITH expired AS (
           SELECT id, data->>'candidateIndexVersionId' AS candidate_id
           FROM smarthub.sync_tasks
@@ -478,6 +492,66 @@ export class PostgresStore implements StateStore {
     return result.rowCount === 1
   }
 
+  async enqueueReviewJob(job: ReviewJob) {
+    await this.pool.query(`
+      INSERT INTO smarthub.review_jobs (id, run_id, project_version_id, status, attempt_count, max_attempts, available_at, created_at, updated_at, data)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+      ON CONFLICT (run_id) DO NOTHING
+    `, [job.id, job.runId, job.projectVersionId, job.status, job.attempts, job.maxAttempts, job.availableAt, job.createdAt, job.updatedAt, JSON.stringify(job)])
+    await this.notifyTask()
+  }
+
+  async claimReviewJob(workerId: string, leaseMs: number): Promise<ReviewJob | null> {
+    const runToken = crypto.randomUUID()
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(`
+        UPDATE smarthub.review_jobs
+        SET status='queued', available_at=now(), lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=now(),
+            data=jsonb_set(data, '{status}', to_jsonb('queued'::text))
+        WHERE status='running' AND lease_expires_at < now() AND cancel_requested_at IS NULL AND attempt_count < max_attempts
+      `)
+      const result = await client.query<{ data: ReviewJob }>(`
+        WITH next_job AS (
+          SELECT id FROM smarthub.review_jobs
+          WHERE status='queued' AND available_at <= now() AND attempt_count < max_attempts
+          ORDER BY available_at, created_at FOR UPDATE SKIP LOCKED LIMIT 1
+        )
+        UPDATE smarthub.review_jobs job
+        SET status='running', attempt_count=attempt_count+1, lease_owner=$1, run_token=$3::uuid,
+            lease_expires_at=now()+($2::text || ' milliseconds')::interval, heartbeat_at=now(),
+            started_at=COALESCE(started_at, now()), updated_at=now(),
+            data=jsonb_set(job.data, '{status}', to_jsonb('running'::text))
+        FROM next_job WHERE job.id=next_job.id RETURNING job.data
+      `, [workerId, Math.max(1_000, leaseMs), runToken])
+      await client.query('COMMIT')
+      const job = result.rows[0]?.data
+      return job ? { ...job, status: 'running', attempts: (job.attempts ?? 0) + 1, leaseOwner: workerId, runToken, heartbeatAt: new Date().toISOString() } : null
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
+  }
+
+  async heartbeatReviewJob(runId: string, lease: TaskLease, leaseMs: number) {
+    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET lease_expires_at=now()+($4::text || ' milliseconds')::interval, heartbeat_at=now(), updated_at=now() WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL`, [runId, lease.workerId, lease.runToken, Math.max(1_000, leaseMs)])
+    return result.rowCount === 1
+  }
+
+  async finishReviewJob(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string) {
+    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET status=$4, finished_at=now(), updated_at=now(), error=$5, lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, data=jsonb_set(data, '{status}', to_jsonb($4::text)) WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid`, [runId, lease.workerId, lease.runToken, status, error ?? null])
+    return result.rowCount === 1
+  }
+
+  async releaseReviewJob(runId: string, lease: TaskLease, retryDelayMs: number, error: string) {
+    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET status='queued', available_at=now()+($4::text || ' milliseconds')::interval, updated_at=now(), error=$5, lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, data=jsonb_set(data, '{status}', to_jsonb('queued'::text)) WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND attempt_count < max_attempts`, [runId, lease.workerId, lease.runToken, Math.max(0, retryDelayMs), error])
+    return result.rowCount === 1
+  }
+
+  async cancelReviewJob(runId: string) {
+    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET cancel_requested_at=now(), updated_at=now(), status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END, finished_at=CASE WHEN status='queued' THEN now() ELSE finished_at END WHERE run_id=$1 AND status IN ('queued','running')`, [runId])
+    return Boolean(result.rowCount)
+  }
+
   async searchChunks(input: ChunkSearchInput): Promise<StoredChunkCandidate[]> {
     const dimensions = positiveInteger(input.dimensions, '向量维度')
     const limit = positiveInteger(input.limit, '召回数量')
@@ -552,10 +626,14 @@ export class PostgresStore implements StateStore {
   }
 
   async transactionWithTaskLease<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
-    return this.runTransaction(operation, { taskId, lease })
+    return this.runTransaction(operation, { kind: 'sync', id: taskId, lease })
   }
 
-  private async runTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>, fencing?: { taskId: string; lease: TaskLease }): Promise<T | null> {
+  async transactionWithReviewLease<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
+    return this.runTransaction(operation, { kind: 'review', id: runId, lease })
+  }
+
+  private async runTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>, fencing?: { kind: 'sync' | 'review'; id: string; lease: TaskLease }): Promise<T | null> {
     let result: T | null = null
     let failure: unknown
     this.queue = this.queue.then(async () => {
@@ -564,24 +642,28 @@ export class PostgresStore implements StateStore {
         await client.query('BEGIN')
         await client.query("SELECT pg_advisory_xact_lock(hashtext('smarthub_state'))")
         if (fencing) {
+          const table = fencing.kind === 'sync' ? 'sync_tasks' : 'review_jobs'
+          const key = fencing.kind === 'sync' ? 'id' : 'run_id'
           const owned = await client.query(`
-            SELECT 1 FROM smarthub.sync_tasks
-            WHERE id = $1 AND status = 'running' AND lease_owner = $2
+            SELECT 1 FROM smarthub.${table}
+            WHERE ${key} = $1 AND status = 'running' AND lease_owner = $2
               AND run_token = $3::uuid AND lease_expires_at > now()
             FOR UPDATE
-          `, [fencing.taskId, fencing.lease.workerId, fencing.lease.runToken])
+          `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
           if (owned.rowCount !== 1) { await client.query('ROLLBACK'); return }
         }
         const before = await loadState(client)
         const draft = structuredClone(before)
         result = await operation(draft)
         if (fencing) {
+          const table = fencing.kind === 'sync' ? 'sync_tasks' : 'review_jobs'
+          const key = fencing.kind === 'sync' ? 'id' : 'run_id'
           const stillOwned = await client.query(`
-            SELECT 1 FROM smarthub.sync_tasks
-            WHERE id = $1 AND status = 'running' AND lease_owner = $2
+            SELECT 1 FROM smarthub.${table}
+            WHERE ${key} = $1 AND status = 'running' AND lease_owner = $2
               AND run_token = $3::uuid AND lease_expires_at > now()
             FOR UPDATE
-          `, [fencing.taskId, fencing.lease.workerId, fencing.lease.runToken])
+          `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
           if (stillOwned.rowCount !== 1) { result = null; await client.query('ROLLBACK'); return }
         }
         await persistChanges(client, before, draft)
@@ -736,10 +818,20 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const projectVersions = await client.query<{ data: DatabaseState['projectVersions'][number] }>('SELECT data FROM smarthub.project_versions ORDER BY created_at, id')
   const projectVersionRequirementBindings = await client.query<{ data: DatabaseState['projectVersionRequirementBindings'][number] }>('SELECT data FROM smarthub.project_version_requirement_bindings ORDER BY created_at, id')
   const reviewRuns = await client.query<{ data: DatabaseState['reviewRuns'][number] }>('SELECT data FROM smarthub.review_runs ORDER BY created_at DESC, id')
-  return { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data) }
+  const findingActions = await client.query<{ data: DatabaseState['findingActions'][number] }>('SELECT data FROM smarthub.finding_actions ORDER BY run_id, finding_id, version')
+  const reviewQaSessions = await client.query<{ data: DatabaseState['reviewQaSessions'][number] }>('SELECT data FROM smarthub.review_qa_sessions ORDER BY created_at, id')
+  const reviewQaTurns = await client.query<{ data: DatabaseState['reviewQaTurns'][number] }>('SELECT data FROM smarthub.review_qa_turns ORDER BY created_at, id')
+  const toolApprovals = await client.query<{ data: DatabaseState['toolApprovals'][number] }>('SELECT data FROM smarthub.tool_approvals ORDER BY requested_at, id')
+  const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), reviewQaSessions: reviewQaSessions.rows.map(row => row.data), reviewQaTurns: reviewQaTurns.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data) }
+  normalizeReviewSeverities(state)
+  return state
 }
 
 async function persistChanges(client: PoolClient, before: DatabaseState, state: DatabaseState) {
+  await deleteMissing(client, 'finding_actions', before.findingActions, state.findingActions)
+  await deleteMissing(client, 'review_qa_turns', before.reviewQaTurns, state.reviewQaTurns)
+  await deleteMissing(client, 'review_qa_sessions', before.reviewQaSessions, state.reviewQaSessions)
+  await deleteMissing(client, 'tool_approvals', before.toolApprovals, state.toolApprovals)
   await deleteMissing(client, 'review_runs', before.reviewRuns, state.reviewRuns)
   await deleteMissing(client, 'project_version_requirement_bindings', before.projectVersionRequirementBindings, state.projectVersionRequirementBindings)
   await deleteMissing(client, 'model_sources', before.modelSources, state.modelSources)
@@ -784,6 +876,10 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   }
   for (const item of changed(before.projectVersionRequirementBindings, state.projectVersionRequirementBindings)) await client.query('INSERT INTO smarthub.project_version_requirement_bindings (id, project_version_id, asset_id, asset_version_id, created_at, data) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET asset_version_id=EXCLUDED.asset_version_id, data=EXCLUDED.data', [item.id, item.projectVersionId, item.assetId, item.assetVersionId, item.createdAt, JSON.stringify(item)])
   for (const item of changed(before.reviewRuns, state.reviewRuns)) await client.query('INSERT INTO smarthub.review_runs (id, project_version_id, asset_id, asset_version_id, status, created_at, finished_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, finished_at=EXCLUDED.finished_at, data=EXCLUDED.data', [item.id, item.projectVersionId, item.assetId, item.assetVersionId, item.status, item.createdAt, item.finishedAt ?? null, JSON.stringify(item)])
+  for (const item of changed(before.findingActions, state.findingActions)) await client.query('INSERT INTO smarthub.finding_actions (id, project_version_id, run_id, finding_id, version, created_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO NOTHING', [item.id, item.projectVersionId, item.runId, item.findingId, item.version, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.reviewQaSessions, state.reviewQaSessions)) await client.query('INSERT INTO smarthub.review_qa_sessions (id, project_version_id, run_id, created_at, data) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (id) DO NOTHING', [item.id, item.projectVersionId, item.runId, item.createdAt, JSON.stringify(item)])
+  for (const item of changed(before.reviewQaTurns, state.reviewQaTurns)) await client.query('INSERT INTO smarthub.review_qa_turns (id, session_id, project_version_id, run_id, status, created_at, finished_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO NOTHING', [item.id, item.sessionId, item.projectVersionId, item.runId, item.status, item.createdAt, item.finishedAt, JSON.stringify(item)])
+  for (const item of changed(before.toolApprovals, state.toolApprovals)) await client.query('INSERT INTO smarthub.tool_approvals (id, project_version_id, run_id, tool_id, parameter_hash, status, requested_at, expires_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, expires_at=EXCLUDED.expires_at, data=EXCLUDED.data', [item.id, item.projectVersionId, item.runId, item.toolId, item.parameterHash, item.status, item.requestedAt, item.expiresAt, JSON.stringify(item)])
   for (const item of changed(before.indexes, state.indexes)) {
     const previous = before.indexes.find(index => index.id === item.id)
     const data = { ...item, indexedChunks: undefined }

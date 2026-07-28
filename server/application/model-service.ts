@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { GenerativeCapability, GenerativeModel, GenerativeModelSource, GenerativeProviderType, ModelHealth } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 
@@ -94,19 +94,29 @@ export class ModelService {
 
     const checkedAt = new Date().toISOString()
     let health: ModelHealth = 'healthy'
-    let message = '连通性探测成功'
+    let message = 'model-probe/v2 质量门禁通过'
+    const sample = controlledProbeSample()
+    let checks = { connectivity: false, longContext: false, structuredSubmission: false, toolCalling: false }
     try {
       const endpoint = source.baseUrl
       const credential = source.apiKey
       const requireToolCall = model.capabilities.includes('tool_calling')
       const response = source.providerType === 'anthropic'
-        ? await probeAnthropic(endpoint, credential, model.name, requireToolCall)
-        : await probeOpenAi(endpoint, credential, model.name, requireToolCall)
+        ? await probeAnthropic(endpoint, credential, model.name, requireToolCall, sample.content)
+        : await probeOpenAi(endpoint, credential, model.name, requireToolCall, sample.content)
       if (!response.ok) throw await providerError(response, credential, endpoint)
+      checks.connectivity = true
       if (requireToolCall) {
         const body = await response.json() as Record<string, unknown>
-        if (!hasRequiredToolCall(body, source.providerType)) throw new Error('模型普通生成可用，但未按要求产生工具调用；不能用于需求评审 Agent')
-        message = '连通性及工具调用探测成功'
+        const submission = requiredProbeSubmission(body, source.providerType)
+        checks.toolCalling = Boolean(submission)
+        checks.longContext = submission?.contextMarker === sample.marker
+        checks.structuredSubmission = submission?.schemaVersion === 'model-probe/v2' && submission?.finding?.severity === 'blocker' && typeof submission.finding.title === 'string' && submission.finding.title.length > 0
+        if (!checks.toolCalling) throw new Error('模型普通生成可用，但未按要求产生工具调用（质量门禁提交）；不能用于需求评审 Agent')
+        if (!checks.longContext) throw new Error('模型未能从受控长上下文末尾恢复固定标记')
+        if (!checks.structuredSubmission) throw new Error('模型提交的结构化质量门禁结果不完整')
+      } else {
+        throw new Error('需求评审模型必须声明并通过工具调用质量门禁')
       }
     } catch (error) {
       health = 'degraded'
@@ -120,6 +130,11 @@ export class ModelService {
       storedModel.health = health
       storedModel.lastCheckedAt = checkedAt
       storedModel.healthMessage = message
+      storedModel.qualityGate = {
+        version: 'model-probe/v2', checkedAt, passed: health === 'healthy', sampleSha256: sample.sha256,
+        inputCharacters: sample.content.length, checks,
+        ...(health === 'healthy' ? {} : { failureSummary: message.slice(0, 500) }),
+      }
       storedSource.lastCheckedAt = checkedAt
       storedSource.health = aggregateHealth(storedSource.models)
       storedSource.healthMessage = message
@@ -196,12 +211,15 @@ function normalizeModel(input: unknown, previous: GenerativeModel[] | undefined)
   const rawCapabilities = Array.isArray(value.capabilities) ? value.capabilities.map(String) : []
   if (rawCapabilities.some(item => !capabilities.has(item as GenerativeCapability))) throw new Error(`模型“${displayName}”包含不支持的能力声明`)
   const unchanged = existing?.name === name
+    && existing.contextWindow === contextWindow
+    && existing.maxOutputTokens === maxOutputTokens
+    && JSON.stringify([...existing.capabilities].sort()) === JSON.stringify([...new Set(rawCapabilities)].sort())
   return {
     id, name, displayName, contextWindow, maxOutputTokens,
     capabilities: [...new Set(rawCapabilities)] as GenerativeCapability[],
     enabled: value.enabled !== false,
     health: unchanged ? existing?.health ?? 'unknown' : 'unknown',
-    ...(unchanged && existing?.lastCheckedAt ? { lastCheckedAt: existing.lastCheckedAt, healthMessage: existing.healthMessage } : {}),
+    ...(unchanged && existing?.lastCheckedAt ? { lastCheckedAt: existing.lastCheckedAt, healthMessage: existing.healthMessage, qualityGate: existing.qualityGate } : {}),
   }
 }
 
@@ -225,38 +243,57 @@ function modelListUrl(endpoint: string) {
 }
 function chatUrl(endpoint: string) { return /\/chat\/completions$/i.test(endpoint) ? endpoint : `${endpoint}/chat/completions` }
 function anthropicUrl(endpoint: string) { return /\/v1\/messages$/i.test(endpoint) ? endpoint : `${endpoint}/v1/messages` }
-function probeOpenAi(endpoint: string, credential: string, model: string, requireToolCall: boolean) {
-  const tool = { type: 'function', function: { name: 'smarthub_capability_probe', description: 'Return the fixed probe value.', parameters: { type: 'object', properties: { value: { type: 'string', enum: ['ok'] } }, required: ['value'], additionalProperties: false } } }
+function probeOpenAi(endpoint: string, credential: string, model: string, requireToolCall: boolean, sample: string) {
+  const tool = { type: 'function', function: { name: 'smarthub_requirement_submit_probe', description: 'Submit the controlled requirement review probe.', parameters: probeSubmissionSchema() } }
   return fetch(chatUrl(endpoint), {
     method: 'POST',
     headers: { ...(credential ? { authorization: `Bearer ${credential}` } : {}), 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? 'Call smarthub_capability_probe with value "ok". Do not answer with text.' : 'Reply with OK.' }], max_tokens: requireToolCall ? 64 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'function', function: { name: 'smarthub_capability_probe' } } } : {}) }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? sample : 'Reply with OK.' }], max_tokens: requireToolCall ? 256 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'function', function: { name: 'smarthub_requirement_submit_probe' } } } : {}) }),
     signal: AbortSignal.timeout(30_000),
   })
 }
-function probeAnthropic(endpoint: string, credential: string, model: string, requireToolCall: boolean) {
-  const tool = { name: 'smarthub_capability_probe', description: 'Return the fixed probe value.', input_schema: { type: 'object', properties: { value: { type: 'string', enum: ['ok'] } }, required: ['value'], additionalProperties: false } }
+function probeAnthropic(endpoint: string, credential: string, model: string, requireToolCall: boolean, sample: string) {
+  const tool = { name: 'smarthub_requirement_submit_probe', description: 'Submit the controlled requirement review probe.', input_schema: probeSubmissionSchema() }
   return fetch(anthropicUrl(endpoint), {
     method: 'POST',
     headers: { 'x-api-key': credential, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? 'Call smarthub_capability_probe with value "ok". Do not answer with text.' : 'Reply with OK.' }], max_tokens: requireToolCall ? 64 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'tool', name: 'smarthub_capability_probe' } } : {}) }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? sample : 'Reply with OK.' }], max_tokens: requireToolCall ? 256 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'tool', name: 'smarthub_requirement_submit_probe' } } : {}) }),
     signal: AbortSignal.timeout(30_000),
   })
 }
-function hasRequiredToolCall(body: Record<string, unknown>, providerType: GenerativeProviderType) {
+function requiredProbeSubmission(body: Record<string, unknown>, providerType: GenerativeProviderType): ProbeSubmission | null {
   if (providerType === 'anthropic') {
     const content = Array.isArray(body.content) ? body.content as Array<Record<string, unknown>> : []
-    return content.some(item => item.type === 'tool_use' && item.name === 'smarthub_capability_probe')
+    const call = content.find(item => item.type === 'tool_use' && item.name === 'smarthub_requirement_submit_probe')
+    return parseProbeSubmission(call?.input)
   }
   const choices = Array.isArray(body.choices) ? body.choices as Array<Record<string, unknown>> : []
-  return choices.some(choice => {
+  return choices.map(choice => {
     const message = choice.message && typeof choice.message === 'object' ? choice.message as Record<string, unknown> : {}
     const calls = Array.isArray(message.tool_calls) ? message.tool_calls as Array<Record<string, unknown>> : []
-    return calls.some(call => {
+    const call = calls.find(call => {
       const fn = call.function && typeof call.function === 'object' ? call.function as Record<string, unknown> : {}
-      return fn.name === 'smarthub_capability_probe'
+      return fn.name === 'smarthub_requirement_submit_probe'
     })
-  })
+    if (!call) return null
+    const fn = call.function && typeof call.function === 'object' ? call.function as Record<string, unknown> : {}
+    try { return parseProbeSubmission(JSON.parse(String(fn.arguments ?? '{}'))) } catch { return null }
+  }).find(Boolean) ?? null
+}
+
+type ProbeSubmission = { schemaVersion: string; contextMarker: string; finding: { title: string; severity: string } }
+function parseProbeSubmission(value: unknown): ProbeSubmission | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const finding = raw.finding && typeof raw.finding === 'object' && !Array.isArray(raw.finding) ? raw.finding as Record<string, unknown> : {}
+  return { schemaVersion: String(raw.schemaVersion ?? ''), contextMarker: String(raw.contextMarker ?? ''), finding: { title: String(finding.title ?? ''), severity: String(finding.severity ?? '') } }
+}
+function probeSubmissionSchema() { return { type: 'object', properties: { schemaVersion: { type: 'string', enum: ['model-probe/v2'] }, contextMarker: { type: 'string' }, finding: { type: 'object', properties: { title: { type: 'string', minLength: 1 }, severity: { type: 'string', enum: ['blocker'] } }, required: ['title', 'severity'], additionalProperties: false } }, required: ['schemaVersion', 'contextMarker', 'finding'], additionalProperties: false } }
+function controlledProbeSample() {
+  const marker = 'SMARTHUB-CONTEXT-END-7F3A'
+  const paragraphs = Array.from({ length: 96 }, (_, index) => `需求段 ${index + 1}：订单在固定条件下进入状态 S${index + 1}，不得将相邻段落的条件混用。`).join('\n')
+  const content = `这是 SmartHub model-probe/v2 受控质量门禁。阅读全部上下文后，调用 smarthub_requirement_submit_probe；schemaVersion 必须为 model-probe/v2，contextMarker 必须复制末尾标记，finding.title 填“缺少失败补偿”，severity 填 blocker。不要返回普通文本。\n${paragraphs}\n末尾固定标记：${marker}`
+  return { marker, content, sha256: createHash('sha256').update(content).digest('hex') }
 }
 async function providerError(response: Response, credential: string, endpoint: string) {
   const raw = (await response.text()).slice(0, 400)

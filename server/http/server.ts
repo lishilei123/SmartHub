@@ -2,16 +2,16 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
+import type { AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
 import type { ReviewQuestionQuote } from '../domain/review-qa-types.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
+import { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewQaService, service, stateStore }
+export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore }
 
 export async function start(port = Number(process.env.PORT ?? 8787)) {
   await service.initialize()
@@ -84,6 +84,27 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   }))
   const requirementReviewRun = /^\/api\/requirement-review-runs\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && requirementReviewRun) return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1]))
+  const findingActions = /^\/api\/requirement-review-runs\/([^/]+)\/finding-actions$/.exec(url.pathname)
+  if (method === 'GET' && findingActions) return send(response, 200, await reviewGovernanceService.listFindingActions(findingActions[1]))
+  const findingAction = /^\/api\/requirement-review-runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
+  if (method === 'POST' && findingAction) {
+    const body = await json(request)
+    return send(response, 201, await reviewGovernanceService.actOnFinding(findingAction[1], findingAction[2], {
+      action: String(body.action ?? '') as FindingActionType,
+      comment: body.comment === undefined ? undefined : String(body.comment),
+      expectedVersion: body.expectedVersion === undefined ? undefined : Number(body.expectedVersion),
+      actorId: requestActorId(request), actorDisplayName: requestActorName(request),
+    }))
+  }
+  const runApprovals = /^\/api\/requirement-review-runs\/([^/]+)\/approvals$/.exec(url.pathname)
+  if (method === 'GET' && runApprovals) return send(response, 200, await reviewGovernanceService.listApprovals(runApprovals[1]))
+  const approvalDecision = /^\/api\/tool-approvals\/([^/]+)\/decision$/.exec(url.pathname)
+  if (method === 'POST' && approvalDecision) {
+    const body = await json(request)
+    return send(response, 200, await reviewGovernanceService.decideApproval(approvalDecision[1], { decision: String(body.decision ?? '') as 'approved' | 'rejected', comment: body.comment === undefined ? undefined : String(body.comment), actorId: requestActorId(request), actorDisplayName: requestActorName(request) }))
+  }
+  const reportExport = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs\/([^/]+)\/report\.md$/.exec(url.pathname)
+  if (method === 'GET' && reportExport) return sendText(response, 200, await reviewGovernanceService.exportMarkdown(reportExport[2], reportExport[1]), 'text/markdown; charset=utf-8', `requirement-review-${reportExport[2]}.md`)
   const requirementReviewRunCancel = /^\/api\/requirement-review-runs\/([^/]+)\/cancel$/.exec(url.pathname)
   if (method === 'POST' && requirementReviewRunCancel) return send(response, 202, await requirementAnalysisService.cancel(requirementReviewRunCancel[1]))
   const requirementReviewRunRetry = /^\/api\/requirement-review-runs\/([^/]+)\/retry$/.exec(url.pathname)
@@ -94,12 +115,13 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     return send(response, 202, await requirementAnalysisService.retry(requirementReviewRunRetry[1], mode))
   }
   const requirementReviewQuestions = /^\/api\/requirement-review-runs\/([^/]+)\/questions$/.exec(url.pathname)
+  if (method === 'GET' && requirementReviewQuestions) return send(response, 200, await reviewQaService.list(requirementReviewQuestions[1]))
   if (method === 'POST' && requirementReviewQuestions) {
     const body = await json(request)
     const controller = new AbortController()
     request.once('aborted', () => controller.abort(new Error('REVIEW_QA_CANCELLED')))
     response.once('close', () => { if (!response.writableEnded) controller.abort(new Error('REVIEW_QA_CANCELLED')) })
-    const question = { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined }
+    const question = { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined, actorId: requestActorId(request), actorDisplayName: requestActorName(request) }
     if (url.searchParams.get('stream') === 'true') {
       response.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' })
       try {
@@ -243,6 +265,7 @@ async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) 
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {}
 }
 function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type' }); response.end(body == null ? '' : JSON.stringify(body)) }
+function sendText(response: ServerResponse, status: number, body: string, type: string, filename?: string) { response.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...(filename ? { 'content-disposition': `attachment; filename="${filename.replaceAll('"', '')}"` } : {}), 'access-control-allow-origin': '*' }); response.end(body) }
 function writeNdjson(response: ServerResponse, body: unknown) { if (!response.writableEnded && !response.destroyed) response.write(`${JSON.stringify(body)}\n`) }
 function sendBinary(response: ServerResponse, status: number, body: Buffer, type: string) { response.writeHead(status, { 'content-type': type, 'content-length': body.length, 'cache-control': 'private, max-age=3600', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' }); response.end(body) }
 function contentType(path: string) { const extension = path.toLowerCase().split('.').at(-1); return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml; charset=utf-8' } as Record<string, string>)[extension ?? ''] ?? 'application/octet-stream' }
@@ -250,6 +273,9 @@ async function notifyTask(_taskId: string) {
   if (usingPostgres) await stateStore.notifyTask?.()
   else void service.processTask(_taskId).catch(error => console.error(`知识库任务 ${_taskId} 调度失败：`, error instanceof Error ? error.message : error))
 }
+
+function requestActorId(request: IncomingMessage) { return String(request.headers['x-smarthub-actor-id'] ?? '').trim().slice(0, 200) || 'current-user' }
+function requestActorName(request: IncomingMessage) { return String(request.headers['x-smarthub-actor-name'] ?? '').trim().slice(0, 200) || '当前用户' }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const port = Number(process.env.PORT ?? 8787)

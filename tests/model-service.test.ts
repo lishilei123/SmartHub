@@ -56,7 +56,7 @@ test('模型发现和连通性探测使用数据库连接并记录真实健康�
     const headers = new Headers(init?.headers)
     calls.push({ url, authorization: headers.get('authorization') ?? '' })
     if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'review-model' }, { id: 'backup-model' }] }), { status: 200, headers: { 'content-type': 'application/json' } })
-    return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ type: 'function', function: { name: 'smarthub_capability_probe', arguments: '{"value":"ok"}' } }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ type: 'function', function: { name: 'smarthub_requirement_submit_probe', arguments: '{"schemaVersion":"model-probe/v2","contextMarker":"SMARTHUB-CONTEXT-END-7F3A","finding":{"title":"缺少失败补偿","severity":"blocker"}}' } }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
     const discovered = await service.discover(source)
@@ -65,7 +65,8 @@ test('模型发现和连通性探测使用数据库连接并记录真实健康�
     assert.equal(probed.ok, true)
     assert.equal(probed.source.health, 'healthy')
     assert.equal(probed.source.models[0].health, 'healthy')
-    assert.equal(probed.message, '连通性及工具调用探测成功')
+    assert.equal(probed.message, 'model-probe/v2 质量门禁通过')
+    assert.equal(probed.source.models[0].qualityGate?.checks.longContext, true)
     assert.deepEqual(calls.map(call => call.url), ['https://provider.example/v1/models', 'https://provider.example/v1/chat/completions'])
     assert.ok(calls.every(call => call.authorization === 'Bearer actual-secret'))
     assert.doesNotMatch(JSON.stringify(await service.listSources()), /actual-secret/u)

@@ -102,6 +102,8 @@ test('AI 资源目录校验标识、引用和内置工具保护', async () => {
   await assert.rejects(() => service.create('tool', { key: 'http.missing', name: '错误 HTTP 工具', source: 'http', risk: 'network_read', timeoutMs: 1000 }), /HTTP 工具 Endpoint/)
   const http = await service.create('tool', { key: 'http.lookup', name: 'HTTP 查询', source: 'http', risk: 'network_read', timeoutMs: 1000, endpoint: 'https://tools.example.com/invoke', authType: 'bearer', parameters: { type: 'object', properties: { query: { type: 'string' } } } })
   assert.equal(http.kind === 'tool' ? http.credentialEnv : '', 'SMARTHUB_HTTP_TOOL_HTTP_LOOKUP_TOKEN')
+  const highRisk = await service.create('tool', { key: 'issues.close', name: '关闭外部问题', source: 'http', risk: 'write_high_risk', timeoutMs: 1000, endpoint: 'https://tools.example.com/issues/close', authType: 'none', parameters: { type: 'object', required: ['issueId'], properties: { issueId: { type: 'string' } } } })
+  assert.equal(highRisk.kind === 'tool' ? highRisk.risk : '', 'write_high_risk')
   await assert.rejects(() => service.create('tool', { key: 'unsafe.local', name: '越界本地工具', source: 'local', sourcePath: 'server/tools/../runtime.ts', risk: 'read', timeoutMs: 1000 }), /相对文件路径/)
   const local = await service.create('tool', { key: 'safe.local', name: '安全本地工具', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 })
   const localSource = await service.source(local.id)

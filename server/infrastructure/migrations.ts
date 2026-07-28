@@ -309,6 +309,106 @@ const migrations: Migration[] = [{
     );
     CREATE INDEX IF NOT EXISTS ai_resources_kind_enabled_idx ON smarthub.ai_resources (kind, enabled, resource_key);
   `,
+}, {
+  version: 10,
+  name: 'phase2-review-governance',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.finding_actions (
+      id text PRIMARY KEY,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      run_id text NOT NULL REFERENCES smarthub.review_runs(id) ON DELETE CASCADE,
+      finding_id text NOT NULL,
+      version integer NOT NULL,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (run_id, finding_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS finding_actions_run_idx ON smarthub.finding_actions (run_id, finding_id, version);
+
+    CREATE TABLE IF NOT EXISTS smarthub.review_qa_sessions (
+      id text PRIMARY KEY,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      run_id text NOT NULL UNIQUE REFERENCES smarthub.review_runs(id) ON DELETE CASCADE,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.review_qa_turns (
+      id text PRIMARY KEY,
+      session_id text NOT NULL REFERENCES smarthub.review_qa_sessions(id) ON DELETE CASCADE,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      run_id text NOT NULL REFERENCES smarthub.review_runs(id) ON DELETE CASCADE,
+      status text NOT NULL,
+      created_at timestamptz NOT NULL,
+      finished_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS review_qa_turns_run_idx ON smarthub.review_qa_turns (run_id, created_at, id);
+
+    CREATE TABLE IF NOT EXISTS smarthub.tool_approvals (
+      id text PRIMARY KEY,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      run_id text NOT NULL REFERENCES smarthub.review_runs(id) ON DELETE CASCADE,
+      tool_id text NOT NULL,
+      parameter_hash char(64) NOT NULL,
+      status text NOT NULL,
+      requested_at timestamptz NOT NULL,
+      expires_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS tool_approvals_run_idx ON smarthub.tool_approvals (run_id, status, requested_at DESC);
+    CREATE INDEX IF NOT EXISTS tool_approvals_exact_idx ON smarthub.tool_approvals (run_id, tool_id, parameter_hash, status);
+  `,
+}, {
+  version: 11,
+  name: 'review-job-worker-queue',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.review_jobs (
+      id text PRIMARY KEY,
+      run_id text NOT NULL UNIQUE REFERENCES smarthub.review_runs(id) ON DELETE CASCADE,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      status text NOT NULL,
+      attempt_count integer NOT NULL DEFAULT 0,
+      max_attempts integer NOT NULL DEFAULT 3,
+      available_at timestamptz NOT NULL DEFAULT now(),
+      lease_owner text,
+      run_token uuid,
+      lease_expires_at timestamptz,
+      heartbeat_at timestamptz,
+      cancel_requested_at timestamptz,
+      started_at timestamptz,
+      finished_at timestamptz,
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      error text,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS review_jobs_claim_idx ON smarthub.review_jobs (available_at, created_at) WHERE status = 'queued';
+    CREATE INDEX IF NOT EXISTS review_jobs_lease_idx ON smarthub.review_jobs (lease_expires_at) WHERE status = 'running';
+  `,
+}, {
+  version: 12,
+  name: 'normalize-finding-severity-contract',
+  sql: `
+    UPDATE smarthub.review_runs run
+    SET data = jsonb_set(
+      run.data,
+      '{result,findings}',
+      COALESCE((
+        SELECT jsonb_agg(
+          CASE finding->>'severity'
+            WHEN 'critical' THEN jsonb_set(finding, '{severity}', to_jsonb('blocker'::text))
+            WHEN 'info' THEN jsonb_set(finding, '{severity}', to_jsonb('low'::text))
+            ELSE finding
+          END
+          ORDER BY ordinal
+        )
+        FROM jsonb_array_elements(run.data->'result'->'findings') WITH ORDINALITY AS items(finding, ordinal)
+      ), '[]'::jsonb),
+      false
+    )
+    WHERE jsonb_typeof(run.data->'result'->'findings') = 'array'
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(run.data->'result'->'findings') finding WHERE finding->>'severity' IN ('critical', 'info'));
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

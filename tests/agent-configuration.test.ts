@@ -28,6 +28,7 @@ async function fixture() {
         capabilities: ['structured_output', 'tool_calling', 'reasoning'],
         enabled: true,
         health: 'healthy',
+        qualityGate: { version: 'model-probe/v2', checkedAt: '2026-07-27T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } },
       }],
     })
   })

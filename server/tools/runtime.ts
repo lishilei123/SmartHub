@@ -1,4 +1,4 @@
-import type { ToolExecutionRequest, ToolExecutionResult } from '../domain/tool-types.js'
+import type { ToolApprovalGate, ToolExecutionRequest, ToolExecutionResult } from '../domain/tool-types.js'
 import { ToolRegistry } from './registry.js'
 
 export class GovernedToolRuntime {
@@ -13,12 +13,24 @@ export class GovernedToolRuntime {
     private readonly registry: ToolRegistry,
     private readonly limits: { maxToolCalls: number; maxRepeatedToolCall: number },
     private readonly reservation: { toolIds: ReadonlySet<string>; calls: number } = { toolIds: new Set(), calls: 0 },
+    private readonly approvalGate?: ToolApprovalGate,
   ) {}
 
   async execute(request: ToolExecutionRequest, signal: AbortSignal): Promise<ToolExecutionResult> {
     if (!request.context.allowedToolIds.has(request.toolId)) throw new Error(`TOOL_NOT_ALLOWED: ${request.toolId}`)
     const registered = this.registry.get(request.toolId)
     if (!registered) throw new Error(`TOOL_NOT_REGISTERED: ${request.toolId}`)
+    if (registered.descriptor.risk === 'write_reversible' || registered.descriptor.risk === 'write_high_risk') {
+      if (!this.approvalGate) throw new Error(`TOOL_APPROVAL_GATE_UNAVAILABLE: ${request.toolId}`)
+      await this.approvalGate.authorize({
+        runId: request.context.snapshot.runId,
+        toolId: request.toolId,
+        toolVersion: registered.descriptor.version,
+        risk: registered.descriptor.risk,
+        arguments: request.arguments,
+        signal,
+      })
+    }
 
     const fingerprint = `${request.toolId}:${stableStringify(request.arguments)}`
     const repeated = (this.fingerprints.get(fingerprint) ?? 0) + 1

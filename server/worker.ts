@@ -1,5 +1,5 @@
 import { hostname } from 'node:os'
-import { service, stateStore, usingPostgres } from './runtime.js'
+import { requirementAnalysisService, service, stateStore, usingPostgres } from './runtime.js'
 import type { TaskLease } from './infrastructure/store.js'
 
 const workerId = process.env.SMARTHUB_WORKER_ID ?? `${hostname()}-${process.pid}`
@@ -10,6 +10,8 @@ let stopping = false
 const activeControllers = new Set<AbortController>()
 
 async function processOne() {
+  const reviewClaimed = await processReviewOne()
+  if (reviewClaimed) return true
   let task
   try {
     task = await stateStore.claimTask?.(workerId, leaseMs)
@@ -38,6 +40,39 @@ async function processOne() {
   return true
 }
 
+async function processReviewOne() {
+  let job
+  try {
+    job = await stateStore.claimReviewJob?.(workerId, leaseMs)
+  } catch (error) {
+    console.error('需求评审任务领取失败：', error instanceof Error ? error.message : error)
+    return false
+  }
+  if (!job) return false
+  const lease: TaskLease = { workerId, runToken: job.runToken! }
+  const controller = new AbortController()
+  activeControllers.add(controller)
+  const heartbeat = setInterval(() => {
+    void stateStore.heartbeatReviewJob?.(job.runId, lease, leaseMs)
+      .then(renewed => { if (!renewed) controller.abort(new Error('需求评审 Worker 租约已失效或运行已取消')) })
+      .catch(error => console.error(`需求评审任务 ${job.runId} 心跳失败：`, error instanceof Error ? error.message : error))
+  }, Math.max(1_000, Math.floor(leaseMs / 3)))
+  try {
+    await requirementAnalysisService.processPreparedRun(job.runId, lease, controller.signal)
+    await stateStore.finishReviewJob?.(job.runId, lease, 'succeeded')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = controller.signal.aborted ? 'cancelled' : 'failed'
+    await requirementAnalysisService.failPreparedRun(job.runId, lease, error, controller.signal.aborted).catch(() => undefined)
+    await stateStore.finishReviewJob?.(job.runId, lease, status, message)
+    if (!controller.signal.aborted) console.error(`需求评审任务 ${job.runId} 失败：${message}`)
+  } finally {
+    clearInterval(heartbeat)
+    activeControllers.delete(controller)
+  }
+  return true
+}
+
 async function retryFailedTask(claimed: { id: string; attempts: number; maxAttempts?: number }, lease: TaskLease, error: string | undefined) {
   const completed = await service.task(claimed.id)
   if (completed.status !== 'failed') return
@@ -52,7 +87,7 @@ async function retryFailedTask(claimed: { id: string; attempts: number; maxAttem
 }
 
 async function run() {
-  if (!usingPostgres || !stateStore.claimTask) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 的 PostgreSQL 模式')
+  if (!usingPostgres || !stateStore.claimTask || !stateStore.claimReviewJob) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
   await service.initialize()
   console.log(`SmartHub Worker ${workerId} 已启动，并发度 ${concurrency}`)
   try {

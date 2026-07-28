@@ -4,6 +4,25 @@ import { dirname } from 'node:path'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
 
 export interface TaskLease { workerId: string; runToken: string }
+export interface ReviewJob {
+  id: string
+  runId: string
+  projectVersionId: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  attempts: number
+  maxAttempts: number
+  availableAt: string
+  createdAt: string
+  updatedAt: string
+  leaseOwner?: string
+  runToken?: string
+  leaseExpiresAt?: string
+  heartbeatAt?: string
+  cancelRequestedAt?: string
+  startedAt?: string
+  finishedAt?: string
+  error?: string
+}
 
 export type RequirementBindingMetadata = ProjectVersionRequirementBinding & {
   asset: {
@@ -46,7 +65,7 @@ export type DefaultKnowledgeBase = {
   knowledgeBase: DatabaseState['knowledgeBases'][number]
 }
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], reviewQaSessions: [], reviewQaTurns: [], toolApprovals: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -78,6 +97,13 @@ export interface StateStore {
   ownsTask?(taskId: string, lease: TaskLease): Promise<boolean>
   notifyTask?(): Promise<void>
   waitForTaskNotification?(timeoutMs: number): Promise<void>
+  enqueueReviewJob?(job: ReviewJob): Promise<void>
+  claimReviewJob?(workerId: string, leaseMs: number): Promise<ReviewJob | null>
+  heartbeatReviewJob?(runId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
+  finishReviewJob?(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
+  releaseReviewJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
+  cancelReviewJob?(runId: string): Promise<boolean>
+  transactionWithReviewLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   ensureVectorIndex?(indexVersionId: string, dimensions: number): Promise<void>
   isVectorIndexReady?(indexVersionId: string, dimensions: number): Promise<boolean>
   close?(): Promise<void>
@@ -107,7 +133,7 @@ export class JsonStore implements StateStore {
   constructor(private readonly file: string | null) {}
   async load() {
     if (!this.file) return
-    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= [] }
+    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.reviewQaSessions ??= []; this.state.reviewQaTurns ??= []; this.state.toolApprovals ??= []; normalizeReviewSeverities(this.state) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   read() { return structuredClone(this.state) }
@@ -148,4 +174,27 @@ export class JsonStore implements StateStore {
     if (failure) throw failure
     return result
   }
+}
+
+export function normalizeReviewSeverities(state: DatabaseState) {
+  const runsById = new Map(state.reviewRuns.map(run => [run.id, run]))
+  state.reviewRuns.forEach(run => {
+    if (!run.reviewId) {
+      let root = run
+      const visited = new Set<string>()
+      while (root.retryOfRunId && !visited.has(root.id)) {
+        visited.add(root.id)
+        const parent = runsById.get(root.retryOfRunId)
+        if (!parent) break
+        root = parent
+      }
+      run.reviewId = root.reviewId ?? `review_${root.id}`
+    }
+    run.snapshot.reviewId ??= run.reviewId
+    run.result?.findings.forEach(finding => {
+      const legacy = String(finding.severity)
+      if (legacy === 'critical') finding.severity = 'blocker'
+      else if (legacy === 'info') finding.severity = 'low'
+    })
+  })
 }

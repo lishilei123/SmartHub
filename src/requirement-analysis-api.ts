@@ -1,7 +1,7 @@
 const apiBase = 'http://127.0.0.1:8787/api'
 
 export type ReviewFindingType = 'missing_requirement' | 'ambiguity' | 'conflict' | 'boundary_gap' | 'state_gap' | 'exception_gap' | 'security_risk' | 'testability_gap' | 'dependency_risk' | 'other'
-export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info'
+export type ReviewSeverity = 'blocker' | 'high' | 'medium' | 'low'
 export type OverallAssessment = 'pass' | 'pass_with_notes' | 'needs_revision' | 'blocked'
 
 export type ReviewEvidence = {
@@ -164,6 +164,7 @@ export type RequirementAnalysisResponse = {
 
 export type RequirementReviewRun = {
   id: string
+  reviewId: string
   retryOfRunId?: string
   retryMode?: 'full' | 'review_only'
   reusedExtractionFromRunId?: string
@@ -185,6 +186,8 @@ export type RequirementReviewRun = {
   startedAt: string
   finishedAt?: string
   error?: string
+  modelRouteAttempts?: Array<{ id: string; agentKey: 'requirement-point-extraction' | 'requirement-review'; sourceId: string; modelId: string; modelLabel: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; startedAt: string; finishedAt?: string; error?: string }>
+  degradations?: Array<{ agentKey: 'requirement-point-extraction' | 'requirement-review'; fromSourceId: string; fromModelId: string; toSourceId: string; toModelId: string; reason: string; occurredAt: string }>
   snapshot?: RequirementAnalysisResponse['snapshot']
   execution?: AgentExecutionRecord
   executions?: AgentExecutions
@@ -212,6 +215,38 @@ export type ReviewQuestionResponse = {
   agentConfigurationRef?: { id: string; version: number; contentSha256: string }
   createdAt: string
 }
+
+export type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
+export type FindingActionType = 'confirm' | 'dismiss' | 'resolve' | 'request_follow_up' | 'reopen'
+export type FindingActionsResponse = {
+  runId: string
+  projectVersionId: string
+  findings: Array<{ findingId: string; state: FindingState; version: number; lastActionAt?: string }>
+  actions: Array<{ id: string; findingId: string; action: FindingActionType; fromState: FindingState; toState: FindingState; comment?: string; actorDisplayName: string; version: number; createdAt: string }>
+}
+
+export type ReviewQuestionHistory = {
+  runId: string
+  projectVersionId: string
+  session: { id: string; createdAt: string; createdBy: string } | null
+  turns: Array<{
+    id: string
+    question: string
+    quote?: ReviewQuestionQuote
+    answer?: string
+    citations: string[]
+    limitations: string[]
+    status: 'succeeded' | 'failed' | 'cancelled'
+    modelRef?: { sourceId: string; modelId: string; label: string }
+    agentConfigurationRef?: { id: string; version: number; contentSha256: string }
+    execution?: AgentExecutionRecord
+    error?: string
+    createdBy: string
+    createdAt: string
+    finishedAt: string
+  }>
+}
+export type ToolApproval = { id: string; runId: string; toolId: string; toolVersion: string; risk: 'write_reversible' | 'write_high_risk'; parameterSummary: string; parameterHash: string; status: 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'; requestedAt: string; expiresAt: string; decidedAt?: string; decidedByDisplayName?: string; decisionComment?: string; consumedAt?: string }
 
 export async function startRequirementAnalysis(projectVersionId: string, input: { assetVersionIds: string[]; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
   const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-reviews/run`, {
@@ -297,4 +332,48 @@ export async function askRequirementReviewQuestion(runId: string, input: { quest
   consume(buffer)
   if (!result) throw new Error('评审问答未返回最终答案')
   return result
+}
+
+export async function loadFindingActions(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/finding-actions`)
+  const body = await response.json() as FindingActionsResponse | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : 'Finding 处置历史读取失败')
+  return body as FindingActionsResponse
+}
+
+export async function createFindingAction(runId: string, findingId: string, input: { action: FindingActionType; comment?: string; expectedVersion: number }) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/findings/${encodeURIComponent(findingId)}/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
+  const body = await response.json() as FindingActionsResponse['actions'][number] | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : 'Finding 处置保存失败')
+  return body as FindingActionsResponse['actions'][number]
+}
+
+export async function loadReviewQuestionHistory(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/questions`)
+  const body = await response.json() as ReviewQuestionHistory | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '评审问答历史读取失败')
+  return body as ReviewQuestionHistory
+}
+
+export async function downloadRequirementReviewReport(projectVersionId: string, runId: string) {
+  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-review-runs/${encodeURIComponent(runId)}/report.md`)
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(body.error || '评审报告导出失败')
+  }
+  return response.blob()
+}
+
+export async function loadToolApprovals(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/approvals`)
+  const body = await response.json() as ToolApproval[] | { error?: string }
+  if (!response.ok) throw new Error(!Array.isArray(body) && body.error ? body.error : '工具审批记录读取失败')
+  return body as ToolApproval[]
+}
+
+export async function decideToolApproval(approvalId: string, decision: 'approved' | 'rejected', comment?: string) {
+  const response = await fetch(`${apiBase}/tool-approvals/${encodeURIComponent(approvalId)}/decision`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision, comment }) })
+  const body = await response.json() as ToolApproval | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '工具审批失败')
+  return body as ToolApproval
 }

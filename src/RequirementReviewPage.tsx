@@ -12,8 +12,14 @@ import { persistedRunningReviewRunIds, resolveReviewRunId } from './requirement-
 import {
   askRequirementReviewQuestion,
   cancelRequirementReviewRun,
+  createFindingAction,
+  decideToolApproval,
+  downloadRequirementReviewReport,
+  loadFindingActions,
   loadRequirementReviewRun,
   loadRequirementReviewRuns,
+  loadReviewQuestionHistory,
+  loadToolApprovals,
   retryRequirementReviewRun,
   startRequirementAnalysis,
   type AgentExecutionEvent,
@@ -26,6 +32,7 @@ import {
   type ReviewSeverity,
   type RequirementReviewRun,
   type ReviewQuestionQuote,
+  type FindingActionType,
 } from './requirement-analysis-api'
 import { bindRequirementVersion, loadRequirementBindings, unbindRequirementVersion, type ProjectVersion, type RequirementBinding } from './project-version-api'
 import { versionDocumentDirectory, versionDocumentPath } from './version-document-path'
@@ -39,13 +46,19 @@ type SourceQuote = ReviewQuestionQuote
 type ChatMessage = { id: string; role: 'user' | 'assistant' | 'system'; text: string; quote?: SourceQuote; citations?: string[]; limitations?: string[]; modelLabel?: string; agentConfigurationVersion?: number; execution?: AgentExecutionRecord }
 type UploadProgress = { stage: 'reading' | 'submitting' | 'processing' | 'binding' | 'completed' | 'failed'; percent: number; detail: string }
 
+function restoredReviewView(): ViewKey {
+  if (typeof window === 'undefined') return 'overview'
+  const value = new URL(window.location.href).searchParams.get('view') as ViewKey | null
+  return viewTabs.some(item => item.key === value) ? value! : 'overview'
+}
+
 type RunRecord = RequirementReviewRun & { content?: string }
 
 const findingTypeLabels: Record<ReviewFindingType, string> = {
   missing_requirement: '需求缺口', ambiguity: '需求歧义', conflict: '逻辑冲突', boundary_gap: '边界条件', state_gap: '状态缺口',
   exception_gap: '异常场景', security_risk: '安全风险', testability_gap: '验收/测试风险', dependency_risk: '依赖风险', other: '其他问题',
 }
-const severityLabels: Record<ReviewSeverity, string> = { critical: '阻断', high: '高', medium: '中', low: '低', info: '提示' }
+const severityLabels: Record<ReviewSeverity, string> = { blocker: '阻断', high: '高', medium: '中', low: '低' }
 const findingStateLabels: Record<FindingState, string> = { open: '待处理', confirmed: '已确认', dismissed: '已驳回', resolved: '已解决', needs_follow_up: '待跟进' }
 const viewTabs: { key: ViewKey; label: string; icon: typeof BookOpen }[] = [
   { key: 'overview', label: '评审概览', icon: Sparkles },
@@ -63,7 +76,7 @@ function ReviewModal({ title, onClose, children, className = 'rr-binding-modal' 
   return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><div className={`modal ${className}`} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-btn" onClick={onClose} aria-label={`关闭${title}`}><XCircle /></button></header>{children}</div></div>
 }
 
-const severityTone = (severity: ReviewSeverity) => severity === 'critical' ? 'red' : severity === 'high' ? 'orange' : severity === 'medium' ? 'gold' : severity === 'low' ? 'blue' : 'gray'
+const severityTone = (severity: ReviewSeverity) => severity === 'blocker' ? 'red' : severity === 'high' ? 'orange' : severity === 'medium' ? 'gold' : 'blue'
 const runTone = (status?: RunStatus) => status === 'succeeded' ? 'green' : status === 'running' ? 'purple' : status === 'failed' ? 'red' : status === 'cancelled' ? 'orange' : 'gray'
 const runLabel = (status?: RunStatus) => status === 'succeeded' ? '评审完成' : status === 'running' ? '分析中' : status === 'failed' ? '运行失败' : status === 'cancelled' ? '已取消' : '待评审'
 const runErrorMessage = (error?: string) => error === 'AGENT_TURN_LIMIT_EXCEEDED'
@@ -119,11 +132,39 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
     || event.type === 'result_submission_required'
     || event.type === 'result_submission_retry')
   const hasDetailedTrace = events.some(event => event.content || event.toolArguments !== undefined || event.toolResult !== undefined || event.toolCalls?.length)
+  const [approvals, setApprovals] = useState<Awaited<ReturnType<typeof loadToolApprovals>>>([])
+  const [approvalError, setApprovalError] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = async () => {
+      try {
+        const items = await loadToolApprovals(run.id)
+        if (cancelled) return
+        setApprovals(items)
+        setApprovalError('')
+        if (run.status === 'running' && items.some(item => item.status === 'pending')) timer = setTimeout(() => { void refresh() }, 1_000)
+      } catch (error) { if (!cancelled) setApprovalError(error instanceof Error ? error.message : '审批记录读取失败') }
+    }
+    void refresh()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [run.id, run.status])
+  const decideApproval = async (id: string, decision: 'approved' | 'rejected') => {
+    const comment = window.prompt(decision === 'approved' ? '审批说明（可选）：' : '请填写拒绝原因：')?.trim()
+    if (decision === 'rejected' && !comment) return
+    try {
+      const decided = await decideToolApproval(id, decision, comment)
+      setApprovals(current => current.map(item => item.id === decided.id ? decided : item))
+    } catch (error) { setApprovalError(error instanceof Error ? error.message : '工具审批失败') }
+  }
 
   return <ReviewModal title="Agent 运行记录" className="rr-run-record-modal" onClose={onClose}><div className="rr-run-record">
     {(stagedExecutions || run.execution?.agentKey === 'requirement-point-extraction' || run.execution?.agentKey === 'requirement-review') && <div className="rr-run-record-tabs"><button className={agentKey === 'requirement-point-extraction' ? 'active' : ''} onClick={() => setAgentKey('requirement-point-extraction')}><FileText />需求点提取 <span>{stagedExecutions?.requirementPointExtraction?.events.length ?? (run.execution?.agentKey === 'requirement-point-extraction' ? run.execution.events.length : 0)}</span></button><button className={agentKey === 'requirement-review' ? 'active' : ''} onClick={() => setAgentKey('requirement-review')}><Bot />需求评审 <span>{stagedExecutions?.requirementReview?.events.length ?? (run.execution?.agentKey === 'requirement-review' ? run.execution.events.length : 0)}</span></button></div>}
     <div className="rr-run-record-summary"><div><ReviewBadge tone={runTone(run.status)}>{runLabel(run.status)}</ReviewBadge><b>{run.id}</b><span>{run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(run.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? 0}</dd></div><div><dt>工具调用</dt><dd>{execution?.toolCalls ?? 0}{execution?.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : run.status === 'running' ? '运行中' : '未完成 / 旧记录'}</dd></div></dl></div>
     {run.error && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(run.error)}</span></div>}
+    {run.degradations?.length ? <div className="rr-run-record-error"><RefreshCw /><span><b>模型降级记录</b>{run.degradations.map(item => `${item.agentKey}：${item.fromSourceId}/${item.fromModelId} → ${item.toSourceId}/${item.toModelId}（${item.reason}）`).join('\n')}</span></div> : null}
+    {approvals.map(approval => <div className="rr-run-record-error" key={approval.id}><ShieldCheck /><span><b>{approval.risk === 'write_high_risk' ? '高风险写操作逐次审批' : '可逆写操作审批'} · {approval.toolId}@{approval.toolVersion}</b><small>参数 SHA-256：{approval.parameterHash}</small><small>{approval.parameterSummary}</small></span><ReviewBadge tone={approval.status === 'approved' ? 'green' : approval.status === 'pending' ? 'orange' : 'red'}>{approval.status}</ReviewBadge>{approval.status === 'pending' && <div><button className="btn primary" onClick={() => void decideApproval(approval.id, 'approved')}>批准</button><button className="btn danger" onClick={() => void decideApproval(approval.id, 'rejected')}>拒绝</button></div>}</div>)}
+    {approvalError && <div className="rr-run-record-error"><AlertTriangle /><span>{approvalError}</span></div>}
     <div className="rr-run-record-tabs"><button className={tab === 'conversation' ? 'active' : ''} onClick={() => onTab('conversation')}><MessageSquareText />Agent 对话 <span>{conversation.length}</span></button><button className={tab === 'events' ? 'active' : ''} onClick={() => onTab('events')}><Activity />事件时间线 <span>{events.length}</span></button></div>
     <div className="rr-run-record-body">{loading ? <div className="rr-trace-empty"><LoaderCircle className="rotating" /><b>正在读取运行记录</b></div> : tab === 'conversation' ? <div className="rr-agent-conversation">
       {conversation.map(event => {
@@ -210,7 +251,7 @@ export function RequirementReviewPage({
   const [selectedAssetId, setSelectedAssetId] = useState('')
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [chatCollapsed, setChatCollapsed] = useState(false)
-  const [view, setView] = useState<ViewKey>('overview')
+  const [view, setView] = useState<ViewKey>(restoredReviewView)
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [runsState, setRunsState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [runsCursor, setRunsCursor] = useState<string | undefined>()
@@ -229,6 +270,7 @@ export function RequirementReviewPage({
   const [traceabilityFilter, setTraceabilityFilter] = useState<'all' | 'traceable' | 'untraceable'>('all')
   const [findingStateFilter, setFindingStateFilter] = useState<'all' | FindingState>('all')
   const [findingStates, setFindingStates] = useState<Record<string, FindingState>>({})
+  const [findingVersions, setFindingVersions] = useState<Record<string, number>>({})
   const [snapshotOpen, setSnapshotOpen] = useState(false)
   const [sourceQuote, setSourceQuote] = useState<SourceQuote | null>(null)
   const [chatDraft, setChatDraft] = useState('')
@@ -359,12 +401,44 @@ export function RequirementReviewPage({
 
   useEffect(() => {
     const latestRun = runs[0]
-    setSelectedRunId(latestRun?.id ?? '')
+    const route = new URL(window.location.href).searchParams
+    const routedRunId = route.get('runId') ?? ''
+    const routedReviewId = route.get('reviewId') ?? ''
+    setSelectedRunId(runs.some(run => run.id === routedRunId && (!routedReviewId || run.reviewId === routedReviewId)) ? routedRunId : latestRun?.id ?? '')
     setSelectedFindingId('')
     setSelectedEvidenceId('')
     setSourceQuote(null)
-    setView('overview')
+    setView(restoredReviewView())
   }, [runsState])
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('page', 'requirements')
+    if (projectVersion?.id) url.searchParams.set('projectVersionId', projectVersion.id)
+    if (selectedRun?.reviewId) url.searchParams.set('reviewId', selectedRun.reviewId)
+    else url.searchParams.delete('reviewId')
+    if (selectedRunId && !selectedRunId.startsWith('pending-')) url.searchParams.set('runId', selectedRunId)
+    else url.searchParams.delete('runId')
+    url.searchParams.set('view', view)
+    if (selectedFindingId) url.searchParams.set('findingId', selectedFindingId); else url.searchParams.delete('findingId')
+    if (selectedEvidenceId) url.searchParams.set('evidenceId', selectedEvidenceId); else url.searchParams.delete('evidenceId')
+    window.history.replaceState({}, '', url)
+  }, [projectVersion?.id, selectedEvidenceId, selectedFindingId, selectedRun?.reviewId, selectedRunId, view])
+
+  useEffect(() => {
+    const restore = () => {
+      const url = new URL(window.location.href)
+      const runId = url.searchParams.get('runId') ?? ''
+      const reviewId = url.searchParams.get('reviewId') ?? ''
+      const nextView = url.searchParams.get('view') as ViewKey | null
+      if (runId && runs.some(run => run.id === runId && (!reviewId || run.reviewId === reviewId))) setSelectedRunId(runId)
+      if (viewTabs.some(item => item.key === nextView)) setView(nextView!)
+      setSelectedFindingId(url.searchParams.get('findingId') ?? '')
+      setSelectedEvidenceId(url.searchParams.get('evidenceId') ?? '')
+    }
+    window.addEventListener('popstate', restore)
+    return () => window.removeEventListener('popstate', restore)
+  }, [runs])
 
   useEffect(() => {
     let cancelled = false
@@ -384,6 +458,25 @@ export function RequirementReviewPage({
     }).catch(error => { if (!cancelled) notify(error instanceof Error ? error.message : '需求评审详情读取失败', 'error') })
     return () => { cancelled = true }
   }, [selectedRun?.id, selectedRun?.response, selectedRun?.status, notify])
+
+  useEffect(() => {
+    if (!selectedRun?.id || selectedRun.id.startsWith('pending-') || selectedRun.status !== 'succeeded') return
+    const runId = selectedRun.id
+    let cancelled = false
+    void Promise.all([loadFindingActions(runId), loadReviewQuestionHistory(runId)]).then(([findingHistory, questionHistory]) => {
+      if (cancelled) return
+      setFindingStates(current => ({ ...current, ...Object.fromEntries(findingHistory.findings.map(item => [`${runId}:${item.findingId}`, item.state])) }))
+      setFindingVersions(current => ({ ...current, ...Object.fromEntries(findingHistory.findings.map(item => [`${runId}:${item.findingId}`, item.version])) }))
+      const messages: ChatMessage[] = questionHistory.turns.flatMap(turn => [
+        { id: `${turn.id}:question`, role: 'user' as const, text: turn.question, quote: turn.quote },
+        turn.status === 'succeeded'
+          ? { id: turn.id, role: 'assistant' as const, text: turn.answer ?? '', citations: turn.citations, limitations: turn.limitations, modelLabel: turn.modelRef?.label, agentConfigurationVersion: turn.agentConfigurationRef?.version, execution: turn.execution }
+          : { id: turn.id, role: 'system' as const, text: turn.error ?? '问答未完成', execution: turn.execution },
+      ])
+      setChatMessages(current => ({ ...current, [runId]: messages }))
+    }).catch(error => { if (!cancelled) notify(error instanceof Error ? error.message : '评审治理记录读取失败', 'error') })
+    return () => { cancelled = true }
+  }, [selectedRun?.id, selectedRun?.status, notify])
 
   useEffect(() => {
     if (!runRecordOpen || !selectedRun?.id || selectedRun.status !== 'running' || selectedRun.id.startsWith('pending-')) return
@@ -492,6 +585,20 @@ export function RequirementReviewPage({
     setSelectedEvidenceId('')
     setSourceQuote(null)
     setView('overview')
+    const url = new URL(window.location.href)
+    url.searchParams.set('reviewId', run.reviewId)
+    url.searchParams.set('runId', run.id)
+    url.searchParams.set('view', 'overview')
+    url.searchParams.delete('findingId')
+    url.searchParams.delete('evidenceId')
+    window.history.pushState({}, '', url)
+  }
+
+  const selectView = (nextView: ViewKey) => {
+    setView(nextView)
+    const url = new URL(window.location.href)
+    url.searchParams.set('view', nextView)
+    window.history.pushState({}, '', url)
   }
 
   const loadMoreRuns = async () => {
@@ -534,6 +641,7 @@ export function RequirementReviewPage({
     const startedAt = new Date().toISOString()
     const pendingRun: RunRecord = {
       id: temporaryId,
+      reviewId: `review-${temporaryId}`,
       projectVersionId: projectVersion!.id,
       assetId: fixedDocuments[0].id,
       assetVersionId: fixedDocuments[0].assetVersionId!,
@@ -705,11 +813,27 @@ export function RequirementReviewPage({
     else notify('关联需求点没有固定证据，无法生成原文高亮。', 'warning')
   }
 
-  const updateFindingState = (finding: ReviewFinding, state: FindingState) => {
+  const updateFindingState = async (finding: ReviewFinding, state: FindingState) => {
     if (!selectedRun || readOnly) return
-    setFindingStates(current => ({ ...current, [`${selectedRun.id}:${finding.clientFindingId}`]: state }))
-    addAudit(`前端处置 ${finding.clientFindingId}：${findingStateLabels[state]}（当前会话）`)
-    notify('处置状态已更新；当前后端尚无 Finding Action 接口，仅保留在本次前端会话。', 'warning')
+    const key = `${selectedRun.id}:${finding.clientFindingId}`
+    const currentState = findingStates[key] ?? 'open'
+    if (state === currentState) return
+    const actionByState: Record<FindingState, FindingActionType> = { open: 'reopen', confirmed: 'confirm', dismissed: 'dismiss', resolved: 'resolve', needs_follow_up: 'request_follow_up' }
+    const requiresComment = state === 'dismissed' || state === 'needs_follow_up' || state === 'open'
+    const comment = requiresComment ? window.prompt(`请填写“${findingStateLabels[state]}”的处置说明：`)?.trim() : undefined
+    if (requiresComment && !comment) return
+    try {
+      const saved = await createFindingAction(selectedRun.id, finding.clientFindingId, { action: actionByState[state], comment, expectedVersion: findingVersions[key] ?? 0 })
+      setFindingStates(current => ({ ...current, [key]: saved.toState }))
+      setFindingVersions(current => ({ ...current, [key]: saved.version }))
+      addAudit(`持久化处置 ${finding.clientFindingId}：${findingStateLabels[saved.toState]}`)
+      notify('Finding 处置已持久化并写入不可变审计记录。')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Finding 处置保存失败', 'error')
+      const refreshed = await loadFindingActions(selectedRun.id).catch(() => null)
+      const latest = refreshed?.findings.find(item => item.findingId === finding.clientFindingId)
+      if (latest) { setFindingStates(current => ({ ...current, [key]: latest.state })); setFindingVersions(current => ({ ...current, [key]: latest.version })) }
+    }
   }
 
   const quoteFinding = (finding: ReviewFinding) => {
@@ -784,60 +908,19 @@ export function RequirementReviewPage({
     }
   }
 
-  const exportReport = () => {
+  const exportReport = async () => {
     if (!selectedRun?.response) return
-    const response = selectedRun.response
-    const agentDefinitions = response.snapshot.agentDefinitions
-      ? [response.snapshot.agentDefinitions.requirementPointExtraction, response.snapshot.agentDefinitions.requirementReview]
-      : [response.snapshot.agentDefinition]
-    const agentExecutions = response.executions
-      ? [response.executions.requirementPointExtraction, response.executions.requirementReview].filter((item): item is AgentExecutionRecord => Boolean(item))
-      : response.execution ? [response.execution] : []
-    const stateFor = (finding: ReviewFinding) => findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open'
-    const lines = [
-      `# ${projectVersion?.name ?? '当前版本'} · 需求点提取与评审报告`, '',
-      `- 运行 ID：${selectedRun.id}`,
-      `- 固定输入文档：${(selectedRun.assetVersionIds ?? [selectedRun.assetVersionId]).length} 份`,
-      ...(selectedRun.documents ?? []).map(item => `  - ${item.displayName}：${item.assetVersionId}`),
-      `- 索引版本：${response.snapshot.indexVersionId}`,
-      `- 模型：${selectedRun.modelLabel}`,
-      `- 生成时间：${formatTime(response.snapshot.createdAt)}`,
-      `- 综合评分：${response.result.summary.score}`, '',
-      '## 评审摘要', '',
-      ...response.result.summary.risks.map(item => `- 风险：${item}`), '',
-      '## 需求点', '',
-      ...(response.result.requirementPoints ?? []).flatMap(point => [`### ${point.clientRequirementPointId} · ${point.title}`, '', point.description, '', `- 证据：${point.evidenceRefs.join('、')}`, '']),
-      '## Findings', '',
-      ...response.result.findings.flatMap((finding, index) => {
-        const evidence = findingEvidence(finding)
-        return [
-          `### ${index + 1}. ${finding.title}`, '',
-          `- 类型：${findingTypeLabels[finding.type]}`,
-          `- 严重度：${severityLabels[finding.severity]}`,
-          `- 置信度：${Math.round(finding.confidence * 100)}%`,
-          `- 处置状态：${findingStateLabels[stateFor(finding)]}`,
-          `- 关联需求点：${finding.requirementPointRefs.join('、')}`,
-          `- 问题：${finding.description}`,
-          `- 影响：${finding.impact}`,
-          `- 建议确认：${finding.recommendation}`,
-          ...evidence.map(item => `- 证据：${item.sourceRef.assetVersionId} / ${item.locator.heading} — ${item.quote}`), '',
-        ]
-      }),
-      '## 执行摘要', '',
-      ...agentDefinitions.map(definition => `- Agent：${definition.agentKey} ${definition.version}`),
-      ...agentExecutions.flatMap(execution => [
-        `- ${execution.agentKey ?? 'legacy'} Framework：${execution.framework ? `${execution.framework.name} ${execution.framework.version}` : '未知'}`,
-        `- ${execution.agentKey ?? 'legacy'} 回合数：${execution.turns}；工具调用数：${execution.toolCalls}`,
-      ]),
-    ]
-    const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${(projectVersion?.name ?? '当前版本').replace(/[\\/:*?"<>|]/g, '-')}-需求点评审报告.md`
-    link.click()
-    URL.revokeObjectURL(url)
-    addAudit(`导出需求评审报告：${selectedRun.id}`)
+    if (!projectVersion) return
+    try {
+      const blob = await downloadRequirementReviewReport(projectVersion.id, selectedRun.id)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${projectVersion.name.replace(/[\\/:*?"<>|]/g, '-')}-需求点评审报告.md`
+      link.click()
+      URL.revokeObjectURL(url)
+      addAudit(`从服务端导出正式需求评审报告：${selectedRun.id}`)
+    } catch (error) { notify(error instanceof Error ? error.message : '评审报告导出失败', 'error') }
   }
 
   const visibleFindings = (result?.findings ?? []).filter(finding => {
@@ -852,7 +935,7 @@ export function RequirementReviewPage({
   const stats = {
     requirements: extractionResult?.requirementPoints?.length ?? 0,
     findings: result?.findings.length ?? 0,
-    high: result?.findings.filter(finding => finding.severity === 'critical' || finding.severity === 'high').length ?? 0,
+    high: result?.findings.filter(finding => finding.severity === 'blocker' || finding.severity === 'high').length ?? 0,
     pending: result?.findings.filter(finding => !findingEvidence(finding).length).length ?? 0,
     evidence: result?.findings.filter(finding => findingEvidence(finding).length).length ?? 0,
   }
@@ -933,7 +1016,7 @@ export function RequirementReviewPage({
 
       <main className="rr-main">
         <div className="rr-main-toolbar">
-          <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
+          <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => selectView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
           <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {run.retryMode === 'review_only' ? '仅评审 · ' : run.retryMode === 'full' ? '全部重跑 · ' : ''}{runLabel(run.status)}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button><ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
         </div>
 

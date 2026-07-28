@@ -1023,7 +1023,9 @@ function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
   const versions = state.versions.filter(version => assetIds.has(version.assetId))
   const versionIds = new Set(versions.map(version => version.id))
   const bindingCount = state.projectVersionRequirementBindings.filter(binding => assetIds.has(binding.assetId) || versionIds.has(binding.assetVersionId)).length
-  const reviewRunCount = state.reviewRuns.filter(run => reviewRunReferencesAssets(state, run, assetIds)).length
+  const deletedReviewRuns = state.reviewRuns.filter(run => reviewRunReferencesAssets(state, run, assetIds))
+  const reviewRunCount = deletedReviewRuns.length
+  const deletedRunIds = new Set(deletedReviewRuns.map(run => run.id))
   const activeIndexIds = new Set(state.knowledgeBases.map(knowledgeBase => knowledgeBase.activeIndexVersionId).filter((value): value is string => Boolean(value)))
   let indexChunkCount = 0
   let indexVersionCount = 0
@@ -1039,6 +1041,10 @@ function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
     return [index]
   })
   state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(binding => !assetIds.has(binding.assetId) && !versionIds.has(binding.assetVersionId))
+  state.findingActions = state.findingActions.filter(item => !deletedRunIds.has(item.runId))
+  state.reviewQaTurns = state.reviewQaTurns.filter(item => !deletedRunIds.has(item.runId))
+  state.reviewQaSessions = state.reviewQaSessions.filter(item => !deletedRunIds.has(item.runId))
+  state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
   state.reviewRuns = state.reviewRuns.filter(run => !reviewRunReferencesAssets(state, run, assetIds))
   state.versions = state.versions.filter(version => !assetIds.has(version.assetId))
   state.assets = state.assets.filter(asset => !assetIds.has(asset.id))

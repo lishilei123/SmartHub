@@ -6,6 +6,7 @@ import { streamSimple as streamAnthropic } from '@earendil-works/pi-ai/api/anthr
 import { streamSimple as streamOpenAi } from '@earendil-works/pi-ai/api/openai-completions'
 import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, InputDeliveryManifest, RequirementInputBatch } from '../domain/agent-types.js'
 import type { AgentCandidateResult, CandidateRequirementPointExtraction } from '../domain/review-types.js'
+import type { ToolApprovalGate } from '../domain/tool-types.js'
 import type { ToolDescriptor } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
@@ -31,7 +32,7 @@ export interface PiRuntimeBindings {
 }
 
 export class PiAgentRuntimeAdapter implements AgentRuntime {
-  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore) {}
+  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore, private readonly approvalGate?: ToolApprovalGate) {}
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
     let candidate: AgentCandidateResult | undefined
@@ -63,7 +64,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const skillPrompt = await new AgentSkillRuntime(this.store, this.skillPackages).render(input.snapshot.agentDefinition)
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
-    const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE })
+    const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
     const allowedToolIds = new Set(input.snapshot.agentDefinition.toolIds)
     const descriptors = registry.descriptors(allowedToolIds)
     const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))

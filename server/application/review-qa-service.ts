@@ -1,10 +1,10 @@
 import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
 import type { AgentDefinitionResolver, AgentExecutionEvent } from '../domain/agent-types.js'
 import type { ReviewQaRuntime, ReviewQuestionQuote } from '../domain/review-qa-types.js'
-import type { AgentConfigurationVersion, DatabaseState, GenerativeModel, GenerativeModelSource, ReviewRun } from '../domain/types.js'
+import type { AgentConfigurationVersion, DatabaseState, GenerativeModel, GenerativeModelSource, ReviewQaTurn, ReviewRun } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 
-export interface ReviewQuestionRequest { question: string; quote?: ReviewQuestionQuote }
+export interface ReviewQuestionRequest { question: string; quote?: ReviewQuestionQuote; actorId?: string; actorDisplayName?: string }
 
 export class ReviewQaService {
   constructor(
@@ -13,6 +13,17 @@ export class ReviewQaService {
     private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver(),
   ) {}
 
+  async list(runId: string) {
+    const state = await this.store.snapshot()
+    const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+    return {
+      runId,
+      projectVersionId: run.projectVersionId,
+      session: state.reviewQaSessions.find(item => item.runId === runId) ?? null,
+      turns: state.reviewQaTurns.filter(item => item.runId === runId).sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    }
+  }
+
   async ask(runId: string, request: ReviewQuestionRequest, signal = new AbortController().signal, onEvent?: (event: AgentExecutionEvent) => void | Promise<void>) {
     const question = String(request.question ?? '').trim()
     if (!question) throw new Error('评审问题不能为空')
@@ -20,6 +31,15 @@ export class ReviewQaService {
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
     if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的评审运行可以继续问答')
+    const actorId = String(request.actorId ?? '').trim().slice(0, 200) || 'current-user'
+    const actorDisplayName = String(request.actorDisplayName ?? '').trim().slice(0, 200) || '当前用户'
+    const session = await this.store.transaction(draft => {
+      const existing = draft.reviewQaSessions.find(item => item.runId === runId)
+      if (existing) return structuredClone(existing)
+      const created = { id: `review_qa_session_${crypto.randomUUID()}`, projectVersionId: run.projectVersionId, runId, createdAt: new Date().toISOString(), createdBy: actorId }
+      draft.reviewQaSessions.push(created)
+      return structuredClone(created)
+    })
     const fixedAssetVersionIds = new Set((run.snapshot.assets ?? [{ assetVersionId: run.assetVersionId }]).map(item => item.assetVersionId))
     const versions = [...fixedAssetVersionIds].map(versionId => required(state.versions.find(item => item.id === versionId && item.status === 'ready'), '评审绑定的固定资产版本不可用'))
     const documentContent = versions.map(version => version.content).join('\n\n')
@@ -31,22 +51,60 @@ export class ReviewQaService {
     const estimatedTokens = Math.ceil((documentContent.length + JSON.stringify(run.result).length + question.length) / 4) + 2_000
     const maxOutputTokens = Math.min(model.maxOutputTokens, configuration?.routing.maxOutputTokens ?? 4_096)
     if (estimatedTokens + maxOutputTokens > model.contextWindow) throw new Error('固定评审上下文超过模型窗口，暂时无法继续问答')
-    const output = await this.runtime.answer({
-      question,
-      quote,
-      snapshot: run.snapshot,
-      reviewResult: run.result,
-      documentContent,
-      model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning'), temperature: configuration?.routing.temperature, requestTimeoutMs: configuration ? configuration.routing.requestTimeoutSeconds * 1_000 : undefined, retryCount: configuration?.routing.retryCount },
-      agentDefinition: definition,
-      onEvent,
-    }, signal)
-    const { candidate, execution } = output
-    const citations = normalizeCitations(candidate.citations, run.result)
-    const answer = String(candidate.answer ?? '').trim()
-    if (!answer) throw new Error('REVIEW_QA_EMPTY_ANSWER')
-    return { id: `review_qa_${crypto.randomUUID()}`, runId, question, answer, citations, limitations: candidate.limitations.map(item => String(item).trim()).filter(Boolean), quote, modelLabel: `${source.name} · ${model.displayName}`, execution, ...(configuration ? { agentConfigurationRef: { id: configuration.id, version: configuration.version, contentSha256: configuration.contentSha256 } } : {}), createdAt: new Date().toISOString() }
+    const turnId = `review_qa_turn_${crypto.randomUUID()}`
+    const createdAt = new Date().toISOString()
+    try {
+      const output = await this.runtime.answer({
+        question,
+        quote,
+        snapshot: run.snapshot,
+        reviewResult: run.result,
+        documentContent,
+        model: { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning'), temperature: configuration?.routing.temperature, requestTimeoutMs: configuration ? configuration.routing.requestTimeoutSeconds * 1_000 : undefined, retryCount: configuration?.routing.retryCount },
+        agentDefinition: definition,
+        onEvent,
+      }, signal)
+      const { candidate, execution } = output
+      const citations = normalizeCitations(candidate.citations, run.result)
+      const answer = String(candidate.answer ?? '').trim()
+      if (!answer) throw new Error('REVIEW_QA_EMPTY_ANSWER')
+      const limitations = candidate.limitations.map(item => String(item).trim()).filter(Boolean)
+      const turn: ReviewQaTurn = {
+        id: turnId, sessionId: session.id, projectVersionId: run.projectVersionId, runId, question, answer, citations, limitations, quote,
+        status: 'succeeded', modelRef: { sourceId: source.id, modelId: model.id, label: `${source.name} · ${model.displayName}` },
+        ...(configuration ? { agentConfigurationRef: { id: configuration.id, version: configuration.version, contentSha256: configuration.contentSha256 } } : {}),
+        agentDefinitionRef: { agentKey: definition.agentKey, version: definition.version, contentSha256: definition.contentSha256, promptRef: definition.promptRef, toolsetContentSha256: definition.toolsetContentSha256 },
+        execution, usage: executionUsage(execution.events), createdBy: actorId, createdAt, finishedAt: new Date().toISOString(),
+      }
+      await this.store.transaction(draft => { draft.reviewQaTurns.push(turn) })
+      return { id: turn.id, sessionId: session.id, runId, question, answer, citations, limitations, quote, modelLabel: turn.modelRef!.label, execution, ...(turn.agentConfigurationRef ? { agentConfigurationRef: turn.agentConfigurationRef } : {}), createdAt, createdBy: actorDisplayName }
+    } catch (error) {
+      const message = sanitizeError(error, source.baseUrl, source.apiKey)
+      const status = signal.aborted ? 'cancelled' : 'failed'
+      const turn: ReviewQaTurn = {
+        id: turnId, sessionId: session.id, projectVersionId: run.projectVersionId, runId, question, citations: [], limitations: [], quote,
+        status, modelRef: { sourceId: source.id, modelId: model.id, label: `${source.name} · ${model.displayName}` },
+        ...(configuration ? { agentConfigurationRef: { id: configuration.id, version: configuration.version, contentSha256: configuration.contentSha256 } } : {}),
+        agentDefinitionRef: { agentKey: definition.agentKey, version: definition.version, contentSha256: definition.contentSha256, promptRef: definition.promptRef, toolsetContentSha256: definition.toolsetContentSha256 },
+        error: message, createdBy: actorId, createdAt, finishedAt: new Date().toISOString(),
+      }
+      await this.store.transaction(draft => { draft.reviewQaTurns.push(turn) })
+      throw new Error(message)
+    }
   }
+}
+
+function executionUsage(events: AgentExecutionEvent[]) {
+  const totals = events.flatMap(event => event.usage ? [event.usage] : [])
+  if (!totals.length) return undefined
+  return totals.reduce((sum, item) => ({ input: sum.input + item.input, output: sum.output + item.output, totalTokens: sum.totalTokens + item.totalTokens }), { input: 0, output: 0, totalTokens: 0 })
+}
+
+function sanitizeError(error: unknown, endpoint: string, credential: string) {
+  let message = error instanceof Error ? error.message : '评审问答失败'
+  if (endpoint) message = message.replaceAll(endpoint, '[模型端点]')
+  if (credential) message = message.replaceAll(credential, '••••••')
+  return message.slice(0, 2_000)
 }
 
 function selectModel(state: DatabaseState, run: ReviewRun, configuration: AgentConfigurationVersion | null) {

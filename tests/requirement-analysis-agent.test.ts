@@ -14,7 +14,7 @@ import { RequirementAnalysisService } from '../server/application/requirement-an
 import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { ReviewQaService } from '../server/application/review-qa-service.js'
-import type { InputDeliveryManifest, RequirementInputPlan, ReviewRunSnapshot } from '../server/domain/agent-types.js'
+import type { AgentRuntime, InputDeliveryManifest, RequirementInputPlan, ReviewRunSnapshot } from '../server/domain/agent-types.js'
 import type { ReviewQaExecutionInput, ReviewQaRuntime } from '../server/domain/review-qa-types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementPointExtractionV4, CandidateRequirementPointExtractionV5, CandidateRequirementReview, CandidateRequirementReviewV3 } from '../server/domain/review-types.js'
 import { defaultConfig } from '../server/domain/types.js'
@@ -173,6 +173,10 @@ test('评审问答将同一冻结运行的 Finding 和需求点引用归一化�
   const service = new ReviewQaService(store, qaRuntime(['F-001', 'RP-001', 'E-002', 'E-001']))
   const answer = await service.ask(runId, { question: '取消订单的风险是什么？' })
   assert.deepEqual(answer.citations, ['E-001', 'E-002'])
+  assert.equal(store.read().reviewQaSessions.length, 1)
+  assert.equal(store.read().reviewQaTurns.length, 1)
+  assert.equal(store.read().reviewQaTurns[0].status, 'succeeded')
+  assert.equal((await service.list(runId)).turns[0].answer, answer.answer)
 })
 
 test('评审问答拒绝无法解析为当前冻结 Evidence 的引用', async () => {
@@ -328,6 +332,7 @@ test('需求评审失败后可复用冻结需求点只重跑评审，并保留�
   assert.equal(sourceRun.result, undefined)
   assert.equal(retryRun.status, 'succeeded')
   assert.equal(retryRun.retryOfRunId, sourceRun.id)
+  assert.equal(retryRun.reviewId, sourceRun.reviewId)
   assert.equal(retryRun.retryMode, 'review_only')
   assert.equal(retryRun.reusedExtractionFromRunId, sourceRun.id)
   assert.deepEqual(retryRun.extractionResult, sourceRun.extractionResult)
@@ -391,6 +396,48 @@ test('新评审固定使用已发布 Agent 配置中的模型、Prompt、工具�
   assert.equal(output.snapshot.agentModelRefs?.requirementReview.maxOutputTokens, 8_192)
   assert.match((await configurations.getVersion(reviewPublished.id)).agentDefinition.systemPrompt, /已发布配置标记/u)
   assert.match(output.snapshot.agentDefinitions.requirementReview.version, /\+config\.1$/u)
+})
+
+test('主模型临时失败后按发布路由降级并持久化实际模型尝试', async () => {
+  const baseline = await successfulRun()
+  const fixedExtraction = formalExtraction(baseline.output.result)
+  const store = await seededStore()
+  await store.transaction(state => {
+    const primary = state.modelSources[0].models[0]
+    state.modelSources[0].models.push({ ...structuredClone(primary), id: 'model-fallback', name: 'fallback-model', displayName: 'Fallback Model' })
+  })
+  const configurations = new AgentConfigurationService(store)
+  for (const agentKey of ['requirementPointExtraction', 'requirementReview'] as const) {
+    const draft = (await configurations.get()).agents[agentKey].draft
+    const saved = await configurations.save({
+      agentKey,
+      revision: draft.revision,
+      routing: { ...draft.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, fallbackEnabled: true, fallbackModels: [{ sourceId: 'source-1', modelId: 'model-fallback' }], maxOutputTokens: 4_096 },
+      definition: draft.definition,
+    })
+    await configurations.publish({ agentKey, revision: saved.revision })
+  }
+  const calls: string[] = []
+  const runtime: AgentRuntime = {
+    execute: async input => {
+      calls.push(input.model.modelId)
+      const extractionStage = !input.fixedRequirementPointExtraction
+      if (extractionStage && input.model.modelId === 'model-1') throw new Error('MODEL_PROVIDER_UNAVAILABLE: primary unavailable')
+      return {
+        candidate: extractionStage ? fixedExtraction : reviewResult(),
+        events: [], turns: 1, toolCalls: 1, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' },
+        ...(extractionStage ? { inputDeliveryManifest: deliveryManifest(input.snapshot) } : {}),
+      }
+    },
+  }
+  const service = new RequirementAnalysisService(store, runtime, configurations)
+  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'] })
+  assert.equal(output.status, 'candidate_validated')
+  assert.deepEqual(calls, ['model-1', 'model-fallback', 'model-1'])
+  const run = (await store.snapshot()).reviewRuns.find(item => item.id === output.runId)!
+  assert.equal(run.degradations?.length, 1)
+  assert.equal(run.degradations?.[0].toModelId, 'model-fallback')
+  assert.deepEqual(run.modelRouteAttempts?.map(item => item.status), ['failed', 'succeeded', 'succeeded'])
 })
 
 test('生产配置解析器拒绝通过请求参数绕过未发布的 Agent 配置', async () => {
@@ -779,7 +826,7 @@ async function seededStore() {
     state.projectVersionRequirementBindings.push({ id: 'binding-1', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-1', createdAt: '2026-07-23T00:00:01.000Z' })
     state.projectVersionRequirementBindings.push({ id: 'binding-2', projectVersionId: 'project-version-1', assetId: 'asset-2', assetVersionId: 'version-2', createdAt: '2026-07-23T00:00:01.000Z' })
     state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', assetVersionIds: ['version-1', 'version-2'], configVersionId: 'config-1', indexedChunks: [{ ...chunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/cancel.md' } }, { ...paymentChunk, assetMetadata: { assetId: 'asset-2', displayName: '支付超时需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/payment.md' } }], createdAt: '2026-07-23T00:00:00.000Z', activatedAt: '2026-07-23T00:00:01.000Z' })
-    state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'review-model', displayName: 'Review Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling', 'structured_output'], enabled: true, health: 'healthy' }], createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
+    state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'review-model', displayName: 'Review Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling', 'structured_output'], enabled: true, health: 'healthy', qualityGate: { version: 'model-probe/v2', checkedAt: '2026-07-23T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } } }], createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
   })
   return store
 }
