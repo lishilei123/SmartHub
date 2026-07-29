@@ -24,7 +24,7 @@ async function governedStore(status: ReviewRun['status'] = 'succeeded') {
 test('FindingAction 追加写、状态投影和并发版本校验形成持久化闭环', async () => {
   const store = await governedStore()
   const service = new ReviewGovernanceService(store)
-  const confirmed = await service.actOnFinding('run-1', 'F-001', { action: 'confirm', expectedVersion: 0, actorDisplayName: '审核员' })
+  const confirmed = await service.actOnFinding('run-1', 'F-001', { action: 'confirm', expectedVersion: 0, principal: { subjectId: 'reviewer-1', displayName: '审核员' } })
   assert.equal(confirmed.toState, 'confirmed')
   await assert.rejects(() => service.actOnFinding('run-1', 'F-001', { action: 'resolve', expectedVersion: 0 }), /VERSION_CONFLICT/u)
   const resolved = await service.actOnFinding('run-1', 'F-001', { action: 'resolve', expectedVersion: 1 })
@@ -47,7 +47,7 @@ test('高风险工具审批绑定参数 Hash，批准后放行且参数变化重
   assert.equal(pending.length, 1)
   assert.equal(pending[0].parameterHash.length, 64)
   assert.doesNotMatch(pending[0].parameterSummary, /must-not-leak/u)
-  await service.decideApproval(pending[0].id, { decision: 'approved', actorDisplayName: '审批人' })
+  await service.decideApproval(pending[0].id, { decision: 'approved', principal: { subjectId: 'approver-1', displayName: '审批人' } })
   await authorization
   assert.ok((await service.listApprovals('run-1'))[0].consumedAt)
 

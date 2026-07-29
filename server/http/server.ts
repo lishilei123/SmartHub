@@ -3,9 +3,11 @@ import { readFile, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
+import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { ReviewQuestionQuote } from '../domain/review-qa-types.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, usingPostgres } from '../runtime.js'
+import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
 
@@ -13,11 +15,14 @@ const webRoot = resolve(applicationRoot, 'dist')
 
 export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore }
 
-export async function start(port = Number(process.env.PORT ?? 8787)) {
+export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
   const server = createServer(async (request, response) => {
-    try { await route(request, response) }
-    catch (error) { send(response, 400, { error: error instanceof Error ? error.message : '未知错误' }) }
+    try { await route(request, response, controls) }
+    catch (error) {
+      const status = error instanceof UnauthenticatedError ? 401 : error instanceof ForbiddenError ? 403 : 400
+      send(response, status, { error: error instanceof Error ? error.message : '未知错误' })
+    }
   })
   server.once('close', () => { void stateStore.close?.() })
   return new Promise<typeof server>((resolvePromise, reject) => {
@@ -37,10 +42,19 @@ export async function start(port = Number(process.env.PORT ?? 8787)) {
   })
 }
 
-async function route(request: IncomingMessage, response: ServerResponse) {
+async function route(request: IncomingMessage, response: ServerResponse, controls: AccessControl) {
   const method = request.method ?? 'GET'; const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (method === 'OPTIONS') return send(response, 204, null)
   if (method === 'GET' && url.pathname === '/api/health') return send(response, 200, { status: 'ok' })
+  const principal = await controls.authenticate(request).catch(() => { throw new UnauthenticatedError() })
+  const requireProjectVersion = async (projectVersionId: string, permission: ProjectVersionPermission) => {
+    await controls.authorize(principal, projectVersionId, permission)
+  }
+  const requireRun = async (runId: string, permission: ProjectVersionPermission) => {
+    const run = await loadRun(runId)
+    await requireProjectVersion(run.projectVersionId, permission)
+    return run
+  }
   if (method === 'GET' && url.pathname === '/api/local-models') return send(response, 200, localModelRuntime.statuses())
   if (method === 'GET' && url.pathname === '/api/local-model/status') return send(response, 200, localModelRuntime.status())
   if (method === 'POST' && url.pathname === '/api/local-model/start') { const body = await json(request); return send(response, 202, localModelRuntime.start(String(body.model ?? ''))) }
@@ -73,55 +87,64 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   if (method === 'GET' && agentConfigurationVersion) return send(response, 200, await agentConfigurationService.getVersion(agentConfigurationVersion[1]))
   const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
   if (method === 'POST' && projectVersionRun) {
+    await requireProjectVersion(projectVersionRun[1], 'review:create')
     const body = await json(request)
     return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionIds: stringList(body.assetVersionIds), assetVersionId: body.assetVersionId ? String(body.assetVersionId) : undefined, focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
   }
   const projectVersionReviewRuns = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs$/.exec(url.pathname)
-  if (method === 'GET' && projectVersionReviewRuns) return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1], {
-    limit: optionalPositiveInteger(url.searchParams.get('limit')),
-    cursor: url.searchParams.get('cursor') ?? undefined,
-    runningOnly: url.searchParams.get('runningOnly') === 'true',
-  }))
+  if (method === 'GET' && projectVersionReviewRuns) {
+    await requireProjectVersion(projectVersionReviewRuns[1], 'review:read')
+    return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1], {
+      limit: optionalPositiveInteger(url.searchParams.get('limit')),
+      cursor: url.searchParams.get('cursor') ?? undefined,
+      runningOnly: url.searchParams.get('runningOnly') === 'true',
+    }))
+  }
   const requirementReviewRun = /^\/api\/requirement-review-runs\/([^/]+)$/.exec(url.pathname)
-  if (method === 'GET' && requirementReviewRun) return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1]))
+  if (method === 'GET' && requirementReviewRun) { await requireRun(requirementReviewRun[1], 'review:read'); return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1])) }
   const findingActions = /^\/api\/requirement-review-runs\/([^/]+)\/finding-actions$/.exec(url.pathname)
-  if (method === 'GET' && findingActions) return send(response, 200, await reviewGovernanceService.listFindingActions(findingActions[1]))
+  if (method === 'GET' && findingActions) { await requireRun(findingActions[1], 'review:read'); return send(response, 200, await reviewGovernanceService.listFindingActions(findingActions[1])) }
   const findingAction = /^\/api\/requirement-review-runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
   if (method === 'POST' && findingAction) {
+    await requireRun(findingAction[1], 'review:handle')
     const body = await json(request)
     return send(response, 201, await reviewGovernanceService.actOnFinding(findingAction[1], findingAction[2], {
       action: String(body.action ?? '') as FindingActionType,
       comment: body.comment === undefined ? undefined : String(body.comment),
       expectedVersion: body.expectedVersion === undefined ? undefined : Number(body.expectedVersion),
-      actorId: requestActorId(request), actorDisplayName: requestActorName(request),
+      principal,
     }))
   }
   const runApprovals = /^\/api\/requirement-review-runs\/([^/]+)\/approvals$/.exec(url.pathname)
-  if (method === 'GET' && runApprovals) return send(response, 200, await reviewGovernanceService.listApprovals(runApprovals[1]))
+  if (method === 'GET' && runApprovals) { await requireRun(runApprovals[1], 'review:read'); return send(response, 200, await reviewGovernanceService.listApprovals(runApprovals[1])) }
   const approvalDecision = /^\/api\/tool-approvals\/([^/]+)\/decision$/.exec(url.pathname)
   if (method === 'POST' && approvalDecision) {
+    const approval = await loadApproval(approvalDecision[1])
+    await requireProjectVersion(approval.projectVersionId, 'tool:approve')
     const body = await json(request)
-    return send(response, 200, await reviewGovernanceService.decideApproval(approvalDecision[1], { decision: String(body.decision ?? '') as 'approved' | 'rejected', comment: body.comment === undefined ? undefined : String(body.comment), actorId: requestActorId(request), actorDisplayName: requestActorName(request) }))
+    return send(response, 200, await reviewGovernanceService.decideApproval(approvalDecision[1], { decision: String(body.decision ?? '') as 'approved' | 'rejected', comment: body.comment === undefined ? undefined : String(body.comment), principal }))
   }
   const reportExport = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs\/([^/]+)\/report\.md$/.exec(url.pathname)
-  if (method === 'GET' && reportExport) return sendText(response, 200, await reviewGovernanceService.exportMarkdown(reportExport[2], reportExport[1]), 'text/markdown; charset=utf-8', `requirement-review-${reportExport[2]}.md`)
+  if (method === 'GET' && reportExport) { await requireProjectVersion(reportExport[1], 'review:read'); await requireRun(reportExport[2], 'review:read'); return sendText(response, 200, await reviewGovernanceService.exportMarkdown(reportExport[2], reportExport[1]), 'text/markdown; charset=utf-8', `requirement-review-${reportExport[2]}.md`) }
   const requirementReviewRunCancel = /^\/api\/requirement-review-runs\/([^/]+)\/cancel$/.exec(url.pathname)
-  if (method === 'POST' && requirementReviewRunCancel) return send(response, 202, await requirementAnalysisService.cancel(requirementReviewRunCancel[1]))
+  if (method === 'POST' && requirementReviewRunCancel) { await requireRun(requirementReviewRunCancel[1], 'review:cancel'); return send(response, 202, await requirementAnalysisService.cancel(requirementReviewRunCancel[1])) }
   const requirementReviewRunRetry = /^\/api\/requirement-review-runs\/([^/]+)\/retry$/.exec(url.pathname)
   if (method === 'POST' && requirementReviewRunRetry) {
+    await requireRun(requirementReviewRunRetry[1], 'review:retry')
     const body = await json(request)
     const mode = String(body.mode ?? '')
     if (mode !== 'full' && mode !== 'review_only') throw new Error('重跑模式必须是 full 或 review_only')
     return send(response, 202, await requirementAnalysisService.retry(requirementReviewRunRetry[1], mode))
   }
   const requirementReviewQuestions = /^\/api\/requirement-review-runs\/([^/]+)\/questions$/.exec(url.pathname)
-  if (method === 'GET' && requirementReviewQuestions) return send(response, 200, await reviewQaService.list(requirementReviewQuestions[1]))
+  if (method === 'GET' && requirementReviewQuestions) { await requireRun(requirementReviewQuestions[1], 'review:read'); return send(response, 200, await reviewQaService.list(requirementReviewQuestions[1])) }
   if (method === 'POST' && requirementReviewQuestions) {
+    await requireRun(requirementReviewQuestions[1], 'review:read')
     const body = await json(request)
     const controller = new AbortController()
     request.once('aborted', () => controller.abort(new Error('REVIEW_QA_CANCELLED')))
     response.once('close', () => { if (!response.writableEnded) controller.abort(new Error('REVIEW_QA_CANCELLED')) })
-    const question = { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined, actorId: requestActorId(request), actorDisplayName: requestActorName(request) }
+    const question = { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined, principal }
     if (url.searchParams.get('stream') === 'true') {
       response.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' })
       try {
@@ -142,17 +165,20 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const modelProbe = /^\/api\/model-sources\/([^/]+)\/models\/([^/]+)\/probe$/.exec(url.pathname)
   if (method === 'POST' && modelProbe) return send(response, 200, await modelService.probe(modelProbe[1], modelProbe[2]))
   if (method === 'POST' && url.pathname === '/api/default-knowledge-base') return send(response, 200, await service.ensureDefaultKnowledgeBase('SmartHub'))
-  if (method === 'GET' && url.pathname === '/api/project-versions') return send(response, 200, await projectVersionService.list())
-  if (method === 'POST' && url.pathname === '/api/project-versions') { const body = await json(request); return send(response, 201, await projectVersionService.create({ name: String(body.name ?? ''), description: body.description ? String(body.description) : undefined, sourceProjectVersionId: body.sourceProjectVersionId ? String(body.sourceProjectVersionId) : undefined, inheritRequirementBindings: body.inheritRequirementBindings === true })) }
+  if (method === 'GET' && url.pathname === '/api/project-versions') {
+    const versions = await projectVersionService.list()
+    return send(response, 200, (await Promise.all(versions.map(async version => await controls.canAccess(principal, version.id, 'project-version:read') ? version : null))).filter(Boolean))
+  }
+  if (method === 'POST' && url.pathname === '/api/project-versions') { const body = await json(request); const sourceProjectVersionId = body.sourceProjectVersionId ? String(body.sourceProjectVersionId) : undefined; await requireProjectVersion(sourceProjectVersionId ?? '*', 'project-version:create'); return send(response, 201, await projectVersionService.create({ name: String(body.name ?? ''), description: body.description ? String(body.description) : undefined, sourceProjectVersionId, inheritRequirementBindings: body.inheritRequirementBindings === true })) }
   const projectVersionStatus = /^\/api\/project-versions\/([^/]+)\/status$/.exec(url.pathname)
-  if (method === 'PATCH' && projectVersionStatus) { const body = await json(request); return send(response, 200, await projectVersionService.updateStatus(projectVersionStatus[1], String(body.status ?? '') as 'open' | 'locked' | 'archived')) }
+  if (method === 'PATCH' && projectVersionStatus) { await requireProjectVersion(projectVersionStatus[1], 'project-version:manage'); const body = await json(request); return send(response, 200, await projectVersionService.updateStatus(projectVersionStatus[1], String(body.status ?? '') as 'open' | 'locked' | 'archived')) }
   const projectVersion = /^\/api\/project-versions\/([^/]+)$/.exec(url.pathname)
-  if (method === 'DELETE' && projectVersion) return send(response, 200, await projectVersionService.delete(projectVersion[1]))
+  if (method === 'DELETE' && projectVersion) { await requireProjectVersion(projectVersion[1], 'project-version:manage'); return send(response, 200, await projectVersionService.delete(projectVersion[1])) }
   const requirementBindings = /^\/api\/project-versions\/([^/]+)\/requirement-bindings$/.exec(url.pathname)
-  if (method === 'GET' && requirementBindings) return send(response, 200, await projectVersionService.bindings(requirementBindings[1]))
-  if (method === 'POST' && requirementBindings) { const body = await json(request); return send(response, 201, await projectVersionService.bindRequirement(requirementBindings[1], String(body.assetVersionId ?? ''))) }
+  if (method === 'GET' && requirementBindings) { await requireProjectVersion(requirementBindings[1], 'project-version:read'); return send(response, 200, await projectVersionService.bindings(requirementBindings[1])) }
+  if (method === 'POST' && requirementBindings) { await requireProjectVersion(requirementBindings[1], 'project-version:manage'); const body = await json(request); return send(response, 201, await projectVersionService.bindRequirement(requirementBindings[1], String(body.assetVersionId ?? ''))) }
   const requirementBinding = /^\/api\/project-versions\/([^/]+)\/requirement-bindings\/([^/]+)$/.exec(url.pathname)
-  if (method === 'DELETE' && requirementBinding) return send(response, 200, await projectVersionService.unbindRequirement(requirementBinding[1], requirementBinding[2]))
+  if (method === 'DELETE' && requirementBinding) { await requireProjectVersion(requirementBinding[1], 'project-version:manage'); return send(response, 200, await projectVersionService.unbindRequirement(requirementBinding[1], requirementBinding[2])) }
   if (method === 'DELETE' && url.pathname === '/api/maintenance/empty-knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-empty-smarthub-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupEmptyDefaultKnowledgeBases('SmartHub')) }
   if (method === 'DELETE' && url.pathname === '/api/maintenance/knowledge-bases') { const body = await json(request); if (body.confirm !== 'delete-all-other-knowledge-bases') throw new Error('缺少清理确认'); return send(response, 200, await service.cleanupKnowledgeBasesExcept(String(body.keepKnowledgeBaseId ?? ''))) }
   const overview = /^\/api\/knowledge-bases\/([^/]+)\/overview$/.exec(url.pathname)
@@ -224,6 +250,22 @@ function webContentType(path: string) {
   return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon' } as Record<string, string>)[extname(path).toLocaleLowerCase()] ?? 'application/octet-stream'
 }
 
+async function loadRun(runId: string) {
+  const run = stateStore.getReviewRun
+    ? await stateStore.getReviewRun(runId)
+    : (await stateStore.snapshot()).reviewRuns.find(item => item.id === runId)
+  if (!run) throw new Error('需求评审运行不存在')
+  return run
+}
+
+async function loadApproval(approvalId: string) {
+  const approval = stateStore.getToolApproval
+    ? await stateStore.getToolApproval(approvalId)
+    : (await stateStore.snapshot()).toolApprovals.find(item => item.id === approvalId)
+  if (!approval) throw new Error('审批记录不存在')
+  return approval
+}
+
 function stringList(value: unknown) { return Array.isArray(value) ? value.map(String) : undefined }
 function optionalPositiveInteger(value: string | null) {
   if (value == null || value === '') return undefined
@@ -264,7 +306,7 @@ async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) 
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {}
 }
-function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type' }); response.end(body == null ? '' : JSON.stringify(body)) }
+function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type, authorization' }); response.end(body == null ? '' : JSON.stringify(body)) }
 function sendText(response: ServerResponse, status: number, body: string, type: string, filename?: string) { response.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...(filename ? { 'content-disposition': `attachment; filename="${filename.replaceAll('"', '')}"` } : {}), 'access-control-allow-origin': '*' }); response.end(body) }
 function writeNdjson(response: ServerResponse, body: unknown) { if (!response.writableEnded && !response.destroyed) response.write(`${JSON.stringify(body)}\n`) }
 function sendBinary(response: ServerResponse, status: number, body: Buffer, type: string) { response.writeHead(status, { 'content-type': type, 'content-length': body.length, 'cache-control': 'private, max-age=3600', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' }); response.end(body) }
@@ -273,9 +315,6 @@ async function notifyTask(_taskId: string) {
   if (usingPostgres) await stateStore.notifyTask?.()
   else void service.processTask(_taskId).catch(error => console.error(`知识库任务 ${_taskId} 调度失败：`, error instanceof Error ? error.message : error))
 }
-
-function requestActorId(request: IncomingMessage) { return String(request.headers['x-smarthub-actor-id'] ?? '').trim().slice(0, 200) || 'current-user' }
-function requestActorName(request: IncomingMessage) { return String(request.headers['x-smarthub-actor-name'] ?? '').trim().slice(0, 200) || '当前用户' }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const port = Number(process.env.PORT ?? 8787)

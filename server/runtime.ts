@@ -16,6 +16,7 @@ import { AiResourceService } from './application/ai-resource-service.js'
 import { SkillPackageStore } from './infrastructure/skill-package-store.js'
 import { applicationRoot, dataRoot } from './infrastructure/runtime-paths.js'
 import { ReviewGovernanceService } from './application/review-governance-service.js'
+import { createBootstrapAccessControl } from './http/access-control.js'
 
 const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -43,4 +44,5 @@ export const requirementAnalysisService = new RequirementAnalysisService(stateSt
 export const reviewQaRuntime = new PiReviewQaRuntimeAdapter({}, stateStore, skillPackageStore)
 export const reviewQaService = new ReviewQaService(stateStore, reviewQaRuntime, agentConfigurationService)
 export const projectVersionService = new ProjectVersionService(stateStore)
+export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore

@@ -145,11 +145,11 @@ export class RequirementAnalysisService {
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
     if (run.status !== 'running') return presentRun(run)
+    await this.store.cancelReviewJob?.(runId)
     await this.store.transaction(draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       if (current.status === 'running') Object.assign(current, { status: 'cancelled', step: 'cancelled', finishedAt: new Date().toISOString(), error: '用户已取消本次评审' } satisfies Partial<ReviewRun>)
     })
-    await this.store.cancelReviewJob?.(runId)
     this.activeRuns.get(runId)?.abort(new Error('AGENT_CANCELLED_BY_USER'))
     return await this.get(runId)
   }
@@ -349,7 +349,7 @@ export class RequirementAnalysisService {
     return this.executeStages({ run, snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition, signal })
   }
 
-  async processPreparedRun(runId: string, lease: TaskLease, signal = new AbortController().signal) {
+  async processPreparedRun(runId: string, lease: TaskLease, signal = new AbortController().signal, retryable = false) {
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
     if (run.status !== 'running') throw new Error('需求评审运行已结束，不能由 Worker 重复执行')
@@ -373,7 +373,7 @@ export class RequirementAnalysisService {
       try {
         return await this.executeReviewStage({ run, extraction, snapshot: run.snapshot, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, reviewModel: reviewModels[0], reviewModels, reviewConfiguration, extractionExecution, reviewEvents, signal, lease, onModelAttempt: selection => { activeReviewModel = selection } })
       } catch (error) {
-        const message = await this.failRun(run.id, error, signal, activeReviewModel, 'requirement-review', reviewEvents, lease)
+        const message = await this.failRun(run.id, error, signal, activeReviewModel, 'requirement-review', reviewEvents, lease, retryable)
         throw new Error(message)
       }
     }
@@ -396,17 +396,22 @@ export class RequirementAnalysisService {
       current.step = 'extracting_requirement_points'
       current.progress = 10
     })
-    return this.executeStages({ run, snapshot: run.snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, signal, lease })
+    return this.executeStages({ run, snapshot: run.snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, signal, lease, retryable })
   }
 
-  async failPreparedRun(runId: string, lease: TaskLease, error: unknown, cancelled = false) {
+  async failPreparedRun(runId: string, lease: TaskLease, error: unknown, cancelled = false, retryable = false) {
     const message = String(error instanceof Error ? error.message : error).replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').slice(0, 500)
     await this.reviewTransaction(runId, lease, state => {
       const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       if (run.status !== 'running') return
-      run.status = cancelled ? 'cancelled' : 'failed'
-      run.step = cancelled ? 'cancelled' : 'failed'
-      run.finishedAt = new Date().toISOString()
+      if (retryable && !cancelled) {
+        run.step = 'waiting_worker'
+        run.finishedAt = undefined
+      } else {
+        run.status = cancelled ? 'cancelled' : 'failed'
+        run.step = cancelled ? 'cancelled' : 'failed'
+        run.finishedAt = new Date().toISOString()
+      }
       run.error = message
     })
   }
@@ -422,8 +427,9 @@ export class RequirementAnalysisService {
     reviewDefinition: ReviewRunSnapshot['agentDefinitions']['requirementReview']
     signal: AbortSignal
     lease?: TaskLease
+    retryable?: boolean
   }) {
-    const { run, snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition, signal, lease } = input
+    const { run, snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition, signal, lease, retryable = false } = input
     const extractionModel = extractionModels[0]
     const reviewModel = reviewModels[0]
     const extractionEvents: AgentExecutionEvent[] = []
@@ -471,7 +477,7 @@ export class RequirementAnalysisService {
     } catch (error) {
       const failedModel = activeModel
       const events = activeAgentKey === 'requirement-point-extraction' ? extractionEvents : reviewEvents
-      const message = await this.failRun(run.id, error, signal, failedModel, activeAgentKey, events, lease)
+      const message = await this.failRun(run.id, error, signal, failedModel, activeAgentKey, events, lease, retryable)
       throw new Error(message)
     }
   }
@@ -537,15 +543,20 @@ export class RequirementAnalysisService {
     return required(completed.response, '需求评审结果不存在')
   }
 
-  private async failRun(runId: string, error: unknown, signal: AbortSignal, failedModel: AgentModelSelection, agentKey: 'requirement-point-extraction' | 'requirement-review', events: AgentExecutionEvent[], lease?: TaskLease) {
+  private async failRun(runId: string, error: unknown, signal: AbortSignal, failedModel: AgentModelSelection, agentKey: 'requirement-point-extraction' | 'requirement-review', events: AgentExecutionEvent[], lease?: TaskLease, retryable = false) {
     const message = sanitizeRuntimeError(error, failedModel.source.baseUrl, failedModel.source.apiKey)
-    const status = signal.aborted || /AGENT_CANCELLED|客户端已中断/u.test(message) ? 'cancelled' : 'failed'
+    const cancelled = /AGENT_CANCELLED_BY_USER|用户已取消|客户端已中断/u.test(message)
     await this.reviewTransaction(runId, lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
-      Object.assign(current, {
-        status, step: status === 'cancelled' ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
-        ...(events.length ? { execution: executionProgress(events, agentKey) } : {}),
-      } satisfies Partial<ReviewRun>)
+      Object.assign(current, retryable && !cancelled
+        ? {
+            status: 'running', step: 'waiting_worker', progress: current.progress, finishedAt: undefined, error: message,
+            ...(events.length ? { execution: executionProgress(events, agentKey) } : {}),
+          } satisfies Partial<ReviewRun>
+        : {
+            status: cancelled ? 'cancelled' : 'failed', step: cancelled ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
+            ...(events.length ? { execution: executionProgress(events, agentKey) } : {}),
+          } satisfies Partial<ReviewRun>)
       if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
         const currentSource = draft.modelSources.find(item => item.id === failedModel.source.id)
         const currentModel = currentSource?.models.find(item => item.id === failedModel.model.id)

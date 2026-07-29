@@ -85,6 +85,7 @@ export interface StateStore {
   listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
   listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
   getReviewRun?(runId: string): Promise<ReviewRun | null>
+  getToolApproval?(approvalId: string): Promise<DatabaseState['toolApprovals'][number] | null>
   recoverInterruptedReviewRuns?(finishedAt: string, error: string): Promise<number>
   saveReviewRunExecution?(runId: string, execution: AgentExecutionRecord): Promise<void>
   transaction<T>(operation: (draft: DatabaseState) => T | Promise<T>): Promise<T>
@@ -146,6 +147,7 @@ export class JsonStore implements StateStore {
     })
   }
   async getActiveAgentConfiguration(scene: 'requirement_analysis', agentKey: AgentConfigurationAgentKey) { return structuredClone(this.state.agentConfigurationVersions.find(item => item.scene === scene && item.agentKey === agentKey && item.status === 'active') ?? null) }
+  async getToolApproval(approvalId: string) { return structuredClone(this.state.toolApprovals.find(item => item.id === approvalId) ?? null) }
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
     await this.transaction(state => {
       const run = state.reviewRuns.find(item => item.id === runId)

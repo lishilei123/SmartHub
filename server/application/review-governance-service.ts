@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { ToolApprovalGate } from '../domain/tool-types.js'
+import type { Principal } from '../domain/access-control.js'
 import type { FindingAction, FindingActionType, FindingState, ReviewRun, ToolApproval } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 
@@ -28,7 +29,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
     return findingProjection(run, state.findingActions.filter(item => item.runId === runId))
   }
 
-  async actOnFinding(runId: string, findingId: string, input: { action: FindingActionType; comment?: string; expectedVersion?: number; actorId?: string; actorDisplayName?: string }) {
+  async actOnFinding(runId: string, findingId: string, input: { action: FindingActionType; comment?: string; expectedVersion?: number; principal?: Principal }) {
     if (!(input.action in findingTransitions)) throw new Error('Finding 处置动作无效')
     const comment = String(input.comment ?? '').trim()
     if (comment.length > 2_000) throw new Error('处置说明不能超过 2000 个字符')
@@ -51,8 +52,8 @@ export class ReviewGovernanceService implements ToolApprovalGate {
         fromState,
         toState: findingTransitions[input.action],
         ...(comment ? { comment } : {}),
-        actorId: cleanActor(input.actorId, 'current-user'),
-        actorDisplayName: cleanActor(input.actorDisplayName, '当前用户'),
+        actorId: principalId(input.principal),
+        actorDisplayName: principalName(input.principal),
         version: version + 1,
         createdAt: new Date().toISOString(),
       }
@@ -73,7 +74,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
     return state.toolApprovals.filter(item => item.runId === runId).sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))
   }
 
-  async decideApproval(approvalId: string, input: { decision: 'approved' | 'rejected'; actorId?: string; actorDisplayName?: string; comment?: string }) {
+  async decideApproval(approvalId: string, input: { decision: 'approved' | 'rejected'; principal?: Principal; comment?: string }) {
     if (!['approved', 'rejected'].includes(input.decision)) throw new Error('审批结果必须是 approved 或 rejected')
     const outcome = await this.store.transaction(state => {
       const approval = required(state.toolApprovals.find(item => item.id === approvalId), '审批记录不存在')
@@ -86,8 +87,8 @@ export class ReviewGovernanceService implements ToolApprovalGate {
       if (Date.parse(approval.expiresAt) <= Date.now()) { approval.status = 'expired'; return { error: '审批已过期' } }
       approval.status = input.decision
       approval.decidedAt = new Date().toISOString()
-      approval.decidedBy = cleanActor(input.actorId, 'current-user')
-      approval.decidedByDisplayName = cleanActor(input.actorDisplayName, '当前用户')
+      approval.decidedBy = principalId(input.principal)
+      approval.decidedByDisplayName = principalName(input.principal)
       const comment = String(input.comment ?? '').trim()
       if (comment) approval.decisionComment = comment.slice(0, 2_000)
       return { approval: structuredClone(approval) }
@@ -231,7 +232,8 @@ function redactParameters(value: unknown): unknown {
 }
 function hashParameters(value: unknown) { return createHash('sha256').update(stableStringify(value)).digest('hex') }
 function summarizeParameters(value: unknown) { const text = stableStringify(value); return text.length <= 500 ? text : `${text.slice(0, 497)}...` }
-function cleanActor(value: unknown, fallback: string) { return String(value ?? '').trim().slice(0, 200) || fallback }
+function principalId(principal: Principal | undefined) { return String(principal?.subjectId ?? '').trim().slice(0, 200) || 'system' }
+function principalName(principal: Principal | undefined) { return String(principal?.displayName ?? '').trim().slice(0, 200) || '系统' }
 function safeMarkdown(value: string) { return String(value).replace(/[\r\n]+/gu, ' ').replace(/([*_`])/gu, '\\$1').trim() }
 function waitForDecision(milliseconds: number, signal: AbortSignal) {
   if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED'))

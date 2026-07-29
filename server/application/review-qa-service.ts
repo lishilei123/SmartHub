@@ -1,10 +1,11 @@
 import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
 import type { AgentDefinitionResolver, AgentExecutionEvent } from '../domain/agent-types.js'
+import type { Principal } from '../domain/access-control.js'
 import type { ReviewQaRuntime, ReviewQuestionQuote } from '../domain/review-qa-types.js'
 import type { AgentConfigurationVersion, DatabaseState, GenerativeModel, GenerativeModelSource, ReviewQaTurn, ReviewRun } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 
-export interface ReviewQuestionRequest { question: string; quote?: ReviewQuestionQuote; actorId?: string; actorDisplayName?: string }
+export interface ReviewQuestionRequest { question: string; quote?: ReviewQuestionQuote; principal?: Principal }
 
 export class ReviewQaService {
   constructor(
@@ -31,8 +32,8 @@ export class ReviewQaService {
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
     if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的评审运行可以继续问答')
-    const actorId = String(request.actorId ?? '').trim().slice(0, 200) || 'current-user'
-    const actorDisplayName = String(request.actorDisplayName ?? '').trim().slice(0, 200) || '当前用户'
+    const actorId = String(request.principal?.subjectId ?? '').trim().slice(0, 200) || 'system'
+    const actorDisplayName = String(request.principal?.displayName ?? '').trim().slice(0, 200) || '系统'
     const session = await this.store.transaction(draft => {
       const existing = draft.reviewQaSessions.find(item => item.runId === runId)
       if (existing) return structuredClone(existing)

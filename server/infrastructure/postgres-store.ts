@@ -279,6 +279,11 @@ export class PostgresStore implements StateStore {
     return result.rows[0]?.data ?? null
   }
 
+  async getToolApproval(approvalId: string) {
+    const result = await this.pool.query<{ data: DatabaseState['toolApprovals'][number] }>('SELECT data FROM smarthub.tool_approvals WHERE id=$1', [approvalId])
+    return result.rows[0]?.data ?? null
+  }
+
   async recoverInterruptedReviewRuns(finishedAt: string, error: string): Promise<number> {
     const result = await this.pool.query(`
       UPDATE smarthub.review_runs
@@ -391,20 +396,6 @@ export class PostgresStore implements StateStore {
     try {
       await client.query('BEGIN')
       await client.query(`
-        WITH exhausted AS (
-          UPDATE smarthub.review_jobs
-          SET status=CASE WHEN cancel_requested_at IS NULL THEN 'failed' ELSE 'cancelled' END,
-              finished_at=now(), updated_at=now(), lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL,
-              error=CASE WHEN cancel_requested_at IS NULL THEN 'REVIEW_JOB_LEASE_EXHAUSTED: Worker 租约多次失效' ELSE '用户已取消本次评审' END
-          WHERE status='running' AND lease_expires_at < now() AND (cancel_requested_at IS NOT NULL OR attempt_count >= max_attempts)
-          RETURNING run_id, status, error
-        )
-        UPDATE smarthub.review_runs run
-        SET status=exhausted.status, finished_at=now(),
-            data=jsonb_set(jsonb_set(jsonb_set(run.data, '{status}', to_jsonb(exhausted.status)), '{step}', to_jsonb(exhausted.status)), '{error}', to_jsonb(exhausted.error))
-        FROM exhausted WHERE run.id=exhausted.run_id AND run.status='running'
-      `)
-      await client.query(`
         WITH expired AS (
           SELECT id, data->>'candidateIndexVersionId' AS candidate_id
           FROM smarthub.sync_tasks
@@ -507,12 +498,39 @@ export class PostgresStore implements StateStore {
     try {
       await client.query('BEGIN')
       await client.query(`
-        UPDATE smarthub.review_jobs
-        SET status='queued', available_at=now(), lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=now(),
-            data=jsonb_set(data, '{status}', to_jsonb('queued'::text))
-        WHERE status='running' AND lease_expires_at < now() AND cancel_requested_at IS NULL AND attempt_count < max_attempts
+        WITH expired AS (
+          UPDATE smarthub.review_jobs
+          SET status=CASE
+                WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
+                WHEN attempt_count >= max_attempts THEN 'failed'
+                ELSE 'queued'
+              END,
+              available_at=CASE WHEN cancel_requested_at IS NULL AND attempt_count < max_attempts THEN now() ELSE available_at END,
+              finished_at=CASE WHEN cancel_requested_at IS NULL AND attempt_count < max_attempts THEN NULL ELSE now() END,
+              updated_at=now(), lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL,
+              error=CASE
+                WHEN cancel_requested_at IS NOT NULL THEN '用户已取消本次评审'
+                WHEN attempt_count >= max_attempts THEN 'REVIEW_JOB_LEASE_EXHAUSTED: Worker 租约多次失效'
+                ELSE error
+              END,
+              data=jsonb_set(data, '{status}', to_jsonb(CASE
+                WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
+                WHEN attempt_count >= max_attempts THEN 'failed'
+                ELSE 'queued'
+              END::text))
+          WHERE status='running' AND lease_expires_at < now()
+          RETURNING run_id, status, error
+        )
+        UPDATE smarthub.review_runs run
+        SET status=CASE WHEN expired.status='queued' THEN 'running' ELSE expired.status END,
+            finished_at=CASE WHEN expired.status='queued' THEN NULL ELSE now() END,
+            data=CASE
+              WHEN expired.status='queued' THEN jsonb_set(jsonb_set(run.data - 'finishedAt', '{status}', to_jsonb('running'::text)), '{step}', to_jsonb('waiting_worker'::text))
+              ELSE jsonb_set(jsonb_set(jsonb_set(run.data, '{status}', to_jsonb(expired.status)), '{step}', to_jsonb(expired.status)), '{error}', to_jsonb(expired.error))
+            END
+        FROM expired WHERE run.id=expired.run_id AND run.status='running'
       `)
-      const result = await client.query<{ data: ReviewJob }>(`
+      const result = await client.query<{ data: ReviewJob; attempt_count: number }>(`
         WITH next_job AS (
           SELECT id FROM smarthub.review_jobs
           WHERE status='queued' AND available_at <= now() AND attempt_count < max_attempts
@@ -523,11 +541,11 @@ export class PostgresStore implements StateStore {
             lease_expires_at=now()+($2::text || ' milliseconds')::interval, heartbeat_at=now(),
             started_at=COALESCE(started_at, now()), updated_at=now(),
             data=jsonb_set(job.data, '{status}', to_jsonb('running'::text))
-        FROM next_job WHERE job.id=next_job.id RETURNING job.data
+        FROM next_job WHERE job.id=next_job.id RETURNING job.data, job.attempt_count
       `, [workerId, Math.max(1_000, leaseMs), runToken])
       await client.query('COMMIT')
-      const job = result.rows[0]?.data
-      return job ? { ...job, status: 'running', attempts: (job.attempts ?? 0) + 1, leaseOwner: workerId, runToken, heartbeatAt: new Date().toISOString() } : null
+      const claimed = result.rows[0]
+      return claimed ? { ...claimed.data, status: 'running', attempts: Number(claimed.attempt_count), leaseOwner: workerId, runToken, heartbeatAt: new Date().toISOString() } : null
     } catch (error) { await client.query('ROLLBACK'); throw error }
     finally { client.release() }
   }
@@ -538,12 +556,12 @@ export class PostgresStore implements StateStore {
   }
 
   async finishReviewJob(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string) {
-    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET status=$4, finished_at=now(), updated_at=now(), error=$5, lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, data=jsonb_set(data, '{status}', to_jsonb($4::text)) WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid`, [runId, lease.workerId, lease.runToken, status, error ?? null])
+    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET status=$4, finished_at=now(), updated_at=now(), error=$5, lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, data=jsonb_set(data, '{status}', to_jsonb($4::text)) WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND ($4 <> 'cancelled' OR cancel_requested_at IS NOT NULL)`, [runId, lease.workerId, lease.runToken, status, error ?? null])
     return result.rowCount === 1
   }
 
   async releaseReviewJob(runId: string, lease: TaskLease, retryDelayMs: number, error: string) {
-    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET status='queued', available_at=now()+($4::text || ' milliseconds')::interval, updated_at=now(), error=$5, lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, data=jsonb_set(data, '{status}', to_jsonb('queued'::text)) WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND attempt_count < max_attempts`, [runId, lease.workerId, lease.runToken, Math.max(0, retryDelayMs), error])
+    const result = await this.pool.query(`UPDATE smarthub.review_jobs SET status='queued', available_at=now()+($4::text || ' milliseconds')::interval, updated_at=now(), error=$5, lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, data=jsonb_set(data, '{status}', to_jsonb('queued'::text)) WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL AND attempt_count < max_attempts`, [runId, lease.workerId, lease.runToken, Math.max(0, retryDelayMs), error])
     return result.rowCount === 1
   }
 
@@ -648,6 +666,7 @@ export class PostgresStore implements StateStore {
             SELECT 1 FROM smarthub.${table}
             WHERE ${key} = $1 AND status = 'running' AND lease_owner = $2
               AND run_token = $3::uuid AND lease_expires_at > now()
+              ${fencing.kind === 'review' ? 'AND cancel_requested_at IS NULL' : ''}
             FOR UPDATE
           `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
           if (owned.rowCount !== 1) { await client.query('ROLLBACK'); return }
@@ -662,6 +681,7 @@ export class PostgresStore implements StateStore {
             SELECT 1 FROM smarthub.${table}
             WHERE ${key} = $1 AND status = 'running' AND lease_owner = $2
               AND run_token = $3::uuid AND lease_expires_at > now()
+              ${fencing.kind === 'review' ? 'AND cancel_requested_at IS NULL' : ''}
             FOR UPDATE
           `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
           if (stillOwned.rowCount !== 1) { result = null; await client.query('ROLLBACK'); return }

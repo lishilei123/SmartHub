@@ -15,6 +15,7 @@
     "start:worker:dist": "node dist-server/server/worker.js",
     "dev:worker": "node --watch --import tsx server/worker.ts",
     "test": "tsx --test tests/**/*.test.ts",
+    "test:postgres": "tsx --test tests/**/*.integration.ts",
     "build:server": "tsc -p tsconfig.server.build.json",
     "build": "tsc -b && vite build && npm run build:server",
     "preview": "vite preview"
