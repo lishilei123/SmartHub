@@ -182,6 +182,14 @@ export type RequirementReviewRun = {
   status: 'running' | 'succeeded' | 'failed' | 'cancelled'
   step: string
   progress: number
+  queue?: {
+    status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+    attempts: number
+    maxAttempts: number
+    availableAt: string
+    error?: string
+  }
+  retryEvents?: Array<{ attempt: number; maxAttempts: number; status: 'scheduled' | 'exhausted'; error: string; occurredAt: string; nextAttemptAt?: string }>
   createdAt: string
   startedAt: string
   finishedAt?: string

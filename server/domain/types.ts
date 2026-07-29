@@ -229,6 +229,22 @@ export interface IndexChunk extends Chunk { assetMetadata: IndexAssetMetadata }
 export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: IndexChunk[]; createdAt: string; activatedAt?: string }
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
 export type ReviewRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type ReviewRunQueueStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export interface ReviewRunQueueState {
+  status: ReviewRunQueueStatus
+  attempts: number
+  maxAttempts: number
+  availableAt: string
+  error?: string
+}
+export interface ReviewRunRetryEvent {
+  attempt: number
+  maxAttempts: number
+  status: 'scheduled' | 'exhausted'
+  error: string
+  occurredAt: string
+  nextAttemptAt?: string
+}
 export type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
 export type FindingActionType = 'confirm' | 'dismiss' | 'resolve' | 'request_follow_up' | 'reopen'
 export interface FindingAction {
@@ -330,6 +346,8 @@ export interface ReviewRun {
     requirementPointExtraction?: AgentExecutionRecord
     requirementReview?: AgentExecutionRecord
   }
+  queue?: ReviewRunQueueState
+  retryEvents?: ReviewRunRetryEvent[]
   modelRouteAttempts?: Array<{
     id: string
     agentKey: 'requirement-point-extraction' | 'requirement-review'

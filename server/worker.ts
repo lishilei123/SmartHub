@@ -76,14 +76,15 @@ async function processReviewOne() {
 
 async function retryFailedReviewJob(claimed: { runId: string; attempts: number; maxAttempts: number }, lease: TaskLease, error: string) {
   const retryable = claimed.attempts < claimed.maxAttempts
-  await requirementAnalysisService.failPreparedRun(claimed.runId, lease, error, false, retryable).catch(() => undefined)
+  const delay = Math.min(60_000, 1_000 * 2 ** Math.max(0, claimed.attempts - 1))
+  const nextAttemptAt = new Date(Date.now() + delay).toISOString()
+  await requirementAnalysisService.failPreparedRun(claimed.runId, lease, error, false, retryable, { attempt: claimed.attempts, maxAttempts: claimed.maxAttempts, ...(retryable ? { nextAttemptAt } : {}) }).catch(() => undefined)
   if (!retryable) {
     const finished = await stateStore.finishReviewJob?.(claimed.runId, lease, 'failed', error)
     if (!finished) console.error(`需求评审任务 ${claimed.runId} 无法标记为最终失败：${error}`)
     else console.error(`需求评审任务 ${claimed.runId} 已达到最大重试次数：${error}`)
     return
   }
-  const delay = Math.min(60_000, 1_000 * 2 ** Math.max(0, claimed.attempts - 1))
   const released = await stateStore.releaseReviewJob?.(claimed.runId, lease, delay, error)
   if (!released) console.error(`需求评审任务 ${claimed.runId} 无法重新入队：${error}`)
   else console.error(`需求评审任务 ${claimed.runId} 将在 ${delay}ms 后重试：${error}`)

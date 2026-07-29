@@ -399,18 +399,30 @@ export class RequirementAnalysisService {
     return this.executeStages({ run, snapshot: run.snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, signal, lease, retryable })
   }
 
-  async failPreparedRun(runId: string, lease: TaskLease, error: unknown, cancelled = false, retryable = false) {
+  async failPreparedRun(runId: string, lease: TaskLease, error: unknown, cancelled = false, retryable = false, retry?: { attempt: number; maxAttempts: number; nextAttemptAt?: string }) {
     const message = String(error instanceof Error ? error.message : error).replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').slice(0, 500)
     await this.reviewTransaction(runId, lease, state => {
       const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       if (run.status !== 'running') return
+      const now = new Date().toISOString()
+      if (retry && !cancelled) {
+        run.retryEvents ??= []
+        run.retryEvents.push({
+          attempt: retry.attempt,
+          maxAttempts: retry.maxAttempts,
+          status: retryable ? 'scheduled' : 'exhausted',
+          error: message,
+          occurredAt: now,
+          ...(retry.nextAttemptAt ? { nextAttemptAt: retry.nextAttemptAt } : {}),
+        })
+      }
       if (retryable && !cancelled) {
         run.step = 'waiting_worker'
         run.finishedAt = undefined
       } else {
         run.status = cancelled ? 'cancelled' : 'failed'
         run.step = cancelled ? 'cancelled' : 'failed'
-        run.finishedAt = new Date().toISOString()
+        run.finishedAt = now
       }
       run.error = message
     })
@@ -690,6 +702,8 @@ function presentRunSummary(run: ReviewRun) {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     error: presentedRunError(run),
+    queue: run.queue,
+    retryEvents: run.retryEvents,
     modelRouteAttempts: run.modelRouteAttempts,
     degradations: run.degradations,
     snapshot: redactSnapshot(run.snapshot),
@@ -732,6 +746,8 @@ function presentRun(run: ReviewRun) {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     error: presentedRunError(run),
+    queue: run.queue,
+    retryEvents: run.retryEvents,
     modelRouteAttempts: run.modelRouteAttempts,
     degradations: run.degradations,
     snapshot: redactSnapshot(run.snapshot),

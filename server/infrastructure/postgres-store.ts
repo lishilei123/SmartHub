@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, SyncTask } from '../domain/types.js'
+import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, ReviewRunQueueState, SyncTask } from '../domain/types.js'
 import { normalizeReviewSeverities, type ChunkSearchInput, type ConfigurationTransactionScope, type DefaultKnowledgeBase, type KnowledgeReadState, type RequirementBindingMetadata, type ReviewJob, type ReviewRunPage, type StateStore, type StoredChunkCandidate, type TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
@@ -256,16 +256,19 @@ export class PostgresStore implements StateStore {
   async listReviewRuns(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage> {
     const limit = Math.min(Math.max(1, options.limit), 100)
     const cursor = decodeReviewRunCursor(options.cursor)
-    const result = await this.pool.query<{ data: ReviewRun }>(`
-      SELECT data - 'result' - 'extractionResult' - 'execution' - 'executions' AS data
-      FROM smarthub.review_runs
-      WHERE project_version_id = $1
-        AND ($2::boolean = false OR status = 'running')
-        AND ($3::timestamptz IS NULL OR (created_at, id) < ($3::timestamptz, $4::text))
-      ORDER BY created_at DESC, id DESC
+    const result = await this.pool.query<ReviewRunQueueRow>(`
+      SELECT run.data - 'result' - 'extractionResult' - 'execution' - 'executions' AS data,
+        job.status AS queue_status, job.attempt_count, job.max_attempts,
+        job.available_at
+      FROM smarthub.review_runs run
+      LEFT JOIN smarthub.review_jobs job ON job.run_id = run.id
+      WHERE run.project_version_id = $1
+        AND ($2::boolean = false OR run.status = 'running')
+        AND ($3::timestamptz IS NULL OR (run.created_at, run.id) < ($3::timestamptz, $4::text))
+      ORDER BY run.created_at DESC, run.id DESC
       LIMIT $5
     `, [projectVersionId, Boolean(options.runningOnly), cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1])
-    const rows = result.rows.map(row => row.data)
+    const rows = result.rows.map(reviewRunFromQueueRow)
     const items = rows.slice(0, limit)
     const last = items.at(-1)
     return {
@@ -275,8 +278,14 @@ export class PostgresStore implements StateStore {
   }
 
   async getReviewRun(runId: string): Promise<ReviewRun | null> {
-    const result = await this.pool.query<{ data: ReviewRun }>('SELECT data FROM smarthub.review_runs WHERE id=$1', [runId])
-    return result.rows[0]?.data ?? null
+    const result = await this.pool.query<ReviewRunQueueRow>(`
+      SELECT run.data, job.status AS queue_status, job.attempt_count, job.max_attempts,
+        job.available_at
+      FROM smarthub.review_runs run
+      LEFT JOIN smarthub.review_jobs job ON job.run_id = run.id
+      WHERE run.id=$1
+    `, [runId])
+    return result.rows[0] ? reviewRunFromQueueRow(result.rows[0]) : null
   }
 
   async getToolApproval(approvalId: string) {
@@ -706,6 +715,14 @@ export function toIsoTimestamp(value: Date | string | null | undefined) {
   return value == null ? undefined : value instanceof Date ? value.toISOString() : value
 }
 
+type ReviewRunQueueRow = {
+  data: ReviewRun
+  queue_status: ReviewRunQueueState['status'] | null
+  attempt_count: number | null
+  max_attempts: number | null
+  available_at: Date | string | null
+}
+
 type SyncTaskRow = {
   data: SyncTask
   status: SyncTask['status']
@@ -729,6 +746,19 @@ type SyncTaskRow = {
 }
 
 const syncTaskSelect = `SELECT data, status, step, progress, created_at, available_at, attempt_count, max_attempts, dedupe_key, target_id, scope, lease_owner, run_token::text AS run_token, lease_expires_at, heartbeat_at, cancel_requested_at, started_at, finished_at, updated_at FROM smarthub.sync_tasks`
+
+function reviewRunFromQueueRow(row: ReviewRunQueueRow): ReviewRun {
+  if (row.queue_status == null || row.attempt_count == null || row.max_attempts == null || row.available_at == null) return row.data
+  return {
+    ...row.data,
+    queue: {
+      status: row.queue_status,
+      attempts: Number(row.attempt_count),
+      maxAttempts: Number(row.max_attempts),
+      availableAt: toIsoTimestamp(row.available_at)!,
+    },
+  }
+}
 
 function syncTaskFromRow(row: SyncTaskRow): SyncTask {
   return {
