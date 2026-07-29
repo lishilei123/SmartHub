@@ -5,6 +5,8 @@ import { versionDocumentDirectory, versionDocumentPath } from '../src/version-do
 test('版本文档路径按项目版本和文档类型分目录', () => {
   assert.equal(versionDocumentDirectory('V1.6', '需求文档'), '版本文档/V1.6/需求文档')
   assert.equal(versionDocumentPath('V1.6', '需求文档', '支付需求.md'), '版本文档/V1.6/需求文档/支付需求.md')
+  assert.equal(versionDocumentDirectory('SmartHub · V2', '技术方案'), '版本文档/SmartHub · V2/技术方案')
+  assert.equal(versionDocumentPath('SmartHub · V2', '技术方案', '总体架构.md'), '版本文档/SmartHub · V2/技术方案/总体架构.md')
 })
 
 test('版本文档路径清理不安全的目录和文件名字符', () => {

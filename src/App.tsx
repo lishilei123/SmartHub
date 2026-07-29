@@ -19,6 +19,7 @@ import { loadAgentConfiguration, publishAgentConfiguration, saveAgentConfigurati
 import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, updateAiResource, uploadSkillPackage, type AiResource, type AiResourceCatalog, type AiResourceKind, type McpServerResource, type SkillPackageMetadata, type SkillResource, type ToolResource, type ToolSource } from './ai-resource-api'
 
 const RequirementReviewPage = lazy(() => import('./RequirementReviewPage').then(module => ({ default: module.RequirementReviewPage })))
+const TechnicalSolutionReviewPage = lazy(() => import('./TechnicalSolutionReviewPage').then(module => ({ default: module.TechnicalSolutionReviewPage })))
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'execution' | 'reports' | 'settings'
 type NotifyTone = 'success' | 'error' | 'warning'
@@ -44,17 +45,17 @@ const restoreProjectVersion = () => {
 
 const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: string }[] = [
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard },
-  { key: 'requirements', label: '需求分析', icon: BrainCircuit },
-  { key: 'design', label: '测试设计', icon: TestTube2, hint: '8' },
+  { key: 'requirements', label: '需求评审', icon: BrainCircuit },
+  { key: 'design', label: '技术方案评审', icon: FileCode2 },
   { key: 'execution', label: '测试执行', icon: Play },
   { key: 'reports', label: '报告与诊断', icon: Activity },
 ]
 
 const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   dashboard: { title: '工作台', desc: '掌握项目质量状态与 AI 任务进展' },
-  requirements: { title: '需求分析', desc: '让 AI 帮你发现需求缺口、边界与测试风险' },
+  requirements: { title: '需求评审', desc: '让 AI 帮你发现需求缺口、边界与测试风险' },
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
-  design: { title: '测试设计', desc: '从需求与风险快速生成可审核的测试资产' },
+  design: { title: '技术方案评审', desc: '基于固定需求基线与技术方案资料完成可追溯评审' },
   execution: { title: '测试执行', desc: '跟踪计划、套件和用例的实时执行状态' },
   reports: { title: '报告与诊断', desc: '聚合质量趋势、失败原因与发布建议' },
   settings: { title: '系统管理', desc: '配置模型、集成、权限与平台策略' },
@@ -120,7 +121,7 @@ function App() {
     if (next.page) url.searchParams.set('page', next.page)
     if (next.projectVersionId) url.searchParams.set('projectVersionId', next.projectVersionId)
     else if (next.projectVersionId === '') url.searchParams.delete('projectVersionId')
-    if (next.resetReviewContext) ['reviewId', 'runId', 'view', 'findingId', 'evidenceId'].forEach(key => url.searchParams.delete(key))
+    if (next.resetReviewContext) ['reviewId', 'technicalReviewId', 'runId', 'view', 'findingId', 'evidenceId'].forEach(key => url.searchParams.delete(key))
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', url)
   }, [])
   const navigate = useCallback((nextPage: PageKey) => { setPage(nextPage); updateRoute({ page: nextPage }) }, [updateRoute])
@@ -208,12 +209,12 @@ function App() {
       <button className="sidebar-foot" onClick={() => notify('帮助与反馈为静态原型说明：当前数据仅保留在本次会话中。')}><CircleHelp size={17} /><span>帮助与反馈</span><span className="version">v0.1</span></button>
     </aside>
     <main>
-      <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
+      <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'design' ? 'technical-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>
         {page === 'dashboard' && <Dashboard navigate={navigate} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
         {page === 'requirements' && <Suspense fallback={<PageLoading label="正在加载需求评审工作台…" />}><RequirementReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={knowledgeDirectoryList} documents={knowledgeDocumentList} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
-        {page === 'design' && <StaticNotice title="测试设计" text="测试设计页面仍展示示例资产；本次交互修复聚焦需求分析、知识库和系统设置。" />}
+        {page === 'design' && <Suspense fallback={<PageLoading label="正在加载技术方案评审工作台…" />}><TechnicalSolutionReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
         {page === 'execution' && <StaticNotice title="测试执行" text="测试执行页面仍展示示例执行数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'reports' && <StaticNotice title="报告与诊断" text="报告页面仍展示示例质量数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'settings' && <SystemSettings knowledgeBaseId={knowledgeBaseId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
@@ -226,7 +227,7 @@ function App() {
 }
 
 function Dashboard({ navigate, projectVersion, onManageVersions }: { navigate: (page: PageKey) => void; projectVersion: ProjectVersion | null; onManageVersions: () => void }) {
-  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> {projectVersion ? `当前版本 ${projectVersion.name}` : '尚未创建项目版本'}</Badge><h2>{projectVersion ? '当前项目空间已按版本隔离' : '先创建项目版本，再开始需求分析'}</h2><p>{projectVersion ? '需求绑定、评审运行与处置上下文只属于当前版本；知识库与系统配置仍为平台全局资源。' : '平台固定服务 SmartHub 单项目，项目空间通过版本切换，不提供项目创建或项目切换。'}</p><div><button className="btn primary" onClick={projectVersion ? () => navigate('requirements') : onManageVersions}>{projectVersion ? '进入需求评审' : '新建项目版本'}</button><button className="btn ghost" onClick={() => navigate('documents')}>查看知识库</button></div></section><section className="card quick-card"><BrainCircuit /><h3>需求评审</h3><p>从当前项目版本绑定的 ready 需求发起分析，版本间结果互不可见。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求评审 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>知识库由平台单项目共享，不随项目版本复制。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>模型与平台配置为全局资源，不参与版本隔离。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
+  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> {projectVersion ? `当前版本 ${projectVersion.name}` : '尚未创建项目版本'}</Badge><h2>{projectVersion ? '当前项目空间已按版本隔离' : '先创建项目版本，再开始需求分析'}</h2><p>{projectVersion ? '需求基线、技术方案输入、评审运行与处置上下文都固定在当前版本。' : '平台固定服务 SmartHub 单项目，项目空间通过版本切换。'}</p><div><button className="btn primary" onClick={projectVersion ? () => navigate('requirements') : onManageVersions}>{projectVersion ? '进入需求评审' : '新建项目版本'}</button><button className="btn ghost" onClick={() => navigate('design')}>技术方案评审</button></div></section><section className="card quick-card"><BrainCircuit /><h3>需求评审</h3><p>从当前项目版本绑定的 ready 需求发起分析，版本间结果互不可见。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求评审 <ChevronRight /></button></section><section className="card quick-card"><FileCode2 /><h3>技术方案评审</h3><p>固定成功需求基线与 technical_design 资产，识别覆盖缺口和技术风险。</p><button className="text-btn" onClick={() => navigate('design')}>打开技术评审 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>知识库由平台单项目共享，不随项目版本复制。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>模型与平台配置为全局资源，不参与版本隔离。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
 }
 
 function ProjectVersionManager({ versions, selectedId, onSelect, onRefresh, onClose, notify }: { versions: ProjectVersion[]; selectedId: string; onSelect: (id: string) => void; onRefresh: () => Promise<ProjectVersion[]>; onClose: () => void; notify: Notify }) {
@@ -258,7 +259,7 @@ function ProjectVersionManager({ versions, selectedId, onSelect, onRefresh, onCl
     try {
       const deleted = await deleteProjectVersion(deleteTarget.id)
       const remaining = await onRefresh()
-      notify(`项目版本 ${deleted.name} 已删除，同时移除 ${deleted.deletedBindings} 条需求绑定和 ${deleted.deletedReviewRuns} 条需求评审运行。`)
+      notify(`项目版本 ${deleted.name} 已删除，同时移除 ${deleted.deletedBindings} 条需求绑定、${deleted.deletedReviewRuns} 条需求评审运行和 ${deleted.deletedTechnicalReviews} 个技术方案评审。`)
       if (deleteTarget.id === selectedId) onSelect(remaining[0]?.id ?? '')
       else setDeleteTarget(null)
     } catch (error) { notify(error instanceof Error ? error.message : '项目版本删除失败', 'error') }
@@ -840,6 +841,7 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
         requirementPointExtraction: configuration.agents.requirementPointExtraction.draft,
         requirementReview: configuration.agents.requirementReview.draft,
         reviewQa: configuration.agents.reviewQa.draft,
+        technicalSolutionAnalysis: configuration.agents.technicalSolutionAnalysis.draft,
       }
       setAgentConfiguration(configuration)
       setSavedAgentDraft(agentDrafts)
@@ -921,7 +923,7 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
           setSavedAgentDraft(current => current ? { ...current, [agentKey]: persisted } : current)
           setAgentConfiguration(current => current ? { ...current, agents: { ...current.agents, [agentKey]: { ...current.agents[agentKey], draft: persisted } } } : current)
           const published = await publishAgentConfiguration(agentKey, persisted.revision)
-          const label = agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : '评审问答 Agent'
+          const label = agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : agentKey === 'reviewQa' ? '评审问答 Agent' : '技术方案分析 Agent'
           addAudit(`发布${label}配置 V${published.version}`)
           notify(`${label} V${published.version} 已发布，新评审将固定使用该版本。`)
           void loadCurrentAgentConfiguration().catch(error => notify(error instanceof Error ? `版本已发布，但配置刷新失败：${error.message}` : '版本已发布，但配置刷新失败。', 'warning'))
@@ -1214,8 +1216,9 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
   const definition = currentDraft.definition
   const isExtraction = selectedAgent === 'requirementPointExtraction'
   const isReview = selectedAgent === 'requirementReview'
-  const agentLabel = isExtraction ? '需求点提取 Agent' : isReview ? '需求评审 Agent' : '评审问答 Agent'
-  const agentIdentifier = isExtraction ? 'RequirementPointExtractionAgent' : isReview ? 'RequirementReviewAgent' : 'ReviewQaAgent'
+  const isTechnical = selectedAgent === 'technicalSolutionAnalysis'
+  const agentLabel = isExtraction ? '需求点提取 Agent' : isReview ? '需求评审 Agent' : isTechnical ? '技术方案分析 Agent' : '评审问答 Agent'
+  const agentIdentifier = isExtraction ? 'RequirementPointExtractionAgent' : isReview ? 'RequirementReviewAgent' : isTechnical ? 'TechnicalSolutionAnalysisAgent' : 'ReviewQaAgent'
   const allModels = draft.generativeSources.flatMap(source => source.models.map(model => ({ ...model, source })))
   const modelSourcesReady = modelSourcesState === 'ready'
   const availableModels = modelSourcesReady ? allModels.filter(model => model.source.enabled && model.enabled) : []
@@ -1268,7 +1271,7 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
   }, [loadResourceCatalog, resourceCatalog, resourceCatalogError, tab])
   const selectAgent = (value: AgentConfigurationAgentKey) => setSelectedAgent(value)
   return <><div className="agent-settings-page">
-    <section className="agent-config-header"><div className="agent-symbol"><BrainCircuit /></div><div className="agent-selector"><span>配置 Agent</span><select value={selectedAgent} onChange={event => selectAgent(event.target.value as AgentConfigurationAgentKey)} aria-label="选择要配置的 Agent"><option value="requirementPointExtraction">需求点提取 Agent（RequirementPointExtractionAgent）</option><option value="requirementReview">需求评审 Agent（RequirementReviewAgent）</option><option value="reviewQa">评审问答 Agent（ReviewQaAgent）</option></select><p>需求分析 / {agentIdentifier} · 草稿 revision {currentDraft.revision}</p></div><Badge tone={currentState.activeVersion ? 'green' : 'orange'}>{currentState.activeVersion ? `V${currentState.activeVersion.version} 生效中` : '尚未发布'}</Badge><button className="btn primary agent-publish-button" disabled={publishing || !routing.primaryModel || !modelSourcesReady} onClick={() => void onPublish(selectedAgent)}><Play />{publishing ? '发布中…' : `发布`}</button></section>
+    <section className="agent-config-header"><div className="agent-symbol"><BrainCircuit /></div><div className="agent-selector"><span>配置 Agent</span><select value={selectedAgent} onChange={event => selectAgent(event.target.value as AgentConfigurationAgentKey)} aria-label="选择要配置的 Agent"><option value="requirementPointExtraction">需求点提取 Agent（RequirementPointExtractionAgent）</option><option value="requirementReview">需求评审 Agent（RequirementReviewAgent）</option><option value="reviewQa">评审问答 Agent（ReviewQaAgent）</option><option value="technicalSolutionAnalysis">技术方案分析 Agent（TechnicalSolutionAnalysisAgent）</option></select><p>{isTechnical ? '技术方案分析' : '需求分析'} / {agentIdentifier} · 草稿 revision {currentDraft.revision}</p></div><Badge tone={currentState.activeVersion ? 'green' : 'orange'}>{currentState.activeVersion ? `V${currentState.activeVersion.version} 生效中` : '尚未发布'}</Badge><button className="btn primary agent-publish-button" disabled={publishing || !routing.primaryModel || !modelSourcesReady} onClick={() => void onPublish(selectedAgent)}><Play />{publishing ? '发布中…' : `发布`}</button></section>
     {configurationError && <div className="agent-configuration-status failed"><AlertTriangle /><div><b>版本已发布，但配置刷新失败</b><span>{configurationError}</span></div><button className="btn ghost" onClick={onRetryConfiguration}><RefreshCw />重新加载</button></div>}
     <nav className="agent-config-tabs"><button className={tab === 'model' ? 'active' : ''} onClick={() => setTab('model')}><Bot />模型与路由</button><button className={tab === 'prompt' ? 'active' : ''} onClick={() => setTab('prompt')}><FileText />提示词</button><button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}><ShieldCheck />Tool、MCP、Skill</button></nav>
     {tab === 'model' && <div className="model-routing-grid"><section className="model-config-panel"><ModelPanelHead title={`${agentLabel}模型参数`} desc={`仅作用于${agentLabel}，不会影响另一个 Agent。`}><Badge tone="purple">需求分析</Badge></ModelPanelHead>{!modelSourcesReady && <div className={`agent-configuration-status ${modelSourcesState === 'failed' ? 'failed' : ''}`}><RefreshCw /><div><b>{modelSourcesState === 'failed' ? '模型来源读取失败' : '正在读取模型来源'}</b><span>{modelSourcesState === 'failed' ? modelSourcesError ?? '模型与路由暂不可编辑。' : '提示词、工具和运行限制仍可使用。'}</span></div>{modelSourcesState === 'failed' && <button className="btn ghost" onClick={onRetryModelSources}><RefreshCw />重新加载</button>}</div>}<div className="routing-form"><FormRow label="默认模型" help="智能路由关闭时固定使用该模型"><select disabled={!modelSourcesReady} value={routing.primaryModel ? modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId) : ''} onChange={event => { const [sourceId, modelId] = event.target.value.split('\u0000'); updateRouting('primaryModel', sourceId && modelId ? { sourceId, modelId } : null) }}><option value="">{modelSourcesReady ? '请选择模型' : '模型来源读取中…'}</option>{availableModels.map(model => <option value={modelValue(model.source.id, model.id)} key={modelValue(model.source.id, model.id)}>{model.displayName} · {model.source.name}</option>)}</select></FormRow><FormRow label="模型温度" help="数值越低，输出结论越稳定"><div className="range-field"><input type="range" min="0" max="10" value={Math.round(routing.temperature * 10)} onChange={event => updateRouting('temperature', Number(event.target.value) / 10)} /><b>{routing.temperature.toFixed(1)}</b></div></FormRow><FormRow label="最大输出 Token" help={`不得超过 ${defaultModel?.displayName ?? '默认模型'} 的能力上限`}><div className="input-unit"><input type="number" min="1024" step="1024" value={routing.maxOutputTokens} onChange={event => updateRouting('maxOutputTokens', Number(event.target.value))} /><span>tokens</span></div></FormRow><FormRow label="请求超时" help="单次模型请求的服务端超时"><div className="input-unit"><input type="number" min="10" value={routing.requestTimeoutSeconds} onChange={event => updateRouting('requestTimeoutSeconds', Number(event.target.value))} /><span>秒</span></div></FormRow><FormRow label="失败重试" help="仅对限流、超时等错误生效"><select value={routing.retryCount} onChange={event => updateRouting('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option></select></FormRow><SwitchRow title="强制结构化输出" desc="提交结果必须通过服务端 Schema 校验" checked={routing.structuredOutput} onChange={value => updateRouting('structuredOutput', value)} /></div></section><section className="model-config-panel route-policy-panel"><ModelPanelHead title="路由与降级" desc={`仅保存到${agentLabel}的独立版本快照。`} /><SwitchRow title="启用智能模型路由" desc="按能力、上下文、启用和健康状态选择模型" checked={routing.intelligentRouting} onChange={value => updateRouting('intelligentRouting', value)} /><SwitchRow title="允许模型降级" desc="默认模型不可用时按顺序尝试备用模型" checked={routing.fallbackEnabled} onChange={value => updateRouting('fallbackEnabled', value)} /><div className={`fallback-route ${routing.fallbackEnabled ? '' : 'disabled'}`}><div className="fallback-primary"><span>主</span><div><b>{defaultModel?.displayName ?? '未选择默认模型'}</b><small>{defaultModel?.source.name ?? '请先在模型管理中启用模型'}</small></div><Badge tone="green">默认</Badge></div>{routing.fallbackModels.map((reference, index) => { const model = resolveModel(reference); return model && <div className="fallback-item" key={modelValue(reference.sourceId, reference.modelId)}><span>{index + 1}</span><div><b>{model.displayName}</b><small>{model.source.name}</small></div><div><button className="icon-btn" disabled={!modelSourcesReady || index === 0} onClick={() => moveFallback(index, -1)}><ArrowUp /></button><button className="icon-btn" disabled={!modelSourcesReady || index === routing.fallbackModels.length - 1} onClick={() => moveFallback(index, 1)}><ArrowDown /></button><button className="icon-btn danger-text" disabled={!modelSourcesReady} onClick={() => updateRouting('fallbackModels', routing.fallbackModels.filter((_, position) => position !== index))}><Trash2 /></button></div></div>})}<button className="add-fallback" disabled={!modelSourcesReady || !routing.fallbackEnabled || !availableModels.some(model => (!routing.primaryModel || modelValue(model.source.id, model.id) !== modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId)) && !routing.fallbackModels.some(reference => modelValue(reference.sourceId, reference.modelId) === modelValue(model.source.id, model.id)))} onClick={addFallback}><Plus />添加回退模型</button></div><div className="route-note"><ShieldCheck /><span><b>{agentLabel}独立配置</b><small>模型来源由通用模型库管理；模型选择和路由策略随当前 Agent 版本发布。</small></span></div></section></div>}

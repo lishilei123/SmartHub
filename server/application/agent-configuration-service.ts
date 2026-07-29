@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { createAgentDefinitionVersion, createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition, createReviewQaAgentDefinition } from '../agent/requirement-analysis-agent.js'
+import { createAgentDefinitionVersion, createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition, createReviewQaAgentDefinition, createTechnicalSolutionAnalysisAgentDefinition } from '../agent/requirement-analysis-agent.js'
 import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -7,22 +7,25 @@ import { mcpPolicyHash, skillConfigurationHash, toolBindingToken } from './ai-re
 import { isSkillRuntimeToolId, requiredSkillRuntimeToolIds } from './skill-runtime-policy.js'
 
 const SCENE = 'requirement_analysis' as const
-const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview', 'reviewQa'] as const
+const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview', 'reviewQa', 'technicalSolutionAnalysis'] as const
 const LEGACY_AGENT_KEYS = ['requirementPointExtraction', 'requirementReview'] as const
-const BUILT_IN_TOOL_KEYS = ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result', 'review.submit_result', 'review.answer_submit'] as const
+const BUILT_IN_TOOL_KEYS = ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result', 'review.submit_result', 'review.answer_submit', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_review.submit_result'] as const
 const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch'])
 const REQUIRED_EXTRACTION_TOOL = 'requirement-points.submit_result'
 const REQUIRED_REVIEW_TOOL = 'review.submit_result'
 const REQUIRED_REVIEW_QA_TOOL = 'review.answer_submit'
+const REQUIRED_TECHNICAL_SOLUTION_TOOL = 'technical_solution_review.submit_result'
 const REQUIRED_SKILLS: Record<AgentConfigurationAgentKey, readonly string[]> = {
   requirementPointExtraction: [],
   requirementReview: [],
   reviewQa: [],
+  technicalSolutionAnalysis: [],
 }
 const REQUIRED_MCPS: Record<AgentConfigurationAgentKey, readonly string[]> = {
   requirementPointExtraction: [],
   requirementReview: [],
   reviewQa: [],
+  technicalSolutionAnalysis: [],
 }
 
 export type AgentConfigurationInput = {
@@ -50,6 +53,7 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
         requirementPointExtraction: agentState('requirementPointExtraction', draft, versions),
         requirementReview: agentState('requirementReview', draft, versions),
         reviewQa: agentState('reviewQa', draft, versions),
+        technicalSolutionAnalysis: agentState('technicalSolutionAnalysis', draft, versions),
       },
     }
   }
@@ -154,6 +158,7 @@ function defaultDraft(): AgentConfigurationDraft {
       requirementPointExtraction: defaultAgentDraft('requirementPointExtraction'),
       requirementReview: defaultAgentDraft('requirementReview'),
       reviewQa: defaultAgentDraft('reviewQa'),
+      technicalSolutionAnalysis: defaultAgentDraft('technicalSolutionAnalysis'),
     },
   }
 }
@@ -305,6 +310,7 @@ function publishedDefinition(agentKey: AgentConfigurationAgentKey, value: AgentD
     agentKey: builtIn.agentKey,
     agentType: builtIn.agentType,
     resultSchemaVersion: builtIn.resultSchemaVersion,
+    modelScene: builtIn.modelScene,
     version: `${builtIn.version}+config.${configurationVersion}`,
     systemPrompt: value.systemPrompt,
     taskTemplate: value.taskTemplate,
@@ -331,6 +337,7 @@ function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): Agent
         requirementPointExtraction: normalizeStoredAgentDraft(value.agents.requirementPointExtraction, 'requirementPointExtraction'),
         requirementReview: normalizeStoredAgentDraft(value.agents.requirementReview, 'requirementReview'),
         reviewQa: normalizeStoredAgentDraft(value.agents.reviewQa, 'reviewQa'),
+        technicalSolutionAnalysis: normalizeStoredAgentDraft(value.agents.technicalSolutionAnalysis, 'technicalSolutionAnalysis'),
       },
     }
   }
@@ -343,6 +350,7 @@ function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): Agent
       requirementPointExtraction: { revision, routing: structuredClone(sharedRouting), definition: normalizeLegacyDefinition(raw.agents?.requirementPointExtraction, 'requirementPointExtraction'), updatedAt },
       requirementReview: { revision, routing: structuredClone(sharedRouting), definition: normalizeLegacyDefinition(raw.agents?.requirementReview, 'requirementReview'), updatedAt },
       reviewQa: defaultAgentDraft('reviewQa'),
+      technicalSolutionAnalysis: defaultAgentDraft('technicalSolutionAnalysis'),
     },
   }
 }
@@ -412,12 +420,13 @@ function migrateState(state: DatabaseState) {
 function builtInDefinition(agentKey: AgentConfigurationAgentKey) {
   if (agentKey === 'requirementPointExtraction') return createRequirementPointExtractionAgentDefinition()
   if (agentKey === 'requirementReview') return createRequirementReviewAgentDefinition()
-  return createReviewQaAgentDefinition()
+  if (agentKey === 'reviewQa') return createReviewQaAgentDefinition()
+  return createTechnicalSolutionAnalysisAgentDefinition()
 }
-function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : agentKey === 'requirement-review' ? 'requirementReview' : 'reviewQa' }
+function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : agentKey === 'requirement-review' ? 'requirementReview' : agentKey === 'review-qa' ? 'reviewQa' : 'technicalSolutionAnalysis' }
 function normalizeAgentKey(value: AgentConfigurationAgentKey) { if (!AGENT_KEYS.includes(value)) throw new Error('Agent 标识无效'); return value }
-function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : '评审问答 Agent' }
-function requiredTool(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? REQUIRED_EXTRACTION_TOOL : agentKey === 'requirementReview' ? REQUIRED_REVIEW_TOOL : REQUIRED_REVIEW_QA_TOOL }
+function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : agentKey === 'reviewQa' ? '评审问答 Agent' : '技术方案分析 Agent' }
+function requiredTool(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? REQUIRED_EXTRACTION_TOOL : agentKey === 'requirementReview' ? REQUIRED_REVIEW_TOOL : agentKey === 'reviewQa' ? REQUIRED_REVIEW_QA_TOOL : REQUIRED_TECHNICAL_SOLUTION_TOOL }
 function modelReference(value: AgentModelReference | null | undefined) { if (!value) return null; const sourceId = cleanText(value.sourceId, 200); const modelId = cleanText(value.modelId, 200); return sourceId && modelId ? { sourceId, modelId } : null }
 function uniqueModelReferences(values: AgentModelReference[]) { return [...new Map(values.map(item => [modelKey(item), item])).values()] }
 function modelKey(value: AgentModelReference) { return `${value.sourceId}\u0000${value.modelId}` }

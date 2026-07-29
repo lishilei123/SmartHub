@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-point-extraction' | 'requirement-review' | 'review-qa'
-  agentType: 'requirement_point_extraction' | 'requirement_review' | 'review_qa'
+  agentKey: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'technical-solution-analysis'
+  agentType: 'requirement_point_extraction' | 'requirement_review' | 'review_qa' | 'technical_solution_analysis'
   version: string
   status: 'published'
-  modelScene: 'requirement_analysis'
-  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1'
+  modelScene: 'requirement_analysis' | 'technical_solution_analysis'
+  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1' | 'technical-solution-review/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -158,7 +158,7 @@ export interface AgentExecutionEvent {
 }
 
 export interface AgentExecutionInput {
-  snapshot: ReviewRunSnapshot
+  snapshot: ReviewRunSnapshot | import('./technical-solution-types.js').TechnicalSolutionRunSnapshot
   model: AgentModelConnection
   fixedRequirementPointExtraction?: CandidateRequirementPointExtraction
   requirementInputPlan?: RequirementInputPlan

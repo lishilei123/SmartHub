@@ -3,6 +3,7 @@ import test from 'node:test'
 import { ProjectVersionService } from '../server/application/project-version-service.js'
 import { defaultConfig } from '../server/domain/types.js'
 import type { ReviewRun } from '../server/domain/types.js'
+import type { TechnicalSolutionReview, TechnicalSolutionReviewRun } from '../server/domain/technical-solution-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
 async function fixture() {
@@ -90,4 +91,19 @@ test('可编辑版本存在运行中的评审时需先取消再删除', async ()
   await assert.rejects(() => service.delete(version.id), /先取消运行/u)
   assert.equal((await service.list()).length, 1)
   assert.equal((await store.snapshot()).reviewRuns.length, 1)
+})
+
+test('项目版本删除保护活动技术评审并级联第三期数据', async () => {
+  const { store, service } = await fixture()
+  const version = await service.create({ name: 'V3.0' })
+  await store.transaction(state => {
+    state.technicalSolutionReviews.push({ id: 'technical-review-1', projectVersionId: version.id, name: '技术评审', sourceReviewRunId: 'baseline-1', solutionAssetVersionIds: ['asset-version-1'], inputSetSha256: 'a'.repeat(64), createdBy: 'user-1', createdAt: '2026-07-29T00:00:00.000Z' } as TechnicalSolutionReview)
+    state.technicalSolutionRuns.push({ id: 'technical-run-1', technicalReviewId: 'technical-review-1', projectVersionId: version.id, sourceReviewRunId: 'baseline-1', status: 'queued' } as TechnicalSolutionReviewRun)
+  })
+  await assert.rejects(() => service.delete(version.id), /技术方案评审/u)
+  await store.transaction(state => { state.technicalSolutionRuns[0].status = 'cancelled' })
+  const deleted = await service.delete(version.id)
+  assert.equal(deleted.deletedTechnicalReviews, 1)
+  assert.equal(deleted.deletedTechnicalRuns, 1)
+  assert.equal((await store.snapshot()).technicalSolutionReviews.length, 0)
 })

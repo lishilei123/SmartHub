@@ -1,5 +1,5 @@
 import { hostname } from 'node:os'
-import { requirementAnalysisService, service, stateStore, usingPostgres } from './runtime.js'
+import { requirementAnalysisService, service, stateStore, technicalSolutionReviewService, usingPostgres } from './runtime.js'
 import type { TaskLease } from './infrastructure/store.js'
 
 const workerId = process.env.SMARTHUB_WORKER_ID ?? `${hostname()}-${process.pid}`
@@ -10,6 +10,8 @@ let stopping = false
 const activeControllers = new Set<AbortController>()
 
 async function processOne() {
+  const technicalClaimed = await processTechnicalSolutionOne()
+  if (technicalClaimed) return true
   const reviewClaimed = await processReviewOne()
   if (reviewClaimed) return true
   let task
@@ -37,6 +39,29 @@ async function processOne() {
     clearInterval(heartbeat)
     activeControllers.delete(controller)
   }
+  return true
+}
+
+async function processTechnicalSolutionOne() {
+  let job
+  try { job = await stateStore.claimTechnicalSolutionJob?.(workerId, leaseMs) }
+  catch (error) { console.error('技术方案评审任务领取失败：', error instanceof Error ? error.message : error); return false }
+  if (!job) return false
+  const lease: TaskLease = { workerId, runToken: job.runToken! }
+  const controller = new AbortController()
+  activeControllers.add(controller)
+  const heartbeat = setInterval(() => { void stateStore.heartbeatTechnicalSolutionJob?.(job.runId, lease, leaseMs).then(renewed => { if (!renewed) controller.abort(new Error('技术方案评审 Worker 租约已失效或运行已取消')) }).catch(error => console.error(`技术方案评审任务 ${job.runId} 心跳失败：`, error instanceof Error ? error.message : error)) }, Math.max(1_000, Math.floor(leaseMs / 3)))
+  try {
+    await technicalSolutionReviewService.processPreparedRun(job.runId, lease, controller.signal, job.attempts)
+    await stateStore.finishTechnicalSolutionJob?.(job.runId, lease, 'succeeded')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (controller.signal.aborted) await stateStore.finishTechnicalSolutionJob?.(job.runId, lease, 'cancelled', message)
+    else if (job.attempts < job.maxAttempts && /^(MODEL_|TECH_RUN_FAILED|MODEL_PROVIDER)/u.test(message)) {
+      const delay = Math.min(60_000, 1_000 * 2 ** Math.max(0, job.attempts - 1))
+      await stateStore.releaseTechnicalSolutionJob?.(job.runId, lease, delay, message)
+    } else await stateStore.finishTechnicalSolutionJob?.(job.runId, lease, 'failed', message)
+  } finally { clearInterval(heartbeat); activeControllers.delete(controller) }
   return true
 }
 
@@ -104,7 +129,7 @@ async function retryFailedTask(claimed: { id: string; attempts: number; maxAttem
 }
 
 async function run() {
-  if (!usingPostgres || !stateStore.claimTask || !stateStore.claimReviewJob) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
+  if (!usingPostgres || !stateStore.claimTask || !stateStore.claimReviewJob || !stateStore.claimTechnicalSolutionJob) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
   await service.initialize()
   console.log(`SmartHub Worker ${workerId} 已启动，并发度 ${concurrency}`)
   try {

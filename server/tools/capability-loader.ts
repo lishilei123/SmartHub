@@ -198,5 +198,5 @@ function credential(environmentName: string | undefined, key: string) { const va
 function piName(key: string) { const value = key.replace(/[^a-zA-Z0-9_-]/gu, '_').slice(0, 64); if (!/^[a-zA-Z_]/u.test(value)) return `tool_${value}`; return value }
 function required<T>(value: T | null | undefined, error: string): T { if (value == null || value === '') throw new Error(error); return value }
 function message(error: unknown) { return error instanceof Error ? error.message : String(error) }
-function publicContext(context: ToolExecutionContext) { return { runId: context.snapshot.runId, projectVersionId: context.snapshot.projectVersionId, assetVersionId: context.snapshot.assetVersionId } }
+function publicContext(context: ToolExecutionContext) { return { runId: context.snapshot.runId, projectVersionId: context.snapshot.projectVersionId, assetVersionId: 'assetVersionId' in context.snapshot ? context.snapshot.assetVersionId : context.snapshot.assets[0]?.assetVersionId } }
 type LocalExecute = (argumentsValue: unknown, context: ToolExecutionContext, signal: AbortSignal) => unknown | Promise<unknown>

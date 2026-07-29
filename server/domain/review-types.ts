@@ -128,7 +128,7 @@ export interface CandidateRequirementReviewV3 {
 export interface CandidateReviewResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
 }
 
-export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementPointExtractionV4 | CandidateRequirementPointExtractionV5 | CandidateRequirementReview | CandidateRequirementReviewV3
+export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementPointExtractionV4 | CandidateRequirementPointExtractionV5 | CandidateRequirementReview | CandidateRequirementReviewV3 | import('./technical-solution-types.js').TechnicalSolutionFormalResult
 
 export interface ValidationIssue { path: string; message: string }
 export interface ValidationReport { valid: boolean; issues: ValidationIssue[] }

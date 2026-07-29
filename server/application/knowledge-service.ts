@@ -1015,8 +1015,14 @@ function reviewRunReferencesAssets(state: DatabaseState, run: DatabaseState['rev
   return (Array.isArray(run.snapshot?.assets) ? run.snapshot.assets : []).some(asset => assetIds.has(asset.assetId) || versionIds.has(asset.assetVersionId))
 }
 
+function technicalRunReferencesAssets(state: DatabaseState, run: DatabaseState['technicalSolutionRuns'][number], assetIds: Set<string>) {
+  const versionIds = new Set(state.versions.filter(version => assetIds.has(version.assetId)).map(version => version.id))
+  return run.snapshot.assets.some(asset => assetIds.has(asset.assetId) || versionIds.has(asset.assetVersionId))
+}
+
 function assertNoRunningAssetReviews(state: DatabaseState, assetIds: Set<string>) {
   if (assetIds.size && state.reviewRuns.some(run => run.status === 'running' && reviewRunReferencesAssets(state, run, assetIds))) throw new Error('原文档仍有关联的需求评审正在运行，请先取消评审再删除')
+  if (assetIds.size && state.technicalSolutionRuns.some(run => ['queued', 'running'].includes(run.status) && technicalRunReferencesAssets(state, run, assetIds))) throw new Error('原文档仍有关联的技术方案评审正在执行或排队，请先取消评审再删除')
 }
 
 function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
@@ -1026,6 +1032,10 @@ function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
   const deletedReviewRuns = state.reviewRuns.filter(run => reviewRunReferencesAssets(state, run, assetIds))
   const reviewRunCount = deletedReviewRuns.length
   const deletedRunIds = new Set(deletedReviewRuns.map(run => run.id))
+  const directlyDeletedTechnicalRuns = state.technicalSolutionRuns.filter(run => technicalRunReferencesAssets(state, run, assetIds) || deletedRunIds.has(run.sourceReviewRunId))
+  const deletedTechnicalReviewIds = new Set(state.technicalSolutionReviews.filter(review => review.solutionAssetVersionIds.some(id => versionIds.has(id)) || deletedRunIds.has(review.sourceReviewRunId) || directlyDeletedTechnicalRuns.some(run => run.technicalReviewId === review.id)).map(review => review.id))
+  const deletedTechnicalRuns = state.technicalSolutionRuns.filter(run => deletedTechnicalReviewIds.has(run.technicalReviewId) || directlyDeletedTechnicalRuns.some(item => item.id === run.id))
+  const deletedTechnicalRunIds = new Set(deletedTechnicalRuns.map(run => run.id))
   const activeIndexIds = new Set(state.knowledgeBases.map(knowledgeBase => knowledgeBase.activeIndexVersionId).filter((value): value is string => Boolean(value)))
   let indexChunkCount = 0
   let indexVersionCount = 0
@@ -1045,6 +1055,9 @@ function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
   state.reviewQaTurns = state.reviewQaTurns.filter(item => !deletedRunIds.has(item.runId))
   state.reviewQaSessions = state.reviewQaSessions.filter(item => !deletedRunIds.has(item.runId))
   state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
+  state.technicalSolutionFindingActions = state.technicalSolutionFindingActions.filter(item => !deletedTechnicalRunIds.has(item.runId))
+  state.technicalSolutionRuns = state.technicalSolutionRuns.filter(run => !deletedTechnicalRunIds.has(run.id))
+  state.technicalSolutionReviews = state.technicalSolutionReviews.filter(review => !deletedTechnicalReviewIds.has(review.id))
   state.reviewRuns = state.reviewRuns.filter(run => !reviewRunReferencesAssets(state, run, assetIds))
   state.versions = state.versions.filter(version => !assetIds.has(version.assetId))
   state.assets = state.assets.filter(asset => !assetIds.has(asset.id))
@@ -1056,6 +1069,8 @@ function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
     indexVersions: indexVersionCount,
     bindings: bindingCount,
     reviewRuns: reviewRunCount,
+    technicalSolutionReviews: deletedTechnicalReviewIds.size,
+    technicalSolutionRuns: deletedTechnicalRunIds.size,
   }
 }
 

@@ -1,7 +1,8 @@
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
-import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
+import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
+import type { TechnicalSolutionReview, TechnicalSolutionReviewJob, TechnicalSolutionReviewRun } from '../domain/technical-solution-types.js'
 
 export interface TaskLease { workerId: string; runToken: string }
 export interface ReviewJob {
@@ -65,7 +66,7 @@ export type DefaultKnowledgeBase = {
   knowledgeBase: DatabaseState['knowledgeBases'][number]
 }
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], reviewQaSessions: [], reviewQaTurns: [], toolApprovals: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], reviewQaSessions: [], reviewQaTurns: [], toolApprovals: [], technicalSolutionReviews: [], technicalSolutionRuns: [], technicalSolutionFindingActions: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -79,8 +80,8 @@ export interface StateStore {
   getActiveKnowledgeConfig?(knowledgeBaseId: string): Promise<ConfigVersion | null>
   listModelSources?(): Promise<GenerativeModelSource[]>
   listAiResources?(): Promise<AiResource[]>
-  getAgentConfigurationState?(scene: 'requirement_analysis'): Promise<{ draft: AgentConfigurationDraft | null; versions: AgentConfigurationVersion[] }>
-  getActiveAgentConfiguration?(scene: 'requirement_analysis', agentKey: AgentConfigurationAgentKey): Promise<AgentConfigurationVersion | null>
+  getAgentConfigurationState?(scene: AgentConfigurationScene): Promise<{ draft: AgentConfigurationDraft | null; versions: AgentConfigurationVersion[] }>
+  getActiveAgentConfiguration?(scene: AgentConfigurationScene, agentKey: AgentConfigurationAgentKey): Promise<AgentConfigurationVersion | null>
   getProjectVersion?(projectVersionId: string): Promise<ProjectVersion | null>
   listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
   listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
@@ -105,6 +106,18 @@ export interface StateStore {
   releaseReviewJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
   cancelReviewJob?(runId: string): Promise<boolean>
   transactionWithReviewLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
+  loadTechnicalSolutionInputState?(projectVersionId: string): Promise<Pick<DatabaseState, 'projects' | 'projectVersions' | 'knowledgeBases' | 'assets' | 'versions' | 'indexes' | 'reviewRuns' | 'findingActions'>>
+  listTechnicalSolutionReviews?(projectVersionId: string): Promise<TechnicalSolutionReview[]>
+  getTechnicalSolutionReview?(technicalReviewId: string): Promise<TechnicalSolutionReview | null>
+  listTechnicalSolutionRuns?(projectVersionId: string, technicalReviewId?: string): Promise<TechnicalSolutionReviewRun[]>
+  getTechnicalSolutionRun?(runId: string): Promise<TechnicalSolutionReviewRun | null>
+  enqueueTechnicalSolutionJob?(job: TechnicalSolutionReviewJob): Promise<void>
+  claimTechnicalSolutionJob?(workerId: string, leaseMs: number): Promise<TechnicalSolutionReviewJob | null>
+  heartbeatTechnicalSolutionJob?(runId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
+  finishTechnicalSolutionJob?(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
+  releaseTechnicalSolutionJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
+  cancelTechnicalSolutionJob?(runId: string): Promise<boolean>
+  transactionWithTechnicalSolutionLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   ensureVectorIndex?(indexVersionId: string, dimensions: number): Promise<void>
   isVectorIndexReady?(indexVersionId: string, dimensions: number): Promise<boolean>
   close?(): Promise<void>
@@ -134,19 +147,19 @@ export class JsonStore implements StateStore {
   constructor(private readonly file: string | null) {}
   async load() {
     if (!this.file) return
-    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.reviewQaSessions ??= []; this.state.reviewQaTurns ??= []; this.state.toolApprovals ??= []; normalizeReviewSeverities(this.state) }
+    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.reviewQaSessions ??= []; this.state.reviewQaTurns ??= []; this.state.toolApprovals ??= []; this.state.technicalSolutionReviews ??= []; this.state.technicalSolutionRuns ??= []; this.state.technicalSolutionFindingActions ??= []; normalizeReviewSeverities(this.state) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   read() { return structuredClone(this.state) }
   async snapshot() { return this.read() }
   async listAiResources() { return structuredClone(this.state.aiResources) }
-  async getAgentConfigurationState(scene: 'requirement_analysis') {
+  async getAgentConfigurationState(scene: AgentConfigurationScene) {
     return structuredClone({
       draft: this.state.agentConfigurationDrafts.find(item => item.scene === scene) ?? null,
       versions: this.state.agentConfigurationVersions.filter(item => item.scene === scene),
     })
   }
-  async getActiveAgentConfiguration(scene: 'requirement_analysis', agentKey: AgentConfigurationAgentKey) { return structuredClone(this.state.agentConfigurationVersions.find(item => item.scene === scene && item.agentKey === agentKey && item.status === 'active') ?? null) }
+  async getActiveAgentConfiguration(scene: AgentConfigurationScene, agentKey: AgentConfigurationAgentKey) { return structuredClone(this.state.agentConfigurationVersions.find(item => item.scene === scene && item.agentKey === agentKey && item.status === 'active') ?? null) }
   async getToolApproval(approvalId: string) { return structuredClone(this.state.toolApprovals.find(item => item.id === approvalId) ?? null) }
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
     await this.transaction(state => {

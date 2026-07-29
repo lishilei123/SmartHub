@@ -32,19 +32,23 @@ async function fixture() {
       }],
     })
   })
+  await new AiResourceService(store).list()
   return { store, service: new AgentConfigurationService(store) }
 }
 
-test('三个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
+test('四个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
   const { store, service } = await fixture()
   const initial = await service.get()
   const extractionInitial = initial.agents.requirementPointExtraction.draft
   const reviewInitial = initial.agents.requirementReview.draft
   const qaInitial = initial.agents.reviewQa.draft
+  const technicalInitial = initial.agents.technicalSolutionAnalysis.draft
   assert.equal(extractionInitial.revision, 0)
   assert.equal(reviewInitial.revision, 0)
   assert.equal(qaInitial.revision, 0)
+  assert.equal(technicalInitial.revision, 0)
   assert.deepEqual(initial.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
+  assert.deepEqual(initial.agents.technicalSolutionAnalysis.requiredToolIds, ['technical_solution_review.submit_result'])
 
   const extractionSaved = await service.save({
     agentKey: 'requirementPointExtraction',
@@ -81,6 +85,16 @@ test('三个 Agent 分别持久化草稿并发布独立不可变版本', async (
   assert.deepEqual(qaPublished.agentDefinition.toolIds, ['review.answer_submit'])
   assert.equal((await service.resolveActive('review-qa'))?.id, qaPublished.id)
 
+  const technicalSaved = await service.save({
+    agentKey: 'technicalSolutionAnalysis', revision: technicalInitial.revision,
+    routing: { ...technicalInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 8_192 },
+    definition: technicalInitial.definition,
+  })
+  const technicalPublished = await service.publish({ agentKey: 'technicalSolutionAnalysis', revision: technicalSaved.revision, publishedBy: '技术方案管理员' })
+  assert.equal(technicalPublished.agentDefinition.agentKey, 'technical-solution-analysis')
+  assert.equal(technicalPublished.agentDefinition.modelScene, 'technical_solution_analysis')
+  assert.equal((await service.resolveActive('technical-solution-analysis'))?.id, technicalPublished.id)
+
   const secondReviewDraft = await service.save({
     agentKey: 'requirementReview',
     revision: reviewSaved.revision,
@@ -107,6 +121,7 @@ test('Agent 配置读取使用窄查询而不加载完整状态快照', async ()
   assert.equal(configuration.agents.requirementPointExtraction.draft.revision, 0)
   assert.equal(configuration.agents.requirementReview.draft.revision, 0)
   assert.equal(configuration.agents.reviewQa.draft.revision, 0)
+  assert.equal(configuration.agents.technicalSolutionAnalysis.draft.revision, 0)
 })
 
 test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用模型', async () => {

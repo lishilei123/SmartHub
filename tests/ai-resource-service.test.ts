@@ -15,6 +15,9 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'requirement-points.submit_result',
     'review.answer_submit',
     'review.submit_result',
+    'technical_solution.evidence.preview',
+    'technical_solution.input.read',
+    'technical_solution_review.submit_result',
   ])
   assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip'])
   assert.equal(initial.skills[0].runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
@@ -26,9 +29,12 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'requirement-points.submit_result': 'server/tools/requirement-points-submit-result.ts',
     'review.answer_submit': 'server/tools/review-answer-submit.ts',
     'review.submit_result': 'server/tools/review-submit-result.ts',
+    'technical_solution.input.read': 'server/tools/technical-solution-tools.ts',
+    'technical_solution.evidence.preview': 'server/tools/technical-solution-tools.ts',
+    'technical_solution_review.submit_result': 'server/tools/technical-solution-tools.ts',
   })
   store.transaction = async () => { throw new Error('内置资源已同步时不应再次启动写事务') }
-  assert.equal((await service.list()).tools.length, 5)
+  assert.equal((await service.list()).tools.length, 8)
   store.transaction = JsonStore.prototype.transaction.bind(store)
   const searchTool = initial.tools.find(tool => tool.key === 'knowledge.search')!
   const builtInSource = await service.source(searchTool.id)
@@ -63,14 +69,14 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
   assert.equal(catalog.skills.length, 2)
-  assert.equal(catalog.tools.length, 6)
+  assert.equal(catalog.tools.length, 9)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)
   await assert.rejects(() => service.delete('mcp', mcp.id), /工具引用/)
   await service.delete('skill', skill.id)
   await service.delete('tool', tool.id)
   await service.delete('mcp', mcp.id)
-  assert.equal((await service.list()).tools.length, 5)
+  assert.equal((await service.list()).tools.length, 8)
 })
 
 test('AI 资源目录清理已退役的批量校验证据工具', async () => {

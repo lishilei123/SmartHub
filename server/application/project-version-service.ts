@@ -54,6 +54,9 @@ export class ProjectVersionService {
       if (dependent) throw new Error(`版本正在被 ${dependent.name} 作为继承来源，不能删除`)
       const reviewRuns = state.reviewRuns.filter(item => item.projectVersionId === version.id)
       if (reviewRuns.some(item => item.status === 'running')) throw new Error('项目版本仍有正在执行的需求评审，请先取消运行后再删除')
+      const technicalReviews = state.technicalSolutionReviews.filter(item => item.projectVersionId === version.id)
+      const technicalRuns = state.technicalSolutionRuns.filter(item => item.projectVersionId === version.id)
+      if (technicalRuns.some(item => ['queued', 'running'].includes(item.status))) throw new Error('项目版本仍有正在执行或排队中的技术方案评审，请先取消运行后再删除')
       const deletedBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id).length
       const deletedRunIds = new Set(reviewRuns.map(item => item.id))
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
@@ -61,9 +64,12 @@ export class ProjectVersionService {
       state.reviewQaTurns = state.reviewQaTurns.filter(item => !deletedRunIds.has(item.runId))
       state.reviewQaSessions = state.reviewQaSessions.filter(item => !deletedRunIds.has(item.runId))
       state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
+      state.technicalSolutionFindingActions = state.technicalSolutionFindingActions.filter(item => item.projectVersionId !== version.id)
+      state.technicalSolutionRuns = state.technicalSolutionRuns.filter(item => item.projectVersionId !== version.id)
+      state.technicalSolutionReviews = state.technicalSolutionReviews.filter(item => item.projectVersionId !== version.id)
       state.reviewRuns = state.reviewRuns.filter(item => item.projectVersionId !== version.id)
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
-      return { id: version.id, name: version.name, deletedBindings, deletedReviewRuns: reviewRuns.length }
+      return { id: version.id, name: version.name, deletedBindings, deletedReviewRuns: reviewRuns.length, deletedTechnicalReviews: technicalReviews.length, deletedTechnicalRuns: technicalRuns.length }
     })
   }
 

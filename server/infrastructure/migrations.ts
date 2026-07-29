@@ -409,6 +409,144 @@ const migrations: Migration[] = [{
     WHERE jsonb_typeof(run.data->'result'->'findings') = 'array'
       AND EXISTS (SELECT 1 FROM jsonb_array_elements(run.data->'result'->'findings') finding WHERE finding->>'severity' IN ('critical', 'info'));
   `,
+}, {
+  version: 13,
+  name: 'phase3-technical-solution-review',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_reviews (
+      id text PRIMARY KEY,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      source_review_run_id text NOT NULL REFERENCES smarthub.review_runs(id) ON DELETE RESTRICT,
+      name text NOT NULL,
+      input_set_sha256 char(64) NOT NULL,
+      created_by text NOT NULL,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS technical_solution_reviews_version_idx ON smarthub.technical_solution_reviews (project_version_id, created_at DESC, id DESC);
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_review_inputs (
+      technical_review_id text NOT NULL REFERENCES smarthub.technical_solution_reviews(id) ON DELETE CASCADE,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      asset_version_id text NOT NULL REFERENCES smarthub.asset_versions(id) ON DELETE RESTRICT,
+      ordinal integer NOT NULL,
+      PRIMARY KEY (technical_review_id, asset_version_id),
+      UNIQUE (technical_review_id, ordinal)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_review_runs (
+      id text PRIMARY KEY,
+      technical_review_id text NOT NULL REFERENCES smarthub.technical_solution_reviews(id) ON DELETE CASCADE,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      source_review_run_id text NOT NULL REFERENCES smarthub.review_runs(id) ON DELETE RESTRICT,
+      status text NOT NULL,
+      step text NOT NULL,
+      progress integer NOT NULL CHECK (progress BETWEEN 0 AND 100),
+      snapshot_sha256 char(64) NOT NULL,
+      created_at timestamptz NOT NULL,
+      started_at timestamptz,
+      finished_at timestamptz,
+      error_code text,
+      error_summary text,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS technical_solution_runs_review_idx ON smarthub.technical_solution_review_runs (technical_review_id, created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS technical_solution_runs_version_idx ON smarthub.technical_solution_review_runs (project_version_id, created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS technical_solution_runs_active_idx ON smarthub.technical_solution_review_runs (status, created_at) WHERE status IN ('queued', 'running');
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_review_jobs (
+      id text PRIMARY KEY,
+      run_id text NOT NULL UNIQUE REFERENCES smarthub.technical_solution_review_runs(id) ON DELETE CASCADE,
+      technical_review_id text NOT NULL REFERENCES smarthub.technical_solution_reviews(id) ON DELETE CASCADE,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      status text NOT NULL,
+      attempt_count integer NOT NULL DEFAULT 0,
+      max_attempts integer NOT NULL DEFAULT 3,
+      available_at timestamptz NOT NULL DEFAULT now(),
+      lease_owner text,
+      run_token uuid,
+      lease_expires_at timestamptz,
+      heartbeat_at timestamptz,
+      cancel_requested_at timestamptz,
+      started_at timestamptz,
+      finished_at timestamptz,
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      error text,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS technical_solution_jobs_claim_idx ON smarthub.technical_solution_review_jobs (available_at, created_at) WHERE status='queued';
+    CREATE INDEX IF NOT EXISTS technical_solution_jobs_lease_idx ON smarthub.technical_solution_review_jobs (lease_expires_at) WHERE status='running';
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_finding_actions (
+      id text PRIMARY KEY,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      technical_review_id text NOT NULL REFERENCES smarthub.technical_solution_reviews(id) ON DELETE CASCADE,
+      run_id text NOT NULL REFERENCES smarthub.technical_solution_review_runs(id) ON DELETE CASCADE,
+      finding_id text NOT NULL,
+      version integer NOT NULL,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (run_id, finding_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS technical_solution_actions_run_idx ON smarthub.technical_solution_finding_actions (run_id, finding_id, version);
+  `,
+}, {
+  version: 14,
+  name: 'phase3-technical-solution-formal-results',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_review_results (
+      run_id text PRIMARY KEY REFERENCES smarthub.technical_solution_review_runs(id) ON DELETE CASCADE,
+      schema_version text NOT NULL,
+      candidate_sha256 char(64) NOT NULL,
+      published_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_coverage (
+      id text PRIMARY KEY,
+      run_id text NOT NULL REFERENCES smarthub.technical_solution_review_runs(id) ON DELETE CASCADE,
+      requirement_point_id text NOT NULL,
+      status text NOT NULL,
+      ordinal integer NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (run_id, requirement_point_id),
+      UNIQUE (run_id, ordinal)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_findings (
+      id text PRIMARY KEY,
+      run_id text NOT NULL REFERENCES smarthub.technical_solution_review_runs(id) ON DELETE CASCADE,
+      finding_type text NOT NULL,
+      severity text NOT NULL,
+      confidence double precision NOT NULL,
+      ordinal integer NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (run_id, ordinal)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_evidence (
+      id text PRIMARY KEY,
+      run_id text NOT NULL REFERENCES smarthub.technical_solution_review_runs(id) ON DELETE CASCADE,
+      source_kind text NOT NULL,
+      asset_id text NOT NULL,
+      asset_version_id text NOT NULL,
+      chunk_id text NOT NULL,
+      content_sha256 char(64) NOT NULL,
+      start_line integer NOT NULL,
+      end_line integer NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS technical_solution_evidence_run_idx ON smarthub.technical_solution_evidence (run_id, asset_version_id, chunk_id);
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_coverage_evidence (
+      coverage_id text NOT NULL REFERENCES smarthub.technical_solution_coverage(id) ON DELETE CASCADE,
+      evidence_id text NOT NULL REFERENCES smarthub.technical_solution_evidence(id) ON DELETE CASCADE,
+      PRIMARY KEY (coverage_id, evidence_id)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_finding_requirements (
+      finding_id text NOT NULL REFERENCES smarthub.technical_solution_findings(id) ON DELETE CASCADE,
+      requirement_point_id text NOT NULL,
+      PRIMARY KEY (finding_id, requirement_point_id)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.technical_solution_finding_evidence (
+      finding_id text NOT NULL REFERENCES smarthub.technical_solution_findings(id) ON DELETE CASCADE,
+      evidence_id text NOT NULL REFERENCES smarthub.technical_solution_evidence(id) ON DELETE CASCADE,
+      PRIMARY KEY (finding_id, evidence_id)
+    );
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

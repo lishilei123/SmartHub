@@ -122,9 +122,9 @@ export interface ToolResource extends AiResourceBase {
 
 export type AiResource = McpServerResource | SkillResource | ToolResource
 
-export type AgentConfigurationScene = 'requirement_analysis'
+export type AgentConfigurationScene = 'requirement_analysis' | 'technical_solution_analysis'
 export type AgentConfigurationStatus = 'active' | 'superseded'
-export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview' | 'reviewQa'
+export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview' | 'reviewQa' | 'technicalSolutionAnalysis'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
   primaryModel: AgentModelReference | null
@@ -157,6 +157,7 @@ export interface AgentConfigurationDraft {
     requirementPointExtraction: AgentConfigurationAgentDraft
     requirementReview: AgentConfigurationAgentDraft
     reviewQa: AgentConfigurationAgentDraft
+    technicalSolutionAnalysis: AgentConfigurationAgentDraft
   }
 }
 export interface AgentConfigurationVersion {
@@ -309,7 +310,7 @@ export interface ToolApproval {
   consumedAt?: string
 }
 export interface AgentExecutionRecord {
-  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis'
+  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis' | 'technical-solution-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number
@@ -371,7 +372,7 @@ export interface ReviewRun {
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; reviewQaSessions: ReviewQaSession[]; reviewQaTurns: ReviewQaTurn[]; toolApprovals: ToolApproval[] }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; reviewQaSessions: ReviewQaSession[]; reviewQaTurns: ReviewQaTurn[]; toolApprovals: ToolApproval[]; technicalSolutionReviews: import('./technical-solution-types.js').TechnicalSolutionReview[]; technicalSolutionRuns: import('./technical-solution-types.js').TechnicalSolutionReviewRun[]; technicalSolutionFindingActions: import('./technical-solution-types.js').TechnicalSolutionFindingAction[] }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

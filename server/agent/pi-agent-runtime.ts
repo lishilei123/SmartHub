@@ -14,8 +14,10 @@ import { GovernedToolRuntime } from '../tools/runtime.js'
 import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { defaultTokenCodec } from '../application/content.js'
 import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
+import { createTechnicalSolutionToolRegistry } from '../tools/technical-solution-tools.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
-import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask } from './requirement-analysis-agent.js'
+import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
+import { TechnicalSolutionResultValidator } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
 
 const require = createRequire(import.meta.url)
@@ -38,7 +40,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let candidate: AgentCandidateResult | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     const stage = stageConfiguration(input)
-    const inputPlan = stage.isExtraction ? required(input.requirementInputPlan, 'REQUIREMENT_INPUT_PLAN_REQUIRED: 提取 Agent 缺少服务端输入计划') : undefined
+    const inputPlan = stage.usesInputPlan ? required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划') : undefined
     const deliveryManifest: InputDeliveryManifest | undefined = inputPlan ? {
       policyVersion: inputPlan.policyVersion,
       mode: inputPlan.mode,
@@ -48,14 +50,22 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     } : undefined
     const registry = stage.isExtraction
       ? createRequirementPointExtractionToolRegistry(this.store, async value => {
-        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV5(value, input.snapshot, required(deliveryManifest, '输入投递证明不存在'))
+        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV5(value, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, required(deliveryManifest, '输入投递证明不存在'))
+        if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
+        candidate = normalized.result
+        lastSubmissionIssues = []
+        return { accepted: true }
+      })
+      : stage.isTechnical
+      ? createTechnicalSolutionToolRegistry(this.store, async value => {
+        const normalized = new TechnicalSolutionResultValidator().normalize(value, input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, await this.store.snapshot())
         if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
         candidate = normalized.result
         lastSubmissionIssues = []
         return { accepted: true }
       })
       : createRequirementReviewToolRegistry(async value => {
-        const normalized = new RequirementReviewValidator().normalizeV3(value, stage.fixedExtraction, input.snapshot)
+        const normalized = new RequirementReviewValidator().normalizeV3(value, stage.fixedExtraction, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
         if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
         candidate = normalized.result
         lastSubmissionIssues = []
@@ -154,14 +164,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       })
       controller.signal.addEventListener('abort', () => agent?.abort(), { once: true })
       await record({ type: 'runtime_initialized', turn: 0, framework: { name: 'pi-agent-core', version: piVersion } })
-      if (stage.isExtraction) {
+      if (stage.usesInputPlan) {
         await record({ type: 'input_package_built', turn: 0, content: JSON.stringify({ mode: inputPlan!.mode, packageSha256: inputPlan!.packageSha256, batches: inputPlan!.batches.length, estimatedInputTokens: inputPlan!.estimatedInputTokens, safeInputBudget: inputPlan!.safeInputBudget }) })
         if (inputPlan!.mode === 'full_context') {
           const current = inputPlan!.batches[0]
           deliveryManifest!.entries.push(manifestEntry(current, 1))
           deliveryManifest!.finalMergeCompleted = true
           await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
-          await agent.prompt(`${renderRequirementTask(input.snapshot)}\n\n${current.content}`)
+          await agent.prompt(`${renderInitialTask(input, stage)}\n\n${current.content}`)
           await agent.waitForIdle()
         } else {
           const drafts: string[] = []
@@ -174,7 +184,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
             latestModelFailure = undefined
             deliveryManifest!.entries.push(manifestEntry(current, current.ordinal + 1))
             await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
-            await agent.prompt(renderSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content))
+            await agent.prompt(stage.isTechnical ? renderTechnicalSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content) : renderSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content))
             await agent.waitForIdle()
             if (latestModelFailure) throw modelProviderError(latestModelFailure)
             if (!latestAssistantText.trim()) throw new Error(`SEGMENT_DRAFT_REQUIRED: 批次 ${current.batchId} 未返回可归并草稿`)
@@ -190,11 +200,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           inDraftStage = false
           deliveryManifest!.finalMergeCompleted = true
           await record({ type: 'input_final_merge_started', turn: turns, content: JSON.stringify({ batchCount: drafts.length }) })
-          await agent.prompt(renderSegmentMergeTask(input.snapshot, drafts))
+          await agent.prompt(stage.isTechnical ? renderTechnicalSegmentMergeTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, drafts) : renderSegmentMergeTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, drafts))
           await agent.waitForIdle()
         }
       } else {
-        await agent.prompt(renderRequirementTask(input.snapshot, input.fixedRequirementPointExtraction))
+        await agent.prompt(renderRequirementTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, input.fixedRequirementPointExtraction))
         await agent.waitForIdle()
       }
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
@@ -207,7 +217,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         await record({ type: 'result_validation_repair_required', turn: turns, content: formatValidationIssues(lastSubmissionIssues) })
         forceResultSubmission = false
         latestModelFailure = undefined
-        const evidenceRepairRequired = stage.isExtraction && hasEvidenceValidationIssue(lastSubmissionIssues)
+        const evidenceRepairRequired = (stage.isExtraction || stage.isTechnical) && hasEvidenceValidationIssue(lastSubmissionIssues)
         if (evidenceRepairRequired) {
           agent.state.tools = tools
           activeToolNames = new Set(tools.map(tool => tool.name))
@@ -320,36 +330,67 @@ function required<T>(value: T | undefined, message: string): T { if (value === u
 
 type StageConfiguration = {
   isExtraction: true
+  isTechnical: false
+  usesInputPlan: true
   submitToolId: 'requirement-points.submit_result'
   submitPiName: 'requirement_points_submit_result'
   schemaVersion: 'requirement-point-extraction/v5'
   agentLabel: 'RequirementPointExtractionAgent'
 } | {
   isExtraction: false
+  isTechnical: false
+  usesInputPlan: false
   submitToolId: 'review.submit_result'
   submitPiName: 'review_submit_result'
   schemaVersion: 'requirement-review/v3'
   agentLabel: 'RequirementReviewAgent'
   fixedExtraction: CandidateRequirementPointExtraction
+} | {
+  isExtraction: false
+  isTechnical: true
+  usesInputPlan: true
+  submitToolId: 'technical_solution_review.submit_result'
+  submitPiName: 'technical_solution_review_submit_result'
+  schemaVersion: 'technical-solution-review/v1'
+  agentLabel: 'TechnicalSolutionAnalysisAgent'
 }
 
 function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
   if (input.snapshot.agentDefinition.agentKey === 'requirement-point-extraction') return {
     isExtraction: true,
+    isTechnical: false,
+    usesInputPlan: true,
     submitToolId: 'requirement-points.submit_result',
     submitPiName: 'requirement_points_submit_result',
     schemaVersion: 'requirement-point-extraction/v5',
     agentLabel: 'RequirementPointExtractionAgent',
   }
+  if (input.snapshot.agentDefinition.agentKey === 'technical-solution-analysis') return {
+    isExtraction: false,
+    isTechnical: true,
+    usesInputPlan: true,
+    submitToolId: 'technical_solution_review.submit_result',
+    submitPiName: 'technical_solution_review_submit_result',
+    schemaVersion: 'technical-solution-review/v1',
+    agentLabel: 'TechnicalSolutionAnalysisAgent',
+  }
   if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
   return {
     isExtraction: false,
+    isTechnical: false,
+    usesInputPlan: false,
     submitToolId: 'review.submit_result',
     submitPiName: 'review_submit_result',
     schemaVersion: 'requirement-review/v3',
     agentLabel: 'RequirementReviewAgent',
     fixedExtraction: input.fixedRequirementPointExtraction,
   }
+}
+
+function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration) {
+  return stage.isTechnical
+    ? renderTechnicalSolutionTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot)
+    : renderRequirementTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
 }
 
 function hasEvidenceValidationIssue(issues: Array<{ path: string; message: string }>) {
