@@ -107,12 +107,12 @@ function App() {
   const [knowledgeApiState, setKnowledgeApiState] = useState<'connecting' | 'ready' | 'offline'>('connecting')
   const toastTimer = useRef<number | undefined>(undefined)
 
-  const notify: Notify = (message, tone = 'success') => {
+  const notify = useCallback<Notify>((message, tone = 'success') => {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
     const next = { id: Date.now(), message, tone }
     setToast(next)
     toastTimer.current = window.setTimeout(() => setToast(current => current?.id === next.id ? null : current), 2600)
-  }
+  }, [])
 
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current) }, [])
   useEffect(() => { window.localStorage.setItem(pageStorageKey, page) }, [page])

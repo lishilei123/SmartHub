@@ -263,7 +263,6 @@ export function RequirementReviewPage({
   const [selectedRunId, setSelectedRunId] = useState('')
   const [retryingMode, setRetryingMode] = useState<'full' | 'review_only' | null>(null)
   const [agentConfiguration, setAgentConfiguration] = useState<AgentConfigurationState | null>(null)
-  const [agentConfigurationState, setAgentConfigurationState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [selectedFindingId, setSelectedFindingId] = useState('')
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('')
   const [activeSectionKey, setActiveSectionKey] = useState<string | null>(null)
@@ -447,10 +446,8 @@ export function RequirementReviewPage({
   useEffect(() => {
     let cancelled = false
     loadAgentConfiguration().then(configuration => {
-      if (cancelled) return
-      setAgentConfiguration(configuration)
-      setAgentConfigurationState('ready')
-    }).catch(() => { if (!cancelled) setAgentConfigurationState('failed') })
+      if (!cancelled) setAgentConfiguration(configuration)
+    }).catch(() => undefined)
     return () => { cancelled = true }
   }, [])
 
@@ -999,8 +996,6 @@ export function RequirementReviewPage({
         <span><small>固定输入文档</small><b>{selectedRun?.assetVersionIds?.length ?? requirementDocuments.length} 份</b></span>
       </div>
       <div className="rr-header-actions">
-        <ReviewBadge tone={readOnly ? 'orange' : 'green'}>{readOnly ? projectVersion.status === 'locked' ? '版本已锁定 · 只读' : '版本已归档 · 只读' : '版本可编辑'}</ReviewBadge>
-        <div className="rr-model-select rr-agent-config-lock"><span>Agent 配置</span><b>{agentConfigurationsReady ? `提取 V${agentConfiguration!.agents.requirementPointExtraction.activeVersion!.version} / 评审 V${agentConfiguration!.agents.requirementReview.activeVersion!.version}` : agentConfigurationState === 'loading' ? '正在读取…' : agentConfigurationState === 'failed' ? '配置读取失败' : '尚未完整发布'}</b></div>
         <button className="btn ghost" onClick={() => setSnapshotOpen(value => !value)} disabled={!selectedRun}><ShieldCheck />固定快照</button>
         <button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />导出报告</button>
         {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!agentConfigurationsReady ? '请先分别发布需求点提取 Agent 和需求评审 Agent' : undefined}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}
@@ -1021,7 +1016,7 @@ export function RequirementReviewPage({
       <main className="rr-main">
         <div className="rr-main-toolbar">
           <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => selectView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
-          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {run.retryMode === 'review_only' ? '仅评审 · ' : run.retryMode === 'full' ? '全部重跑 · ' : ''}{runLabel(run.status, isRetryingRun(run))}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button><ReviewBadge tone={runsState === 'failed' ? 'red' : 'green'}>{runsState === 'failed' ? '读取失败' : '已持久化'}</ReviewBadge></label>
+          <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {run.retryMode === 'review_only' ? '仅评审 · ' : run.retryMode === 'full' ? '全部重跑 · ' : ''}{runLabel(run.status, isRetryingRun(run))}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button></label>
         </div>
 
         {selectedRun?.status === 'running' && (waitingForRetry ? <div className="rr-warning-status"><Clock3 /><div><b>等待 Worker 自动重试</b><span>{selectedRun.queue ? `第 ${selectedRun.queue.attempts} / ${selectedRun.queue.maxAttempts} 次尝试已失败，预计在 ${formatTime(selectedRun.queue.availableAt)} 再次执行。` : '本次执行遇到可恢复错误，正在等待 Worker 重新领取。'} </span>{(selectedRun.queue?.error ?? selectedRun.error) && <small>{runErrorMessage(selectedRun.queue?.error ?? selectedRun.error)}</small>}</div><ReviewBadge tone="orange">可取消</ReviewBadge></div> : <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>{selectedRun.step === 'reviewing_requirements' ? 'RequirementReviewAgent 正在评审固定需求点' : 'RequirementPointExtractionAgent 正在提取需求点'}</b><span>两个 Agent 使用独立会话；页面每秒同步服务端状态，刷新或关闭浏览器不会取消本次运行。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>)}

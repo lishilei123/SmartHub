@@ -1,25 +1,30 @@
 import { useEffect, useRef } from 'react'
-import { X } from 'lucide-react'
+import { ShieldCheck, X } from 'lucide-react'
+import { MarkdownDocument } from './MarkdownDocument'
 import type { TechnicalEvidence } from './technical-solution-review-api'
 
 export type TechnicalDocument = {
   assetVersionId: string
   title: string
   content: string
+  logicalPath?: string
   evidence?: TechnicalEvidence
 }
 
-export function TechnicalDocumentViewer({ document, onClose }: { document: TechnicalDocument; onClose: () => void }) {
-  const scrollerRef = useRef<HTMLPreElement>(null)
-  const firstHitRef = useRef<HTMLSpanElement>(null)
-  const lines = document.content.split(/\r?\n/u)
+export function TechnicalDocumentViewer({ document, knowledgeBaseId = '', onClose }: { document: TechnicalDocument; knowledgeBaseId?: string; onClose: () => void }) {
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const format = document.title.toLowerCase().endsWith('.txt') ? 'text' : 'markdown'
 
   useEffect(() => {
-    if (document.evidence && firstHitRef.current) {
-      firstHitRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const scroller = scrollerRef.current
+    if (!scroller) return
+    const firstHit = scroller.querySelector<HTMLElement>('.technical-evidence-hit')
+    if (document.evidence && firstHit) {
+      const top = firstHit.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+      scroller.scrollTo({ top: Math.max(0, top - scroller.clientHeight * .25), behavior: 'smooth' })
       return
     }
-    scrollerRef.current?.scrollTo({ top: 0 })
+    scroller.scrollTo({ top: 0 })
   }, [document])
 
   useEffect(() => {
@@ -32,15 +37,10 @@ export function TechnicalDocumentViewer({ document, onClose }: { document: Techn
 
   return <section className="fixed-document" aria-label={`固定原文：${document.title}`}>
     <header>
-      <span><b>{document.title}</b><small>{document.assetVersionId}{document.evidence ? ` · L${document.evidence.startLine}-${document.evidence.endLine}` : ' · 从文档顶部打开'}</small></span>
+      <span><b>{document.title}</b><small>{document.assetVersionId}{document.evidence ? ` · Evidence L${document.evidence.startLine}-${document.evidence.endLine}` : ` · ${format === 'text' ? '纯文本' : 'Markdown'} 渲染视图`}</small></span>
       <button type="button" onClick={onClose} aria-label="关闭固定原文" title="关闭（Esc）"><X /></button>
     </header>
-    <pre ref={scrollerRef} tabIndex={0}>{lines.map((line, index) => {
-      const lineNumber = index + 1
-      const isHit = Boolean(document.evidence && lineNumber >= document.evidence.startLine && lineNumber <= document.evidence.endLine)
-      return <span key={lineNumber} ref={document.evidence?.startLine === lineNumber ? firstHitRef : undefined} className={isHit ? 'hit' : undefined} data-source-line={lineNumber}>
-        <i aria-hidden="true">{lineNumber}</i><code>{line || ' '}</code>
-      </span>
-    })}</pre>
+    {document.evidence && <div className="fixed-document-evidence"><ShieldCheck /><span><b>已定位固定 Evidence</b><small>{document.evidence.headingPath.join(' / ') || `L${document.evidence.startLine}-${document.evidence.endLine}`} · {document.evidence.quote}</small></span></div>}
+    <div className="fixed-document-body rr-markdown" ref={scrollerRef} tabIndex={0}><MarkdownDocument source={document.content} format={format} knowledgeBaseId={knowledgeBaseId} logicalPath={document.logicalPath ?? document.title} highlightSourceRange={document.evidence ? { startLine: document.evidence.startLine, endLine: document.evidence.endLine } : undefined} anchorPrefix={`technical-${document.assetVersionId}`} /></div>
   </section>
 }

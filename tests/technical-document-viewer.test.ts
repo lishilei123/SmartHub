@@ -8,21 +8,22 @@ function render(document: TechnicalDocument) {
   return renderToStaticMarkup(createElement(TechnicalDocumentViewer, { document, onClose: () => undefined }))
 }
 
-test('renders a bounded fixed-source reader with an accessible close action', () => {
-  const html = render({ assetVersionId: 'asset-version-1', title: '技术设计.md', content: '# 标题\n正文' })
+test('renders fixed Markdown as a document with an accessible close action', () => {
+  const html = render({ assetVersionId: 'asset-version-1', title: '技术设计.md', content: '# 标题\n\n| 项目 | 内容 |\n| --- | --- |\n| 系统 | SmartHub |' })
 
   assert.match(html, /class="fixed-document"/)
   assert.match(html, /aria-label="关闭固定原文"/)
-  assert.match(html, /从文档顶部打开/)
-  assert.match(html, /data-source-line="1"/)
-  assert.match(html, /data-source-line="2"/)
+  assert.match(html, /Markdown 渲染视图/)
+  assert.match(html, /<h1[^>]*>标题<\/h1>/)
+  assert.match(html, /<table class="md-table">/)
+  assert.doesNotMatch(html, /data-source-line=/)
 })
 
-test('marks the complete Evidence line range without changing the fixed asset version', () => {
+test('highlights the rendered Markdown block intersecting the fixed Evidence range', () => {
   const html = render({
     assetVersionId: 'asset-version-1',
     title: '技术设计.md',
-    content: '第一行\n第二行\n第三行\n第四行',
+    content: '# 标题\n\n## 接口设计\n第二行\n第三行\n\n## 其他\n第四行',
     evidence: {
       id: 'evidence-1',
       sourceKind: 'technical_design',
@@ -32,14 +33,14 @@ test('marks the complete Evidence line range without changing the fixed asset ve
       contentSha256: 'hash-1',
       headingPath: ['接口设计'],
       quote: '第二行\n第三行',
-      startLine: 2,
-      endLine: 3,
+      startLine: 4,
+      endLine: 5,
     },
   })
 
-  assert.match(html, /asset-version-1 · L2-3/)
-  assert.equal((html.match(/class="hit"/g) ?? []).length, 2)
-  assert.match(html, /class="hit" data-source-line="2"/)
-  assert.match(html, /class="hit" data-source-line="3"/)
-  assert.doesNotMatch(html, /class="hit" data-source-line="4"/)
+  assert.match(html, /asset-version-1 · Evidence L4-5/)
+  assert.match(html, /已定位固定 Evidence/)
+  assert.equal((html.match(/technical-evidence-hit/g) ?? []).length, 1)
+  assert.match(html, /<p[^>]*class="technical-evidence-hit"[^>]*>第二行\n第三行<\/p>/)
+  assert.doesNotMatch(html, /<h2[^>]*class="technical-evidence-hit"[^>]*>其他<\/h2>/)
 })

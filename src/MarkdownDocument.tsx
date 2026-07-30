@@ -5,6 +5,7 @@ import { emptyMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 
 export type DocumentFormat = 'markdown' | 'text'
 type PositionedNode = { position?: { start?: { line?: number; offset?: number }; end?: { line?: number } } }
+type SourceRange = { startLine: number; endLine: number }
 
 const sourceLocation = (node?: PositionedNode) => {
   const startLine = node?.position?.start?.line
@@ -33,23 +34,29 @@ export function resolveKnowledgeImage(kbId: string, logicalPath: string, source:
   return `http://127.0.0.1:8787/api/knowledge-bases/${encodeURIComponent(kbId)}/files/${normalized.map(encodeURIComponent).join('/')}`
 }
 
-export function MarkdownDocument({ source, format, knowledgeBaseId = '', logicalPath = '', outline = emptyMarkdownOutline, activeSectionKey, anchorPrefix = 'document-section', onOpenKnowledgeDocument }: { source: string; format: DocumentFormat; knowledgeBaseId?: string; logicalPath?: string; outline?: MarkdownOutline; activeSectionKey?: string | null; anchorPrefix?: string; onOpenKnowledgeDocument?: (logicalPath: string) => void }) {
+export function MarkdownDocument({ source, format, knowledgeBaseId = '', logicalPath = '', outline = emptyMarkdownOutline, activeSectionKey, anchorPrefix = 'document-section', highlightSourceRange, onOpenKnowledgeDocument }: { source: string; format: DocumentFormat; knowledgeBaseId?: string; logicalPath?: string; outline?: MarkdownOutline; activeSectionKey?: string | null; anchorPrefix?: string; highlightSourceRange?: SourceRange; onOpenKnowledgeDocument?: (logicalPath: string) => void }) {
   if (format === 'text') return <pre className="plain-text-document">{source}</pre>
 
   const sectionsByOffset = new Map(outline.sections.map(section => [section.sourceOffset, section]))
+  const sourceClassName = (node?: PositionedNode, className?: string) => {
+    const startLine = node?.position?.start?.line
+    const endLine = node?.position?.end?.line ?? startLine
+    const highlighted = highlightSourceRange && typeof startLine === 'number' && typeof endLine === 'number' && startLine <= highlightSourceRange.endLine && endLine >= highlightSourceRange.startLine
+    return [className, highlighted ? 'technical-evidence-hit' : ''].filter(Boolean).join(' ') || undefined
+  }
   const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => ({ children, className, node, ...props }: ComponentPropsWithoutRef<'h2'> & { node?: PositionedNode }) => {
     const section = sectionsByOffset.get(node?.position?.start?.offset ?? -1)
-    const classes = [className, section ? 'document-section-heading' : '', section && section.key === activeSectionKey ? 'active-document-section' : ''].filter(Boolean).join(' ')
+    const classes = sourceClassName(node, [className, section ? 'document-section-heading' : '', section && section.key === activeSectionKey ? 'active-document-section' : ''].filter(Boolean).join(' '))
     return <Tag {...props} {...sourceLocation(node)} {...(section ? { id: `${anchorPrefix}-${section.key}`, 'data-document-section-key': section.key } : {})} className={classes || undefined}>{children}</Tag>
   }
   return <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
     h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
-    p({ node, ...props }) { return <p {...props} {...sourceLocation(node)} /> },
-    li({ node, ...props }) { return <li {...props} {...sourceLocation(node)} /> },
-    blockquote({ node, ...props }) { return <blockquote {...props} {...sourceLocation(node)} /> },
-    pre({ node, ...props }) { return <pre {...props} {...sourceLocation(node)} /> },
+    p({ className, node, ...props }) { return <p {...props} {...sourceLocation(node)} className={sourceClassName(node, className)} /> },
+    li({ className, node, ...props }) { return <li {...props} {...sourceLocation(node)} className={sourceClassName(node, className)} /> },
+    blockquote({ className, node, ...props }) { return <blockquote {...props} {...sourceLocation(node)} className={sourceClassName(node, className)} /> },
+    pre({ className, node, ...props }) { return <pre {...props} {...sourceLocation(node)} className={sourceClassName(node, className)} /> },
     table({ className, children, node, ...props }) {
-      return <div className="md-table-wrap" {...sourceLocation(node)}><table {...props} className={['md-table', className].filter(Boolean).join(' ')}>{children}</table></div>
+      return <div className={sourceClassName(node, 'md-table-wrap')} {...sourceLocation(node)}><table {...props} className={['md-table', className].filter(Boolean).join(' ')}>{children}</table></div>
     },
     a({ href, children, node, ...props }) {
       void node
