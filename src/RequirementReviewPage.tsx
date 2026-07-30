@@ -195,31 +195,39 @@ function executionFromEvents(events: AgentExecutionEvent[]): AgentExecutionRecor
   }
 }
 
-function qaTraceStep(event: AgentExecutionEvent) {
-  if (event.type === 'runtime_initialized') return '问答 Agent Runtime 已初始化'
-  if (event.type === 'turn_start') return `开始第 ${event.turn ?? 0} 个 Turn`
-  if (event.type === 'message_end' && event.role === 'user') return '固定 ReviewRun 上下文与当前问题已交付'
-  if (event.type === 'message_end' && event.role === 'assistant') return event.toolCalls?.length ? `模型决定请求 ${event.toolCalls.map(call => call.name).join('、')}` : '模型完成一段可公开输出'
-  if (event.type === 'tool_execution_start') return `开始调用工具 ${event.toolId ?? '未知工具'}`
-  if (event.type === 'tool_execution_end') return `${event.toolId ?? '工具'}调用${event.isError ? '失败' : '完成'}`
-  if (event.type === 'result_submission_retry') return '进入答案强制提交阶段'
-  if (event.type === 'agent_end') return '问答 Agent 执行结束'
-  return agentEventLabels[event.type] ?? event.type
+function AgentExecutionTrace({ execution, loading, modelLabel, status, tab, onTab }: { execution?: AgentExecutionRecord; loading: boolean; modelLabel?: string; status?: RunStatus; tab: 'conversation' | 'events'; onTab: (tab: 'conversation' | 'events') => void }) {
+  const events = execution?.events ?? []
+  const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
+  const completedToolIds = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
+  const conversation = events.filter(event => (event.type === 'message_end' && (event.role === 'user' || event.role === 'assistant'))
+    || event.type === 'tool_execution_end'
+    || (event.type === 'tool_execution_start' && !completedToolIds.has(event.toolCallId))
+    || event.type === 'result_submission_required'
+    || event.type === 'result_submission_retry')
+  const hasDetailedTrace = events.some(event => event.content || event.toolArguments !== undefined || event.toolResult !== undefined || event.toolCalls?.length)
+  return <>
+    <div className="rr-run-record-tabs"><button className={tab === 'conversation' ? 'active' : ''} onClick={() => onTab('conversation')}><MessageSquareText />Agent 对话 <span>{conversation.length}</span></button><button className={tab === 'events' ? 'active' : ''} onClick={() => onTab('events')}><Activity />事件时间线 <span>{events.length}</span></button></div>
+    <div className="rr-run-record-body">{loading ? <div className="rr-trace-empty"><LoaderCircle className="rotating" /><b>正在读取运行记录</b></div> : tab === 'conversation' ? <div className="rr-agent-conversation">
+      {conversation.map(event => {
+        if (event.type === 'message_end') return <article className={`rr-agent-message ${event.role}`} key={event.sequence}><header><span>{event.role === 'user' ? <FileText /> : <Bot />}{event.role === 'user' ? '运行任务' : event.model ?? modelLabel ?? 'Agent'}</span><small>Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></header>{event.content ? <p>{event.content}</p> : null}{event.toolCalls?.length ? <div className="rr-agent-tool-requests">{event.toolCalls.map(call => <span key={call.id}><Wrench />请求 {call.name}</span>)}</div> : null}{event.usage && <footer>Token：输入 {event.usage.input} · 输出 {event.usage.output} · 缓存读取 {event.usage.cacheRead} · 总计 {event.usage.totalTokens} · {event.stopReason ?? '未知停止原因'}</footer>}</article>
+        if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+          const start = event.type === 'tool_execution_start' ? event : toolStarts.get(event.toolCallId ?? '')
+          return <article className={`rr-agent-tool ${event.isError ? 'failed' : ''}`} key={event.sequence}><header><span><Wrench />{event.toolId ?? start?.toolId ?? '未知工具'}</span><ReviewBadge tone={event.type === 'tool_execution_start' ? 'orange' : event.isError ? 'red' : 'green'}>{event.type === 'tool_execution_start' ? '执行中' : event.isError ? '失败' : '完成'}</ReviewBadge><small>Turn {event.turn ?? start?.turn ?? 0} · {eventTime(event.occurredAt)}</small></header><div><details><summary>查看调用参数</summary><pre>{formatTraceValue(start?.toolArguments) || '该历史记录未保存参数'}</pre></details>{event.type === 'tool_execution_end' && <details><summary>查看工具返回</summary><pre>{formatTraceValue(event.toolResult) || '该历史记录未保存返回内容'}</pre></details>}</div><footer>{event.toolCallId}</footer></article>
+        }
+        return <div className="rr-agent-control" key={event.sequence}><Sparkles /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></span></div>
+      })}
+      {!conversation.length && <div className="rr-trace-empty"><MessageSquareText /><b>{status === 'running' ? '等待首个 Agent Turn 完成' : '没有可展示的 Agent 对话'}</b><p>{events.length ? '这是一条旧运行，只保存了生命周期元数据。请发起新评审以采集完整对话和工具交互。' : status === 'running' ? '问答执行事件会在收到 Agent 响应后同步到这里。' : '该运行没有采集可展示的交互记录。'}</p></div>}
+      {conversation.length > 0 && !hasDetailedTrace && <div className="rr-trace-legacy"><AlertTriangle />旧运行只保存事件点，没有保存消息正文和工具参数/返回。</div>}
+    </div> : <div className="rr-agent-events">{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : event.type.includes('message') ? 'message' : ''} /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.role ? ` · ${event.role}` : ''}</small></span><time>{eventTime(event.occurredAt)}</time></article>)}{!events.length && <div className="rr-trace-empty"><Activity /><b>暂无事件记录</b><p>{status === 'running' ? '首个 Turn 完成后会同步到这里。' : '该历史运行未采集执行事件。'}</p></div>}</div>}</div>
+  </>
 }
 
 function QaExecutionModal({ question, modelLabel, execution, running, failed, onClose }: { question: string; modelLabel?: string; execution: AgentExecutionRecord; running: boolean; failed?: boolean; onClose: () => void }) {
-  const events = execution.events
-  const toolEnds = new Map(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => [event.toolCallId!, event]))
-  const toolCalls = events.filter(event => event.type === 'tool_execution_start')
-  const summaryEvents = events.filter(event => event.type === 'runtime_initialized' || event.type === 'turn_start' || event.type === 'message_end' || event.type === 'tool_execution_start' || event.type === 'tool_execution_end' || event.type === 'result_submission_retry' || event.type === 'agent_end')
-  const publicOutputs = events.filter(event => event.type === 'message_end' && event.role === 'assistant' && event.content)
-  return <ReviewModal title="评审问答执行详情" className="rr-run-record-modal rr-qa-trace-modal" onClose={onClose}><div className="rr-run-record">
+  const [tab, setTab] = useState<'conversation' | 'events'>('conversation')
+  const status: RunStatus = running ? 'running' : failed ? 'failed' : 'succeeded'
+  return <ReviewModal title="评审问答运行记录" className="rr-run-record-modal rr-qa-trace-modal" onClose={onClose}><div className="rr-run-record">
     <div className="rr-run-record-summary"><div><ReviewBadge tone={running ? 'purple' : failed ? 'red' : 'green'}>{running ? '生成中' : failed ? '执行失败' : '回答完成'}</ReviewBadge><b>{question}</b><span>{modelLabel ?? '评审问答 Agent'}</span></div><dl><div><dt>Turn</dt><dd>{execution.turns}</dd></div><div><dt>工具调用</dt><dd>{execution.toolCalls}{execution.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution.framework ? `${execution.framework.name} ${execution.framework.version}` : running ? '连接中' : '未知'}</dd></div></dl></div>
-    <div className="rr-run-record-body"><div className="rr-qa-trace-content">
-      <section><header><Sparkles /><span><b>推理与执行摘要</b><small>按实际事件生成，不补写模型未公开的思考</small></span></header><div className="rr-qa-trace-steps">{summaryEvents.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : ''} /><span><b>{qaTraceStep(event)}</b><small>#{event.sequence} · Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></span></article>)}{!summaryEvents.length && <div className="rr-trace-empty"><LoaderCircle className={running ? 'rotating' : ''} /><b>{running ? '正在建立问答执行上下文' : '没有可展示的执行事件'}</b></div>}</div></section>
-      <section><header><Wrench /><span><b>工具调用详情</b><small>调用参数和返回均经过服务端脱敏</small></span></header><div className="rr-qa-tool-list">{toolCalls.map(start => { const end = start.toolCallId ? toolEnds.get(start.toolCallId) : undefined; return <article className={`rr-agent-tool ${end?.isError ? 'failed' : ''}`} key={start.sequence}><header><span><Wrench />{start.toolId ?? '未知工具'}</span><ReviewBadge tone={!end ? 'orange' : end.isError ? 'red' : 'green'}>{!end ? '执行中' : end.isError ? '失败' : '完成'}</ReviewBadge><small>Turn {start.turn ?? 0}</small></header><div><details open><summary>调用参数</summary><pre>{formatTraceValue(start.toolArguments) || '未保存参数'}</pre></details><details><summary>工具返回</summary><pre>{formatTraceValue(end?.toolResult) || (!end ? '等待工具返回…' : '未保存返回内容')}</pre></details></div><footer>{start.toolCallId}</footer></article> })}{!toolCalls.length && <div className="rr-trace-empty"><Wrench /><b>{running ? '等待首个工具调用' : '本轮没有工具调用记录'}</b></div>}</div></section>
-      {publicOutputs.length > 0 && <section><header><MessageSquareText /><span><b>模型公开输出</b><small>仅展示模型公开文本，不包含隐藏 reasoning 块</small></span></header><div className="rr-qa-public-output">{publicOutputs.map(event => <article key={event.sequence}><small>Turn {event.turn ?? 0}</small><p>{event.content}</p></article>)}</div></section>}
-    </div></div>
+    <AgentExecutionTrace execution={execution} loading={false} modelLabel={modelLabel} status={status} tab={tab} onTab={setTab} />
   </div></ReviewModal>
 }
 

@@ -88,6 +88,34 @@ test('服务端拒绝歧义 Evidence 和缺失的需求覆盖结论', async () =
   assert.ok(normalized.report.issues.some(item => /歧义/u.test(item.message)))
 })
 
+test('Agent 未提交技术方案结果时保留真实失败阶段且不发布正式结果', async () => {
+  const store = await seededStore()
+  await new AiResourceService(store).list()
+  const configurations = new AgentConfigurationService(store)
+  const draft = (await configurations.get()).agents.technicalSolutionAnalysis.draft
+  const saved = await configurations.save({
+    agentKey: 'technicalSolutionAnalysis', revision: draft.revision,
+    routing: { ...draft.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 4_096 },
+    definition: draft.definition,
+  })
+  await configurations.publish({ agentKey: 'technicalSolutionAnalysis', revision: saved.revision })
+  const runtime: AgentRuntime = { execute: async () => {
+    throw new Error('MODEL_TOOL_CALL_REQUIRED: 模型未调用 technical_solution_review_submit_result')
+  } }
+  Object.assign(store, { enqueueTechnicalSolutionJob: async () => undefined })
+  const service = new TechnicalSolutionReviewService(store, runtime, configurations)
+  const review = await service.createReview('project-version-1', { name: '失败阶段测试', sourceReviewRunId: 'requirement-run-1', solutionAssetVersionIds: ['tech-version-1'] })
+  const run = await service.createRun('project-version-1', review.id)
+  await assert.rejects(() => service.processPreparedRun(run.runId), /MODEL_TOOL_CALL_REQUIRED/u)
+  const failed = await service.getRun('project-version-1', review.id, run.runId)
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.failedAtStep, 'analyzing_solution')
+  assert.equal(failed.step, 'failed')
+  assert.equal(failed.result, undefined)
+  assert.match(failed.error ?? '', /MODEL_TOOL_CALL_REQUIRED/u)
+  assert.ok(failed.execution)
+})
+
 test('Provider 暂时失败后按已发布路由切换候选模型并保留同一 Run', async () => {
   const store = await seededStore()
   await store.transaction(state => { state.modelSources[0].models.push({ ...structuredClone(state.modelSources[0].models[0]), id: 'model-2', name: 'fallback-model', displayName: '回退模型' }) })

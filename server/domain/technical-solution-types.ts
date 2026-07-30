@@ -200,6 +200,7 @@ export interface TechnicalSolutionReviewRun {
   finishedAt?: string
   errorCode?: string
   error?: string
+  failedAtStep?: string
   result?: TechnicalSolutionFormalResult
   inputDeliveryManifest?: InputDeliveryManifest
   execution?: AgentExecutionRecord

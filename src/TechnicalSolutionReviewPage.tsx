@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, BookOpen, CheckCircle2, Clock3, Download, FileText, Filter, GitBranch, History, Play, RefreshCw, ShieldCheck, Square, Upload, XCircle } from 'lucide-react'
+import { Activity, AlertTriangle, BookOpen, CheckCircle2, Clock3, Download, FileText, Filter, GitBranch, History, Play, RefreshCw, ShieldCheck, Sparkles, Square, Upload, Wrench, XCircle } from 'lucide-react'
 import type { ProjectVersion } from './project-version-api'
 import { uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
 import { actOnTechnicalFinding, cancelTechnicalRun, createTechnicalReview, createTechnicalRun, downloadTechnicalReport, loadTechnicalBaselines, loadTechnicalFindingActions, loadTechnicalFixedContent, loadTechnicalReviews, loadTechnicalRun, loadTechnicalRuns, loadTechnicalSolutionAssets, type CoverageStatus, type FindingActionsResponse, type FindingState, type TechnicalBaseline, type TechnicalEvidence, type TechnicalFormalResult, type TechnicalReview, type TechnicalRun, type TechnicalRunSummary, type TechnicalSolutionAsset } from './technical-solution-review-api'
@@ -36,7 +36,7 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
   const [runId, setRunId] = useState(initial.runId)
   const [run, setRun] = useState<TechnicalRun | null>(null)
   const [runs, setRuns] = useState<TechnicalRunSummary[]>([])
-  const [tab, setTab] = useState<Tab>('overview')
+  const [tab, setTab] = useState<Tab>(initial.tab)
   const [selectedFindingId, setSelectedFindingId] = useState('')
   const [actions, setActions] = useState<FindingActionsResponse>({ actions: [], findings: [] })
   const [severity, setSeverity] = useState('all')
@@ -48,6 +48,9 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
   const [acting, setActing] = useState(false)
   const [uploadState, setUploadState] = useState<'idle' | 'running'>('idle')
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
+  const [runRecordOpen, setRunRecordOpen] = useState(false)
+  const [runRecordLoading, setRunRecordLoading] = useState(false)
+  const [runRecordTab, setRunRecordTab] = useState<'events' | 'summary'>('summary')
   const pollRef = useRef<number | undefined>(undefined)
   const uploadRef = useRef<HTMLInputElement>(null)
   const technicalUploadDirectory = projectVersion ? versionDocumentDirectory(projectVersion.name, '技术方案') : ''
@@ -73,6 +76,9 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
         const actionResponse = await loadTechnicalFindingActions(projectVersionId, technicalReviewId, technicalRunId)
         setActions(actionResponse)
         setSelectedFindingId(current => detail.result?.findings.some(item => item.id === current) ? current : detail.result?.findings[0]?.id ?? '')
+      } else {
+        setActions({ actions: [], findings: [] })
+        setSelectedFindingId('')
       }
     } catch (error) { notify(message(error), 'error') }
   }, [projectVersionId, notify])
@@ -84,10 +90,20 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
     return () => window.clearTimeout(timer)
   }, [uploadProgress?.stage])
   useEffect(() => {
-    const restore = () => { const context = routeContext(); setReviewId(context.technicalReviewId); setRunId(context.runId); setDocument(null) }
+    const restore = () => { const context = routeContext(); setReviewId(context.technicalReviewId); setRunId(context.runId); setTab(context.tab); setDocument(null) }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
   }, [])
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('page', 'design')
+    if (projectVersionId) url.searchParams.set('projectVersionId', projectVersionId)
+    if (reviewId) url.searchParams.set('technicalReviewId', reviewId); else url.searchParams.delete('technicalReviewId')
+    if (runId) url.searchParams.set('runId', runId); else url.searchParams.delete('runId')
+    url.searchParams.set('view', tab)
+    ;['reviewId', 'findingId', 'evidenceId'].forEach(key => url.searchParams.delete(key))
+    window.history.replaceState({}, '', url)
+  }, [projectVersionId, reviewId, runId, tab])
   useEffect(() => { if (projectVersionId && reviewId && runId) void loadRunContext(reviewId, runId) }, [projectVersionId, reviewId, runId, loadRunContext])
   useEffect(() => {
     if (pollRef.current) window.clearInterval(pollRef.current)
@@ -102,7 +118,7 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
     try {
       const review = await createTechnicalReview(projectVersionId, { name: reviewName, sourceReviewRunId: selectedBaseline, solutionAssetVersionIds: selectedAssets })
       const created = await createTechnicalRun(projectVersionId, review.id)
-      setReviewId(review.id); setRunId(created.runId); setRun(created); updateRoute(review.id, created.runId); notify('技术方案评审已进入运行队列')
+      setReviewId(review.id); setRunId(created.runId); setRun(created); setTab('overview'); updateRoute(review.id, created.runId, 'overview'); notify('技术方案评审已进入运行队列')
       await refreshInputs()
     } catch (error) { notify(message(error), 'error') }
     finally { setStarting(false) }
@@ -156,11 +172,12 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
       notify(detail, 'error')
     } finally { setUploadState('idle') }
   }
-  const rerun = async () => { if (!projectVersionId || !reviewId) return; setStarting(true); try { const created = await createTechnicalRun(projectVersionId, reviewId); setRunId(created.runId); setRun(created); updateRoute(reviewId, created.runId); notify('已创建新的技术方案评审运行') } catch (error) { notify(message(error), 'error') } finally { setStarting(false) } }
+  const rerun = async () => { if (!projectVersionId || !reviewId) return; setStarting(true); try { const created = await createTechnicalRun(projectVersionId, reviewId); setReviewId(reviewId); setRunId(created.runId); setRun(created); setTab('overview'); updateRoute(reviewId, created.runId, 'overview'); notify('已创建新的技术方案评审运行') } catch (error) { notify(message(error), 'error') } finally { setStarting(false) } }
   const cancel = async () => { if (!run) return; try { setRun(await cancelTechnicalRun(projectVersionId, run.technicalReviewId, run.runId)); notify('已取消技术方案评审', 'warning') } catch (error) { notify(message(error), 'error') } }
-  const selectRun = (item: TechnicalRunSummary) => { setReviewId(item.technicalReviewId); setRunId(item.runId); updateRoute(item.technicalReviewId, item.runId); setTab('overview'); setDocument(null) }
+  const selectRun = (item: TechnicalRunSummary) => { setReviewId(item.technicalReviewId); setRunId(item.runId); setTab('overview'); updateRoute(item.technicalReviewId, item.runId, 'overview'); setDocument(null) }
   const openEvidence = async (evidence: TechnicalEvidence) => { if (!run) return; try { const value = await loadTechnicalFixedContent(projectVersionId, run.technicalReviewId, run.runId, evidence.assetVersionId); if (value.contentSha256 !== evidence.contentSha256) throw new Error('固定正文 Hash 与 Evidence 不一致'); const input = run.snapshot.solutionInputs.find(item => item.assetVersionId === evidence.assetVersionId); const title = input?.displayName ?? (evidence.sourceKind === 'requirement' ? '冻结需求原文' : '技术方案原文'); setDocument({ assetVersionId: evidence.assetVersionId, title, content: value.content, logicalPath: input?.logicalPath, evidence }) } catch (error) { notify(message(error), 'error') } }
   const exportReport = async () => { if (!run) return; try { const blob = await downloadTechnicalReport(projectVersionId, run.technicalReviewId, run.runId); const url = URL.createObjectURL(blob); const anchor = window.document.createElement('a'); anchor.href = url; anchor.download = `技术方案评审-${run.runId.slice(-8)}.md`; anchor.click(); URL.revokeObjectURL(url); notify('Markdown 报告已导出') } catch (error) { notify(message(error), 'error') } }
+  const openRunRecord = async () => { if (!run) return; setRunRecordOpen(true); setRunRecordTab('summary'); setRunRecordLoading(true); try { const detail = await loadTechnicalRun(projectVersionId, run.technicalReviewId, run.runId); setRun(detail) } catch (error) { notify(message(error), 'error') } finally { setRunRecordLoading(false) } }
 
   if (!projectVersion) return <section className="tech-empty"><FileText /><h2>请先选择项目版本</h2><p>技术方案评审必须固定到明确的项目版本。</p></section>
   if (!run) return <InputSelection loading={loading} projectVersion={projectVersion} baselines={baselines} assets={assets} reviews={reviews} selectedBaseline={selectedBaseline} setSelectedBaseline={setSelectedBaseline} selectedAssets={selectedAssets} setSelectedAssets={setSelectedAssets} reviewName={reviewName} setReviewName={setReviewName} agentReady={agentReady} starting={starting} start={start} openHistory={item => item.latestRun && selectRun(item.latestRun)} refresh={() => void refreshInputs()} uploadRef={uploadRef} uploadState={uploadState} uploadProgress={uploadProgress} uploadDirectory={technicalUploadDirectory} apiState={apiState} upload={uploadTechnicalSolutions} onManageVersions={onManageVersions} onOpenKnowledge={onOpenKnowledge} />
@@ -173,8 +190,8 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
   const act = async (action: string) => { if (!selectedFinding || !currentProjection) return; setActing(true); try { await actOnTechnicalFinding(projectVersionId, run.technicalReviewId, run.runId, selectedFinding.id, { action, comment, expectedVersion: currentProjection.version }); setActions(await loadTechnicalFindingActions(projectVersionId, run.technicalReviewId, run.runId)); setComment(''); notify('Finding 处置已追加保存') } catch (error) { notify(message(error), 'error'); setActions(await loadTechnicalFindingActions(projectVersionId, run.technicalReviewId, run.runId).catch(() => actions)) } finally { setActing(false) } }
 
   return <div className="tech-workbench">
-    <header className="tech-run-header"><div className="tech-run-heading"><div className="tech-title-line"><span className="tech-run-symbol"><ShieldCheck /></span><div><h2>{reviews.find(item => item.id === run.technicalReviewId)?.name ?? '技术方案评审'}</h2><p>基于固定需求基线与技术方案资料完成可追溯评审</p></div><StatusBadge status={run.status} /></div><div className="tech-run-meta"><span><small>运行 ID</small><b title={run.runId}>{run.runId.replace('technical_run_', '').slice(0, 14)}</b></span><span><small>需求基线</small><b title={run.sourceReviewRunId}>{run.sourceReviewRunId.replace('review_run_', '').slice(0, 14)}</b></span><span><small>模型</small><b>{run.modelLabel}</b></span>{run.degradations?.length ? <span className="warning"><small>路由降级</small><b>{run.degradations.length} 次</b></span> : null}</div><div className="tech-header-progress"><div><span>{stepLabel(run.step)}</span><b>{run.progress}%</b></div><div><i style={{ width: `${run.progress}%` }} /></div></div></div><div className="tech-actions"><button className="btn ghost" onClick={rerun} disabled={starting || ['queued','running'].includes(run.status)}><RefreshCw />重新评审</button>{['queued','running'].includes(run.status) && <button className="btn danger" onClick={cancel}><Square />取消</button>}<button className="btn primary" disabled={run.status !== 'succeeded'} onClick={exportReport}><Download />导出报告</button></div></header>
-    {(run.status === 'failed' || run.status === 'cancelled') && <div className={`tech-terminal ${run.status}`}><AlertTriangle /><div><b>{run.status === 'failed' ? '运行失败' : '运行已取消'}</b><p>{run.error ?? '本次运行没有发布正式结果。'}</p></div></div>}
+    <header className="tech-run-header"><div className="tech-run-heading"><div className="tech-title-line"><span className="tech-run-symbol"><ShieldCheck /></span><div><h2>{reviews.find(item => item.id === run.technicalReviewId)?.name ?? '技术方案评审'}</h2><p>基于固定需求基线与技术方案资料完成可追溯评审</p></div><StatusBadge status={run.status} /></div><div className="tech-run-meta"><span><small>运行 ID</small><b title={run.runId}>{run.runId.replace('technical_run_', '').slice(0, 14)}</b></span><span><small>需求基线</small><b title={run.sourceReviewRunId}>{run.sourceReviewRunId.replace('review_run_', '').slice(0, 14)}</b></span><span><small>模型</small><b>{run.modelLabel}</b></span>{run.degradations?.length ? <span className="warning"><small>路由降级</small><b>{run.degradations.length} 次</b></span> : null}</div><div className={`tech-header-progress ${run.status === 'failed' ? 'failed' : ''}`}><div><span>{run.status === 'failed' ? `失败于：${stepLabel(run.failedAtStep ?? run.step)}` : stepLabel(run.step)}</span><b>{run.status === 'failed' ? `最后进度 ${run.progress}%` : `${run.progress}%`}</b></div><div><i style={{ width: `${run.progress}%` }} /></div></div></div><div className="tech-actions"><button className="btn ghost" onClick={rerun} disabled={starting || ['queued','running'].includes(run.status)}><RefreshCw />重新评审</button>{['queued','running'].includes(run.status) && <button className="btn danger" onClick={cancel}><Square />取消</button>}<button className="btn ghost" onClick={() => void openRunRecord()} disabled={runRecordLoading}><Activity />运行记录</button><button className="btn primary" disabled={run.status !== 'succeeded'} onClick={exportReport}><Download />导出报告</button></div></header>
+    {(run.status === 'failed' || run.status === 'cancelled') && <div className={`tech-terminal ${run.status}`}><AlertTriangle /><div><b>{run.status === 'failed' ? `运行失败 · ${stepLabel(run.failedAtStep ?? run.step)}` : '运行已取消'}</b><p>{run.error ?? '本次运行没有发布正式结果。'}</p></div></div>}
     <div className="tech-columns">
       <aside className="tech-sources"><div className="tech-sidebar-head"><span><FileText /><b>固定资料</b></span><em>{run.snapshot.solutionInputs.length + 1} 组输入</em></div><div className="tech-sidebar-scroll"><SourceList run={run} result={result} openEvidence={openEvidence} document={document} loadContent={async assetVersionId => { const value = await loadTechnicalFixedContent(projectVersionId, run.technicalReviewId, run.runId, assetVersionId); const input = run.snapshot.solutionInputs.find(item => item.assetVersionId === assetVersionId); setDocument({ assetVersionId, title: input?.displayName ?? '冻结原文', content: value.content, logicalPath: input?.logicalPath }) }} /></div><div className="tech-sidebar-foot"><ShieldCheck /><span><b>服务端固定输入</b><small>正文 Hash 与索引版本不会随页面刷新变化</small></span></div></aside>
       <main className="tech-results"><nav className="tech-tabs" role="tablist" aria-label="技术方案评审视图">{technicalTabs.map(([key,label,Icon]) => <button key={key} id={`tech-tab-${key}`} className={tab === key ? 'active' : ''} role="tab" aria-selected={tab === key} aria-controls="tech-tab-panel" disabled={!result && key !== 'history'} onClick={() => setTab(key)}><Icon />{label}</button>)}</nav>
@@ -191,8 +208,29 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
       </main>
       <aside className="tech-detail"><div className="tech-sidebar-head"><span><ShieldCheck /><b>{selectedFinding ? 'Finding 详情与处置' : '运行上下文'}</b></span>{result && <em>{result.findings.length} 条 Finding</em>}</div>{selectedFinding && result ? <><div className="detail-heading"><Severity severity={selectedFinding.severity} /><div><h4>{selectedFinding.title}</h4><p>{typeLabel(selectedFinding.type)} · {stateLabel(currentProjection?.state ?? 'open')}</p></div></div><DetailBlock title="问题" value={selectedFinding.problem} /><DetailBlock title="影响" value={selectedFinding.impact} /><DetailBlock title="建议" value={selectedFinding.recommendation} /><DetailBlock title="关联需求点" value={selectedFinding.requirementPointIds.join('、') || '未关联'} /><EvidenceButtons ids={selectedFinding.evidenceIds} result={result} open={openEvidence} /><div className="action-box"><label>处置说明<textarea value={comment} onChange={event => setComment(event.target.value)} maxLength={2000} placeholder="追加说明，不覆盖 AI 原始内容" /></label><div>{currentProjection?.state === 'open' ? <><button disabled={acting} onClick={() => void act('confirm')}>确认</button><button disabled={acting} onClick={() => void act('dismiss')}>驳回</button><button disabled={acting} onClick={() => void act('resolve')}>已解决</button><button disabled={acting} onClick={() => void act('request_follow_up')}>需跟进</button></> : <button disabled={acting} onClick={() => void act('reopen')}>重新打开</button>}</div></div><div className="action-history">{actions.actions.filter(item => item.findingId === selectedFinding.id).map(item => <p key={item.id}><b>{stateLabel(item.toState)}</b><span>{item.actorDisplayName} · {formatTime(item.createdAt)}</span><em>{item.comment}</em></p>)}</div></> : result ? <div className="detail-empty"><ShieldCheck /><b>选择一条技术 Finding</b><p>在“技术 Finding”页签中选择结论后，可查看影响、建议、Evidence 和人工处置。</p></div> : <RunContextPanel run={run} />}</aside>
     </div>
+    {runRecordOpen && <TechnicalRunRecordModal run={run} loading={runRecordLoading} tab={runRecordTab} onTab={setRunRecordTab} onClose={() => setRunRecordOpen(false)} />}
   </div>
 }
+
+function TechnicalRunRecordModal({ run, loading, tab, onTab, onClose }: { run: TechnicalRun; loading: boolean; tab: 'events' | 'summary'; onTab: (tab: 'events' | 'summary') => void; onClose: () => void }) {
+  const events = run.events ?? run.execution?.events ?? []
+  const attempts = run.modelRouteAttempts ?? []
+  return <div className="tech-record-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="tech-record-modal" role="dialog" aria-modal="true" aria-label="技术方案评审运行记录">
+    <header className="tech-record-header"><div><span><Activity />技术方案评审运行记录</span><h2>{run.runId}</h2></div><button onClick={onClose} aria-label="关闭运行记录"><XCircle /></button></header>
+    <div className="tech-record-summary"><StatusBadge status={run.status} /><span>{run.status === 'failed' ? `失败于：${stepLabel(run.failedAtStep ?? run.step)}` : stepLabel(run.step)}</span><b>{run.status === 'failed' ? `最后进度 ${run.progress}%` : `${run.progress}%`}</b></div>
+    {loading ? <div className="tech-record-empty"><RefreshCw className="spin" /><b>正在读取运行记录</b></div> : <>
+      {run.error && <div className="tech-record-error"><AlertTriangle /><span><b>终止原因</b><small>{run.error}</small></span></div>}
+      <div className="tech-record-tabs"><button className={tab === 'summary' ? 'active' : ''} onClick={() => onTab('summary')}><Sparkles />执行摘要</button><button className={tab === 'events' ? 'active' : ''} onClick={() => onTab('events')}><Activity />事件时间线 <em>{events.length}</em></button></div>
+      <div className="tech-record-body">{tab === 'summary' ? <>
+        <section className="tech-record-grid"><div><small>模型</small><b>{run.modelLabel}</b></div><div><small>Turn</small><b>{run.execution?.turns ?? 0}</b></div><div><small>工具调用</small><b>{run.execution?.toolCalls ?? 0}{run.execution?.toolErrors ? `（异常 ${run.execution.toolErrors}）` : ''}</b></div><div><small>Runtime</small><b>{run.execution?.framework ? `${run.execution.framework.name} ${run.execution.framework.version}` : '未记录'}</b></div></section>
+        {attempts.length > 0 && <section className="tech-record-section"><h3>模型路由尝试</h3>{attempts.map(item => <article className="tech-attempt" key={item.id}><span><b>第 {item.attempt} 次 · {item.modelLabel}</b><small>{item.status}{item.error ? ` · ${item.error}` : ''}</small></span><StatusBadge status={item.status === 'succeeded' ? 'succeeded' : item.status === 'running' ? 'running' : item.status === 'cancelled' ? 'cancelled' : 'failed'} /></article>)}</section>}
+        {run.degradations?.length ? <section className="tech-record-section"><h3>路由降级</h3>{run.degradations.map((item, index) => <p key={`${item.occurredAt}-${index}`}>{item.fromModelId} → {item.toModelId}：{item.reason}</p>)}</section> : null}
+      </> : <section className="tech-record-section tech-event-list"><h3>事件时间线</h3>{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : ''} /><span><b>{eventLabel(event.type)}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.content ? ` · ${event.content}` : ''}</small></span><time>{formatTime(event.occurredAt)}</time></article>)}{!events.length && <div className="tech-record-empty"><Activity /><b>暂无事件记录</b></div>}</section>}</div>
+    </>}
+  </section></div>
+}
+
+function eventLabel(value: string) { return ({ runtime_initialized: 'Runtime 初始化', input_package_built: '正文输入包已生成', input_batch_delivered: '正文批次已投递', input_final_merge_started: '分段草稿开始归并', turn_start: 'Turn 开始', turn_end: 'Turn 结束', tool_execution_start: '工具调用开始', tool_execution_end: '工具调用结束', result_submission_required: '进入结果提交窗口', result_submission_retry: '要求重新提交结果', result_validation_repair_required: '结果校验要求修正', agent_end: 'Agent 执行结束' } as Record<string, string>)[value] ?? value }
 
 function InputSelection(props: { loading:boolean;projectVersion:ProjectVersion;baselines:TechnicalBaseline[];assets:TechnicalSolutionAsset[];reviews:TechnicalReview[];selectedBaseline:string;setSelectedBaseline:(value:string)=>void;selectedAssets:string[];setSelectedAssets:(value:string[])=>void;reviewName:string;setReviewName:(value:string)=>void;agentReady:boolean;starting:boolean;start:()=>void;openHistory:(review:TechnicalReview)=>void;refresh:()=>void;uploadRef:React.RefObject<HTMLInputElement|null>;uploadState:'idle'|'running';uploadProgress:UploadProgress|null;uploadDirectory:string;apiState:'connecting'|'ready'|'offline';upload:(event:React.ChangeEvent<HTMLInputElement>)=>Promise<void>;onManageVersions:()=>void;onOpenKnowledge:()=>void }) {
   const selected = props.baselines.find(item => item.id === props.selectedBaseline)
@@ -209,12 +247,13 @@ function SourceList({run,result,openEvidence,document,loadContent}:{run:Technica
 function Overview({result,run}:{result:TechnicalFormalResult;run:TechnicalRun}) { const stats=result.statistics; return <section className="tech-overview"><div className="stat-grid"><Stat label="需求总数" value={stats.totalRequirements}/><Stat label="已覆盖" value={stats.covered} tone="green"/><Stat label="部分覆盖" value={stats.partiallyCovered} tone="orange"/><Stat label="未覆盖" value={stats.notCovered} tone="red"/><Stat label="待确认" value={stats.needsConfirmation} tone="violet"/><Stat label="覆盖率" value={`${(stats.coverageRatio*100).toFixed(1)}%`} tone="blue"/></div><article className="summary-card"><h3>AI 技术方案摘要</h3><p>{result.summary.overview}</p><div><section><b>主要缺口</b>{result.summary.majorGaps.map(item=><span key={item}>{item}</span>)}</section><section><b>主要风险</b>{result.summary.majorRisks.map(item=><span key={item}>{item}</span>)}</section><section><b>建议处理顺序</b>{result.summary.recommendedOrder.map((item,index)=><span key={item}>{index+1}. {item}</span>)}</section></div></article><article className="snapshot-card"><h3>运行快照</h3><dl><dt>Agent / Prompt</dt><dd>{run.snapshot.agentDefinition.agentKey} {run.snapshot.agentDefinition.version} · {run.snapshot.agentDefinition.promptRef.contentSha256.slice(0,12)}</dd><dt>模型</dt><dd>{run.modelLabel}</dd><dt>索引</dt><dd>{run.snapshot.indexVersionId}</dd><dt>输入投递</dt><dd>{run.snapshot.inputPlan.mode} · {run.snapshot.inputPlan.batches.length} 批 · {run.snapshot.inputPlan.estimatedInputTokens} Token</dd><dt>执行</dt><dd>{run.execution?.turns??0} 轮 · {run.execution?.toolCalls??0} 次工具调用 · {run.execution?.toolErrors??0} 次错误</dd></dl></article></section> }
 function RunPlaceholder({run}:{run:TechnicalRun}) {
   const phases = ['校验固定输入', 'Agent 分析方案', '解析与校验 Evidence', '发布正式结果']
-  const currentPhase = runPhase(run.step)
+  const currentPhase = runPhase(run.status === 'failed' ? (run.failedAtStep ?? run.step) : run.step)
   const active = ['queued', 'running'].includes(run.status)
+  const failed = run.status === 'failed'
   return <section className={`run-placeholder ${run.status}`}>
-    <div className="run-placeholder-hero"><span className="run-state-icon">{active ? <RefreshCw className="spin" /> : run.status === 'failed' ? <XCircle /> : <AlertTriangle />}</span><div><small>{run.status === 'queued' ? '等待执行' : run.status === 'running' ? '实时运行' : '运行已结束'}</small><h3>{run.status === 'queued' ? '等待 Worker 领取评审任务' : run.status === 'running' ? 'TechnicalSolutionAnalysisAgent 正在分析固定输入' : run.status === 'failed' ? '本次运行失败，未发布正式结果' : '本次运行未发布正式结果'}</h3><p>{run.error ?? '页面持续同步服务端阶段和进度；刷新或关闭浏览器不会中断本次评审。'}</p></div></div>
-    <div className="run-phase-list">{phases.map((phase, index) => <div key={phase} className={index < currentPhase ? 'done' : index === currentPhase && active ? 'active' : ''}><span>{index < currentPhase ? <CheckCircle2 /> : index + 1}</span><b>{phase}</b><small>{index < currentPhase ? '已完成' : index === currentPhase && active ? stepLabel(run.step) : '等待前序阶段'}</small></div>)}</div>
-    <div className="run-placeholder-progress"><div><span>{stepLabel(run.step)}</span><b>{run.progress}%</b></div><div><i style={{ width: `${run.progress}%` }} /></div></div>
+    <div className="run-placeholder-hero"><span className="run-state-icon">{active ? <RefreshCw className="spin" /> : failed ? <XCircle /> : <AlertTriangle />}</span><div><small>{run.status === 'queued' ? '等待执行' : run.status === 'running' ? '实时运行' : failed ? '运行失败' : '运行已结束'}</small><h3>{run.status === 'queued' ? '等待 Worker 领取评审任务' : run.status === 'running' ? 'TechnicalSolutionAnalysisAgent 正在分析固定输入' : failed ? '本次运行失败，未发布正式结果' : '本次运行未发布正式结果'}</h3><p>{run.error ?? '页面持续同步服务端阶段和进度；刷新或关闭浏览器不会中断本次评审。'}</p></div></div>
+    <div className="run-phase-list">{phases.map((phase, index) => { const state = phaseState(index, currentPhase, run.status); return <div key={phase} className={state}><span>{state === 'done' ? <CheckCircle2 /> : state === 'failed' ? <XCircle /> : index + 1}</span><b>{phase}</b><small>{state === 'done' ? '已完成' : state === 'failed' ? '失败' : state === 'active' ? stepLabel(run.step) : '未开始'}</small></div> })}</div>
+    <div className={`run-placeholder-progress ${failed ? 'failed' : ''}`}><div><span>{failed ? `失败于：${stepLabel(run.failedAtStep ?? run.step)}` : stepLabel(run.step)}</span><b>{failed ? `最后进度 ${run.progress}%` : `${run.progress}%`}</b></div><div><i style={{ width: `${run.progress}%` }} /></div></div>
     <div className="run-facts"><span><small>固定需求点</small><b>{run.snapshot.requirementBaseline.requirementPoints.length}</b></span><span><small>技术方案</small><b>{run.snapshot.solutionInputs.length} 份</b></span><span><small>输入模式</small><b>{run.snapshot.inputPlan.mode === 'full_context' ? '完整上下文' : `${run.snapshot.inputPlan.batches.length} 个分段`}</b></span><span><small>预计输入</small><b>{run.snapshot.inputPlan.estimatedInputTokens.toLocaleString()} Token</b></span></div>
   </section>
 }
@@ -227,13 +266,14 @@ function Stat({label,value,tone='gray'}:{label:string;value:string|number;tone?:
 function StatusBadge({status}:{status:TechnicalRun['status']}) { return <span className={`tech-status ${status}`}>{statusLabel(status)}</span> }
 function StatusPill({status}:{status:CoverageStatus}) { return <span className={`coverage-status ${status}`}>{coverageLabel(status)}</span> }
 function Severity({severity}:{severity:string}) { return <span className={`severity-dot ${severity}`}>{severity.toUpperCase()}</span> }
-function updateRoute(technicalReviewId:string,runId:string){const url=new URL(window.location.href);url.searchParams.set('page','design');url.searchParams.set('technicalReviewId',technicalReviewId);url.searchParams.set('runId',runId);window.history.pushState({},'',url)}
-function routeContext(){if(typeof window==='undefined')return{technicalReviewId:'',runId:''};const url=new URL(window.location.href);return{technicalReviewId:url.searchParams.get('technicalReviewId')??'',runId:url.searchParams.get('runId')??''}}
+function updateRoute(technicalReviewId:string,runId:string,view:Tab='overview'){const url=new URL(window.location.href);url.searchParams.set('page','design');url.searchParams.set('technicalReviewId',technicalReviewId);url.searchParams.set('runId',runId);url.searchParams.set('view',view);['reviewId','findingId','evidenceId'].forEach(key=>url.searchParams.delete(key));window.history.pushState({},'',url)}
+function routeContext():{technicalReviewId:string;runId:string;tab:Tab}{if(typeof window==='undefined')return{technicalReviewId:'',runId:'',tab:'overview'};const url=new URL(window.location.href);const value=url.searchParams.get('view') as Tab|null;return{technicalReviewId:url.searchParams.get('technicalReviewId')??'',runId:url.searchParams.get('runId')??'',tab:technicalTabs.some(item=>item[0]===value)?value!:'overview'}}
 function message(error:unknown){return error instanceof Error?error.message:'操作失败'}
 function formatTime(value?:string){return value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'未完成'}
 function statusLabel(value:string){return({queued:'排队中',running:'运行中',succeeded:'已成功',failed:'失败',cancelled:'已取消'} as Record<string,string>)[value]??value}
 function stepLabel(value:string){return({waiting_worker:'等待 Worker',validating_input:'校验输入',assembling_context:'组装正文',analyzing_solution:'Agent 分析',candidate_submitted:'结果已提交',resolving_evidence:'解析 Evidence',validating_result:'校验结果',publishing_result:'保存正式结果',succeeded:'已完成',failed:'失败',cancelled:'已取消'} as Record<string,string>)[value]??value}
 function runPhase(value:string){return({waiting_worker:0,validating_input:0,assembling_context:0,analyzing_solution:1,candidate_submitted:1,resolving_evidence:2,validating_result:2,publishing_result:3,succeeded:4} as Record<string,number>)[value]??0}
+function phaseState(index:number,current:number,status:TechnicalRun['status']){if(status==='failed')return index<current?'done':index===current?'failed':'pending';if(status==='succeeded')return 'done';return index<current?'done':index===current?'active':'pending'}
 function taskStepLabel(value:string){return({queued:'等待处理',parsing:'解析文档',chunking:'切分正文',embedding:'生成向量',indexing:'写入索引',publishing:'发布索引',completed:'处理完成',succeeded:'处理完成',failed:'处理失败'} as Record<string,string>)[value]??value}
 function coverageLabel(value:CoverageStatus){return({covered:'已覆盖',partially_covered:'部分覆盖',not_covered:'未覆盖',needs_confirmation:'待确认'} as Record<CoverageStatus,string>)[value]}
 function stateLabel(value:FindingState){return({open:'待处理',confirmed:'已确认',dismissed:'已驳回',resolved:'已解决',needs_follow_up:'需跟进'} as Record<FindingState,string>)[value]}
