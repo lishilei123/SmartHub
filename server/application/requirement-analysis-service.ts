@@ -349,7 +349,8 @@ export class RequirementAnalysisService {
     return this.executeStages({ run, snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition, signal })
   }
 
-  async processPreparedRun(runId: string, lease: TaskLease, signal = new AbortController().signal, retryable = false) {
+  async processPreparedRun(runId: string, lease?: TaskLease, signal = new AbortController().signal, infrastructureAttempt = 1, maxInfrastructureAttempts = 1) {
+    await this.beginExecutionAttempt(runId, lease, infrastructureAttempt, maxInfrastructureAttempts)
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
     if (run.status !== 'running') throw new Error('需求评审运行已结束，不能由 Worker 重复执行')
@@ -373,7 +374,7 @@ export class RequirementAnalysisService {
       try {
         return await this.executeReviewStage({ run, extraction, snapshot: run.snapshot, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, reviewModel: reviewModels[0], reviewModels, reviewConfiguration, extractionExecution, reviewEvents, signal, lease, onModelAttempt: selection => { activeReviewModel = selection } })
       } catch (error) {
-        const message = await this.failRun(run.id, error, signal, activeReviewModel, 'requirement-review', reviewEvents, lease, retryable)
+        const message = await this.failRun(run.id, error, signal, activeReviewModel, 'requirement-review', reviewEvents, lease, infrastructureAttempt < maxInfrastructureAttempts)
         throw new Error(message)
       }
     }
@@ -396,20 +397,22 @@ export class RequirementAnalysisService {
       current.step = 'extracting_requirement_points'
       current.progress = 10
     })
-    return this.executeStages({ run, snapshot: run.snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, signal, lease, retryable })
+    return this.executeStages({ run, snapshot: run.snapshot, requirementInputPlan, extractionModels, reviewModels, extractionConfiguration, reviewConfiguration, reviewDefinition: run.snapshot.agentDefinitions.requirementReview, signal, lease, retryable: infrastructureAttempt < maxInfrastructureAttempts })
   }
 
-  async failPreparedRun(runId: string, lease: TaskLease, error: unknown, cancelled = false, retryable = false, retry?: { attempt: number; maxAttempts: number; nextAttemptAt?: string }) {
+  async failPreparedRun(runId: string, lease: TaskLease | undefined, error: unknown, cancelled = false, retryable = false, retry?: { attempt: number; maxAttempts: number; nextAttemptAt?: string }) {
     const message = String(error instanceof Error ? error.message : error).replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').slice(0, 500)
     await this.reviewTransaction(runId, lease, state => {
       const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       if (run.status !== 'running') return
       const now = new Date().toISOString()
       if (retry && !cancelled) {
+        const retryAttempt = run.executionAttempts?.find(item => item.attempt === retry.attempt)
         run.retryEvents ??= []
         run.retryEvents.push({
           attempt: retry.attempt,
           maxAttempts: retry.maxAttempts,
+          ...(retryAttempt?.activeAgentKey ? { agentKey: retryAttempt.activeAgentKey } : {}),
           status: retryable ? 'scheduled' : 'exhausted',
           error: message,
           occurredAt: now,
@@ -425,6 +428,15 @@ export class RequirementAnalysisService {
         run.finishedAt = now
       }
       run.error = message
+      const attempt = latestRunningExecutionAttempt(run)
+      if (attempt) {
+        attempt.status = cancelled ? 'cancelled' : 'failed'
+        attempt.finishedAt = now
+        attempt.modelLabel = run.modelLabel
+        attempt.error = message
+        if (run.execution?.agentKey === 'requirement-point-extraction') attempt.executions.requirementPointExtraction = structuredClone(run.execution)
+        if (run.execution?.agentKey === 'requirement-review') attempt.executions.requirementReview = structuredClone(run.execution)
+      }
     })
   }
 
@@ -480,6 +492,11 @@ export class RequirementAnalysisService {
         current.inputDeliveryManifest = structuredClone(required(extractionOutput.inputDeliveryManifest, '输入投递证明不存在'))
         current.executions = { ...(current.executions ?? {}), requirementPointExtraction: extractionExecution }
         current.execution = extractionExecution
+        const attempt = latestRunningExecutionAttempt(current)
+        if (attempt) {
+          attempt.executions.requirementPointExtraction = structuredClone(extractionExecution)
+          attempt.activeAgentKey = 'requirement-review'
+        }
         current.step = 'reviewing_requirements'
         current.progress = 60
       })
@@ -550,6 +567,14 @@ export class RequirementAnalysisService {
         },
         error: undefined,
       } satisfies Partial<ReviewRun>)
+      const attempt = latestRunningExecutionAttempt(current)
+      if (attempt) {
+        attempt.activeAgentKey = 'requirement-review'
+        attempt.status = 'succeeded'
+        attempt.finishedAt = finishedAt
+        attempt.modelLabel = current.modelLabel
+        attempt.executions = structuredClone(current.executions ?? {})
+      }
     })
     const completed = await this.get(input.run.id)
     return required(completed.response, '需求评审结果不存在')
@@ -569,6 +594,15 @@ export class RequirementAnalysisService {
             status: cancelled ? 'cancelled' : 'failed', step: cancelled ? 'cancelled' : 'failed', progress: current.progress, finishedAt: new Date().toISOString(), error: message,
             ...(events.length ? { execution: executionProgress(events, agentKey) } : {}),
           } satisfies Partial<ReviewRun>)
+      const attempt = latestRunningExecutionAttempt(current)
+      if (attempt) {
+        attempt.activeAgentKey = agentKey
+        attempt.status = cancelled ? 'cancelled' : 'failed'
+        attempt.finishedAt = new Date().toISOString()
+        attempt.modelLabel = current.modelLabel
+        attempt.error = message
+        if (events.length) attempt.executions[agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : 'requirementReview'] = executionProgress(events, agentKey)
+      }
       if (message.startsWith('MODEL_TOOL_CALL_REQUIRED:')) {
         const currentSource = draft.modelSources.find(item => item.id === failedModel.source.id)
         const currentModel = currentSource?.models.find(item => item.id === failedModel.model.id)
@@ -671,8 +705,44 @@ export class RequirementAnalysisService {
     await this.reviewTransaction(runId, lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
       current.execution = execution
+      const attempt = latestRunningExecutionAttempt(current)
+      if (attempt) {
+        attempt.activeAgentKey = agentKey
+        attempt.executions[agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : 'requirementReview'] = structuredClone(execution)
+      }
     })
   }
+
+  private async beginExecutionAttempt(runId: string, lease: TaskLease | undefined, attemptNumber: number, maxAttempts: number) {
+    await this.reviewTransaction(runId, lease, draft => {
+      const run = required(draft.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+      if (run.status !== 'running') throw new Error('需求评审运行已结束，不能创建新的 Worker 尝试记录')
+      const retainedExtraction = run.retryMode === 'review_only' ? run.executions?.requirementPointExtraction : undefined
+      run.execution = undefined
+      run.executions = retainedExtraction ? { requirementPointExtraction: structuredClone(retainedExtraction) } : undefined
+      run.executionAttempts ??= []
+      const startedAt = new Date().toISOString()
+      for (const previous of run.executionAttempts) {
+        if (previous.status !== 'running' || previous.attempt >= Math.max(1, attemptNumber)) continue
+        previous.status = 'failed'
+        previous.finishedAt = previous.finishedAt ?? startedAt
+        previous.error = previous.error ?? 'WORKER_ATTEMPT_SUPERSEDED: 后续重试已开始，本次尝试未完成'
+      }
+      const value = {
+        attempt: Math.max(1, attemptNumber), maxAttempts: Math.max(1, maxAttempts), status: 'running' as const,
+        activeAgentKey: run.retryMode === 'review_only' ? 'requirement-review' as const : 'requirement-point-extraction' as const,
+        startedAt, modelLabel: run.modelLabel,
+        executions: retainedExtraction ? { requirementPointExtraction: structuredClone(retainedExtraction) } : {},
+      }
+      const existing = run.executionAttempts.findIndex(item => item.attempt === value.attempt)
+      if (existing >= 0) run.executionAttempts[existing] = value
+      else run.executionAttempts.push(value)
+    })
+  }
+}
+
+function latestRunningExecutionAttempt(run: ReviewRun) {
+  return [...(run.executionAttempts ?? [])].reverse().find(item => item.status === 'running')
 }
 
 function presentRunSummary(run: ReviewRun) {
@@ -750,6 +820,7 @@ function presentRun(run: ReviewRun) {
     retryEvents: run.retryEvents,
     modelRouteAttempts: run.modelRouteAttempts,
     degradations: run.degradations,
+    executionAttempts: run.executionAttempts,
     snapshot: redactSnapshot(run.snapshot),
     execution: response ? undefined : run.execution,
     executions: response ? undefined : run.executions,
@@ -838,6 +909,10 @@ function snapshotAssets(run: ReviewRun) {
 function presentedRunError(run: ReviewRun) {
   if (!run.error?.startsWith('MODEL_TOOL_CALL_REQUIRED:')) return run.error
   const savedEvents = [
+    ...(run.executionAttempts ?? []).flatMap(attempt => [
+      ...(attempt.executions.requirementPointExtraction?.events ?? []),
+      ...(attempt.executions.requirementReview?.events ?? []),
+    ]),
     ...(run.executions?.requirementPointExtraction?.events ?? []),
     ...(run.executions?.requirementReview?.events ?? []),
     ...(run.execution?.events ?? []),

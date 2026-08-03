@@ -31,6 +31,7 @@ import {
   type ReviewFindingType,
   type ReviewSeverity,
   type RequirementReviewRun,
+  type ReviewRunExecutionAttempt,
   type ReviewQuestionQuote,
   type FindingActionType,
 } from './requirement-analysis-api'
@@ -117,15 +118,113 @@ const agentEventLabels: Record<string, string> = {
 function eventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
 function formatTraceValue(value: unknown) { return value === undefined ? '' : JSON.stringify(value, null, 2) }
 
+type DisplayExecutionAttempt = ReviewRunExecutionAttempt & { legacy?: boolean }
+type AgentStageKey = 'requirement-point-extraction' | 'requirement-review'
+type DisplayStageAttempt = DisplayExecutionAttempt & {
+  stageAttempt: number
+  stageMaxAttempts: number
+  stageStatus: ReviewRunExecutionAttempt['status']
+}
+
+function inferAgentKeyFromError(error?: string): AgentStageKey | undefined {
+  if (!error) return undefined
+  if (/需求评审|requirement-review/iu.test(error)) return 'requirement-review'
+  if (/需求点提取|requirement-point-extraction/iu.test(error)) return 'requirement-point-extraction'
+  return undefined
+}
+
+function executionForAgent(attempt: DisplayExecutionAttempt, agentKey: AgentStageKey) {
+  return agentKey === 'requirement-point-extraction' ? attempt.executions.requirementPointExtraction : attempt.executions.requirementReview
+}
+
+function activeAgentKeyForAttempt(attempt: DisplayExecutionAttempt): AgentStageKey | undefined {
+  return attempt.activeAgentKey
+    ?? inferAgentKeyFromError(attempt.error)
+    ?? (attempt.executions.requirementReview ? 'requirement-review' : attempt.executions.requirementPointExtraction ? 'requirement-point-extraction' : undefined)
+}
+
+function stageAttemptsForAgent(attempts: DisplayExecutionAttempt[], agentKey: AgentStageKey): DisplayStageAttempt[] {
+  const relevant = attempts.filter(attempt => Boolean(executionForAgent(attempt, agentKey)) || activeAgentKeyForAttempt(attempt) === agentKey)
+  return relevant.map((attempt, index) => ({
+    ...attempt,
+    stageAttempt: index + 1,
+    stageMaxAttempts: relevant.length,
+    stageStatus: activeAgentKeyForAttempt(attempt) === agentKey ? attempt.status : 'succeeded',
+  }))
+}
+
+function executionAttemptsForRun(run: RunRecord): DisplayExecutionAttempt[] {
+  const retryEvents = run.retryEvents ?? []
+  if (run.executionAttempts?.length) {
+    const sorted = [...run.executionAttempts].sort((left, right) => left.attempt - right.attempt)
+    return sorted.map((attempt, index) => {
+      const retry = retryEvents.find(item => item.attempt === attempt.attempt)
+      const superseded = attempt.status === 'running' && (Boolean(retry) || index < sorted.length - 1)
+      if (!superseded) return attempt
+      return {
+        ...attempt,
+        status: 'failed',
+        finishedAt: attempt.finishedAt ?? retry?.occurredAt ?? sorted[index + 1]?.startedAt,
+        error: attempt.error ?? retry?.error ?? 'WORKER_ATTEMPT_SUPERSEDED: 后续重试已开始，本次尝试未完成',
+        activeAgentKey: attempt.activeAgentKey ?? retry?.agentKey ?? inferAgentKeyFromError(retry?.error),
+      }
+    })
+  }
+  if (!retryEvents.length) return []
+  const attemptCount = Math.max(run.queue?.attempts ?? 0, ...retryEvents.map(item => item.attempt), 1)
+  const maxAttempts = Math.max(run.queue?.maxAttempts ?? 0, ...retryEvents.map(item => item.maxAttempts), attemptCount)
+  const projected = run.response?.executions ?? run.executions
+  const projectedExecution = run.response?.execution ?? run.execution
+  const finalExecutions = projected ?? (projectedExecution?.agentKey === 'requirement-point-extraction'
+    ? { requirementPointExtraction: projectedExecution }
+    : projectedExecution?.agentKey === 'requirement-review' ? { requirementReview: projectedExecution } : {})
+  return Array.from({ length: attemptCount }, (_, index) => {
+    const attempt = index + 1
+    const retry = retryEvents.find(item => item.attempt === attempt)
+    const isLast = attempt === attemptCount
+    return {
+      attempt, maxAttempts, legacy: true,
+      activeAgentKey: inferAgentKeyFromError(retry?.error ?? (isLast ? run.error : undefined))
+        ?? (isLast && finalExecutions.requirementReview ? 'requirement-review' : isLast && finalExecutions.requirementPointExtraction ? 'requirement-point-extraction' : undefined),
+      status: retry ? 'failed' : isLast ? run.status : 'failed',
+      startedAt: attempt === 1 ? run.startedAt : retryEvents.find(item => item.attempt === attempt - 1)?.nextAttemptAt ?? run.startedAt,
+      ...(retry?.occurredAt || (isLast && run.finishedAt) ? { finishedAt: retry?.occurredAt ?? run.finishedAt } : {}),
+      modelLabel: run.modelLabel,
+      ...(retry?.error || (isLast && run.error) ? { error: retry?.error ?? run.error } : {}),
+      executions: isLast ? finalExecutions : {},
+    }
+  })
+}
+
 function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord; loading: boolean; tab: 'conversation' | 'events'; onTab: (tab: 'conversation' | 'events') => void; onClose: () => void }) {
-  const stagedExecutions = run.response?.executions ?? run.executions
-  const initialAgentKey = run.step === 'extracting_requirement_points' ? 'requirement-point-extraction' : run.step === 'reviewing_requirements' || stagedExecutions?.requirementReview ? 'requirement-review' : 'requirement-point-extraction'
-  const [agentKey, setAgentKey] = useState<'requirement-point-extraction' | 'requirement-review'>(initialAgentKey)
-  const stagedExecution = agentKey === 'requirement-point-extraction' ? stagedExecutions?.requirementPointExtraction : stagedExecutions?.requirementReview
+  const executionAttempts = useMemo(() => executionAttemptsForRun(run), [run])
+  const projectedExecutions = run.response?.executions ?? run.executions
+  const initialAgentKey: AgentStageKey = run.step === 'extracting_requirement_points' ? 'requirement-point-extraction' : run.step === 'reviewing_requirements' || executionAttempts.some(item => item.executions.requirementReview) || projectedExecutions?.requirementReview ? 'requirement-review' : 'requirement-point-extraction'
+  const [agentKey, setAgentKey] = useState<AgentStageKey>(initialAgentKey)
+  const [attemptNumbers, setAttemptNumbers] = useState<Partial<Record<AgentStageKey, number>>>({})
+  useEffect(() => { setAgentKey(initialAgentKey); setAttemptNumbers({}) }, [run.id])
+  const extractionAttempts = useMemo(() => stageAttemptsForAgent(executionAttempts, 'requirement-point-extraction'), [executionAttempts])
+  const reviewAttempts = useMemo(() => stageAttemptsForAgent(executionAttempts, 'requirement-review'), [executionAttempts])
+  const stageAttempts = agentKey === 'requirement-point-extraction' ? extractionAttempts : reviewAttempts
+  const selectedAttempt = stageAttempts.find(item => item.attempt === attemptNumbers[agentKey]) ?? stageAttempts.at(-1)
+  const selectedExtractionAttempt = extractionAttempts.find(item => item.attempt === attemptNumbers['requirement-point-extraction']) ?? extractionAttempts.at(-1)
+  const selectedReviewAttempt = reviewAttempts.find(item => item.attempt === attemptNumbers['requirement-review']) ?? reviewAttempts.at(-1)
+  const selectedExtractionExecution = selectedExtractionAttempt ? executionForAgent(selectedExtractionAttempt, 'requirement-point-extraction') : projectedExecutions?.requirementPointExtraction
+  const selectedReviewExecution = selectedReviewAttempt ? executionForAgent(selectedReviewAttempt, 'requirement-review') : projectedExecutions?.requirementReview
+  const projectedExecution = agentKey === 'requirement-point-extraction' ? projectedExecutions?.requirementPointExtraction : projectedExecutions?.requirementReview
   const currentExecution = run.execution?.agentKey === agentKey ? run.execution : undefined
-  const execution: AgentExecutionRecord | undefined = stagedExecution ?? currentExecution ?? (!stagedExecutions ? run.response?.execution ?? run.execution : undefined)
+  const execution: AgentExecutionRecord | undefined = selectedAttempt ? executionForAgent(selectedAttempt, agentKey) : projectedExecution ?? currentExecution ?? (!projectedExecutions ? run.response?.execution ?? run.execution : undefined)
   const events = execution?.events ?? []
   const retryEvents = run.retryEvents ?? []
+  const displayedStatus = selectedAttempt?.stageStatus ?? run.status
+  const displayedError = selectedAttempt ? ['failed', 'cancelled'].includes(selectedAttempt.stageStatus) ? selectedAttempt.error : undefined : run.error
+  const stageRetryEvents = retryEvents.filter(event => {
+    const sourceAttempt = executionAttempts.find(item => item.attempt === event.attempt)
+    const attemptAgentKey = event.agentKey ?? (sourceAttempt ? activeAgentKeyForAttempt(sourceAttempt) : undefined) ?? inferAgentKeyFromError(event.error)
+    return attemptAgentKey === agentKey
+  })
+  const agentName = agentKey === 'requirement-point-extraction' ? '需求点提取' : '需求评审'
+  const stageDegradations = run.degradations?.filter(item => item.agentKey === agentKey) ?? []
   const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
   const completedToolIds = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
   const conversation = events.filter(event => (event.type === 'message_end' && (event.role === 'user' || event.role === 'assistant'))
@@ -161,11 +260,12 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
   }
 
   return <ReviewModal title="Agent 运行记录" className="rr-run-record-modal" onClose={onClose}><div className="rr-run-record">
-    {(stagedExecutions || run.execution?.agentKey === 'requirement-point-extraction' || run.execution?.agentKey === 'requirement-review') && <div className="rr-run-record-tabs"><button className={agentKey === 'requirement-point-extraction' ? 'active' : ''} onClick={() => setAgentKey('requirement-point-extraction')}><FileText />需求点提取 <span>{stagedExecutions?.requirementPointExtraction?.events.length ?? (run.execution?.agentKey === 'requirement-point-extraction' ? run.execution.events.length : 0)}</span></button><button className={agentKey === 'requirement-review' ? 'active' : ''} onClick={() => setAgentKey('requirement-review')}><Bot />需求评审 <span>{stagedExecutions?.requirementReview?.events.length ?? (run.execution?.agentKey === 'requirement-review' ? run.execution.events.length : 0)}</span></button></div>}
-    <div className="rr-run-record-summary"><div><ReviewBadge tone={runTone(run.status, isRetryingRun(run))}>{runLabel(run.status, isRetryingRun(run))}</ReviewBadge><b>{run.id}</b><span>{run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(run.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? 0}</dd></div><div><dt>工具调用</dt><dd>{execution?.toolCalls ?? 0}{execution?.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : run.status === 'running' ? '运行中' : '未完成 / 旧记录'}</dd></div></dl></div>
-    {run.error && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(run.error)}</span></div>}
-    {retryEvents.length > 0 && <div className="rr-run-record-error"><RefreshCw /><span><b>Worker 重试记录</b>{retryEvents.map((event, index) => <small key={`${event.occurredAt}-${index}`}>{event.status === 'scheduled' ? `第 ${event.attempt} / ${event.maxAttempts} 次失败，已安排于 ${formatTime(event.nextAttemptAt ?? event.occurredAt)} 重试` : `第 ${event.attempt} / ${event.maxAttempts} 次失败，已达到最大重试次数`}：{runErrorMessage(event.error)}</small>)}</span></div>}
-    {run.degradations?.length ? <div className="rr-run-record-error"><RefreshCw /><span><b>模型降级记录</b>{run.degradations.map(item => `${item.agentKey}：${item.fromSourceId}/${item.fromModelId} → ${item.toSourceId}/${item.toModelId}（${item.reason}）`).join('\n')}</span></div> : null}
+    {(executionAttempts.length > 0 || projectedExecutions || run.execution?.agentKey === 'requirement-point-extraction' || run.execution?.agentKey === 'requirement-review') && <div className="rr-run-record-tabs"><button className={agentKey === 'requirement-point-extraction' ? 'active' : ''} onClick={() => setAgentKey('requirement-point-extraction')}><FileText />需求点提取 <span>{selectedExtractionExecution?.events.length ?? (run.execution?.agentKey === 'requirement-point-extraction' ? run.execution.events.length : 0)}</span></button><button className={agentKey === 'requirement-review' ? 'active' : ''} onClick={() => setAgentKey('requirement-review')}><Bot />需求评审 <span>{selectedReviewExecution?.events.length ?? (run.execution?.agentKey === 'requirement-review' ? run.execution.events.length : 0)}</span></button></div>}
+    {stageAttempts.length > 1 && <div className="rr-run-attempt-switch" role="tablist" aria-label={`${agentName}重试对话记录`}>{stageAttempts.map(item => <button type="button" role="tab" aria-selected={item.attempt === selectedAttempt?.attempt} className={`${item.attempt === selectedAttempt?.attempt ? 'active' : ''} ${item.stageStatus}`} onClick={() => setAttemptNumbers(current => ({ ...current, [agentKey]: item.attempt }))} key={item.attempt}><i />第 {item.stageAttempt} / {item.stageMaxAttempts} 次<small>{runLabel(item.stageStatus)}</small></button>)}</div>}
+    <div className="rr-run-record-summary"><div><ReviewBadge tone={runTone(displayedStatus)}>{selectedAttempt ? `第 ${selectedAttempt.stageAttempt} / ${selectedAttempt.stageMaxAttempts} 次 · ${runLabel(displayedStatus)}` : runLabel(run.status, isRetryingRun(run))}</ReviewBadge><b>{run.id}</b><span>{selectedAttempt?.modelLabel ?? run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(selectedAttempt?.startedAt ?? run.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? 0}</dd></div><div><dt>工具调用</dt><dd>{execution?.toolCalls ?? 0}{execution?.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : displayedStatus === 'running' ? '运行中' : '未完成 / 旧记录'}</dd></div></dl></div>
+    {displayedError && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(displayedError)}</span></div>}
+    {stageRetryEvents.length > 0 && <div className="rr-run-record-error"><RefreshCw /><span><b>{agentName}重试记录</b>{stageRetryEvents.map((event, index) => { const stageAttempt = stageAttempts.find(item => item.attempt === event.attempt); return <small key={`${event.occurredAt}-${index}`}>{event.status === 'scheduled' ? `第 ${stageAttempt?.stageAttempt ?? index + 1} / ${stageAttempts.length} 次失败，已安排于 ${formatTime(event.nextAttemptAt ?? event.occurredAt)} 重试` : `第 ${stageAttempt?.stageAttempt ?? index + 1} / ${stageAttempts.length} 次失败，已达到最大重试次数`}：{runErrorMessage(event.error)}</small> })}</span></div>}
+    {stageDegradations.length ? <div className="rr-run-record-error"><RefreshCw /><span><b>{agentName}模型降级记录</b>{stageDegradations.map(item => `${item.fromSourceId}/${item.fromModelId} → ${item.toSourceId}/${item.toModelId}（${item.reason}）`).join('\n')}</span></div> : null}
     {approvals.map(approval => <div className="rr-run-record-error" key={approval.id}><ShieldCheck /><span><b>{approval.risk === 'write_high_risk' ? '高风险写操作逐次审批' : '可逆写操作审批'} · {approval.toolId}@{approval.toolVersion}</b><small>参数 SHA-256：{approval.parameterHash}</small><small>{approval.parameterSummary}</small></span><ReviewBadge tone={approval.status === 'approved' ? 'green' : approval.status === 'pending' ? 'orange' : 'red'}>{approval.status}</ReviewBadge>{approval.status === 'pending' && <div><button className="btn primary" onClick={() => void decideApproval(approval.id, 'approved')}>批准</button><button className="btn danger" onClick={() => void decideApproval(approval.id, 'rejected')}>拒绝</button></div>}</div>)}
     {approvalError && <div className="rr-run-record-error"><AlertTriangle /><span>{approvalError}</span></div>}
     <div className="rr-run-record-tabs"><button className={tab === 'conversation' ? 'active' : ''} onClick={() => onTab('conversation')}><MessageSquareText />Agent 对话 <span>{conversation.length}</span></button><button className={tab === 'events' ? 'active' : ''} onClick={() => onTab('events')}><Activity />事件时间线 <span>{events.length}</span></button></div>
@@ -178,9 +278,9 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
         }
         return <div className="rr-agent-control" key={event.sequence}><Sparkles /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></span></div>
       })}
-      {!conversation.length && <div className="rr-trace-empty"><MessageSquareText /><b>{run.status === 'running' ? '等待首个 Agent Turn 完成' : '没有可展示的 Agent 对话'}</b><p>{events.length ? '这是一条旧运行，只保存了生命周期元数据。请发起新评审以采集完整对话和工具交互。' : '该运行创建时尚未启用交互记录。'}</p></div>}
+      {!conversation.length && <div className="rr-trace-empty"><MessageSquareText /><b>{displayedStatus === 'running' ? '等待首个 Agent Turn 完成' : '没有可展示的 Agent 对话'}</b><p>{selectedAttempt?.legacy ? '这是一条旧运行，早期 Worker 尝试只保存了失败摘要，没有保存独立对话；新的重试运行会逐次保留完整记录。' : events.length ? '这是一条旧运行，只保存了生命周期元数据。请发起新评审以采集完整对话和工具交互。' : '该次尝试没有采集到 Agent 交互。'}</p></div>}
       {conversation.length > 0 && !hasDetailedTrace && <div className="rr-trace-legacy"><AlertTriangle />旧运行只保存事件点，没有保存消息正文和工具参数/返回。</div>}
-    </div> : <div className="rr-agent-events">{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : event.type.includes('message') ? 'message' : ''} /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.role ? ` · ${event.role}` : ''}</small></span><time>{eventTime(event.occurredAt)}</time></article>)}{!events.length && <div className="rr-trace-empty"><Activity /><b>暂无事件记录</b><p>{run.status === 'running' ? '首个 Turn 完成后会同步到这里。' : '该历史运行未采集执行事件。'}</p></div>}</div>}</div>
+    </div> : <div className="rr-agent-events">{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : event.type.includes('message') ? 'message' : ''} /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.role ? ` · ${event.role}` : ''}</small></span><time>{eventTime(event.occurredAt)}</time></article>)}{!events.length && <div className="rr-trace-empty"><Activity /><b>暂无事件记录</b><p>{displayedStatus === 'running' ? '首个 Turn 完成后会同步到这里。' : '该历史运行未采集执行事件。'}</p></div>}</div>}</div>
   </div></ReviewModal>
 }
 

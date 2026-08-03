@@ -241,6 +241,7 @@ export interface ReviewRunQueueState {
 export interface ReviewRunRetryEvent {
   attempt: number
   maxAttempts: number
+  agentKey?: 'requirement-point-extraction' | 'requirement-review'
   status: 'scheduled' | 'exhausted'
   error: string
   occurredAt: string
@@ -317,6 +318,21 @@ export interface AgentExecutionRecord {
   framework?: { name: 'pi-agent-core'; version: string }
   events: AgentExecutionEvent[]
 }
+export interface ReviewRunStageExecutions {
+  requirementPointExtraction?: AgentExecutionRecord
+  requirementReview?: AgentExecutionRecord
+}
+export interface ReviewRunExecutionAttempt {
+  attempt: number
+  maxAttempts: number
+  activeAgentKey?: 'requirement-point-extraction' | 'requirement-review'
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  startedAt: string
+  finishedAt?: string
+  modelLabel: string
+  error?: string
+  executions: ReviewRunStageExecutions
+}
 export interface ReviewRun {
   id: string
   reviewId?: string
@@ -343,10 +359,8 @@ export interface ReviewRun {
   inputDeliveryManifest?: InputDeliveryManifest
   result?: CandidateReviewResult
   execution?: AgentExecutionRecord
-  executions?: {
-    requirementPointExtraction?: AgentExecutionRecord
-    requirementReview?: AgentExecutionRecord
-  }
+  executions?: ReviewRunStageExecutions
+  executionAttempts?: ReviewRunExecutionAttempt[]
   queue?: ReviewRunQueueState
   retryEvents?: ReviewRunRetryEvent[]
   modelRouteAttempts?: Array<{

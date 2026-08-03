@@ -106,6 +106,18 @@ export type AgentExecutions = {
   requirementReview?: AgentExecutionRecord
 }
 
+export type ReviewRunExecutionAttempt = {
+  attempt: number
+  maxAttempts: number
+  activeAgentKey?: 'requirement-point-extraction' | 'requirement-review'
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  startedAt: string
+  finishedAt?: string
+  modelLabel: string
+  error?: string
+  executions: AgentExecutions
+}
+
 export type InputDeliveryManifest = {
   policyVersion: string
   mode: 'full_context' | 'segmented_context'
@@ -189,7 +201,7 @@ export type RequirementReviewRun = {
     availableAt: string
     error?: string
   }
-  retryEvents?: Array<{ attempt: number; maxAttempts: number; status: 'scheduled' | 'exhausted'; error: string; occurredAt: string; nextAttemptAt?: string }>
+  retryEvents?: Array<{ attempt: number; maxAttempts: number; agentKey?: 'requirement-point-extraction' | 'requirement-review'; status: 'scheduled' | 'exhausted'; error: string; occurredAt: string; nextAttemptAt?: string }>
   createdAt: string
   startedAt: string
   finishedAt?: string
@@ -199,6 +211,7 @@ export type RequirementReviewRun = {
   snapshot?: RequirementAnalysisResponse['snapshot']
   execution?: AgentExecutionRecord
   executions?: AgentExecutions
+  executionAttempts?: ReviewRunExecutionAttempt[]
   inputDeliveryManifest?: InputDeliveryManifest
   extractionResult?: RequirementPointExtractionResult
   response?: RequirementAnalysisResponse

@@ -64,6 +64,59 @@ test('服务启动时将失去执行进程的 running ReviewRun 收口为可重�
   assert.equal(await service.recoverInterruptedRuns(), 0)
 })
 
+test('Worker 重试逐次保留 Agent 对话且成功尝试不覆盖失败尝试', async () => {
+  const baseline = await successfulRun()
+  const fixedExtraction = formalExtraction(baseline.output.result)
+  const store = await seededStore()
+  let call = 0
+  const runtime: AgentRuntime = {
+    execute: async input => {
+      call += 1
+      const extractionStage = !input.fixedRequirementPointExtraction
+      const event = {
+        sequence: 1,
+        type: 'message_end',
+        occurredAt: new Date().toISOString(),
+        turn: 1,
+        role: 'assistant' as const,
+        content: call === 1 ? '第一次提取对话' : extractionStage ? '第二次提取对话' : '第二次评审对话',
+      }
+      await input.onEvent?.(event)
+      if (call === 1) throw new Error('MODEL_PROVIDER_UNAVAILABLE: temporary failure')
+      return {
+        candidate: extractionStage ? fixedExtraction : reviewResult(),
+        events: [event], turns: 1, toolCalls: 0, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' },
+        ...(extractionStage ? { inputDeliveryManifest: deliveryManifest(input.snapshot as ReviewRunSnapshot) } : {}),
+      }
+    },
+  }
+  const service = new RequirementAnalysisService(store, runtime)
+  const queued = await service.analyze(request(), new AbortController().signal, undefined, true)
+  let firstError: unknown
+  try {
+    await service.processPreparedRun(queued.runId, undefined, new AbortController().signal, 1, 2)
+  } catch (error) {
+    firstError = error
+  }
+  assert.match(String(firstError), /MODEL_PROVIDER_UNAVAILABLE/u)
+  await service.failPreparedRun(queued.runId, undefined, firstError, false, true, { attempt: 1, maxAttempts: 2, nextAttemptAt: new Date().toISOString() })
+  await store.transaction(state => {
+    const staleAttempt = state.reviewRuns.find(item => item.id === queued.runId)!.executionAttempts![0]
+    staleAttempt.status = 'running'
+    staleAttempt.finishedAt = undefined
+  })
+  await service.processPreparedRun(queued.runId, undefined, new AbortController().signal, 2, 2)
+
+  const run = (await store.snapshot()).reviewRuns.find(item => item.id === queued.runId)!
+  assert.deepEqual(run.executionAttempts?.map(item => item.status), ['failed', 'succeeded'])
+  assert.deepEqual(run.executionAttempts?.map(item => item.activeAgentKey), ['requirement-point-extraction', 'requirement-review'])
+  assert.equal(run.executionAttempts?.[0].executions.requirementPointExtraction?.events[0].content, '第一次提取对话')
+  assert.equal(run.executionAttempts?.[1].executions.requirementPointExtraction?.events[0].content, '第二次提取对话')
+  assert.equal(run.executionAttempts?.[1].executions.requirementReview?.events[0].content, '第二次评审对话')
+  assert.equal(run.retryEvents?.[0].attempt, 1)
+  assert.equal(run.retryEvents?.[0].agentKey, 'requirement-point-extraction')
+})
+
 test('Evidence 定位可把 Markdown 可见文本规范化回原文，并纠正同一资产内的相邻 Chunk', () => {
   const chunks = [
     { id: 'chunk-a', assetVersionId: 'version-a', ordinal: 0, content: '- 状态包括 `open`、`locked`、`archived`。', contentHash: 'hash-a', headingPath: ['状态'], startChar: 100 },

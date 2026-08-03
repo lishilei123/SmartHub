@@ -83,7 +83,7 @@ async function processReviewOne() {
       .catch(error => console.error(`需求评审任务 ${job.runId} 心跳失败：`, error instanceof Error ? error.message : error))
   }, Math.max(1_000, Math.floor(leaseMs / 3)))
   try {
-    await requirementAnalysisService.processPreparedRun(job.runId, lease, controller.signal, job.attempts < job.maxAttempts)
+    await requirementAnalysisService.processPreparedRun(job.runId, lease, controller.signal, job.attempts, job.maxAttempts)
     await stateStore.finishReviewJob?.(job.runId, lease, 'succeeded')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
