@@ -1,15 +1,35 @@
 import { randomUUID } from 'node:crypto'
 import type { ValidationIssue } from '../domain/review-types.js'
-import type { TechnicalSolutionEvidence, TechnicalSolutionFormalResult, TechnicalSolutionReviewCandidateV1, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
+import type { TechnicalSolutionEvidence, TechnicalSolutionFormalResult, TechnicalSolutionReviewCandidateV1, TechnicalSolutionReviewSubmissionV1, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
 import type { DatabaseState } from '../domain/types.js'
 
 const coverageStatuses = new Set(['covered', 'partially_covered', 'not_covered', 'needs_confirmation'])
 const findingTypes = new Set(['requirement_coverage_gap', 'architecture_gap', 'interface_gap', 'data_gap', 'exception_gap', 'non_functional_gap', 'conflict', 'risk', 'other'])
 const severities = new Set(['blocker', 'high', 'medium', 'low'])
 const assessments = new Set(['pass', 'pass_with_notes', 'needs_revision', 'blocked'])
+const assessmentAliases = new Map<string, TechnicalSolutionReviewCandidateV1['summary']['overallAssessment']>([
+  ['passed', 'pass'], ['approved', 'pass'], ['passed_with_findings', 'pass_with_notes'], ['pass_with_findings', 'pass_with_notes'],
+  ['conditional_pass', 'pass_with_notes'], ['conditionally_passed', 'pass_with_notes'], ['revision_required', 'needs_revision'],
+  ['revise', 'needs_revision'], ['failed', 'needs_revision'], ['fail', 'needs_revision'], ['rejected', 'blocked'],
+])
+const coverageAliases = new Map<string, TechnicalSolutionReviewCandidateV1['coverageCandidates'][number]['status']>([
+  ['fully_covered', 'covered'], ['complete', 'covered'], ['partial', 'partially_covered'], ['partially', 'partially_covered'],
+  ['uncovered', 'not_covered'], ['missing', 'not_covered'], ['unknown', 'needs_confirmation'], ['uncertain', 'needs_confirmation'],
+])
+const findingTypeAliases = new Map<string, TechnicalSolutionReviewCandidateV1['findings'][number]['type']>([
+  ['logic_error', 'architecture_gap'], ['logic_gap', 'architecture_gap'], ['business_logic_gap', 'architecture_gap'],
+  ['implementation_gap', 'architecture_gap'], ['integration_gap', 'interface_gap'], ['api_gap', 'interface_gap'],
+  ['schema_gap', 'data_gap'], ['database_gap', 'data_gap'], ['error_handling_gap', 'exception_gap'],
+  ['security_gap', 'non_functional_gap'], ['performance_gap', 'non_functional_gap'], ['reliability_gap', 'non_functional_gap'],
+])
+const severityAliases = new Map<string, TechnicalSolutionReviewCandidateV1['findings'][number]['severity']>([
+  ['critical', 'blocker'], ['fatal', 'blocker'], ['major', 'high'], ['moderate', 'medium'], ['normal', 'medium'],
+  ['minor', 'low'], ['info', 'low'], ['informational', 'low'],
+])
 
 export class TechnicalSolutionResultValidator {
-  normalize(candidate: TechnicalSolutionReviewCandidateV1, snapshot: TechnicalSolutionRunSnapshot, state: DatabaseState) {
+  normalize(submission: TechnicalSolutionReviewSubmissionV1, snapshot: TechnicalSolutionRunSnapshot, state: DatabaseState) {
+    const candidate = normalizeSubmission(submission)
     const issues: ValidationIssue[] = []
     validateShape(candidate, snapshot, issues)
     if (issues.length) return { report: { valid: false, issues } }
@@ -25,31 +45,20 @@ export class TechnicalSolutionResultValidator {
       return id
     }
     const resolveRequirement = (texts: string[], path: string) => {
-      const pointIds = new Set<string>()
-      const evidenceIds: string[] = []
-      texts.forEach((text, index) => {
-        const matches = snapshot.requirementBaseline.evidence.filter(item => containsEquivalent(item.quote, text))
-        if (matches.length !== 1) { issues.push({ path: `${path}[${index}]`, message: matches.length ? '需求原文线索存在歧义' : '需求原文线索不在冻结基线中' }); return }
-        const match = matches[0]
-        pointIds.add(match.requirementPointId)
-        evidenceIds.push(add({ sourceKind: 'requirement', assetId: match.assetId, assetVersionId: match.assetVersionId, chunkId: match.chunkId, contentSha256: match.contentSha256, headingPath: match.headingPath, quote: text, startLine: match.startLine, endLine: match.endLine }))
-      })
+      const matches = snapshot.requirementBaseline.evidence.filter(item => texts.some(text => cluesOverlap(item.quote, text)))
+      const pointIds = new Set(matches.map(item => item.requirementPointId))
+      if (pointIds.size > 1) issues.push({ path, message: '需求原文线索关联到多个需求点，请仅保留一个需求点的逐字原文' })
+      const evidenceIds = pointIds.size === 1 ? matches.map(match => add({ sourceKind: 'requirement', assetId: match.assetId, assetVersionId: match.assetVersionId, chunkId: match.chunkId, contentSha256: match.contentSha256, headingPath: match.headingPath, quote: match.quote, startLine: match.startLine, endLine: match.endLine })) : []
       return { pointIds: [...pointIds], evidenceIds }
     }
     const resolveSolution = (texts: string[], path: string) => {
       const evidenceIds: string[] = []
       texts.forEach((text, index) => {
-        const matches = snapshot.solutionInputs.flatMap(input => {
-          const version = state.versions.find(item => item.id === input.assetVersionId)
-          const asset = state.assets.find(item => item.id === input.assetId)
-          if (!version || !asset || !containsEquivalent(version.content, text)) return []
-          const chunks = version.chunks.filter(chunk => containsEquivalent(chunk.content, text))
-          const line = locateLine(version.content, text)
-          return chunks.map(chunk => ({ input, asset, chunk, line }))
-        })
-        if (matches.length !== 1) { issues.push({ path: `${path}[${index}]`, message: matches.length ? '技术方案原文线索存在歧义，请提供更长原文' : '技术方案原文线索不在固定输入中' }); return }
-        const match = matches[0]
-        evidenceIds.push(add({ sourceKind: 'technical_design', assetId: match.asset.id, assetVersionId: match.input.assetVersionId, chunkId: match.chunk.id, contentSha256: match.input.contentSha256, headingPath: match.chunk.headingPath, quote: text, startLine: match.line.start, endLine: match.line.end }))
+        const resolved = resolveSolutionClue(text, snapshot, state)
+        if (resolved.matches.length > 1) { issues.push({ path: `${path}[${index}]`, message: '技术方案原文线索存在歧义，请提供更长的逐字原文' }); return }
+        if (!resolved.matches.length) return
+        const match = resolved.matches[0]
+        evidenceIds.push(add({ sourceKind: 'technical_design', assetId: match.asset.id, assetVersionId: match.input.assetVersionId, chunkId: match.chunk.id, contentSha256: match.input.contentSha256, headingPath: match.chunk.headingPath, quote: match.quote, startLine: match.line.start, endLine: match.line.end }))
       })
       return evidenceIds
     }
@@ -57,7 +66,7 @@ export class TechnicalSolutionResultValidator {
       const requirement = resolveRequirement(item.requirementSourceTexts, `coverageCandidates[${index}].requirementSourceTexts`)
       const solutionEvidenceIds = resolveSolution(item.solutionSourceTexts, `coverageCandidates[${index}].solutionSourceTexts`)
       if (requirement.pointIds.length !== 1) issues.push({ path: `coverageCandidates[${index}].requirementSourceTexts`, message: '每条覆盖候选必须唯一关联一个冻结需求点' })
-      if (['covered', 'partially_covered'].includes(item.status) && !solutionEvidenceIds.length) issues.push({ path: `coverageCandidates[${index}].solutionSourceTexts`, message: '已覆盖或部分覆盖必须提供技术方案 Evidence' })
+      if (['covered', 'partially_covered'].includes(item.status) && !solutionEvidenceIds.length) issues.push({ path: `coverageCandidates[${index}].solutionSourceTexts`, message: '已覆盖或部分覆盖必须提供固定技术方案中的逐字原文' })
       return { id: `tech_coverage_${randomUUID()}`, requirementPointId: requirement.pointIds[0] ?? '', requirementTitle: snapshot.requirementBaseline.requirementPoints.find(point => point.id === requirement.pointIds[0])?.title ?? '', status: item.status, analysis: item.analysis.trim(), evidenceIds: [...requirement.evidenceIds, ...solutionEvidenceIds] }
     })
     const findings = candidate.findings.map((item, index) => {
@@ -115,12 +124,111 @@ function validateShape(candidate: TechnicalSolutionReviewCandidateV1, snapshot: 
   })
 }
 
+function normalizeSubmission(submission: TechnicalSolutionReviewSubmissionV1) {
+  const candidate = structuredClone(submission) as unknown as TechnicalSolutionReviewCandidateV1
+  if (!candidate || typeof candidate !== 'object') return candidate
+  if (Array.isArray(candidate.coverageCandidates)) candidate.coverageCandidates.forEach(item => { item.status = canonicalCoverageStatus(String(item.status)) })
+  if (Array.isArray(candidate.findings)) candidate.findings.forEach(item => {
+    item.type = canonicalFindingType(String(item.type), item)
+    item.severity = canonicalSeverity(String(item.severity), item)
+  })
+  if (candidate.summary && typeof candidate.summary === 'object') candidate.summary.overallAssessment = canonicalAssessment(String(candidate.summary.overallAssessment), candidate.findings ?? [])
+  return candidate
+}
+
+function canonicalAssessment(value: string, findings: TechnicalSolutionReviewCandidateV1['findings']) {
+  const key = enumKey(value)
+  if (assessments.has(key)) return key as TechnicalSolutionReviewCandidateV1['summary']['overallAssessment']
+  return assessmentAliases.get(key) ?? (findings.length ? 'needs_revision' : 'pass_with_notes')
+}
+
+function canonicalCoverageStatus(value: string) {
+  const key = enumKey(value)
+  if (coverageStatuses.has(key)) return key as TechnicalSolutionReviewCandidateV1['coverageCandidates'][number]['status']
+  return coverageAliases.get(key) ?? 'needs_confirmation'
+}
+
+function canonicalFindingType(value: string, finding: TechnicalSolutionReviewSubmissionV1['findings'][number]) {
+  const key = enumKey(value)
+  if (findingTypes.has(key)) return key as TechnicalSolutionReviewCandidateV1['findings'][number]['type']
+  const alias = findingTypeAliases.get(key)
+  if (alias) return alias
+  const text = normalize(`${finding.title} ${finding.problem} ${finding.impact} ${finding.recommendation}`).toLocaleLowerCase()
+  if (/接口|api|契约|协议/u.test(text)) return 'interface_gap'
+  if (/数据|数据库|字段|表结构|schema/u.test(text)) return 'data_gap'
+  if (/异常|错误|超时|重试|补偿/u.test(text)) return 'exception_gap'
+  if (/性能|安全|可靠|容量|可用性|监控/u.test(text)) return 'non_functional_gap'
+  if (/冲突|矛盾/u.test(text)) return 'conflict'
+  if (/风险/u.test(text)) return 'risk'
+  return 'other'
+}
+
+function canonicalSeverity(value: string, finding: TechnicalSolutionReviewSubmissionV1['findings'][number]) {
+  const key = enumKey(value)
+  if (severities.has(key)) return key as TechnicalSolutionReviewCandidateV1['findings'][number]['severity']
+  const alias = severityAliases.get(key)
+  if (alias) return alias
+  const text = normalize(`${finding.title} ${finding.problem} ${finding.impact}`).toLocaleLowerCase()
+  if (/阻断|无法上线|数据丢失|越权|严重安全/u.test(text)) return 'blocker'
+  if (/严重|核心流程|不可用/u.test(text)) return 'high'
+  if (/轻微|建议优化|体验/u.test(text)) return 'low'
+  return 'medium'
+}
+
+function enumKey(value: string) { return value.normalize('NFKC').trim().toLocaleLowerCase().replace(/[\s-]+/gu, '_') }
+
+function cluesOverlap(reference: string, clue: string) {
+  const normalizedReference = normalize(reference)
+  const normalizedClue = normalize(clue)
+  return normalizedReference.length >= 4 && normalizedClue.length >= 4 && (normalizedReference.includes(normalizedClue) || normalizedClue.includes(normalizedReference))
+}
+
+type SolutionMatch = {
+  input: TechnicalSolutionRunSnapshot['solutionInputs'][number]
+  asset: DatabaseState['assets'][number]
+  chunk: DatabaseState['versions'][number]['chunks'][number]
+  quote: string
+  line: { start: number; end: number }
+}
+
+function resolveSolutionClue(text: string, snapshot: TechnicalSolutionRunSnapshot, state: DatabaseState): { matches: SolutionMatch[] } {
+  const fragments = clueFragments(text)
+  let ambiguous: { matches: SolutionMatch[] } | undefined
+  for (const fragment of fragments) {
+    const matches: SolutionMatch[] = snapshot.solutionInputs.flatMap(input => {
+      const version = state.versions.find(item => item.id === input.assetVersionId && item.contentHash === input.contentSha256)
+      const asset = state.assets.find(item => item.id === input.assetId)
+      if (!version || !asset) return []
+      const located = locateFixedQuote(version.content, fragment)
+      if (!located) return []
+      return version.chunks.filter(chunk => containsEquivalent(chunk.content, fragment)).map(chunk => ({ input, asset, chunk, quote: located.quote, line: located.line }))
+    })
+    if (matches.length === 1) return { matches }
+    if (matches.length > 1 && !ambiguous) ambiguous = { matches }
+  }
+  return ambiguous ?? { matches: [] }
+}
+
+function clueFragments(text: string) {
+  const values = [text, ...text.split(/(?:\.{3,}|…+)/u)]
+    .map(value => value.trim())
+    .filter(value => normalize(value).length >= 4)
+    .sort((left, right) => right.length - left.length)
+  const seen = new Set<string>()
+  return values.filter(value => { const key = normalize(value); if (seen.has(key)) return false; seen.add(key); return true })
+}
+
 function clean(value: unknown) { return typeof value === 'string' && Boolean(value.trim()) }
 function normalize(value: string) { return value.normalize('NFKC').replace(/\s+/gu, ' ').trim() }
 function containsEquivalent(content: string, text: string) { const needle = normalize(text); return needle.length >= 4 && normalize(content).includes(needle) }
-function locateLine(content: string, text: string) {
+function locateFixedQuote(content: string, text: string) {
   const exact = content.indexOf(text)
-  if (exact < 0) return { start: 1, end: 1 }
-  const start = content.slice(0, exact).split(/\r?\n/u).length
-  return { start, end: start + text.split(/\r?\n/u).length - 1 }
+  if (exact >= 0) {
+    const start = content.slice(0, exact).split(/\r?\n/u).length
+    return { quote: text, line: { start, end: start + text.split(/\r?\n/u).length - 1 } }
+  }
+  const needle = normalize(text)
+  const lines = content.split(/\r?\n/u)
+  const matches = lines.flatMap((line, index) => normalize(line).includes(needle) ? [{ quote: line.trim(), line: { start: index + 1, end: index + 1 } }] : [])
+  return matches.length === 1 ? matches[0] : undefined
 }

@@ -6,9 +6,10 @@ import { AgentConfigurationService } from '../server/application/agent-configura
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { TechnicalSolutionReviewService } from '../server/application/technical-solution-review-service.js'
 import type { AgentRuntime, InputDeliveryManifest } from '../server/domain/agent-types.js'
-import type { TechnicalSolutionReviewCandidateV1, TechnicalSolutionRunSnapshot } from '../server/domain/technical-solution-types.js'
+import type { TechnicalSolutionReviewCandidateV1, TechnicalSolutionReviewSubmissionV1, TechnicalSolutionRunSnapshot } from '../server/domain/technical-solution-types.js'
 import { defaultConfig, type ReviewRun } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
+import { createTechnicalSolutionToolRegistry } from '../server/tools/technical-solution-tools.js'
 
 const at = '2026-07-29T00:00:00.000Z'
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -86,6 +87,44 @@ test('服务端拒绝歧义 Evidence 和缺失的需求覆盖结论', async () =
   assert.equal(normalized.report.valid, false)
   assert.ok(normalized.report.issues.some(item => /恰好有一条覆盖结论/u.test(item.message)))
   assert.ok(normalized.report.issues.some(item => /歧义/u.test(item.message)))
+})
+
+test('技术方案提交近义枚举和带章节前缀的原文线索由服务端确定性归一化', async () => {
+  const store = await seededStore()
+  const state = await store.snapshot()
+  const snapshot = technicalSnapshot(state.reviewRuns[0])
+  const input = candidate() as unknown as TechnicalSolutionReviewSubmissionV1
+  input.summary.overallAssessment = 'passed_with_findings'
+  input.coverageCandidates[0].status = 'partial'
+  input.coverageCandidates[0].requirementSourceTexts = ['订单提交幂等', '描述：订单提交必须支持幂等处理。', '需求原文：订单提交必须支持幂等处理。']
+  input.coverageCandidates[0].solutionSourceTexts = ['5.2 接口设计... 订单服务暴露创建订单接口。']
+  input.findings[0].type = 'logic_gap'
+  input.findings[0].severity = 'moderate'
+  input.findings[0].requirementSourceTexts = ['需求原文：订单提交必须支持幂等处理。']
+  input.findings[0].solutionSourceTexts = ['接口章节... 订单服务暴露创建订单接口。']
+  input.risks[0].requirementSourceTexts = ['描述：客户端重试需要关注重复订单风险。']
+
+  const normalized = new TechnicalSolutionResultValidator().normalize(input, snapshot, state)
+  assert.equal(normalized.report.valid, true, JSON.stringify(normalized.report.issues))
+  assert.equal(normalized.result?.summary.overallAssessment, 'pass_with_notes')
+  assert.equal(normalized.result?.coverage[0].status, 'partially_covered')
+  assert.equal(normalized.result?.findings[0].type, 'architecture_gap')
+  assert.equal(normalized.result?.findings[0].severity, 'medium')
+  assert.ok(normalized.result?.risks[0].evidenceIds.length)
+  assert.ok(normalized.result?.evidence.some(item => item.quote === '订单服务暴露创建订单接口。'))
+  assert.ok(normalized.result?.evidence.every(item => !item.quote.includes('...')))
+})
+
+test('技术方案提交工具把模型语义枚举交给服务端归一化', async () => {
+  const store = await seededStore()
+  const registry = createTechnicalSolutionToolRegistry(store, async () => ({ accepted: true }))
+  const descriptor = registry.get('technical_solution_review.submit_result')?.descriptor
+  assert.ok(descriptor)
+  const schema = descriptor.parameters as unknown as { properties: { summary: { properties: { overallAssessment: { type: string; description: string } } }; findings: { items: { properties: { type: { type: string }; severity: { type: string } } } } } }
+  assert.equal(schema.properties.summary.properties.overallAssessment.type, 'string')
+  assert.match(schema.properties.summary.properties.overallAssessment.description, /服务端确定性归一化/u)
+  assert.equal(schema.properties.findings.items.properties.type.type, 'string')
+  assert.equal(schema.properties.findings.items.properties.severity.type, 'string')
 })
 
 test('Agent 未提交技术方案结果时保留真实失败阶段且不发布正式结果', async () => {

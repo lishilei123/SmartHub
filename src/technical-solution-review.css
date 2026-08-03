@@ -30,7 +30,7 @@
 /* Technical review workbench: align hierarchy and interaction with requirement review. */
 .tech-workbench{min-height:0;overflow:hidden;background:#f4f6fa}
 .tech-run-header{min-height:86px;padding:13px 18px;align-items:flex-start;gap:20px}
-.tech-run-heading{min-width:0;flex:1}
+.tech-run-heading{min-width:230px;flex:0 1 360px}
 .tech-title-line{align-items:center;gap:10px}
 .tech-title-line>div{min-width:0}
 .tech-title-line h2{font-size:15px}
@@ -38,7 +38,7 @@
 .tech-run-symbol{width:36px;height:36px;flex:0 0 36px;border-radius:9px;background:#eef0ff;color:#5965e9;display:grid;place-items:center}
 .tech-run-symbol svg{width:18px}
 .tech-title-line .tech-status{margin-left:2px}
-.tech-run-meta{margin:9px 0 8px 46px;display:flex;align-items:center;gap:18px}
+.tech-run-meta{min-width:0;margin:4px auto 0;display:flex;align-items:center;justify-content:center;gap:18px;flex:1}
 .tech-run-meta>span{min-width:0}
 .tech-run-meta small,.tech-run-meta b{display:block}
 .tech-run-meta small{color:#979fab;font-size:7px}
@@ -205,7 +205,7 @@
   .tech-workbench{overflow:visible}
   .tech-run-header{min-height:0}
   .tech-run-heading{width:100%}
-  .tech-run-meta{margin-left:0;flex-wrap:wrap}
+  .tech-run-meta{width:100%;margin:0;justify-content:flex-start;flex-wrap:wrap}
   .tech-columns{display:flex}
   .tech-sources,.tech-detail{min-height:300px;border:0;border-bottom:1px solid #e1e4ea}
   .tech-sidebar-scroll{overflow:visible}

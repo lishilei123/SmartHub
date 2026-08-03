@@ -1,12 +1,12 @@
 import { Type } from 'typebox'
-import type { TechnicalSolutionReviewCandidateV1, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
+import type { TechnicalSolutionReviewSubmissionV1, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { registerKnowledgeReadChunkTool } from './knowledge-read-chunk.js'
 import { registerKnowledgeSearchTool } from './knowledge-search.js'
 import { ToolRegistry } from './registry.js'
 import type { ReviewSubmissionFeedback } from './submission-feedback.js'
 
-export function createTechnicalSolutionToolRegistry(store: StateStore, submit: (candidate: TechnicalSolutionReviewCandidateV1) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
+export function createTechnicalSolutionToolRegistry(store: StateStore, submit: (candidate: TechnicalSolutionReviewSubmissionV1) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
   const registry = new ToolRegistry()
   registerKnowledgeSearchTool(registry, store)
   registerKnowledgeReadChunkTool(registry, store)
@@ -49,7 +49,7 @@ export function createTechnicalSolutionToolRegistry(store: StateStore, submit: (
     description: '提交 technical-solution-review/v1 的语义内容和原文线索；正式 ID、Evidence、需求关系和统计由服务端生成。',
     parameters: candidateSchema(),
   }, async request => {
-    const feedback = await submit(structuredClone(request.arguments) as TechnicalSolutionReviewCandidateV1)
+    const feedback = await submit(structuredClone(request.arguments) as TechnicalSolutionReviewSubmissionV1)
     return feedback.accepted ? { data: { accepted: true, status: 'candidate_validated' }, terminate: true } : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] } }
   })
   return registry
@@ -60,9 +60,9 @@ function candidateSchema() {
   const stringList = Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 })
   return Type.Object({
     schemaVersion: Type.Literal('technical-solution-review/v1'),
-    summary: Type.Object({ overallAssessment: Type.Union([Type.Literal('pass'), Type.Literal('pass_with_notes'), Type.Literal('needs_revision'), Type.Literal('blocked')]), overview: Type.String({ minLength: 1, maxLength: 8_000 }), majorGaps: stringList, majorRisks: stringList, recommendedOrder: stringList }, { additionalProperties: false }),
-    coverageCandidates: Type.Array(Type.Object({ requirementSourceTexts: sourceTexts, status: Type.Union([Type.Literal('covered'), Type.Literal('partially_covered'), Type.Literal('not_covered'), Type.Literal('needs_confirmation')]), analysis: Type.String({ minLength: 1, maxLength: 8_000 }), solutionSourceTexts: sourceTexts }, { additionalProperties: false }), { maxItems: 500 }),
-    findings: Type.Array(Type.Object({ type: Type.Union([Type.Literal('requirement_coverage_gap'), Type.Literal('architecture_gap'), Type.Literal('interface_gap'), Type.Literal('data_gap'), Type.Literal('exception_gap'), Type.Literal('non_functional_gap'), Type.Literal('conflict'), Type.Literal('risk'), Type.Literal('other')]), severity: Type.Union([Type.Literal('blocker'), Type.Literal('high'), Type.Literal('medium'), Type.Literal('low')]), title: Type.String({ minLength: 1, maxLength: 300 }), problem: Type.String({ minLength: 1, maxLength: 8_000 }), impact: Type.String({ minLength: 1, maxLength: 4_000 }), recommendation: Type.String({ minLength: 1, maxLength: 4_000 }), confidence: Type.Number({ minimum: 0, maximum: 1 }), requirementSourceTexts: sourceTexts, solutionSourceTexts: sourceTexts }, { additionalProperties: false }), { maxItems: 200 }),
+    summary: Type.Object({ overallAssessment: Type.String({ minLength: 1, maxLength: 100, description: '建议使用 pass、pass_with_notes、needs_revision 或 blocked；常见近义值由服务端确定性归一化。' }), overview: Type.String({ minLength: 1, maxLength: 8_000 }), majorGaps: stringList, majorRisks: stringList, recommendedOrder: stringList }, { additionalProperties: false }),
+    coverageCandidates: Type.Array(Type.Object({ requirementSourceTexts: sourceTexts, status: Type.String({ minLength: 1, maxLength: 100, description: '建议使用 covered、partially_covered、not_covered 或 needs_confirmation；常见近义值由服务端确定性归一化。' }), analysis: Type.String({ minLength: 1, maxLength: 8_000 }), solutionSourceTexts: sourceTexts }, { additionalProperties: false }), { maxItems: 500 }),
+    findings: Type.Array(Type.Object({ type: Type.String({ minLength: 1, maxLength: 100, description: '建议使用 requirement_coverage_gap、architecture_gap、interface_gap、data_gap、exception_gap、non_functional_gap、conflict、risk 或 other；常见近义值由服务端确定性归一化。' }), severity: Type.String({ minLength: 1, maxLength: 100, description: '建议使用 blocker、high、medium 或 low；常见近义值由服务端确定性归一化。' }), title: Type.String({ minLength: 1, maxLength: 300 }), problem: Type.String({ minLength: 1, maxLength: 8_000 }), impact: Type.String({ minLength: 1, maxLength: 4_000 }), recommendation: Type.String({ minLength: 1, maxLength: 4_000 }), confidence: Type.Number({ minimum: 0, maximum: 1 }), requirementSourceTexts: sourceTexts, solutionSourceTexts: sourceTexts }, { additionalProperties: false }), { maxItems: 200 }),
     risks: Type.Array(Type.Object({ description: Type.String({ minLength: 1, maxLength: 4_000 }), impact: Type.String({ minLength: 1, maxLength: 4_000 }), mitigation: Type.String({ minLength: 1, maxLength: 4_000 }), requirementSourceTexts: sourceTexts, solutionSourceTexts: sourceTexts }, { additionalProperties: false }), { maxItems: 200 }),
     questions: Type.Array(Type.Object({ question: Type.String({ minLength: 1, maxLength: 4_000 }), reason: Type.String({ minLength: 1, maxLength: 4_000 }), requirementSourceTexts: sourceTexts, solutionSourceTexts: sourceTexts }, { additionalProperties: false }), { maxItems: 200 }),
   }, { additionalProperties: false })

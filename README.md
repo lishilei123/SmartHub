@@ -39,8 +39,9 @@
 ## 当前已实现的第三期技术方案评审流程
 
 - “技术方案评审”创建页沿用需求分析的三栏工作台：左侧可直接上传 Markdown、TXT 或 ZIP 到 `版本文档/{项目版本名}/技术方案/`，等待真实入库/索引任务完成后刷新并自动勾选 ready 的 `technical_design` 资产版本；中间选择成功 ReviewRun 作为固定需求基线并确认一至十份固定输入，右侧恢复历史评审；
-- `TechnicalSolutionAnalysisAgent` 使用独立 `technical_solution_analysis` 场景、Prompt、模型路由和 `technical-solution-review/v1` 候选协议；模型只提交语义、建议和原文线索，服务端生成正式 ID、Evidence、需求关系、覆盖统计与确定性定位；
+- `TechnicalSolutionAnalysisAgent` 使用独立 `technical_solution_analysis` 场景、Prompt、模型路由和 `technical-solution-review/v1` 候选协议；模型只提交语义、建议和原文线索，服务端对总体结论、覆盖状态、Finding 类型与严重度的常见近义值做确定性归一化，再生成正式 ID、Evidence、需求关系、覆盖统计与定位；提交工具不会在业务归一化前用难以修正的枚举 `anyOf` 拦截近义值；
 - 正常正文以 `full_context` 投递，超长正文确定性切换 `segmented_context`；成功发布前强制校验 `InputDeliveryManifest`、固定输入 Hash、Evidence 唯一性及需求覆盖全量唯一；
+- Evidence 仍以固定输入中的逐字原文为准；若模型提交“章节提示 + ... + 逐字片段”，服务端只提取并保存可唯一定位的连续原文，忽略同组冗余说明，歧义、越界或完全无法定位仍会结构化拒绝；
 - PostgreSQL 使用 `technical_solution_reviews`、输入、Run、Job、正式结果、Coverage、Finding、Evidence、关系表和追加写 FindingAction；Worker 使用 lease、heartbeat、run token 与 fencing，支持排队、取消、有限重试和迟到结果隔离；
 - 前端通过显式 `projectVersionId + technicalReviewId + runId` 恢复评审上下文，提供摘要、覆盖、Finding、风险、Evidence、历史运行、固定原文、人工处置与 Markdown 导出；项目版本或知识资产删除会保护活动运行并级联第三期数据；
 - 本期边界不包含 Git、代码 Diff、代码生成、部署、测试执行和多 Agent 编排。

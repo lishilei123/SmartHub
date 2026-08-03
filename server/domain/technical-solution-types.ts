@@ -89,6 +89,12 @@ export interface TechnicalSolutionReviewCandidateV1 {
   }>
 }
 
+export type TechnicalSolutionReviewSubmissionV1 = Omit<TechnicalSolutionReviewCandidateV1, 'summary' | 'coverageCandidates' | 'findings'> & {
+  summary: Omit<TechnicalSolutionReviewCandidateV1['summary'], 'overallAssessment'> & { overallAssessment: string }
+  coverageCandidates: Array<Omit<TechnicalSolutionReviewCandidateV1['coverageCandidates'][number], 'status'> & { status: string }>
+  findings: Array<Omit<TechnicalSolutionReviewCandidateV1['findings'][number], 'type' | 'severity'> & { type: string; severity: string }>
+}
+
 export interface TechnicalSolutionEvidence {
   id: string
   sourceKind: 'requirement' | 'technical_design'
