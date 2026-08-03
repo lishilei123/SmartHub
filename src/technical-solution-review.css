@@ -251,3 +251,66 @@
 .run-phase-list>div.failed{border-color:#f0cbd1;background:#fff5f6;color:#c94658}.run-phase-list>div.failed span{background:#f8dce0;color:#c94658}.run-phase-list>div.failed b{color:#c94658}.run-phase-list>div.pending{color:#a0a8b4;background:#fbfbfc}.run-phase-list>div.pending b{color:#7f8998}
 .tech-record-backdrop{position:fixed;inset:0;z-index:30;padding:24px;background:#17203355;display:grid;place-items:center}.tech-record-modal{width:min(780px,calc(100vw - 32px));max-height:min(760px,calc(100vh - 48px));overflow:hidden;border:1px solid #dfe3eb;border-radius:12px;background:#f7f8fb;box-shadow:0 20px 60px #202b4433;display:flex;flex-direction:column}.tech-record-header{min-height:66px;padding:13px 16px;border-bottom:1px solid #e5e8ee;background:#fff;display:flex;align-items:center;justify-content:space-between;gap:12px}.tech-record-header span{display:flex;align-items:center;gap:6px;color:#5965e9;font-size:9px;font-weight:700}.tech-record-header span svg{width:14px}.tech-record-header h2{margin:6px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#465164;font:600 9px ui-monospace,SFMono-Regular,Consolas,monospace}.tech-record-header>button{width:30px;height:30px;border:1px solid #dfe3e9;border-radius:6px;background:#fff;color:#7f8998;display:grid;place-items:center;cursor:pointer}.tech-record-header>button svg{width:15px}.tech-record-summary{min-height:42px;padding:9px 16px;border-bottom:1px solid #e5e8ee;background:#fafbfc;display:flex;align-items:center;gap:9px;color:#717c8d;font-size:8px}.tech-record-summary b{margin-left:auto;color:#5965e9}.tech-record-error{margin:12px 16px 0;padding:10px;border:1px solid #f1cfd4;border-radius:7px;background:#fff4f5;color:#c94658;display:flex;align-items:flex-start;gap:8px}.tech-record-error>svg{width:15px;flex:0 0 15px}.tech-record-error b,.tech-record-error small{display:block}.tech-record-error b{font-size:8px}.tech-record-error small{margin-top:4px;color:#91636c;font-size:8px;line-height:1.5;overflow-wrap:anywhere}.tech-record-tabs{padding:0 16px;border-bottom:1px solid #e5e8ee;background:#fff;display:flex;gap:16px}.tech-record-tabs button{height:40px;padding:0;border:0;border-bottom:2px solid transparent;background:transparent;color:#8993a1;display:flex;align-items:center;gap:5px;font-size:8px;cursor:pointer}.tech-record-tabs button.active{border-color:#5965e9;color:#5965e9;font-weight:700}.tech-record-tabs svg{width:13px}.tech-record-tabs em{padding:2px 5px;border-radius:8px;background:#eef0ff;color:#5965e9;font-size:7px;font-style:normal}.tech-record-body{min-height:0;overflow:auto;padding:14px 16px}.tech-record-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.tech-record-grid>div{min-width:0;padding:11px;border:1px solid #e2e5eb;border-radius:8px;background:#fff}.tech-record-grid small,.tech-record-grid b{display:block}.tech-record-grid small{color:#929ba8;font-size:7px}.tech-record-grid b{margin-top:5px;color:#4f5b6c;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tech-record-section{margin-top:12px;padding:12px;border:1px solid #e2e5eb;border-radius:8px;background:#fff}.tech-record-section h3{margin:0 0 8px;color:#4b5768;font-size:9px}.tech-attempt{padding:8px 0;border-top:1px solid #edf0f3;display:flex;align-items:center;justify-content:space-between;gap:8px}.tech-attempt:first-of-type{border-top:0}.tech-attempt b,.tech-attempt small{display:block}.tech-attempt b{color:#536071;font-size:8px}.tech-attempt small{margin-top:4px;color:#9099a7;font-size:7px;overflow-wrap:anywhere}.tech-record-section>p{margin:6px 0;color:#697486;font-size:8px;line-height:1.55}.tech-event-list{padding:0;overflow:hidden}.tech-event-list h3{padding:12px 12px 8px;margin:0}.tech-event-list>article{min-height:45px;padding:7px 12px;border-top:1px solid #edf0f3;display:flex;align-items:center;gap:9px}.tech-event-list>article>i{width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:#6975df}.tech-event-list>article>i.tool{background:#23a679}.tech-event-list>article>i.failed{background:#d94f62}.tech-event-list b,.tech-event-list small{display:block}.tech-event-list b{color:#536071;font-size:8px}.tech-event-list small{margin-top:3px;color:#929ba8;font-size:7px;line-height:1.4;overflow-wrap:anywhere}.tech-event-list time{margin-left:auto;flex:0 0 auto;color:#929ba8;font-size:7px}.tech-record-empty{min-height:160px;display:grid;place-items:center;color:#8d96a4;font-size:9px}.tech-record-empty svg{width:23px;color:#6975df}
 @media(max-width:640px){.tech-record-backdrop{padding:10px}.tech-record-modal{width:100%;max-height:calc(100vh - 20px)}.tech-record-grid{grid-template-columns:1fr 1fr}.tech-record-header h2{max-width:calc(100vw - 100px)}.tech-run-header .tech-actions{flex-wrap:wrap}}
+
+/* Match the requirement review workbench hierarchy. */
+.tech-run-header{min-height:72px;flex:0 0 72px;padding:10px 16px;align-items:center;gap:14px;border-color:#e8eaf0}
+.tech-run-heading{min-width:0;flex:0 1 300px}
+.tech-title-line{gap:10px}
+.tech-title-line h2{font-size:15px}
+.tech-title-line p{font-size:8px}
+.tech-run-summary{min-width:0;height:46px;padding:0 12px;border:1px solid #eceef2;border-radius:7px;background:#fafbfc;display:flex;align-items:center;gap:12px;flex:1}
+.tech-run-summary>.tech-status{flex:0 0 auto}
+.tech-run-meta{min-width:0;margin:0;justify-content:flex-start;gap:14px;flex:1}
+.tech-run-meta>span{min-width:0}
+.tech-run-meta small{font-size:7px}
+.tech-run-meta b{max-width:145px;font-size:8px}
+.tech-run-header .tech-actions{padding:0;border:0;background:transparent;gap:8px}
+.tech-run-header .tech-actions .btn{height:35px;padding:0 11px;font-size:9px;border-radius:6px}
+.tech-columns{grid-template-columns:260px minmax(480px,1fr) 320px;background:#f4f5f8}
+.tech-sources,.tech-detail{border-color:#e8eaf0}
+.tech-sidebar-head{height:52px;min-height:52px;padding:0 12px;border-color:#e8eaf0}
+.tech-sidebar-head b{font-size:10px}
+.tech-sidebar-scroll{padding:8px}
+.tech-sidebar-foot{min-height:58px;padding:9px 11px}
+.tech-results{background:#f7f8fb}
+.tech-tabs{height:52px;padding:0 15px;gap:18px;border-color:#e8eaf0}
+.tech-tabs button{font-size:9px}
+.tech-results-scroll{background:#f7f8fb}
+.tech-overview,.tech-evidence-grid,.tech-risk-grid,.run-history-list{padding:14px 16px 22px}
+.tech-filters{padding:7px 10px}
+
+@media(max-width:1350px){
+  .tech-columns{grid-template-columns:235px minmax(390px,1fr) 300px}
+  .tech-run-header{gap:10px}
+  .tech-run-heading{min-width:220px}
+  .tech-run-meta{gap:9px}
+  .tech-run-meta b{max-width:120px}
+  .tech-run-header .tech-actions .btn{padding:0 8px}
+}
+@media(max-width:1050px){
+  .tech-run-header{min-height:108px;flex-basis:108px;align-items:flex-start;flex-wrap:wrap}
+  .tech-run-heading{flex:1;min-width:220px}
+  .tech-run-summary{flex:1;min-width:0}
+  .tech-run-header .tech-actions{width:100%;margin-left:auto;justify-content:flex-end}
+  .tech-columns{grid-template-columns:50px minmax(0,1fr) 50px}
+  .tech-sources,.tech-detail{position:relative;z-index:4}
+  .tech-sources{position:absolute;inset:0 auto 0 0;width:280px;box-shadow:10px 0 28px #1720331b}
+  .tech-detail{position:absolute;inset:0 0 0 auto;width:330px;box-shadow:-10px 0 28px #1720331b}
+  .tech-results{grid-column:2}
+}
+@media(max-width:760px){
+  .tech-workbench{min-height:760px;overflow:visible}
+  .tech-run-header{min-height:0;height:auto;flex-basis:auto;padding:12px;display:block}
+  .tech-run-heading{min-width:0;margin-bottom:10px}
+  .tech-run-summary{height:auto;padding:8px 0;border:0;border-top:1px solid #eceef2;border-bottom:1px solid #eceef2;flex-wrap:wrap}
+  .tech-run-meta{flex-wrap:wrap;gap:8px}
+  .tech-run-meta>span{width:calc(50% - 8px)}
+  .tech-run-header .tech-actions{width:auto;margin-top:9px;align-items:stretch;flex-wrap:wrap;justify-content:flex-start}
+  .tech-run-header .tech-actions .btn{flex:1}
+  .tech-columns{min-height:650px;display:flex;flex-direction:column}
+  .tech-sources,.tech-detail{position:static;width:auto;min-height:300px;box-shadow:none;border:0;border-bottom:1px solid #e1e4ea}
+  .tech-results{min-height:420px;overflow:hidden}
+  .tech-tabs{height:auto;min-height:48px;padding:5px;gap:3px}
+  .tech-tabs button{height:40px;padding:0 7px;flex:0 0 auto}
+  .tech-risk-grid,.tech-evidence-grid{grid-template-columns:1fr}
+}
