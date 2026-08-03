@@ -35,7 +35,11 @@ export function resolveKnowledgeImage(kbId: string, logicalPath: string, source:
 }
 
 export function MarkdownDocument({ source, format, knowledgeBaseId = '', logicalPath = '', outline = emptyMarkdownOutline, activeSectionKey, anchorPrefix = 'document-section', highlightSourceRange, onOpenKnowledgeDocument }: { source: string; format: DocumentFormat; knowledgeBaseId?: string; logicalPath?: string; outline?: MarkdownOutline; activeSectionKey?: string | null; anchorPrefix?: string; highlightSourceRange?: SourceRange; onOpenKnowledgeDocument?: (logicalPath: string) => void }) {
-  if (format === 'text') return <pre className="plain-text-document">{source}</pre>
+  if (format === 'text') return <pre className="plain-text-document">{source.split(/\r?\n/u).map((line, index) => {
+    const lineNumber = index + 1
+    const highlighted = highlightSourceRange && lineNumber >= highlightSourceRange.startLine && lineNumber <= highlightSourceRange.endLine
+    return <span key={lineNumber} className={highlighted ? 'technical-evidence-hit' : undefined} data-source-start-line={lineNumber} data-source-end-line={lineNumber}>{line || ' '}</span>
+  })}</pre>
 
   const sectionsByOffset = new Map(outline.sections.map(section => [section.sourceOffset, section]))
   const sourceClassName = (node?: PositionedNode, className?: string) => {

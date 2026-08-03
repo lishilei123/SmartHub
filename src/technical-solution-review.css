@@ -10,22 +10,7 @@
 
 .tech-tabs{position:relative;top:auto;flex:0 0 auto}
 .tech-tabs{height:49px;padding:0 13px;align-items:stretch;gap:18px}.tech-tabs button{position:relative;height:auto;padding:0;border-radius:0;display:flex;align-items:center;gap:5px;font-size:9px}.tech-tabs button:hover{background:transparent;color:#5965e9}.tech-tabs button.active{background:transparent;color:#5965e9;font-weight:600;box-shadow:none}
-.fixed-document{inset:44px 8px 8px;min-width:0;overflow:hidden}
-.fixed-document>header{min-height:49px;padding:9px 12px;background:#fafbfc;gap:12px}
-.fixed-document>header span{min-width:0}
-.fixed-document>header b,.fixed-document>header small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fixed-document>header b{color:#3f4b5d;font-size:11px}
-.fixed-document>header small{margin-top:4px;font-size:8px}
-.fixed-document>header button{width:30px;height:30px;flex:0 0 auto;border:1px solid #dfe3e9;border-radius:6px;background:#fff;color:#6f7a8a;display:flex;align-items:center;justify-content:center;cursor:pointer}
-.fixed-document>header button:hover{border-color:#bcc4d0;background:#f2f4f7;color:#354052}
-.fixed-document>header button svg{width:15px}
-.fixed-document pre{padding:10px 0;background:#fff;color:#445164;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:normal;scroll-padding-block:40%}
-.fixed-document pre>span{min-height:22px;padding:1px 14px 1px 0;display:grid;grid-template-columns:48px minmax(0,1fr);align-items:start}
-.fixed-document pre>span.hit{background:#fff3c4;box-shadow:inset 3px 0 #e5a922}
-.fixed-document pre i{padding-right:12px;color:#a1a9b5;font-style:normal;text-align:right;user-select:none}
-.fixed-document pre code{min-width:0;color:inherit;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
-
-@media(max-width:900px){.tech-results{min-height:360px;overflow:hidden}.fixed-document{position:fixed;inset:20px}}
+@media(max-width:900px){.tech-results{min-height:360px;overflow:hidden}}
 
 /* Technical review workbench: align hierarchy and interaction with requirement review. */
 .tech-workbench{min-height:0;overflow:hidden;background:#f4f6fa}
@@ -226,29 +211,13 @@
   .stat-grid{grid-template-columns:1fr 1fr}
 }
 
-/* Fixed technical inputs use the shared rendered-document experience. */
-.fixed-document-evidence{margin:10px 14px 0;padding:9px 11px;border:1px solid #cfeadd;border-radius:7px;background:#eefaf5;color:#32755d;display:flex;align-items:flex-start;gap:8px}
-.fixed-document-evidence>svg{width:16px;flex:0 0 16px}
-.fixed-document-evidence>span{min-width:0}
-.fixed-document-evidence b,.fixed-document-evidence small{display:block}
-.fixed-document-evidence b{font-size:8px}
-.fixed-document-evidence small{margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#688579;font-size:7px}
-.fixed-document-body{min-height:0;flex:1;padding:28px 42px 58px;overflow:auto;overscroll-behavior:contain;background:#fff;color:#3d4859;scroll-behavior:smooth}
-.fixed-document-body:focus-visible{outline:0}
-.fixed-document-body h1{margin:6px 0 16px;color:#344052;font-size:23px}
-.fixed-document-body h2{margin:26px 0 11px;padding-bottom:8px;border-bottom:1px solid #e9ecf1;color:#3d4859;font-size:15px}
-.fixed-document-body h3{margin:21px 0 9px;color:#465164;font-size:12px}
-.fixed-document-body h4,.fixed-document-body h5,.fixed-document-body h6{margin:17px 0 8px;color:#526071}
-.fixed-document-body p,.fixed-document-body li{color:#5f6b7c;font-size:10px;line-height:1.9}
-.fixed-document-body blockquote{margin:14px 0;padding:10px 13px;border-left:3px solid #8793f6;background:#f7f8ff;color:#5f6b7c}
-.fixed-document-body pre{max-height:none;margin:13px 0;padding:13px 15px;border:1px solid #e0e4ea;border-radius:7px;background:#f6f7f9;color:#445164;overflow:auto;white-space:pre;font:9px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace}
-.fixed-document-body pre code{color:inherit;font:inherit;white-space:inherit}
-.fixed-document-body .plain-text-document{white-space:pre-wrap;overflow-wrap:anywhere}
-.fixed-document-body .md-table-wrap{margin:14px 0;overflow:auto}
-.fixed-document-body .technical-evidence-hit{scroll-margin-top:90px;background:#fff3c4;box-shadow:inset 3px 0 #e5a922;border-radius:4px}
-.fixed-document-body h1.technical-evidence-hit,.fixed-document-body h2.technical-evidence-hit,.fixed-document-body h3.technical-evidence-hit,.fixed-document-body h4.technical-evidence-hit,.fixed-document-body p.technical-evidence-hit,.fixed-document-body blockquote.technical-evidence-hit{padding-left:10px;padding-right:10px}
-.fixed-document-body li.technical-evidence-hit{padding-left:5px}
-@media(max-width:640px){.fixed-document-body{padding:20px 18px 42px}.fixed-document-evidence{margin:8px 8px 0}}
+/* Technical Evidence highlights in the shared requirement-style document modal. */
+.rr-source-document .rr-markdown .technical-evidence-hit{scroll-margin-top:90px;background:#fff3c4;box-shadow:inset 3px 0 #e5a922;border-radius:4px}
+.rr-source-document .rr-markdown h1.technical-evidence-hit,.rr-source-document .rr-markdown h2.technical-evidence-hit,.rr-source-document .rr-markdown h3.technical-evidence-hit,.rr-source-document .rr-markdown h4.technical-evidence-hit,.rr-source-document .rr-markdown p.technical-evidence-hit,.rr-source-document .rr-markdown blockquote.technical-evidence-hit{padding-left:10px;padding-right:10px}
+.rr-source-document .rr-markdown li.technical-evidence-hit{padding-left:5px}
+.rr-source-document .rr-markdown .plain-text-document>span{display:block;min-height:17px;padding:1px 10px;white-space:pre-wrap;overflow-wrap:anywhere}
+.rr-source-document .rr-markdown .plain-text-document>span.technical-evidence-hit{padding-left:10px}
+@media(max-width:640px){.rr-source-document .rr-markdown .plain-text-document>span{padding-left:0;padding-right:0}.rr-source-document .rr-markdown .plain-text-document>span.technical-evidence-hit{padding-left:8px}}
 
 /* Failure-state and execution-record details. */
 .run-placeholder-progress.failed>div:first-child span{color:#c94658}.run-placeholder-progress.failed i{background:linear-gradient(90deg,#e06a79,#c94658)}
