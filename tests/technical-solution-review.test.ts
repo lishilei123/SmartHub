@@ -89,6 +89,27 @@ test('服务端拒绝歧义 Evidence 和缺失的需求覆盖结论', async () =
   assert.ok(normalized.report.issues.some(item => /歧义/u.test(item.message)))
 })
 
+test('技术方案完整原文跨相邻 Chunk 时按真实边界生成多个 Evidence', async () => {
+  const store = await seededStore()
+  const state = await store.snapshot()
+  const version = state.versions.find(item => item.id === 'tech-version-1')!
+  const start = version.content.indexOf('订单服务暴露创建订单接口。')
+  const split = start + '订单服务暴露创建'.length
+  version.chunks = [start, split, version.content.length].slice(0, -1).map((_, index, boundaries) => {
+    const rangeStart = boundaries[index]
+    const rangeEnd = index === boundaries.length - 1 ? version.content.length : boundaries[index + 1]
+    const content = version.content.slice(rangeStart, rangeEnd)
+    return { ...version.chunks[0], id: `tech-cross-${index}`, chunkKey: `tech-cross-${index}`, ordinal: index, content, contentHash: hash(content), startChar: rangeStart + 3, endChar: rangeEnd + 3 }
+  })
+  const normalized = new TechnicalSolutionResultValidator().normalize(candidate(), technicalSnapshot(state.reviewRuns[0]), state)
+  assert.equal(normalized.report.valid, true, JSON.stringify(normalized.report.issues))
+  const solutionEvidence = normalized.result?.evidence.filter(item => item.sourceKind === 'technical_design') ?? []
+  assert.equal(solutionEvidence.length, 2)
+  assert.deepEqual(solutionEvidence.map(item => item.quote), ['订单服务暴露创建', '订单接口。'])
+  assert.ok(solutionEvidence.every(item => version.content.includes(item.quote)))
+  assert.equal(normalized.result?.coverage[0].evidenceIds.length, 3)
+})
+
 test('技术方案提交近义枚举和带章节前缀的原文线索由服务端确定性归一化', async () => {
   const store = await seededStore()
   const state = await store.snapshot()

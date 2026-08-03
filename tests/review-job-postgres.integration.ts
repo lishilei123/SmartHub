@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import { Pool } from 'pg'
+import type { TechnicalSolutionReview, TechnicalSolutionReviewRun } from '../server/domain/technical-solution-types.js'
 import type { ReviewRun } from '../server/domain/types.js'
 import { runMigrations } from '../server/infrastructure/migrations.js'
 import { PostgresStore } from '../server/infrastructure/postgres-store.js'
@@ -33,6 +34,8 @@ await seedParents()
 
 test.after(async () => {
   await database.query('DELETE FROM smarthub.review_jobs WHERE id LIKE $1', [`${prefix}%`])
+  await database.query('DELETE FROM smarthub.technical_solution_review_runs WHERE id LIKE $1', [`${prefix}%`])
+  await database.query('DELETE FROM smarthub.technical_solution_reviews WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.review_runs WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.asset_versions WHERE id=$1', [ids.assetVersion])
   await database.query('DELETE FROM smarthub.knowledge_assets WHERE id=$1', [ids.asset])
@@ -91,6 +94,36 @@ test('PostgreSQL Review Job 在重试时清理租约并拒绝旧 fencing token',
   assert.equal(exhausted.status, 'failed')
   assert.equal(exhausted.attempt_count, 3)
   assert.equal(await store.claimReviewJob?.('worker-d', 60_000), null)
+})
+
+test('PostgreSQL 第三期 Run 查询以正式结果关系表为准', async () => {
+  const runId = `${prefix}-technical-run`
+  const reviewId = `${prefix}-technical-review`
+  const evidenceId = `${prefix}-evidence`
+  const coverageId = `${prefix}-coverage`
+  const findingId = `${prefix}-finding`
+  const baselineId = `${prefix}-baseline`
+  const review: TechnicalSolutionReview = { id: reviewId, projectVersionId: ids.projectVersion, sourceReviewRunId: baselineId, name: '技术方案关系查询', solutionAssetVersionIds: [ids.assetVersion], inputSetSha256: 'b'.repeat(64), createdBy: 'test', createdAt: now }
+  const run: TechnicalSolutionReviewRun = { id: runId, technicalReviewId: reviewId, projectVersionId: ids.projectVersion, sourceReviewRunId: review.sourceReviewRunId, status: 'succeeded', step: 'succeeded', progress: 100, snapshotSha256: 'c'.repeat(64), snapshot: {} as TechnicalSolutionReviewRun['snapshot'], modelLabel: 'test', createdAt: now, finishedAt: now, result: { schemaVersion: 'technical-solution-review-result/v1', summary: { overallAssessment: 'pass', overview: 'stale', majorGaps: [], majorRisks: [], recommendedOrder: [] }, coverage: [{ id: coverageId, requirementPointId: 'RP-FORMAL', requirementTitle: '正式', status: 'covered', analysis: '正式分析', evidenceIds: [evidenceId] }], findings: [{ id: findingId, type: 'risk', severity: 'high', title: '正式 Finding', problem: '正式问题', impact: '正式影响', recommendation: '正式建议', confidence: 0.9, requirementPointIds: ['RP-FORMAL'], evidenceIds: [evidenceId] }], evidence: [{ id: evidenceId, sourceKind: 'technical_design', assetId: ids.asset, assetVersionId: ids.assetVersion, chunkId: `${prefix}-chunk`, contentSha256: 'd'.repeat(64), headingPath: ['正式'], quote: '正式引用', startLine: 1, endLine: 1 }], risks: [], questions: [], statistics: { totalRequirements: 1, covered: 1, partiallyCovered: 0, notCovered: 0, needsConfirmation: 0, coverageRatio: 1 } } }
+  await database.query('INSERT INTO smarthub.review_runs (id, project_version_id, asset_id, asset_version_id, status, created_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [baselineId, ids.projectVersion, ids.asset, ids.assetVersion, 'succeeded', now, JSON.stringify({ id: baselineId, projectVersionId: ids.projectVersion, assetId: ids.asset, assetVersionId: ids.assetVersion, status: 'succeeded', createdAt: now })])
+  await database.query('INSERT INTO smarthub.technical_solution_reviews (id, project_version_id, source_review_run_id, name, input_set_sha256, created_by, created_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [review.id, review.projectVersionId, review.sourceReviewRunId, review.name, review.inputSetSha256, review.createdBy, review.createdAt, JSON.stringify(review)])
+  await database.query('INSERT INTO smarthub.technical_solution_review_runs (id, technical_review_id, project_version_id, source_review_run_id, status, step, progress, snapshot_sha256, created_at, finished_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)', [run.id, run.technicalReviewId, run.projectVersionId, run.sourceReviewRunId, run.status, run.step, run.progress, run.snapshotSha256, run.createdAt, run.finishedAt, JSON.stringify({ ...run, result: { ...run.result, summary: { ...run.result.summary, overview: 'stale-json' }, coverage: [{ ...run.result.coverage[0], evidenceIds: ['stale-evidence'] }] } })])
+  await database.query('INSERT INTO smarthub.technical_solution_review_results (run_id, schema_version, candidate_sha256, published_at, data) VALUES ($1,$2,$3,$4,$5::jsonb)', [run.id, run.result.schemaVersion, 'e'.repeat(64), now, JSON.stringify({ summary: { ...run.result.summary, overview: 'formal-summary' }, statistics: run.result.statistics, risks: [], questions: [] })])
+  await database.query('INSERT INTO smarthub.technical_solution_evidence (id, run_id, source_kind, asset_id, asset_version_id, chunk_id, content_sha256, start_line, end_line, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)', [evidenceId, runId, 'technical_design', ids.asset, ids.assetVersion, `${prefix}-chunk`, 'd'.repeat(64), 1, 1, JSON.stringify(run.result.evidence[0])])
+  await database.query('INSERT INTO smarthub.technical_solution_coverage (id, run_id, requirement_point_id, status, ordinal, data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [coverageId, runId, 'RP-FORMAL', 'covered', 0, JSON.stringify(run.result.coverage[0])])
+  await database.query('INSERT INTO smarthub.technical_solution_findings (id, run_id, finding_type, severity, confidence, ordinal, data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [findingId, runId, 'risk', 'high', 0.9, 0, JSON.stringify(run.result.findings[0])])
+  await database.query('INSERT INTO smarthub.technical_solution_coverage_evidence (coverage_id, evidence_id) VALUES ($1,$2)', [coverageId, evidenceId])
+  await database.query('INSERT INTO smarthub.technical_solution_finding_requirements (finding_id, requirement_point_id) VALUES ($1,$2)', [findingId, 'RP-FORMAL'])
+  await database.query('INSERT INTO smarthub.technical_solution_finding_evidence (finding_id, evidence_id) VALUES ($1,$2)', [findingId, evidenceId])
+  const loaded = await store.getTechnicalSolutionRun(runId)
+  assert.equal(loaded?.result?.summary.overview, 'formal-summary')
+  assert.deepEqual(loaded?.result?.coverage[0].evidenceIds, [evidenceId])
+  assert.deepEqual(loaded?.result?.findings[0].requirementPointIds, ['RP-FORMAL'])
+  assert.equal((await store.listTechnicalSolutionRuns(ids.projectVersion, reviewId))[0].result?.summary.overview, 'formal-summary')
+  assert.equal((await store.snapshot()).technicalSolutionRuns.find(item => item.id === runId)?.result?.summary.overview, 'formal-summary')
+  await database.query('DELETE FROM smarthub.technical_solution_review_runs WHERE id=$1', [runId])
+  await database.query('DELETE FROM smarthub.technical_solution_reviews WHERE id=$1', [reviewId])
+  await database.query('DELETE FROM smarthub.review_runs WHERE id=$1', [baselineId])
 })
 
 test('PostgreSQL Review Job 仅靠领取操作恢复失效租约并保持 Run 为运行态', async () => {

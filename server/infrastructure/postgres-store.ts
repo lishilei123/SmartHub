@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, ReviewRunQueueState, SyncTask } from '../domain/types.js'
-import type { TechnicalSolutionReview, TechnicalSolutionReviewJob, TechnicalSolutionReviewRun } from '../domain/technical-solution-types.js'
+import type { TechnicalSolutionFormalResult, TechnicalSolutionReview, TechnicalSolutionReviewJob, TechnicalSolutionReviewRun } from '../domain/technical-solution-types.js'
 import { normalizeReviewSeverities, type ChunkSearchInput, type ConfigurationTransactionScope, type DefaultKnowledgeBase, type KnowledgeReadState, type RequirementBindingMetadata, type ReviewJob, type ReviewRunPage, type StateStore, type StoredChunkCandidate, type TaskLease } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
@@ -315,16 +315,15 @@ export class PostgresStore implements StateStore {
 
   async listTechnicalSolutionRuns(projectVersionId: string, technicalReviewId?: string): Promise<TechnicalSolutionReviewRun[]> {
     const result = await this.pool.query<TechnicalRunQueueRow>(`
-      SELECT (run.data - 'result' - 'execution' - 'events') ||
-        CASE WHEN run.data ? 'result' THEN jsonb_build_object('result', jsonb_build_object('summary', run.data->'result'->'summary', 'statistics', run.data->'result'->'statistics')) ELSE '{}'::jsonb END AS data,
-        job.status AS queue_status,
+      SELECT run.data, job.status AS queue_status,
         job.attempt_count, job.max_attempts, job.available_at
       FROM smarthub.technical_solution_review_runs run
       LEFT JOIN smarthub.technical_solution_review_jobs job ON job.run_id=run.id
       WHERE run.project_version_id=$1 AND ($2::text IS NULL OR run.technical_review_id=$2)
       ORDER BY run.created_at DESC, run.id DESC
     `, [projectVersionId, technicalReviewId ?? null])
-    return result.rows.map(technicalRunFromQueueRow)
+    const runs = await hydrateTechnicalSolutionRuns(this.pool, result.rows.map(row => row.data))
+    return result.rows.map((row, index) => technicalRunFromQueueRow({ ...row, data: runs[index] }))
   }
 
   async getTechnicalSolutionRun(runId: string): Promise<TechnicalSolutionReviewRun | null> {
@@ -334,7 +333,9 @@ export class PostgresStore implements StateStore {
       LEFT JOIN smarthub.technical_solution_review_jobs job ON job.run_id=run.id
       WHERE run.id=$1
     `, [runId])
-    return result.rows[0] ? technicalRunFromQueueRow(result.rows[0]) : null
+    if (!result.rows[0]) return null
+    const [run] = await hydrateTechnicalSolutionRuns(this.pool, [result.rows[0].data])
+    return technicalRunFromQueueRow({ ...result.rows[0], data: run })
   }
 
   async getToolApproval(approvalId: string) {
@@ -886,6 +887,57 @@ function technicalRunFromQueueRow(row: TechnicalRunQueueRow): TechnicalSolutionR
   return { ...row.data, queue: { status: row.queue_status, attempts: Number(row.attempt_count), maxAttempts: Number(row.max_attempts), availableAt: toIsoTimestamp(row.available_at)! } }
 }
 
+async function hydrateTechnicalSolutionRuns(client: Queryable, runs: TechnicalSolutionReviewRun[]) {
+  if (!runs.length) return runs
+  const runIds = runs.map(run => run.id)
+  const results = await client.query<{ run_id: string; schema_version: string; data: Pick<TechnicalSolutionFormalResult, 'summary' | 'statistics' | 'risks' | 'questions'> }>('SELECT run_id, schema_version, data FROM smarthub.technical_solution_review_results WHERE run_id = ANY($1::text[])', [runIds])
+  if (!results.rows.length) return runs
+  const coverage = await client.query<{ run_id: string; id: string; ordinal: number; data: TechnicalSolutionFormalResult['coverage'][number] }>('SELECT run_id, id, ordinal, data FROM smarthub.technical_solution_coverage WHERE run_id = ANY($1::text[]) ORDER BY run_id, ordinal, id', [runIds])
+  const findings = await client.query<{ run_id: string; id: string; ordinal: number; data: TechnicalSolutionFormalResult['findings'][number] }>('SELECT run_id, id, ordinal, data FROM smarthub.technical_solution_findings WHERE run_id = ANY($1::text[]) ORDER BY run_id, ordinal, id', [runIds])
+  const evidence = await client.query<{ run_id: string; data: TechnicalSolutionFormalResult['evidence'][number] }>('SELECT run_id, data FROM smarthub.technical_solution_evidence WHERE run_id = ANY($1::text[]) ORDER BY run_id, id', [runIds])
+  const coverageEvidence = await client.query<{ coverage_id: string; evidence_id: string }>('SELECT coverage_id, evidence_id FROM smarthub.technical_solution_coverage_evidence WHERE coverage_id = ANY($1::text[])', [coverage.rows.map(row => row.id)])
+  const findingEvidence = await client.query<{ finding_id: string; evidence_id: string }>('SELECT finding_id, evidence_id FROM smarthub.technical_solution_finding_evidence WHERE finding_id = ANY($1::text[])', [findings.rows.map(row => row.id)])
+  const findingRequirements = await client.query<{ finding_id: string; requirement_point_id: string }>('SELECT finding_id, requirement_point_id FROM smarthub.technical_solution_finding_requirements WHERE finding_id = ANY($1::text[])', [findings.rows.map(row => row.id)])
+  const resultByRun = new Map(results.rows.map(row => [row.run_id, row]))
+  const coverageEvidenceById = groupRelationIds(coverageEvidence.rows, 'coverage_id', 'evidence_id')
+  const findingEvidenceById = groupRelationIds(findingEvidence.rows, 'finding_id', 'evidence_id')
+  const findingRequirementsById = groupRelationIds(findingRequirements.rows, 'finding_id', 'requirement_point_id')
+  const coverageByRun = groupRows(coverage.rows)
+  const findingsByRun = groupRows(findings.rows)
+  const evidenceByRun = groupRows(evidence.rows)
+  return runs.map(run => {
+    const formal = resultByRun.get(run.id)
+    if (!formal) return run
+    const result: TechnicalSolutionFormalResult = {
+      schemaVersion: formal.schema_version as TechnicalSolutionFormalResult['schemaVersion'],
+      summary: formal.data.summary,
+      statistics: formal.data.statistics,
+      risks: formal.data.risks,
+      questions: formal.data.questions,
+      coverage: (coverageByRun.get(run.id) ?? []).map(row => ({ ...row.data, evidenceIds: coverageEvidenceById.get(row.id) ?? [] })),
+      findings: (findingsByRun.get(run.id) ?? []).map(row => ({ ...row.data, requirementPointIds: findingRequirementsById.get(row.id) ?? [], evidenceIds: findingEvidenceById.get(row.id) ?? [] })),
+      evidence: (evidenceByRun.get(run.id) ?? []).map(row => row.data),
+    }
+    return { ...run, result }
+  })
+}
+
+function groupRows<T extends { run_id: string }>(rows: T[]) {
+  const grouped = new Map<string, T[]>()
+  rows.forEach(row => grouped.set(row.run_id, [...(grouped.get(row.run_id) ?? []), row]))
+  return grouped
+}
+
+function groupRelationIds<T extends Record<string, string>>(rows: T[], owner: keyof T, value: keyof T) {
+  const grouped = new Map<string, string[]>()
+  rows.forEach(row => {
+    const key = row[owner]
+    const id = row[value]
+    grouped.set(key, [...(grouped.get(key) ?? []), id])
+  })
+  return grouped
+}
+
 function syncTaskFromRow(row: SyncTaskRow): SyncTask {
   return {
     ...row.data,
@@ -999,9 +1051,10 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const reviewQaTurns = await client.query<{ data: DatabaseState['reviewQaTurns'][number] }>('SELECT data FROM smarthub.review_qa_turns ORDER BY created_at, id')
   const toolApprovals = await client.query<{ data: DatabaseState['toolApprovals'][number] }>('SELECT data FROM smarthub.tool_approvals ORDER BY requested_at, id')
   const technicalSolutionReviews = await client.query<{ data: DatabaseState['technicalSolutionReviews'][number] }>('SELECT data FROM smarthub.technical_solution_reviews ORDER BY created_at DESC, id')
-  const technicalSolutionRuns = await client.query<{ data: DatabaseState['technicalSolutionRuns'][number] }>('SELECT data FROM smarthub.technical_solution_review_runs ORDER BY created_at DESC, id')
+  const technicalSolutionRunsRows = await client.query<{ data: DatabaseState['technicalSolutionRuns'][number] }>('SELECT data FROM smarthub.technical_solution_review_runs ORDER BY created_at DESC, id')
+  const technicalSolutionRuns = await hydrateTechnicalSolutionRuns(client, technicalSolutionRunsRows.rows.map(row => row.data))
   const technicalSolutionFindingActions = await client.query<{ data: DatabaseState['technicalSolutionFindingActions'][number] }>('SELECT data FROM smarthub.technical_solution_finding_actions ORDER BY run_id, finding_id, version')
-  const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), reviewQaSessions: reviewQaSessions.rows.map(row => row.data), reviewQaTurns: reviewQaTurns.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data), technicalSolutionReviews: technicalSolutionReviews.rows.map(row => row.data), technicalSolutionRuns: technicalSolutionRuns.rows.map(row => row.data), technicalSolutionFindingActions: technicalSolutionFindingActions.rows.map(row => row.data) }
+  const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), reviewQaSessions: reviewQaSessions.rows.map(row => row.data), reviewQaTurns: reviewQaTurns.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data), technicalSolutionReviews: technicalSolutionReviews.rows.map(row => row.data), technicalSolutionRuns, technicalSolutionFindingActions: technicalSolutionFindingActions.rows.map(row => row.data) }
   normalizeReviewSeverities(state)
   return state
 }

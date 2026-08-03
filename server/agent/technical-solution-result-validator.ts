@@ -55,10 +55,10 @@ export class TechnicalSolutionResultValidator {
       const evidenceIds: string[] = []
       texts.forEach((text, index) => {
         const resolved = resolveSolutionClue(text, snapshot, state)
-        if (resolved.matches.length > 1) { issues.push({ path: `${path}[${index}]`, message: '技术方案原文线索存在歧义，请提供更长的逐字原文' }); return }
-        if (!resolved.matches.length) return
-        const match = resolved.matches[0]
-        evidenceIds.push(add({ sourceKind: 'technical_design', assetId: match.asset.id, assetVersionId: match.input.assetVersionId, chunkId: match.chunk.id, contentSha256: match.input.contentSha256, headingPath: match.chunk.headingPath, quote: match.quote, startLine: match.line.start, endLine: match.line.end }))
+        if (resolved.ambiguous) { issues.push({ path: `${path}[${index}]`, message: '技术方案原文线索存在歧义，请提供更长的逐字原文' }); return }
+        resolved.matches.forEach(match => {
+          evidenceIds.push(add({ sourceKind: 'technical_design', assetId: match.asset.id, assetVersionId: match.input.assetVersionId, chunkId: match.chunk.id, contentSha256: match.input.contentSha256, headingPath: match.chunk.headingPath, quote: match.quote, startLine: match.line.start, endLine: match.line.end }))
+        })
       })
       return evidenceIds
     }
@@ -191,22 +191,81 @@ type SolutionMatch = {
   line: { start: number; end: number }
 }
 
-function resolveSolutionClue(text: string, snapshot: TechnicalSolutionRunSnapshot, state: DatabaseState): { matches: SolutionMatch[] } {
+type LocatedQuote = {
+  quote: string
+  line: { start: number; end: number }
+  startChar: number
+  endChar: number
+}
+
+type SolutionResolution = { matches: SolutionMatch[]; ambiguous?: boolean }
+
+function resolveSolutionClue(text: string, snapshot: TechnicalSolutionRunSnapshot, state: DatabaseState): SolutionResolution {
   const fragments = clueFragments(text)
-  let ambiguous: { matches: SolutionMatch[] } | undefined
+  let ambiguous = false
+  let locatedButUnmapped = false
   for (const fragment of fragments) {
-    const matches: SolutionMatch[] = snapshot.solutionInputs.flatMap(input => {
+    const candidates = snapshot.solutionInputs.flatMap(input => {
       const version = state.versions.find(item => item.id === input.assetVersionId && item.contentHash === input.contentSha256)
       const asset = state.assets.find(item => item.id === input.assetId)
       if (!version || !asset) return []
-      const located = locateFixedQuote(version.content, fragment)
-      if (!located) return []
-      return version.chunks.filter(chunk => containsEquivalent(chunk.content, fragment)).map(chunk => ({ input, asset, chunk, quote: located.quote, line: located.line }))
+      const locatedQuotes = locateFixedQuotes(version.content, fragment)
+      if (locatedQuotes.length > 1) ambiguous = true
+      return locatedQuotes.flatMap(located => {
+        const matches = splitSolutionQuote(input, asset, version, located)
+        if (!matches) locatedButUnmapped = true
+        return matches ? [{ location: `${input.assetVersionId}:${located.startChar}:${located.endChar}`, matches }] : []
+      })
     })
-    if (matches.length === 1) return { matches }
-    if (matches.length > 1 && !ambiguous) ambiguous = { matches }
+    if (ambiguous) return { matches: [], ambiguous: true }
+    if (candidates.length === 1) return { matches: candidates[0].matches }
+    if (candidates.length > 1) ambiguous = true
   }
-  return ambiguous ?? { matches: [] }
+  return { matches: [], ...((ambiguous || locatedButUnmapped) ? { ambiguous: true } : {}) }
+}
+
+function splitSolutionQuote(
+  input: TechnicalSolutionRunSnapshot['solutionInputs'][number],
+  asset: DatabaseState['assets'][number],
+  version: DatabaseState['versions'][number],
+  located: LocatedQuote,
+): SolutionMatch[] | undefined {
+  const ranges = version.chunks
+    .map(chunk => ({ chunk, range: resolveChunkRange(version.content, chunk) }))
+    .filter((item): item is { chunk: DatabaseState['versions'][number]['chunks'][number]; range: { start: number; end: number } } => Boolean(item.range))
+    .filter(item => item.range.end > located.startChar && item.range.start < located.endChar)
+    .sort((left, right) => left.range.start - right.range.start || left.chunk.ordinal - right.chunk.ordinal)
+
+  let cursor = located.startChar
+  const matches: SolutionMatch[] = []
+  for (const item of ranges) {
+    if (item.range.start > cursor) break
+    const start = Math.max(cursor, located.startChar, item.range.start)
+    const end = Math.min(located.endChar, item.range.end)
+    if (end <= start) continue
+    const quote = version.content.slice(start, end)
+    if (!containsChunkSegment(item.chunk.content, quote)) continue
+    const line = lineRange(version.content, start, end)
+    matches.push({ input, asset, chunk: item.chunk, quote, line })
+    cursor = Math.max(cursor, end)
+    if (cursor >= located.endChar) break
+  }
+  return cursor >= located.endChar && matches.length ? matches : undefined
+}
+
+function resolveChunkRange(content: string, chunk: DatabaseState['versions'][number]['chunks'][number]) {
+  const metadata = Number.isInteger(chunk.startChar) && Number.isInteger(chunk.endChar) && chunk.startChar >= 0 && chunk.endChar > chunk.startChar && chunk.endChar <= content.length
+    ? { start: chunk.startChar, end: chunk.endChar }
+    : undefined
+  const exact = allIndexesOf(content, chunk.content)
+  if (exact.length === 1) return { start: exact[0], end: exact[0] + chunk.content.length }
+  return metadata
+}
+
+function lineRange(content: string, startChar: number, endChar: number) {
+  const start = content.slice(0, startChar).split(/\r?\n/u).length
+  const end = content.slice(0, Math.max(startChar, endChar - 1)).split(/\r?\n/u).length
+  return { start, end }
 }
 
 function clueFragments(text: string) {
@@ -221,14 +280,35 @@ function clueFragments(text: string) {
 function clean(value: unknown) { return typeof value === 'string' && Boolean(value.trim()) }
 function normalize(value: string) { return value.normalize('NFKC').replace(/\s+/gu, ' ').trim() }
 function containsEquivalent(content: string, text: string) { const needle = normalize(text); return needle.length >= 4 && normalize(content).includes(needle) }
-function locateFixedQuote(content: string, text: string) {
-  const exact = content.indexOf(text)
-  if (exact >= 0) {
-    const start = content.slice(0, exact).split(/\r?\n/u).length
-    return { quote: text, line: { start, end: start + text.split(/\r?\n/u).length - 1 } }
-  }
+function containsChunkSegment(content: string, text: string) {
+  if (content.includes(text)) return true
+  const normalizedContent = normalize(content)
+  const normalizedText = normalize(text)
+  return normalizedText.length >= 1 && normalizedContent.includes(normalizedText)
+}
+function locateFixedQuotes(content: string, text: string): LocatedQuote[] {
+  const exact = allIndexesOf(content, text)
+  if (exact.length) return exact.map(startChar => ({ quote: text, line: lineRange(content, startChar, startChar + text.length), startChar, endChar: startChar + text.length }))
   const needle = normalize(text)
+  if (needle.length < 4) return []
   const lines = content.split(/\r?\n/u)
-  const matches = lines.flatMap((line, index) => normalize(line).includes(needle) ? [{ quote: line.trim(), line: { start: index + 1, end: index + 1 } }] : [])
-  return matches.length === 1 ? matches[0] : undefined
+  let cursor = 0
+  const matches: LocatedQuote[] = []
+  lines.forEach(line => {
+    const leading = line.length - line.trimStart().length
+    const trimmed = line.trim()
+    if (trimmed && normalize(line).includes(needle)) {
+      const startChar = cursor + leading
+      const endChar = startChar + trimmed.length
+      matches.push({ quote: trimmed, line: lineRange(content, startChar, endChar), startChar, endChar })
+    }
+    cursor += line.length + 1
+  })
+  return matches
+}
+function allIndexesOf(source: string, query: string) {
+  if (!query.length) return []
+  const indexes: number[] = []
+  for (let index = source.indexOf(query); index >= 0; index = source.indexOf(query, index + 1)) indexes.push(index)
+  return indexes
 }
