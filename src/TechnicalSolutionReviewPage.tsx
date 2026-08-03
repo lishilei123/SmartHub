@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, AlertTriangle, BookOpen, Bot, CheckCircle2, Clock3, Download, FileText, Filter, GitBranch, History, LoaderCircle, MessageSquareText, Play, RefreshCw, ShieldCheck, Sparkles, Square, Upload, Wrench, XCircle } from 'lucide-react'
+import { Activity, AlertTriangle, ArrowLeft, BookOpen, Bot, CheckCircle2, Clock3, Download, FileText, Filter, GitBranch, History, LoaderCircle, MessageSquareText, Play, RefreshCw, ShieldCheck, Sparkles, Square, Upload, Wrench, XCircle } from 'lucide-react'
 import type { ProjectVersion } from './project-version-api'
 import { uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
 import { actOnTechnicalFinding, cancelTechnicalRun, createTechnicalReview, createTechnicalRun, downloadTechnicalReport, loadTechnicalBaselines, loadTechnicalFindingActions, loadTechnicalFixedContent, loadTechnicalReviews, loadTechnicalRun, loadTechnicalRuns, loadTechnicalSolutionAssets, type CoverageStatus, type FindingActionsResponse, type FindingState, type TechnicalBaseline, type TechnicalEvidence, type TechnicalExecutionEvent, type TechnicalExecutionRecord, type TechnicalFormalResult, type TechnicalReview, type TechnicalRun, type TechnicalRunSummary, type TechnicalSolutionAsset } from './technical-solution-review-api'
@@ -19,7 +19,7 @@ const technicalTabs = [
   ['evidence', 'Evidence', BookOpen],
 ] as const satisfies ReadonlyArray<readonly [Tab, string, typeof FileText]>
 
-export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, apiState, refreshKnowledge, onManageVersions, onOpenKnowledge, notify, addAudit }: { projectVersion: ProjectVersion | null; knowledgeBaseId: string; apiState: 'connecting' | 'ready' | 'offline'; refreshKnowledge: () => Promise<void>; onManageVersions: () => void; onOpenKnowledge: () => void; notify: Notify; addAudit: (entry: string) => void }) {
+export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, apiState, refreshKnowledge, onManageVersions, onOpenKnowledge, onBackToWorkbench, notify, addAudit }: { projectVersion: ProjectVersion | null; knowledgeBaseId: string; apiState: 'connecting' | 'ready' | 'offline'; refreshKnowledge: () => Promise<void>; onManageVersions: () => void; onOpenKnowledge: () => void; onBackToWorkbench: () => void; notify: Notify; addAudit: (entry: string) => void }) {
   const projectVersionId = projectVersion?.id ?? ''
   const initial = useMemo(() => routeContext(), [])
   const [baselines, setBaselines] = useState<TechnicalBaseline[]>([])
@@ -104,7 +104,18 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
     return () => window.clearTimeout(timer)
   }, [uploadProgress?.stage])
   useEffect(() => {
-    const restore = () => { const context = routeContext(); setReviewId(context.technicalReviewId); setRunId(context.runId); setTab(context.tab); setDocument(null) }
+    const restore = () => {
+      const context = routeContext()
+      setReviewId(context.technicalReviewId)
+      setRunId(context.runId)
+      setTab(context.tab)
+      setDocument(null)
+      if (!context.runId) {
+        setRun(null)
+        setActions({ actions: [], findings: [] })
+        setSelectedFindingId('')
+      }
+    }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
   }, [])
@@ -205,7 +216,7 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
   const act = async (action: string) => { if (!selectedFinding || !currentProjection) return; setActing(true); try { await actOnTechnicalFinding(projectVersionId, run.technicalReviewId, run.runId, selectedFinding.id, { action, comment, expectedVersion: currentProjection.version }); setActions(await loadTechnicalFindingActions(projectVersionId, run.technicalReviewId, run.runId)); setComment(''); notify('Finding 处置已追加保存') } catch (error) { notify(message(error), 'error'); setActions(await loadTechnicalFindingActions(projectVersionId, run.technicalReviewId, run.runId).catch(() => actions)) } finally { setActing(false) } }
 
   return <div className="tech-workbench">
-    <header className="tech-run-header"><div className="tech-run-heading"><div className="tech-title-line"><span className="tech-run-symbol"><ShieldCheck /></span><div><h2>{reviews.find(item => item.id === run.technicalReviewId)?.name ?? '技术方案评审'}</h2><p>基于固定需求基线与技术方案资料完成可追溯评审</p></div></div></div><div className="tech-run-summary"><StatusBadge status={run.status} /><div className="tech-run-meta"><span><small>运行 ID</small><b title={run.runId}>{run.runId.replace('technical_run_', '').slice(0, 14)}</b></span><span><small>需求基线</small><b title={run.sourceReviewRunId}>{run.sourceReviewRunId.replace('review_run_', '').slice(0, 14)}</b></span><span><small>模型</small><b>{run.modelLabel}</b></span>{run.degradations?.length ? <span className="warning"><small>路由降级</small><b>{run.degradations.length} 次</b></span> : null}</div></div><div className="tech-actions"><label className="rr-history"><Clock3 /><span>运行历史</span><select value={run.runId} onChange={event => selectRunById(event.target.value)} disabled={!runs.length}>{runs.map(item => <option value={item.runId} key={item.runId}>{formatTime(item.createdAt)} · {statusLabel(item.status)}</option>)}</select><button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={runRecordLoading}><Activity />运行记录</button></label><button className="btn ghost" onClick={rerun} disabled={starting || ['queued','running'].includes(run.status)}><RefreshCw />重新评审</button>{['queued','running'].includes(run.status) && <button className="btn danger" onClick={cancel}><Square />取消</button>}<button className="btn primary" disabled={run.status !== 'succeeded'} onClick={exportReport}><Download />导出报告</button></div></header>
+    <header className="tech-run-header"><div className="tech-run-heading"><button className="tech-back-button" type="button" onClick={onBackToWorkbench}><ArrowLeft />返回技术方案评审工作台</button><div className="tech-title-line"><span className="tech-run-symbol"><ShieldCheck /></span><div><h2>{reviews.find(item => item.id === run.technicalReviewId)?.name ?? '技术方案评审'}</h2><p>基于固定需求基线与技术方案资料完成可追溯评审</p></div></div></div><div className="tech-run-summary"><StatusBadge status={run.status} /><div className="tech-run-meta"><span><small>运行 ID</small><b title={run.runId}>{run.runId.replace('technical_run_', '').slice(0, 14)}</b></span><span><small>需求基线</small><b title={run.sourceReviewRunId}>{run.sourceReviewRunId.replace('review_run_', '').slice(0, 14)}</b></span><span><small>模型</small><b>{run.modelLabel}</b></span>{run.degradations?.length ? <span className="warning"><small>路由降级</small><b>{run.degradations.length} 次</b></span> : null}</div></div><div className="tech-actions"><label className="rr-history"><Clock3 /><span>运行历史</span><select value={run.runId} onChange={event => selectRunById(event.target.value)} disabled={!runs.length}>{runs.map(item => <option value={item.runId} key={item.runId}>{formatTime(item.createdAt)} · {statusLabel(item.status)}</option>)}</select><button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={runRecordLoading}><Activity />运行记录</button></label><button className="btn ghost" onClick={rerun} disabled={starting || ['queued','running'].includes(run.status)}><RefreshCw />重新评审</button>{['queued','running'].includes(run.status) && <button className="btn danger" onClick={cancel}><Square />取消</button>}<button className="btn primary" disabled={run.status !== 'succeeded'} onClick={exportReport}><Download />导出报告</button></div></header>
     <div className="tech-columns">
       <aside className="tech-sources"><div className="tech-sidebar-head"><span><FileText /><b>固定资料</b></span><em>{run.snapshot.solutionInputs.length + 1} 组输入</em></div><div className="tech-sidebar-scroll"><SourceList run={run} result={result} openEvidence={openEvidence} document={document} loadContent={async assetVersionId => { const value = await loadTechnicalFixedContent(projectVersionId, run.technicalReviewId, run.runId, assetVersionId); const input = run.snapshot.solutionInputs.find(item => item.assetVersionId === assetVersionId); setDocument({ assetVersionId, title: input?.displayName ?? '冻结原文', content: value.content, logicalPath: input?.logicalPath }) }} /></div><div className="tech-sidebar-foot"><ShieldCheck /><span><b>服务端固定输入</b><small>正文 Hash 与索引版本不会随页面刷新变化</small></span></div></aside>
       <main className="tech-results"><nav className="tech-tabs" role="tablist" aria-label="技术方案评审视图">{technicalTabs.map(([key,label,Icon]) => <button key={key} id={`tech-tab-${key}`} className={tab === key ? 'active' : ''} role="tab" aria-selected={tab === key} aria-controls="tech-tab-panel" onClick={() => setTab(key)}><Icon />{label}</button>)}</nav>
