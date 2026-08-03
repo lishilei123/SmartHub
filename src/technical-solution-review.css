@@ -9,7 +9,7 @@
 @media(max-width:1180px){.tech-columns{grid-template-columns:220px minmax(380px,1fr) 290px}.tech-setup-columns{grid-template-columns:230px minmax(430px,1fr) 250px}}@media(max-width:900px){.tech-input-page{overflow:auto}.tech-setup-columns{display:flex;flex-direction:column}.tech-setup-sources,.tech-setup-history{min-height:360px;border:0;border-bottom:1px solid #e1e4ea}.tech-columns{display:flex;flex-direction:column;overflow:auto}.tech-list,.tech-detail,.tech-results{min-height:360px;overflow:visible}.tech-list,.tech-results{border:0;border-bottom:1px solid #e1e4ea}.tech-run-header,.tech-setup-header{align-items:flex-start;flex-direction:column}.fixed-document{position:fixed;inset:20px}}@media(max-width:640px){.tech-setup-main{padding:10px}.tech-setup-header>div{display:block}.tech-version-chip{display:inline-flex;margin-bottom:7px}.tech-setup-header p{margin-left:0}.tech-start-bar{align-items:stretch;flex-direction:column}.tech-start-bar .start-tech{width:100%}.tech-input-card>header{align-items:flex-start;flex-direction:column}.stat-grid,.tech-filters{grid-template-columns:1fr}.tech-actions{justify-content:stretch}.tech-actions .btn{flex:1}}
 
 .tech-tabs{position:relative;top:auto;flex:0 0 auto}
-.tech-tabs{height:49px;padding:0 13px;align-items:stretch;gap:18px}.tech-tabs button{position:relative;height:auto;padding:0;border-radius:0;display:flex;align-items:center;gap:5px;font-size:9px}.tech-tabs button.active{color:#5965e9;font-weight:600}.tech-tabs button.active:after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:2px;background:#5965e9}
+.tech-tabs{height:49px;padding:0 13px;align-items:stretch;gap:18px}.tech-tabs button{position:relative;height:auto;padding:0;border-radius:0;display:flex;align-items:center;gap:5px;font-size:9px}.tech-tabs button:hover{background:transparent;color:#5965e9}.tech-tabs button.active{background:transparent;color:#5965e9;font-weight:600;box-shadow:none}
 .fixed-document{inset:44px 8px 8px;min-width:0;overflow:hidden}
 .fixed-document>header{min-height:49px;padding:9px 12px;background:#fafbfc;gap:12px}
 .fixed-document>header span{min-width:0}
@@ -81,8 +81,6 @@
 .tech-tabs{height:49px;padding:0 14px;gap:18px;overflow-x:auto;overflow-y:hidden}
 .tech-tabs button{gap:6px;color:#7c8796;font-size:9px}
 .tech-tabs button svg{width:14px;flex:0 0 14px}
-.tech-tabs button:disabled{cursor:not-allowed;opacity:.42}
-.tech-tabs button:disabled:after{display:none}
 .tech-results-scroll{background:#f7f8fb}
 .tech-results .tech-list{border-right:0}
 
