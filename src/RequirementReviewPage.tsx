@@ -74,6 +74,14 @@ function ReviewBadge({ children, tone = 'gray' }: { children: React.ReactNode; t
 }
 
 function ReviewModal({ title, onClose, children, className = 'rr-binding-modal' }: { title: string; onClose: () => void; children: React.ReactNode; className?: string }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+
   return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><div className={`modal ${className}`} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-btn" onClick={onClose} aria-label={`关闭${title}`}><XCircle /></button></header>{children}</div></div>
 }
 
@@ -373,6 +381,7 @@ export function RequirementReviewPage({
   const [agentConfiguration, setAgentConfiguration] = useState<AgentConfigurationState | null>(null)
   const [selectedFindingId, setSelectedFindingId] = useState('')
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('')
+  const [sourceModalOpen, setSourceModalOpen] = useState(false)
   const [activeSectionKey, setActiveSectionKey] = useState<string | null>(null)
   const [outlineCollapsed, setOutlineCollapsed] = useState(false)
   const [findingTypeFilter, setFindingTypeFilter] = useState<'all' | ReviewFindingType>('all')
@@ -607,13 +616,13 @@ export function RequirementReviewPage({
 
   const sourceVersionId = selectedDocument?.assetVersionId
   useEffect(() => {
-    if (view !== 'source' || !sourceVersionId || contentByVersion[sourceVersionId]) return
+    if ((view !== 'source' && !sourceModalOpen) || !sourceVersionId || contentByVersion[sourceVersionId]) return
     let cancelled = false
     void loadAssetVersion(sourceVersionId).then(version => {
       if (!cancelled) setContentByVersion(current => ({ ...current, [version.id]: version.content ?? '' }))
     }).catch(error => { if (!cancelled) notify(error instanceof Error ? error.message : '固定版本读取失败', 'error') })
     return () => { cancelled = true }
-  }, [contentByVersion, notify, sourceVersionId, view])
+  }, [contentByVersion, notify, sourceModalOpen, sourceVersionId, view])
 
   useEffect(() => {
     const history = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
@@ -650,7 +659,7 @@ export function RequirementReviewPage({
   const activateSection = (key: string) => {
     pendingSectionScroll.current = key
     setActiveSectionKey(key)
-    if (view !== 'source') { setView('source'); return }
+    if (view !== 'source' && !sourceModalOpen) { setView('source'); return }
     requestAnimationFrame(() => {
       if (pendingSectionScroll.current !== key) return
       pendingSectionScroll.current = null
@@ -659,7 +668,7 @@ export function RequirementReviewPage({
   }
 
   useEffect(() => {
-    if (view !== 'source') return
+    if (view !== 'source' && !sourceModalOpen) return
     const scroller = sourceRef.current
     if (!scroller) return
     const updateActiveSection = () => {
@@ -680,7 +689,7 @@ export function RequirementReviewPage({
     updateActiveSection()
     scroller.addEventListener('scroll', updateActiveSection, { passive: true })
     return () => scroller.removeEventListener('scroll', updateActiveSection)
-  }, [documentContent, documentVersionId, view])
+  }, [documentContent, documentVersionId, sourceModalOpen, view])
 
   useEffect(() => () => requestController.current?.abort(), [])
 
@@ -897,12 +906,12 @@ export function RequirementReviewPage({
     if (sourceDocument) setSelectedAssetId(sourceDocument.id)
     setSelectedEvidenceId(evidence.clientEvidenceId)
     if (findingId) setSelectedFindingId(findingId)
-    setView('source')
+    setSourceModalOpen(true)
   }
 
   useEffect(() => {
     const evidence = evidenceById.get(selectedEvidenceId)
-    if (view !== 'source' || !evidence || evidence.sourceRef.assetVersionId !== documentVersionId || !documentContent) return
+    if ((view !== 'source' && !sourceModalOpen) || !evidence || evidence.sourceRef.assetVersionId !== documentVersionId || !documentContent) return
     const heading = evidence.locator.heading.trim()
     const section = outline.sections.find(item => item.title === heading || item.title.includes(heading) || heading.includes(item.title))
     if (!section) { setActiveSectionKey(null); return }
@@ -913,7 +922,7 @@ export function RequirementReviewPage({
       pendingSectionScroll.current = null
       scrollToSection(section.key)
     })
-  }, [documentContent, documentVersionId, evidenceById, outline.sections, selectedEvidenceId, view])
+  }, [documentContent, documentVersionId, evidenceById, outline.sections, selectedEvidenceId, sourceModalOpen, view])
 
   const locateFinding = (finding: ReviewFinding) => {
     setSelectedFindingId(finding.clientFindingId)
@@ -1133,7 +1142,7 @@ export function RequirementReviewPage({
 
         <div className={`rr-view-content ${view === 'source' ? 'rr-source-view' : ''}`}>
           {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} traceabilityFilter={traceabilityFilter} setTraceabilityFilter={setTraceabilityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} findingEvidence={findingEvidence} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
-          {view === 'source' && <SourceDocumentView document={selectedDocument} content={documentContent} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} />}
+          {view === 'source' && !sourceModalOpen && <SourceDocumentView document={selectedDocument} content={documentContent} loading={Boolean(sourceVersionId && !documentContent)} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} />}
           {view === 'diff' && <DiffView versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
           {view === 'tree' && <RequirementPointsView requirementPoints={extractionResult?.requirementPoints ?? []} evidence={extractionResult?.evidence ?? []} onLocateEvidence={locateEvidence} />}
           {view === 'evidence' && <EvidenceView evidence={extractionResult?.evidence ?? []} findings={result?.findings ?? []} requirementPoints={extractionResult?.requirementPoints ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
@@ -1148,7 +1157,7 @@ export function RequirementReviewPage({
           <div className="rr-chat-input"><textarea value={chatDraft} onChange={event => setChatDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat() } }} disabled={selectedRun?.status !== 'succeeded' || !reviewQaReady || Boolean(chatSendingRunId)} placeholder={selectedRun?.status === 'succeeded' ? reviewQaReady ? '基于固定评审运行提问…' : '请先发布评审问答 Agent' : '完成一次真实评审后可引用提问'} /><div><span><ShieldCheck />固定 ReviewRun · 独立问答 Agent</span><button onClick={() => void sendChat()} disabled={!chatDraft.trim() || selectedRun?.status !== 'succeeded' || !reviewQaReady || Boolean(chatSendingRunId)} aria-label="发送评审问题">{chatSendingRunId ? <LoaderCircle className="rotating" /> : <Send />}</button></div></div></>}
       </aside>
     </div>
-  </section>{runRecordOpen && selectedRun && <RunRecordModal run={selectedRun} loading={runRecordLoading} tab={runRecordTab} onTab={setRunRecordTab} onClose={() => setRunRecordOpen(false)} />}{qaTraceSelection && selectedQaTraceExecution && <QaExecutionModal question={qaTraceSelection.question} modelLabel={selectedQaTraceMessage?.modelLabel} execution={selectedQaTraceExecution} running={qaTraceSelection.messageId === 'pending' && chatSendingRunId === qaTraceSelection.runId} failed={selectedQaTraceMessage?.role === 'system'} onClose={() => setQaTraceSelection(null)} />}{bindingManagerOpen && <ReviewModal title={`${projectVersion.name} · 需求绑定`} onClose={() => setBindingManagerOpen(false)}><div className="rr-binding-manager"><header><div><b>{readOnly ? '当前版本只读' : '维护当前版本的需求范围'}</b><span>继承得到的是独立固定绑定。加入、替换或移除只影响 {projectVersion.name}，不会修改来源版本或删除知识库文件。</span></div><ReviewBadge tone={readOnly ? 'orange' : 'green'}>{bindings.length} 条绑定</ReviewBadge></header><div className="rr-binding-list">{availableRequirementDocuments.map(document => {
+  </section>{sourceModalOpen && <ReviewModal title="固定原文定位" className="rr-source-modal" onClose={() => setSourceModalOpen(false)}><SourceDocumentView document={selectedDocument} content={documentContent} loading={Boolean(sourceVersionId && !documentContent)} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} /></ReviewModal>}{runRecordOpen && selectedRun && <RunRecordModal run={selectedRun} loading={runRecordLoading} tab={runRecordTab} onTab={setRunRecordTab} onClose={() => setRunRecordOpen(false)} />}{qaTraceSelection && selectedQaTraceExecution && <QaExecutionModal question={qaTraceSelection.question} modelLabel={selectedQaTraceMessage?.modelLabel} execution={selectedQaTraceExecution} running={qaTraceSelection.messageId === 'pending' && chatSendingRunId === qaTraceSelection.runId} failed={selectedQaTraceMessage?.role === 'system'} onClose={() => setQaTraceSelection(null)} />}{bindingManagerOpen && <ReviewModal title={`${projectVersion.name} · 需求绑定`} onClose={() => setBindingManagerOpen(false)}><div className="rr-binding-manager"><header><div><b>{readOnly ? '当前版本只读' : '维护当前版本的需求范围'}</b><span>继承得到的是独立固定绑定。加入、替换或移除只影响 {projectVersion.name}，不会修改来源版本或删除知识库文件。</span></div><ReviewBadge tone={readOnly ? 'orange' : 'green'}>{bindings.length} 条绑定</ReviewBadge></header><div className="rr-binding-list">{availableRequirementDocuments.map(document => {
     const binding = bindings.find(item => item.assetId === document.id)
     const boundDocument = boundDocuments.find(item => item.id === document.id)
     const isLatest = binding?.assetVersionId === document.assetVersionId
@@ -1175,7 +1184,8 @@ function OverviewView({ result, stats, visibleFindings, selectedFindingId, selec
   </div>
 }
 
-function SourceDocumentView({ document, content, format, outline, activeSectionKey, outlineCollapsed, selectedEvidence, sourceRef, outlineRef, knowledgeBaseId, onSection, onToggleOutline, onQuote }: { document?: KnowledgeDocument; content: string; format: 'markdown' | 'text'; outline: ReturnType<typeof parseMarkdownOutline>; activeSectionKey: string | null; outlineCollapsed: boolean; selectedEvidence?: ReviewEvidence; sourceRef: React.RefObject<HTMLDivElement | null>; outlineRef: React.RefObject<HTMLElement | null>; knowledgeBaseId: string; onSection: (key: string) => void; onToggleOutline: () => void; onQuote: () => void }) {
+function SourceDocumentView({ document, content, loading = false, format, outline, activeSectionKey, outlineCollapsed, selectedEvidence, sourceRef, outlineRef, knowledgeBaseId, onSection, onToggleOutline, onQuote }: { document?: KnowledgeDocument; content: string; loading?: boolean; format: 'markdown' | 'text'; outline: ReturnType<typeof parseMarkdownOutline>; activeSectionKey: string | null; outlineCollapsed: boolean; selectedEvidence?: ReviewEvidence; sourceRef: React.RefObject<HTMLDivElement | null>; outlineRef: React.RefObject<HTMLElement | null>; knowledgeBaseId: string; onSection: (key: string) => void; onToggleOutline: () => void; onQuote: () => void }) {
+  if (loading) return <div className="rr-empty"><LoaderCircle className="rotating" /><b>正在读取固定原文</b><p>正在加载 Evidence 指定的固定资产版本。</p></div>
   if (!document || !content) return <div className="rr-empty"><BookOpen /><b>固定原文不可用</b><p>请确认需求资产版本已达到 ready 状态。</p></div>
   return <div className={`rr-source-layout ${outlineCollapsed ? 'outline-collapsed' : ''}`}><nav className="rr-outline" ref={outlineRef}><header><b>本文目录</b>{!outlineCollapsed && <ReviewBadge tone="blue">{outline.sections.length}</ReviewBadge>}<button className="rr-outline-toggle" onClick={onToggleOutline} aria-label={outlineCollapsed ? '展开文档目录' : '收起文档目录'} title={outlineCollapsed ? '展开目录' : '收起目录'}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></header>{!outlineCollapsed && outline.sections.map(section => <button className={activeSectionKey === section.key ? 'active' : ''} data-outline-section-key={section.key} style={{ paddingLeft: `${12 + Math.max(0, section.depth - 2) * 10}px` }} onClick={() => onSection(section.key)} key={section.key}><span>{section.title}</span></button>)}</nav><article className="rr-source-document"><header><div><ReviewBadge tone="blue">{format === 'text' ? 'TXT' : 'Markdown'}</ReviewBadge><b>{document.title}</b><span>{document.assetVersionId}</span></div><span><ShieldCheck />只读固定版本</span></header>{selectedEvidence && <div className="rr-evidence-banner"><ShieldCheck /><span><b>已定位证据 · {selectedEvidence.locator.heading}</b><small>{selectedEvidence.quote}</small></span><ReviewBadge tone="green">{selectedEvidence.sourceRef.chunkId}</ReviewBadge></div>}<div className="rr-markdown" ref={sourceRef} onMouseUp={onQuote}><MarkdownDocument source={content} format={format} knowledgeBaseId={knowledgeBaseId} logicalPath={document.logicalPath ?? document.name} outline={outline} activeSectionKey={activeSectionKey} anchorPrefix={`review-${document.assetVersionId}`} /></div><footer><Quote />选中原文可引用到右侧评审问答；不会修改或覆盖固定需求版本。</footer></article></div>
 }
