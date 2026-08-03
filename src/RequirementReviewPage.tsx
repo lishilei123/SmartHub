@@ -40,7 +40,7 @@ import { versionDocumentDirectory, versionDocumentPath } from './version-documen
 import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
-type ViewKey = 'overview' | 'source' | 'diff' | 'tree' | 'evidence'
+type ViewKey = 'overview' | 'diff' | 'tree' | 'evidence'
 type RunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
 type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
 type SourceQuote = ReviewQuestionQuote
@@ -63,7 +63,6 @@ const severityLabels: Record<ReviewSeverity, string> = { blocker: '阻断', high
 const findingStateLabels: Record<FindingState, string> = { open: '待处理', confirmed: '已确认', dismissed: '已驳回', resolved: '已解决', needs_follow_up: '待跟进' }
 const viewTabs: { key: ViewKey; label: string; icon: typeof BookOpen }[] = [
   { key: 'overview', label: '评审概览', icon: Sparkles },
-  { key: 'source', label: '原始文档', icon: BookOpen },
   { key: 'diff', label: '版本差异', icon: FileDiff },
   { key: 'tree', label: '需求点', icon: GitBranch },
   { key: 'evidence', label: '证据引用', icon: ShieldCheck },
@@ -553,6 +552,7 @@ export function RequirementReviewPage({
       const nextView = url.searchParams.get('view') as ViewKey | null
       if (runId && runs.some(run => run.id === runId && (!reviewId || run.reviewId === reviewId))) setSelectedRunId(runId)
       if (viewTabs.some(item => item.key === nextView)) setView(nextView!)
+      else setView('overview')
       setSelectedFindingId(url.searchParams.get('findingId') ?? '')
       setSelectedEvidenceId(url.searchParams.get('evidenceId') ?? '')
     }
@@ -616,13 +616,13 @@ export function RequirementReviewPage({
 
   const sourceVersionId = selectedDocument?.assetVersionId
   useEffect(() => {
-    if ((view !== 'source' && !sourceModalOpen) || !sourceVersionId || contentByVersion[sourceVersionId]) return
+    if (!sourceModalOpen || !sourceVersionId || contentByVersion[sourceVersionId]) return
     let cancelled = false
     void loadAssetVersion(sourceVersionId).then(version => {
       if (!cancelled) setContentByVersion(current => ({ ...current, [version.id]: version.content ?? '' }))
     }).catch(error => { if (!cancelled) notify(error instanceof Error ? error.message : '固定版本读取失败', 'error') })
     return () => { cancelled = true }
-  }, [contentByVersion, notify, sourceModalOpen, sourceVersionId, view])
+  }, [contentByVersion, notify, sourceModalOpen, sourceVersionId])
 
   useEffect(() => {
     const history = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
@@ -659,7 +659,7 @@ export function RequirementReviewPage({
   const activateSection = (key: string) => {
     pendingSectionScroll.current = key
     setActiveSectionKey(key)
-    if (view !== 'source' && !sourceModalOpen) { setView('source'); return }
+    if (!sourceModalOpen) return
     requestAnimationFrame(() => {
       if (pendingSectionScroll.current !== key) return
       pendingSectionScroll.current = null
@@ -668,7 +668,7 @@ export function RequirementReviewPage({
   }
 
   useEffect(() => {
-    if (view !== 'source' && !sourceModalOpen) return
+    if (!sourceModalOpen) return
     const scroller = sourceRef.current
     if (!scroller) return
     const updateActiveSection = () => {
@@ -689,7 +689,7 @@ export function RequirementReviewPage({
     updateActiveSection()
     scroller.addEventListener('scroll', updateActiveSection, { passive: true })
     return () => scroller.removeEventListener('scroll', updateActiveSection)
-  }, [documentContent, documentVersionId, sourceModalOpen, view])
+  }, [documentContent, documentVersionId, sourceModalOpen])
 
   useEffect(() => () => requestController.current?.abort(), [])
 
@@ -717,6 +717,13 @@ export function RequirementReviewPage({
     const url = new URL(window.location.href)
     url.searchParams.set('view', nextView)
     window.history.pushState({}, '', url)
+  }
+
+  const openSourceDocument = (document: KnowledgeDocument) => {
+    setSelectedAssetId(document.id)
+    setSelectedEvidenceId('')
+    setActiveSectionKey(null)
+    setSourceModalOpen(true)
   }
 
   const loadMoreRuns = async () => {
@@ -911,7 +918,7 @@ export function RequirementReviewPage({
 
   useEffect(() => {
     const evidence = evidenceById.get(selectedEvidenceId)
-    if ((view !== 'source' && !sourceModalOpen) || !evidence || evidence.sourceRef.assetVersionId !== documentVersionId || !documentContent) return
+    if (!sourceModalOpen || !evidence || evidence.sourceRef.assetVersionId !== documentVersionId || !documentContent) return
     const heading = evidence.locator.heading.trim()
     const section = outline.sections.find(item => item.title === heading || item.title.includes(heading) || heading.includes(item.title))
     if (!section) { setActiveSectionKey(null); return }
@@ -922,7 +929,7 @@ export function RequirementReviewPage({
       pendingSectionScroll.current = null
       scrollToSection(section.key)
     })
-  }, [documentContent, documentVersionId, evidenceById, outline.sections, selectedEvidenceId, sourceModalOpen, view])
+  }, [documentContent, documentVersionId, evidenceById, outline.sections, selectedEvidenceId, sourceModalOpen])
 
   const locateFinding = (finding: ReviewFinding) => {
     setSelectedFindingId(finding.clientFindingId)
@@ -1126,7 +1133,7 @@ export function RequirementReviewPage({
         <div className="rr-panel-head"><span><FileText /><b>需求文件目录</b></span><button onClick={() => setLeftCollapsed(value => !value)} aria-label={leftCollapsed ? '展开需求文件目录' : '收起需求文件目录'}>{leftCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>
         {!leftCollapsed && <>
           <div className="rr-list-meta"><span>{requirementDocuments.length} 份固定输入文档</span><button onClick={() => void refreshKnowledge()}><RefreshCw />刷新</button></div>
-          <div className="rr-list-scroll">{requirementDocuments.map(document => <button className={`rr-review-row ${selectedDocument?.id === document.id ? 'active' : ''}`} key={document.id} onClick={() => { setSelectedAssetId(document.id); setView('source') }}><span className="rr-file-icon">MD</span><span><b>{document.title}</b><small>{document.version} · 固定输入</small><em>{document.logicalPath}</em></span></button>)}{!requirementDocuments.length && <div className="rr-empty compact"><FileText /><b>没有可分析的需求文档</b><p>仅展示当前项目版本已绑定且 ready 的 requirement 类型 Markdown/纯文本资产。</p></div>}</div>
+          <div className="rr-list-scroll">{requirementDocuments.map(document => <button className={`rr-review-row ${selectedDocument?.id === document.id ? 'active' : ''}`} key={document.id} onClick={() => openSourceDocument(document)}><span className="rr-file-icon">MD</span><span><b>{document.title}</b><small>{document.version} · 固定输入</small><em>{document.logicalPath}</em></span></button>)}{!requirementDocuments.length && <div className="rr-empty compact"><FileText /><b>没有可分析的需求文档</b><p>仅展示当前项目版本已绑定且 ready 的 requirement 类型 Markdown/纯文本资产。</p></div>}</div>
           <div className="rr-list-footer"><button className="rr-upload-button" disabled={readOnly || uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload />{readOnly ? '当前版本只读' : uploadState === 'running' ? '正在解析并入库…' : '上传需求 / ZIP'}</button>{requirementUploadDirectory && <small className="rr-upload-target" title={`/${requirementUploadDirectory}`}>入库目录：/{requirementUploadDirectory}</small>}<input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={event => void uploadRequirements(event)} />{uploadProgress && <div className={`rr-upload-progress ${uploadProgress.stage}`} role="status" aria-live="polite"><div><span>{uploadProgress.stage === 'failed' ? '上传未完成' : uploadProgress.stage === 'completed' ? '上传完成' : '上传解析进度'}</span><b>{uploadProgress.percent}%</b></div><progress max="100" value={uploadProgress.percent} /><small>{uploadProgress.detail}</small></div>}<button onClick={() => setBindingManagerOpen(true)}><FileDiff />管理需求绑定</button><button onClick={onManageVersions}><GitBranch />切换 / 管理版本</button><button onClick={onOpenKnowledge}><BookOpen />前往知识库</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></div>
         </>}
       </aside>
@@ -1140,9 +1147,8 @@ export function RequirementReviewPage({
         {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>{selectedRun.hasFrozenExtraction ? '需求评审失败，需求点提取结果已保留' : '需求点提取或运行启动失败'}</b><span>{runErrorMessage(selectedRun.error)}</span>{selectedRun.hasFrozenExtraction && !reviewAgentReady && <small>请先发布需求评审 Agent，再单独重跑评审。</small>}{!selectedRun.hasFrozenExtraction && !agentConfigurationsReady && <small>请先分别发布两个 Agent 配置。</small>}</div><div className="rr-retry-actions">{selectedRun.hasFrozenExtraction && <button className="btn primary" onClick={() => void retryAnalysis('review_only')} disabled={!canRetryReview}><RefreshCw />{retryingMode === 'review_only' ? '启动中…' : '重新需求评审'}</button>}<button className="btn ghost" onClick={() => void retryAnalysis('full')} disabled={!canRun}><Play />{retryingMode === 'full' ? '启动中…' : '全部重跑'}</button></div></div>}
         {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{selectedRun.hasFrozenExtraction && !reviewAgentReady && <small>请先发布需求评审 Agent，再单独重跑评审。</small>}</div><div className="rr-retry-actions">{selectedRun.hasFrozenExtraction && <button className="btn primary" onClick={() => void retryAnalysis('review_only')} disabled={!canRetryReview}><RefreshCw />重新需求评审</button>}<button className="btn ghost" onClick={() => void retryAnalysis('full')} disabled={!canRun}><Play />全部重跑</button></div></div>}
 
-        <div className={`rr-view-content ${view === 'source' ? 'rr-source-view' : ''}`}>
+        <div className="rr-view-content">
           {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} traceabilityFilter={traceabilityFilter} setTraceabilityFilter={setTraceabilityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} findingEvidence={findingEvidence} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
-          {view === 'source' && !sourceModalOpen && <SourceDocumentView document={selectedDocument} content={documentContent} loading={Boolean(sourceVersionId && !documentContent)} format={documentFormat} outline={outline} activeSectionKey={activeSectionKey} outlineCollapsed={outlineCollapsed} selectedEvidence={selectedEvidenceId ? evidenceById.get(selectedEvidenceId) : undefined} sourceRef={sourceRef} outlineRef={outlineRef} knowledgeBaseId={knowledgeBaseId} onSection={activateSection} onToggleOutline={() => setOutlineCollapsed(value => !value)} onQuote={captureSourceQuote} />}
           {view === 'diff' && <DiffView versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
           {view === 'tree' && <RequirementPointsView requirementPoints={extractionResult?.requirementPoints ?? []} evidence={extractionResult?.evidence ?? []} onLocateEvidence={locateEvidence} />}
           {view === 'evidence' && <EvidenceView evidence={extractionResult?.evidence ?? []} findings={result?.findings ?? []} requirementPoints={extractionResult?.requirementPoints ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
