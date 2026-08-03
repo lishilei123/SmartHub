@@ -80,7 +80,22 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
         setActions({ actions: [], findings: [] })
         setSelectedFindingId('')
       }
-    } catch (error) { notify(message(error), 'error') }
+    } catch (error) {
+      const detail = message(error)
+      if (detail.startsWith('TECH_RUN_NOT_FOUND')) {
+        setRun(null)
+        setReviewId('')
+        setRunId('')
+        const url = new URL(window.location.href)
+        url.searchParams.delete('technicalReviewId')
+        url.searchParams.delete('runId')
+        url.searchParams.set('view', 'overview')
+        window.history.replaceState({}, '', url)
+        notify('技术方案评审运行已不存在，已返回新建评审页面。', 'warning')
+        return
+      }
+      notify(detail, 'error')
+    }
   }, [projectVersionId, notify])
 
   useEffect(() => { void refreshInputs() }, [refreshInputs])
@@ -190,8 +205,7 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
   const act = async (action: string) => { if (!selectedFinding || !currentProjection) return; setActing(true); try { await actOnTechnicalFinding(projectVersionId, run.technicalReviewId, run.runId, selectedFinding.id, { action, comment, expectedVersion: currentProjection.version }); setActions(await loadTechnicalFindingActions(projectVersionId, run.technicalReviewId, run.runId)); setComment(''); notify('Finding 处置已追加保存') } catch (error) { notify(message(error), 'error'); setActions(await loadTechnicalFindingActions(projectVersionId, run.technicalReviewId, run.runId).catch(() => actions)) } finally { setActing(false) } }
 
   return <div className="tech-workbench">
-    <header className="tech-run-header"><div className="tech-run-heading"><div className="tech-title-line"><span className="tech-run-symbol"><ShieldCheck /></span><div><h2>{reviews.find(item => item.id === run.technicalReviewId)?.name ?? '技术方案评审'}</h2><p>基于固定需求基线与技术方案资料完成可追溯评审</p></div><StatusBadge status={run.status} /></div><div className="tech-run-meta"><span><small>运行 ID</small><b title={run.runId}>{run.runId.replace('technical_run_', '').slice(0, 14)}</b></span><span><small>需求基线</small><b title={run.sourceReviewRunId}>{run.sourceReviewRunId.replace('review_run_', '').slice(0, 14)}</b></span><span><small>模型</small><b>{run.modelLabel}</b></span>{run.degradations?.length ? <span className="warning"><small>路由降级</small><b>{run.degradations.length} 次</b></span> : null}</div><div className={`tech-header-progress ${run.status === 'failed' ? 'failed' : ''}`}><div><span>{run.status === 'failed' ? `失败于：${stepLabel(run.failedAtStep ?? run.step)}` : stepLabel(run.step)}</span><b>{run.status === 'failed' ? `最后进度 ${run.progress}%` : `${run.progress}%`}</b></div><div><i style={{ width: `${run.progress}%` }} /></div></div></div><div className="tech-actions"><button className="btn ghost" onClick={rerun} disabled={starting || ['queued','running'].includes(run.status)}><RefreshCw />重新评审</button>{['queued','running'].includes(run.status) && <button className="btn danger" onClick={cancel}><Square />取消</button>}<button className="btn ghost" onClick={() => void openRunRecord()} disabled={runRecordLoading}><Activity />运行记录</button><button className="btn primary" disabled={run.status !== 'succeeded'} onClick={exportReport}><Download />导出报告</button></div></header>
-    {(run.status === 'failed' || run.status === 'cancelled') && <div className={`tech-terminal ${run.status}`}><AlertTriangle /><div><b>{run.status === 'failed' ? `运行失败 · ${stepLabel(run.failedAtStep ?? run.step)}` : '运行已取消'}</b><p>{run.error ?? '本次运行没有发布正式结果。'}</p></div></div>}
+    <header className="tech-run-header"><div className="tech-run-heading"><div className="tech-title-line"><span className="tech-run-symbol"><ShieldCheck /></span><div><h2>{reviews.find(item => item.id === run.technicalReviewId)?.name ?? '技术方案评审'}</h2><p>基于固定需求基线与技术方案资料完成可追溯评审</p></div><StatusBadge status={run.status} /></div><div className="tech-run-meta"><span><small>运行 ID</small><b title={run.runId}>{run.runId.replace('technical_run_', '').slice(0, 14)}</b></span><span><small>需求基线</small><b title={run.sourceReviewRunId}>{run.sourceReviewRunId.replace('review_run_', '').slice(0, 14)}</b></span><span><small>模型</small><b>{run.modelLabel}</b></span>{run.degradations?.length ? <span className="warning"><small>路由降级</small><b>{run.degradations.length} 次</b></span> : null}</div></div><div className="tech-actions"><button className="btn ghost" onClick={rerun} disabled={starting || ['queued','running'].includes(run.status)}><RefreshCw />重新评审</button>{['queued','running'].includes(run.status) && <button className="btn danger" onClick={cancel}><Square />取消</button>}<button className="btn ghost" onClick={() => void openRunRecord()} disabled={runRecordLoading}><Activity />运行记录</button><button className="btn primary" disabled={run.status !== 'succeeded'} onClick={exportReport}><Download />导出报告</button></div></header>
     <div className="tech-columns">
       <aside className="tech-sources"><div className="tech-sidebar-head"><span><FileText /><b>固定资料</b></span><em>{run.snapshot.solutionInputs.length + 1} 组输入</em></div><div className="tech-sidebar-scroll"><SourceList run={run} result={result} openEvidence={openEvidence} document={document} loadContent={async assetVersionId => { const value = await loadTechnicalFixedContent(projectVersionId, run.technicalReviewId, run.runId, assetVersionId); const input = run.snapshot.solutionInputs.find(item => item.assetVersionId === assetVersionId); setDocument({ assetVersionId, title: input?.displayName ?? '冻结原文', content: value.content, logicalPath: input?.logicalPath }) }} /></div><div className="tech-sidebar-foot"><ShieldCheck /><span><b>服务端固定输入</b><small>正文 Hash 与索引版本不会随页面刷新变化</small></span></div></aside>
       <main className="tech-results"><nav className="tech-tabs" role="tablist" aria-label="技术方案评审视图">{technicalTabs.map(([key,label,Icon]) => <button key={key} id={`tech-tab-${key}`} className={tab === key ? 'active' : ''} role="tab" aria-selected={tab === key} aria-controls="tech-tab-panel" disabled={!result && key !== 'history'} onClick={() => setTab(key)}><Icon />{label}</button>)}</nav>

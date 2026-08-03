@@ -124,7 +124,11 @@ function App() {
     if (next.resetReviewContext) ['reviewId', 'technicalReviewId', 'runId', 'view', 'findingId', 'evidenceId'].forEach(key => url.searchParams.delete(key))
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', url)
   }, [])
-  const navigate = useCallback((nextPage: PageKey) => { setPage(nextPage); updateRoute({ page: nextPage }) }, [updateRoute])
+  const navigate = useCallback((nextPage: PageKey) => {
+    const pageChanged = nextPage !== page
+    setPage(nextPage)
+    updateRoute({ page: nextPage, ...(pageChanged ? { resetReviewContext: true } : {}) })
+  }, [page, updateRoute])
   const selectProjectVersion = useCallback((id: string) => { setSelectedProjectVersionId(id); updateRoute({ projectVersionId: id, resetReviewContext: true }) }, [updateRoute])
   useEffect(() => {
     const restore = () => {
