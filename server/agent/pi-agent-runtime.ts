@@ -15,6 +15,7 @@ import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { defaultTokenCodec } from '../application/content.js'
 import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
 import { createTechnicalSolutionExtractionToolRegistry, createTechnicalSolutionReviewToolRegistry } from '../tools/technical-solution-tools.js'
+import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
 import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
@@ -87,6 +88,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const descriptors = registry.descriptors(allowedToolIds)
     const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))
     const unavailableToolIds = input.snapshot.agentDefinition.toolIds.filter(toolId => !registeredToolIds.has(toolId))
+    if (!registeredToolIds.has(stage.submitToolId)) {
+      await capabilityLoad.close()
+      throw new Error(`RESULT_SUBMISSION_TOOL_UNAVAILABLE: ${stage.submitToolId}`)
+    }
     const byPiName = new Map(descriptors.map(descriptor => [descriptor.piName, descriptor]))
     const events: AgentExecutionEvent[] = []
     let sequence = 0
@@ -342,7 +347,7 @@ type StageConfiguration = {
   isTechnicalReview: false
   usesInputPlan: true
   submitToolId: 'requirement-points.submit_result'
-  submitPiName: 'requirement_points_submit_result'
+  submitPiName: string
   schemaVersion: 'requirement-point-extraction/v5'
   agentLabel: 'RequirementPointExtractionAgent'
 } | {
@@ -351,7 +356,7 @@ type StageConfiguration = {
   isTechnicalReview: false
   usesInputPlan: false
   submitToolId: 'review.submit_result'
-  submitPiName: 'review_submit_result'
+  submitPiName: string
   schemaVersion: 'requirement-review/v3'
   agentLabel: 'RequirementReviewAgent'
   fixedExtraction: CandidateRequirementPointExtraction
@@ -361,7 +366,7 @@ type StageConfiguration = {
   isTechnicalReview: false
   usesInputPlan: true
   submitToolId: 'technical_solution_points.submit_result'
-  submitPiName: 'technical_solution_points_submit_result'
+  submitPiName: string
   schemaVersion: 'technical-solution-extraction/v1'
   agentLabel: 'TechnicalSolutionExtractionAgent'
 } | {
@@ -370,54 +375,53 @@ type StageConfiguration = {
   isTechnicalReview: true
   usesInputPlan: false
   submitToolId: 'technical_solution_review.submit_result'
-  submitPiName: 'technical_solution_review_submit_result'
+  submitPiName: string
   schemaVersion: 'technical-solution-review/v2'
   agentLabel: 'TechnicalSolutionReviewAgent'
 }
 
 function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
-  if (input.snapshot.agentDefinition.agentKey === 'requirement-point-extraction') return {
+  if (input.snapshot.agentDefinition.agentKey === 'requirement-point-extraction') return stage({
     isExtraction: true,
     isTechnicalExtraction: false,
     isTechnicalReview: false,
     usesInputPlan: true,
     submitToolId: 'requirement-points.submit_result',
-    submitPiName: 'requirement_points_submit_result',
     schemaVersion: 'requirement-point-extraction/v5',
     agentLabel: 'RequirementPointExtractionAgent',
-  }
-  if (input.snapshot.agentDefinition.agentKey === 'technical-solution-extraction') return {
+  })
+  if (input.snapshot.agentDefinition.agentKey === 'technical-solution-extraction') return stage({
     isExtraction: false,
     isTechnicalExtraction: true,
     isTechnicalReview: false,
     usesInputPlan: true,
     submitToolId: 'technical_solution_points.submit_result',
-    submitPiName: 'technical_solution_points_submit_result',
     schemaVersion: 'technical-solution-extraction/v1',
     agentLabel: 'TechnicalSolutionExtractionAgent',
-  }
-  if (input.snapshot.agentDefinition.agentKey === 'technical-solution-review' || input.snapshot.agentDefinition.agentKey === 'technical-solution-analysis') return {
+  })
+  if (input.snapshot.agentDefinition.agentKey === 'technical-solution-review' || input.snapshot.agentDefinition.agentKey === 'technical-solution-analysis') return stage({
     isExtraction: false,
     isTechnicalExtraction: false,
     isTechnicalReview: true,
     usesInputPlan: false,
     submitToolId: 'technical_solution_review.submit_result',
-    submitPiName: 'technical_solution_review_submit_result',
     schemaVersion: 'technical-solution-review/v2',
     agentLabel: 'TechnicalSolutionReviewAgent',
-  }
+  })
   if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
-  return {
+  return { ...stage({
     isExtraction: false,
     isTechnicalExtraction: false,
     isTechnicalReview: false,
     usesInputPlan: false,
     submitToolId: 'review.submit_result',
-    submitPiName: 'review_submit_result',
     schemaVersion: 'requirement-review/v3',
     agentLabel: 'RequirementReviewAgent',
-    fixedExtraction: input.fixedRequirementPointExtraction,
-  }
+  }), fixedExtraction: input.fixedRequirementPointExtraction }
+}
+
+function stage<T extends Omit<StageConfiguration, 'submitPiName' | 'fixedExtraction'>>(value: T): T & { submitPiName: string } {
+  return { ...value, submitPiName: defaultBuiltInToolConfigResolver.toDescriptor(value.submitToolId).piName }
 }
 
 function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration) {

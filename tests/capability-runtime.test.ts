@@ -102,6 +102,28 @@ test('绑定 Skill 的网络访问仅允许清单中的 Origin、只读方法且
   } finally { await close(server) }
 })
 
+test('配置已声明但当前阶段未注册的内置工具会产生预警', async () => {
+  const tool = builtInTool('review.submit_result', 'internal_write', 30_000)
+  const registry = new ToolRegistry()
+  const loaded = await new AgentCapabilityLoader(await storeWith(tool)).load(definition([tool]), registry, new AbortController().signal)
+  assert.equal(registry.get(tool.key), undefined)
+  assert.ok(loaded.warnings.some(warning => /review\.submit_result.*当前 Agent 阶段未注册/u.test(warning)))
+  await loaded.close()
+})
+
+test('已停用内置工具不会在 Agent 能力注册表中暴露', async () => {
+  const store = new JsonStore(null)
+  await store.load()
+  const catalog = await new AiResourceService(store).list()
+  const tool = catalog.tools.find(item => item.key === 'knowledge.search')!
+  await new AiResourceService(store).update('tool', tool.id, { enabled: false })
+  const registry = new ToolRegistry()
+  const loaded = await new AgentCapabilityLoader(store).load(definition([tool]), registry, new AbortController().signal)
+  assert.equal(registry.get(tool.key), undefined)
+  assert.ok(loaded.warnings.some(warning => /knowledge\.search.*已停用/u.test(warning)))
+  await loaded.close()
+})
+
 test('打包兼容的本地模块按发布 Toolset Hash 加载并执行', async () => {
   const tool = resource({ key: 'example.echo', source: 'local', sourcePath: 'ai/tools/example-echo.ts' })
   const store = await storeWith(tool)

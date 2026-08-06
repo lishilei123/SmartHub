@@ -1,0 +1,484 @@
+{
+  "schemaVersion": 1,
+  "tools": {
+    "knowledge.search": {
+      "version": "1.0.0",
+      "piName": "knowledge_search",
+      "label": "固定索引检索",
+      "catalogName": "固定索引检索",
+      "description": "仅在本次运行固定的知识索引版本内检索相关 Chunk；正文已直接投递时只用于定向复查。",
+      "catalogDescription": "仅在运行固定的知识索引中检索相关内容。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "sourcePath": "server/tools/knowledge-search.ts",
+      "handlerKey": "knowledge.search",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20 }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    },
+    "knowledge.read_chunk": {
+      "version": "1.0.0",
+      "piName": "knowledge_read_chunk",
+      "label": "读取固定 Chunk",
+      "catalogName": "读取固定 Chunk",
+      "description": "仅在需要复核引用时按 Chunk ID 读取本次固定输入中的完整内容与定位。",
+      "catalogDescription": "按 Chunk ID 读取本次固定输入的完整内容与定位。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "repeatPolicy": "replay_success_once",
+      "sourcePath": "server/tools/knowledge-read-chunk.ts",
+      "handlerKey": "knowledge.read_chunk",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "chunkId": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "required": ["chunkId"],
+        "additionalProperties": false
+      }
+    },
+    "requirement-points.submit_result": {
+      "version": "5.1.0",
+      "piName": "requirement_points_submit_result",
+      "label": "提交需求标题、描述与原文线索",
+      "catalogName": "提交需求点",
+      "description": "提交 requirement-point-extraction/v5。模型正常为每条需求点生成 title，并提交 description 和 sourceTexts；title 缺失或空白时服务端根据 description 兜底，其余结构、ID、Evidence、引用、定位和覆盖清单全部由服务端生成。",
+      "catalogDescription": "提交需求点提取候选结果，由服务端生成 ID 和证据关联。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-points-submit-result.ts",
+      "handlerKey": "requirement-points.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "requirementPoints": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string", "maxLength": 1000, "description": "模型生成的简洁需求点标题；缺失或空白时由服务端根据 description 兜底。" },
+                "description": { "type": "string", "minLength": 1, "maxLength": 8000, "description": "可独立实现、测试或验收的原子需求描述。" },
+                "sourceTexts": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000, "description": "支撑当前需求点的原文或高区分度原文线索。" } }
+              },
+              "required": ["description", "sourceTexts"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["requirementPoints"],
+        "additionalProperties": false
+      }
+    },
+    "review.submit_result": {
+      "version": "4.0.0",
+      "piName": "review_submit_result",
+      "label": "提交需求点对应分析",
+      "catalogName": "提交评审分析",
+      "description": "提交 requirement-review/v3。每条分析只需关联一个冻结需求点；模型给出标题、类型、严重度、置信度、影响、建议和总体摘要，服务端生成 Finding ID 并完成引用结构。",
+      "catalogDescription": "提交需求点评审候选结果，由服务端校验并发布。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/review-submit-result.ts",
+      "handlerKey": "review.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "object",
+            "properties": {
+              "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 pass、pass_with_notes、needs_revision 或 blocked。" },
+              "score": { "type": "number" },
+              "strengths": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
+              "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+            },
+            "additionalProperties": false
+          },
+          "analyses": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "requirementPointRef": { "type": "string", "minLength": 1, "maxLength": 100, "description": "必须是输入中存在的 RP-* 需求点 ID。" },
+                "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "type": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "severity": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "confidence": { "type": "number" },
+                "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "recommendation": { "type": "string", "minLength": 1, "maxLength": 4000 }
+              },
+              "required": ["requirementPointRef", "analysis"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["analyses"],
+        "additionalProperties": false
+      }
+    },
+    "review.answer_submit": {
+      "version": "1.0.0",
+      "piName": "review_answer_submit",
+      "label": "提交评审问答答案",
+      "catalogName": "提交评审问答答案",
+      "description": "提交 review-qa/v1。答案必须基于固定 ReviewRun；citations 只能填写固定上下文允许的 E-* Evidence ID。",
+      "catalogDescription": "提交基于固定 ReviewRun 的问答答案、Evidence 引用和限制项。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/review-answer-submit.ts",
+      "handlerKey": "review.answer_submit",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "answer": { "type": "string", "minLength": 1, "maxLength": 12000 },
+          "citations": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
+          "limitations": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+        },
+        "required": ["answer", "citations", "limitations"],
+        "additionalProperties": false
+      }
+    },
+    "technical_solution.input.read": {
+      "version": "1.0.0",
+      "piName": "technical_solution_input_read",
+      "label": "补读固定技术方案正文",
+      "catalogName": "读取技术方案固定输入",
+      "description": "仅按本次运行快照中的技术方案资产版本补读固定正文，不读取最新版本。",
+      "catalogDescription": "按本次运行快照读取技术方案正文批次，不访问运行外内容。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "repeatPolicy": "replay_success_once",
+      "sourcePath": "server/tools/technical-solution-tools.ts",
+      "handlerKey": "technical_solution.input.read",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "assetVersionId": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "chunkId": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "required": ["assetVersionId"],
+        "additionalProperties": false
+      }
+    },
+    "technical_solution.evidence.preview": {
+      "version": "1.0.0",
+      "piName": "technical_solution_evidence_preview",
+      "label": "预校验技术方案原文线索",
+      "catalogName": "预览技术方案 Evidence",
+      "description": "检查逐字原文线索在固定技术方案输入中是否唯一出现；只返回候选匹配，不生成正式 Evidence。",
+      "catalogDescription": "在提交前校验需求基线或技术方案原文引用能否唯一解析。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "sourcePath": "server/tools/technical-solution-tools.ts",
+      "handlerKey": "technical_solution.evidence.preview",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sourceText": { "type": "string", "minLength": 4, "maxLength": 4000 }
+        },
+        "required": ["sourceText"],
+        "additionalProperties": false
+      }
+    },
+    "technical_solution_points.submit_result": {
+      "version": "1.0.0",
+      "piName": "technical_solution_points_submit_result",
+      "label": "提交技术方案要点",
+      "catalogName": "提交技术方案要点",
+      "description": "提交 technical-solution-extraction/v1；正式技术方案要点 ID、Evidence、引用和定位由服务端生成。",
+      "catalogDescription": "提交提取出的技术方案要点和原文线索，由服务端生成 ID 与 Evidence。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/technical-solution-tools.ts",
+      "handlerKey": "technical_solution_points.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "technical-solution-extraction/v1" },
+          "solutionPoints": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "description": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "sourceTexts": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
+              },
+              "required": ["description", "sourceTexts"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["schemaVersion", "solutionPoints"],
+        "additionalProperties": false
+      }
+    },
+    "technical_solution_review.submit_result": {
+      "version": "2.0.0",
+      "piName": "technical_solution_review_submit_result",
+      "label": "提交技术方案评审结果",
+      "catalogName": "提交技术方案评审结果",
+      "description": "提交 technical-solution-review/v2；只能引用冻结需求点和冻结技术方案要点，正式 ID、Evidence 和统计由服务端生成。",
+      "catalogDescription": "引用冻结需求点和技术方案要点提交评审语义，由服务端生成 ID、Evidence、覆盖关系和统计。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/technical-solution-tools.ts",
+      "handlerKey": "technical_solution_review.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "technical-solution-review/v2" },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "overview": { "type": "string", "minLength": 1, "maxLength": 8000 },
+              "majorGaps": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+              "majorRisks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+              "recommendedOrder": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+            },
+            "required": ["overallAssessment", "overview", "majorGaps", "majorRisks", "recommendedOrder"],
+            "additionalProperties": false
+          },
+          "coverage": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "requirementPointRef": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "status": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
+              },
+              "required": ["requirementPointRef", "status", "analysis", "solutionPointRefs"],
+              "additionalProperties": false
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "severity": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "problem": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "recommendation": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "requirementPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
+                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
+              },
+              "required": ["type", "severity", "title", "problem", "impact", "recommendation", "confidence", "requirementPointRefs", "solutionPointRefs"],
+              "additionalProperties": false
+            }
+          },
+          "risks": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "mitigation": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "requirementPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
+                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
+              },
+              "required": ["description", "impact", "mitigation", "requirementPointRefs", "solutionPointRefs"],
+              "additionalProperties": false
+            }
+          },
+          "questions": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "properties": {
+                "question": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "requirementPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
+                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
+              },
+              "required": ["question", "reason", "requirementPointRefs", "solutionPointRefs"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["schemaVersion", "summary", "coverage", "findings", "risks", "questions"],
+        "additionalProperties": false
+      },
+      "variants": {
+        "legacy-candidate": {
+          "version": "1.0.0",
+          "label": "提交技术方案评审候选",
+          "description": "提交 technical-solution-review/v1 的语义内容和原文线索；正式 ID、Evidence、需求关系和统计由服务端生成。",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "schemaVersion": { "const": "technical-solution-review/v1" },
+              "summary": {
+                "type": "object",
+                "properties": {
+                  "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 pass、pass_with_notes、needs_revision 或 blocked；常见近义值由服务端确定性归一化。" },
+                  "overview": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                  "majorGaps": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                  "majorRisks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                  "recommendedOrder": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+                },
+                "required": ["overallAssessment", "overview", "majorGaps", "majorRisks", "recommendedOrder"],
+                "additionalProperties": false
+              },
+              "coverageCandidates": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
+                    "status": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 covered、partially_covered、not_covered 或 needs_confirmation；常见近义值由服务端确定性归一化。" },
+                    "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
+                  },
+                  "required": ["requirementSourceTexts", "status", "analysis", "solutionSourceTexts"],
+                  "additionalProperties": false
+                }
+              },
+              "findings": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 requirement_coverage_gap、architecture_gap、interface_gap、data_gap、exception_gap、non_functional_gap、conflict、risk 或 other；常见近义值由服务端确定性归一化。" },
+                    "severity": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 blocker、high、medium 或 low；常见近义值由服务端确定性归一化。" },
+                    "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+                    "problem": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                    "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "recommendation": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
+                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
+                  },
+                  "required": ["type", "severity", "title", "problem", "impact", "recommendation", "confidence", "requirementSourceTexts", "solutionSourceTexts"],
+                  "additionalProperties": false
+                }
+              },
+              "risks": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "mitigation": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
+                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
+                  },
+                  "required": ["description", "impact", "mitigation", "requirementSourceTexts", "solutionSourceTexts"],
+                  "additionalProperties": false
+                }
+              },
+              "questions": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "question": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
+                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
+                  },
+                  "required": ["question", "reason", "requirementSourceTexts", "solutionSourceTexts"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["schemaVersion", "summary", "coverageCandidates", "findings", "risks", "questions"],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "skill.execute_script": {
+      "version": "1.0.0",
+      "piName": "skill_execute_script",
+      "label": "执行 Skill 脚本",
+      "catalogName": "执行 Skill 脚本",
+      "description": "执行已绑定 Skill 在 skill-runtime.json 中明确声明的 PowerShell 脚本。只能使用相对脚本路径和字符串参数；服务端会按脚本路径解析唯一 Skill，只有同路径存在歧义时才需要 skillKey。",
+      "catalogDescription": "仅供已绑定 Skill 的受控脚本运行时使用，不出现在普通工具目录中。",
+      "risk": "code_execution",
+      "timeoutMs": 120000,
+      "idempotent": false,
+      "sourcePath": "server/tools/skill-capability.ts",
+      "handlerKey": "skill.execute_script",
+      "catalogVisible": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skillKey": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "script": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "args": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 500 } }
+        },
+        "required": ["script"],
+        "additionalProperties": false
+      }
+    },
+    "skill.http_request": {
+      "version": "1.0.0",
+      "piName": "skill_http_request",
+      "label": "访问 Skill 允许的网络目标",
+      "catalogName": "访问 Skill 允许的网络目标",
+      "description": "向已绑定 Skill 在 skill-runtime.json 中明确允许的 HTTP/HTTPS Origin 发起 GET 或 HEAD 请求。",
+      "catalogDescription": "仅供已绑定 Skill 的受控网络运行时使用，不出现在普通工具目录中。",
+      "risk": "network_read",
+      "timeoutMs": 60000,
+      "idempotent": true,
+      "sourcePath": "server/tools/skill-capability.ts",
+      "handlerKey": "skill.http_request",
+      "catalogVisible": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skillKey": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "url": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "method": { "enum": ["GET", "HEAD"] }
+        },
+        "required": ["skillKey", "url"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

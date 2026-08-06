@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { dirname } from 'node:path'
-import { Type } from 'typebox'
 import { SKILL_EXECUTE_SCRIPT_TOOL_ID, SKILL_HTTP_REQUEST_TOOL_ID } from '../application/skill-runtime-policy.js'
+import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
 import { matchesSkillConfigurationHash } from '../application/ai-resource-hash.js'
 import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { DatabaseState, SkillResource } from '../domain/types.js'
@@ -31,42 +31,14 @@ export class SkillCapabilityRuntime {
   }
 
   private registerScriptTool(registry: ToolRegistry) {
-    registry.register({
-      id: SKILL_EXECUTE_SCRIPT_TOOL_ID,
-      piName: 'skill_execute_script',
-      version: '1.0.0',
-      label: '执行 Skill 脚本',
-      description: '执行已绑定 Skill 在 skill-runtime.json 中明确声明的 PowerShell 脚本。只能使用相对脚本路径和字符串参数；服务端会按脚本路径解析唯一 Skill，只有同路径存在歧义时才需要 skillKey。',
-      risk: 'code_execution',
-      parameters: Type.Object({
-        skillKey: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-        script: Type.String({ minLength: 1, maxLength: 500 }),
-        args: Type.Optional(Type.Array(Type.String({ maxLength: MAX_SCRIPT_ARGUMENT_LENGTH }), { maxItems: MAX_SCRIPT_ARGUMENTS })),
-      }, { additionalProperties: false }),
-      timeoutMs: 120_000,
-      idempotent: false,
-    }, async (request, signal) => {
+    registry.register(defaultBuiltInToolConfigResolver.toDescriptor(SKILL_EXECUTE_SCRIPT_TOOL_ID), async (request, signal) => {
       const args = request.arguments as { skillKey?: string; script: string; args?: string[] }
       return { data: await this.executeScript(args.skillKey, args.script, args.args ?? [], request.context, signal) }
     })
   }
 
   private registerNetworkTool(registry: ToolRegistry) {
-    registry.register({
-      id: SKILL_HTTP_REQUEST_TOOL_ID,
-      piName: 'skill_http_request',
-      version: '1.0.0',
-      label: '访问 Skill 允许的网络目标',
-      description: '向已绑定 Skill 在 skill-runtime.json 中明确允许的 HTTP/HTTPS Origin 发起 GET 或 HEAD 请求。',
-      risk: 'network_read',
-      parameters: Type.Object({
-        skillKey: Type.String({ minLength: 1, maxLength: 100 }),
-        url: Type.String({ minLength: 1, maxLength: 2_000 }),
-        method: Type.Optional(Type.Union([Type.Literal('GET'), Type.Literal('HEAD')])),
-      }, { additionalProperties: false }),
-      timeoutMs: 60_000,
-      idempotent: true,
-    }, async (request, signal) => {
+    registry.register(defaultBuiltInToolConfigResolver.toDescriptor(SKILL_HTTP_REQUEST_TOOL_ID), async (request, signal) => {
       const args = request.arguments as { skillKey: string; url: string; method?: 'GET' | 'HEAD' }
       return { data: await this.httpRequest(args.skillKey, args.url, args.method ?? 'GET', signal) }
     })

@@ -10,6 +10,7 @@ import type { StateStore } from '../infrastructure/store.js'
 import { AgentCapabilityLoader, type CapabilityLoadResult } from '../tools/capability-loader.js'
 import { ToolRegistry } from '../tools/registry.js'
 import { registerReviewAnswerSubmitTool } from '../tools/review-answer-submit.js'
+import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
 import { defaultAgentDefinitionResolver } from './dynamic-agent-definition-resolver.js'
@@ -41,7 +42,10 @@ export class PiReviewQaRuntimeAdapter implements ReviewQaRuntime {
       : emptyCapabilityLoad()
     const allowedToolIds = new Set(definition.toolIds)
     const descriptors = registry.descriptors(allowedToolIds)
-    if (!descriptors.some(item => item.id === 'review.answer_submit')) throw new Error('REVIEW_QA_SUBMIT_TOOL_UNAVAILABLE')
+    if (!descriptors.some(item => item.id === 'review.answer_submit')) {
+      await capabilityLoad.close()
+      throw new Error('REVIEW_QA_SUBMIT_TOOL_UNAVAILABLE')
+    }
     const registeredToolIds = new Set(descriptors.map(item => item.id))
     const unavailableToolIds = definition.toolIds.filter(toolId => !registeredToolIds.has(toolId))
     const events: AgentExecutionEvent[] = []
@@ -65,6 +69,7 @@ export class PiReviewQaRuntimeAdapter implements ReviewQaRuntime {
     signal.addEventListener('abort', abort, { once: true })
     const model = this.bindings.model ?? createModel(input)
     const providerStream = this.bindings.streamFn ?? createStreamFn(input)
+    const submitPiName = defaultBuiltInToolConfigResolver.toDescriptor('review.answer_submit').piName
     let forceSubmit = false
     const streamFn: StreamFn = (streamModel, context, options) => {
       const requestSignal = input.model.requestTimeoutMs
@@ -79,8 +84,8 @@ export class PiReviewQaRuntimeAdapter implements ReviewQaRuntime {
       return providerStream(streamModel, context, forceSubmit ? {
         ...configured,
         toolChoice: input.model.providerType === 'anthropic'
-          ? { type: 'tool', name: 'review_answer_submit' }
-          : { type: 'function', function: { name: 'review_answer_submit' } },
+          ? { type: 'tool', name: submitPiName }
+          : { type: 'function', function: { name: submitPiName } },
       } as Parameters<StreamFn>[2] : configured)
     }
     const byPiName = new Set(descriptors.map(item => item.piName))
@@ -111,7 +116,7 @@ export class PiReviewQaRuntimeAdapter implements ReviewQaRuntime {
       if (!candidate && !controller.signal.aborted) {
         forceSubmit = true
         await record({ type: 'result_submission_retry', turn: turns, content: '模型尚未通过结果工具提交答案，已进入强制提交阶段。' })
-        await agent.prompt('请立即使用 review_answer_submit 提交最终答案；不要继续输出普通文本。')
+        await agent.prompt(`请立即使用 ${submitPiName} 提交最终答案；不要继续输出普通文本。`)
         await agent.waitForIdle()
       }
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('REVIEW_QA_CANCELLED')

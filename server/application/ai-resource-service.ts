@@ -6,6 +6,7 @@ import type { SkillPackageStore } from '../infrastructure/skill-package-store.js
 import type { StateStore } from '../infrastructure/store.js'
 import { applicationRoot, codeRoot, deployedModuleCandidates } from '../infrastructure/runtime-paths.js'
 import { isSkillRuntimeToolId, normalizeSkillRuntimePolicy, SKILL_RUNTIME_TOOL_IDS } from './skill-runtime-policy.js'
+import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 
 export type AiResourceCatalog = {
   mcpServers: McpServerResource[]
@@ -13,17 +14,7 @@ export type AiResourceCatalog = {
   tools: ToolResource[]
 }
 
-const builtInTools: ToolResource[] = [
-  builtInTool('knowledge.search', '固定索引检索', '仅在运行固定的知识索引中检索相关内容。', '1.0.0', 'read', 30_000, 'server/tools/knowledge-search.ts'),
-  builtInTool('knowledge.read_chunk', '读取固定 Chunk', '按 Chunk ID 读取本次固定输入的完整内容与定位。', '1.0.0', 'read', 30_000, 'server/tools/knowledge-read-chunk.ts'),
-  builtInTool('requirement-points.submit_result', '提交需求点', '提交需求点提取候选结果，由服务端生成 ID 和证据关联。', '5.1.0', 'internal_write', 30_000, 'server/tools/requirement-points-submit-result.ts'),
-  builtInTool('review.submit_result', '提交评审分析', '提交需求点评审候选结果，由服务端校验并发布。', '4.0.0', 'internal_write', 30_000, 'server/tools/review-submit-result.ts'),
-  builtInTool('review.answer_submit', '提交评审问答答案', '提交基于固定 ReviewRun 的问答答案、Evidence 引用和限制项。', '1.0.0', 'internal_write', 30_000, 'server/tools/review-answer-submit.ts'),
-  builtInTool('technical_solution.input.read', '读取技术方案固定输入', '按本次运行快照读取技术方案正文批次，不访问运行外内容。', '1.0.0', 'read', 30_000, 'server/tools/technical-solution-tools.ts'),
-  builtInTool('technical_solution.evidence.preview', '预览技术方案 Evidence', '在提交前校验需求基线或技术方案原文引用能否唯一解析。', '1.0.0', 'read', 30_000, 'server/tools/technical-solution-tools.ts'),
-  builtInTool('technical_solution_points.submit_result', '提交技术方案要点', '提交提取出的技术方案要点和原文线索，由服务端生成 ID 与 Evidence。', '1.0.0', 'internal_write', 30_000, 'server/tools/technical-solution-tools.ts'),
-  builtInTool('technical_solution_review.submit_result', '提交技术方案评审结果', '引用冻结需求点和技术方案要点提交评审语义，由服务端生成 ID、Evidence、覆盖关系和统计。', '2.0.0', 'internal_write', 30_000, 'server/tools/technical-solution-tools.ts'),
-]
+const builtInTools: ToolResource[] = defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).map(key => defaultBuiltInToolConfigResolver.toToolResource(key))
 const builtInSkills: SkillResource[] = [
   builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.0.0', 'ai/skills/query-local-ip/SKILL.md', [], ['系统', '网络', 'IP'], {
     scripts: [{ path: 'scripts/get-local-ip.ps1', runner: 'powershell', timeoutMs: 15_000 }],
@@ -197,9 +188,6 @@ function builtInsNeedSync(resources: AiResource[]) {
   })
 }
 
-function builtInTool(key: string, name: string, description: string, version: string, risk: ToolResource['risk'], timeoutMs: number, sourcePath: string): ToolResource {
-  return { id: `builtin_tool_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'tool', key, name, description, version, enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk, timeoutMs, sourcePath, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
-}
 
 function builtInSkill(key: string, name: string, description: string, version: string, entrypoint: string, toolIds: string[], tags: string[], runtime: SkillResource['runtime']): SkillResource {
   return { id: `builtin_skill_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'skill', key, name, description, version, enabled: true, status: 'ready', builtIn: true, entrypoint, toolIds, tags, runtime, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
@@ -244,6 +232,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
 
 function validateUnique(resources: AiResource[], candidate: AiResource) {
   if (candidate.kind === 'tool' && isSkillRuntimeToolId(candidate.key)) throw new Error('Skill 运行能力由运行权限清单管理，不能注册为独立工具')
+  if (candidate.kind === 'tool' && !candidate.builtIn && defaultBuiltInToolConfigResolver.has(candidate.key)) throw new Error('内置工具标识由受版本控制的配置保留，不能注册为自定义工具')
   if (resources.some(item => item.kind === candidate.kind && item.key.toLocaleLowerCase() === candidate.key.toLocaleLowerCase())) throw new Error(`已存在相同标识的${kindLabel(candidate.kind)}资源`)
 }
 

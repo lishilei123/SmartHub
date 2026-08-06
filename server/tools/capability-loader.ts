@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { Client, SSEClientTransport, StreamableHTTPClientTransport, type AuthProvider, type Tool as McpTool } from '@modelcontextprotocol/client'
 import type { TSchema } from 'typebox'
-import { mcpPolicyHash, toolBindingToken, toolsetContentHash } from '../application/ai-resource-hash.js'
+import { builtInToolBindingToken, mcpPolicyHash, toolBindingToken, toolsetContentHash } from '../application/ai-resource-hash.js'
 import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { McpServerResource, ToolResource } from '../domain/types.js'
 import type { ToolExecutionContext, ToolExecutionResult } from '../domain/tool-types.js'
@@ -11,19 +11,10 @@ import type { SkillPackageStore } from '../infrastructure/skill-package-store.js
 import { applicationRoot, codeRoot, deployedModuleCandidates, moduleUrl } from '../infrastructure/runtime-paths.js'
 import { ToolRegistry } from './registry.js'
 import { SkillCapabilityRuntime } from './skill-capability.js'
+import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
 
 const MAX_REMOTE_RESULT_BYTES = 256 * 1024
 const MCP_CONNECT_TIMEOUT_MS = 20_000
-const BUILT_IN_VERSIONS: Record<string, string> = {
-  'knowledge.search': '1.0.0',
-  'knowledge.read_chunk': '1.0.0',
-  'requirement-points.submit_result': '5.1.0',
-  'review.submit_result': '4.0.0',
-  'review.answer_submit': '1.0.0',
-  'skill.execute_script': '1.0.0',
-  'skill.http_request': '1.0.0',
-}
-
 export interface CapabilityLoadResult { warnings: string[]; close(): Promise<void> }
 
 export class AgentCapabilityLoader {
@@ -35,8 +26,7 @@ export class AgentCapabilityLoader {
     const tokens = definition.toolIds.map(toolId => {
       const resource = resources.find(tool => tool.key === toolId)
       if (resource) return toolBindingToken(resource)
-      const version = BUILT_IN_VERSIONS[toolId]
-      return version ? `${toolId}@${version}` : `${toolId}@missing`
+      return defaultBuiltInToolConfigResolver.has(toolId) ? builtInToolBindingToken(toolId) : `${toolId}@missing`
     })
     const warnings: string[] = []
     if (toolsetContentHash(tokens) !== definition.toolsetContentSha256) {
@@ -45,6 +35,14 @@ export class AgentCapabilityLoader {
     }
 
     new SkillCapabilityRuntime(definition, state, this.skillPackages).register(definition, registry)
+
+    for (const tool of resources.filter(tool => tool.builtIn && definition.toolIds.includes(tool.key) && !tool.enabled)) {
+      registry.unregister(tool.key)
+      warnings.push(`${tool.key}@${tool.version} 已停用。`)
+    }
+    for (const key of definition.toolIds.filter(key => defaultBuiltInToolConfigResolver.has(key) && !registry.get(key) && !warnings.some(warning => warning.startsWith(`${key}@`)))) {
+      warnings.push(`${key} 已在内置配置中声明，但当前 Agent 阶段未注册受控实现。`)
+    }
 
     const selected = resources.filter(tool => definition.toolIds.includes(tool.key) && !tool.builtIn)
     const mcpServers = state.aiResources.filter((item): item is McpServerResource => item.kind === 'mcp')

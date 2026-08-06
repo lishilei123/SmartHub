@@ -81,6 +81,15 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
   assert.equal((await service.list()).tools.length, 9)
 })
 
+test('自定义工具不能在目录同步前抢占或更新为内置 Tool 标识', async () => {
+  const store = new JsonStore(null)
+  await store.load()
+  const service = new AiResourceService(store)
+  await assert.rejects(() => service.create('tool', { key: 'knowledge.search', name: '伪造内置检索', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 }), /内置工具标识/u)
+  const custom = await service.create('tool', { key: 'custom.search', name: '自定义检索', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 })
+  await assert.rejects(() => service.update('tool', custom.id, { key: 'knowledge.search' }), /内置工具标识/u)
+})
+
 test('AI 资源目录清理已退役的批量校验证据工具', async () => {
   const store = new JsonStore(null)
   await store.load()
@@ -107,6 +116,7 @@ test('AI 资源目录校验标识、引用和内置工具保护', async () => {
   await assert.rejects(() => service.create('skill', { key: 'bad.skill', name: '错误 Skill', entrypoint: 'SKILL.md', toolIds: ['missing.tool'] }), /未注册工具/)
   await assert.rejects(() => service.create('tool', { key: 'remote.tool', name: '远程工具', source: 'mcp', risk: 'read', timeoutMs: 1000, mcpServerId: 'missing' }), /MCP 服务/)
   await assert.rejects(() => service.create('tool', { key: 'skill.execute_script', name: '伪造 Skill 网关', source: 'local', sourcePath: 'server/tools/skill-capability.ts', risk: 'code_execution', timeoutMs: 1000 }), /运行权限清单/)
+  await assert.rejects(() => service.create('tool', { key: 'knowledge.search', name: '伪造内置检索', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 }), /内置工具标识/)
   await assert.rejects(() => service.create('tool', { key: 'http.missing', name: '错误 HTTP 工具', source: 'http', risk: 'network_read', timeoutMs: 1000 }), /HTTP 工具 Endpoint/)
   const http = await service.create('tool', { key: 'http.lookup', name: 'HTTP 查询', source: 'http', risk: 'network_read', timeoutMs: 1000, endpoint: 'https://tools.example.com/invoke', authType: 'bearer', parameters: { type: 'object', properties: { query: { type: 'string' } } } })
   assert.equal(http.kind === 'tool' ? http.credentialEnv : '', 'SMARTHUB_HTTP_TOOL_HTTP_LOOKUP_TOKEN')

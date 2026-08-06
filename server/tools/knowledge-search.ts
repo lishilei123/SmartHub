@@ -1,13 +1,9 @@
-import { Type } from 'typebox'
 import type { StateStore } from '../infrastructure/store.js'
 import type { ToolRegistry } from './registry.js'
+import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
 
 export function registerKnowledgeSearchTool(registry: ToolRegistry, store: StateStore) {
-  registry.register({
-    id: 'knowledge.search', piName: 'knowledge_search', version: '1.0.0', label: '固定索引检索', risk: 'read', idempotent: true, timeoutMs: 30_000,
-    description: '仅在本次运行固定的知识索引版本内检索相关 Chunk；正文已直接投递时只用于定向复查。',
-    parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 500 }), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) }),
-  }, async request => {
+  registry.register(defaultBuiltInToolConfigResolver.toDescriptor('knowledge.search'), async request => {
     const args = request.arguments as { query: string; limit?: number }
     const state = await store.snapshot()
     const index = required(state.indexes.find(item => item.id === request.context.snapshot.indexVersionId && item.knowledgeBaseId === request.context.snapshot.knowledgeBaseId), '固定索引不存在')

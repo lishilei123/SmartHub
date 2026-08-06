@@ -6,11 +6,11 @@ import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentCon
 import type { StateStore } from '../infrastructure/store.js'
 import { mcpPolicyHash, skillConfigurationHash, toolBindingToken } from './ai-resource-hash.js'
 import { isSkillRuntimeToolId, requiredSkillRuntimeToolIds } from './skill-runtime-policy.js'
+import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 
 const SCENE = 'requirement_analysis' as const
 const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview', 'reviewQa', 'technicalSolutionExtraction', 'technicalSolutionReview'] as const
 const LEGACY_AGENT_KEYS = ['requirementPointExtraction', 'requirementReview'] as const
-const BUILT_IN_TOOL_KEYS = ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result', 'review.submit_result', 'review.answer_submit', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result'] as const
 const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch'])
 const REQUIRED_EXTRACTION_TOOL = 'requirement-points.submit_result'
 const REQUIRED_REVIEW_TOOL = 'review.submit_result'
@@ -482,7 +482,7 @@ function resolveMcps(serverKeys: string[], state: DatabaseState) {
 function normalizeToolIds(value: unknown, label: string, state: DatabaseState) {
   const toolIds = stringKeys(value).filter(key => !isSkillRuntimeToolId(key))
   const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
-  const known = new Set<string>([...BUILT_IN_TOOL_KEYS, ...tools.map(tool => tool.key)])
+  const known = new Set<string>([...defaultBuiltInToolConfigResolver.keys(), ...tools.map(tool => tool.key)])
   const unknown = toolIds.filter(key => !known.has(key))
   if (unknown.length) throw new Error(`${label}包含未注册工具：${unknown.join('、')}`)
   const unavailable = toolIds.filter(key => tools.some(tool => tool.key === key && !tool.enabled))
@@ -494,17 +494,7 @@ function resolveTools(toolIds: string[], state: DatabaseState): Array<ToolResour
   return toolIds.map(key => tools.find(tool => tool.key === key && tool.enabled) ?? builtInToolReference(key))
 }
 function builtInToolReference(key: string): ToolResource {
-  const definitions: Record<string, { version: string; risk: ToolResource['risk']; timeoutMs: number }> = {
-    'knowledge.search': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'knowledge.read_chunk': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'requirement-points.submit_result': { version: '5.1.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'review.submit_result': { version: '4.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'review.answer_submit': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'skill.execute_script': { version: '1.0.0', risk: 'code_execution', timeoutMs: 120_000 },
-    'skill.http_request': { version: '1.0.0', risk: 'network_read', timeoutMs: 60_000 },
-  }
-  const definition = required(definitions[key], `工具 ${key} 不存在或未启用`)
-  return { id: `builtin_tool_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'tool', key, name: key, description: '', version: definition.version, enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk: definition.risk, timeoutMs: definition.timeoutMs, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
+  return defaultBuiltInToolConfigResolver.toToolResource(key)
 }
 function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ? value : []).map(item => String(item).trim()).filter(Boolean))] }
 function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key) && !isSkillRuntimeToolId(key)) }

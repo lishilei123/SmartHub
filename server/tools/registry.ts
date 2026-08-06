@@ -13,6 +13,7 @@ export class ToolRegistry {
   }
 
   get(id: string) { return this.tools.get(id) }
+  unregister(id: string) { this.tools.delete(id); return this }
   descriptors(ids?: Iterable<string>) {
     const allowed = ids ? new Set(ids) : null
     return [...this.tools.values()].map(item => item.descriptor).filter(item => !allowed || allowed.has(item.id))
