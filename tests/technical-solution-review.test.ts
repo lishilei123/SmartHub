@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { TechnicalSolutionResultValidator } from '../server/agent/technical-solution-result-validator.js'
+import { TechnicalSolutionExtractionValidator, TechnicalSolutionResultValidator, TechnicalSolutionReviewValidatorV2 } from '../server/agent/technical-solution-result-validator.js'
 import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { TechnicalSolutionReviewService } from '../server/application/technical-solution-review-service.js'
 import type { AgentRuntime, InputDeliveryManifest } from '../server/domain/agent-types.js'
-import type { TechnicalSolutionReviewCandidateV1, TechnicalSolutionReviewSubmissionV1, TechnicalSolutionRunSnapshot } from '../server/domain/technical-solution-types.js'
+import type { TechnicalSolutionExtractionResult, TechnicalSolutionExtractionSubmissionV1, TechnicalSolutionReviewCandidateV1, TechnicalSolutionReviewSubmissionV1, TechnicalSolutionReviewSubmissionV2, TechnicalSolutionRunSnapshot } from '../server/domain/technical-solution-types.js'
 import { defaultConfig, type ReviewRun } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 import { createTechnicalSolutionToolRegistry } from '../server/tools/technical-solution-tools.js'
@@ -18,23 +18,24 @@ test('第三期固定输入、独立运行、Evidence、处置和报告形成完
   const store = await seededStore()
   await new AiResourceService(store).list()
   const configurations = new AgentConfigurationService(store)
-  const draft = (await configurations.get()).agents.technicalSolutionAnalysis.draft
-  const saved = await configurations.save({
-    agentKey: 'technicalSolutionAnalysis', revision: draft.revision,
-    routing: { ...draft.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 4_096 },
-    definition: draft.definition,
-  })
-  const published = await configurations.publish({ agentKey: 'technicalSolutionAnalysis', revision: saved.revision, publishedBy: '技术负责人' })
-  assert.equal(published.agentDefinition.agentKey, 'technical-solution-analysis')
-  assert.equal(published.agentDefinition.modelScene, 'technical_solution_analysis')
-  assert.deepEqual(published.agentDefinition.toolIds, ['knowledge.search', 'knowledge.read_chunk', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_review.submit_result'])
+  const published = await publishTechnicalAgents(configurations)
+  assert.equal(published.extraction.agentDefinition.agentKey, 'technical-solution-extraction')
+  assert.equal(published.review.agentDefinition.agentKey, 'technical-solution-review')
+  assert.equal(published.review.agentDefinition.modelScene, 'technical_solution_analysis')
+  assert.deepEqual(published.extraction.agentDefinition.toolIds, ['knowledge.search', 'knowledge.read_chunk', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result'])
+  assert.deepEqual(published.review.agentDefinition.toolIds, ['technical_solution_review.submit_result'])
 
   const runtime: AgentRuntime = {
     execute: async input => {
       const snapshot = input.snapshot as TechnicalSolutionRunSnapshot
-      const normalized = new TechnicalSolutionResultValidator().normalize(candidate(), snapshot, await store.snapshot())
+      if (snapshot.agentDefinition.agentKey === 'technical-solution-extraction') {
+        const normalized = new TechnicalSolutionExtractionValidator().normalize(extractionCandidate(), snapshot, await store.snapshot())
+        assert.equal(normalized.report.valid, true, JSON.stringify(normalized.report.issues))
+        return { candidate: normalized.result!, events: [{ sequence: 1, type: 'agent_end', occurredAt: at, turn: 1 }], turns: 1, toolCalls: 1, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' }, inputDeliveryManifest: manifest(snapshot) }
+      }
+      const normalized = new TechnicalSolutionReviewValidatorV2().normalize(reviewCandidate(), snapshot, input.fixedTechnicalSolutionExtraction!)
       assert.equal(normalized.report.valid, true, JSON.stringify(normalized.report.issues))
-      return { candidate: normalized.result!, events: [{ sequence: 1, type: 'agent_end', occurredAt: at, turn: 1 }], turns: 1, toolCalls: 1, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' }, inputDeliveryManifest: manifest(snapshot) }
+      return { candidate: normalized.result!, events: [{ sequence: 1, type: 'agent_end', occurredAt: at, turn: 1 }], turns: 1, toolCalls: 1, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' } }
     },
   }
   Object.assign(store, { enqueueTechnicalSolutionJob: async () => undefined, cancelTechnicalSolutionJob: async () => undefined })
@@ -42,7 +43,8 @@ test('第三期固定输入、独立运行、Evidence、处置和报告形成完
   const candidates = await service.inputCandidates('project-version-1')
   assert.deepEqual(candidates.baselines.map(item => item.id), ['requirement-run-1'])
   assert.deepEqual(candidates.solutionAssets.map(item => item.assetVersionId), ['tech-version-1'])
-  assert.equal(candidates.agentConfiguration?.id, published.id)
+  assert.equal(candidates.agentConfigurations.extraction?.id, published.extraction.id)
+  assert.equal(candidates.agentConfigurations.review?.id, published.review.id)
 
   const review = await service.createReview('project-version-1', { name: '订单技术方案评审', sourceReviewRunId: 'requirement-run-1', solutionAssetVersionIds: ['tech-version-1'], principal: { subjectId: 'reviewer-1', displayName: '评审人' } })
   const queued = await service.createRun('project-version-1', review.id)
@@ -50,10 +52,13 @@ test('第三期固定输入、独立运行、Evidence、处置和报告形成完
   await service.processPreparedRun(queued.runId)
   const completed = await service.getRun('project-version-1', review.id, queued.runId)
   assert.equal(completed.status, 'succeeded')
+  assert.equal(completed.extractionResult?.solutionPoints[0].id, 'TSP-001')
+  assert.ok(completed.executions?.technicalSolutionExtraction)
+  assert.ok(completed.executions?.technicalSolutionReview)
   assert.equal(completed.result?.statistics.coverageRatio, 0.5)
   assert.equal(completed.result?.coverage[0].requirementPointId, 'RP-001')
   assert.deepEqual(new Set(completed.result?.evidence.map(item => item.sourceKind)), new Set(['requirement', 'technical_design']))
-  assert.ok(completed.result?.evidence.every(item => item.id.startsWith('tech_evidence_')))
+  assert.ok(completed.result?.evidence.every(item => item.id.startsWith('tech_evidence_') || item.id.startsWith('tech_requirement_evidence_')))
 
   const finding = completed.result!.findings[0]
   const action = await service.actOnFinding('project-version-1', review.id, queued.runId, finding.id, { action: 'confirm', expectedVersion: 0, comment: '确认补充接口幂等与异常处理。', principal: { subjectId: 'lead-1', displayName: '技术负责人' } })
@@ -148,17 +153,25 @@ test('技术方案提交工具把模型语义枚举交给服务端归一化', as
   assert.equal(schema.properties.findings.items.properties.severity.type, 'string')
 })
 
+test('技术方案评审 v2 只能引用冻结需求点和冻结方案要点', async () => {
+  const store = await seededStore()
+  const state = await store.snapshot()
+  const snapshot = technicalSnapshot(state.reviewRuns[0])
+  const extraction = new TechnicalSolutionExtractionValidator().normalize(extractionCandidate(), snapshot, state).result!
+  const invalid = reviewCandidate()
+  invalid.coverage[0].solutionPointRefs = ['TSP-999']
+  invalid.findings[0].requirementPointRefs = ['RP-999']
+  const normalized = new TechnicalSolutionReviewValidatorV2().normalize(invalid, snapshot, extraction)
+  assert.equal(normalized.report.valid, false)
+  assert.ok(normalized.report.issues.some(item => /TSP-999/u.test(item.message)))
+  assert.ok(normalized.report.issues.some(item => /RP-999/u.test(item.message)))
+})
+
 test('Agent 未提交技术方案结果时保留真实失败阶段且不发布正式结果', async () => {
   const store = await seededStore()
   await new AiResourceService(store).list()
   const configurations = new AgentConfigurationService(store)
-  const draft = (await configurations.get()).agents.technicalSolutionAnalysis.draft
-  const saved = await configurations.save({
-    agentKey: 'technicalSolutionAnalysis', revision: draft.revision,
-    routing: { ...draft.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 4_096 },
-    definition: draft.definition,
-  })
-  await configurations.publish({ agentKey: 'technicalSolutionAnalysis', revision: saved.revision })
+  await publishTechnicalAgents(configurations)
   const runtime: AgentRuntime = { execute: async () => {
     throw new Error('MODEL_TOOL_CALL_REQUIRED: 模型未调用 technical_solution_review_submit_result')
   } }
@@ -169,7 +182,7 @@ test('Agent 未提交技术方案结果时保留真实失败阶段且不发布�
   await assert.rejects(() => service.processPreparedRun(run.runId), /MODEL_TOOL_CALL_REQUIRED/u)
   const failed = await service.getRun('project-version-1', review.id, run.runId)
   assert.equal(failed.status, 'failed')
-  assert.equal(failed.failedAtStep, 'analyzing_solution')
+  assert.equal(failed.failedAtStep, 'extracting_solution_points')
   assert.equal(failed.step, 'failed')
   assert.equal(failed.result, undefined)
   assert.match(failed.error ?? '', /MODEL_TOOL_CALL_REQUIRED/u)
@@ -181,14 +194,16 @@ test('Provider 暂时失败后按已发布路由切换候选模型并保留同�
   await store.transaction(state => { state.modelSources[0].models.push({ ...structuredClone(state.modelSources[0].models[0]), id: 'model-2', name: 'fallback-model', displayName: '回退模型' }) })
   await new AiResourceService(store).list()
   const configurations = new AgentConfigurationService(store)
-  const draft = (await configurations.get()).agents.technicalSolutionAnalysis.draft
-  const saved = await configurations.save({ agentKey: 'technicalSolutionAnalysis', revision: draft.revision, routing: { ...draft.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, fallbackEnabled: true, fallbackModels: [{ sourceId: 'source-1', modelId: 'model-2' }], maxOutputTokens: 4_096 }, definition: draft.definition })
-  await configurations.publish({ agentKey: 'technicalSolutionAnalysis', revision: saved.revision })
+  await publishTechnicalAgents(configurations, true)
   const runtime: AgentRuntime = { execute: async input => {
     if (input.model.modelId === 'model-1') throw new Error('MODEL_PROVIDER_UNAVAILABLE: 临时不可用')
     const snapshot = input.snapshot as TechnicalSolutionRunSnapshot
-    const normalized = new TechnicalSolutionResultValidator().normalize(candidate(), snapshot, await store.snapshot())
-    return { candidate: normalized.result!, events: [], turns: 1, toolCalls: 1, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' }, inputDeliveryManifest: manifest(snapshot) }
+    if (snapshot.agentDefinition.agentKey === 'technical-solution-extraction') {
+      const normalized = new TechnicalSolutionExtractionValidator().normalize(extractionCandidate(), snapshot, await store.snapshot())
+      return { candidate: normalized.result!, events: [], turns: 1, toolCalls: 1, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' }, inputDeliveryManifest: manifest(snapshot) }
+    }
+    const normalized = new TechnicalSolutionReviewValidatorV2().normalize(reviewCandidate(), snapshot, input.fixedTechnicalSolutionExtraction!)
+    return { candidate: normalized.result!, events: [], turns: 1, toolCalls: 1, toolErrors: 0, framework: { name: 'pi-agent-core', version: 'test' } }
   } }
   Object.assign(store, { enqueueTechnicalSolutionJob: async () => undefined })
   const service = new TechnicalSolutionReviewService(store, runtime, configurations)
@@ -198,10 +213,35 @@ test('Provider 暂时失败后按已发布路由切换候选模型并保留同�
   await service.processPreparedRun(run.runId, undefined, new AbortController().signal, 2)
   const completed = await service.getRun('project-version-1', review.id, run.runId)
   assert.equal(completed.status, 'succeeded')
-  assert.equal(completed.modelLabel, '测试来源 · 回退模型')
+  assert.equal(completed.modelLabel, '测试来源 · 回退模型 / 测试来源 · 回退模型')
   assert.deepEqual(completed.modelRouteAttempts?.map(item => [item.modelId, item.status]), [['model-1', 'failed'], ['model-2', 'succeeded']])
   assert.equal(completed.degradations?.[0].toModelId, 'model-2')
 })
+
+async function publishTechnicalAgents(configurations: AgentConfigurationService, withFallback = false) {
+  const agents = (await configurations.get()).agents
+  const routing = (draft: typeof agents.technicalSolutionExtraction.draft) => ({ ...draft.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, fallbackEnabled: withFallback, fallbackModels: withFallback ? [{ sourceId: 'source-1', modelId: 'model-2' }] : [], maxOutputTokens: 4_096 })
+  const extractionSaved = await configurations.save({ agentKey: 'technicalSolutionExtraction', revision: agents.technicalSolutionExtraction.draft.revision, routing: routing(agents.technicalSolutionExtraction.draft), definition: agents.technicalSolutionExtraction.draft.definition })
+  const extraction = await configurations.publish({ agentKey: 'technicalSolutionExtraction', revision: extractionSaved.revision, publishedBy: '技术负责人' })
+  const reviewSaved = await configurations.save({ agentKey: 'technicalSolutionReview', revision: agents.technicalSolutionReview.draft.revision, routing: routing(agents.technicalSolutionReview.draft), definition: agents.technicalSolutionReview.draft.definition })
+  const review = await configurations.publish({ agentKey: 'technicalSolutionReview', revision: reviewSaved.revision, publishedBy: '技术负责人' })
+  return { extraction, review }
+}
+
+function extractionCandidate(): TechnicalSolutionExtractionSubmissionV1 {
+  return { schemaVersion: 'technical-solution-extraction/v1', solutionPoints: [{ title: '创建订单接口', description: '订单服务暴露创建订单接口。', sourceTexts: ['订单服务暴露创建订单接口。'] }] }
+}
+
+function reviewCandidate(): TechnicalSolutionReviewSubmissionV2 {
+  return {
+    schemaVersion: 'technical-solution-review/v2',
+    summary: { overallAssessment: 'needs_revision', overview: '方案覆盖主流程，但接口幂等和异常响应仍需补充。', majorGaps: ['幂等约束未落到接口'], majorRisks: ['重复提交'], recommendedOrder: ['先补接口契约'] },
+    coverage: [{ requirementPointRef: 'RP-001', status: 'partially_covered', analysis: '已描述订单接口，但没有明确幂等键和重复请求语义。', solutionPointRefs: ['TSP-001'] }],
+    findings: [{ type: 'interface_gap', severity: 'high', title: '接口幂等契约缺失', problem: '创建订单接口未说明幂等键。', impact: '重试可能生成重复订单。', recommendation: '定义幂等键、冲突响应与保存周期。', confidence: 0.96, requirementPointRefs: ['RP-001'], solutionPointRefs: ['TSP-001'] }],
+    risks: [{ description: '客户端超时重试造成重复下单。', impact: '产生重复交易。', mitigation: '持久化幂等键并返回首次结果。', requirementPointRefs: ['RP-001'], solutionPointRefs: ['TSP-001'] }],
+    questions: [{ question: '幂等键保存多长时间？', reason: '决定重复请求的判定窗口。', requirementPointRefs: ['RP-001'], solutionPointRefs: [] }],
+  }
+}
 
 function candidate(): TechnicalSolutionReviewCandidateV1 {
   return {

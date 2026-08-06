@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ValidationIssue } from '../domain/review-types.js'
-import type { TechnicalSolutionEvidence, TechnicalSolutionFormalResult, TechnicalSolutionReviewCandidateV1, TechnicalSolutionReviewSubmissionV1, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
+import type { TechnicalSolutionEvidence, TechnicalSolutionExtractionResult, TechnicalSolutionExtractionSubmissionV1, TechnicalSolutionFormalResult, TechnicalSolutionReviewCandidateV1, TechnicalSolutionReviewSubmissionV1, TechnicalSolutionReviewSubmissionV2, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
 import type { DatabaseState } from '../domain/types.js'
 
 const coverageStatuses = new Set(['covered', 'partially_covered', 'not_covered', 'needs_confirmation'])
@@ -100,6 +100,115 @@ export class TechnicalSolutionResultValidator {
       coverageRatio: coverage.length ? (coverage.filter(item => item.status === 'covered').length + 0.5 * coverage.filter(item => item.status === 'partially_covered').length) / coverage.length : 0,
     }
     const result: TechnicalSolutionFormalResult = { schemaVersion: 'technical-solution-review-result/v1', summary: structuredClone(candidate.summary), coverage, findings, evidence: [...evidence.values()], risks, questions, statistics }
+    return { report: { valid: true, issues: [] as ValidationIssue[] }, result }
+  }
+}
+
+export class TechnicalSolutionExtractionValidator {
+  normalize(submission: TechnicalSolutionExtractionSubmissionV1, snapshot: TechnicalSolutionRunSnapshot, state: DatabaseState) {
+    const issues: ValidationIssue[] = []
+    if (!submission || typeof submission !== 'object') issues.push({ path: '', message: 'Candidate 必须是对象' })
+    else if (submission.schemaVersion !== 'technical-solution-extraction/v1') issues.push({ path: 'schemaVersion', message: '必须为 technical-solution-extraction/v1' })
+    if (!Array.isArray(submission?.solutionPoints)) issues.push({ path: 'solutionPoints', message: '必须是数组' })
+    if (issues.length) return { report: { valid: false, issues } }
+    if (!submission.solutionPoints.length) issues.push({ path: 'solutionPoints', message: '至少提取一个技术方案要点' })
+    if (submission.solutionPoints.length > 500) issues.push({ path: 'solutionPoints', message: '技术方案要点数量超过 500' })
+    const evidence = new Map<string, TechnicalSolutionEvidence>()
+    const evidenceKeys = new Map<string, string>()
+    const solutionPoints = submission.solutionPoints.map((point, index) => {
+      const description = String(point.description ?? '').trim()
+      const sourceTexts = Array.isArray(point.sourceTexts) ? [...new Set(point.sourceTexts.map(String).map(item => item.trim()).filter(Boolean))] : []
+      if (!description) issues.push({ path: `solutionPoints[${index}].description`, message: '描述不能为空' })
+      if (!sourceTexts.length) issues.push({ path: `solutionPoints[${index}].sourceTexts`, message: '逐字原文线索不能为空' })
+      const evidenceIds: string[] = []
+      sourceTexts.forEach((text, clueIndex) => {
+        const resolved = resolveSolutionClue(text, snapshot, state)
+        if (resolved.ambiguous) issues.push({ path: `solutionPoints[${index}].sourceTexts[${clueIndex}]`, message: '技术方案原文线索存在歧义，请提供更长的逐字原文' })
+        if (!resolved.matches.length && !resolved.ambiguous) issues.push({ path: `solutionPoints[${index}].sourceTexts[${clueIndex}]`, message: '技术方案固定正文中未找到原文线索' })
+        resolved.matches.forEach(match => {
+          const key = `${match.input.assetVersionId}:${match.chunk.id}:${match.quote}:${match.line.start}:${match.line.end}`
+          let id = evidenceKeys.get(key)
+          if (!id) {
+            id = `tech_evidence_${randomUUID()}`
+            evidenceKeys.set(key, id)
+            evidence.set(id, { id, sourceKind: 'technical_design', assetId: match.asset.id, assetVersionId: match.input.assetVersionId, chunkId: match.chunk.id, contentSha256: match.input.contentSha256, headingPath: match.chunk.headingPath, quote: match.quote, startLine: match.line.start, endLine: match.line.end })
+          }
+          evidenceIds.push(id)
+        })
+      })
+      const title = clean(point.title) ? String(point.title).trim().slice(0, 200) : fallbackTitle(description, index)
+      return { id: `TSP-${String(index + 1).padStart(3, '0')}`, title, description, evidenceIds: [...new Set(evidenceIds)] }
+    })
+    if (issues.length) return { report: { valid: false, issues } }
+    const result: TechnicalSolutionExtractionResult = { schemaVersion: 'technical-solution-extraction-result/v1', solutionPoints, evidence: [...evidence.values()] }
+    return { report: { valid: true, issues: [] as ValidationIssue[] }, result }
+  }
+}
+
+export class TechnicalSolutionReviewValidatorV2 {
+  normalize(submission: TechnicalSolutionReviewSubmissionV2, snapshot: TechnicalSolutionRunSnapshot, extraction: TechnicalSolutionExtractionResult) {
+    const issues: ValidationIssue[] = []
+    if (!submission || typeof submission !== 'object') issues.push({ path: '', message: 'Candidate 必须是对象' })
+    else if (submission.schemaVersion !== 'technical-solution-review/v2') issues.push({ path: 'schemaVersion', message: '必须为 technical-solution-review/v2' })
+    if (!submission?.summary || typeof submission.summary !== 'object') issues.push({ path: 'summary', message: '总体摘要不能为空' })
+    for (const field of ['coverage', 'findings', 'risks', 'questions'] as const) if (!Array.isArray(submission?.[field])) issues.push({ path: field, message: '必须是数组' })
+    if (issues.length) return { report: { valid: false, issues } }
+    if (submission.findings.length > snapshot.agentDefinition.limits.maxFindings) issues.push({ path: 'findings', message: 'Finding 数量超过运行限制' })
+    const normalizedFindings = submission.findings.map(item => ({ ...item, type: canonicalFindingType(String(item.type), item as never), severity: canonicalSeverity(String(item.severity), item as never) }))
+    const summary = { ...submission.summary, overallAssessment: canonicalAssessment(String(submission.summary.overallAssessment), normalizedFindings as never) }
+    const requirementIds = new Set(snapshot.requirementBaseline.requirementPoints.map(item => item.id))
+    const solutionIds = new Set(extraction.solutionPoints.map(item => item.id))
+    const validateRefs = (values: unknown, allowed: Set<string>, path: string) => {
+      const refs = Array.isArray(values) ? [...new Set(values.map(String).map(item => item.trim()).filter(Boolean))] : []
+      refs.filter(ref => !allowed.has(ref)).forEach(ref => issues.push({ path, message: `引用不存在或不属于冻结输入：${ref}` }))
+      return refs
+    }
+    const evidence = new Map<string, TechnicalSolutionEvidence>()
+    const addRequirementEvidence = (pointId: string) => snapshot.requirementBaseline.evidence.filter(item => item.requirementPointId === pointId).map(item => {
+      const id = `tech_requirement_evidence_${item.evidenceId}`
+      evidence.set(id, { id, sourceKind: 'requirement', assetId: item.assetId, assetVersionId: item.assetVersionId, chunkId: item.chunkId, contentSha256: item.contentSha256, headingPath: [...item.headingPath], quote: item.quote, startLine: item.startLine, endLine: item.endLine })
+      return id
+    })
+    const addSolutionEvidence = (refs: string[]) => refs.flatMap(ref => {
+      const point = extraction.solutionPoints.find(item => item.id === ref)
+      return (point?.evidenceIds ?? []).flatMap(id => {
+        const item = extraction.evidence.find(value => value.id === id)
+        if (!item) return []
+        evidence.set(item.id, structuredClone(item))
+        return [item.id]
+      })
+    })
+    const coverage = submission.coverage.map((item, index) => {
+      const requirementPointRef = String(item.requirementPointRef ?? '').trim()
+      if (!requirementIds.has(requirementPointRef)) issues.push({ path: `coverage[${index}].requirementPointRef`, message: '必须引用一个冻结需求点' })
+      const status = canonicalCoverageStatus(String(item.status))
+      const solutionPointRefs = validateRefs(item.solutionPointRefs, solutionIds, `coverage[${index}].solutionPointRefs`)
+      if (['covered', 'partially_covered'].includes(status) && !solutionPointRefs.length) issues.push({ path: `coverage[${index}].solutionPointRefs`, message: '已覆盖或部分覆盖必须引用至少一个冻结技术方案要点' })
+      if (!clean(item.analysis)) issues.push({ path: `coverage[${index}].analysis`, message: '覆盖分析不能为空' })
+      return { id: `tech_coverage_${randomUUID()}`, requirementPointId: requirementPointRef, requirementTitle: snapshot.requirementBaseline.requirementPoints.find(point => point.id === requirementPointRef)?.title ?? '', status, analysis: String(item.analysis ?? '').trim(), evidenceIds: [...new Set([...addRequirementEvidence(requirementPointRef), ...addSolutionEvidence(solutionPointRefs)])] }
+    })
+    const counts = new Map<string, number>()
+    coverage.forEach(item => counts.set(item.requirementPointId, (counts.get(item.requirementPointId) ?? 0) + 1))
+    snapshot.requirementBaseline.requirementPoints.forEach(point => { if (counts.get(point.id) !== 1) issues.push({ path: 'coverage', message: `需求点 ${point.id} 必须恰好有一条覆盖结论` }) })
+    const findings = normalizedFindings.map((item, index) => {
+      const requirementPointRefs = validateRefs(item.requirementPointRefs, requirementIds, `findings[${index}].requirementPointRefs`)
+      const solutionPointRefs = validateRefs(item.solutionPointRefs, solutionIds, `findings[${index}].solutionPointRefs`)
+      if (!requirementPointRefs.length && !solutionPointRefs.length) issues.push({ path: `findings[${index}]`, message: 'Finding 必须引用冻结需求点或技术方案要点' })
+      if (item.type === 'requirement_coverage_gap' && !requirementPointRefs.length) issues.push({ path: `findings[${index}].requirementPointRefs`, message: '需求覆盖缺口必须关联需求点' })
+      if (![item.title, item.problem, item.impact, item.recommendation].every(clean)) issues.push({ path: `findings[${index}]`, message: '标题、问题、影响和建议不能为空' })
+      if (!Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) issues.push({ path: `findings[${index}].confidence`, message: '置信度必须在 0 到 1 之间' })
+      return { id: `tech_finding_${randomUUID()}`, type: item.type, severity: item.severity, title: item.title.trim(), problem: item.problem.trim(), impact: item.impact.trim(), recommendation: item.recommendation.trim(), confidence: item.confidence, requirementPointIds: requirementPointRefs, evidenceIds: [...new Set([...requirementPointRefs.flatMap(addRequirementEvidence), ...addSolutionEvidence(solutionPointRefs)])] }
+    })
+    const related = <T extends { requirementPointRefs: string[]; solutionPointRefs: string[] }>(item: T, path: string) => {
+      const requirementPointRefs = validateRefs(item.requirementPointRefs, requirementIds, `${path}.requirementPointRefs`)
+      const solutionPointRefs = validateRefs(item.solutionPointRefs, solutionIds, `${path}.solutionPointRefs`)
+      return [...new Set([...requirementPointRefs.flatMap(addRequirementEvidence), ...addSolutionEvidence(solutionPointRefs)])]
+    }
+    const risks = submission.risks.map((item, index) => ({ id: `tech_risk_${randomUUID()}`, description: String(item.description ?? '').trim(), impact: String(item.impact ?? '').trim(), mitigation: String(item.mitigation ?? '').trim(), evidenceIds: related(item, `risks[${index}]`) }))
+    const questions = submission.questions.map((item, index) => ({ id: `tech_question_${randomUUID()}`, question: String(item.question ?? '').trim(), reason: String(item.reason ?? '').trim(), evidenceIds: related(item, `questions[${index}]`) }))
+    if (issues.length) return { report: { valid: false, issues } }
+    const statistics = { totalRequirements: coverage.length, covered: coverage.filter(item => item.status === 'covered').length, partiallyCovered: coverage.filter(item => item.status === 'partially_covered').length, notCovered: coverage.filter(item => item.status === 'not_covered').length, needsConfirmation: coverage.filter(item => item.status === 'needs_confirmation').length, coverageRatio: coverage.length ? (coverage.filter(item => item.status === 'covered').length + 0.5 * coverage.filter(item => item.status === 'partially_covered').length) / coverage.length : 0 }
+    const result: TechnicalSolutionFormalResult = { schemaVersion: 'technical-solution-review-result/v1', summary: summary as TechnicalSolutionFormalResult['summary'], coverage, findings: findings as TechnicalSolutionFormalResult['findings'], evidence: [...evidence.values()], risks, questions, statistics }
     return { report: { valid: true, issues: [] as ValidationIssue[] }, result }
   }
 }
@@ -278,6 +387,7 @@ function clueFragments(text: string) {
 }
 
 function clean(value: unknown) { return typeof value === 'string' && Boolean(value.trim()) }
+function fallbackTitle(description: string, index: number) { const value = description.replace(/[。！？；\r\n].*$/u, '').trim(); return (value || `技术方案要点 ${index + 1}`).slice(0, 80) }
 function normalize(value: string) { return value.normalize('NFKC').replace(/\s+/gu, ' ').trim() }
 function containsEquivalent(content: string, text: string) { const needle = normalize(text); return needle.length >= 4 && normalize(content).includes(needle) }
 function containsChunkSegment(content: string, text: string) {

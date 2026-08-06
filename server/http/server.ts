@@ -78,14 +78,14 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   const toolSource = /^\/api\/ai-resources\/tool\/([^/]+)\/source$/.exec(url.pathname)
   if (method === 'GET' && toolSource) return send(response, 200, await aiResourceService.source(toolSource[1]))
   if (method === 'GET' && url.pathname === '/api/agent-configurations/requirement-analysis') return send(response, 200, await agentConfigurationService.get())
-  if (method === 'GET' && url.pathname === '/api/agent-configurations/technical-solution-analysis') return send(response, 200, { scene: 'technical_solution_analysis', agent: (await agentConfigurationService.get()).agents.technicalSolutionAnalysis })
+  if (method === 'GET' && url.pathname === '/api/agent-configurations/technical-solution-analysis') { const agents = (await agentConfigurationService.get()).agents; return send(response, 200, { scene: 'technical_solution_analysis', agents: { extraction: agents.technicalSolutionExtraction, review: agents.technicalSolutionReview } }) }
   if (method === 'PUT' && url.pathname === '/api/agent-configurations/technical-solution-analysis/draft') {
     const body = await json(request)
-    return send(response, 200, await agentConfigurationService.save({ ...(body as unknown as AgentConfigurationInput), agentKey: 'technicalSolutionAnalysis' }))
+    return send(response, 200, await agentConfigurationService.save({ ...(body as unknown as AgentConfigurationInput), agentKey: body.agentKey === 'technicalSolutionExtraction' ? 'technicalSolutionExtraction' : 'technicalSolutionReview' }))
   }
   if (method === 'POST' && url.pathname === '/api/agent-configurations/technical-solution-analysis/publish') {
     const body = await json(request)
-    return send(response, 201, await agentConfigurationService.publish({ agentKey: 'technicalSolutionAnalysis', revision: Number(body.revision), publishedBy: body.publishedBy ? String(body.publishedBy) : undefined }))
+    return send(response, 201, await agentConfigurationService.publish({ agentKey: body.agentKey === 'technicalSolutionExtraction' ? 'technicalSolutionExtraction' : 'technicalSolutionReview', revision: Number(body.revision), publishedBy: body.publishedBy ? String(body.publishedBy) : undefined }))
   }
   if (method === 'PUT' && url.pathname === '/api/agent-configurations/requirement-analysis/draft') return send(response, 200, await agentConfigurationService.save(await json(request) as unknown as AgentConfigurationInput))
   if (method === 'POST' && url.pathname === '/api/agent-configurations/requirement-analysis/publish') {

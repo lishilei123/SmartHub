@@ -89,6 +89,61 @@ export interface TechnicalSolutionReviewCandidateV1 {
   }>
 }
 
+export interface TechnicalSolutionExtractionSubmissionV1 {
+  schemaVersion: 'technical-solution-extraction/v1'
+  solutionPoints: Array<{
+    title?: string
+    description: string
+    sourceTexts: string[]
+  }>
+}
+
+export interface TechnicalSolutionExtractionResult {
+  schemaVersion: 'technical-solution-extraction-result/v1'
+  solutionPoints: Array<{
+    id: string
+    title: string
+    description: string
+    evidenceIds: string[]
+  }>
+  evidence: TechnicalSolutionEvidence[]
+}
+
+export interface TechnicalSolutionReviewSubmissionV2 {
+  schemaVersion: 'technical-solution-review/v2'
+  summary: Omit<TechnicalSolutionReviewCandidateV1['summary'], 'overallAssessment'> & { overallAssessment: string }
+  coverage: Array<{
+    requirementPointRef: string
+    status: string
+    analysis: string
+    solutionPointRefs: string[]
+  }>
+  findings: Array<{
+    type: string
+    severity: string
+    title: string
+    problem: string
+    impact: string
+    recommendation: string
+    confidence: number
+    requirementPointRefs: string[]
+    solutionPointRefs: string[]
+  }>
+  risks: Array<{
+    description: string
+    impact: string
+    mitigation: string
+    requirementPointRefs: string[]
+    solutionPointRefs: string[]
+  }>
+  questions: Array<{
+    question: string
+    reason: string
+    requirementPointRefs: string[]
+    solutionPointRefs: string[]
+  }>
+}
+
 export type TechnicalSolutionReviewSubmissionV1 = Omit<TechnicalSolutionReviewCandidateV1, 'summary' | 'coverageCandidates' | 'findings'> & {
   summary: Omit<TechnicalSolutionReviewCandidateV1['summary'], 'overallAssessment'> & { overallAssessment: string }
   coverageCandidates: Array<Omit<TechnicalSolutionReviewCandidateV1['coverageCandidates'][number], 'status'> & { status: string }>
@@ -145,7 +200,7 @@ export interface TechnicalSolutionFormalResult {
 }
 
 export interface TechnicalSolutionRunSnapshot {
-  schemaVersion: 'technical-solution-run-snapshot/v1'
+  schemaVersion: 'technical-solution-run-snapshot/v1' | 'technical-solution-run-snapshot/v2'
   runId: string
   technicalReviewId: string
   projectId: string
@@ -172,9 +227,25 @@ export interface TechnicalSolutionRunSnapshot {
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }>
   indexVersionId: string
   modelRef: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>
+  agentModelRefs?: {
+    technicalSolutionExtraction: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>
+    technicalSolutionReview: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>
+  }
+  agentModelRoutes?: {
+    technicalSolutionExtraction: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>>
+    technicalSolutionReview: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>>
+  }
   modelRoute?: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>>
   agentConfigurationRef?: { id: string; version: number; contentSha256: string }
+  agentConfigurationRefs?: {
+    technicalSolutionExtraction: { id: string; version: number; contentSha256: string }
+    technicalSolutionReview: { id: string; version: number; contentSha256: string }
+  }
   agentDefinition: AgentDefinitionVersion
+  agentDefinitions?: {
+    technicalSolutionExtraction: AgentDefinitionVersion
+    technicalSolutionReview: AgentDefinitionVersion
+  }
   inputPlan: RequirementInputPlan
   createdAt: string
 }
@@ -208,8 +279,13 @@ export interface TechnicalSolutionReviewRun {
   error?: string
   failedAtStep?: string
   result?: TechnicalSolutionFormalResult
+  extractionResult?: TechnicalSolutionExtractionResult
   inputDeliveryManifest?: InputDeliveryManifest
   execution?: AgentExecutionRecord
+  executions?: {
+    technicalSolutionExtraction?: AgentExecutionRecord
+    technicalSolutionReview?: AgentExecutionRecord
+  }
   events?: AgentExecutionEvent[]
   modelRouteAttempts?: Array<{ id: string; attempt: number; sourceId: string; modelId: string; modelLabel: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; startedAt: string; finishedAt?: string; error?: string }>
   degradations?: Array<{ fromSourceId: string; fromModelId: string; toSourceId: string; toModelId: string; reason: string; occurredAt: string }>

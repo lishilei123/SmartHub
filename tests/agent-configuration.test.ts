@@ -36,19 +36,22 @@ async function fixture() {
   return { store, service: new AgentConfigurationService(store) }
 }
 
-test('四个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
+test('五个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
   const { store, service } = await fixture()
   const initial = await service.get()
   const extractionInitial = initial.agents.requirementPointExtraction.draft
   const reviewInitial = initial.agents.requirementReview.draft
   const qaInitial = initial.agents.reviewQa.draft
-  const technicalInitial = initial.agents.technicalSolutionAnalysis.draft
+  const technicalExtractionInitial = initial.agents.technicalSolutionExtraction.draft
+  const technicalReviewInitial = initial.agents.technicalSolutionReview.draft
   assert.equal(extractionInitial.revision, 0)
   assert.equal(reviewInitial.revision, 0)
   assert.equal(qaInitial.revision, 0)
-  assert.equal(technicalInitial.revision, 0)
+  assert.equal(technicalExtractionInitial.revision, 0)
+  assert.equal(technicalReviewInitial.revision, 0)
   assert.deepEqual(initial.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
-  assert.deepEqual(initial.agents.technicalSolutionAnalysis.requiredToolIds, ['technical_solution_review.submit_result'])
+  assert.deepEqual(initial.agents.technicalSolutionExtraction.requiredToolIds, ['technical_solution_points.submit_result'])
+  assert.deepEqual(initial.agents.technicalSolutionReview.requiredToolIds, ['technical_solution_review.submit_result'])
 
   const extractionSaved = await service.save({
     agentKey: 'requirementPointExtraction',
@@ -85,15 +88,19 @@ test('四个 Agent 分别持久化草稿并发布独立不可变版本', async (
   assert.deepEqual(qaPublished.agentDefinition.toolIds, ['review.answer_submit'])
   assert.equal((await service.resolveActive('review-qa'))?.id, qaPublished.id)
 
-  const technicalSaved = await service.save({
-    agentKey: 'technicalSolutionAnalysis', revision: technicalInitial.revision,
-    routing: { ...technicalInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 8_192 },
-    definition: technicalInitial.definition,
+  const technicalExtractionSaved = await service.save({
+    agentKey: 'technicalSolutionExtraction', revision: technicalExtractionInitial.revision,
+    routing: { ...technicalExtractionInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 8_192 },
+    definition: technicalExtractionInitial.definition,
   })
-  const technicalPublished = await service.publish({ agentKey: 'technicalSolutionAnalysis', revision: technicalSaved.revision, publishedBy: '技术方案管理员' })
-  assert.equal(technicalPublished.agentDefinition.agentKey, 'technical-solution-analysis')
-  assert.equal(technicalPublished.agentDefinition.modelScene, 'technical_solution_analysis')
-  assert.equal((await service.resolveActive('technical-solution-analysis'))?.id, technicalPublished.id)
+  const technicalExtractionPublished = await service.publish({ agentKey: 'technicalSolutionExtraction', revision: technicalExtractionSaved.revision, publishedBy: '技术方案管理员' })
+  const technicalReviewSaved = await service.save({ agentKey: 'technicalSolutionReview', revision: technicalReviewInitial.revision, routing: { ...technicalReviewInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 8_192 }, definition: technicalReviewInitial.definition })
+  const technicalReviewPublished = await service.publish({ agentKey: 'technicalSolutionReview', revision: technicalReviewSaved.revision, publishedBy: '技术方案管理员' })
+  assert.equal(technicalExtractionPublished.agentDefinition.agentKey, 'technical-solution-extraction')
+  assert.equal(technicalReviewPublished.agentDefinition.agentKey, 'technical-solution-review')
+  assert.equal(technicalReviewPublished.agentDefinition.modelScene, 'technical_solution_analysis')
+  assert.equal((await service.resolveActive('technical-solution-extraction'))?.id, technicalExtractionPublished.id)
+  assert.equal((await service.resolveActive('technical-solution-review'))?.id, technicalReviewPublished.id)
 
   const secondReviewDraft = await service.save({
     agentKey: 'requirementReview',
@@ -121,7 +128,8 @@ test('Agent 配置读取使用窄查询而不加载完整状态快照', async ()
   assert.equal(configuration.agents.requirementPointExtraction.draft.revision, 0)
   assert.equal(configuration.agents.requirementReview.draft.revision, 0)
   assert.equal(configuration.agents.reviewQa.draft.revision, 0)
-  assert.equal(configuration.agents.technicalSolutionAnalysis.draft.revision, 0)
+  assert.equal(configuration.agents.technicalSolutionExtraction.draft.revision, 0)
+  assert.equal(configuration.agents.technicalSolutionReview.draft.revision, 0)
 })
 
 test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用模型', async () => {

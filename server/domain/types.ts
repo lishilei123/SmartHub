@@ -124,7 +124,7 @@ export type AiResource = McpServerResource | SkillResource | ToolResource
 
 export type AgentConfigurationScene = 'requirement_analysis' | 'technical_solution_analysis'
 export type AgentConfigurationStatus = 'active' | 'superseded'
-export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview' | 'reviewQa' | 'technicalSolutionAnalysis'
+export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview' | 'reviewQa' | 'technicalSolutionExtraction' | 'technicalSolutionReview'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
   primaryModel: AgentModelReference | null
@@ -157,7 +157,8 @@ export interface AgentConfigurationDraft {
     requirementPointExtraction: AgentConfigurationAgentDraft
     requirementReview: AgentConfigurationAgentDraft
     reviewQa: AgentConfigurationAgentDraft
-    technicalSolutionAnalysis: AgentConfigurationAgentDraft
+    technicalSolutionExtraction: AgentConfigurationAgentDraft
+    technicalSolutionReview: AgentConfigurationAgentDraft
   }
 }
 export interface AgentConfigurationVersion {
@@ -311,7 +312,7 @@ export interface ToolApproval {
   consumedAt?: string
 }
 export interface AgentExecutionRecord {
-  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis' | 'technical-solution-analysis'
+  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis' | 'technical-solution-analysis' | 'technical-solution-extraction' | 'technical-solution-review'
   turns: number
   toolCalls: number
   toolErrors?: number

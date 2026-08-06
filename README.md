@@ -1,6 +1,6 @@
 # SmartHub Phase 1 + Phase 2 + Phase 3 完整评审闭环
 
-当前仓库已实现第一期资料接入与检索闭环、第二期需求评审闭环和第三期技术方案评审闭环。第三期使用独立 `TechnicalSolutionAnalysisAgent`，固定一个成功需求评审运行与一至多份 `technical_design` 资产版本，由服务端生成 Evidence、需求覆盖关系、Finding ID、统计与 Markdown 报告。四个 Agent 均拥有独立定义、模型路由、Prompt、工具协议和发布版本；PostgreSQL 模式下需求评审与技术方案评审均由独立 Job/Worker 队列执行，并持久化固定快照、运行历史、人工处置和正式结果。
+当前仓库已实现第一期资料接入与检索闭环、第二期需求评审闭环和第三期技术方案评审闭环。第三期采用固定双阶段流水线：`TechnicalSolutionExtractionAgent` 从一至多份固定 `technical_design` 资产版本提取方案要点并由服务端固化 Evidence，`TechnicalSolutionReviewAgent` 再基于固定成功需求评审运行与冻结方案要点生成覆盖、Finding、统计和 Markdown 报告。五个 Agent 均拥有独立定义、模型路由、Prompt、工具协议和发布版本；PostgreSQL 模式下需求评审与技术方案评审均由独立 Job/Worker 队列执行，并持久化固定快照、阶段检查点、运行历史、人工处置和正式结果。
 
 ## 阶段文档
 
@@ -30,8 +30,8 @@
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
 - “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。Skill ZIP 或 `ai/skills` 手动入口会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent；可执行 ZIP 还可在入口同目录提供 `skill-runtime.json`，显式声明包内 PowerShell 脚本及 GET/HEAD 网络 Origin。脚本和网络权限归属 Skill，不出现在可独立管理的 Tool 目录；选择 Skill 发布时服务端自动派生内部调用协议，并实施相对路径、参数、精确 Origin、无重定向、超时、取消、受限环境和 256 KB 结果上限。内置 `system.query-local-ip` Skill 使用声明脚本查询 SmartHub 服务主机的本地 IPv4/IPv6。自定义 Tool 仍支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
-- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent、需求评审 Agent、评审问答 Agent 与技术方案分析 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。页面不提供版本记录入口，历史不可变快照仅由服务端保留用于运行追溯。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前除资源和参数校验外，模型必须通过版本化 `model-probe/v2` 长上下文、结构化提交和工具调用质量门禁。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
-- 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；四个 Agent 分别通过各自的需求点、需求评审、评审问答或技术方案结果提交工具提交协议结果，最终结果仍由应用服务复验；
+- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent、需求评审 Agent、评审问答 Agent、技术方案提取 Agent 与技术方案评审 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。页面不提供版本记录入口，历史不可变快照仅由服务端保留用于运行追溯。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前除资源和参数校验外，模型必须通过版本化 `model-probe/v2` 长上下文、结构化提交和工具调用质量门禁。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
+- 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；五个 Agent 分别通过各自的结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
 - 需求分析上传支持 Markdown、TXT 和 ZIP；当前项目版本的文件统一入库到 `版本文档/{项目版本名}/需求文档/`，ZIP 保留包内子目录和图片相对路径；上传区展示文件读取、任务提交、解析/Embedding、向量索引发布和项目版本绑定的真实进度，成功结果展示 15 秒后自动收起，失败结果保留。等待窗口为 10 分钟，批量上传按资产独立绑定并反馈部分失败，避免后端仍在处理却被前端误报整体失败；上传完成的固定需求资产版本自动绑定到当前项目版本。评审接口按 `projectVersionId` 校验版本状态和需求绑定；正式 ReviewRun、固定快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON，页面刷新后按项目版本恢复真实历史；
 - AC-001～AC-009 自动化验收场景。
@@ -39,12 +39,12 @@
 ## 当前已实现的第三期技术方案评审流程
 
 - “技术方案评审”创建页沿用需求分析的三栏工作台：左侧可直接上传 Markdown、TXT 或 ZIP 到 `版本文档/{项目版本名}/技术方案/`，等待真实入库/索引任务完成后刷新并自动勾选 ready 的 `technical_design` 资产版本；中间选择成功 ReviewRun 作为固定需求基线并确认一至十份固定输入，右侧恢复历史评审；
-- `TechnicalSolutionAnalysisAgent` 使用独立 `technical_solution_analysis` 场景、Prompt、模型路由和 `technical-solution-review/v1` 候选协议；模型只提交语义、建议和原文线索，服务端对总体结论、覆盖状态、Finding 类型与严重度的常见近义值做确定性归一化，再生成正式 ID、Evidence、需求关系、覆盖统计与定位；提交工具不会在业务归一化前用难以修正的枚举 `anyOf` 拦截近义值；
+- `TechnicalSolutionExtractionAgent` 使用 `technical-solution-extraction/v1` 提交方案要点和原文线索，服务端生成 `TSP-*` 与 Evidence；`TechnicalSolutionReviewAgent` 使用 `technical-solution-review/v2` 只引用冻结 `RP-*` 与 `TSP-*`，服务端归一化模型语义并生成正式 ID、需求关系和覆盖统计；
 - 正常正文以 `full_context` 投递，超长正文确定性切换 `segmented_context`；成功发布前强制校验 `InputDeliveryManifest`、固定输入 Hash、Evidence 唯一性及需求覆盖全量唯一；
 - Evidence 仍以固定输入中的逐字原文为准；若模型提交“章节提示 + ... + 逐字片段”，服务端只提取并保存可唯一定位的连续原文，忽略同组冗余说明，歧义、越界或完全无法定位仍会结构化拒绝；
 - PostgreSQL 使用 `technical_solution_reviews`、输入、Run、Job、正式结果、Coverage、Finding、Evidence、关系表和追加写 FindingAction；Worker 使用 lease、heartbeat、run token 与 fencing，支持排队、取消、有限重试和迟到结果隔离；
 - 前端通过显式 `projectVersionId + technicalReviewId + runId` 恢复评审上下文，提供摘要、覆盖、Finding、风险、Evidence、历史运行、固定原文、人工处置与 Markdown 导出；项目版本或知识资产删除会保护活动运行并级联第三期数据；
-- 本期边界不包含 Git、代码 Diff、代码生成、部署、测试执行和多 Agent 编排。
+- 本期边界不包含 Git、代码 Diff、代码生成、部署、测试执行、Agent 自由委派和通用多 Agent 编排。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、配置版本、资产、不可变版本、资产 Chunk、索引固定 Chunk、同步任务、模型来源、AI 资源目录、Agent 配置草稿/发布版本、ReviewRun、ReviewJob、FindingAction、ReviewQaSession/Turn 和 ToolApproval 分别写入 `smarthub` schema。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除，不再全库 `TRUNCATE + 重写`。Chunk 向量使用 pgvector 的 `vector` 类型，并为默认384维模型建立 HNSW 余弦索引。首次连接时会安装可用的 `vector`、`pg_trgm` 扩展、自动建表或迁移旧向量。未配置 `DATABASE_URL` 时回退到 JSON 文件；JSON 开发模式仍直接执行评审，生产模式必须使用 PostgreSQL Worker。
 
@@ -122,7 +122,7 @@ Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文�
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
-进入“系统管理 → Agent 配置”后，使用顶部中文下拉框选择“需求点提取 Agent”“需求评审 Agent”“评审问答 Agent”或“技术方案分析 Agent”。页面只提供模型与路由、提示词、Tool/MCP/Skill 三类配置；Tool/MCP/Skill 页面按截图在资源清单底部集中维护最大轮次、最大工具调用、总截止时间和推理强度。资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布新版本”会先保存当前 Agent 草稿，再只发布该 Agent 的下一不可变版本。四个 Agent 的版本号和生效状态互不影响；发布会校验资源依赖及模型的 `model-probe/v2` 质量门禁。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；`write-reversible`/`write-high-risk` 会按参数 SHA-256 建立 Approval，运行记录窗口可批准或拒绝，高风险写操作必须逐次批准；参数变化、拒绝、过期、取消都会阻止执行。
+进入“系统管理 → Agent 配置”后，使用顶部中文下拉框选择“需求点提取 Agent”“需求评审 Agent”“评审问答 Agent”“技术方案提取 Agent”或“技术方案评审 Agent”。页面只提供模型与路由、提示词、Tool/MCP/Skill 三类配置；Tool/MCP/Skill 页面在资源清单底部集中维护最大轮次、最大工具调用、总截止时间和推理强度。资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布新版本”会先保存当前 Agent 草稿，再只发布该 Agent 的下一不可变版本。五个 Agent 的版本号和生效状态互不影响；发布会校验资源依赖及模型的 `model-probe/v2` 质量门禁。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；`write-reversible`/`write-high-risk` 会按参数 SHA-256 建立 Approval，运行记录窗口可批准或拒绝，高风险写操作必须逐次批准；参数变化、拒绝、过期、取消都会阻止执行。
 
 ## 生产构建与运行
 
@@ -156,7 +156,7 @@ npm test
 npm run build
 ```
 
-测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、候选索引切换、远程 Embedding、生成式模型连接和 `model-probe/v2`、Agent 草稿/发布、检索降级、Reranker、不可变原文快照、固定版本 Evidence、PI Agent 工具循环、候选结果校验、ReviewRun 持久化、配置/Prompt/Toolset/Skill/MCP 快照、问答 Turn 持久化、FindingAction 并发控制、参数 Hash 审批和服务端报告导出。
+测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、候选索引切换、远程 Embedding、生成式模型连接和 `model-probe/v2`、Agent 草稿/发布、需求与技术方案双阶段 Agent、检索降级、Reranker、不可变原文快照、固定版本 Evidence、PI Agent 工具循环、候选结果校验、ReviewRun 持久化、配置/Prompt/Toolset/Skill/MCP 快照、问答 Turn 持久化、FindingAction 并发控制、参数 Hash 审批和服务端报告导出。
 
 ## 接口摘要
 
@@ -183,8 +183,8 @@ npm run build
 - `PUT /api/agent-configurations/requirement-analysis/draft`
 - `POST /api/agent-configurations/requirement-analysis/publish`
 - `GET /api/agent-configurations/technical-solution-analysis`
-- `PUT /api/agent-configurations/technical-solution-analysis/draft`
-- `POST /api/agent-configurations/technical-solution-analysis/publish`
+- `PUT /api/agent-configurations/technical-solution-analysis/draft`（`agentKey=technicalSolutionExtraction|technicalSolutionReview`）
+- `POST /api/agent-configurations/technical-solution-analysis/publish`（分别发布提取与评审 Agent）
 - `GET /api/agent-configuration-versions/:id`
 - `POST /api/project-versions/:id/requirement-reviews/run`
 - `GET /api/project-versions/:id/requirement-review-runs`

@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'technical-solution-analysis'
-  agentType: 'requirement_point_extraction' | 'requirement_review' | 'review_qa' | 'technical_solution_analysis'
+  agentKey: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'technical-solution-extraction' | 'technical-solution-review' | 'technical-solution-analysis'
+  agentType: 'requirement_point_extraction' | 'requirement_review' | 'review_qa' | 'technical_solution_extraction' | 'technical_solution_review' | 'technical_solution_analysis'
   version: string
   status: 'published'
   modelScene: 'requirement_analysis' | 'technical_solution_analysis'
-  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1' | 'technical-solution-review/v1'
+  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1' | 'technical-solution-extraction/v1' | 'technical-solution-review/v1' | 'technical-solution-review/v2'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -38,6 +38,7 @@ export interface AgentDefinitionVersion {
 export interface AgentDefinitionResolver {
   resolve(agentKey: AgentDefinitionVersion['agentKey']): AgentDefinitionVersion | Promise<AgentDefinitionVersion>
   resolveActive?(agentKey: AgentDefinitionVersion['agentKey']): import('./types.js').AgentConfigurationVersion | null | Promise<import('./types.js').AgentConfigurationVersion | null>
+  resolveVersion?(id: string): import('./types.js').AgentConfigurationVersion | Promise<import('./types.js').AgentConfigurationVersion>
 }
 
 export interface ReviewRunSnapshot {
@@ -161,6 +162,7 @@ export interface AgentExecutionInput {
   snapshot: ReviewRunSnapshot | import('./technical-solution-types.js').TechnicalSolutionRunSnapshot
   model: AgentModelConnection
   fixedRequirementPointExtraction?: CandidateRequirementPointExtraction
+  fixedTechnicalSolutionExtraction?: import('./technical-solution-types.js').TechnicalSolutionExtractionResult
   requirementInputPlan?: RequirementInputPlan
   onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
 }

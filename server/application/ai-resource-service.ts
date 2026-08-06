@@ -21,7 +21,8 @@ const builtInTools: ToolResource[] = [
   builtInTool('review.answer_submit', '提交评审问答答案', '提交基于固定 ReviewRun 的问答答案、Evidence 引用和限制项。', '1.0.0', 'internal_write', 30_000, 'server/tools/review-answer-submit.ts'),
   builtInTool('technical_solution.input.read', '读取技术方案固定输入', '按本次运行快照读取技术方案正文批次，不访问运行外内容。', '1.0.0', 'read', 30_000, 'server/tools/technical-solution-tools.ts'),
   builtInTool('technical_solution.evidence.preview', '预览技术方案 Evidence', '在提交前校验需求基线或技术方案原文引用能否唯一解析。', '1.0.0', 'read', 30_000, 'server/tools/technical-solution-tools.ts'),
-  builtInTool('technical_solution_review.submit_result', '提交技术方案评审结果', '提交语义候选结果，由服务端生成 ID、Evidence、覆盖关系和统计。', '1.0.0', 'internal_write', 30_000, 'server/tools/technical-solution-tools.ts'),
+  builtInTool('technical_solution_points.submit_result', '提交技术方案要点', '提交提取出的技术方案要点和原文线索，由服务端生成 ID 与 Evidence。', '1.0.0', 'internal_write', 30_000, 'server/tools/technical-solution-tools.ts'),
+  builtInTool('technical_solution_review.submit_result', '提交技术方案评审结果', '引用冻结需求点和技术方案要点提交评审语义，由服务端生成 ID、Evidence、覆盖关系和统计。', '2.0.0', 'internal_write', 30_000, 'server/tools/technical-solution-tools.ts'),
 ]
 const builtInSkills: SkillResource[] = [
   builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.0.0', 'ai/skills/query-local-ip/SKILL.md', [], ['系统', '网络', 'IP'], {

@@ -6,7 +6,8 @@ export type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'ne
 
 export type TechnicalBaseline = { id: string; reviewId: string; completedAt?: string; requirementCount: number; documentTitle: string; unresolvedHighCount: number }
 export type TechnicalSolutionAsset = { assetId: string; assetVersionId: string; displayName: string; logicalPath: string; version: number; contentSha256: string; indexVersionId: string }
-export type TechnicalInputResponse<T> = { projectVersion: { id: string; name: string; status: 'open' | 'locked' | 'archived' }; items: T[]; agentConfiguration: null | { id: string; version: number; contentSha256: string; toolIds: string[]; primaryModel: { sourceId: string; modelId: string } | null } }
+type TechnicalAgentConfiguration = null | { id: string; version: number; contentSha256: string; toolIds: string[]; primaryModel: { sourceId: string; modelId: string } | null }
+export type TechnicalInputResponse<T> = { projectVersion: { id: string; name: string; status: 'open' | 'locked' | 'archived' }; items: T[]; agentConfiguration: TechnicalAgentConfiguration; agentConfigurations?: { extraction: TechnicalAgentConfiguration; review: TechnicalAgentConfiguration } }
 export type TechnicalReview = { id: string; projectVersionId: string; name: string; sourceReviewRunId: string; solutionAssetVersionIds: string[]; inputSetSha256: string; createdAt: string; latestRun?: TechnicalRunSummary | null }
 export type TechnicalEvidence = { id: string; sourceKind: 'requirement' | 'technical_design'; assetId: string; assetVersionId: string; chunkId: string; contentSha256: string; headingPath: string[]; quote: string; startLine: number; endLine: number }
 export type TechnicalFormalResult = {
@@ -19,7 +20,8 @@ export type TechnicalFormalResult = {
   questions: Array<{ id: string; question: string; reason: string; evidenceIds: string[] }>
   statistics: { totalRequirements: number; covered: number; partiallyCovered: number; notCovered: number; needsConfirmation: number; coverageRatio: number }
 }
-export type TechnicalSnapshot = { schemaVersion: string; runId: string; technicalReviewId: string; projectVersionId: string; projectVersionName: string; indexVersionId: string; requirementBaseline: { sourceReviewRunId: string; snapshotSha256: string; requirementPoints: Array<{ id: string; title: string; description: string; evidenceIds: string[] }>; evidence: Array<{ evidenceId: string; requirementPointId: string; assetVersionId: string; quote: string; startLine: number; endLine: number }>; findings: Array<{ id: string; severity: string; state: FindingState; title: string }> }; solutionInputs: Array<{ assetId: string; assetVersionId: string; displayName: string; logicalPath: string; contentSha256: string }>; modelRef: { sourceId: string; modelId: string; modelName: string }; agentConfigurationRef?: { id: string; version: number; contentSha256: string }; agentDefinition: { agentKey: string; version: string; promptRef: { contentSha256: string }; toolsetContentSha256: string; toolIds: string[] }; inputPlan: { mode: 'full_context' | 'segmented_context'; estimatedInputTokens: number; safeInputBudget: number; packageSha256: string; batches: Array<{ batchId: string; tokenCount: number; assetVersionIds: string[]; chunkIds: string[] }> } }
+type TechnicalAgentSnapshot = { agentKey: string; version: string; promptRef: { contentSha256: string }; toolsetContentSha256: string; toolIds: string[] }
+export type TechnicalSnapshot = { schemaVersion: string; runId: string; technicalReviewId: string; projectVersionId: string; projectVersionName: string; indexVersionId: string; requirementBaseline: { sourceReviewRunId: string; snapshotSha256: string; requirementPoints: Array<{ id: string; title: string; description: string; evidenceIds: string[] }>; evidence: Array<{ evidenceId: string; requirementPointId: string; assetVersionId: string; quote: string; startLine: number; endLine: number }>; findings: Array<{ id: string; severity: string; state: FindingState; title: string }> }; solutionInputs: Array<{ assetId: string; assetVersionId: string; displayName: string; logicalPath: string; contentSha256: string }>; modelRef: { sourceId: string; modelId: string; modelName: string }; agentConfigurationRef?: { id: string; version: number; contentSha256: string }; agentDefinition: TechnicalAgentSnapshot; agentDefinitions?: { technicalSolutionExtraction: TechnicalAgentSnapshot; technicalSolutionReview: TechnicalAgentSnapshot }; inputPlan: { mode: 'full_context' | 'segmented_context'; estimatedInputTokens: number; safeInputBudget: number; packageSha256: string; batches: Array<{ batchId: string; tokenCount: number; assetVersionIds: string[]; chunkIds: string[] }> } }
 export type TechnicalRunSummary = { id: string; runId: string; technicalReviewId: string; projectVersionId: string; sourceReviewRunId: string; status: TechnicalRunStatus; step: string; failedAtStep?: string; progress: number; modelLabel: string; modelRouteAttempts?: Array<{ id: string; attempt: number; modelLabel: string; status: string; error?: string }>; degradations?: Array<{ fromModelId: string; toModelId: string; reason: string; occurredAt: string }>; createdAt: string; startedAt?: string; finishedAt?: string; errorCode?: string; error?: string; queue?: { status: TechnicalRunStatus; attempts: number; maxAttempts: number; availableAt: string }; snapshot: TechnicalSnapshot; summary?: TechnicalFormalResult['summary']; statistics?: TechnicalFormalResult['statistics'] }
 export type TechnicalExecutionEvent = {
   sequence: number
@@ -41,7 +43,7 @@ export type TechnicalExecutionEvent = {
 }
 
 export type TechnicalExecutionRecord = {
-  agentKey?: 'technical-solution-analysis'
+  agentKey?: 'technical-solution-analysis' | 'technical-solution-extraction' | 'technical-solution-review'
   turns: number
   toolCalls: number
   toolErrors?: number
@@ -49,7 +51,7 @@ export type TechnicalExecutionRecord = {
   events: TechnicalExecutionEvent[]
 }
 
-export type TechnicalRun = TechnicalRunSummary & { result?: TechnicalFormalResult; inputDeliveryManifest?: { mode: string; entries: unknown[]; finalMergeCompleted: boolean }; execution?: TechnicalExecutionRecord; events?: TechnicalExecutionEvent[] }
+export type TechnicalRun = TechnicalRunSummary & { result?: TechnicalFormalResult; extractionResult?: { schemaVersion: string; solutionPoints: Array<{ id: string; title: string; description: string; evidenceIds: string[] }>; evidence: TechnicalEvidence[] }; inputDeliveryManifest?: { mode: string; entries: unknown[]; finalMergeCompleted: boolean }; execution?: TechnicalExecutionRecord; executions?: { technicalSolutionExtraction?: TechnicalExecutionRecord; technicalSolutionReview?: TechnicalExecutionRecord }; events?: TechnicalExecutionEvent[] }
 export type FindingActionsResponse = { actions: Array<{ id: string; findingId: string; action: string; fromState: FindingState; toState: FindingState; comment?: string; actorDisplayName: string; version: number; createdAt: string }>; findings: Array<{ findingId: string; state: FindingState; version: number }> }
 
 export async function loadTechnicalBaselines(projectVersionId: string) { return request<TechnicalInputResponse<TechnicalBaseline>>(`/project-versions/${encodeURIComponent(projectVersionId)}/technical-solution-review-inputs/baselines`) }

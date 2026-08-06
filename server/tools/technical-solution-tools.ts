@@ -1,5 +1,5 @@
 import { Type } from 'typebox'
-import type { TechnicalSolutionReviewSubmissionV1, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
+import type { TechnicalSolutionExtractionSubmissionV1, TechnicalSolutionReviewSubmissionV1, TechnicalSolutionReviewSubmissionV2, TechnicalSolutionRunSnapshot } from '../domain/technical-solution-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { registerKnowledgeReadChunkTool } from './knowledge-read-chunk.js'
 import { registerKnowledgeSearchTool } from './knowledge-search.js'
@@ -51,6 +51,44 @@ export function createTechnicalSolutionToolRegistry(store: StateStore, submit: (
   }, async request => {
     const feedback = await submit(structuredClone(request.arguments) as TechnicalSolutionReviewSubmissionV1)
     return feedback.accepted ? { data: { accepted: true, status: 'candidate_validated' }, terminate: true } : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] } }
+  })
+  return registry
+}
+
+export function createTechnicalSolutionExtractionToolRegistry(store: StateStore, submit: (candidate: TechnicalSolutionExtractionSubmissionV1) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
+  const registry = createTechnicalSolutionToolRegistry(store, async () => ({ accepted: false, issues: [{ path: '', message: '旧版单阶段提交工具不可用于技术方案提取阶段' }] }))
+  registry.register({
+    id: 'technical_solution_points.submit_result', piName: 'technical_solution_points_submit_result', version: '1.0.0', label: '提交技术方案要点', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
+    description: '提交 technical-solution-extraction/v1；正式技术方案要点 ID、Evidence、引用和定位由服务端生成。',
+    parameters: Type.Object({
+      schemaVersion: Type.Literal('technical-solution-extraction/v1'),
+      solutionPoints: Type.Array(Type.Object({ title: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })), description: Type.String({ minLength: 1, maxLength: 8_000 }), sourceTexts: Type.Array(Type.String({ minLength: 4, maxLength: 4_000 }), { minItems: 1, maxItems: 20 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 500 }),
+    }, { additionalProperties: false }),
+  }, async request => {
+    const feedback = await submit(structuredClone(request.arguments) as TechnicalSolutionExtractionSubmissionV1)
+    return feedback.accepted ? { data: { accepted: true, status: 'extraction_validated' }, terminate: true } : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] } }
+  })
+  return registry
+}
+
+export function createTechnicalSolutionReviewToolRegistry(submit: (candidate: TechnicalSolutionReviewSubmissionV2) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>) {
+  const registry = new ToolRegistry()
+  const refs = Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 100 })
+  const stringList = Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 })
+  registry.register({
+    id: 'technical_solution_review.submit_result', piName: 'technical_solution_review_submit_result', version: '2.0.0', label: '提交技术方案评审结果', risk: 'internal_write', idempotent: false, timeoutMs: 30_000,
+    description: '提交 technical-solution-review/v2；只能引用冻结需求点和冻结技术方案要点，正式 ID、Evidence 和统计由服务端生成。',
+    parameters: Type.Object({
+      schemaVersion: Type.Literal('technical-solution-review/v2'),
+      summary: Type.Object({ overallAssessment: Type.String({ minLength: 1, maxLength: 100 }), overview: Type.String({ minLength: 1, maxLength: 8_000 }), majorGaps: stringList, majorRisks: stringList, recommendedOrder: stringList }, { additionalProperties: false }),
+      coverage: Type.Array(Type.Object({ requirementPointRef: Type.String({ minLength: 1, maxLength: 100 }), status: Type.String({ minLength: 1, maxLength: 100 }), analysis: Type.String({ minLength: 1, maxLength: 8_000 }), solutionPointRefs: refs }, { additionalProperties: false }), { maxItems: 500 }),
+      findings: Type.Array(Type.Object({ type: Type.String({ minLength: 1, maxLength: 100 }), severity: Type.String({ minLength: 1, maxLength: 100 }), title: Type.String({ minLength: 1, maxLength: 300 }), problem: Type.String({ minLength: 1, maxLength: 8_000 }), impact: Type.String({ minLength: 1, maxLength: 4_000 }), recommendation: Type.String({ minLength: 1, maxLength: 4_000 }), confidence: Type.Number({ minimum: 0, maximum: 1 }), requirementPointRefs: refs, solutionPointRefs: refs }, { additionalProperties: false }), { maxItems: 200 }),
+      risks: Type.Array(Type.Object({ description: Type.String({ minLength: 1, maxLength: 4_000 }), impact: Type.String({ minLength: 1, maxLength: 4_000 }), mitigation: Type.String({ minLength: 1, maxLength: 4_000 }), requirementPointRefs: refs, solutionPointRefs: refs }, { additionalProperties: false }), { maxItems: 200 }),
+      questions: Type.Array(Type.Object({ question: Type.String({ minLength: 1, maxLength: 4_000 }), reason: Type.String({ minLength: 1, maxLength: 4_000 }), requirementPointRefs: refs, solutionPointRefs: refs }, { additionalProperties: false }), { maxItems: 200 }),
+    }, { additionalProperties: false }),
+  }, async request => {
+    const feedback = await submit(structuredClone(request.arguments) as TechnicalSolutionReviewSubmissionV2)
+    return feedback.accepted ? { data: { accepted: true, status: 'review_validated' }, terminate: true } : { data: { accepted: false, status: 'validation_failed', issues: feedback.issues?.slice(0, 20) ?? [] } }
   })
   return registry
 }
