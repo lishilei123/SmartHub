@@ -24,6 +24,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@babel/parser": "^7.29.8",
     "@earendil-works/pi-agent-core": "0.81.1",
     "@earendil-works/pi-ai": "0.81.1",
     "@huggingface/transformers": "3.8.1",

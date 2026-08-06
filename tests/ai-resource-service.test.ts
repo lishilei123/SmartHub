@@ -90,16 +90,27 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
   assert.equal((await service.list()).tools.length, 10)
 })
 
-test('ai/skills 与 ai/tools 外置目录自动扫描并按内容 Hash 重载', async () => {
+test('ai/skills 与 ai/tools 支持单文件、单描述、目录、批量和 package 自动识别并按内容 Hash 重载', async () => {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-ai-extensions-'))
   const skillDirectory = join(root, 'ai', 'skills', 'demo')
   const toolDirectory = join(root, 'ai', 'tools')
-  await Promise.all([mkdir(skillDirectory, { recursive: true }), mkdir(toolDirectory, { recursive: true })])
+  const directoryTool = join(toolDirectory, 'directory-tool')
+  const batchTool = join(toolDirectory, 'batch-tool')
+  const packageTool = join(toolDirectory, 'package-tool')
+  await Promise.all([mkdir(skillDirectory, { recursive: true }), mkdir(directoryTool, { recursive: true }), mkdir(batchTool, { recursive: true }), mkdir(packageTool, { recursive: true })])
   await Promise.all([
     writeFile(join(skillDirectory, 'skill.json'), JSON.stringify({ key: 'demo.skill', name: 'Demo Skill', version: '1.0.0', toolIds: ['demo.echo'], tags: ['demo'] }), 'utf8'),
     writeFile(join(skillDirectory, 'SKILL.md'), '# Demo Skill', 'utf8'),
-    writeFile(join(toolDirectory, 'demo-echo.tool.json'), JSON.stringify({ key: 'demo.echo', name: 'Demo Echo', version: '1.0.0', module: 'demo-echo.ts', risk: 'read', timeoutMs: 5000 }), 'utf8'),
+    writeFile(join(toolDirectory, 'demo-echo.tool.json'), JSON.stringify({ key: 'demo.echo', name: 'Demo Echo', version: '1.0.0', risk: 'read', timeoutMs: 5000 }), 'utf8'),
     writeFile(join(toolDirectory, 'demo-echo.ts'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "v1" } }', 'utf8'),
+    writeFile(join(toolDirectory, 'inline.ts'), 'export const tool = { key: "inline.echo", name: "Inline Echo", version: "1.0.0", risk: "read", timeoutMs: 5000 } as const; throw new Error("扫描阶段不得执行模块");', 'utf8'),
+    writeFile(join(directoryTool, 'tool.json'), JSON.stringify({ key: 'directory.echo', name: 'Directory Echo', version: '1.0.0', risk: 'read', timeoutMs: 5000 }), 'utf8'),
+    writeFile(join(directoryTool, 'tool.ts'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "directory" } }', 'utf8'),
+    writeFile(join(batchTool, 'tools.json'), JSON.stringify({ tools: [{ key: 'batch.echo', name: 'Batch Echo', version: '1.0.0', module: 'batch.ts', risk: 'read', timeoutMs: 5000 }, { key: 'batch.second', name: 'Batch Second', version: '1.0.0', module: 'second.ts', risk: 'read', timeoutMs: 5000 }] }), 'utf8'),
+    writeFile(join(batchTool, 'batch.ts'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "batch" } }', 'utf8'),
+    writeFile(join(batchTool, 'second.ts'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "second" } }', 'utf8'),
+    writeFile(join(packageTool, 'package.json'), JSON.stringify({ main: 'index.js', smarthub: { tool: { key: 'package.echo', name: 'Package Echo', version: '1.0.0', risk: 'read', timeoutMs: 5000 } } }), 'utf8'),
+    writeFile(join(packageTool, 'index.js'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "package" } }', 'utf8'),
   ])
   const store = new JsonStore(null)
   await store.load()
@@ -110,6 +121,7 @@ test('ai/skills 与 ai/tools 外置目录自动扫描并按内容 Hash 重载', 
     const initialTool = initial.tools.find(tool => tool.key === 'demo.echo')!
     assert.equal(initialTool.managedBy, 'filesystem')
     assert.equal(initial.skills.find(skill => skill.key === 'demo.skill')?.managedBy, 'filesystem')
+    assert.deepEqual(['inline.echo', 'directory.echo', 'batch.echo', 'batch.second', 'package.echo'].map(key => initial.tools.find(tool => tool.key === key)?.managedBy), ['filesystem', 'filesystem', 'filesystem', 'filesystem', 'filesystem'])
     await writeFile(join(toolDirectory, 'demo-echo.ts'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "v2" } }', 'utf8')
     await eventually(async () => (await store.snapshot()).aiResources.some(item => item.kind === 'tool' && item.key === 'demo.echo' && item.contentSha256 !== initialTool.contentSha256))
     await Promise.all([rm(join(toolDirectory, 'demo-echo.tool.json')), rm(join(skillDirectory, 'skill.json'))])
