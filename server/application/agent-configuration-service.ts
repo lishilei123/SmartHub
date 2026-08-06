@@ -494,7 +494,17 @@ function resolveTools(toolIds: string[], state: DatabaseState): Array<ToolResour
   return toolIds.map(key => tools.find(tool => tool.key === key && tool.enabled) ?? builtInToolReference(key))
 }
 function builtInToolReference(key: string): ToolResource {
-  return defaultBuiltInToolConfigResolver.toToolResource(key)
+  const definitions: Record<string, { version: string; risk: ToolResource['risk']; timeoutMs: number }> = {
+    'knowledge.search': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
+    'knowledge.read_chunk': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
+    'requirement-points.submit_result': { version: '5.1.0', risk: 'internal_write', timeoutMs: 30_000 },
+    'review.submit_result': { version: '4.0.0', risk: 'internal_write', timeoutMs: 30_000 },
+    'review.answer_submit': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
+    'skill.execute_script': { version: '1.0.0', risk: 'code_execution', timeoutMs: 120_000 },
+    'skill.http_request': { version: '1.0.0', risk: 'network_read', timeoutMs: 60_000 },
+  }
+  const definition = required(definitions[key], `工具 ${key} 不存在或未启用`)
+  return { id: `builtin_tool_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'tool', key, name: key, description: '', version: definition.version, enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk: definition.risk, timeoutMs: definition.timeoutMs, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
 }
 function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ? value : []).map(item => String(item).trim()).filter(Boolean))] }
 function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key) && !isSkillRuntimeToolId(key)) }
