@@ -1103,13 +1103,25 @@ function AiResourceManagement({ kind, notify }: { kind: AiResourceKind; notify: 
   const [editor, setEditor] = useState<AiResourceEditor | null>(null)
   const [sourceViewer, setSourceViewer] = useState<ToolSource | null>(null)
   const [sourceLoadingId, setSourceLoadingId] = useState('')
-  const load = useCallback(async () => {
-    setLoading(true); setError('')
-    try { setCatalog(await loadAiResources()) }
-    catch (loadError) { setError(loadError instanceof Error ? loadError.message : 'AI 资源目录读取失败') }
-    finally { setLoading(false) }
+  const load = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError('') }
+    try {
+      const nextCatalog = await loadAiResources()
+      setCatalog(nextCatalog)
+      setError('')
+      return nextCatalog
+    } catch (loadError) {
+      if (!silent) setError(loadError instanceof Error ? loadError.message : 'AI 资源目录读取失败')
+      return null
+    } finally {
+      if (!silent) setLoading(false)
+    }
   }, [])
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(() => void load(true), 1000)
+    return () => window.clearInterval(timer)
+  }, [load])
   const resources: AiResource[] = catalog ? kind === 'mcp' ? catalog.mcpServers : kind === 'skill' ? catalog.skills : catalog.tools : []
   const title = kind === 'mcp' ? 'MCP 服务' : kind === 'skill' ? 'Skill' : '工具'
   const description = kind === 'mcp' ? '注册远程 MCP 服务及其暴露的工具范围；当前只允许 HTTP/S 传输。' : kind === 'skill' ? '维护可复用工作流、外部依赖和运行权限，供 Agent 发布版本时绑定。' : '统一治理可独立配置的内置、本地、HTTP 与 MCP 工具；Skill 脚本和网络权限不作为独立工具。'
@@ -1156,7 +1168,11 @@ function AiResourceManagement({ kind, notify }: { kind: AiResourceKind; notify: 
   const viewSource = async (resource: ToolResource) => {
     setSourceLoadingId(resource.id)
     try { setSourceViewer(await loadToolSource(resource.id)) }
-    catch (sourceError) { notify(sourceError instanceof Error ? sourceError.message : '工具源码读取失败', 'error') }
+    catch (sourceError) {
+      const refreshedCatalog = await load(true)
+      if (refreshedCatalog && !refreshedCatalog.tools.some(tool => tool.id === resource.id)) return
+      notify(sourceError instanceof Error ? sourceError.message : '工具源码读取失败', 'error')
+    }
     finally { setSourceLoadingId('') }
   }
   return <section className="model-config-panel ai-resource-panel">
