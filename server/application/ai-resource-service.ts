@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import type { AiResource, AiResourceKind, McpServerResource, SkillPackageMetadata, SkillResource, ToolResource } from '../domain/types.js'
@@ -7,6 +7,7 @@ import type { StateStore } from '../infrastructure/store.js'
 import { applicationRoot, codeRoot, deployedModuleCandidates } from '../infrastructure/runtime-paths.js'
 import { isSkillRuntimeToolId, normalizeSkillRuntimePolicy, SKILL_RUNTIME_TOOL_IDS } from './skill-runtime-policy.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
+import { scanAiExtensions, type AiExtensionCandidate } from '../infrastructure/ai-extension-scanner.js'
 
 export type AiResourceCatalog = {
   mcpServers: McpServerResource[]
@@ -16,9 +17,10 @@ export type AiResourceCatalog = {
 
 const builtInTools: ToolResource[] = defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).map(key => defaultBuiltInToolConfigResolver.toToolResource(key))
 const builtInSkills: SkillResource[] = [
-  builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.0.0', 'ai/skills/query-local-ip/SKILL.md', [], ['系统', '网络', 'IP'], {
+  builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.1.0', 'server/skills/query-local-ip/SKILL.md', [], ['系统', '网络', 'IP'], {
     scripts: [{ path: 'scripts/get-local-ip.ps1', runner: 'powershell', timeoutMs: 15_000 }],
   }),
+  builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例'], undefined),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
 const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', ...SKILL_RUNTIME_TOOL_IDS])
@@ -26,14 +28,34 @@ const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 
 export class AiResourceService {
-  constructor(private readonly store: StateStore, private readonly skillPackages?: SkillPackageStore) {}
+  private extensionReloadTimer?: NodeJS.Timeout
+  private synchronization?: Promise<void>
+  private lastExtensionWarnings = ''
+
+  constructor(
+    private readonly store: StateStore,
+    private readonly skillPackages?: SkillPackageStore,
+    private readonly options: { extensionRoot?: string; reloadIntervalMs?: number } = {},
+  ) {}
+
+  async initialize() {
+    await this.synchronizeCatalog()
+    if (this.extensionReloadTimer) return
+    const interval = this.options.reloadIntervalMs ?? 1_000
+    if (interval <= 0) return
+    this.extensionReloadTimer = setInterval(() => { void this.synchronizeCatalog().catch(error => console.error('AI 外置资源自动重载失败：', message(error))) }, interval)
+    this.extensionReloadTimer.unref()
+  }
+
+  async close() {
+    if (this.extensionReloadTimer) clearInterval(this.extensionReloadTimer)
+    this.extensionReloadTimer = undefined
+    await this.synchronization
+  }
 
   async list(): Promise<AiResourceCatalog> {
-    let resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
-    if (builtInsNeedSync(resources) || catalogMetadataNeedsSync(resources)) {
-      await this.ensureBuiltIns()
-      resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
-    }
+    await this.synchronizeCatalog()
+    const resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
     return catalog(resources)
   }
 
@@ -82,8 +104,9 @@ export class AiResourceService {
       if (previous.kind === 'skill' && !previous.package && ('package' in update || String(update.entrypoint ?? '').startsWith('skill-package://'))) throw new Error('Skill 包元数据和受控入口只能由 ZIP 上传生成')
       const merged = { ...previous, ...update, id: previous.id, kind: previous.kind, builtIn: previous.builtIn, createdAt: previous.createdAt, updatedAt: new Date().toISOString() }
       if (previous.kind === 'skill' && previous.package) Object.assign(merged, { key: previous.key, version: previous.version, entrypoint: previous.entrypoint, package: previous.package, runtime: previous.runtime, status: previous.status })
+      if (previous.managedBy === 'filesystem') Object.assign(merged, previous, { enabled: typeof update.enabled === 'boolean' ? update.enabled : previous.enabled, updatedAt: new Date().toISOString() })
       if (previous.builtIn) Object.assign(merged, previous, { enabled: typeof update.enabled === 'boolean' ? update.enabled : previous.enabled, updatedAt: new Date().toISOString() })
-      const resource = normalizeResource(kind, merged, { id: previous.id, builtIn: previous.builtIn, createdAt: previous.createdAt, updatedAt: merged.updatedAt })
+      const resource = normalizeResource(kind, merged, { id: previous.id, builtIn: previous.builtIn, managedBy: previous.managedBy, createdAt: previous.createdAt, updatedAt: merged.updatedAt })
       validateUnique(state.aiResources.filter(item => item.id !== id), resource)
       validateReferences(state.aiResources.filter(item => item.id !== id), resource)
       state.aiResources[index] = resource
@@ -96,6 +119,7 @@ export class AiResourceService {
       const resource = state.aiResources.find(item => item.id === id && item.kind === kind)
       if (!resource) throw new Error('AI 资源不存在')
       if (resource.builtIn) throw new Error('内置资源不可删除，只能停用')
+      if (resource.managedBy === 'filesystem') throw new Error('外置目录资源由文件系统管理，请删除对应描述文件')
       if (resource.kind === 'mcp' && state.aiResources.some(item => item.kind === 'tool' && item.mcpServerId === resource.id)) throw new Error('MCP 服务仍被工具引用，无法删除')
       if (resource.kind === 'tool' && state.aiResources.some(item => item.kind === 'skill' && item.toolIds.includes(resource.key))) throw new Error('工具仍被 Skill 引用，无法删除')
       if (resource.kind === 'tool' && state.agentConfigurationDrafts.some(draft => Object.values(draft.agents).some(agent => agent.definition.toolIds?.includes(resource.key)))) throw new Error('工具仍被 Agent 草稿引用，请先从 Agent 配置移除')
@@ -135,9 +159,9 @@ export class AiResourceService {
       state.aiResources = state.aiResources.filter(item => !(item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key)))
       state.aiResources = state.aiResources.map(item => {
         if (item.builtIn) return item
-        if (item.kind === 'mcp') return { ...item, status: 'ready', ...(item.authType === 'none' || item.credentialEnv ? {} : { credentialEnv: defaultCredentialEnv('MCP', item.key) }) }
-        if (item.kind === 'skill') return { ...item, status: 'ready', toolIds: item.toolIds.filter(toolId => !isSkillRuntimeToolId(toolId)) }
-        return { ...item, status: item.source !== 'http' || item.endpoint ? 'ready' : 'draft' }
+        if (item.kind === 'mcp') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', ...(item.authType === 'none' || item.credentialEnv ? {} : { credentialEnv: defaultCredentialEnv('MCP', item.key) }) }
+        if (item.kind === 'skill') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', toolIds: item.toolIds.filter(toolId => !isSkillRuntimeToolId(toolId)) }
+        return { ...item, managedBy: item.managedBy ?? 'catalog', status: item.source !== 'http' || item.endpoint ? 'ready' : 'draft' }
       })
       for (const builtIn of builtInResources) {
         const index = state.aiResources.findIndex(item => item.kind === builtIn.kind && item.key === builtIn.key)
@@ -145,6 +169,34 @@ export class AiResourceService {
         else if (state.aiResources[index].builtIn) state.aiResources[index] = { ...structuredClone(builtIn), enabled: state.aiResources[index].enabled, createdAt: state.aiResources[index].createdAt, updatedAt: state.aiResources[index].updatedAt }
       }
     })
+  }
+
+  private synchronizeCatalog() {
+    if (this.synchronization) return this.synchronization
+    this.synchronization = this.performSynchronization().finally(() => { this.synchronization = undefined })
+    return this.synchronization
+  }
+
+  private async performSynchronization() {
+    let resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
+    if (builtInsNeedSync(resources) || catalogMetadataNeedsSync(resources)) {
+      await this.ensureBuiltIns()
+      resources = this.store.listAiResources ? await this.store.listAiResources() : (await this.store.snapshot()).aiResources
+    }
+    const scanned = await scanAiExtensions(this.options.extensionRoot ?? applicationRoot)
+    const normalized = normalizeExtensionCandidates(scanned.candidates, resources, scanned.warnings)
+    this.reportExtensionWarnings(scanned.warnings)
+    const synchronizedAt = new Date().toISOString()
+    const next = reconcileExtensions(resources, normalized, synchronizedAt)
+    if (JSON.stringify(next) === JSON.stringify(resources)) return
+    await this.transaction(state => { state.aiResources = reconcileExtensions(state.aiResources, normalized, synchronizedAt) })
+  }
+
+  private reportExtensionWarnings(warnings: string[]) {
+    const current = warnings.join('\n')
+    if (current === this.lastExtensionWarnings) return
+    this.lastExtensionWarnings = current
+    for (const warning of warnings) console.warn(`AI 外置资源已跳过：${warning}`)
   }
 
   private transaction<T>(operation: (draft: Awaited<ReturnType<StateStore['snapshot']>>) => T | Promise<T>): Promise<T> {
@@ -156,7 +208,8 @@ export class AiResourceService {
 
 function catalogMetadataNeedsSync(resources: AiResource[]) {
   return resources.some(item => !item.builtIn && (
-    (item.kind === 'mcp' && (item.status !== 'ready' || (item.authType !== 'none' && !item.credentialEnv)))
+    !item.managedBy
+    || (item.kind === 'mcp' && (item.status !== 'ready' || (item.authType !== 'none' && !item.credentialEnv)))
     || (item.kind === 'skill' && (item.status !== 'ready' || item.toolIds.some(isSkillRuntimeToolId)))
     || (item.kind === 'tool' && item.status !== (item.source !== 'http' || item.endpoint ? 'ready' : 'draft'))
   ))
@@ -190,10 +243,10 @@ function builtInsNeedSync(resources: AiResource[]) {
 
 
 function builtInSkill(key: string, name: string, description: string, version: string, entrypoint: string, toolIds: string[], tags: string[], runtime: SkillResource['runtime']): SkillResource {
-  return { id: `builtin_skill_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'skill', key, name, description, version, enabled: true, status: 'ready', builtIn: true, entrypoint, toolIds, tags, runtime, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
+  return { id: `builtin_skill_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'skill', key, name, description, version, enabled: true, status: 'ready', builtIn: true, managedBy: 'builtin', entrypoint, toolIds, tags, runtime, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
 }
 
-function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiResource, 'id' | 'builtIn' | 'createdAt' | 'updatedAt'>): AiResource {
+function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiResource, 'id' | 'builtIn' | 'createdAt' | 'updatedAt'> & Pick<AiResource, 'managedBy'>): AiResource {
   const value = object(input)
   const base = {
     ...fixed,
@@ -204,6 +257,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
     version: version(value.version),
     enabled: value.enabled !== false,
     status: 'ready' as const,
+    managedBy: fixed.builtIn ? 'builtin' as const : fixed.managedBy ?? 'catalog' as const,
   }
   if (kind === 'mcp') {
     const transport = oneOf(value.transport, ['streamable_http', 'sse'] as const, 'MCP 传输类型')
@@ -215,7 +269,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
   if (kind === 'skill') {
     const runtime = normalizeSkillRuntimePolicy(value.runtime)
     const toolIds = keys(value.toolIds).filter(toolId => !isSkillRuntimeToolId(toolId))
-    return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds, tags: stringList(value.tags, 20, 50), runtime, package: value.package === undefined ? undefined : skillPackage(value.package) }
+    return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds, tags: stringList(value.tags, 20, 50), runtime, package: value.package === undefined ? undefined : skillPackage(value.package), contentSha256: optionalSha256(value.contentSha256) }
   }
   const source = oneOf(value.source ?? 'local', ['builtin', 'local', 'http', 'mcp'] as const, '工具来源')
   if (source === 'builtin' && !fixed.builtIn) throw new Error('不能创建自定义内置工具')
@@ -227,7 +281,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
   const authType = source === 'http' ? oneOf(value.authType ?? 'none', ['none', 'bearer'] as const, 'HTTP 工具鉴权类型') : undefined
   const credentialEnv = source === 'http' && authType === 'bearer' ? environmentName(value.credentialEnv ?? defaultCredentialEnv('HTTP_TOOL', String(value.key ?? ''))) : undefined
   const parameters = source === 'http' ? jsonObjectSchema(value.parameters) : undefined
-  return { ...base, kind, source, risk, timeoutMs, sourcePath, mcpServerId, endpoint, authType, credentialEnv, parameters }
+  return { ...base, kind, source, risk, timeoutMs, sourcePath, mcpServerId, endpoint, authType, credentialEnv, parameters, contentSha256: optionalSha256(value.contentSha256) }
 }
 
 function validateUnique(resources: AiResource[], candidate: AiResource) {
@@ -245,6 +299,48 @@ function validateReferences(resources: AiResource[], candidate: AiResource) {
   if (candidate.kind === 'tool' && candidate.source === 'mcp' && !resources.some(item => item.kind === 'mcp' && item.id === candidate.mcpServerId)) throw new Error('请选择已注册的 MCP 服务')
 }
 
+function normalizeExtensionCandidates(candidates: AiExtensionCandidate[], resources: AiResource[], warnings: string[]) {
+  const normalized: AiResource[] = []
+  const ordered = [...candidates].sort((left, right) => Number(left.kind === 'skill') - Number(right.kind === 'skill') || left.source.localeCompare(right.source, 'en'))
+  for (const candidate of ordered) {
+    try {
+      const epoch = new Date(0).toISOString()
+      const resource = normalizeResource(candidate.kind, candidate.input, {
+        id: extensionResourceId(candidate.kind, candidate.source),
+        builtIn: false,
+        managedBy: 'filesystem',
+        createdAt: epoch,
+        updatedAt: epoch,
+      })
+      const available = [...resources.filter(item => item.managedBy !== 'filesystem'), ...normalized]
+      validateUnique(available, resource)
+      validateReferences(available, resource)
+      normalized.push(resource)
+    } catch (error) { warnings.push(`${candidate.source}: ${message(error)}`) }
+  }
+  return normalized
+}
+
+function reconcileExtensions(resources: AiResource[], candidates: AiResource[], synchronizedAt: string) {
+  const existing = new Map(resources.filter(item => item.managedBy === 'filesystem').map(item => [item.id, item]))
+  const fixed = resources.filter(item => item.managedBy !== 'filesystem')
+  const extensions = candidates.map(candidate => {
+    const previous = existing.get(candidate.id)
+    if (!previous) return { ...candidate, createdAt: synchronizedAt, updatedAt: synchronizedAt }
+    const next = { ...candidate, enabled: previous.enabled, createdAt: previous.createdAt, updatedAt: previous.updatedAt }
+    return sameExtension(previous, next) ? previous : { ...next, updatedAt: synchronizedAt }
+  })
+  return [...fixed, ...extensions]
+}
+
+function sameExtension(left: AiResource, right: AiResource) {
+  return JSON.stringify({ ...left, enabled: true, createdAt: '', updatedAt: '' }) === JSON.stringify({ ...right, enabled: true, createdAt: '', updatedAt: '' })
+}
+
+function extensionResourceId(kind: 'skill' | 'tool', source: string) {
+  return `filesystem_${kind}_${createHash('sha256').update(source.toLocaleLowerCase()).digest('hex').slice(0, 24)}`
+}
+
 function object(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 function text(value: unknown, label: string, maxLength: number) { const result = String(value ?? '').trim(); if (!result) throw new Error(`${label}不能为空`); if (result.length > maxLength) throw new Error(`${label}不能超过 ${maxLength} 个字符`); return result }
 function optionalText(value: unknown, maxLength: number) { const result = String(value ?? '').trim(); if (result.length > maxLength) throw new Error(`描述不能超过 ${maxLength} 个字符`); return result }
@@ -256,6 +352,7 @@ function integer(value: unknown, label: string, min: number, max: number) { cons
 function oneOf<T extends readonly string[]>(value: unknown, allowed: T, label: string): T[number] { if (!allowed.includes(value as T[number])) throw new Error(`${label}无效`); return value as T[number] }
 function httpUrl(value: unknown, label: string) { const result = text(value, label, 2000); let parsed: URL; try { parsed = new URL(result) } catch { throw new Error(`${label}必须是有效 URL`) }; if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(`${label}仅支持 HTTP/HTTPS`); return parsed.toString().replace(/\/$/u, '') }
 function environmentName(value: unknown) { const result = text(value, '凭据环境变量', 200); if (!/^[A-Z_][A-Z0-9_]*$/u.test(result)) throw new Error('凭据环境变量只能使用大写字母、数字和下划线'); return result }
+function optionalSha256(value: unknown) { if (value === undefined) return undefined; const result = String(value); if (!/^[a-f0-9]{64}$/u.test(result)) throw new Error('内容 SHA-256 无效'); return result }
 function defaultCredentialEnv(prefix: string, resourceKey: string) { return `SMARTHUB_${prefix}_${resourceKey.toLocaleUpperCase().replace(/[^A-Z0-9]+/gu, '_')}_TOKEN` }
 function jsonObjectSchema(value: unknown): Record<string, unknown> {
   const schema = value === undefined ? { type: 'object', additionalProperties: true } : object(value)
@@ -296,3 +393,4 @@ function normalizeSourcePath(value: unknown) {
   return result
 }
 function sourceLanguage(extension: string) { return extension === '.ts' || extension === '.tsx' ? 'typescript' : 'javascript' }
+function message(error: unknown) { return error instanceof Error ? error.message : String(error) }

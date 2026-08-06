@@ -11,10 +11,9 @@ export async function resolveManualSkillFile(entrypoint: string, relativePath: s
 }
 
 async function resolveManualSkillPath(entrypoint: string, relativePath: string | null) {
-  const normalized = safeEntrypoint(entrypoint)
-  const relativeEntrypoint = normalized.slice('ai/skills/'.length)
+  const { rootPath, relativeEntrypoint } = safeEntrypoint(entrypoint)
   const resourceParts = relativePath == null ? [] : safeRelativePath(relativePath).split('/')
-  const roots = [...new Set([resolve(applicationRoot, 'ai/skills'), resolve(codeRoot, 'ai/skills')])]
+  const roots = [...new Set([resolve(applicationRoot, rootPath), resolve(codeRoot, rootPath)])]
   for (const root of roots) {
     const actualRoot = await realpath(root).catch(() => null)
     const actualEntrypoint = await realpath(resolve(root, ...relativeEntrypoint.split('/'))).catch(() => null)
@@ -28,8 +27,9 @@ async function resolveManualSkillPath(entrypoint: string, relativePath: string |
 
 function safeEntrypoint(value: string) {
   const normalized = value.replaceAll('\\', '/')
-  if (!normalized.startsWith('ai/skills/') || normalized.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('SKILL_ENTRYPOINT_OUTSIDE_ALLOWED_ROOT')
-  return normalized
+  const rootPath = normalized.startsWith('ai/skills/') ? 'ai/skills' : normalized.startsWith('server/skills/') ? 'server/skills' : null
+  if (!rootPath || normalized.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('SKILL_ENTRYPOINT_OUTSIDE_ALLOWED_ROOT')
+  return { rootPath, relativeEntrypoint: normalized.slice(rootPath.length + 1) }
 }
 
 function safeRelativePath(value: string) {

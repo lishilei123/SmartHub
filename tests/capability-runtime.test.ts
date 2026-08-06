@@ -219,7 +219,7 @@ function builtInTool(key: string, risk: ToolResource['risk'], timeoutMs: number)
 }
 
 function skillResource(overrides: Partial<SkillResource> & Pick<SkillResource, 'key'>): SkillResource {
-  return { id: `skill-${overrides.key}`, kind: 'skill', key: overrides.key, name: overrides.key, description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: false, entrypoint: 'ai/skills/query-local-ip/SKILL.md', toolIds: [], tags: [], createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), ...overrides }
+  return { id: `skill-${overrides.key}`, kind: 'skill', key: overrides.key, name: overrides.key, description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: false, entrypoint: 'server/skills/query-local-ip/SKILL.md', toolIds: [], tags: [], createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), ...overrides }
 }
 
 function mcpServer(endpoint: string): McpServerResource {

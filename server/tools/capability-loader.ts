@@ -76,7 +76,7 @@ export class AgentCapabilityLoader {
 
 async function registerLocal(registry: ToolRegistry, tool: ToolResource) {
   const path = await resolveLocalModule(required(tool.sourcePath, '本地工具缺少源码路径'))
-  const loaded = await import(`${moduleUrl(path)}?v=${encodeURIComponent(tool.version)}`) as Record<string, unknown>
+  const loaded = await import(`${moduleUrl(path)}?v=${encodeURIComponent(tool.contentSha256 ?? tool.version)}`) as Record<string, unknown>
   const execute = loaded.execute ?? (loaded.default as { execute?: unknown } | undefined)?.execute
   const parameters = loaded.parameters ?? (loaded.default as { parameters?: unknown } | undefined)?.parameters
   if (typeof execute !== 'function') throw new Error('本地工具必须导出 execute(arguments, context, signal)')

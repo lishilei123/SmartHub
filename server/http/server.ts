@@ -17,6 +17,7 @@ export { agentConfigurationService, aiResourceService, localModelRuntime, modelS
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
+  await aiResourceService.initialize()
   const server = createServer(async (request, response) => {
     try { await route(request, response, controls) }
     catch (error) {
@@ -24,7 +25,7 @@ export async function start(port = Number(process.env.PORT ?? 8787), controls: A
       send(response, status, { error: error instanceof Error ? error.message : '未知错误' })
     }
   })
-  server.once('close', () => { void stateStore.close?.() })
+  server.once('close', () => { void aiResourceService.close().then(() => stateStore.close?.()) })
   return new Promise<typeof server>((resolvePromise, reject) => {
     const onError = (error: Error) => reject(error)
     server.once('error', onError)

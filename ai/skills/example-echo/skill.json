@@ -1,0 +1,10 @@
+{
+  "key": "example.echo-skill",
+  "name": "外置 Skill 示例",
+  "description": "演示 ai/skills 外置 Skill 的自动扫描、登记与重载。",
+  "version": "1.0.0",
+  "entrypoint": "SKILL.md",
+  "toolIds": ["example.echo"],
+  "tags": ["示例", "外置"]
+}
+

@@ -87,6 +87,7 @@ export class BuiltInToolConfigResolver {
       enabled: true,
       status: 'ready',
       builtIn: true,
+      managedBy: 'builtin',
       source: 'builtin',
       risk: config.risk,
       timeoutMs: config.timeoutMs,

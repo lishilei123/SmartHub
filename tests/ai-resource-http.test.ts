@@ -24,9 +24,9 @@ test('AI 资源 HTTP API 完成 MCP、工具、Skill 的管理闭环', async con
     const initial = await fetch(`${baseUrl}/ai-resources`)
     assert.equal(initial.status, 200)
     const initialCatalog = await initial.json() as { tools: Array<{ id: string; key: string; sourcePath: string }>; skills: Array<{ key: string }> }
-    assert.equal(initialCatalog.tools.length, 9)
-    assert.equal(new Set(initialCatalog.tools.map(tool => tool.sourcePath)).size, 6)
-    assert.deepEqual(initialCatalog.skills.map(skill => skill.key), ['system.query-local-ip'])
+    assert.equal(initialCatalog.tools.length, 10)
+    assert.equal(new Set(initialCatalog.tools.map(tool => tool.sourcePath)).size, 7)
+    assert.deepEqual(initialCatalog.skills.map(skill => skill.key), ['system.query-local-ip', 'system.structured-summary', 'example.echo-skill'])
     const searchTool = initialCatalog.tools.find(tool => tool.key === 'knowledge.search')!
     const sourceResponse = await fetch(`${baseUrl}/ai-resources/tool/${searchTool.id}/source`)
     assert.equal(sourceResponse.status, 200)

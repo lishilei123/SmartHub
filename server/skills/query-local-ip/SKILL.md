@@ -21,3 +21,4 @@ description: Query the local IPv4 and IPv6 addresses of the host running the Sma
 不得猜测或编造 IP。工具失败或未返回地址时，直接说明失败原因或未发现非回环地址。
 
 这里的“本机”指运行 SmartHub 服务的主机，不是浏览器所在客户端。该脚本查询网卡地址，不查询公网出口 IP；用户明确询问公网 IP 时应说明这个边界。
+

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { JsonStore } from '../server/infrastructure/store.js'
@@ -10,6 +13,7 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
 
   const initial = await service.list()
   assert.deepEqual(initial.tools.map(tool => tool.key).sort(), [
+    'example.echo',
     'knowledge.read_chunk',
     'knowledge.search',
     'requirement-points.submit_result',
@@ -20,10 +24,14 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'technical_solution_points.submit_result',
     'technical_solution_review.submit_result',
   ])
-  assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip'])
+  assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip', 'system.structured-summary', 'example.echo-skill'])
   assert.equal(initial.skills[0].runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
   assert.deepEqual(initial.skills[0].toolIds, [])
-  assert.ok(initial.tools.every(tool => tool.builtIn && tool.status === 'ready'))
+  assert.equal(initial.skills[1].entrypoint, 'server/skills/structured-summary/SKILL.md')
+  assert.equal(initial.skills[2].managedBy, 'filesystem')
+  assert.deepEqual(initial.skills[2].toolIds, ['example.echo'])
+  assert.ok(initial.tools.filter(tool => tool.builtIn).every(tool => tool.status === 'ready'))
+  assert.equal(initial.tools.find(tool => tool.key === 'example.echo')?.managedBy, 'filesystem')
   assert.deepEqual(Object.fromEntries(initial.tools.map(tool => [tool.key, tool.sourcePath])), {
     'knowledge.search': 'server/tools/knowledge-search.ts',
     'knowledge.read_chunk': 'server/tools/knowledge-read-chunk.ts',
@@ -34,9 +42,10 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'technical_solution.evidence.preview': 'server/tools/technical-solution-tools.ts',
     'technical_solution_points.submit_result': 'server/tools/technical-solution-tools.ts',
     'technical_solution_review.submit_result': 'server/tools/technical-solution-tools.ts',
+    'example.echo': 'ai/tools/example-echo.ts',
   })
   store.transaction = async () => { throw new Error('内置资源已同步时不应再次启动写事务') }
-  assert.equal((await service.list()).tools.length, 9)
+  assert.equal((await service.list()).tools.length, 10)
   store.transaction = JsonStore.prototype.transaction.bind(store)
   const searchTool = initial.tools.find(tool => tool.key === 'knowledge.search')!
   const builtInSource = await service.source(searchTool.id)
@@ -70,15 +79,45 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
 
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
-  assert.equal(catalog.skills.length, 2)
-  assert.equal(catalog.tools.length, 10)
+  assert.equal(catalog.skills.length, 4)
+  assert.equal(catalog.tools.length, 11)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)
   await assert.rejects(() => service.delete('mcp', mcp.id), /工具引用/)
   await service.delete('skill', skill.id)
   await service.delete('tool', tool.id)
   await service.delete('mcp', mcp.id)
-  assert.equal((await service.list()).tools.length, 9)
+  assert.equal((await service.list()).tools.length, 10)
+})
+
+test('ai/skills 与 ai/tools 外置目录自动扫描并按内容 Hash 重载', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-ai-extensions-'))
+  const skillDirectory = join(root, 'ai', 'skills', 'demo')
+  const toolDirectory = join(root, 'ai', 'tools')
+  await Promise.all([mkdir(skillDirectory, { recursive: true }), mkdir(toolDirectory, { recursive: true })])
+  await Promise.all([
+    writeFile(join(skillDirectory, 'skill.json'), JSON.stringify({ key: 'demo.skill', name: 'Demo Skill', version: '1.0.0', toolIds: ['demo.echo'], tags: ['demo'] }), 'utf8'),
+    writeFile(join(skillDirectory, 'SKILL.md'), '# Demo Skill', 'utf8'),
+    writeFile(join(toolDirectory, 'demo-echo.tool.json'), JSON.stringify({ key: 'demo.echo', name: 'Demo Echo', version: '1.0.0', module: 'demo-echo.ts', risk: 'read', timeoutMs: 5000 }), 'utf8'),
+    writeFile(join(toolDirectory, 'demo-echo.ts'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "v1" } }', 'utf8'),
+  ])
+  const store = new JsonStore(null)
+  await store.load()
+  const service = new AiResourceService(store, undefined, { extensionRoot: root, reloadIntervalMs: 20 })
+  try {
+    await service.initialize()
+    const initial = await service.list()
+    const initialTool = initial.tools.find(tool => tool.key === 'demo.echo')!
+    assert.equal(initialTool.managedBy, 'filesystem')
+    assert.equal(initial.skills.find(skill => skill.key === 'demo.skill')?.managedBy, 'filesystem')
+    await writeFile(join(toolDirectory, 'demo-echo.ts'), 'export const parameters = { type: "object" }; export async function execute() { return { data: "v2" } }', 'utf8')
+    await eventually(async () => (await store.snapshot()).aiResources.some(item => item.kind === 'tool' && item.key === 'demo.echo' && item.contentSha256 !== initialTool.contentSha256))
+    await Promise.all([rm(join(toolDirectory, 'demo-echo.tool.json')), rm(join(skillDirectory, 'skill.json'))])
+    await eventually(async () => !(await store.snapshot()).aiResources.some(item => item.kind === 'tool' && item.key === 'demo.echo'))
+  } finally {
+    await service.close()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('自定义工具不能在目录同步前抢占或更新为内置 Tool 标识', async () => {
@@ -87,6 +126,9 @@ test('自定义工具不能在目录同步前抢占或更新为内置 Tool 标�
   const service = new AiResourceService(store)
   await assert.rejects(() => service.create('tool', { key: 'knowledge.search', name: '伪造内置检索', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 }), /内置工具标识/u)
   const custom = await service.create('tool', { key: 'custom.search', name: '自定义检索', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 })
+  assert.equal(custom.managedBy, 'catalog')
+  const cannotSpoof = await service.create('tool', { key: 'custom.filesystem', name: '不可伪造外置资源', managedBy: 'filesystem', source: 'local', sourcePath: 'server/tools/knowledge-search.ts', risk: 'read', timeoutMs: 1000 })
+  assert.equal(cannotSpoof.managedBy, 'catalog')
   await assert.rejects(() => service.update('tool', custom.id, { key: 'knowledge.search' }), /内置工具标识/u)
 })
 
@@ -106,12 +148,17 @@ test('AI 资源目录校验标识、引用和内置工具保护', async () => {
   const service = new AiResourceService(store)
   const catalog = await service.list()
   const builtIn = catalog.tools[0]
+  const external = catalog.tools.find(tool => tool.key === 'example.echo')!
 
   await service.update('tool', builtIn.id, { enabled: false, key: 'cannot.change' })
   const disabled = (await service.list()).tools.find(tool => tool.id === builtIn.id)
   assert.equal(disabled?.enabled, false)
   assert.equal(disabled?.key, builtIn.key)
   await assert.rejects(() => service.delete('tool', builtIn.id), /内置资源不可删除/)
+  await service.update('tool', external.id, { name: '不能覆盖文件描述', enabled: false })
+  assert.equal((await service.list()).tools.find(tool => tool.id === external.id)?.name, external.name)
+  assert.equal((await service.list()).tools.find(tool => tool.id === external.id)?.enabled, false)
+  await assert.rejects(() => service.delete('tool', external.id), /文件系统管理/)
   await assert.rejects(() => service.create('mcp', { key: 'Bad Key', name: '错误', endpoint: 'file:///tmp/mcp', transport: 'sse', authType: 'none' }), /资源标识/)
   await assert.rejects(() => service.create('skill', { key: 'bad.skill', name: '错误 Skill', entrypoint: 'SKILL.md', toolIds: ['missing.tool'] }), /未注册工具/)
   await assert.rejects(() => service.create('tool', { key: 'remote.tool', name: '远程工具', source: 'mcp', risk: 'read', timeoutMs: 1000, mcpServerId: 'missing' }), /MCP 服务/)
@@ -128,3 +175,12 @@ test('AI 资源目录校验标识、引用和内置工具保护', async () => {
   assert.equal(localSource.toolKey, 'safe.local')
   assert.equal(localSource.readOnly, true)
 })
+
+async function eventually(predicate: () => Promise<boolean>) {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    if (await predicate()) return
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
+  }
+  assert.fail('等待外置资源自动重载超时')
+}

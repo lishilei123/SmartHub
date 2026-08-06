@@ -25,7 +25,7 @@ export function mcpPolicyHash(server: McpServerResource) {
 export function toolsetContentHash(tools: string[]) { return sha256(tools) }
 
 export function toolConfigurationHash(tool: ToolResource) {
-  return sha256({ key: tool.key, version: tool.version, source: tool.source, risk: tool.risk, timeoutMs: tool.timeoutMs, sourcePath: tool.sourcePath, mcpServerId: tool.mcpServerId, endpoint: tool.endpoint, authType: tool.authType, credentialEnv: tool.credentialEnv, parameters: tool.parameters })
+  return sha256({ key: tool.key, version: tool.version, source: tool.source, risk: tool.risk, timeoutMs: tool.timeoutMs, sourcePath: tool.sourcePath, mcpServerId: tool.mcpServerId, endpoint: tool.endpoint, authType: tool.authType, credentialEnv: tool.credentialEnv, parameters: tool.parameters, contentSha256: tool.contentSha256 })
 }
 
 export function builtInToolBindingToken(key: string, resolver = defaultBuiltInToolConfigResolver) {
@@ -37,6 +37,6 @@ export function toolBindingToken(tool: Pick<ToolResource, 'key' | 'version' | 'b
   return tool.builtIn ? builtInToolBindingToken(tool.key) : `${tool.key}@${tool.version}#${toolConfigurationHash(tool as ToolResource)}`
 }
 
-function skillHashPayload(skill: SkillResource, toolIds: string[]) { return { key: skill.key, version: skill.version, entrypoint: skill.entrypoint, contentSha256: skill.package?.contentSha256, toolIds, tags: skill.tags, runtime: skill.runtime } }
+function skillHashPayload(skill: SkillResource, toolIds: string[]) { return { key: skill.key, version: skill.version, entrypoint: skill.entrypoint, contentSha256: skill.contentSha256 ?? skill.package?.contentSha256, toolIds, tags: skill.tags, runtime: skill.runtime } }
 
 function sha256(value: unknown) { return createHash('sha256').update(JSON.stringify(value)).digest('hex') }

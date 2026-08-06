@@ -32,7 +32,7 @@
 - 本地模型添加框提供经过 Transformers.js 模型页核对的推荐模型，可搜索并一键填入，同时保留任意 Hugging Face 模型名称的自由输入；
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
-- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。Skill ZIP 或 `ai/skills` 手动入口会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent；可执行 ZIP 还可在入口同目录提供 `skill-runtime.json`，显式声明包内 PowerShell 脚本及 GET/HEAD 网络 Origin。脚本和网络权限归属 Skill，不出现在可独立管理的 Tool 目录；选择 Skill 发布时服务端自动派生内部调用协议，并实施相对路径、参数、精确 Origin、无重定向、超时、取消、受限环境和 256 KB 结果上限。内置 `system.query-local-ip` Skill 使用声明脚本查询 SmartHub 服务主机的本地 IPv4/IPv6。自定义 Tool 仍支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
+- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。随应用发布的内置 Skill 位于 `server/skills`，当前包含 `system.query-local-ip` 和 `system.structured-summary` 示例；项目外置 Skill/Tool 分别位于 `ai/skills`、`ai/tools`，服务启动和目录读取时扫描，并默认每 1 秒自动重扫。外置 Skill 通过同目录 `skill.json` 登记，外置 Tool 通过 `*.tool.json` 关联本地模块；管理页标记为“外置”，只允许启停，编辑或删除应修改文件。Skill ZIP、内置 Skill 或外置 Skill 都会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent；可执行 Skill 还可在入口同目录提供 `skill-runtime.json`，显式声明 PowerShell 脚本及 GET/HEAD 网络 Origin。脚本和网络权限归属 Skill，不出现在可独立管理的 Tool 目录；选择 Skill 发布时服务端自动派生内部调用协议，并实施相对路径、参数、精确 Origin、无重定向、超时、取消、受限环境和 256 KB 结果上限。自定义 Tool 仍支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
 - “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent、需求评审 Agent、评审问答 Agent、技术方案提取 Agent 与技术方案评审 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。页面不提供版本记录入口，历史不可变快照仅由服务端保留用于运行追溯。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前除资源和参数校验外，模型必须通过版本化 `model-probe/v2` 长上下文、结构化提交和工具调用质量门禁。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；五个 Agent 分别通过各自的结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
@@ -121,7 +121,7 @@ npm run migrate
 
 进入“系统管理 → 模型管理”后，直接填写来源的 Base URL、可选 API Key 和模型。服务端不会把 URL/API Key 转成环境变量；它们与当前向量模型配置一样，以明文配置值保存在数据库 JSON/JSONB 中。读取和保存响应返回 Base URL、`hasApiKey` 状态和空的 `apiKey`，编辑时 API Key 留空表示保留旧值，填写新值表示覆盖。
 
-Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文件，单文件最多 5 MB、解压后总计最多 50 MB，并且必须且只能包含一个非空 UTF-8 `SKILL.md`。服务端校验 CRC，拒绝绝对路径、路径穿越、Windows 保留名、大小写冲突、符号链接与原生可执行文件，再原子解压到 `data/skills/{skillKey}/{version}`，记录压缩包 Hash、内容 Hash 和文件清单。已上传包的标识、版本、入口和包元数据不可原位覆盖；删除未被 Agent 引用的 Skill 时同步删除对应包目录。Agent 发布版本的 Skill 配置 Hash 包含内容 Hash，但上传本身不会执行包内脚本，也不会自动扩大工具权限。
+Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文件，单文件最多 5 MB、解压后总计最多 50 MB，并且必须且只能包含一个非空 UTF-8 `SKILL.md`。服务端校验 CRC，拒绝绝对路径、路径穿越、Windows 保留名、大小写冲突、符号链接与原生可执行文件，再原子解压到 `data/skills/{skillKey}/{version}`，记录压缩包 Hash、内容 Hash 和文件清单。已上传包的标识、版本、入口和包元数据不可原位覆盖；删除未被 Agent 引用的 Skill 时同步删除对应包目录。`ai/skills/{name}/skill.json` 至少声明 `key`、`name` 和 `version`，可声明 `description`、`entrypoint`（默认 `SKILL.md`）、`toolIds` 和 `tags`；目录内容共同参与 SHA-256。Agent 发布版本的 Skill 配置 Hash 包含内容 Hash，但上传或扫描本身不会执行包内脚本，也不会自动扩大工具权限。
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
@@ -149,7 +149,7 @@ $env:SMARTHUB_HTTP_TOOL_ISSUES_LOOKUP_TOKEN = '<bearer-token>'
 npm run start:api:dist
 ```
 
-本地扩展模块应在构建前放到 `ai/tools` 或 `server/tools`，TypeScript 会输出到 `dist-server`；安装后扩展则应部署为同一允许目录下的 JavaScript 模块。示例契约见 `ai/tools/example-echo.ts`。
+`server/tools` 是随应用发布、由内置配置登记的受控实现目录；`ai/tools` 是项目外置扩展目录。外置模块旁放置 `*.tool.json`，至少声明 `key`、`name`、`version`、`module`、`risk` 和 `timeoutMs`，服务端会自动登记并以描述文件和模块内容的 SHA-256 作为重载与发布绑定依据。TypeScript 会在构建时输出到 `dist-server`；安装后扩展可部署为 `ai/tools` 下的 JavaScript 模块。示例契约见 `ai/tools/example-echo.ts` 与 `ai/tools/example-echo.tool.json`。文件变化会自动刷新资源目录和模块缓存键；已发布 Agent 检测到内容漂移时拒绝静默加载，管理员需重新发布 Agent 配置后才会使用新版扩展。
 
 ## 验证
 

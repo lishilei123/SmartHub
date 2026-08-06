@@ -61,6 +61,7 @@ interface AiResourceBase {
   enabled: boolean
   status: AiResourceStatus
   builtIn: boolean
+  managedBy?: 'builtin' | 'catalog' | 'filesystem'
   createdAt: string
   updatedAt: string
 }
@@ -81,6 +82,7 @@ export interface SkillResource extends AiResourceBase {
   tags: string[]
   runtime?: SkillRuntimePolicy
   package?: SkillPackageMetadata
+  contentSha256?: string
 }
 
 export interface SkillRuntimePolicy {
@@ -118,6 +120,7 @@ export interface ToolResource extends AiResourceBase {
   authType?: 'none' | 'bearer'
   credentialEnv?: string
   parameters?: Record<string, unknown>
+  contentSha256?: string
 }
 
 export type AiResource = McpServerResource | SkillResource | ToolResource
