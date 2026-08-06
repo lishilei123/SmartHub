@@ -30,7 +30,8 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
   assert.equal(initial.skills[1].entrypoint, 'server/skills/structured-summary/SKILL.md')
   assert.equal(initial.skills[2].managedBy, 'filesystem')
   assert.deepEqual(initial.skills[2].toolIds, ['example.echo'])
-  assert.ok(initial.tools.filter(tool => tool.builtIn).every(tool => tool.status === 'ready'))
+  assert.ok(initial.tools.filter(tool => tool.builtIn).every(tool => tool.status === 'ready' && tool.enabled))
+  assert.ok(initial.skills.filter(skill => skill.builtIn).every(skill => skill.status === 'ready' && skill.enabled))
   assert.equal(initial.tools.find(tool => tool.key === 'example.echo')?.managedBy, 'filesystem')
   assert.deepEqual(Object.fromEntries(initial.tools.map(tool => [tool.key, tool.sourcePath])), {
     'knowledge.search': 'server/tools/knowledge-search.ts',
@@ -154,19 +155,36 @@ test('AI 资源目录清理已退役的批量校验证据工具', async () => {
   assert.ok(!catalog.tools.some(tool => tool.key === 'evidence.validate_batch'))
 })
 
-test('AI 资源目录校验标识、引用和内置工具保护', async () => {
+test('AI 资源目录自动恢复历史上被停用的内置 Tool 和 Skill', async () => {
+  const store = new JsonStore(null)
+  await store.load()
+  const service = new AiResourceService(store)
+  const initial = await service.list()
+  const toolId = initial.tools.find(tool => tool.builtIn)!.id
+  const skillId = initial.skills.find(skill => skill.builtIn)!.id
+  await store.transaction(state => {
+    state.aiResources = state.aiResources.map(resource => resource.id === toolId || resource.id === skillId ? { ...resource, enabled: false } : resource)
+  })
+
+  const repaired = await service.list()
+  assert.equal(repaired.tools.find(tool => tool.id === toolId)?.enabled, true)
+  assert.equal(repaired.skills.find(skill => skill.id === skillId)?.enabled, true)
+})
+
+test('AI 资源目录校验标识、引用和内置 Tool/Skill 保护', async () => {
   const store = new JsonStore(null)
   await store.load()
   const service = new AiResourceService(store)
   const catalog = await service.list()
   const builtIn = catalog.tools[0]
+  const builtInSkill = catalog.skills.find(skill => skill.builtIn)!
   const external = catalog.tools.find(tool => tool.key === 'example.echo')!
 
-  await service.update('tool', builtIn.id, { enabled: false, key: 'cannot.change' })
-  const disabled = (await service.list()).tools.find(tool => tool.id === builtIn.id)
-  assert.equal(disabled?.enabled, false)
-  assert.equal(disabled?.key, builtIn.key)
-  await assert.rejects(() => service.delete('tool', builtIn.id), /内置资源不可删除/)
+  await assert.rejects(() => service.update('tool', builtIn.id, { enabled: false }), /始终启用，不可停用/)
+  await assert.rejects(() => service.update('skill', builtInSkill.id, { enabled: false }), /始终启用，不可停用/)
+  assert.equal((await service.list()).tools.find(tool => tool.id === builtIn.id)?.enabled, true)
+  assert.equal((await service.list()).skills.find(skill => skill.id === builtInSkill.id)?.enabled, true)
+  await assert.rejects(() => service.delete('tool', builtIn.id), /不可删除或停用/)
   await service.update('tool', external.id, { name: '不能覆盖文件描述', enabled: false })
   assert.equal((await service.list()).tools.find(tool => tool.id === external.id)?.name, external.name)
   assert.equal((await service.list()).tools.find(tool => tool.id === external.id)?.enabled, false)

@@ -23,7 +23,7 @@ test('AI 资源 HTTP API 完成 MCP、工具、Skill 的管理闭环', async con
     const baseUrl = `http://127.0.0.1:${address.port}/api`
     const initial = await fetch(`${baseUrl}/ai-resources`)
     assert.equal(initial.status, 200)
-    const initialCatalog = await initial.json() as { tools: Array<{ id: string; key: string; sourcePath: string }>; skills: Array<{ key: string }> }
+    const initialCatalog = await initial.json() as { tools: Array<{ id: string; key: string; sourcePath: string }>; skills: Array<{ id: string; key: string; builtIn: boolean }> }
     assert.equal(initialCatalog.tools.length, 10)
     assert.equal(new Set(initialCatalog.tools.map(tool => tool.sourcePath)).size, 7)
     assert.deepEqual(initialCatalog.skills.map(skill => skill.key), ['system.query-local-ip', 'system.structured-summary', 'example.echo-skill'])
@@ -35,6 +35,14 @@ test('AI 资源 HTTP API 完成 MCP、工具、Skill 的管理闭环', async con
     assert.equal(source.language, 'typescript')
     assert.equal(source.readOnly, true)
     assert.match(source.content, /registerKnowledgeSearchTool/u)
+
+    const disableBuiltInTool = await fetch(`${baseUrl}/ai-resources/tool/${searchTool.id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) })
+    assert.equal(disableBuiltInTool.status, 400)
+    assert.match((await disableBuiltInTool.json() as { error: string }).error, /始终启用，不可停用/u)
+    const builtInSkill = initialCatalog.skills.find(skill => skill.builtIn)!
+    const disableBuiltInSkill = await fetch(`${baseUrl}/ai-resources/skill/${builtInSkill.id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) })
+    assert.equal(disableBuiltInSkill.status, 400)
+    assert.match((await disableBuiltInSkill.json() as { error: string }).error, /始终启用，不可停用/u)
 
     const skillArchive = await new JSZip()
       .file('workflow/SKILL.md', '# HTTP ZIP Skill\n\n受控上传测试。')

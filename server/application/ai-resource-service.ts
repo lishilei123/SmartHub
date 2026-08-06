@@ -101,11 +101,12 @@ export class AiResourceService {
       if (index < 0) throw new Error('AI 资源不存在')
       const previous = state.aiResources[index]
       const update = object(input)
+      if (previous.builtIn && update.enabled === false) throw new Error('内置 Tool 和 Skill 始终启用，不可停用')
       if (previous.kind === 'skill' && !previous.package && ('package' in update || String(update.entrypoint ?? '').startsWith('skill-package://'))) throw new Error('Skill 包元数据和受控入口只能由 ZIP 上传生成')
       const merged = { ...previous, ...update, id: previous.id, kind: previous.kind, builtIn: previous.builtIn, createdAt: previous.createdAt, updatedAt: new Date().toISOString() }
       if (previous.kind === 'skill' && previous.package) Object.assign(merged, { key: previous.key, version: previous.version, entrypoint: previous.entrypoint, package: previous.package, runtime: previous.runtime, status: previous.status })
       if (previous.managedBy === 'filesystem') Object.assign(merged, previous, { enabled: typeof update.enabled === 'boolean' ? update.enabled : previous.enabled, updatedAt: new Date().toISOString() })
-      if (previous.builtIn) Object.assign(merged, previous, { enabled: typeof update.enabled === 'boolean' ? update.enabled : previous.enabled, updatedAt: new Date().toISOString() })
+      if (previous.builtIn) Object.assign(merged, previous, { enabled: true, updatedAt: new Date().toISOString() })
       const resource = normalizeResource(kind, merged, { id: previous.id, builtIn: previous.builtIn, managedBy: previous.managedBy, createdAt: previous.createdAt, updatedAt: merged.updatedAt })
       validateUnique(state.aiResources.filter(item => item.id !== id), resource)
       validateReferences(state.aiResources.filter(item => item.id !== id), resource)
@@ -118,7 +119,7 @@ export class AiResourceService {
     const result = await this.transaction(state => {
       const resource = state.aiResources.find(item => item.id === id && item.kind === kind)
       if (!resource) throw new Error('AI 资源不存在')
-      if (resource.builtIn) throw new Error('内置资源不可删除，只能停用')
+      if (resource.builtIn) throw new Error('内置 Tool 和 Skill 不可删除或停用')
       if (resource.managedBy === 'filesystem') throw new Error('外置目录资源由文件系统管理，请删除对应描述文件')
       if (resource.kind === 'mcp' && state.aiResources.some(item => item.kind === 'tool' && item.mcpServerId === resource.id)) throw new Error('MCP 服务仍被工具引用，无法删除')
       if (resource.kind === 'tool' && state.aiResources.some(item => item.kind === 'skill' && item.toolIds.includes(resource.key))) throw new Error('工具仍被 Skill 引用，无法删除')
@@ -166,7 +167,7 @@ export class AiResourceService {
       for (const builtIn of builtInResources) {
         const index = state.aiResources.findIndex(item => item.kind === builtIn.kind && item.key === builtIn.key)
         if (index < 0) state.aiResources.push(structuredClone(builtIn))
-        else if (state.aiResources[index].builtIn) state.aiResources[index] = { ...structuredClone(builtIn), enabled: state.aiResources[index].enabled, createdAt: state.aiResources[index].createdAt, updatedAt: state.aiResources[index].updatedAt }
+        else if (state.aiResources[index].builtIn) state.aiResources[index] = { ...structuredClone(builtIn), createdAt: state.aiResources[index].createdAt, updatedAt: state.aiResources[index].updatedAt }
       }
     })
   }
@@ -237,7 +238,7 @@ function builtInsNeedSync(resources: AiResource[]) {
   return builtInResources.some(expected => {
     const actual = resources.find(item => item.kind === expected.kind && item.key === expected.key)
     if (!actual?.builtIn) return true
-    return JSON.stringify({ ...actual, enabled: true, createdAt: expected.createdAt, updatedAt: expected.updatedAt }) !== JSON.stringify(expected)
+    return JSON.stringify({ ...actual, createdAt: expected.createdAt, updatedAt: expected.updatedAt }) !== JSON.stringify(expected)
   })
 }
 

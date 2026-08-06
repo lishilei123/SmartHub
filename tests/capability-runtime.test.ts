@@ -111,12 +111,14 @@ test('配置已声明但当前阶段未注册的内置工具会产生预警', as
   await loaded.close()
 })
 
-test('已停用内置工具不会在 Agent 能力注册表中暴露', async () => {
+test('存储异常导致内置工具停用时不会在 Agent 能力注册表中暴露', async () => {
   const store = new JsonStore(null)
   await store.load()
   const catalog = await new AiResourceService(store).list()
   const tool = catalog.tools.find(item => item.key === 'knowledge.search')!
-  await new AiResourceService(store).update('tool', tool.id, { enabled: false })
+  await store.transaction(state => {
+    state.aiResources = state.aiResources.map(resource => resource.id === tool.id ? { ...resource, enabled: false } : resource)
+  })
   const registry = new ToolRegistry()
   const loaded = await new AgentCapabilityLoader(store).load(definition([tool]), registry, new AbortController().signal)
   assert.equal(registry.get(tool.key), undefined)
