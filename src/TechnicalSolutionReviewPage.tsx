@@ -237,9 +237,14 @@ export function TechnicalSolutionReviewPage({ projectVersion, knowledgeBaseId, a
 }
 
 function TechnicalRunRecordModal({ run, loading, tab, onTab, onClose }: { run: TechnicalRun; loading: boolean; tab: 'conversation' | 'events'; onTab: (tab: 'conversation' | 'events') => void; onClose: () => void }) {
-  const [agentStage, setAgentStage] = useState<'extraction' | 'review'>(run.executions?.technicalSolutionReview ? 'review' : 'extraction')
-  const execution: TechnicalExecutionRecord | undefined = agentStage === 'extraction' ? run.executions?.technicalSolutionExtraction ?? (run.execution?.agentKey !== 'technical-solution-review' ? run.execution : undefined) : run.executions?.technicalSolutionReview ?? (run.execution?.agentKey === 'technical-solution-review' || run.execution?.agentKey === 'technical-solution-analysis' ? run.execution : undefined)
-  const events: TechnicalExecutionEvent[] = execution?.events ?? (run.executions ? [] : run.events ?? [])
+  const extractionExecution = run.executions?.technicalSolutionExtraction ?? (run.execution?.agentKey === 'technical-solution-extraction' ? run.execution : undefined)
+  const reviewExecution = run.executions?.technicalSolutionReview ?? (run.execution?.agentKey === 'technical-solution-review' || run.execution?.agentKey === 'technical-solution-analysis' || (!run.execution?.agentKey && !run.executions) ? run.execution : undefined)
+  const reviewStageReached = Boolean(reviewExecution) || ['reviewing_solution', 'analyzing_solution', 'candidate_submitted', 'resolving_evidence', 'validating_result', 'publishing_result', 'succeeded'].includes(run.failedAtStep ?? run.step)
+  const initialAgentStage: 'extraction' | 'review' = run.step === 'extracting_solution_points' ? 'extraction' : reviewStageReached ? 'review' : 'extraction'
+  const [agentStage, setAgentStage] = useState<'extraction' | 'review'>(initialAgentStage)
+  useEffect(() => setAgentStage(initialAgentStage), [run.runId, initialAgentStage])
+  const execution: TechnicalExecutionRecord | undefined = agentStage === 'extraction' ? extractionExecution : reviewExecution
+  const events: TechnicalExecutionEvent[] = execution?.events ?? (agentStage === 'review' && !run.executions ? run.events ?? [] : [])
   const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
   const completedToolIds = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
   const conversation = events.filter(event => (event.type === 'message_end' && (event.role === 'user' || event.role === 'assistant'))
@@ -251,16 +256,18 @@ function TechnicalRunRecordModal({ run, loading, tab, onTab, onClose }: { run: T
   const turns = execution?.turns ?? Math.max(0, ...events.map(event => event.turn ?? 0))
   const toolCalls = execution?.toolCalls ?? events.filter(event => event.type === 'tool_execution_start').length
   const toolErrors = execution?.toolErrors ?? events.filter(event => event.type === 'tool_execution_end' && event.isError).length
-  const runtime = execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : '未记录'
+  const displayedStatus: TechnicalRun['status'] = agentStage === 'extraction' && reviewStageReached ? 'succeeded' : agentStage === 'review' && !reviewStageReached ? 'queued' : run.status
+  const displayedError = run.error && ((agentStage === 'extraction' && !reviewStageReached) || (agentStage === 'review' && reviewStageReached)) ? run.error : undefined
+  const runtime = execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : displayedStatus === 'running' ? '运行中' : '未完成 / 旧记录'
   const attempts = run.modelRouteAttempts ?? []
   return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="modal rr-run-record-modal" role="dialog" aria-modal="true" aria-label="技术方案评审运行记录">
     <header><h2>技术方案评审运行记录</h2><button className="icon-btn" onClick={onClose} aria-label="关闭运行记录"><XCircle /></button></header>
     <div className="rr-run-record">
-      <div className="rr-run-record-summary"><div><TechnicalRecordBadge status={run.status} /><b>{run.runId}</b><span>{run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(run.startedAt ?? run.createdAt)}</dd></div><div><dt>Turn</dt><dd>{turns}</dd></div><div><dt>工具调用</dt><dd>{toolCalls}{toolErrors ? `（异常 ${toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{runtime}</dd></div></dl></div>
-      {run.error && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b><small>{run.error}</small></span></div>}
+      <div className="rr-run-record-tabs"><button className={agentStage === 'extraction' ? 'active' : ''} onClick={() => setAgentStage('extraction')}><FileText />技术方案提取 <span>{extractionExecution?.events.length ?? 0}</span></button><button className={agentStage === 'review' ? 'active' : ''} onClick={() => setAgentStage('review')}><Bot />技术方案评审 <span>{reviewExecution?.events.length ?? (run.executions ? 0 : run.events?.length ?? 0)}</span></button></div>
+      <div className="rr-run-record-summary"><div><TechnicalRecordBadge status={displayedStatus} /><b>{run.runId}</b><span>{run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(run.startedAt ?? run.createdAt)}</dd></div><div><dt>Turn</dt><dd>{turns}</dd></div><div><dt>工具调用</dt><dd>{toolCalls}{toolErrors ? `（异常 ${toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{runtime}</dd></div></dl></div>
+      {displayedError && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b><small>{displayedError}</small></span></div>}
       {attempts.length > 0 && <div className="rr-run-record-notice"><RefreshCw /><span><b>模型路由尝试</b>{attempts.map(item => <small key={item.id}>第 {item.attempt} 次 · {item.modelLabel} · {technicalAttemptLabel(item.status)}{item.error ? `：${item.error}` : ''}</small>)}</span></div>}
       {run.degradations?.length ? <div className="rr-run-record-notice"><RefreshCw /><span><b>模型降级记录</b>{run.degradations.map((item, index) => <small key={`${item.occurredAt}-${index}`}>{item.fromModelId} → {item.toModelId}（{item.reason}）</small>)}</span></div> : null}
-      <div className="rr-run-record-tabs"><button className={agentStage === 'extraction' ? 'active' : ''} onClick={() => setAgentStage('extraction')}><FileText />技术方案提取 <span>{run.executions?.technicalSolutionExtraction?.events.length ?? 0}</span></button><button className={agentStage === 'review' ? 'active' : ''} onClick={() => setAgentStage('review')}><Bot />技术方案评审 <span>{run.executions?.technicalSolutionReview?.events.length ?? 0}</span></button></div>
       <div className="rr-run-record-tabs"><button className={tab === 'conversation' ? 'active' : ''} onClick={() => onTab('conversation')}><MessageSquareText />Agent 对话 <span>{conversation.length}</span></button><button className={tab === 'events' ? 'active' : ''} onClick={() => onTab('events')}><Activity />事件时间线 <span>{events.length}</span></button></div>
       <div className="rr-run-record-body">{loading ? <div className="rr-trace-empty"><LoaderCircle className="rotating" /><b>正在读取运行记录</b></div> : tab === 'conversation' ? <div className="rr-agent-conversation">
         {conversation.map(event => {
@@ -271,9 +278,9 @@ function TechnicalRunRecordModal({ run, loading, tab, onTab, onClose }: { run: T
           }
           return <div className="rr-agent-control" key={event.sequence}><Sparkles /><span><b>{eventLabel(event.type)}</b><small>Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></span></div>
         })}
-        {!conversation.length && <div className="rr-trace-empty"><MessageSquareText /><b>{run.status === 'running' ? '等待首个 Agent Turn 完成' : '没有可展示的 Agent 对话'}</b><p>{events.length ? '这是一条旧运行，只保存了生命周期元数据。请发起新评审以采集完整对话和工具交互。' : run.status === 'running' ? '首个 Agent Turn 完成后会同步到这里。' : '该运行没有采集可展示的交互记录。'}</p></div>}
+        {!conversation.length && <div className="rr-trace-empty"><MessageSquareText /><b>{displayedStatus === 'running' ? '等待首个 Agent Turn 完成' : '没有可展示的 Agent 对话'}</b><p>{events.length ? '这是一条旧运行，只保存了生命周期元数据。请发起新评审以采集完整对话和工具交互。' : displayedStatus === 'running' ? '首个 Agent Turn 完成后会同步到这里。' : '该阶段没有采集可展示的交互记录。'}</p></div>}
         {conversation.length > 0 && !hasDetailedTrace && <div className="rr-trace-legacy"><AlertTriangle />旧运行只保存事件点，没有保存消息正文和工具参数/返回。</div>}
-      </div> : <div className="rr-agent-events">{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : event.type.includes('message') ? 'message' : ''} /><span><b>{eventLabel(event.type)}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.role ? ` · ${event.role}` : ''}</small></span><time>{eventTime(event.occurredAt)}</time></article>)}{!events.length && <div className="rr-trace-empty"><Activity /><b>暂无事件记录</b><p>{run.status === 'running' ? '首个 Turn 完成后会同步到这里。' : '该历史运行未采集执行事件。'}</p></div>}</div>}</div>
+      </div> : <div className="rr-agent-events">{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : event.type.includes('message') ? 'message' : ''} /><span><b>{eventLabel(event.type)}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.role ? ` · ${event.role}` : ''}</small></span><time>{eventTime(event.occurredAt)}</time></article>)}{!events.length && <div className="rr-trace-empty"><Activity /><b>暂无事件记录</b><p>{displayedStatus === 'running' ? '首个 Turn 完成后会同步到这里。' : '该阶段未采集执行事件。'}</p></div>}</div>}</div>
     </div>
   </section></div>
 }
