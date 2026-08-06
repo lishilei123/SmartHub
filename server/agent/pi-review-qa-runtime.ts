@@ -12,7 +12,7 @@ import { ToolRegistry } from '../tools/registry.js'
 import { registerReviewAnswerSubmitTool } from '../tools/review-answer-submit.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
-import { createReviewQaAgentDefinition } from './requirement-analysis-agent.js'
+import { defaultAgentDefinitionResolver } from './dynamic-agent-definition-resolver.js'
 import { isTransientAgentEvent, piVersion, toAuditEvent } from './pi-agent-runtime.js'
 
 const RESULT_SUBMISSION_TOOL_RESERVE = 3
@@ -28,7 +28,7 @@ export class PiReviewQaRuntimeAdapter implements ReviewQaRuntime {
 
   async answer(input: ReviewQaExecutionInput, signal: AbortSignal) {
     let candidate: ReviewAnswerCandidate | undefined
-    const definition = input.agentDefinition ?? createReviewQaAgentDefinition()
+    const definition = input.agentDefinition ?? defaultAgentDefinitionResolver.resolve('review-qa')
     const registry = new ToolRegistry()
     registerReviewAnswerSubmitTool(registry, value => {
       const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8')

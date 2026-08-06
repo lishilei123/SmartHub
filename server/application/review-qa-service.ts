@@ -1,4 +1,4 @@
-import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
+import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import type { AgentDefinitionResolver, AgentExecutionEvent } from '../domain/agent-types.js'
 import type { Principal } from '../domain/access-control.js'
 import type { ReviewQaRuntime, ReviewQuestionQuote } from '../domain/review-qa-types.js'
@@ -11,7 +11,7 @@ export class ReviewQaService {
   constructor(
     private readonly store: StateStore,
     private readonly runtime: ReviewQaRuntime,
-    private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver(),
+    private readonly definitions: AgentDefinitionResolver = defaultAgentDefinitionResolver,
   ) {}
 
   async list(runId: string) {

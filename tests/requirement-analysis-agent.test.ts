@@ -8,7 +8,8 @@ import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
 import { PiReviewQaRuntimeAdapter } from '../server/agent/pi-review-qa-runtime.js'
 import { resolveEvidenceQuote, resolveEvidenceSourceText, searchEvidenceCandidates } from '../server/agent/evidence-locator.js'
 import { buildRequirementInputPlan } from '../server/agent/requirement-context-assembler.js'
-import { createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition, createReviewQaAgentDefinition, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, REQUIREMENT_REVIEW_AGENT_VERSION } from '../server/agent/requirement-analysis-agent.js'
+import { defaultAgentDefinitionResolver, DynamicAgentDefinitionResolver } from '../server/agent/dynamic-agent-definition-resolver.js'
+import { defaultAgentDefinitionConfigDictionary, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, REQUIREMENT_REVIEW_AGENT_VERSION } from '../server/agent/agent-definition-config.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from '../server/agent/result-validator.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
 import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
@@ -21,7 +22,7 @@ import { defaultConfig } from '../server/domain/types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
 test('提取 Agent v5 生成可选标题并提交描述与原文线索，其余字段由服务端生成', () => {
-  const definition = createRequirementPointExtractionAgentDefinition()
+  const definition = defaultAgentDefinitionResolver.resolve('requirement-point-extraction')
   assert.equal(REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, '7.1.0')
   assert.equal(definition.resultSchemaVersion, 'requirement-point-extraction/v5')
   assert.match(definition.systemPrompt, /正文会以 full_context 一次完整投递/u)
@@ -35,13 +36,28 @@ test('提取 Agent v5 生成可选标题并提交描述与原文线索，其余�
 })
 
 test('评审 Agent v3 只强制分析内容对应冻结需求点，展示与摘要字段由模型给出', () => {
-  const definition = createRequirementReviewAgentDefinition()
+  const definition = defaultAgentDefinitionResolver.resolve('requirement-review')
   assert.equal(REQUIREMENT_REVIEW_AGENT_VERSION, '4.0.0')
   assert.equal(definition.resultSchemaVersion, 'requirement-review/v3')
   assert.match(definition.systemPrompt, /每条分析必须通过 requirementPointRef/u)
   assert.match(definition.systemPrompt, /title、type、severity、confidence、analysis、impact 和 recommendation/u)
   assert.match(definition.systemPrompt, /Finding ID 和正式引用结构由 SmartHub 生成/u)
   assert.deepEqual(definition.toolIds, ['review.submit_result'])
+})
+
+test('动态 Resolver 从配置字典构建定义并兼容历史技术方案 key', () => {
+  const config = structuredClone(defaultAgentDefinitionConfigDictionary)
+  config['requirement-review'].systemPrompt = '动态 Prompt'
+  config['requirement-review'].taskTemplate = '动态 Template'
+  config['requirement-review'].version = '9.0.0'
+  const resolver = new DynamicAgentDefinitionResolver(config)
+  const definition = resolver.resolve('requirement-review')
+  assert.equal(definition.systemPrompt, '动态 Prompt')
+  assert.equal(definition.taskTemplate, '动态 Template')
+  assert.equal(definition.version, '9.0.0')
+  assert.equal(resolver.resolve('technical-solution-analysis').agentKey, 'technical-solution-review')
+  assert.equal(resolver.resolve('technical-solution-analysis').resultSchemaVersion, 'technical-solution-review/v2')
+  assert.throws(() => new DynamicAgentDefinitionResolver({}).resolve('review-qa'), /AGENT_DEFINITION_NOT_FOUND/u)
 })
 
 test('服务启动时将失去执行进程的 running ReviewRun 收口为可重试失败态', async () => {
@@ -311,7 +327,7 @@ test('评审问答提示将 Evidence 白名单与 Finding、需求点 ID 区分�
   const executionOutput = await runtime.answer({
     question: '请说明取消订单的风险。', snapshot: output.snapshot, reviewResult: output.result,
     documentContent: '用户可以取消待支付订单。', model: { sourceId: 'source-1', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', modelId: 'model-1', modelName: 'review-model', contextWindow: 32_768, maxOutputTokens: 4_096, supportsReasoning: false },
-    agentDefinition: createReviewQaAgentDefinition(),
+    agentDefinition: defaultAgentDefinitionResolver.resolve('review-qa'),
   }, new AbortController().signal)
   assert.match(prompts[0], /allowedCitationEvidence/u)
   assert.match(prompts[0], /F-\* Finding ID 和 RP-\* 需求点 ID/u)
@@ -711,7 +727,7 @@ test('v3 评审漏掉展示字段时服务端兜底，但错误需求点引用�
 })
 
 test('超长正文确定性切换 segmented_context 并为每批生成哈希边界', () => {
-  const definition = createRequirementPointExtractionAgentDefinition()
+  const definition = defaultAgentDefinitionResolver.resolve('requirement-point-extraction')
   const repeated = '订单状态变化后必须记录审计日志。'.repeat(180)
   const chunks = [0, 1, 2].map(index => ({ id: `chunk-${index}`, content: repeated, contentHash: `hash-${index}`, ordinal: index, headingPath: [`章节${index}`], tokenCount: 2000, startLine: index + 1, endLine: index + 1, startChar: index * repeated.length, endChar: (index + 1) * repeated.length, embedding: [], reused: false, chunkKey: `key-${index}`, assetVersionId: 'version-large' }))
   const plan = buildRequirementInputPlan({
@@ -726,7 +742,7 @@ test('超长正文确定性切换 segmented_context 并为每批生成哈希边�
 })
 
 test('用户排除的 Chunk 不会混入 full_context 正文输入包', () => {
-  const definition = createRequirementPointExtractionAgentDefinition()
+  const definition = defaultAgentDefinitionResolver.resolve('requirement-point-extraction')
   const chunks = [
     { id: 'included', content: '应当投递的订单规则。', contentHash: 'included-hash', ordinal: 0, headingPath: ['订单'], tokenCount: 10, startLine: 1, endLine: 1, startChar: 0, endChar: 10, embedding: [], reused: false, chunkKey: 'included', assetVersionId: 'version-scope' },
     { id: 'excluded', content: '禁止进入模型的排除内容。', contentHash: 'excluded-hash', ordinal: 1, headingPath: ['排除章节'], tokenCount: 10, startLine: 2, endLine: 2, startChar: 11, endChar: 22, embedding: [], reused: false, chunkKey: 'excluded', assetVersionId: 'version-scope' },

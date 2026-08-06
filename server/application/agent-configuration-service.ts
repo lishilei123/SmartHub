@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { createAgentDefinitionVersion, createRequirementPointExtractionAgentDefinition, createRequirementReviewAgentDefinition, createReviewQaAgentDefinition, createTechnicalSolutionExtractionAgentDefinition, createTechnicalSolutionReviewAgentDefinition } from '../agent/requirement-analysis-agent.js'
+import { createAgentDefinitionVersion } from '../agent/requirement-analysis-agent.js'
+import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -134,7 +135,7 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
 
   async resolve(agentKey: AgentDefinitionVersion['agentKey']) {
     const active = await this.resolveActive(agentKey)
-    if (!active) return builtInDefinition(configurationKey(agentKey))
+    if (!active) return defaultDefinition(configurationKey(agentKey))
     return structuredClone(active.agentDefinition)
   }
 
@@ -174,7 +175,7 @@ function defaultAgentDraft(agentKey: AgentConfigurationAgentKey): AgentConfigura
   return {
     revision: 0,
     routing: defaultRouting(),
-    definition: definitionDraft(builtInDefinition(agentKey)),
+    definition: definitionDraft(defaultDefinition(agentKey)),
     updatedAt: new Date(0).toISOString(),
   }
 }
@@ -296,7 +297,7 @@ function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentC
 }
 
 function publishedDefinition(agentKey: AgentConfigurationAgentKey, value: AgentDefinitionDraft, configurationVersion: number, state: DatabaseState) {
-  const builtIn = builtInDefinition(agentKey)
+  const builtIn = defaultDefinition(agentKey)
   const selectedSkills = resolveSkills(value.skillKeys, state)
   const skills = selectedSkills.map(skill => ({
     skillKey: skill.key,
@@ -370,7 +371,7 @@ function normalizeLegacyDefinition(value: unknown, agentKey: AgentConfigurationA
     const definition = structuredClone(value as AgentDefinitionDraft)
     return { ...definition, skillKeys: stringKeys(definition.skillKeys), mcpServerKeys: stringKeys(definition.mcpServerKeys), toolIds: activeToolKeys(definition.toolIds) }
   }
-  return definitionDraft(builtInDefinition(agentKey))
+  return definitionDraft(defaultDefinition(agentKey))
 }
 
 function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft | undefined, agentKey: AgentConfigurationAgentKey, legacyTechnical?: AgentConfigurationAgentDraft): AgentConfigurationAgentDraft {
@@ -411,7 +412,7 @@ function legacyVersion(value: AgentConfigurationVersion, raw: { agentDefinitions
     version: legacy.version,
     status: legacy.status,
     routing: structuredClone(legacy.routing),
-    agentDefinition: structuredClone(raw.agentDefinitions?.[agentKey] ?? builtInDefinition(agentKey)),
+    agentDefinition: structuredClone(raw.agentDefinitions?.[agentKey] ?? defaultDefinition(agentKey)),
     contentSha256: legacy.contentSha256,
     createdAt: legacy.createdAt,
     publishedBy: legacy.publishedBy,
@@ -428,12 +429,20 @@ function migrateState(state: DatabaseState) {
   }
 }
 
-function builtInDefinition(agentKey: AgentConfigurationAgentKey) {
-  if (agentKey === 'requirementPointExtraction') return createRequirementPointExtractionAgentDefinition()
-  if (agentKey === 'requirementReview') return createRequirementReviewAgentDefinition()
-  if (agentKey === 'reviewQa') return createReviewQaAgentDefinition()
-  if (agentKey === 'technicalSolutionExtraction') return createTechnicalSolutionExtractionAgentDefinition()
-  return createTechnicalSolutionReviewAgentDefinition()
+function defaultDefinition(agentKey: AgentConfigurationAgentKey) {
+  return defaultAgentDefinitionResolver.resolve(configurationAgentKey(agentKey))
+}
+
+function configurationAgentKey(agentKey: AgentConfigurationAgentKey): AgentDefinitionVersion['agentKey'] {
+  return agentKey === 'requirementPointExtraction'
+    ? 'requirement-point-extraction'
+    : agentKey === 'requirementReview'
+    ? 'requirement-review'
+    : agentKey === 'reviewQa'
+    ? 'review-qa'
+    : agentKey === 'technicalSolutionExtraction'
+    ? 'technical-solution-extraction'
+    : 'technical-solution-review'
 }
 function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : agentKey === 'requirement-review' ? 'requirementReview' : agentKey === 'review-qa' ? 'reviewQa' : agentKey === 'technical-solution-extraction' ? 'technicalSolutionExtraction' : 'technicalSolutionReview' }
 function normalizeAgentKey(value: AgentConfigurationAgentKey) { if (!AGENT_KEYS.includes(value)) throw new Error('Agent 标识无效'); return value }

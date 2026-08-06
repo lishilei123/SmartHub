@@ -4,7 +4,7 @@ import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, Re
 import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator, ReviewResultValidator } from '../agent/result-validator.js'
-import { BuiltInAgentDefinitionResolver } from '../agent/requirement-analysis-agent.js'
+import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import { buildRequirementInputPlan } from '../agent/requirement-context-assembler.js'
 
 export interface RequirementAnalysisRequest {
@@ -27,7 +27,7 @@ export class RequirementAnalysisService {
   private readonly extractionValidator: RequirementPointExtractionValidator
   private readonly reviewValidator = new RequirementReviewValidator()
   private readonly activeRuns = new Map<string, AbortController>()
-  constructor(private readonly store: StateStore, private readonly runtime: AgentRuntime, private readonly definitions: AgentDefinitionResolver = new BuiltInAgentDefinitionResolver()) {
+  constructor(private readonly store: StateStore, private readonly runtime: AgentRuntime, private readonly definitions: AgentDefinitionResolver = defaultAgentDefinitionResolver) {
     this.validator = new ReviewResultValidator(store)
     this.extractionValidator = new RequirementPointExtractionValidator(store)
   }
