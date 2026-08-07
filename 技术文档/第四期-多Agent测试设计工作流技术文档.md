@@ -4,13 +4,13 @@
 |---|---|
 | 产品名称 | SmartHub |
 | 阶段 | Phase 4：多 Agent 测试设计工作流 |
-| 文档版本 | V1.0 |
-| 文档状态 | 实施设计稿，功能尚未实现 |
-| 编制日期 | 2026-08-06 |
-| 对应需求 | [第四期-多Agent测试设计工作流需求文档.md](../需求文档/第四期-多Agent测试设计工作流需求文档.md) V1.4 |
-| 当前代码基线 | Phase 1 + Phase 2 + Phase 3 已实现，数据库迁移最高版本为 14 |
+| 文档版本 | V1.1 |
+| 文档状态 | 实施设计稿；交互式前端预览已编码，后端功能尚未实现 |
+| 编制日期 | 2026-08-07 |
+| 对应需求 | [第四期-多Agent测试设计工作流需求文档.md](../需求文档/第四期-多Agent测试设计工作流需求文档.md) V1.5 |
+| 当前代码基线 | Phase 1 + Phase 2 + Phase 3 已实现，Phase 4 已有模拟数据前端预览，数据库迁移最高版本为 14 |
 
-本文给出第四期的实施级技术设计。文档中的表、接口、模块和配置均为待实现方案，不表示当前仓库已经交付测试设计、测试数据创建、脚本生成或测试执行能力。
+本文给出第四期的实施级技术设计。仓库中的 Phase 4 页面是交互式前端预览；本文中的服务端表、接口、工作流和持久化仍为待实现方案，不表示已经交付真实测试设计闭环、测试数据创建、脚本生成或测试执行能力。
 
 ---
 
@@ -22,8 +22,9 @@
 2. 如何同时支持 `review_baseline` 与 `knowledge_assets` 两种互斥主依据，并保证输入、召回和历史用例不漂移；
 3. 如何让四个 Agent 分工完成五阶段产物链，同时由服务端拥有 ID、关系、Hash、覆盖统计、状态和发布权限；
 4. 如何实现测试点树 revision/ETag、用例在线编辑、历史复用、审核和覆盖审计失效传播；
-5. 如何发布不可变、机器可读、可供后续执行阶段直接消费的 `TestCaseSetVersion`；
-6. 如何将 FR-601～FR-613、AC-401～AC-415落实到数据、API、前端、测试和发布门禁。
+5. 如何让一条用例通过非空 `executionMethods[]` 同时保存 UI、API 或二者组合的独立执行分支；
+6. 如何发布不可变 `TestCaseSetVersion`，聚合项目用例库/套件版本，并生成精确到执行方式的 `TestExecutionHandoff`；
+7. 如何将 FR-601～FR-613、AC-401～AC-415落实到数据、API、前端、测试和发布门禁。
 
 ---
 
@@ -39,8 +40,10 @@
 - `TestAnalysisAgent`、`FunctionalTestDesignAgent`、`NonFunctionalTestDesignAgent`、`TestCaseSynthesisAgent` 四个独立 Agent；
 - 分析范围门禁、功能/非功能并行设计、测试点树人工门禁、用例/数据具象化和服务端覆盖审计；
 - 测试点树结构化编辑、revision、ETag、Diff 和批准版本；
-- UI/API 结构化用例、独立数据需求、历史复用关系、用例 revision 和人工审核；
+- 可包含 UI、API 或二者组合的结构化用例，各方式独立步骤/检查点/就绪状态，配套独立数据需求、历史复用关系、用例 revision 和人工审核；
 - JSON、Markdown、Excel 导出及不可变 `TestCaseSetVersion` 发布；
+- 项目测试用例库与既有冒烟/回归/功能域 `TestSuiteVersion` 的只读聚合；
+- 冒烟候选、影响回归固定引用、冒烟组合快照及标准/快速/直接全量 `TestExecutionHandoff`；
 - `test_case` 知识资产展示投影的异步、幂等入库；
 - 节点级重试、重新具象化、全部重跑、取消、租约、恢复和迟到结果隔离。
 
@@ -52,6 +55,7 @@
 - 不读取或写入 Git、分支、Commit、Pull Request、Patch；
 - 不执行 Shell、任意 HTTP、宿主文件系统或外部写操作；
 - 不创建缺陷，不接入 CI/CD，不分析真实执行日志、截图、视频或 Trace；
+- 不创建 `TestPlanVersion` 或执行任务，不发布/修改冒烟、回归或功能域 `TestSuiteVersion`；
 - 不提供面向用户的通用 DAG 编辑器，也不允许 Agent 自主委派；
 - 不实现组织级 ACL、SSO、多人会签或外部工单同步。
 
@@ -67,8 +71,10 @@
 4. 测试点树、用例、数据需求、覆盖审计和发布版本均真实持久化；
 5. 固定路由 `projectVersionId + testDesignId + workflowRunId` 刷新后恢复同一上下文；
 6. 发布 JSON 通过 `test-case-set/v1`，且报告/Excel与同一规范对象一致；
-7. `npm run migrate`、`npm test`、`npm run build` 和 `git diff --check` 全部通过；
-8. README、需求文档、技术文档与最终实现边界一致。
+7. 组合用例的 UI/API 分支可独立编辑/校验，项目目录、固定套件、冒烟候选和三种交接均有真实后端数据且不使用 `latest`；
+8. 交接不会创建计划、执行记录或新冒烟基线，原套件版本保持不可变；
+9. `npm run migrate`、`npm test`、`npm run build` 和 `git diff --check` 全部通过；
+10. README、需求文档、技术文档与最终实现边界一致。
 
 ---
 
@@ -129,7 +135,12 @@
 | Historical Case Snapshot | 用户显式选择的历史结构化用例或固定文本的独立快照。 |
 | Gate Decision | 对范围、测试点树或其他门禁的追加式人工决定。 |
 | Candidate Publication | 四 Agent 及服务端审计通过后，原子保存 revision 0 候选；不是正式用例集发布。 |
-| TestCaseSetVersion | 人工审核、当前审计和发布门禁全部通过后的不可变正式资产。 |
+| TestCaseSetVersion | 人工审核、当前审计和发布门禁全部通过后的不可变本次功能测试资产。 |
+| Execution Method | 一条用例中的 UI 或 API 执行分支；`executionMethods[]` 可同时包含二者，每个分支独立保存步骤、检查点和就绪状态。 |
+| Project Test Case Catalog | 已发布用例及集合成员的项目级只读投影，不拥有可编辑正文。 |
+| TestSuiteVersion | 冒烟、回归或功能域套件的不可变成员快照，成员精确引用用例版本、caseId 和执行方式。 |
+| Smoke Candidate | 当前功能用例成为未来冒烟基线成员的建议关系；不是正式套件成员。 |
+| TestExecutionHandoff | 固定功能集、套件版本、执行方式、顺序和条件的建议快照；不是测试计划或执行记录。 |
 | Stale | 产物仍可查看，但其输入 Hash 已不再匹配当前投影，不得用于发布。 |
 
 ---
@@ -204,7 +215,7 @@
 
 - Workflow `succeeded`：固定 DAG 完成，revision 0 候选原子保存且初始审计无 blocker；
 - 用例 `approved`：人工审核了某个明确 revision；
-- `TestCaseSetVersion` 发布：当前全部用例 approved + ready，审计仍 valid 且 Hash 相等，人工执行发布。
+- `TestCaseSetVersion` 发布：当前全部用例 approved、全部已声明执行方式 ready，审计仍 valid 且 Hash 相等，人工执行发布。
 
 运行成功后人工编辑不会改写历史 Workflow 终态，但会让当前用例审核和审计失效，直到重新审核和重新审计。
 
@@ -219,6 +230,14 @@
 ### 5.12 ADR-412：Excel 在服务端从规范 JSON 生成
 
 Excel 不由前端拼接，也不从 Markdown 反解析。实现时引入经过依赖审查并由 `package-lock.json` 固定的 ExcelJS，服务端从指定 `TestCaseSetVersion` 生成固定工作表；若依赖审查不通过则替换为等价受维护库，不手写 XLSX ZIP/XML。
+
+### 5.13 ADR-413：执行方式使用非空判别联合数组
+
+`TestCaseV1` 使用非空、按 `method` 唯一的 `executionMethods[]`，而不是互斥的单值 `testMethod`。UI/API 分支分别拥有专属 Spec、步骤、检查点、就绪状态和自动化提示；目标、共同前置、数据、依赖、清理和跨方式检查点位于用例顶层。发布要求所有已声明分支都 ready。套件和交接成员进一步固定要执行的非空方式子集，避免组合用例在后续阶段被默认为只执行其中一种。
+
+### 5.14 ADR-414：功能集、项目套件与执行计划分层
+
+第四期发布本次功能 `TestCaseSetVersion`；`ProjectTestCaseCatalog` 是跨发布版本的只读投影；冒烟/回归/功能域基线以不可变 `TestSuiteVersion` 表示。第四期只读取既有套件，保存 `SmokeCandidateRelation`、`ImpactedRegressionReference` 并生成 `TestExecutionHandoff`。后续阶段才把交接转换为 `TestPlanVersion`、执行并依据稳定性证据和人工决定发布新套件版本，任何阶段都不原地修改旧版本。
 
 ---
 
@@ -407,6 +426,8 @@ queued -> running -> waiting_approval -> running -> succeeded
 | `server/application/test-design-edit-service.ts` | 树/用例/数据 revision、Diff、ETag 和失效传播。 |
 | `server/application/test-design-review-service.ts` | 用例逐条/批量审核和乐观锁。 |
 | `server/application/test-case-set-service.ts` | 发布门禁、不可变版本、导出与知识资产投影。 |
+| `server/application/project-test-catalog-service.ts` | 已发布用例、固定来源及套件成员关系的项目级只读聚合。 |
+| `server/application/test-execution-handoff-service.ts` | 冒烟候选/影响回归校验、组合成员去重与执行交接幂等生成。 |
 | `server/agent/test-design-context-assembler.ts` | 两种模式输入包、分段、预算与投递证明。 |
 | `server/agent/test-design-result-validator.ts` | 四类 Agent Submission 校验和规范化。 |
 | `server/agent/knowledge-basis-resolver.ts` | `sourceTexts` 固定定位、KBP 和冲突状态。 |
@@ -442,6 +463,9 @@ queued -> running -> waiting_approval -> running -> succeeded
 | `src/test-design/TestDesignWorkflowView.tsx` | 五阶段、四 Agent、门禁和恢复操作。 |
 | `src/test-design/TestPointTreeEditor.tsx` | 增删移动拆并、键盘操作、revision 与 Diff。 |
 | `src/test-design/TestCaseEditor.tsx` | `test-case/v1` 结构化表单与 UI/API 分支。 |
+| `src/test-design/ProjectTestCaseLibrary.tsx` | 项目已发布用例、执行方式和集合归属的只读检索视图。 |
+| `src/test-design/TestCaseSetCatalog.tsx` | 功能集和既有冒烟/回归/功能域套件版本目录。 |
+| `src/test-design/TestExecutionHandoffView.tsx` | 冒烟候选、影响回归、组合快照和三种交接策略预览。 |
 | `src/test-design/TestDataView.tsx` | 数据需求筛选、详情和 readiness。 |
 | `src/test-design/CoverageAuditView.tsx` | 依据 -> 测试点 -> 用例双向矩阵。 |
 | `src/test-design/HistoricalCaseDiff.tsx` | 冻结来源、当前 revision 和字段 Diff。 |
@@ -473,6 +497,18 @@ interface CoverageAuditor {
 interface TestCaseSetService {
   publish(input: PublishTestCaseSetInput, actor: Principal): Promise<TestCaseSetVersion>
   export(versionId: string, format: 'json' | 'markdown' | 'xlsx'): Promise<ExportPayload>
+}
+
+interface ProjectTestCatalogService {
+  listCases(input: ProjectCaseCatalogQuery): Promise<ProjectCaseCatalogPage>
+  listSuites(input: ProjectSuiteQuery): Promise<TestSuiteVersionSummary[]>
+  getSuite(versionId: string): Promise<TestSuiteVersion>
+}
+
+interface TestExecutionHandoffService {
+  reviewSmokeCandidate(input: ReviewSmokeCandidateInput, actor: Principal): Promise<SmokeCandidateRelation>
+  setImpactedRegression(input: SetImpactedRegressionInput, actor: Principal): Promise<ImpactedRegressionReference[]>
+  create(input: CreateTestExecutionHandoffInput, actor: Principal): Promise<TestExecutionHandoff>
 }
 ```
 
@@ -700,11 +736,12 @@ performance, stability, compatibility, security
 
 ### 11.4 Synthesis Submission
 
-`test-case-synthesis/v1` 只能引用批准树中的 `testPointRef`。每个候选至少包含标题、目标、维度、`testMethod`、优先级、前置、步骤/逐步期望、检查点、清理、依赖、数据临时 Ref、Basis Ref、历史建议、自动化提示和执行就绪状态。
+`test-case-synthesis/v1` 只能引用批准树中的 `testPointRef`。每个候选至少包含标题、目标、维度、非空 `executionMethods[]`、优先级、共同前置/数据/清理、各方式步骤与检查点、共享检查点、依赖、数据临时 Ref、Basis Ref、历史建议和组合/拆分理由。
 
-- `ui` 必须且只能包含 `uiSpec`；
-- `api` 必须且只能包含 `apiSpec`；
-- 数据、异步任务和集成结果只能作为 `verificationChecks`，不能成为第三种 testMethod；
+- `executionMethods[]` 按 `method` 唯一，可为 `[ui]`、`[api]` 或 `[ui, api]`；
+- `ui` 分支必须且只能包含 `uiSpec`，`api` 分支必须且只能包含 `apiSpec`；
+- 每个分支独立提交 `steps[]`、`verificationChecks[]`、`automationHint` 和 `executionReadiness`；
+- 数据、异步任务和集成结果进入分支或顶层共享检查点，不能成为第三种执行方式；
 - 零用例测试点或多测试点合并必须提交理由；
 - 综合 Agent 不得创建树外节点。
 
@@ -727,8 +764,8 @@ Validator 返回机器可修正的公开错误：
 ```json
 {
   "code": "CASE_API_SPEC_REQUIRED",
-  "path": "/cases/3/apiSpec",
-  "message": "testMethod=api 时必须提供 apiSpec",
+  "path": "/cases/3/executionMethods/1/apiSpec",
+  "message": "executionMethods[1].method=api 时必须提供 apiSpec",
   "retryable": true
 }
 ```
@@ -801,16 +838,27 @@ add, rename, update, move, split, merge, delete, mark_not_applicable, reorder
 
 ### 13.1 test-case/v1
 
-规范对象至少包含需求文档 5.8 的全部字段，并使用严格联合：
+规范对象至少包含需求文档 5.8 的全部字段，并使用非空判别联合数组：
 
 ```ts
-type TestCaseV1 = CommonCase & (
-  | { testMethod: 'ui'; uiSpec: UiSpec; apiSpec?: never }
-  | { testMethod: 'api'; apiSpec: ApiSpec; uiSpec?: never }
-)
+type ExecutionMethod =
+  | { method: 'ui'; uiSpec: UiSpec; apiSpec?: never }
+  | { method: 'api'; apiSpec: ApiSpec; uiSpec?: never }
+
+type ExecutionMethodSpec = ExecutionMethod & {
+  steps: NonEmptyArray<TestStep>
+  verificationChecks: VerificationCheck[]
+  executionReadiness: ExecutionReadiness
+  automationHint: AutomationHint
+}
+
+type TestCaseV1 = CommonCase & {
+  executionMethods: NonEmptyArray<ExecutionMethodSpec>
+  sharedVerificationChecks: VerificationCheck[]
+}
 ```
 
-`steps[]` 中每个稳定 step key 同时包含动作和本步骤期望；`dependencies[]` 发布前执行图循环检测；`basisRelations` 和历史来源由服务端从冻结 Ref 生成，客户端不能填写任意 ID。
+Schema 和服务端额外校验 `executionMethods[].method` 唯一且只允许 `ui|api`。每个分支的 `steps[]` 使用稳定 step key 并同时包含动作和本步骤期望；共同前置、数据、依赖和清理保留在 `CommonCase`。`dependencies[]` 发布前执行图循环检测；`basisRelations` 和历史来源由服务端从冻结 Ref 生成，客户端不能填写任意 ID。
 
 ### 13.2 Draft 与 Revision
 
@@ -903,7 +951,7 @@ testDataRequirementSetVersionId + dataSha256
 2. TestCase/TestData Schema；
 3. 树节点、数据和用例依赖归属；
 4. 枚举与语义字段规范化；
-5. UI/API 判别字段；
+5. 非空 UI/API `executionMethods[]` 判别联合、方式唯一性及各分支必需字段；
 6. 模式匹配的 Basis 引用；
 7. 步骤、期望、oracle 和 readiness；
 8. 历史复用 Hash/Diff；
@@ -924,7 +972,7 @@ testDataRequirementSetVersionId + dataSha256
 
 ### 14.4 重复与自动合并
 
-服务端先用确定性 fingerprint 建组，再可选使用固定模型/向量产生相似候选建议。正式审计记录建议算法和阈值。系统不得自动合并会丢失专项来源、严格 oracle、不同 testMethod 或不同 Basis 的用例；人工合并产生新 revision。
+服务端先用确定性 fingerprint 建组，再可选使用固定模型/向量产生相似候选建议。正式审计记录建议算法和阈值。系统不得自动合并会丢失专项来源、严格 oracle、不同 `executionMethods[]` 分支语义或不同 Basis 的用例；人工合并产生新 revision。
 
 ### 14.5 失效传播
 
@@ -945,7 +993,7 @@ Synthesis Submission 使用临时候选 Ref。服务端先完成基础 Schema、
 人工正式发布时再次锁定 TestDesign 和当前投影，并依次验证：
 
 1. 当前树批准仍有效；
-2. 所有非 tombstone 当前用例均为目标 revision 的 `approved + ready`；
+2. 所有非 tombstone 当前用例均为目标 revision 的 `approved`，且其全部已声明 `executionMethods[]` 均为 `ready`；
 3. 所有被引用数据需求均为 `ready`；
 4. 用例依赖存在、无环且成员全部进入发布集合；
 5. 当前 `approvedCaseRevisionSetSha256` 等于有效 Audit 的 `auditedCaseRevisionSetSha256`；
@@ -954,6 +1002,19 @@ Synthesis Submission 使用临时候选 Ref。服务端先完成基础 Schema、
 8. `test-case-set/v1` 全量校验通过。
 
 随后按 TestDesign 锁定并递增版本号，写 `test_case_set_versions`、成员、关系和规范 JSON。相同 contentSha256 幂等返回已有版本；不同内容必须创建新版本。事务提交后再异步创建 `test_case` 知识资产投影，默认逻辑路径为 `版本文档/{项目版本名}/测试设计/`。投影失败不回滚正式用例集。
+
+### 14.7 冒烟候选与执行交接
+
+功能集发布后才允许保存候选/影响关系和生成交接。`TestExecutionHandoffService` 在单事务中完成：
+
+1. 锁定并校验当前功能 `TestCaseSetVersion`、基础 smoke/regression `TestSuiteVersion` 和所有成员可读；
+2. 校验冒烟候选属于当前功能集、被人工确认、候选方式是该用例已声明且 ready 的非空子集；
+3. 校验影响回归属于固定回归套件版本，保存原因，不复制用例内容；
+4. 按 `testCaseSetVersionId + caseId + method` 去重生成冒烟组合快照和各策略阶段成员；
+5. 对策略、版本、成员、顺序、条件和去重结果计算 canonical contentSha256；
+6. 用 `(projectVersionId, strategy, contentSha256)` 幂等返回既有交接或 INSERT 新交接。
+
+服务不提供套件 UPDATE/发布、测试计划、调度或结果写入接口。基础 smoke v6 与 3 条候选组合为 21 条执行成员时，v6 的 18 条成员保持不变；未来 v7 只能由后续执行阶段基于真实结果另行发布。
 
 ---
 
@@ -974,6 +1035,12 @@ TestDesign 1---n WorkflowRun 1---n WorkflowNodeRun 1---n TaskJob
                         +---n TestDataRequirementSetVersion
                         +---n CoverageAuditResult
                         +---n TestCaseSetVersion
+                                  +---n SmokeCandidateRelation
+                                  +---n ImpactedRegressionReference
+                                  +---n TestExecutionHandoff
+
+Project 1---n TestSuiteVersion 1---n TestSuiteMember
+Project 1---1 ProjectTestCaseCatalog (read model)
 ```
 
 ### 15.2 通用 Workflow 表
@@ -1066,18 +1133,30 @@ Snapshot 主体 JSONB 保留完整版本化协议，常用归属、模式、状�
 - `test_case_set_members`：version、case、case revision、ordinal；
 - `test_case_asset_publications`：用例集版本、目标逻辑路径、contentSha、task/status/error。
 
-### 15.7 删除与保留
+### 15.7 项目套件与执行交接表
+
+- `test_suite_versions`：项目、suite key/type、version、name、canonical JSON、contentSha、发布人/time；第四期 Store 只开放查询；
+- `test_suite_version_members`：suite version、来源 case set version、caseId、非空执行方式子集、ordinal、选择理由；
+- `test_case_smoke_candidates`：功能集版本、caseId、执行方式子集、理由、预计耗时、稳定性/依赖结论、建议来源、人工决定/actor/time；
+- `test_case_impacted_regression_refs`：功能集版本、回归 suite version/member、执行方式子集、影响来源/理由、actor/time；
+- `test_execution_handoffs`：项目版本、功能集版本、策略、基础 suite versions、canonical JSON、contentSha、创建人/time；只追加；
+- `test_execution_handoff_members`：handoff、stage、ordinal、来源集合版本、caseId、单一 method、候选/影响来源和去重 key。
+
+`ProjectTestCaseCatalog` 不单独建可编辑正文表，由已发布 `test_case_set_versions/members`、规范用例内容和 suite members 的只读查询/物化投影生成。若使用物化视图，刷新失败只能导致投影滞后并显式返回 `catalogAsOf`，不能改变正式版本。
+
+### 15.8 删除与保留
 
 - 活动 WorkflowRun 阻止项目版本物理删除，必须先取消并收敛；
 - open 项目版本删除时级联第四期逻辑对象和业务关系；
 - frozen content 仅在全部 owner Ref 删除后由维护任务清理；
 - 发布用例集随项目版本删除遵循现有不可逆级联确认，但不能级联修改其历史来源项目版本；
+- 已被交接引用的 suite/case set 版本按现有保留策略保存独立摘要与成员快照；删除源对象不得把历史交接重绑到最新版本；
 - 删除当前草稿不删除 Historical Snapshot 或源 TestCaseSetVersion；
 - locked/archived 项目版本只读。
 
-### 15.8 迁移顺序
+### 15.9 迁移顺序
 
-建议在现有迁移 14 后分四次实施：
+建议在现有迁移 14 后分五次实施：
 
 | 迁移 | 内容 |
 |---|---|
@@ -1085,6 +1164,7 @@ Snapshot 主体 JSONB 保留完整版本化协议，常用归属、模式、状�
 | 16 | TestDesign、三类 Snapshot、frozen content、KnowledgeBasisItem |
 | 17 | 测试点树、用例 revision、数据需求、来源/历史关系 |
 | 18 | 覆盖审计、用例集版本、导出/知识资产投影状态 |
+| 19 | 套件只读基础表、冒烟候选、影响回归、执行交接及成员索引 |
 
 每次迁移使用现有 checksum 和 advisory lock；先建表/索引，再发布读取兼容代码，再开放写入。禁止修改已应用迁移 1～14。
 
@@ -1160,7 +1240,7 @@ PATCH body 为 operations 数组和说明，不接受整棵树覆盖。
 ### 16.6 用例、数据和审核
 
 ```text
-GET   /runs/:runId/test-cases?cursor=&dimension=&testMethod=&status=
+GET   /runs/:runId/test-cases?cursor=&dimension=&executionMethod=&status=
 POST  /runs/:runId/test-cases
 GET   /runs/:runId/test-cases/:caseId
 PATCH /runs/:runId/test-cases/:caseId
@@ -1174,6 +1254,8 @@ PATCH /runs/:runId/test-data-requirements
 ```
 
 DELETE 是当前设计中的追加式 tombstone，不物理删除历史 revision。
+
+`executionMethod=ui|api` 使用“数组包含”语义；同时声明两种方式的组合用例会命中两个筛选。PATCH 整体校验 `executionMethods[]`，删除最后一个方式返回 `CASE_EXECUTION_METHOD_REQUIRED`。
 
 ### 16.7 覆盖、来源与历史
 
@@ -1207,6 +1289,23 @@ POST /test-case-set-versions/:versionId/knowledge-asset-publication/retry
 
 重复发布同一 contentSha256 返回同一逻辑版本；内容变化创建递增版本。知识资产入库失败返回已发布版本和独立 projection failure，不回滚用例集。
 
+### 16.9 项目用例目录、套件与执行交接
+
+```text
+GET  /api/projects/:projectId/test-case-catalog?cursor=&domain=&executionMethod=&suiteVersionId=
+GET  /api/projects/:projectId/test-suite-versions?cursor=&suiteType=
+GET  /api/projects/:projectId/test-suite-versions/:suiteVersionId
+GET  /test-case-set-versions/:versionId/smoke-candidates
+POST /test-case-set-versions/:versionId/smoke-candidates/:caseId/review
+GET  /test-case-set-versions/:versionId/impacted-regression
+PUT  /test-case-set-versions/:versionId/impacted-regression
+POST /test-case-set-versions/:versionId/execution-handoffs
+GET  /test-case-set-versions/:versionId/execution-handoffs
+GET  /test-execution-handoffs/:handoffId
+```
+
+目录和套件 API 只读，不提供 `POST/PATCH/DELETE TestSuiteVersion`。候选/影响关系中的 `executionMethods[]` 必须是来源用例已声明且 ready 的非空子集。创建交接必须显式提交 `strategy`、基础 smoke/regression suite version ID 和预期输入 Hash；服务端解析并冻结成员，拒绝 `latest`、前端自报成员正文和 Hash 漂移。
+
 ---
 
 ## 17. 前端工作台
@@ -1218,7 +1317,8 @@ POST /test-case-set-versions/:versionId/knowledge-asset-publication/retry
 &projectVersionId=...
 &testDesignId=...
 &workflowRunId=...
-&tab=workflow|analysis|retrieval|tree|cases|data|coverage|history
+&assetView=designs|library|sets
+&tab=workflow|analysis|retrieval|tree|cases|case-set|data|coverage|history
 ```
 
 恢复时按三 ID 归属加载。缺少或非法 Run 显示错误/选择页，不自动跳到该设计最新 Run。切换项目版本清空 testDesign/run 查询参数。
@@ -1237,7 +1337,7 @@ POST /test-case-set-versions/:versionId/knowledge-asset-publication/retry
 
 - 顶部：三 ID、basisMode、五阶段、四 Agent、门禁、过期状态、取消/恢复/导出/发布；
 - 左侧：模式化依据、历史来源、用户目标和推导项；
-- 中间：工作流、分析、召回、树、用例、数据、覆盖、历史标签；
+- 中间：工作流、分析、召回、树、用例、用例集、数据、覆盖、历史标签；
 - 右侧：固定原文、节点编辑、用例表单、数据详情、Finding/待确认处置或覆盖缺口；
 - 小屏改为可切换抽屉，不让三列挤压重叠。
 
@@ -1264,8 +1364,9 @@ POST /test-case-set-versions/:versionId/knowledge-asset-publication/retry
 ### 17.6 用例编辑器
 
 - 结构化字段表单，不以 Markdown 大文本替代；
-- UI/API 使用分段控制，切换时提示将移除不适用分支字段；
-- 步骤、逐步期望、检查点、参数、依赖和清理支持增删排序；
+- UI/API 使用可多选分段控件，允许同时激活，至少保留一种；取消方式前提示只会移除该方式分支字段并要求确认；
+- 每个激活方式独立编辑 Spec、步骤、逐步期望、检查点、就绪状态和自动化提示；共同目标、前置、数据、依赖、共享检查点和清理只编辑一次；
+- “包含 UI / 包含 API”筛选按数组包含语义，组合用例同时命中两项；列表用双图标和 `UI + API` 文本呈现，不用单一图标误导；
 - caseId、来源 ID、Hash 为只读；
 - 当前 revision、review status、readiness、origin、reuseMode 始终可见；
 - 本地未提交内容只保存在当前路由上下文，切 Run 前提示；
@@ -1278,6 +1379,15 @@ POST /test-case-set-versions/:versionId/knowledge-asset-publication/retry
 - 发布按钮显示服务端 blockers 列表；
 - 前端不自行判断可发布，只展示 `publishReadiness` DTO；
 - JSON/Markdown/Excel 均从指定 TestCaseSetVersion 下载，不从当前页面状态导出。
+
+### 17.8 项目用例库、用例集与执行交接
+
+- 项目级页签提供测试设计、测试用例库、用例集三种视图；目录行展示固定来源版本、执行方式集合和所在套件，不提供正文编辑；
+- 用例集目录按 feature/smoke/regression/domain 分组并展示明确版本、成员数、Hash 和只读状态；
+- 工作台“用例集”页区分 18 条新增、4 条修改、6 条原样复用、12 条影响回归引用和 3 条冒烟候选；统计从服务端 DTO 读取；
+- 冒烟演进视图同时显示基础 v6 的 18 条、3 条候选和去重后 21 条组合快照，并明确 v6 未被修改；
+- 标准/快速/直接全量使用单选策略控件，展示每阶段固定集合版本、成员/方式数量、顺序和条件；生成按钮只创建交接，不出现可用的“开始执行”或“发布 v7”动作；
+- 缺少基线、成员不可读、方式非 ready 或 Hash 漂移时显示服务端 blocker，不以页面缓存拼出交接。
 
 ---
 
@@ -1419,7 +1529,7 @@ Worker 启动时：
 | `TEST_POINT_TREE_CYCLE` | 操作产生父子循环。 |
 | `TEST_POINT_TREE_APPROVAL_REQUIRED` | 无有效批准版本。 |
 | `TEST_CASE_REVISION_CONFLICT` | 用例已被其他会话修改。 |
-| `TEST_CASE_METHOD_SCHEMA_INVALID` | UI/API 判别字段非法。 |
+| `TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID` | `executionMethods[]` 为空、方式重复或 UI/API 分支字段非法。 |
 | `TEST_CASE_BASIS_REFERENCE_INVALID` | 来源不属于固定快照或模式不匹配。 |
 | `TEST_CASE_DEPENDENCY_CYCLE` | 用例依赖形成循环。 |
 | `COVERAGE_AUDIT_STALE` | 当前集合与审计 Hash 不一致。 |
@@ -1541,7 +1651,7 @@ Token、模型耗时、队列耗时和工作流总耗时分别记录。
 - Workflow/Node/审核状态机；
 - KnowledgeBasis 唯一/歧义/越界定位；
 - Tree operations、循环、Diff 和 ETag；
-- UI/API TestCase 联合；
+- 非空 `executionMethods[]` 判别联合、单 UI、单 API、UI+API、重复方式和删除唯一方式；
 - 历史 semantic hash、unchanged/modified 转换；
 - 用例依赖循环；
 - Coverage 分母、状态、重复和失效；
@@ -1549,7 +1659,7 @@ Token、模型耗时、队列耗时和工作流总耗时分别记录。
 
 ### 23.2 Store 与迁移测试
 
-- 全新数据库迁移 1～18；
+- 全新数据库迁移 1～19；
 - 已有迁移 14 数据库升级；
 - FK、CHECK、唯一键和索引存在；
 - claim/heartbeat/release/fence；
@@ -1565,7 +1675,7 @@ Token、模型耗时、队列耗时和工作流总耗时分别记录。
 
 - 正常 submission；
 - 未知字段、越界 Ref、伪造 ID；
-- 缺失分区、缺失 UI/API 专属字段；
+- 缺失分区、空/重复执行方式、缺失 UI/API 分支专属字段；
 - 非功能编造阈值；
 - 树外用例；
 - 数据先于用例候选提交；
@@ -1718,11 +1828,12 @@ Golden Set 固定输入 Hash 和期望服务端不变量，不要求模型逐字
 
 ### M3：树、用例、数据与审计
 
-- 迁移 17/18；
+- 迁移 17/18/19；
 - Tree Merger/Revision/Version；
 - Case/Data candidate、历史复用、revision、审核；
 - Coverage Auditor 和失效传播；
 - TestCaseSet 发布、三种导出和知识资产投影。
+- 项目用例目录查询、固定套件读取、冒烟候选/影响回归和交接幂等生成。
 
 完成门禁：后端 API 闭环和 `test-case-set/v1` consumer 测试通过。
 
@@ -1730,6 +1841,7 @@ Golden Set 固定输入 Hash 和期望服务端不变量，不要求模型逐字
 
 - 创建页、三栏工作台和固定路由；
 - Workflow、树、用例、数据、Coverage、历史 Diff；
+- 项目用例库/用例集、组合执行方式编辑、冒烟演进和三种执行交接；
 - ETag 冲突、审核、导出和发布；
 - 响应式、键盘和容量优化。
 
@@ -1835,10 +1947,10 @@ SMARTHUB_TEST_DESIGN_CANCEL_POLL_MS=2000
 - Basis/Retrieval/Tree/Data/Audit ID 与 Hash；
 - 来源 Workflow；
 - approved case revision set Hash；
-- cases、data requirements、relations、review/reuse summary；
+- cases（含非空 `executionMethods[]`）、data requirements、relations、review/reuse summary；
 - contentSha256、publishedBy、publishedAt。
 
-后续执行阶段只接收 `testCaseSetVersionId + caseId[]`，且只能选择该版本内 `approved + ready` 用例。
+后续执行阶段只接收 `testCaseSetVersionId + {caseId, executionMethods[]}[]`，且选择的方式必须存在于该版本的 approved 用例并分别为 ready。组合用例是否执行 UI、API 或二者由固定交接显式决定，不允许消费方自行推断。
 
 ### 28.2 Markdown
 
@@ -1861,6 +1973,6 @@ SMARTHUB_TEST_DESIGN_CANCEL_POLL_MS=2000
 
 ## 29. 结论
 
-第四期不应在现有某个评审 Service 中继续追加分支，也不应让一个万能 Agent 自由规划。正确实施方式是在现有受控 Agent 执行单元之上增加服务端固定 DAG 和独立第四期领域模型：两种主依据形成不可变快照，四个 Agent 通过结构化 Artifact 协作，测试点树与用例由人工追加修订，正式覆盖由服务端审计，最终只发布经过审核且 Hash 完全一致的不可变 `TestCaseSetVersion`。
+第四期不应在现有某个评审 Service 中继续追加分支，也不应让一个万能 Agent 自由规划。正确实施方式是在现有受控 Agent 执行单元之上增加服务端固定 DAG 和独立第四期领域模型：两种主依据形成不可变快照，四个 Agent 通过结构化 Artifact 协作，测试点树与用例由人工追加修订，一条用例可用非空 `executionMethods[]` 保存独立 UI/API 分支，正式覆盖由服务端审计，最终发布经过审核且 Hash 完全一致的本次功能 `TestCaseSetVersion`，并生成固定套件/方式/顺序的 `TestExecutionHandoff`。
 
-该方案保留 Phase 1～3 的固定输入、Evidence、Agent 配置、Tool 治理和 Worker 可靠性原则，同时明确补齐当前仓库尚不存在的 DAG、树编辑、用例 revision、数据需求、覆盖审计和机器可读发布能力。脚本编写、真实造数和测试执行仍属于后续独立阶段。
+该方案保留 Phase 1～3 的固定输入、Evidence、Agent 配置、Tool 治理和 Worker 可靠性原则，同时明确补齐当前仓库尚不存在的 DAG、树编辑、用例 revision、数据需求、覆盖审计、项目测试资产聚合和机器可读交接能力。脚本编写、真实造数、`TestPlanVersion`、测试执行与基于结果发布新冒烟套件仍属于后续独立阶段；当前前端预览不改变这一交付边界。
