@@ -18,6 +18,7 @@ type ViewMode = 'list' | 'create' | 'workspace'
 type CollectionView = 'designs' | 'library' | 'sets'
 type TabKey = 'overview' | 'workflow' | 'analysis' | 'retrieval' | 'tree' | 'cases' | 'case-set' | 'data' | 'coverage' | 'history' | 'questions'
 type ExecutionMethod = 'UI' | 'API'
+type TestDimension = '功能' | '性能' | '稳定性' | '兼容性' | '安全'
 
 type Props = {
   projectVersion: ProjectVersion | null
@@ -28,6 +29,14 @@ type Props = {
 type StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
 
 const tabKeys: TabKey[] = ['overview', 'workflow', 'analysis', 'retrieval', 'tree', 'cases', 'case-set', 'data', 'coverage', 'history', 'questions']
+const testDimensions: TestDimension[] = ['功能', '性能', '稳定性', '兼容性', '安全']
+const dimensionClasses: Record<TestDimension, string> = {
+  功能: 'functional',
+  性能: 'performance',
+  稳定性: 'stability',
+  兼容性: 'compatibility',
+  安全: 'security',
+}
 
 const tabs: Array<{ key: TabKey; label: string; count?: number }> = [
   { key: 'overview', label: '概览' },
@@ -61,24 +70,26 @@ const basisItems = [
 ]
 
 const treeNodes = [
-  { id: 'TP-001', level: 0, title: '身份认证', count: 18, priority: 'P0', method: 'UI + API', expanded: true },
-  { id: 'TP-003', level: 1, title: '账号密码登录', count: 7, priority: 'P0', method: 'UI', expanded: true },
-  { id: 'TP-008', level: 2, title: '有效账号完成登录', count: 2, priority: 'P0', method: 'UI' },
-  { id: 'TP-009', level: 2, title: '错误密码提示与重试', count: 3, priority: 'P0', method: 'UI' },
-  { id: 'TP-010', level: 2, title: '表单边界与防重复提交', count: 2, priority: 'P1', method: 'UI' },
-  { id: 'TP-004', level: 1, title: '账户保护', count: 6, priority: 'P0', method: 'API', expanded: false },
-  { id: 'TP-005', level: 1, title: '令牌轮换', count: 5, priority: 'P1', method: 'API', expanded: false },
-  { id: 'TP-002', level: 0, title: '可靠性与安全', count: 12, priority: 'P1', method: 'UI + API', expanded: false },
-  { id: 'TP-006', level: 0, title: '兼容性', count: 8, priority: 'P2', method: 'UI', expanded: false },
+  { id: 'TP-001', level: 0, title: '身份认证', count: 18, priority: 'P0', method: 'UI + API', dimension: '功能' as TestDimension, expanded: true },
+  { id: 'TP-003', level: 1, title: '账号密码登录', count: 7, priority: 'P0', method: 'UI', dimension: '功能' as TestDimension, expanded: true },
+  { id: 'TP-008', level: 2, title: '有效账号完成登录', count: 2, priority: 'P0', method: 'UI', dimension: '功能' as TestDimension },
+  { id: 'TP-009', level: 2, title: '错误密码提示与重试', count: 3, priority: 'P0', method: 'UI', dimension: '功能' as TestDimension },
+  { id: 'TP-010', level: 2, title: '表单边界与防重复提交', count: 2, priority: 'P1', method: 'UI', dimension: '功能' as TestDimension },
+  { id: 'TP-004', level: 1, title: '账户保护', count: 6, priority: 'P0', method: 'API', dimension: '安全' as TestDimension, expanded: false },
+  { id: 'TP-005', level: 1, title: '令牌轮换', count: 5, priority: 'P1', method: 'API', dimension: '稳定性' as TestDimension, expanded: false },
+  { id: 'TP-002', level: 0, title: '可靠性与安全', count: 12, priority: 'P1', method: 'UI + API', dimension: '稳定性' as TestDimension, expanded: false },
+  { id: 'TP-006', level: 0, title: '兼容性', count: 8, priority: 'P2', method: 'UI', dimension: '兼容性' as TestDimension, expanded: false },
+  { id: 'TP-007', level: 0, title: '认证服务性能', count: 4, priority: 'P1', method: 'API', dimension: '性能' as TestDimension, expanded: false },
 ]
 
 const cases = [
-  { id: 'TC-AUTH-001', title: '有效账号密码登录成功', point: 'TP-008', methods: ['UI', 'API'] as ExecutionMethod[], priority: 'P0', status: '已通过', readiness: '就绪', origin: 'AI 生成', smokeCandidate: true },
-  { id: 'TC-AUTH-002', title: '错误密码登录失败并显示明确提示', point: 'TP-009', methods: ['UI'] as ExecutionMethod[], priority: 'P0', status: '已通过', readiness: '就绪', origin: '历史复用', smokeCandidate: true },
-  { id: 'TC-AUTH-003', title: '连续五次失败后账户进入保护状态', point: 'TP-004', methods: ['API'] as ExecutionMethod[], priority: 'P0', status: '审核中', readiness: '待确认', origin: 'AI 生成', smokeCandidate: true },
-  { id: 'TC-AUTH-004', title: '并发刷新令牌时仅一个请求成功', point: 'TP-005', methods: ['API'] as ExecutionMethod[], priority: 'P1', status: '需修订', readiness: '阻塞', origin: '复制并修改' },
-  { id: 'TC-AUTH-005', title: '登录按钮防止连续重复提交', point: 'TP-010', methods: ['UI'] as ExecutionMethod[], priority: 'P1', status: '草稿', readiness: '就绪', origin: 'AI 生成' },
-  { id: 'TC-AUTH-006', title: 'Safari 最新两个主版本完成登录', point: 'TP-006', methods: ['UI'] as ExecutionMethod[], priority: 'P2', status: '草稿', readiness: '就绪', origin: 'AI 生成' },
+  { id: 'TC-AUTH-001', title: '有效账号密码登录成功', point: 'TP-008', dimension: '功能' as TestDimension, methods: ['UI', 'API'] as ExecutionMethod[], priority: 'P0', status: '已通过', readiness: '就绪', origin: 'AI 生成', smokeCandidate: true },
+  { id: 'TC-AUTH-002', title: '错误密码登录失败并显示明确提示', point: 'TP-009', dimension: '功能' as TestDimension, methods: ['UI'] as ExecutionMethod[], priority: 'P0', status: '已通过', readiness: '就绪', origin: '历史复用', smokeCandidate: true },
+  { id: 'TC-AUTH-003', title: '连续五次失败后账户进入保护状态', point: 'TP-004', dimension: '安全' as TestDimension, methods: ['API'] as ExecutionMethod[], priority: 'P0', status: '审核中', readiness: '待确认', origin: 'AI 生成', smokeCandidate: true },
+  { id: 'TC-AUTH-004', title: '并发刷新令牌时仅一个请求成功', point: 'TP-005', dimension: '稳定性' as TestDimension, methods: ['API'] as ExecutionMethod[], priority: 'P1', status: '需修订', readiness: '阻塞', origin: '复制并修改' },
+  { id: 'TC-AUTH-005', title: '登录按钮防止连续重复提交', point: 'TP-010', dimension: '功能' as TestDimension, methods: ['UI'] as ExecutionMethod[], priority: 'P1', status: '草稿', readiness: '就绪', origin: 'AI 生成' },
+  { id: 'TC-AUTH-006', title: 'Safari 最新两个主版本完成登录', point: 'TP-006', dimension: '兼容性' as TestDimension, methods: ['UI'] as ExecutionMethod[], priority: 'P2', status: '草稿', readiness: '就绪', origin: 'AI 生成' },
+  { id: 'TC-AUTH-007', title: '峰值并发登录满足响应时间目标', point: 'TP-007', dimension: '性能' as TestDimension, methods: ['API'] as ExecutionMethod[], priority: 'P1', status: '草稿', readiness: '待确认', origin: 'AI 生成' },
 ]
 
 const workflowNodes = [
@@ -90,6 +101,10 @@ const workflowNodes = [
 
 function StatusPill({ children, tone = 'neutral' }: { children: ReactNode; tone?: StatusTone }) {
   return <span className={`td-status ${tone}`}>{children}</span>
+}
+
+function DimensionTag({ dimension }: { dimension: TestDimension }) {
+  return <span className={`td-dimension-tag ${dimensionClasses[dimension]}`}>{dimension}</span>
 }
 
 function setRouteContext(params: Record<string, string | null>) {
@@ -111,6 +126,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   const [selectedTreeNode, setSelectedTreeNode] = useState('TP-009')
   const [selectedCase, setSelectedCase] = useState(cases[0].id)
   const [caseFilter, setCaseFilter] = useState('全部方式')
+  const [caseDimensionFilter, setCaseDimensionFilter] = useState('全部维度')
   const [caseQuery, setCaseQuery] = useState('')
   const [rightOpen, setRightOpen] = useState(() => typeof window === 'undefined' || window.innerWidth > 900)
   const [treeApproved, setTreeApproved] = useState(true)
@@ -119,18 +135,21 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   const [createStep, setCreateStep] = useState(1)
   const [selectedAssets, setSelectedAssets] = useState(['ASSET-001', 'ASSET-002'])
   const [augmentation, setAugmentation] = useState('selected_assets')
-  const [historyEnabled, setHistoryEnabled] = useState(true)
+  const [historyEnabled, setHistoryEnabled] = useState(false)
   const [caseMethods, setCaseMethods] = useState<Record<string, ExecutionMethod[]>>(() => Object.fromEntries(cases.map(item => [item.id, item.methods])))
+  const [caseDimensions, setCaseDimensions] = useState<Record<string, TestDimension>>(() => Object.fromEntries(cases.map(item => [item.id, item.dimension])))
 
   const activeBasis = basisItems.find(item => item.id === selectedBasis) ?? basisItems[0]
   const activeTreeNode = treeNodes.find(item => item.id === selectedTreeNode) ?? treeNodes[0]
   const activeCase = cases.find(item => item.id === selectedCase) ?? cases[0]
   const activeCaseMethods = caseMethods[activeCase.id] ?? activeCase.methods
-  const filteredCases = useMemo(() => cases.map(item => ({ ...item, methods: caseMethods[item.id] ?? item.methods })).filter(item => {
+  const activeCaseDimension = caseDimensions[activeCase.id] ?? activeCase.dimension
+  const filteredCases = useMemo(() => cases.map(item => ({ ...item, methods: caseMethods[item.id] ?? item.methods, dimension: caseDimensions[item.id] ?? item.dimension })).filter(item => {
     const methodMatches = caseFilter === '全部方式' || item.methods.includes(caseFilter as ExecutionMethod)
+    const dimensionMatches = caseDimensionFilter === '全部维度' || item.dimension === caseDimensionFilter
     const queryMatches = !caseQuery.trim() || `${item.id}${item.title}`.toLowerCase().includes(caseQuery.trim().toLowerCase())
-    return methodMatches && queryMatches
-  }), [caseFilter, caseMethods, caseQuery])
+    return methodMatches && dimensionMatches && queryMatches
+  }), [caseDimensionFilter, caseDimensions, caseFilter, caseMethods, caseQuery])
 
   const openWorkspace = () => {
     setView('workspace')
@@ -223,14 +242,6 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
       <span className="td-agent-ready"><CheckCircle2 />4/4 Agent 就绪</span>
     </div>
 
-    <div className="td-stage-strip" aria-label="五阶段进度">
-      {stages.map((stage, index) => <div key={stage.label} className={stage.state}>
-        <span>{stage.state === 'done' ? <Check /> : index + 1}</span>
-        <p><small>阶段 {index + 1}</small><b>{stage.label}</b></p>
-        {index < stages.length - 1 && <i />}
-      </div>)}
-    </div>
-
     <nav className="td-tabs" aria-label="测试设计视图">
       {tabs.map(item => <button key={item.key} className={tab === item.key ? 'active' : ''} onClick={() => selectTab(item.key)}>{item.label}{item.count !== undefined && <span>{item.count}</span>}</button>)}
       <button className="td-detail-toggle" onClick={() => setRightOpen(value => !value)} title={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
@@ -244,14 +255,14 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
         {tab === 'analysis' && <AnalysisView />}
         {tab === 'retrieval' && <RetrievalView />}
         {tab === 'tree' && <TreeView selected={selectedTreeNode} onSelect={setSelectedTreeNode} approved={treeApproved} onApprove={() => { setTreeApproved(true); notify('测试点树 r12 已批准。') }} onInvalidate={() => { setTreeApproved(false); notify('树已进入编辑状态，下游产物标记为过期。', 'warning') }} />}
-        {tab === 'cases' && <CasesView selected={selectedCase} onSelect={id => { setSelectedCase(id); setCaseTitle(cases.find(item => item.id === id)?.title ?? '') }} filter={caseFilter} setFilter={setCaseFilter} query={caseQuery} setQuery={setCaseQuery} rows={filteredCases} notify={notify} />}
+        {tab === 'cases' && <CasesView selected={selectedCase} onSelect={id => { setSelectedCase(id); setCaseTitle(cases.find(item => item.id === id)?.title ?? '') }} filter={caseFilter} setFilter={setCaseFilter} dimensionFilter={caseDimensionFilter} setDimensionFilter={setCaseDimensionFilter} query={caseQuery} setQuery={setCaseQuery} rows={filteredCases} notify={notify} />}
         {tab === 'case-set' && <FeatureCaseSetView notify={notify} />}
         {tab === 'data' && <DataView />}
         {tab === 'coverage' && <CoverageView notify={notify} />}
         {tab === 'history' && <HistoryView notify={notify} />}
         {tab === 'questions' && <QuestionsView notify={notify} />}
       </main>
-      {rightOpen && <DetailPanel tab={tab} basis={activeBasis} treeNode={activeTreeNode} testCase={activeCase} executionMethods={activeCaseMethods} onToggleMethod={toggleCaseMethod} caseTitle={caseTitle} setCaseTitle={setCaseTitle} saving={saving} onSave={saveCase} approved={treeApproved} notify={notify} />}
+      {rightOpen && <DetailPanel tab={tab} basis={activeBasis} treeNode={activeTreeNode} testCase={activeCase} testDimension={activeCaseDimension} onChangeDimension={dimension => setCaseDimensions(current => ({ ...current, [activeCase.id]: dimension }))} executionMethods={activeCaseMethods} onToggleMethod={toggleCaseMethod} caseTitle={caseTitle} setCaseTitle={setCaseTitle} saving={saving} onSave={saveCase} approved={treeApproved} notify={notify} />}
     </div>
   </section>
 }
@@ -259,32 +270,47 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
 function DesignList({ projectVersion, view, setView, onCreate, onOpen, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; onCreate: () => void; onOpen: () => void; notify: Notify }) {
   return <section className="td-list-page">
     <nav className="td-asset-tabs" aria-label="测试资产视图">
-      <button className={view === 'designs' ? 'active' : ''} onClick={() => setView('designs')}><GitBranch />测试设计<span>3</span></button>
+      <button className={view === 'designs' ? 'active' : ''} onClick={() => setView('designs')}><GitBranch />当期测试设计<span>3</span></button>
       <button className={view === 'library' ? 'active' : ''} onClick={() => setView('library')}><TableProperties />测试用例库<span>412</span></button>
       <button className={view === 'sets' ? 'active' : ''} onClick={() => setView('sets')}><Layers3 />测试用例集<span>8</span></button>
     </nav>
     {view === 'designs' && <>
+    <section className="td-cycle-overview">
+      <div className="td-cycle-identity">
+        <span><TestTube2 /></span>
+        <div>
+          <small>当前项目版本</small>
+          <h2>{projectVersion.name} 当期测试设计</h2>
+          <p>这里只展示固定在当前版本的设计任务；历史用例需要显式选择并冻结，不会随新版本自动继承。</p>
+        </div>
+      </div>
+      <dl>
+        <div><dt>设计任务</dt><dd>3</dd><small>当前版本</small></div>
+        <div><dt>进行中</dt><dd>1</dd><small>覆盖审计</small></div>
+        <div><dt>待处理</dt><dd className="warning">5</dd><small>3 阻断 · 2 待确认</small></div>
+        <div><dt>已发布</dt><dd>1</dd><small>不可变用例集</small></div>
+      </dl>
+    </section>
+    <div className="td-design-list-head">
+      <div><h2>设计记录 <span>3</span></h2><p>继续推进当前任务，或查看本版本已经完成的设计结果。</p></div>
+      <button className="btn primary" onClick={onCreate}><Plus />创建测试设计</button>
+    </div>
     <div className="td-list-toolbar">
       <div className="td-list-search"><Search /><input aria-label="搜索测试设计" placeholder="搜索名称或运行 ID" /></div>
       <select aria-label="状态筛选"><option>全部状态</option><option>设计中</option><option>待审核</option><option>已发布</option></select>
-      <button className="btn primary" onClick={onCreate}><Plus />创建测试设计</button>
     </div>
-    <section className="td-summary-band">
-      <div><span className="td-summary-icon"><TestTube2 /></span><p><small>当前项目版本</small><b>{projectVersion.name}</b><em>测试设计与输入快照均固定在此版本</em></p></div>
-      <dl><div><dt>测试设计</dt><dd>3</dd></div><div><dt>运行中</dt><dd>1</dd></div><div><dt>待审核用例</dt><dd>7</dd></div><div><dt>已发布版本</dt><dd>1</dd></div></dl>
-    </section>
     <div className="td-list-table-wrap">
       <table className="td-design-table">
-        <thead><tr><th>测试设计</th><th>主依据</th><th>当前阶段</th><th>用例 / 覆盖</th><th>更新时间</th><th>状态</th><th /></tr></thead>
+        <thead><tr><th>测试设计</th><th>固定输入</th><th>当前进度</th><th>当期产出</th><th>更新时间</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>
-          <tr onClick={onOpen}>
+          <tr className="td-current-design-row" onClick={onOpen}>
             <td><span className="td-row-symbol active"><TestTube2 /></span><p><b>登录与身份认证测试设计</b><small>TD-20260807-01 · WF-20260807-03</small></p></td>
             <td><StatusPill tone="info">评审基线</StatusPill><small>需求评审 RR-021 · 技术评审 TR-014</small></td>
             <td><b>覆盖反向审计</b><div className="td-mini-progress"><span style={{ width: '86%' }} /></div></td>
-            <td><b>28 条用例</b><small>覆盖率 91.3% · 3 个阻断项</small></td>
+            <td><b>28 条用例</b><small className="td-row-warning">覆盖率 91.3% · 3 个阻断项</small></td>
             <td><b>今天 14:32</b><small>李磊</small></td>
             <td><StatusPill tone="warning">待覆盖确认</StatusPill></td>
-            <td><button className="icon-btn" aria-label="打开测试设计"><ChevronRight /></button></td>
+            <td><button className="td-row-action primary" onClick={event => { event.stopPropagation(); onOpen() }}>继续设计<ArrowRight /></button></td>
           </tr>
           <tr>
             <td><span className="td-row-symbol"><Database /></span><p><b>知识库检索与索引测试设计</b><small>TD-20260806-02 · WF-20260806-04</small></p></td>
@@ -293,7 +319,7 @@ function DesignList({ projectVersion, view, setView, onCreate, onOpen, notify }:
             <td><b>42 条用例</b><small>覆盖率 100% · 无阻断项</small></td>
             <td><b>昨天 18:06</b><small>李磊</small></td>
             <td><StatusPill tone="info">审核中</StatusPill></td>
-            <td><button className="icon-btn" aria-label="打开测试设计"><ChevronRight /></button></td>
+            <td><button className="td-row-action" onClick={() => notify('已定位到知识库检索与索引测试设计的审核记录。')}>查看审核<ChevronRight /></button></td>
           </tr>
           <tr>
             <td><span className="td-row-symbol"><CheckCircle2 /></span><p><b>需求评审工作台回归设计</b><small>TD-20260802-01 · TCS v1</small></p></td>
@@ -302,7 +328,7 @@ function DesignList({ projectVersion, view, setView, onCreate, onOpen, notify }:
             <td><b>35 条用例</b><small>覆盖率 100% · 已全部通过</small></td>
             <td><b>8月2日 16:40</b><small>李磊</small></td>
             <td><StatusPill tone="success">已发布 v1</StatusPill></td>
-            <td><button className="icon-btn" aria-label="打开测试设计"><ChevronRight /></button></td>
+            <td><button className="td-row-action" onClick={() => notify('已打开需求评审工作台回归设计的只读发布结果。')}>查看结果<ChevronRight /></button></td>
           </tr>
         </tbody>
       </table>
@@ -314,18 +340,27 @@ function DesignList({ projectVersion, view, setView, onCreate, onOpen, notify }:
 }
 
 function ProjectCaseLibrary({ projectVersion }: { projectVersion: ProjectVersion }) {
+  const [query, setQuery] = useState('')
+  const [dimensionFilter, setDimensionFilter] = useState('全部维度')
   const rows = [
-    ['TC-AUTH-001', '有效账号密码登录成功', '身份认证', 'UI + API', 'P0', '冒烟 · 核心回归 · 身份认证 v2', '已批准'],
-    ['TC-AUTH-002', '错误密码登录失败并显示明确提示', '身份认证', 'UI', 'P0', '冒烟 · 核心回归 · 身份认证 v2', '已批准'],
-    ['TC-KB-014', '混合检索返回固定资产版本与原文定位', '知识库', 'API', 'P0', '核心回归 · 知识库检索 v3', '已批准'],
-    ['TC-RR-028', '需求评审失败后仅重跑评审阶段', '需求评审', 'API', 'P1', '核心回归 · 需求评审 v1', '已批准'],
-    ['TC-TS-011', '技术方案评审引用固定需求基线', '技术方案', 'UI', 'P1', '技术方案评审 v1', '已批准'],
-    ['TC-AUTH-004', '并发刷新令牌时仅一个请求成功', '身份认证', 'API', 'P1', '身份认证候选集', '需修订'],
+    { id: 'TC-AUTH-001', title: '有效账号密码登录成功', domain: '身份认证', dimension: '功能' as TestDimension, method: 'UI + API', priority: 'P0', sets: '冒烟 · 核心回归 · 身份认证 v2', status: '已批准' },
+    { id: 'TC-AUTH-002', title: '错误密码登录失败并显示明确提示', domain: '身份认证', dimension: '功能' as TestDimension, method: 'UI', priority: 'P0', sets: '冒烟 · 核心回归 · 身份认证 v2', status: '已批准' },
+    { id: 'TC-KB-014', title: '混合检索返回固定资产版本与原文定位', domain: '知识库', dimension: '性能' as TestDimension, method: 'API', priority: 'P0', sets: '核心回归 · 知识库检索 v3', status: '已批准' },
+    { id: 'TC-RR-028', title: '需求评审失败后仅重跑评审阶段', domain: '需求评审', dimension: '稳定性' as TestDimension, method: 'API', priority: 'P1', sets: '核心回归 · 需求评审 v1', status: '已批准' },
+    { id: 'TC-TS-011', title: '技术方案评审引用固定需求基线', domain: '技术方案', dimension: '安全' as TestDimension, method: 'UI', priority: 'P1', sets: '技术方案评审 v1', status: '已批准' },
+    { id: 'TC-AUTH-006', title: 'Safari 最新两个主版本完成登录', domain: '身份认证', dimension: '兼容性' as TestDimension, method: 'UI', priority: 'P2', sets: '身份认证候选集', status: '需修订' },
+    { id: 'TC-AUTH-004', title: '并发刷新令牌时仅一个请求成功', domain: '身份认证', dimension: '稳定性' as TestDimension, method: 'API', priority: 'P1', sets: '身份认证候选集', status: '需修订' },
   ]
+  const filteredRows = rows.filter(row => {
+    const queryMatches = !query.trim() || `${row.id}${row.title}${row.domain}`.toLowerCase().includes(query.trim().toLowerCase())
+    const dimensionMatches = dimensionFilter === '全部维度' || row.dimension === dimensionFilter
+    return queryMatches && dimensionMatches
+  })
   return <div className="td-library-view">
     <div className="td-list-toolbar">
-      <div className="td-list-search"><Search /><input aria-label="搜索测试用例库" placeholder="搜索用例 ID、名称或业务域" /></div>
+      <div className="td-list-search"><Search /><input aria-label="搜索测试用例库" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索用例 ID、名称或业务域" /></div>
       <select aria-label="业务域筛选"><option>全部业务域</option><option>身份认证</option><option>知识库</option><option>需求评审</option></select>
+      <select aria-label="测试维度筛选" value={dimensionFilter} onChange={event => setDimensionFilter(event.target.value)}><option>全部维度</option>{testDimensions.map(dimension => <option key={dimension}>{dimension}</option>)}</select>
       <select aria-label="状态筛选"><option>当前有效版本</option><option>已废弃</option><option>全部版本</option></select>
       <button className="btn"><Download />导出清单</button>
     </div>
@@ -334,11 +369,12 @@ function ProjectCaseLibrary({ projectVersion }: { projectVersion: ProjectVersion
       <dl><div><dt>有效用例</dt><dd>386</dd></div><div><dt>P0 用例</dt><dd>74</dd></div><div><dt>含 UI / API</dt><dd>221 / 171</dd></div><div><dt>待维护</dt><dd className="warning">9</dd></div></dl>
     </section>
     <div className="td-library-table">
-      <div className="td-library-table-head"><span>测试用例</span><span>业务域</span><span>方式</span><span>优先级</span><span>所属用例集</span><span>当前状态</span></div>
-      {rows.map((row, index) => <button key={row[0]}>
-        <span><i className={row[3] === 'UI' ? 'ui' : row[3] === 'API' ? 'api' : 'mixed'}>{row[3].includes('UI') && <TableProperties />}{row[3].includes('API') && <Braces />}</i><p><b>{row[1]}</b><small>{row[0]} · revision {index + 3}</small></p></span>
-        <em>{row[2]}</em><strong>{row[3]}</strong><strong className={row[4] === 'P0' ? 'p0' : ''}>{row[4]}</strong><small>{row[5]}</small><StatusPill tone={row[6] === '已批准' ? 'success' : 'warning'}>{row[6]}</StatusPill>
+      <div className="td-library-table-head"><span>测试用例</span><span>业务域</span><span>测试维度</span><span>方式</span><span>优先级</span><span>所属用例集</span><span>当前状态</span></div>
+      {filteredRows.map((row, index) => <button key={row.id}>
+        <span><i className={row.method === 'UI' ? 'ui' : row.method === 'API' ? 'api' : 'mixed'}>{row.method.includes('UI') && <TableProperties />}{row.method.includes('API') && <Braces />}</i><p><b>{row.title}</b><small>{row.id} · revision {index + 3}</small></p><span className="td-mobile-dimension"><DimensionTag dimension={row.dimension} /></span></span>
+        <em>{row.domain}</em><DimensionTag dimension={row.dimension} /><strong>{row.method}</strong><strong className={row.priority === 'P0' ? 'p0' : ''}>{row.priority}</strong><small>{row.sets}</small><StatusPill tone={row.status === '已批准' ? 'success' : 'warning'}>{row.status}</StatusPill>
       </button>)}
+      {filteredRows.length === 0 && <div className="td-empty-filter"><Search /><b>没有匹配的测试用例</b><span>调整测试维度或搜索关键词后重试。</span></div>}
     </div>
   </div>
 }
@@ -417,7 +453,7 @@ function CreateDesign({ projectVersion, basisMode, setBasisMode, createStep, set
           <fieldset><legend>知识增强</legend><div className="td-radio-list">
             {[['disabled', '不启用', '仅使用主依据，不执行补充召回'], ['selected_assets', '指定资料', '从 2 份已选资料中进行受控召回'], ['fixed_index', '固定索引', '从当前知识库索引 v12 中召回']].map(option => <label key={option[0]} className={augmentation === option[0] ? 'selected' : ''}><input type="radio" name="augmentation" checked={augmentation === option[0]} onChange={() => setAugmentation(option[0])} /><span><b>{option[1]}</b><small>{option[2]}</small></span></label>)}
           </div></fieldset>
-          <fieldset><legend>历史用例</legend><label className="td-switch-row"><input type="checkbox" checked={historyEnabled} onChange={event => setHistoryEnabled(event.target.checked)} /><span><b>参考已发布历史用例集</b><small>默认不选择；已选择 6 条与认证能力相关的用例。</small></span><em className={historyEnabled ? 'on' : ''}><i /></em></label>{historyEnabled && <div className="td-history-source"><History /><span><b>需求评审工作台回归设计 · TCS v1</b><small>6 条用例 · 来源版本 SmartHub 2026.07 · Hash 17b8...c921</small></span><button className="btn">更改选择</button></div>}</fieldset>
+          <fieldset><legend>历史用例</legend><label className="td-switch-row"><input type="checkbox" checked={historyEnabled} onChange={event => setHistoryEnabled(event.target.checked)} /><span><b>使用历史用例作为设计输入</b><small>{historyEnabled ? '已显式选择 6 条与认证能力相关的用例，并将冻结具体来源版本。' : '默认不选择；系统不会自动继承上一项目版本的测试用例。'}</small></span><em className={historyEnabled ? 'on' : ''}><i /></em></label>{historyEnabled ? <div className="td-history-source"><History /><span><b>需求评审工作台回归设计 · TCS v1</b><small>6 条用例 · 来源版本 SmartHub 2026.07 · Hash 17b8...c921</small></span><button className="btn">更改选择</button></div> : <p className="td-history-empty"><LockKeyhole />开启后可从同一项目的已发布用例集中选择；只提供复用候选，不会改写历史用例。</p>}</fieldset>
         </div>
       </>}
       {createStep === 3 && <>
@@ -508,8 +544,26 @@ function TreeView({ selected, onSelect, approved, onApprove, onInvalidate }: { s
   return <div className="td-tree-view"><header className="td-canvas-toolbar"><div><b>测试点树</b><small>revision r12 · 46 个节点 · 64 项依据</small></div><StatusPill tone={approved ? 'success' : 'warning'}>{approved ? '已批准' : '编辑中'}</StatusPill><button className="btn" onClick={onInvalidate}><Pencil />编辑树</button>{approved ? <button className="btn" onClick={onInvalidate}>要求修订</button> : <button className="btn primary" onClick={onApprove}><Check />批准 r13</button>}</header><div className="td-tree-tools"><div className="td-panel-search"><Search /><input placeholder="搜索测试点" /></div><button className="btn"><Plus />新增</button><button className="icon-btn" aria-label="上移"><ArrowUp /></button><button className="icon-btn" aria-label="下移"><ArrowDown /></button><button className="icon-btn" aria-label="拆分"><Split /></button><button className="icon-btn" aria-label="删除"><Trash2 /></button></div><div className="td-tree-header"><span>测试点</span><span>方法</span><span>优先级</span><span>用例数</span></div><div className="td-tree-list" role="tree">{treeNodes.map(node => <button role="treeitem" aria-level={node.level + 1} aria-selected={selected === node.id} key={node.id} className={selected === node.id ? 'active' : ''} style={{ '--tree-level': node.level } as React.CSSProperties} onClick={() => onSelect(node.id)}><span className="td-tree-name">{node.expanded !== undefined ? <ChevronRight className={node.expanded ? 'expanded' : ''} /> : <i />}<TestTube2 /><span><b>{node.title}</b><small>{node.id} · {node.level === 0 ? '业务域' : '测试点'}</small></span></span><em>{node.method}</em><strong className={node.priority === 'P0' ? 'p0' : ''}>{node.priority}</strong><small>{node.count}</small></button>)}</div></div>
 }
 
-function CasesView({ selected, onSelect, filter, setFilter, query, setQuery, rows, notify }: { selected: string; onSelect: (id: string) => void; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; rows: typeof cases; notify: Notify }) {
-  return <div className="td-cases-view"><header className="td-canvas-toolbar"><div><b>测试用例</b><small>28 条 · 18 条已通过 · 3 条冒烟候选</small></div><button className="btn" onClick={() => notify('已选择 7 条可提交用例。')}><Users />批量审核</button><button className="btn primary" onClick={() => notify('已创建空白用例草稿。')}><Plus />新建用例</button></header><div className="td-case-filters"><div className="td-panel-search"><Search /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索用例 ID 或标题" /></div><select value={filter} onChange={event => setFilter(event.target.value)}><option>全部方式</option><option>UI</option><option>API</option></select><select><option>全部优先级</option><option>P0</option><option>P1</option><option>P2</option></select><select><option>全部集合角色</option><option>冒烟候选</option><option>普通用例</option></select><button className="icon-btn" aria-label="更多筛选"><Filter /></button></div><div className="td-case-table"><div className="td-case-table-head"><span>用例</span><span>测试点</span><span>方式</span><span>优先级</span><span>审核</span><span>就绪</span></div>{rows.map(item => <button key={item.id} className={selected === item.id ? 'active' : ''} onClick={() => onSelect(item.id)}><span><i className={item.methods.length === 2 ? 'mixed' : item.methods[0].toLowerCase()}>{item.methods.includes('UI') && <TableProperties />}{item.methods.includes('API') && <Braces />}</i><p><b>{item.title}</b><small>{item.id} · {item.origin}</small></p>{item.smokeCandidate && <span className="td-smoke-candidate"><Sparkles />冒烟候选</span>}</span><em>{item.point}</em><strong>{item.methods.join(' + ')}</strong><strong className={item.priority === 'P0' ? 'p0' : ''}>{item.priority}</strong><StatusPill tone={item.status === '已通过' ? 'success' : item.status === '需修订' ? 'danger' : item.status === '审核中' ? 'info' : 'neutral'}>{item.status}</StatusPill><StatusPill tone={item.readiness === '就绪' ? 'success' : item.readiness === '阻塞' ? 'danger' : 'warning'}>{item.readiness}</StatusPill></button>)}{rows.length === 0 && <div className="td-empty-filter"><Search /><b>没有匹配的测试用例</b><span>调整测试方式或搜索关键词后重试。</span></div>}</div></div>
+function CasesView({ selected, onSelect, filter, setFilter, dimensionFilter, setDimensionFilter, query, setQuery, rows, notify }: { selected: string; onSelect: (id: string) => void; filter: string; setFilter: (value: string) => void; dimensionFilter: string; setDimensionFilter: (value: string) => void; query: string; setQuery: (value: string) => void; rows: typeof cases; notify: Notify }) {
+  return <div className="td-cases-view">
+    <header className="td-canvas-toolbar"><div><b>测试用例</b><small>28 条 · 18 条已通过 · 5 类测试维度</small></div><button className="btn" onClick={() => notify('已选择 7 条可提交用例。')}><Users />批量审核</button><button className="btn primary" onClick={() => notify('已创建空白用例草稿。')}><Plus />新建用例</button></header>
+    <div className="td-case-filters">
+      <div className="td-panel-search"><Search /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索用例 ID 或标题" /></div>
+      <select aria-label="测试维度筛选" value={dimensionFilter} onChange={event => setDimensionFilter(event.target.value)}><option>全部维度</option>{testDimensions.map(dimension => <option key={dimension}>{dimension}</option>)}</select>
+      <select aria-label="执行方式筛选" value={filter} onChange={event => setFilter(event.target.value)}><option>全部方式</option><option>UI</option><option>API</option></select>
+      <select aria-label="优先级筛选"><option>全部优先级</option><option>P0</option><option>P1</option><option>P2</option></select>
+      <select aria-label="集合角色筛选"><option>全部集合角色</option><option>冒烟候选</option><option>普通用例</option></select>
+      <button className="icon-btn" aria-label="更多筛选"><Filter /></button>
+    </div>
+    <div className="td-case-table">
+      <div className="td-case-table-head"><span>用例</span><span>测试点</span><span>测试维度</span><span>方式</span><span>优先级</span><span>审核</span><span>就绪</span></div>
+      {rows.map(item => <button key={item.id} className={selected === item.id ? 'active' : ''} onClick={() => onSelect(item.id)}>
+        <span><i className={item.methods.length === 2 ? 'mixed' : item.methods[0].toLowerCase()}>{item.methods.includes('UI') && <TableProperties />}{item.methods.includes('API') && <Braces />}</i><p><b>{item.title}</b><small>{item.id} · {item.origin}</small></p><span className="td-mobile-dimension"><DimensionTag dimension={item.dimension} /></span>{item.smokeCandidate && <span className="td-smoke-candidate"><Sparkles />冒烟候选</span>}</span>
+        <em>{item.point}</em><DimensionTag dimension={item.dimension} /><strong>{item.methods.join(' + ')}</strong><strong className={item.priority === 'P0' ? 'p0' : ''}>{item.priority}</strong><StatusPill tone={item.status === '已通过' ? 'success' : item.status === '需修订' ? 'danger' : item.status === '审核中' ? 'info' : 'neutral'}>{item.status}</StatusPill><StatusPill tone={item.readiness === '就绪' ? 'success' : item.readiness === '阻塞' ? 'danger' : 'warning'}>{item.readiness}</StatusPill>
+      </button>)}
+      {rows.length === 0 && <div className="td-empty-filter"><Search /><b>没有匹配的测试用例</b><span>调整测试维度、执行方式或搜索关键词后重试。</span></div>}
+    </div>
+  </div>
 }
 
 function FeatureCaseSetView({ notify }: { notify: Notify }) {
@@ -588,10 +642,10 @@ function QuestionsView({ notify }: { notify: Notify }) {
   return <div className="td-questions-view"><header className="td-canvas-toolbar"><div><b>待确认项</b><small>确认结论将追加保存并进入报告与发布门禁</small></div><StatusPill tone="warning">2 项未解决</StatusPill></header>{[['Q-006', '账户保护窗口是否允许管理员提前解除？', '该规则会影响保护状态的等价类和恢复场景。', '产品规则'], ['Q-009', 'Safari 的支持范围按最新两个主版本还是固定版本？', '上游仅写明支持主流浏览器，无法形成可验收的兼容性边界。', '验收标准']].map(item => <article key={item[0]}><span><CircleDot /></span><p><small>{item[0]} · {item[3]}</small><b>{item[1]}</b><em>{item[2]}</em></p><button className="btn" onClick={() => notify(`${item[0]} 已标记为确认处理中。`)}>填写结论</button></article>)}</div>
 }
 
-function DetailPanel({ tab, basis, treeNode, testCase, executionMethods, onToggleMethod, caseTitle, setCaseTitle, saving, onSave, approved, notify }: { tab: TabKey; basis: typeof basisItems[number]; treeNode: typeof treeNodes[number]; testCase: typeof cases[number]; executionMethods: ExecutionMethod[]; onToggleMethod: (method: ExecutionMethod) => void; caseTitle: string; setCaseTitle: (value: string) => void; saving: boolean; onSave: () => void; approved: boolean; notify: Notify }) {
+function DetailPanel({ tab, basis, treeNode, testCase, testDimension, onChangeDimension, executionMethods, onToggleMethod, caseTitle, setCaseTitle, saving, onSave, approved, notify }: { tab: TabKey; basis: typeof basisItems[number]; treeNode: typeof treeNodes[number]; testCase: typeof cases[number]; testDimension: TestDimension; onChangeDimension: (dimension: TestDimension) => void; executionMethods: ExecutionMethod[]; onToggleMethod: (method: ExecutionMethod) => void; caseTitle: string; setCaseTitle: (value: string) => void; saving: boolean; onSave: () => void; approved: boolean; notify: Notify }) {
   if (tab === 'case-set') return <aside className="td-detail-panel"><header><div><small>候选用例集</small><b>SET-AUTH · v2</b></div><StatusPill tone="warning">待发布</StatusPill></header><div className="td-detail-scroll"><section className="td-set-version-card"><span><FileJson2 /></span><div><small>test-case-set/v1</small><b>登录与身份认证新功能用例集</b><code>contentSha256: pending</code></div></section><div className="td-basis-meta"><p><span>来源设计</span><b>TD-20260807-01</b></p><p><span>候选成员</span><b>28 条</b></p><p><span>冒烟候选</span><b>3 条</b></p><p><span>覆盖审计</span><b>Audit r4</b></p></div><section className="td-detail-section"><h3>发布后固定</h3><button><TestTube2 /><span><small>用例成员</small><b>caseId + revision</b></span><CheckCircle2 /></button><button><Sparkles /><span><small>冒烟建议</small><b>3 条候选关系</b></span><CheckCircle2 /></button><button><ShieldCheck /><span><small>覆盖审计</small><b>成员集合 Hash</b></span><CheckCircle2 /></button></section><section className="td-detail-callout danger"><AlertTriangle /><p><b>3 个发布阻断项</b><small>当前内容不能形成不可变版本，需先补齐覆盖并重新审核。</small></p></section></div><footer><button className="btn" onClick={() => notify('已导出候选用例集预览。')}><Download />导出预览</button><button className="btn primary" onClick={() => notify('仍有 3 个发布阻断项。', 'warning')}><LockKeyhole />发布</button></footer></aside>
-  if (tab === 'cases') return <aside className="td-detail-panel td-case-editor"><header><div><small>结构化用例</small><b>{testCase.id}</b></div><button className="icon-btn" aria-label="更多用例操作"><MoreHorizontal /></button></header><div className="td-editor-meta"><StatusPill tone="neutral">revision r6</StatusPill><StatusPill tone={testCase.status === '已通过' ? 'success' : 'warning'}>{testCase.status}</StatusPill><span>{saving ? '正在保存...' : '已保存'}</span></div><div className="td-detail-scroll"><label><span>用例标题</span><input value={caseTitle} onChange={event => setCaseTitle(event.target.value)} /></label><div className="td-method-segment" aria-label="执行方式，可多选"><button type="button" aria-pressed={executionMethods.includes('UI')} className={executionMethods.includes('UI') ? 'active' : ''} onClick={() => onToggleMethod('UI')}><TableProperties />UI</button><button type="button" aria-pressed={executionMethods.includes('API')} className={executionMethods.includes('API') ? 'active' : ''} onClick={() => onToggleMethod('API')}><Braces />API</button></div><div className="td-readonly-grid"><p><span>优先级</span><b>{testCase.priority}</b></p><p><span>来源</span><b>{testCase.origin}</b></p><p><span>测试点</span><b>{testCase.point}</b></p><p><span>执行方式</span><b>{executionMethods.join(' + ')}</b></p></div><label><span>共同前置条件</span><textarea defaultValue="存在状态正常且密码已设置的测试账号；测试环境中的认证服务可用。" /></label>{executionMethods.includes('UI') && <section className="td-step-editor td-method-editor"><header><b><TableProperties />UI 执行流程</b><button><Plus />添加步骤</button></header><article><em>1</em><div><input defaultValue="打开登录页面，输入有效账号与密码" /><textarea defaultValue="输入框展示内容正确，登录按钮可用" /></div><button className="icon-btn" aria-label="UI 步骤操作"><MoreHorizontal /></button></article><article><em>2</em><div><input defaultValue="点击登录按钮" /><textarea defaultValue="页面进入工作台并展示当前用户" /></div><button className="icon-btn" aria-label="UI 步骤操作"><MoreHorizontal /></button></article></section>}{executionMethods.includes('API') && <section className="td-step-editor td-method-editor"><header><b><Braces />API 执行流程</b><button><Plus />添加步骤</button></header><article><em>1</em><div><input defaultValue="POST /api/auth/login，提交账号与密码参数" /><textarea defaultValue="响应 200，返回访问令牌与刷新令牌" /></div><button className="icon-btn" aria-label="API 步骤操作"><MoreHorizontal /></button></article><article><em>2</em><div><input defaultValue="携带访问令牌请求 GET /api/session" /><textarea defaultValue="响应当前用户，身份与登录账号一致" /></div><button className="icon-btn" aria-label="API 步骤操作"><MoreHorizontal /></button></article></section>}<label><span>共同验证检查点</span><textarea defaultValue="UI 与 API 结果指向同一登录会话；产生 auth.login.succeeded 审计事件；无重复令牌。" /></label><label><span>清理要求</span><input defaultValue="撤销测试会话并清理浏览器 Cookie" /></label></div><footer><button className="btn" onClick={() => notify('用例已提交人工审核。')}>提交审核</button><button className="btn primary" onClick={onSave} disabled={saving}>{saving ? <RefreshCw className="rotating" /> : <Check />}保存草稿</button></footer></aside>
-  if (tab === 'tree') return <aside className="td-detail-panel"><header><div><small>测试点节点</small><b>{treeNode.id}</b></div><StatusPill tone={approved ? 'success' : 'warning'}>{approved ? '树 r12 已批准' : '编辑中'}</StatusPill></header><div className="td-detail-scroll"><label><span>测试点名称</span><input defaultValue={treeNode.title} /></label><label><span>测试维度</span><select defaultValue="功能"><option>功能</option><option>性能</option><option>稳定性</option><option>兼容性</option><option>安全</option></select></label><div className="td-method-segment"><button className={treeNode.method.includes('UI') ? 'active' : ''}>UI</button><button className={treeNode.method.includes('API') ? 'active' : ''}>API</button></div><label><span>优先级</span><select defaultValue={treeNode.priority}><option>P0</option><option>P1</option><option>P2</option></select></label><label><span>设计说明</span><textarea defaultValue="覆盖正常路径、输入校验、错误反馈以及重复提交场景。" /></label><section className="td-source-links"><header><b>来源关系</b><StatusPill tone="neutral">2 项</StatusPill></header><button><Link2 /><span><b>REQ-018</b><small>用户可通过账号密码登录系统</small></span><ChevronRight /></button><button><Link2 /><span><b>SOL-008</b><small>认证令牌采用双 Token 轮换机制</small></span><ChevronRight /></button></section></div><footer><button className="btn" onClick={() => notify('节点已标记为不适用。', 'warning')}>标记不适用</button><button className="btn primary" onClick={() => notify('节点修改已保存为新的树 revision。')}><Check />保存节点</button></footer></aside>
+  if (tab === 'cases') return <aside className="td-detail-panel td-case-editor"><header><div><small>结构化用例</small><b>{testCase.id}</b></div><DimensionTag dimension={testDimension} /><button className="icon-btn" aria-label="更多用例操作"><MoreHorizontal /></button></header><div className="td-editor-meta"><StatusPill tone="neutral">revision r6</StatusPill><StatusPill tone={testCase.status === '已通过' ? 'success' : 'warning'}>{testCase.status}</StatusPill><span>{saving ? '正在保存...' : '已保存'}</span></div><div className="td-detail-scroll"><label><span>用例标题</span><input value={caseTitle} onChange={event => setCaseTitle(event.target.value)} /></label><label><span>测试维度</span><select value={testDimension} onChange={event => onChangeDimension(event.target.value as TestDimension)}>{testDimensions.map(dimension => <option key={dimension}>{dimension}</option>)}</select></label><div className="td-method-segment" aria-label="执行方式，可多选"><button type="button" aria-pressed={executionMethods.includes('UI')} className={executionMethods.includes('UI') ? 'active' : ''} onClick={() => onToggleMethod('UI')}><TableProperties />UI</button><button type="button" aria-pressed={executionMethods.includes('API')} className={executionMethods.includes('API') ? 'active' : ''} onClick={() => onToggleMethod('API')}><Braces />API</button></div><div className="td-readonly-grid"><p><span>优先级</span><b>{testCase.priority}</b></p><p><span>来源</span><b>{testCase.origin}</b></p><p><span>测试点</span><b>{testCase.point}</b></p><p><span>执行方式</span><b>{executionMethods.join(' + ')}</b></p></div><label><span>共同前置条件</span><textarea defaultValue="存在状态正常且密码已设置的测试账号；测试环境中的认证服务可用。" /></label>{executionMethods.includes('UI') && <section className="td-step-editor td-method-editor"><header><b><TableProperties />UI 执行流程</b><button><Plus />添加步骤</button></header><article><em>1</em><div><input defaultValue="打开登录页面，输入有效账号与密码" /><textarea defaultValue="输入框展示内容正确，登录按钮可用" /></div><button className="icon-btn" aria-label="UI 步骤操作"><MoreHorizontal /></button></article><article><em>2</em><div><input defaultValue="点击登录按钮" /><textarea defaultValue="页面进入工作台并展示当前用户" /></div><button className="icon-btn" aria-label="UI 步骤操作"><MoreHorizontal /></button></article></section>}{executionMethods.includes('API') && <section className="td-step-editor td-method-editor"><header><b><Braces />API 执行流程</b><button><Plus />添加步骤</button></header><article><em>1</em><div><input defaultValue="POST /api/auth/login，提交账号与密码参数" /><textarea defaultValue="响应 200，返回访问令牌与刷新令牌" /></div><button className="icon-btn" aria-label="API 步骤操作"><MoreHorizontal /></button></article><article><em>2</em><div><input defaultValue="携带访问令牌请求 GET /api/session" /><textarea defaultValue="响应当前用户，身份与登录账号一致" /></div><button className="icon-btn" aria-label="API 步骤操作"><MoreHorizontal /></button></article></section>}<label><span>共同验证检查点</span><textarea defaultValue="UI 与 API 结果指向同一登录会话；产生 auth.login.succeeded 审计事件；无重复令牌。" /></label><label><span>清理要求</span><input defaultValue="撤销测试会话并清理浏览器 Cookie" /></label></div><footer><button className="btn" onClick={() => notify('用例已提交人工审核。')}>提交审核</button><button className="btn primary" onClick={onSave} disabled={saving}>{saving ? <RefreshCw className="rotating" /> : <Check />}保存草稿</button></footer></aside>
+  if (tab === 'tree') return <aside className="td-detail-panel"><header><div><small>测试点节点</small><b>{treeNode.id}</b></div><DimensionTag dimension={treeNode.dimension} /><StatusPill tone={approved ? 'success' : 'warning'}>{approved ? '树 r12 已批准' : '编辑中'}</StatusPill></header><div className="td-detail-scroll"><label><span>测试点名称</span><input defaultValue={treeNode.title} /></label><label><span>测试维度</span><select key={`${treeNode.id}-dimension`} defaultValue={treeNode.dimension}>{testDimensions.map(dimension => <option key={dimension}>{dimension}</option>)}</select></label><div className="td-method-segment"><button className={treeNode.method.includes('UI') ? 'active' : ''}>UI</button><button className={treeNode.method.includes('API') ? 'active' : ''}>API</button></div><label><span>优先级</span><select defaultValue={treeNode.priority}><option>P0</option><option>P1</option><option>P2</option></select></label><label><span>设计说明</span><textarea defaultValue="覆盖正常路径、输入校验、错误反馈以及重复提交场景。" /></label><section className="td-source-links"><header><b>来源关系</b><StatusPill tone="neutral">2 项</StatusPill></header><button><Link2 /><span><b>REQ-018</b><small>用户可通过账号密码登录系统</small></span><ChevronRight /></button><button><Link2 /><span><b>SOL-008</b><small>认证令牌采用双 Token 轮换机制</small></span><ChevronRight /></button></section></div><footer><button className="btn" onClick={() => notify('节点已标记为不适用。', 'warning')}>标记不适用</button><button className="btn primary" onClick={() => notify('节点修改已保存为新的树 revision。')}><Check />保存节点</button></footer></aside>
   if (tab === 'coverage') return <aside className="td-detail-panel"><header><div><small>覆盖缺口</small><b>REQ-021</b></div><StatusPill tone="danger">发布阻断</StatusPill></header><div className="td-detail-scroll"><section className="td-detail-callout danger"><AlertTriangle /><p><b>账户保护解除后的首次登录未覆盖</b><small>当前依据项仅覆盖保护触发与保护期间行为，未验证自动解除后的状态恢复。</small></p></section><section className="td-detail-section"><h3>关联链路</h3><button><FileText /><span><small>依据</small><b>REQ-021 账户保护策略</b></span></button><button><Network /><span><small>测试点</small><b>TP-004 账户保护</b></span></button><button className="missing"><TestTube2 /><span><small>用例</small><b>缺少恢复路径用例</b></span></button></section><label><span>处置结论</span><textarea placeholder="填写处理说明或不可测原因" /></label></div><footer><button className="btn" onClick={() => notify('已将该依据标记为待确认。')}>标记待确认</button><button className="btn primary" onClick={() => notify('已基于缺口创建用例草稿。')}><Plus />创建用例</button></footer></aside>
   return <aside className="td-detail-panel"><header><div><small>{basis.kind} · 固定来源</small><b>{basis.id}</b></div><StatusPill tone="success"><LockKeyhole />Hash 已固定</StatusPill></header><div className="td-detail-scroll"><h2>{basis.title}</h2><div className="td-basis-meta"><p><span>来源</span><b>{basis.source}</b></p><p><span>覆盖状态</span><b>{basis.status}</b></p><p><span>内容 Hash</span><code>sha256:9f2a84...e31c</code></p><p><span>固定时间</span><b>2026-08-07 13:08</b></p></div><section className="td-source-quote"><header><FileText /><b>固定原文</b><span>L128-L143</span></header><p>当用户连续输入错误密码达到策略阈值时，系统应进入账户保护状态。保护期间所有登录请求返回统一提示，不得泄漏账号存在性。</p></section><section className="td-detail-section"><h3>派生关系</h3><button><Network /><span><small>测试点</small><b>3 个直接关联节点</b></span><ChevronRight /></button><button><TestTube2 /><span><small>测试用例</small><b>5 条当前用例</b></span><ChevronRight /></button></section></div><footer><button className="btn full" onClick={() => notify('已定位到固定来源原文。')}><Link2 />查看来源定位</button></footer></aside>
 }
