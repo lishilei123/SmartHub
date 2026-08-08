@@ -15,6 +15,7 @@ import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { defaultTokenCodec } from '../application/content.js'
 import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
 import { createTechnicalSolutionExtractionToolRegistry, createTechnicalSolutionReviewToolRegistry } from '../tools/technical-solution-tools.js'
+import { createTestDesignToolRegistry } from '../tools/test-design-tools.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
 import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
@@ -38,7 +39,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
   constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore, private readonly approvalGate?: ToolApprovalGate) {}
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
-    let candidate: AgentCandidateResult | undefined
+    let candidate: AgentCandidateResult | Record<string, unknown> | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     const stage = stageConfiguration(input)
     const inputPlan = stage.usesInputPlan ? required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划') : undefined
@@ -49,7 +50,13 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       entries: [],
       finalMergeCompleted: false,
     } : undefined
-    const registry = stage.isExtraction
+    const registry = stage.isTestDesign
+      ? createTestDesignToolRegistry(stage.submitToolId, stage.schemaVersion, async value => {
+        candidate = value
+        lastSubmissionIssues = []
+        return { accepted: true }
+      })
+      : stage.isExtraction
       ? createRequirementPointExtractionToolRegistry(this.store, async value => {
         const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV5(value, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, required(deliveryManifest, '输入投递证明不存在'))
         if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
@@ -74,7 +81,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         return { accepted: true }
       })
       : createRequirementReviewToolRegistry(async value => {
-        const normalized = new RequirementReviewValidator().normalizeV3(value, stage.fixedExtraction, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
+        const normalized = new RequirementReviewValidator().normalizeV3(value, required(stage.fixedExtraction, 'REQUIREMENT_POINT_EXTRACTION_REQUIRED'), input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
         if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
         candidate = normalized.result
         lastSubmissionIssues = []
@@ -304,7 +311,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       parameters: descriptor.parameters,
       executionMode: 'sequential',
       execute: async (toolCallId, args, toolSignal) => {
-        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: args, context: { snapshot: input.snapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: args, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
         const stage = stageConfiguration(input)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
@@ -342,49 +349,32 @@ function sha256(value: string) { return createHash('sha256').update(value).diges
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }
 
 type StageConfiguration = {
-  isExtraction: true
-  isTechnicalExtraction: false
-  isTechnicalReview: false
-  usesInputPlan: true
-  submitToolId: 'requirement-points.submit_result'
+  isExtraction: boolean
+  isTechnicalExtraction: boolean
+  isTechnicalReview: boolean
+  isTestDesign: boolean
+  usesInputPlan: boolean
+  submitToolId: string
   submitPiName: string
-  schemaVersion: 'requirement-point-extraction/v5'
-  agentLabel: 'RequirementPointExtractionAgent'
-} | {
-  isExtraction: false
-  isTechnicalExtraction: false
-  isTechnicalReview: false
-  usesInputPlan: false
-  submitToolId: 'review.submit_result'
-  submitPiName: string
-  schemaVersion: 'requirement-review/v3'
-  agentLabel: 'RequirementReviewAgent'
-  fixedExtraction: CandidateRequirementPointExtraction
-} | {
-  isExtraction: false
-  isTechnicalExtraction: true
-  isTechnicalReview: false
-  usesInputPlan: true
-  submitToolId: 'technical_solution_points.submit_result'
-  submitPiName: string
-  schemaVersion: 'technical-solution-extraction/v1'
-  agentLabel: 'TechnicalSolutionExtractionAgent'
-} | {
-  isExtraction: false
-  isTechnicalExtraction: false
-  isTechnicalReview: true
-  usesInputPlan: false
-  submitToolId: 'technical_solution_review.submit_result'
-  submitPiName: string
-  schemaVersion: 'technical-solution-review/v2'
-  agentLabel: 'TechnicalSolutionReviewAgent'
+  schemaVersion: string
+  agentLabel: string
+  fixedExtraction?: CandidateRequirementPointExtraction
 }
 
 function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
+  const testDesignStages: Partial<Record<string, { submitToolId: string; schemaVersion: string; agentLabel: string }>> = {
+    'test-analysis': { submitToolId: 'test_analysis.submit_result', schemaVersion: 'test-analysis/v1', agentLabel: 'TestAnalysisAgent' },
+    'functional-test-design': { submitToolId: 'functional_test_design.submit_result', schemaVersion: 'functional-test-design/v1', agentLabel: 'FunctionalTestDesignAgent' },
+    'non-functional-test-design': { submitToolId: 'non_functional_test_design.submit_result', schemaVersion: 'non-functional-test-design/v1', agentLabel: 'NonFunctionalTestDesignAgent' },
+    'test-case-synthesis': { submitToolId: 'test_case_synthesis.submit_result', schemaVersion: 'test-case-synthesis/v1', agentLabel: 'TestCaseSynthesisAgent' },
+  }
+  const testDesign = testDesignStages[input.snapshot.agentDefinition.agentKey]
+  if (testDesign) return stage({ isExtraction: false, isTechnicalExtraction: false, isTechnicalReview: false, isTestDesign: true, usesInputPlan: false, ...testDesign })
   if (input.snapshot.agentDefinition.agentKey === 'requirement-point-extraction') return stage({
     isExtraction: true,
     isTechnicalExtraction: false,
     isTechnicalReview: false,
+    isTestDesign: false,
     usesInputPlan: true,
     submitToolId: 'requirement-points.submit_result',
     schemaVersion: 'requirement-point-extraction/v5',
@@ -394,6 +384,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: false,
     isTechnicalExtraction: true,
     isTechnicalReview: false,
+    isTestDesign: false,
     usesInputPlan: true,
     submitToolId: 'technical_solution_points.submit_result',
     schemaVersion: 'technical-solution-extraction/v1',
@@ -403,6 +394,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: false,
     isTechnicalExtraction: false,
     isTechnicalReview: true,
+    isTestDesign: false,
     usesInputPlan: false,
     submitToolId: 'technical_solution_review.submit_result',
     schemaVersion: 'technical-solution-review/v2',
@@ -413,6 +405,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     isExtraction: false,
     isTechnicalExtraction: false,
     isTechnicalReview: false,
+    isTestDesign: false,
     usesInputPlan: false,
     submitToolId: 'review.submit_result',
     schemaVersion: 'requirement-review/v3',
@@ -425,7 +418,9 @@ function stage<T extends Omit<StageConfiguration, 'submitPiName' | 'fixedExtract
 }
 
 function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration) {
-  return stage.isTechnicalExtraction
+  return stage.isTestDesign
+    ? required(input.testDesignTask, 'TEST_DESIGN_TASK_REQUIRED')
+    : stage.isTechnicalExtraction
     ? renderTechnicalSolutionTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot)
     : stage.isTechnicalReview
     ? renderTechnicalSolutionReviewTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED'))

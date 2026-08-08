@@ -8,7 +8,8 @@ import {
   X, XCircle,
 } from 'lucide-react'
 import type { ProjectVersion } from './project-version-api'
-import { getTestDesignCreateBlockers, PREVIEW_TEST_DESIGN_ID, PREVIEW_WORKFLOW_RUN_ID, resolveTestDesignRoute } from './test-design-state'
+import { applyTestDesignGateDecision, createTestDesign, createTestDesignRun, loadTestCaseSetVersion, loadTestDesign, loadTestDesignInputs, loadTestDesignRun, loadTestDesigns, type TestDesign, type TestDesignInputCandidates, type TestDesignWorkflowRun } from './test-design-api'
+import { resolveTestDesignRoute } from './test-design-state'
 import './test-design.css'
 import './test-design-collection.css'
 
@@ -191,11 +192,56 @@ function setRouteContext(params: Record<string, string | null>) {
   window.history.pushState({}, '', url)
 }
 
+const nodeLabels: Record<string, string> = {
+  test_analysis: '测试分析',
+  scope_gate: '范围确认门禁',
+  functional_design: '功能测试设计',
+  non_functional_design: '非功能测试设计',
+  tree_merge: '测试点树归并',
+  tree_gate: '测试点树确认门禁',
+  test_case_synthesis: '测试用例具象化',
+  coverage_audit: '覆盖反向审计',
+  completed: '已完成',
+  cancelled: '已取消',
+  failed: '执行失败',
+}
+
+function nodeLabel(value: string) { return nodeLabels[value] ?? value }
+function nodeStatusLabel(value: string) { return ({ pending: '等待', queued: '已排队', running: '运行中', waiting_gate: '等待确认', succeeded: '成功', failed: '失败', cancelled: '已取消', stale: '已过期' } as Record<string, string>)[value] ?? value }
+function runStatusLabel(value?: string) { return value ? ({ queued: '已排队', running: '运行中', waiting_gate: '等待确认', succeeded: '已完成', failed: '运行失败', cancelled: '已取消' } as Record<string, string>)[value] ?? value : '尚未运行' }
+function runStatusTone(value?: string): StatusTone { return value === 'failed' || value === 'cancelled' ? 'danger' : value === 'succeeded' ? 'success' : value === 'running' || value === 'queued' ? 'info' : value === 'waiting_gate' ? 'warning' : 'neutral' }
+function runStageLabel(stage?: string, status?: string) { return status === 'failed' ? '执行失败' : stage ? nodeLabel(stage) : '尚未开始' }
+function runErrorMessage(error?: string, code?: string) { const value = error?.trim() || '服务端未记录可公开的失败详情。'; return code && value.startsWith(`${code}:`) ? value.slice(code.length + 1).trim() : value }
+function formatRunTime(value?: string) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '未记录' }
+function shortId(value: string) { return value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value }
+function shortHash(value: string) { return value.length > 20 ? `${value.slice(0, 10)}…${value.slice(-8)}` : value }
+function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === 'object' ? value as Record<string, unknown> : {} }
+function runTabCount(tab: TabKey, run: TestDesignWorkflowRun) {
+  if (tab === 'overview' || tab === 'workflow') return undefined
+  if (tab === 'analysis') return run.findings.length
+  if (tab === 'retrieval') return run.retrievalSnapshot.hits.length
+  if (tab === 'tree') return run.artifacts.filter(value => recordOf(value).nodeKey === 'tree_merge').length
+  if (tab === 'cases') return run.testCases.length
+  if (tab === 'case-set') return 0
+  if (tab === 'data') return run.dataSetVersions.length
+  if (tab === 'coverage') return run.coverageAudits.length
+  if (tab === 'history') return run.historicalSnapshot.items.length
+  return run.confirmationItems.length
+}
+
 export function TestDesignPage({ projectVersion, onManageVersions, notify }: Props) {
   const initialRoute = readPreviewRoute()
   const [view, setView] = useState<ViewMode>(initialRoute.view)
   const [collectionView, setCollectionView] = useState<CollectionView>(initialRoute.collectionView)
   const [tab, setTab] = useState<TabKey>(initialRoute.tab)
+  const [activeContext, setActiveContext] = useState({ testDesignId: initialRoute.testDesignId, workflowRunId: initialRoute.workflowRunId })
+  const [designs, setDesigns] = useState<TestDesign[]>([])
+  const [designsLoading, setDesignsLoading] = useState(false)
+  const [designInputs, setDesignInputs] = useState<TestDesignInputCandidates | null>(null)
+  const [activeDesign, setActiveDesign] = useState<TestDesign | null>(null)
+  const [activeRun, setActiveRun] = useState<TestDesignWorkflowRun | null>(null)
+  const [workspaceLoading, setWorkspaceLoading] = useState(false)
+  const [workspaceError, setWorkspaceError] = useState('')
   const [basisMode, setBasisMode] = useState<BasisMode>('review_baseline')
   const [selectedBasis, setSelectedBasis] = useState(basisItems[0].id)
   const [selectedTreeNode, setSelectedTreeNode] = useState('TP-009')
@@ -210,6 +256,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   const [treeConflict, setTreeConflict] = useState(false)
   const [treeNodeList, setTreeNodeList] = useState<TreeNode[]>(treeNodes)
   const [createStep, setCreateStep] = useState(1)
+  const [designName, setDesignName] = useState('')
   const [knowledgeGoal, setKnowledgeGoal] = useState('')
   const [selectedAssets, setSelectedAssets] = useState<string[]>([])
   const [augmentation, setAugmentation] = useState('disabled')
@@ -218,6 +265,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   const [caseDrafts, setCaseDrafts] = useState<Record<string, CaseDraft>>(() => Object.fromEntries(cases.map(item => [item.id, createCaseDraft(item)])))
   const [caseSaveStates, setCaseSaveStates] = useState<Record<string, SaveState>>(() => Object.fromEntries(cases.map(item => [item.id, 'clean'])))
   const [caseRevisions, setCaseRevisions] = useState<Record<string, number>>(() => Object.fromEntries(cases.map(item => [item.id, 6])))
+  const [gateSubmitting, setGateSubmitting] = useState(false)
 
   const visibleBasisItems = basisMode === 'review_baseline' ? basisItems : knowledgeBasisItems
   const activeBasis = visibleBasisItems.find(item => item.id === selectedBasis) ?? visibleBasisItems[0]
@@ -232,23 +280,112 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   }), [caseDimensionFilter, caseDrafts, caseFilter, caseQuery])
 
   useEffect(() => {
+    if (!projectVersion) return
+    setDesignsLoading(true)
+    void Promise.all([loadTestDesigns(projectVersion.id), loadTestDesignInputs(projectVersion.id)])
+      .then(([designResponse, inputResponse]) => { setDesigns(designResponse.items); setDesignInputs(inputResponse) })
+      .catch(error => notify(error instanceof Error ? error.message : '测试设计数据加载失败', 'error'))
+      .finally(() => setDesignsLoading(false))
+  }, [notify, projectVersion])
+
+  useEffect(() => {
+    if (!projectVersion || view !== 'workspace' || !activeContext.testDesignId || !activeContext.workflowRunId) return
+    setWorkspaceLoading(true)
+    setWorkspaceError('')
+    void Promise.all([
+      loadTestDesign(projectVersion.id, activeContext.testDesignId),
+      loadTestDesignRun(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId),
+    ]).then(([design, run]) => {
+      setActiveDesign(design)
+      setActiveRun(run)
+      setBasisMode(design.basisMode)
+    }).catch(error => {
+      setActiveDesign(null)
+      setActiveRun(null)
+      setWorkspaceError(error instanceof Error ? error.message : '测试设计运行加载失败')
+    }).finally(() => setWorkspaceLoading(false))
+  }, [activeContext, projectVersion, view])
+
+  useEffect(() => {
     const restore = () => {
       const route = readPreviewRoute()
       setView(route.view)
       setTab(route.tab)
       setCollectionView(route.collectionView)
+      setActiveContext({ testDesignId: route.testDesignId, workflowRunId: route.workflowRunId })
     }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
   }, [])
 
-  const openWorkspace = () => {
+  const openWorkspace = (candidate?: TestDesign) => {
+    const design = candidate ?? designs.find(item => item.latestRun)
+    if (!design?.latestRun) {
+      notify('该测试设计还没有可查看的工作流运行。', 'warning')
+      return
+    }
+    setActiveDesign(design)
+    setActiveRun(null)
+    setActiveContext({ testDesignId: design.id, workflowRunId: design.latestRun.id })
     setView('workspace')
-    setRouteContext({ testDesignId: 'td-auth-20260807', workflowRunId: 'wf-20260807-03', tab })
+    setRouteContext({ testDesignId: design.id, workflowRunId: design.latestRun.id, tab, create: null })
   }
   const returnToList = () => {
     setView('list')
-    setRouteContext({ testDesignId: null, workflowRunId: null, tab: null })
+    setActiveContext({ testDesignId: null, workflowRunId: null })
+    setActiveDesign(null)
+    setActiveRun(null)
+    setWorkspaceError('')
+    setRouteContext({ testDesignId: null, workflowRunId: null, tab: null, create: null })
+  }
+  const refreshWorkspace = () => {
+    if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId) return
+    setWorkspaceLoading(true)
+    setWorkspaceError('')
+    void Promise.all([
+      loadTestDesign(projectVersion.id, activeContext.testDesignId),
+      loadTestDesignRun(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId),
+    ]).then(([design, run]) => { setActiveDesign(design); setActiveRun(run) })
+      .catch(error => setWorkspaceError(error instanceof Error ? error.message : '测试设计运行加载失败'))
+      .finally(() => setWorkspaceLoading(false))
+  }
+  const submitGateDecision = async (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => {
+    if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId || !activeRun) return
+    const gateNodeKey = gateKey === 'scope' ? 'scope_gate' : 'tree_gate'
+    const gateNode = activeRun.nodeRuns.find(item => item.nodeKey === gateNodeKey)
+    const target = gateKey === 'scope'
+      ? activeRun.artifacts.find(item => item.nodeKey === 'test_analysis')
+      : activeRun.testPointTree
+    if (!gateNode || gateNode.status !== 'waiting_gate' || !target) {
+      notify('当前门禁已变化，请刷新工作流后再操作。', 'warning')
+      return
+    }
+    setGateSubmitting(true)
+    try {
+      const nextRun = await applyTestDesignGateDecision(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId, gateKey, {
+        targetId: target.id,
+        targetRevision: gateKey === 'scope' ? (target as { generation: number }).generation : (target as { currentRevision: number }).currentRevision,
+        expectedVersion: activeRun.gateDecisions.filter(item => item.gateKey === gateKey).length,
+        decision,
+        ...(comment.trim() ? { comment: comment.trim() } : {}),
+      })
+      setActiveRun(nextRun)
+      notify(decision === 'approved' ? `${gateKey === 'scope' ? '测试范围' : '测试点树'}已确认，工作流将继续执行。` : `${gateKey === 'scope' ? '测试范围' : '测试点树'}已驳回，运行已停止。`, decision === 'approved' ? 'success' : 'warning')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '门禁决策提交失败', 'error')
+    } finally {
+      setGateSubmitting(false)
+    }
+  }
+  const startDesign = async (input: Record<string, unknown>) => {
+    if (!projectVersion) throw new Error('请先选择项目版本')
+    const projectVersionId = projectVersion.id
+    const design = await createTestDesign(projectVersionId, input)
+    const run = await createTestDesignRun(projectVersionId, design.id)
+    const created: TestDesign = { ...design, latestRun: { id: run.id, testDesignId: design.id, projectVersionId, status: run.status, stage: 'test_analysis', progress: 0, createdAt: new Date().toISOString() } }
+    setDesigns(current => [created, ...current.filter(item => item.id !== created.id)])
+    notify('测试设计已创建，并已提交真实工作流运行。')
+    openWorkspace(created)
   }
   const selectTab = (next: TabKey) => {
     setTab(next)
@@ -391,8 +528,12 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   }
 
   if (view === 'create') {
+    if (!designInputs) return <section className="td-create-page"><header><button className="icon-btn" onClick={() => { setView('list'); setRouteContext({ create: null }) }} aria-label="关闭创建页"><X /></button><div><span>创建测试设计</span><h2>正在读取当前版本可选输入</h2></div></header><RunLoading /></section>
     return <CreateDesign
       projectVersion={projectVersion}
+      inputs={designInputs}
+      designName={designName}
+      setDesignName={setDesignName}
       basisMode={basisMode}
       setBasisMode={changeBasisMode}
       createStep={createStep}
@@ -407,13 +548,23 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
       setAugmentationAssets={setAugmentationAssets}
       historyEnabled={historyEnabled}
       setHistoryEnabled={setHistoryEnabled}
-      onCancel={() => setView('list')}
-      onStart={() => { notify('交互预览：已创建测试设计运行。'); openWorkspace() }}
+      onCancel={() => { setView('list'); setRouteContext({ create: null }) }}
+      onStart={startDesign}
     />
   }
 
   if (view === 'list') {
-    return <DesignList projectVersion={projectVersion} view={collectionView} setView={selectCollectionView} onCreate={() => setView('create')} onOpen={openWorkspace} notify={notify} />
+    return <DesignList projectVersion={projectVersion} view={collectionView} setView={selectCollectionView} designs={designs} loading={designsLoading} onCreate={() => { setView('create'); setRouteContext({ create: '1' }) }} onOpen={openWorkspace} notify={notify} />
+  }
+
+  if (workspaceError) {
+    return <section className="td-route-error" role="alert">
+      <XCircle />
+      <StatusPill tone="danger">运行加载失败</StatusPill>
+      <h2>无法打开指定的测试设计运行</h2>
+      <p>{workspaceError}</p>
+      <button className="btn primary" onClick={returnToList}><ArrowRight />返回测试设计列表</button>
+    </section>
   }
 
   return <section className={`td-workbench ${rightOpen ? '' : 'detail-collapsed'}`}>
@@ -421,50 +572,276 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
       <div className="td-title-block">
         <button className="td-back" onClick={returnToList} aria-label="返回测试设计列表"><ChevronRight /></button>
         <span className="td-workbench-icon"><TestTube2 /></span>
-        <div><span>测试设计</span><h2>登录与身份认证测试设计</h2></div>
-        <StatusPill tone="warning">待覆盖确认</StatusPill>
+        <div><span>测试设计</span><h2>{activeDesign?.name ?? '正在加载测试设计'}</h2></div>
+        <StatusPill tone={runStatusTone(activeRun?.status)}>{workspaceLoading ? '正在加载' : runStatusLabel(activeRun?.status)}</StatusPill>
       </div>
       <div className="td-head-actions">
         <button className="icon-btn td-mobile-detail-button" onClick={() => setRightOpen(value => !value)} aria-label={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
-        <button className="btn" onClick={() => notify('交互预览：正式刷新将按当前 workflowRunId 重新读取服务端状态。')}><RefreshCw />刷新</button>
-        <button className="btn" onClick={() => notify('交互预览：正式导出只会下载指定 TestCaseSetVersion。')}><Download />导出<ChevronDown /></button>
-        <button className="btn primary" onClick={() => notify('仍有 3 个发布阻断项，请先完成覆盖处置。', 'warning')}><LockKeyhole />发布新功能用例集</button>
+        <button className="btn" disabled={workspaceLoading} onClick={refreshWorkspace}><RefreshCw className={workspaceLoading ? 'spin' : ''} />刷新</button>
+        <button className="btn" disabled={!activeRun?.testCases.length} onClick={() => notify('当前运行尚未发布用例集，暂无可导出的固定版本。', 'warning')}><Download />导出<ChevronDown /></button>
+        <button className="btn primary" disabled={activeRun?.status !== 'succeeded'} onClick={() => notify('请在用例集视图完成发布门禁。', 'warning')}><LockKeyhole />发布用例集</button>
         <button className="icon-btn" aria-label="更多操作"><MoreHorizontal /></button>
       </div>
     </header>
 
     <div className="td-context-bar">
-      <dl><div><dt>项目版本</dt><dd>{projectVersion.name}</dd></div><div><dt>测试设计</dt><dd>{PREVIEW_TEST_DESIGN_ID}</dd></div><div><dt>工作流运行</dt><dd>{PREVIEW_WORKFLOW_RUN_ID}</dd></div><div><dt>主依据</dt><dd>{basisMode === 'review_baseline' ? '评审基线' : '知识库资料'}</dd></div></dl>
-      <span className="td-preview-flag"><CircleDot />交互预览数据</span>
-      <span className="td-agent-ready"><CheckCircle2 />4/4 Agent 就绪</span>
+      <dl><div><dt>项目版本</dt><dd>{projectVersion.name}</dd></div><div><dt>测试设计</dt><dd>{activeContext.testDesignId}</dd></div><div><dt>工作流运行</dt><dd>{activeContext.workflowRunId}</dd></div><div><dt>主依据</dt><dd>{basisMode === 'review_baseline' ? '评审基线' : '知识库资料'}</dd></div></dl>
+      <span className="td-preview-flag"><CircleDot />真实运行数据</span>
+      {activeRun?.errorCode ? <span className="td-run-error-code"><AlertTriangle />{activeRun.errorCode}</span> : <span className="td-agent-ready"><CheckCircle2 />运行上下文已固定</span>}
     </div>
 
     <nav className="td-tabs" aria-label="测试设计视图">
-      {tabs.map(item => <button key={item.key} className={tab === item.key ? 'active' : ''} onClick={() => selectTab(item.key)}>{item.label}{item.count !== undefined && <span>{item.count}</span>}</button>)}
+      {tabs.map(item => { const count = activeRun ? runTabCount(item.key, activeRun) : item.count; return <button key={item.key} className={tab === item.key ? 'active' : ''} onClick={() => selectTab(item.key)}>{item.label}{count !== undefined && <span>{count}</span>}</button> })}
       <button className="td-detail-toggle" onClick={() => setRightOpen(value => !value)} title={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
     </nav>
 
     <div className="td-workspace-grid">
-      <BasisPanel selected={selectedBasis} onSelect={setSelectedBasis} basisMode={basisMode} />
+      {activeRun ? <RunBasisPanel run={activeRun} /> : <BasisPanel selected={selectedBasis} onSelect={setSelectedBasis} basisMode={basisMode} />}
       <main className="td-main-canvas">
-        {tab === 'overview' && <Overview onNavigate={selectTab} />}
-        {tab === 'workflow' && <WorkflowView notify={notify} />}
-        {tab === 'analysis' && <AnalysisView />}
-        {tab === 'retrieval' && <RetrievalView />}
-        {tab === 'tree' && <TreeView nodes={treeNodeList} selected={selectedTreeNode} onSelect={setSelectedTreeNode} approved={treeApproved} revision={treeRevision} dirty={treeDirty} conflict={treeConflict} onAdd={addTreeNode} onMove={moveTreeNode} onSplit={splitTreeNode} onMerge={mergeTreeNode} onDelete={deleteTreeNode} onToggleExpanded={id => markTreeChanged(treeNodeList.map(node => node.id === id ? { ...node, expanded: !node.expanded } : node))} onSave={saveTree} onPreviewConflict={() => setTreeConflict(true)} onResolveConflict={() => { setTreeConflict(false); setTreeDirty(true) }} onApprove={() => { if (treeDirty) { notify('请先保存当前树修改再批准。', 'warning'); return } setTreeApproved(true); notify(`树 r${treeRevision} 已在当前会话预览中批准。`) }} onInvalidate={() => { setTreeApproved(false); notify('树已进入编辑状态，下游产物在当前预览中标记为过期。', 'warning') }} />}
-        {tab === 'cases' && <CasesView selected={selectedCase} onSelect={setSelectedCase} filter={caseFilter} setFilter={setCaseFilter} dimensionFilter={caseDimensionFilter} setDimensionFilter={setCaseDimensionFilter} query={caseQuery} setQuery={setCaseQuery} rows={filteredCases} notify={notify} />}
-        {tab === 'case-set' && <FeatureCaseSetView notify={notify} />}
-        {tab === 'data' && <DataView />}
-        {tab === 'coverage' && <CoverageView notify={notify} />}
-        {tab === 'history' && <HistoryView notify={notify} />}
-        {tab === 'questions' && <QuestionsView notify={notify} />}
+        {workspaceLoading && <RunLoading />}
+        {!workspaceLoading && activeRun && tab === 'overview' && <RunOverview design={activeDesign} run={activeRun} onNavigate={selectTab} />}
+        {!workspaceLoading && activeRun && tab === 'workflow' && <RunWorkflowView design={activeDesign} run={activeRun} onGateDecision={submitGateDecision} gateSubmitting={gateSubmitting} />}
+        {!workspaceLoading && activeRun && !['overview', 'workflow'].includes(tab) && <RunArtifactState tab={tab} run={activeRun} />}
       </main>
-      {rightOpen && <DetailPanel tab={tab} basis={activeBasis} treeNode={activeTreeNode} onUpdateTreeNode={updateTreeNode} onSaveTree={saveTree} treeDirty={treeDirty} testCase={activeCase} draft={activeCaseDraft} onChangeDraft={updateCaseDraft} onChangeMethodDraft={updateMethodDraft} onToggleMethod={toggleCaseMethod} saveState={caseSaveStates[activeCase.id] ?? 'clean'} revision={caseRevisions[activeCase.id] ?? 6} onSetSaveState={state => setCaseSaveStates(current => ({ ...current, [activeCase.id]: state }))} onSave={saveCase} approved={treeApproved} notify={notify} />}
+      {rightOpen && activeRun && <RunDetailPanel design={activeDesign} run={activeRun} />}
     </div>
   </section>
 }
 
-function DesignList({ projectVersion, view, setView, onCreate, onOpen, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; onCreate: () => void; onOpen: () => void; notify: Notify }) {
+function RunLoading() {
+  return <div className="td-run-loading"><RefreshCw className="spin" /><h2>正在加载运行上下文</h2><p>正在读取固定输入、节点状态和运行结果。</p></div>
+}
+
+function RunOverview({ design, run, onNavigate }: { design: TestDesign | null; run: TestDesignWorkflowRun; onNavigate: (tab: TabKey) => void }) {
+  const failedNode = run.nodeRuns.find(item => item.status === 'failed')
+  const completedNodes = run.nodeRuns.filter(item => item.status === 'succeeded').length
+  const pendingGate = run.nodeRuns.find(item => item.nodeKey === 'scope_gate' && item.status === 'waiting_gate') ? 'scope' : run.nodeRuns.find(item => item.nodeKey === 'tree_gate' && item.status === 'waiting_gate') ? 'test-point-tree' : null
+  return <div className="td-real-overview">
+    {run.status === 'failed' && <section className="td-run-failure-banner" role="alert"><AlertTriangle /><div><small>{run.errorCode ?? 'TEST_DESIGN_RUN_FAILED'}</small><h2>测试设计运行失败</h2><p>{runErrorMessage(run.error, run.errorCode)}</p></div></section>}
+    {pendingGate && <section className="td-gate-overview-callout"><Users /><div><b>{pendingGate === 'scope' ? '测试范围确认门禁正在等待处理' : '测试点树确认门禁正在等待处理'}</b><p>工作流已暂停，确认固定产物后才能继续后续测试设计阶段。</p></div><button className="btn primary" onClick={() => onNavigate('workflow')}>{pendingGate === 'scope' ? '确认测试范围' : '批准测试点树'}<ChevronRight /></button></section>}
+    <div className="td-real-metrics">
+      <article><span><GitBranch /></span><p><small>工作流进度</small><b>{run.progress}%</b><em>{completedNodes} / {run.nodeRuns.length} 个节点成功</em></p></article>
+      <article><span><FileText /></span><p><small>固定测试依据</small><b>{run.basisSnapshot.items.length}</b><em>{design?.basisMode === 'review_baseline' ? '评审基线' : '知识库资料'}</em></p></article>
+      <article><span><TestTube2 /></span><p><small>生成测试用例</small><b>{run.testCases.length}</b><em>{run.artifacts.length} 个工作流产物</em></p></article>
+      <article><span><Clock3 /></span><p><small>当前状态</small><b>{runStatusLabel(run.status)}</b><em>{runStageLabel(run.stage, run.status)}</em></p></article>
+    </div>
+    <section className="td-real-flow-summary"><header><div><b>节点执行状态</b><small>当前工作流运行的服务端真实记录</small></div><button onClick={() => onNavigate('workflow')}>查看工作流<ChevronRight /></button></header><div>{run.nodeRuns.map(node => <article key={node.id} className={node.status}><span>{node.status === 'succeeded' ? <Check /> : node.status === 'failed' ? <XCircle /> : <Clock3 />}</span><p><small>{nodeStatusLabel(node.status)}</small><b>{nodeLabel(node.nodeKey)}</b><em>{node.status === 'failed' ? node.errorCode ?? '执行失败' : node.attempt > 0 ? `attempt ${node.attempt}` : '尚未执行'}</em></p></article>)}</div></section>
+    {failedNode && <section className="td-run-next-step"><Bot /><div><b>失败发生在 {nodeLabel(failedNode.nodeKey)}</b><p>{runErrorMessage(failedNode.error ?? run.error, failedNode.errorCode ?? run.errorCode)}</p></div></section>}
+  </div>
+}
+
+function RunWorkflowView({ design, run, onGateDecision, gateSubmitting }: { design: TestDesign | null; run: TestDesignWorkflowRun; onGateDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void>; gateSubmitting: boolean }) {
+  const node = (nodeKey: string) => run.nodeRuns.find(item => item.nodeKey === nodeKey)
+  const fixedInputTime = formatRunTime(run.basisSnapshot.createdAt)
+  const gateDecision = (gateKey: 'scope' | 'test-point-tree') => [...run.gateDecisions].reverse().find(item => item.gateKey === gateKey)
+  const scopeDecision = gateDecision('scope')
+  const treeDecision = gateDecision('test-point-tree')
+  const analysis = node('test_analysis')
+  const scopeGate = node('scope_gate')
+  const functional = node('functional_design')
+  const nonFunctional = node('non_functional_design')
+  const treeMerge = node('tree_merge')
+  const treeGate = node('tree_gate')
+  const synthesis = node('test_case_synthesis')
+  const coverage = node('coverage_audit')
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const pendingGate = scopeGate?.status === 'waiting_gate' ? 'scope' : treeGate?.status === 'waiting_gate' ? 'test-point-tree' : null
+  return <div className="td-workflow-view td-real-workflow">
+    <header className="td-canvas-toolbar"><div><b>固定工作流</b><small>test-design-workflow/v1 · {run.id} · 服务端真实拓扑</small></div><StatusPill tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</StatusPill><span><i className="done" />成功</span><span><i className="running" />进行中</span><span><i />等待 / 门禁</span>{pendingGate && <a className="btn primary td-gate-entry" href="#test-design-gate-decision"><Users />{pendingGate === 'scope' ? '确认测试范围' : '批准测试点树'}</a>}<button className="btn" onClick={() => setDetailsOpen(value => !value)}>{detailsOpen ? '收起详情' : '运行详情'}</button></header>
+    <div className="td-workflow-canvas td-workflow-sequence td-real-workflow-canvas">
+      <div className="td-flow-column start"><small>固定输入</small><FixedInputCard run={run} time={fixedInputTime} /></div>
+      <ArrowRight className="td-flow-arrow inline" />
+      <div className="td-flow-column analysis"><small>阶段 1</small><RunWorkflowCard node={analysis} nodeKey="test_analysis" kind="agent" subtitle="依据解构与受控知识召回" /></div>
+      <ArrowRight className="td-flow-arrow inline" />
+      <div className="td-flow-column gate"><small>人工门禁 1</small><RunWorkflowCard node={scopeGate} nodeKey="scope_gate" kind="gate" subtitle={scopeDecision ? `${scopeDecision.decision === 'approved' ? '已批准' : '已拒绝'} · ${scopeDecision.actorId}` : '等待范围确认'} /></div>
+      <ArrowRight className="td-flow-arrow inline" />
+      <div className="td-flow-branch"><div><small>阶段 2 · 并行</small><RunWorkflowCard node={functional} nodeKey="functional_design" kind="agent" subtitle="功能测试点发散" /><RunWorkflowCard node={nonFunctional} nodeKey="non_functional_design" kind="agent" subtitle="性能 / 稳定性 / 兼容性 / 安全" /></div></div>
+      <ArrowRight className="td-flow-arrow inline" />
+      <div className="td-flow-column server"><small>服务端阶段</small><RunWorkflowCard node={treeMerge} nodeKey="tree_merge" kind="server" subtitle="合并专项候选并保留来源、重复与冲突" /></div>
+      <ArrowRight className="td-flow-arrow inline" />
+      <div className="td-flow-column gate"><small>人工门禁 2</small><RunWorkflowCard node={treeGate} nodeKey="tree_gate" kind="gate" subtitle={treeDecision ? `${treeDecision.decision === 'approved' ? '已批准' : '已拒绝'} · ${treeDecision.actorId}` : '等待测试点树批准'} /></div>
+      <ArrowRight className="td-flow-arrow inline" />
+      <div className="td-flow-column synthesis"><small>阶段 3-4</small><RunWorkflowCard node={synthesis} nodeKey="test_case_synthesis" kind="agent" subtitle="测试用例与数据需求具象化" /></div>
+      <ArrowRight className="td-flow-arrow inline" />
+      <div className="td-flow-column audit server"><small>阶段 5 · 服务端</small><RunWorkflowCard node={coverage} nodeKey="coverage_audit" kind="server" subtitle="覆盖反向审计与候选发布" /></div>
+    </div>
+    {pendingGate && <GateDecisionPanel gateKey={pendingGate} design={design} run={run} submitting={gateSubmitting} onDecision={onGateDecision} />}
+    {detailsOpen && <section className="td-run-details td-real-run-details" aria-label="工作流节点详情"><header><b>节点执行详情</b><span>来源：workflowRunId 对应的服务端记录；错误仅展示脱敏公开信息</span></header>{run.nodeRuns.map(nodeRun => <div key={nodeRun.id}><b>{nodeLabel(nodeRun.nodeKey)}</b><span><strong>{nodeExecutionSummary(nodeRun)}</strong><small>{nodeRun.error ? `${nodeRun.errorCode ?? '执行失败'}：${runErrorMessage(nodeRun.error, nodeRun.errorCode)}` : nodeRun.dependencies.length ? `依赖：${nodeRun.dependencies.map(nodeLabel).join('、')}` : '无上游依赖'}</small></span><time>{formatNodeTime(nodeRun.startedAt)} → {formatNodeTime(nodeRun.finishedAt)}</time><em>{nodeRun.execution ? (nodeRun.execution.degraded ? '已降级' : '未降级') : isAgentNode(nodeRun.nodeKey) ? '未记录' : '不适用'}</em><StatusPill tone={runStatusTone(nodeRun.status)}>{nodeStatusLabel(nodeRun.status)} · {nodeRun.attempt} 次尝试</StatusPill></div>)}</section>}
+  </div>
+}
+
+function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { gateKey: 'scope' | 'test-point-tree'; design: TestDesign | null; run: TestDesignWorkflowRun; submitting: boolean; onDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void> }) {
+  const [comment, setComment] = useState('')
+  const scopeArtifact = run.artifacts.find(item => item.nodeKey === 'test_analysis')
+  const scopeContent = recordOf(scopeArtifact?.content)
+  const analysisContent = recordOf(scopeContent.analysis)
+  const rangeContent = recordOf(analysisContent.range ?? scopeContent.range)
+  const scopeRecord = recordOf(scopeContent.scope)
+  const requirements = labelScopeRefs(displayValues(rangeContent.requirements ?? scopeRecord.requirements ?? scopeContent.requirements), run, ['requirementPoints'])
+  const technicalSolutions = labelScopeRefs(displayValues(rangeContent.technicalSolutions ?? rangeContent.solutions ?? scopeRecord.technicalSolutions ?? scopeContent.technicalSolutions), run, ['solutionPoints', 'technicalSolutionPoints'])
+  const includedScopes = uniqueText([
+    ...scopeRules(design?.input?.includedScopes),
+    ...displayValues(analysisContent.includedScopes ?? scopeContent.includedScopes ?? scopeRecord.included),
+  ])
+  const excludedScopes = uniqueText([
+    ...scopeRules(design?.input?.excludedScopes),
+    ...displayValues(analysisContent.excludedScopes ?? scopeContent.excludedScopes ?? scopeRecord.excluded),
+  ])
+  const focusDimensions = uniqueText([
+    ...displayValues(design?.input?.focusDimensions),
+    ...displayValues(analysisContent.focusDimensions ?? analysisContent.dimensions ?? scopeContent.focusDimensions),
+  ]).map(dimensionLabel)
+  const coverageObjectives = uniqueText([
+    ...displayValues(design?.input?.userCoverageObjectives),
+    ...displayValues(analysisContent.coverageObjectives ?? scopeContent.coverageObjectives),
+  ])
+  const risks = uniqueText([
+    ...displayValues(analysisContent.risks ?? scopeContent.risks),
+    ...run.findings.map(readableText),
+  ])
+  const confirmations = uniqueText([
+    ...displayValues(analysisContent.pendingConfirmations ?? analysisContent.confirmationItems ?? scopeContent.confirmationItems),
+    ...run.confirmationItems.map(item => { const value = recordOf(item); return readableText(value.question ?? value.title) }),
+  ])
+  const historicalDispositions = displayValues(analysisContent.historicalCaseDispositions ?? analysisContent.historicalCases ?? scopeContent.historicalCaseDispositions)
+  const scopeText = readableText(scopeContent.scope)
+    || readableText(scopeContent.summary)
+    || readableText(scopeContent.overview)
+    || `已识别 ${requirements.length} 个需求点、${technicalSolutions.length} 个技术方案要点，请核对下列范围边界后再确认。`
+  const isScope = gateKey === 'scope'
+  const targetId = isScope ? scopeArtifact?.id : run.testPointTree?.id
+  const targetRevision = isScope ? scopeArtifact?.generation : run.testPointTree?.currentRevision
+  return <section className="td-gate-decision" id="test-design-gate-decision" aria-label={isScope ? '测试范围确认' : '测试点树批准'}>
+    <header><span><Users /></span><div><small>{isScope ? '人工门禁 1' : '人工门禁 2'} · 等待你的决策</small><h2>{isScope ? '确认本次测试范围' : '批准当前测试点树'}</h2><p>{isScope ? scopeText : `当前测试点树 revision r${targetRevision ?? '-'} 已固定，批准后将进入测试用例具象化。`}</p></div><StatusPill tone="warning">等待确认</StatusPill></header>
+    <div className="td-gate-facts">
+      <div><small>固定目标</small><b>{targetId ? shortId(targetId) : '目标尚未生成'}</b></div>
+      <div><small>目标版本</small><b>{targetRevision ?? '-'}</b></div>
+      <div><small>分析风险</small><b>{risks.length} 项</b></div>
+      <div><small>待确认项</small><b>{confirmations.length} 项</b></div>
+    </div>
+    {isScope && <div className="td-scope-review" aria-label="本次测试范围明细">
+      <section className="td-scope-objective">
+        <small>测试目标</small>
+        <p>{design?.objective || readableText(analysisContent.objective) || '未声明测试目标'}</p>
+      </section>
+      <div className="td-scope-grid">
+        <ScopeReviewSection title="纳入的需求点" count={requirements.length} items={requirements} empty="分析产物未列出需求点" tone="included" />
+        <ScopeReviewSection title="纳入的技术方案要点" count={technicalSolutions.length} items={technicalSolutions} empty="分析产物未列出技术方案要点" tone="included" />
+        <ScopeReviewSection title="显式包含规则" count={includedScopes.length} items={includedScopes} empty="未额外限定，按固定基线全量分析" />
+        <ScopeReviewSection title="明确排除范围" count={excludedScopes.length} items={excludedScopes} empty="未声明排除项" tone="excluded" />
+        <ScopeReviewSection title="关注维度" count={focusDimensions.length} items={focusDimensions} empty="未限定重点维度，后续仍需逐项判断五维适用性" />
+        <ScopeReviewSection title="用户覆盖目标" count={coverageObjectives.length} items={coverageObjectives} empty="未额外声明覆盖目标" />
+        <ScopeReviewSection title="分析风险" count={risks.length} items={risks} empty="分析产物未报告风险" tone={risks.length ? 'warning' : undefined} />
+        <ScopeReviewSection title="范围待确认项" count={confirmations.length} items={confirmations} empty="没有待确认项" tone={confirmations.length ? 'warning' : undefined} />
+        <ScopeReviewSection title="历史用例处置" count={historicalDispositions.length || run.historicalSnapshot.items.length} items={historicalDispositions} empty={run.historicalSnapshot.items.length ? `已固定 ${run.historicalSnapshot.items.length} 项历史用例，但分析产物未给出处置结论` : '本次未选择历史用例'} />
+      </div>
+    </div>}
+    <label><span>决策说明（可选）</span><textarea value={comment} maxLength={4000} placeholder={isScope ? '补充范围边界、风险接受或需要调整的原因' : '补充树版本的批准或驳回说明'} onChange={event => setComment(event.target.value)} disabled={submitting} /></label>
+    <footer><span><LockKeyhole />决策将绑定当前目标 ID 与版本，提交后不可覆盖。</span><button className="btn danger" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'rejected', comment)}><XCircle />驳回{isScope ? '范围' : '测试点树'}</button><button className="btn primary" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'approved', comment)}>{submitting ? <RefreshCw className="spin" /> : <Check />}确认{isScope ? '范围并继续' : '批准并继续'}</button></footer>
+  </section>
+}
+
+function ScopeReviewSection({ title, count, items, empty, tone }: { title: string; count: number; items: string[]; empty: string; tone?: 'included' | 'excluded' | 'warning' }) {
+  return <section className={`td-scope-section ${tone ?? ''}`}>
+    <header><b>{title}</b><span>{count} 项</span></header>
+    {items.length ? <ul>{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p>{empty}</p>}
+  </section>
+}
+
+function scopeRules(value: unknown) {
+  return Array.isArray(value) ? value.map(candidate => {
+    const item = recordOf(candidate)
+    const kind = readableText(item.kind)
+    const rule = readableText(item.value)
+    return kind && rule ? `${kind}：${rule}` : rule || kind
+  }).filter(Boolean) : []
+}
+
+function displayValues(value: unknown): string[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    const text = readableText(value)
+    return text ? [text] : []
+  }
+  return value.map(readableText).filter((item): item is string => Boolean(item))
+}
+
+function labelScopeRefs(refs: string[], run: TestDesignWorkflowRun, collectionKeys: string[]) {
+  const labels = new Map<string, string>()
+  for (const basisItem of run.basisSnapshot.items) {
+    const content = recordOf(recordOf(basisItem).content)
+    for (const key of collectionKeys) {
+      const candidates = content[key]
+      if (!Array.isArray(candidates)) continue
+      for (const candidate of candidates) {
+        const item = recordOf(candidate)
+        const ref = primitiveText(item.clientRequirementPointId ?? item.requirementPointId ?? item.solutionPointId ?? item.clientSolutionPointId ?? item.id ?? item.ref)
+        const title = primitiveText(item.title ?? item.name)
+        if (ref && title) labels.set(ref, title)
+      }
+    }
+  }
+  return refs.map(ref => labels.has(ref) ? `${ref} · ${labels.get(ref)}` : ref)
+}
+
+function readableText(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value).trim()
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  const item = value as Record<string, unknown>
+  const title = primitiveText(item.title ?? item.name ?? item.label ?? item.id ?? item.ref)
+  const detail = primitiveText(item.description ?? item.question ?? item.reason ?? item.value ?? item.objective ?? item.summary ?? item.impact)
+  if (title && detail && title !== detail) return `${title}：${detail}`
+  return detail || title
+}
+
+function primitiveText(value: unknown) { return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? String(value).trim() : '' }
+function uniqueText(values: string[]) { return [...new Set(values.map(value => value.trim()).filter(Boolean))] }
+function dimensionLabel(value: string) { return ({ functional: '功能', performance: '性能', stability: '稳定性', compatibility: '兼容性', security: '安全' } as Record<string, string>)[value] ?? value }
+
+function FixedInputCard({ run, time }: { run: TestDesignWorkflowRun; time: string }) {
+  return <article className="fixed-input"><span><LockKeyhole /></span><p><b>{run.basisSnapshot.basisMode === 'review_baseline' ? '评审基线快照' : '知识库资料快照'}</b><small>{run.basisSnapshot.items.length} 项依据 · Hash 已固定</small><em>{time}</em></p><CheckCircle2 /></article>
+}
+
+function RunWorkflowCard({ node, nodeKey, kind, subtitle }: { node?: TestDesignWorkflowRun['nodeRuns'][number]; nodeKey: string; kind: 'agent' | 'gate' | 'server'; subtitle: string }) {
+  const status = node?.status ?? 'pending'
+  const description = node?.error ? `${node.errorCode ?? '执行失败'}：${runErrorMessage(node.error, node.errorCode)}` : subtitle
+  return <article className={`${kind} ${nodeKey} ${status}`} data-node-key={nodeKey}><span>{nodeStatusIcon(status, kind)}</span><p><b>{nodeLabel(nodeKey)}</b><small>{description}</small><em>{nodeExecutionSummary(node)}<br />{node ? `${formatNodeTime(node.startedAt)} → ${formatNodeTime(node.finishedAt)}` : '节点记录未返回'}</em></p><StatusIcon status={status} /></article>
+}
+
+function StatusIcon({ status }: { status: string }) { return status === 'succeeded' ? <CheckCircle2 /> : status === 'failed' ? <XCircle /> : status === 'running' ? <RefreshCw className="spin" /> : null }
+function nodeStatusIcon(status: string, kind: 'agent' | 'gate' | 'server') { if (status === 'succeeded') return <Check />; if (status === 'failed') return <XCircle />; if (status === 'running') return <RefreshCw className="spin" />; return kind === 'gate' ? <Users /> : kind === 'server' ? <Network /> : <Bot /> }
+function isAgentNode(nodeKey: string) { return ['test_analysis', 'functional_design', 'non_functional_design', 'test_case_synthesis'].includes(nodeKey) }
+function nodeExecutionSummary(node?: TestDesignWorkflowRun['nodeRuns'][number]) { if (!node) return '节点记录未返回'; if (!isAgentNode(node.nodeKey)) return node.nodeKey === 'scope_gate' || node.nodeKey === 'tree_gate' ? '人工门禁' : '服务端确定性阶段'; if (!node.execution) return node.attempt ? `attempt ${node.attempt} · 执行详情未记录` : '尚未执行'; return `${node.execution.modelLabel} · ${node.execution.turns} Turn · ${node.execution.toolCalls} 次工具调用${node.execution.toolErrors ? ` · 异常 ${node.execution.toolErrors}` : ''}` }
+function formatNodeTime(value?: string) { return value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '未记录' }
+
+function RunBasisPanel({ run }: { run: TestDesignWorkflowRun }) {
+  return <aside className="td-basis-panel td-real-basis-panel">
+    <header><div><b>固定测试依据</b><small>{run.basisSnapshot.items.length} 项 · Hash 已固定</small></div><LockKeyhole /></header>
+    <section className="td-basis-summary"><Database /><span><b>{run.basisSnapshot.basisMode === 'review_baseline' ? '评审基线' : '知识库资料'}</b><small>{shortHash(run.basisSnapshot.snapshotSha256)}</small></span><CheckCircle2 /></section>
+    <div className="td-basis-list">{run.basisSnapshot.items.map((value, index) => { const item = recordOf(value); return <button key={String(item.id ?? item.sourceId ?? index)}><i className={String(item.kind).includes('technical') ? 'solution' : ''} /><span><small>{String(item.kind ?? `固定依据 ${index + 1}`)}</small><b>{String(item.sourceId ?? item.id ?? `依据 ${index + 1}`)}</b><em>{String(item.contentSha256 ?? '')}</em></span><LockKeyhole /></button> })}</div>
+    <footer><span><i className="covered" />内容快照已固定</span></footer>
+  </aside>
+}
+
+function RunDetailPanel({ design, run }: { design: TestDesign | null; run: TestDesignWorkflowRun }) {
+  const failedNode = run.nodeRuns.find(item => item.status === 'failed')
+  return <aside className="td-detail-panel td-run-detail-panel"><header><div><small>工作流运行</small><b>{shortId(run.id)}</b></div><StatusPill tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</StatusPill></header><div className="td-detail-scroll">
+    {run.status === 'failed' && <section className="td-detail-callout danger"><AlertTriangle /><p><b>{run.errorCode ?? '运行失败'}</b><small>{runErrorMessage(run.error, run.errorCode)}</small></p></section>}
+    <div className="td-basis-meta"><p><span>测试设计</span><b>{design?.name ?? run.testDesignId}</b></p><p><span>当前阶段</span><b>{runStageLabel(run.stage, run.status)}</b></p><p><span>运行进度</span><b>{run.progress}%</b></p><p><span>创建时间</span><b>{formatRunTime(run.createdAt)}</b></p><p><span>开始时间</span><b>{formatRunTime(run.startedAt)}</b></p><p><span>结束时间</span><b>{formatRunTime(run.finishedAt)}</b></p></div>
+    {failedNode && <section className="td-detail-section"><h3>失败节点</h3><button className="missing"><Bot /><span><small>{failedNode.errorCode ?? '节点执行失败'}</small><b>{nodeLabel(failedNode.nodeKey)}</b></span><XCircle /></button></section>}
+    <section className="td-detail-section"><h3>固定快照</h3><button><FileText /><span><small>测试依据</small><b>{run.basisSnapshot.items.length} 项</b></span><LockKeyhole /></button><button><Database /><span><small>知识召回</small><b>{run.retrievalSnapshot.mode}</b></span><LockKeyhole /></button><button><History /><span><small>历史用例</small><b>{run.historicalSnapshot.items.length} 项</b></span><LockKeyhole /></button></section>
+  </div></aside>
+}
+
+function RunArtifactState({ tab, run }: { tab: TabKey; run: TestDesignWorkflowRun }) {
+  const labels: Record<TabKey, string> = { overview: '概览', workflow: '工作流', analysis: '依据解构', retrieval: '知识召回', tree: '测试点树', cases: '测试用例', 'case-set': '用例集', data: '测试数据', coverage: '覆盖审计', history: '历史复用', questions: '待确认项' }
+  return <div className="td-run-artifact-state"><Layers3 /><StatusPill tone={run.status === 'failed' ? 'danger' : 'neutral'}>{runStatusLabel(run.status)}</StatusPill><h2>{labels[tab]}尚不可用</h2><p>{run.status === 'failed' ? '当前运行在上游节点失败，尚未生成该阶段的固定产物。请先查看概览或工作流中的失败原因。' : '当前运行尚未生成该阶段的固定产物。'}</p></div>
+}
+
+function DesignList({ projectVersion, view, setView, designs, loading, onCreate, onOpen, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; designs: TestDesign[]; loading: boolean; onCreate: () => void; onOpen: (design?: TestDesign) => void; notify: Notify }) {
+  const runningCount = designs.filter(item => ['queued', 'running', 'waiting_gate'].includes(item.latestRun?.status ?? '')).length
+  const failedCount = designs.filter(item => item.latestRun?.status === 'failed').length
+  const completedCount = designs.filter(item => item.latestRun?.status === 'succeeded').length
   return <section className="td-list-page">
     {view === 'designs' && <>
     <section className="td-cycle-overview">
@@ -473,10 +850,10 @@ function DesignList({ projectVersion, view, setView, onCreate, onOpen, notify }:
         <AssetViewSelect projectVersion={projectVersion} view={view} setView={setView} description="这里只展示固定在当前版本的设计任务；历史用例需要显式选择并冻结，不会随新版本自动继承。" />
       </div>
       <dl>
-        <div><dt>设计任务</dt><dd>3</dd><small>当前版本</small></div>
-        <div><dt>进行中</dt><dd>1</dd><small>覆盖审计</small></div>
-        <div><dt>待处理</dt><dd className="warning">5</dd><small>3 阻断 · 2 待确认</small></div>
-        <div><dt>已发布</dt><dd>1</dd><small>不可变用例集</small></div>
+        <div><dt>设计任务</dt><dd>{designs.length}</dd><small>当前版本</small></div>
+        <div><dt>进行中</dt><dd>{runningCount}</dd><small>运行与门禁</small></div>
+        <div><dt>待处理</dt><dd className="warning">{failedCount}</dd><small>失败运行</small></div>
+        <div><dt>已完成</dt><dd>{completedCount}</dd><small>工作流成功</small></div>
       </dl>
     </section>
     <div className="td-list-toolbar">
@@ -487,40 +864,25 @@ function DesignList({ projectVersion, view, setView, onCreate, onOpen, notify }:
     <div className="td-list-table-wrap">
       <table className="td-design-table">
         <thead><tr><th>测试设计</th><th>固定输入</th><th>当前进度</th><th>当期产出</th><th>更新时间</th><th>状态</th><th>操作</th></tr></thead>
-        <tbody>
-          <tr className="td-current-design-row" onClick={onOpen}>
-            <td><span className="td-row-symbol active"><TestTube2 /></span><p><b>登录与身份认证测试设计</b><small>TD-20260807-01 · WF-20260807-03</small></p></td>
-            <td><StatusPill tone="info">评审基线</StatusPill><small>需求评审 RR-021 · 技术评审 TR-014</small></td>
-            <td><b>覆盖反向审计</b><div className="td-mini-progress"><span style={{ width: '86%' }} /></div></td>
-            <td><b>28 条用例</b><small className="td-row-warning">覆盖率 91.3% · 3 个阻断项</small></td>
-            <td><b>今天 14:32</b><small>李磊</small></td>
-            <td><StatusPill tone="warning">待覆盖确认</StatusPill></td>
-            <td><button className="td-row-action primary" onClick={event => { event.stopPropagation(); onOpen() }}>继续设计<ArrowRight /></button></td>
+        <tbody>{designs.map((design, index) => {
+          const run = design.latestRun
+          return <tr key={design.id} className={index === 0 ? 'td-current-design-row' : undefined} onClick={() => onOpen(design)}>
+            <td><span className={`td-row-symbol ${run ? 'active' : ''}`}><TestTube2 /></span><p><b>{design.name}</b><small>{design.id}{run ? ` · ${run.id}` : ''}</small></p></td>
+            <td><StatusPill tone={design.basisMode === 'review_baseline' ? 'info' : 'success'}>{design.basisMode === 'review_baseline' ? '评审基线' : '知识库资料'}</StatusPill><small>{design.objective}</small></td>
+            <td><b>{run ? runStageLabel(run.stage, run.status) : '尚未运行'}</b><div className="td-mini-progress"><span style={{ width: `${run?.progress ?? 0}%` }} /></div></td>
+            <td><b>{run?.status === 'failed' ? '运行失败' : run ? `${run.progress}%` : '无运行产出'}</b><small className={run?.status === 'failed' ? 'td-row-warning' : undefined}>{run?.errorCode ?? (run ? '打开工作台查看固定产物' : '创建运行后生成')}</small></td>
+            <td><b>{formatRunTime(run?.finishedAt ?? run?.startedAt ?? run?.createdAt ?? design.createdAt)}</b><small>{run?.finishedAt ? '已结束' : run?.startedAt ? '已开始' : '已创建'}</small></td>
+            <td><StatusPill tone={runStatusTone(run?.status)}>{runStatusLabel(run?.status)}</StatusPill></td>
+            <td><button className={`td-row-action ${run?.status === 'failed' ? 'primary' : ''}`} disabled={!run} onClick={event => { event.stopPropagation(); onOpen(design) }}>{run?.status === 'failed' ? '查看原因' : '进入设计'}<ChevronRight /></button></td>
           </tr>
-          <tr>
-            <td><span className="td-row-symbol"><Database /></span><p><b>知识库检索与索引测试设计</b><small>TD-20260806-02 · WF-20260806-04</small></p></td>
-            <td><StatusPill tone="success">知识库资料</StatusPill><small>3 份固定资产 · Index v12</small></td>
-            <td><b>人工审核</b><div className="td-mini-progress"><span style={{ width: '100%' }} /></div></td>
-            <td><b>42 条用例</b><small>覆盖率 100% · 无阻断项</small></td>
-            <td><b>昨天 18:06</b><small>李磊</small></td>
-            <td><StatusPill tone="info">审核中</StatusPill></td>
-            <td><button className="td-row-action" onClick={() => notify('已定位到知识库检索与索引测试设计的审核记录。')}>查看审核<ChevronRight /></button></td>
-          </tr>
-          <tr>
-            <td><span className="td-row-symbol"><CheckCircle2 /></span><p><b>需求评审工作台回归设计</b><small>TD-20260802-01 · TCS v1</small></p></td>
-            <td><StatusPill tone="info">评审基线</StatusPill><small>需求评审 RR-017 · 技术评审 TR-009</small></td>
-            <td><b>已完成</b><div className="td-mini-progress"><span style={{ width: '100%' }} /></div></td>
-            <td><b>35 条用例</b><small>覆盖率 100% · 已全部通过</small></td>
-            <td><b>8月2日 16:40</b><small>李磊</small></td>
-            <td><StatusPill tone="success">已发布 v1</StatusPill></td>
-            <td><button className="td-row-action" onClick={() => notify('已打开需求评审工作台回归设计的只读发布结果。')}>查看结果<ChevronRight /></button></td>
-          </tr>
-        </tbody>
+        })}</tbody>
       </table>
+      {!loading && designs.length === 0 && <div className="td-collection-empty"><TestTube2 /><h2>暂无测试设计</h2><p>当前项目版本还没有测试设计记录。</p></div>}
+      {loading && designs.length === 0 && <div className="td-collection-empty"><RefreshCw className="spin" /><h2>正在加载测试设计</h2><p>正在读取当前项目版本的真实任务。</p></div>}
     </div>
     </>}
     {view === 'library' && <ProjectCaseLibrary projectVersion={projectVersion} view={view} setView={setView} />}
-    {view === 'sets' && <CaseSetCatalog projectVersion={projectVersion} view={view} setView={setView} onOpenFeature={onOpen} notify={notify} />}
+    {view === 'sets' && <CaseSetCatalog projectVersion={projectVersion} view={view} setView={setView} onOpenFeature={() => onOpen()} notify={notify} />}
   </section>
 }
 
@@ -529,9 +891,9 @@ function AssetViewSelect({ projectVersion, view, setView, description }: { proje
     <small>当前项目版本 · {projectVersion.name}</small>
     <label className="td-asset-view-select">
       <select aria-label="测试资产视图" value={view} onChange={event => setView(event.target.value as CollectionView)}>
-        <option value="designs">当期测试设计（3）</option>
-        <option value="library">测试用例库（412）</option>
-        <option value="sets">测试用例集（8）</option>
+        <option value="designs">当期测试设计</option>
+        <option value="library">测试用例库</option>
+        <option value="sets">测试用例集</option>
       </select>
       <ChevronDown />
     </label>
@@ -608,8 +970,11 @@ function CaseSetCatalog({ projectVersion, view, setView, onOpenFeature, notify }
   </div>
 }
 
-function CreateDesign({ projectVersion, basisMode, setBasisMode, createStep, setCreateStep, knowledgeGoal, setKnowledgeGoal, selectedAssets, setSelectedAssets, augmentation, setAugmentation, augmentationAssets, setAugmentationAssets, historyEnabled, setHistoryEnabled, onCancel, onStart }: {
+function CreateDesign({ projectVersion, inputs, designName, setDesignName, basisMode, setBasisMode, createStep, setCreateStep, knowledgeGoal, setKnowledgeGoal, selectedAssets, setSelectedAssets, augmentation, setAugmentation, augmentationAssets, setAugmentationAssets, historyEnabled, setHistoryEnabled, onCancel, onStart }: {
   projectVersion: ProjectVersion
+  inputs: TestDesignInputCandidates
+  designName: string
+  setDesignName: (value: string) => void
   basisMode: BasisMode
   setBasisMode: (mode: BasisMode) => void
   createStep: number
@@ -625,17 +990,43 @@ function CreateDesign({ projectVersion, basisMode, setBasisMode, createStep, set
   historyEnabled: boolean
   setHistoryEnabled: (value: boolean) => void
   onCancel: () => void
-  onStart: () => void
+  onStart: (input: Record<string, unknown>) => Promise<void>
 }) {
-  const assets = [
-    { id: 'ASSET-001', type: '产品需求', name: 'SmartHub 身份认证需求', path: '/产品/认证/身份认证需求.md', version: 'v8', status: 'ready', hash: '9f2a...e31c' },
-    { id: 'ASSET-002', type: '技术方案', name: '认证服务技术设计', path: '/技术/服务/认证服务设计.md', version: 'v5', status: 'ready', hash: '34bd...19af' },
-    { id: 'ASSET-003', type: '接口文档', name: 'Auth API 规范', path: '/接口/auth-openapi.yaml', version: 'v3', status: 'ready', hash: '7c11...d20e' },
-  ]
+  const selectableBaselines = inputs.reviewBaselines.filter(item => item.selectable)
+  const selectableAssets = inputs.knowledgeAssets.filter(item => item.selectable)
+  const selectableIndexes = inputs.fixedIndexes.filter(item => item.selectable)
+  const [selectedBaselineId, setSelectedBaselineId] = useState(selectableBaselines[0]?.sourceTechnicalSolutionRunId ?? '')
+  const [selectedIndexId, setSelectedIndexId] = useState(selectableIndexes[0]?.id ?? '')
+  const [historicalSource, setHistoricalSource] = useState(inputs.historicalCaseSets[0]?.id ? `set:${inputs.historicalCaseSets[0].id}` : inputs.historicalCaseAssets[0]?.assetVersionId ? `asset:${inputs.historicalCaseAssets[0].assetVersionId}` : '')
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState('')
   const toggleAsset = (id: string) => setSelectedAssets(selectedAssets.includes(id) ? selectedAssets.filter(item => item !== id) : [...selectedAssets, id])
   const toggleAugmentationAsset = (id: string) => setAugmentationAssets(augmentationAssets.includes(id) ? augmentationAssets.filter(item => item !== id) : [...augmentationAssets, id])
-  const { basisIssues, augmentationIssues, blockers } = getTestDesignCreateBlockers({ basisMode, knowledgeGoal, selectedAssets, augmentation, augmentationAssets })
+  const commonIssues = [!designName.trim() ? '填写测试设计名称' : '', !knowledgeGoal.trim() ? '填写测试目标' : ''].filter(Boolean)
+  const basisIssues = [...commonIssues, basisMode === 'review_baseline' && !selectedBaselineId ? '选择一条可用的评审基线' : '', basisMode === 'knowledge_assets' && selectedAssets.length === 0 ? '至少选择一份 ready 固定资产版本' : ''].filter(Boolean)
+  const augmentationIssues = [augmentation === 'selected_assets' && augmentationAssets.length === 0 ? '为指定资料召回选择至少一份固定资产' : '', augmentation === 'fixed_index' && !selectedIndexId ? '选择一个活动固定索引' : '', historyEnabled && !historicalSource ? '选择历史用例来源' : ''].filter(Boolean)
+  const readinessIssues = inputs.agentReadiness.ready ? [] : ['测试设计 Agent 尚未全部就绪']
+  const blockers = [...basisIssues, ...augmentationIssues, ...readinessIssues]
   const canAdvance = createStep === 1 ? basisIssues.length === 0 : createStep === 2 ? augmentationIssues.length === 0 : blockers.length === 0
+  const submit = async () => {
+    const baseline = selectableBaselines.find(item => item.sourceTechnicalSolutionRunId === selectedBaselineId)
+    const knowledgeAugmentation = augmentation === 'selected_assets' ? { mode: 'selected_assets', assetVersionIds: augmentationAssets } : augmentation === 'fixed_index' ? { mode: 'fixed_index', indexVersionId: selectedIndexId } : { mode: 'disabled' }
+    const historicalCaseSelections: Array<Record<string, unknown>> = []
+    if (historyEnabled && historicalSource.startsWith('asset:')) historicalCaseSelections.push({ sourceType: 'asset_version', assetVersionId: historicalSource.slice(6) })
+    if (historyEnabled && historicalSource.startsWith('set:')) {
+      const versionId = historicalSource.slice(4)
+      const version = await loadTestCaseSetVersion(versionId)
+      historicalCaseSelections.push({ sourceType: 'test_case_set', testCaseSetVersionId: versionId, caseIds: version.members.map(item => item.caseId) })
+    }
+    const input = basisMode === 'review_baseline' && baseline
+      ? { name: designName.trim(), objective: knowledgeGoal.trim(), basisMode, sourceReviewRunId: baseline.sourceReviewRunId, sourceTechnicalSolutionRunId: baseline.sourceTechnicalSolutionRunId, knowledgeAugmentation, historicalCaseSelections }
+      : { name: designName.trim(), objective: knowledgeGoal.trim(), basisMode: 'knowledge_assets', knowledgeAssetVersionIds: selectedAssets, knowledgeAugmentation, historicalCaseSelections }
+    setSubmitting(true)
+    setSubmitError('')
+    try { await onStart(input) }
+    catch (error) { setSubmitError(error instanceof Error ? error.message : '测试设计创建失败') }
+    finally { setSubmitting(false) }
+  }
   return <section className="td-create-page">
     <header><button className="icon-btn" onClick={onCancel} aria-label="关闭创建页"><X /></button><div><span>创建测试设计</span><h2>固定输入并启动多 Agent 工作流</h2></div><StatusPill tone="neutral">{projectVersion.name}</StatusPill></header>
     <div className="td-create-steps">
@@ -644,14 +1035,14 @@ function CreateDesign({ projectVersion, basisMode, setBasisMode, createStep, set
     <div className="td-create-body">
       {createStep === 1 && <>
         <div className="td-form-heading"><h3>选择主测试依据</h3><p>主依据创建后不可切换，所有内容会固定为不可变快照。</p></div>
+        <div className="td-form-section td-create-identity-fields"><label><span>测试设计名称</span><input value={designName} onChange={event => setDesignName(event.target.value)} placeholder="填写本次测试设计名称" /></label><label><span>测试目标</span><textarea value={knowledgeGoal} onChange={event => setKnowledgeGoal(event.target.value)} placeholder="说明本次要验证的能力、范围和排除项" /></label></div>
         <div className="td-segmented"><button className={basisMode === 'review_baseline' ? 'active' : ''} onClick={() => setBasisMode('review_baseline')}><GitBranch /><span><b>评审基线</b><small>固定成功的需求与技术方案评审</small></span></button><button className={basisMode === 'knowledge_assets' ? 'active' : ''} onClick={() => setBasisMode('knowledge_assets')}><Database /><span><b>知识库资料</b><small>直接选择一至多份 ready 资产版本</small></span></button></div>
         {basisMode === 'review_baseline' ? <div className="td-form-section">
-          <label><span>需求评审基线</span><select><option>登录能力需求评审 · RR-20260801-021 · 已成功</option></select><small>36 个固定需求点，2 个高风险 Finding 已处置</small></label>
-          <label><span>技术方案评审基线</span><select><option>认证服务技术方案评审 · TR-20260805-014 · 已成功</option></select><small>来源需求与所选评审一致，包含 28 个方案要点</small></label>
-          <div className="td-inline-notice success"><CheckCircle2 /><span><b>基线关系校验通过</b><small>项目版本、来源需求、Finding 处置和结果 Hash 均一致。</small></span></div>
+           <label><span>需求评审基线</span><select value={selectedBaselineId} onChange={event => setSelectedBaselineId(event.target.value)}><option value="">请选择当前版本的成功需求评审</option>{selectableBaselines.map(item => <option key={item.sourceTechnicalSolutionRunId} value={item.sourceTechnicalSolutionRunId}>{item.requirementDocumentTitle ?? item.label} · {shortId(item.sourceReviewRunId)}</option>)}</select><small>{selectableBaselines.length ? '仅展示当前项目版本中已成功的需求评审。' : '当前版本没有可用的成功需求评审。'}</small></label>
+           <label><span>技术方案评审基线</span><select value={selectedBaselineId} onChange={event => setSelectedBaselineId(event.target.value)}><option value="">请选择与需求评审关联的技术方案评审</option>{selectableBaselines.map(item => <option key={item.sourceTechnicalSolutionRunId} value={item.sourceTechnicalSolutionRunId}>{item.technicalReviewName ?? '技术方案评审'} · {shortId(item.sourceTechnicalSolutionRunId)}</option>)}</select><small>{selectableBaselines.find(item => item.sourceTechnicalSolutionRunId === selectedBaselineId)?.technicalCompletedAt ? `完成于 ${formatRunTime(selectableBaselines.find(item => item.sourceTechnicalSolutionRunId === selectedBaselineId)?.technicalCompletedAt)}` : '技术方案评审必须与需求评审属于同一条成功链路。'}</small></label>
+          {selectedBaselineId && <div className="td-inline-notice success"><CheckCircle2 /><span><b>基线关系已由服务端校验</b><small>{selectableBaselines.find(item => item.sourceTechnicalSolutionRunId === selectedBaselineId)?.label}</small></span></div>}
         </div> : <div className="td-form-section">
-          <label><span>测试目标</span><textarea value={knowledgeGoal} onChange={event => setKnowledgeGoal(event.target.value)} placeholder="说明本次要验证的能力、范围和排除项" /></label>
-          <div className="td-asset-picker"><div className="td-picker-head"><b>固定资产版本</b><span>{selectedAssets.length} 项已选择</span></div>{assets.map(asset => <label key={asset.id} className={selectedAssets.includes(asset.id) ? 'selected' : ''}><input type="checkbox" checked={selectedAssets.includes(asset.id)} onChange={() => toggleAsset(asset.id)} /><FileText /><span><b>{asset.name}</b><small>{asset.type} · {asset.path}</small></span><em>{asset.version} · {asset.status}</em><code>{asset.hash}</code></label>)}</div>
+          <div className="td-asset-picker"><div className="td-picker-head"><b>固定资产版本</b><span>{selectedAssets.length} 项已选择 · {selectableAssets.length} 项可用</span></div>{selectableAssets.map(asset => <label key={asset.assetVersionId} className={selectedAssets.includes(asset.assetVersionId) ? 'selected' : ''}><input type="checkbox" checked={selectedAssets.includes(asset.assetVersionId)} onChange={() => toggleAsset(asset.assetVersionId)} /><FileText /><span><b>{asset.displayName}</b><small>{asset.assetType} · {asset.logicalPath}</small></span><em>v{asset.version} · {asset.status}</em><code>{shortHash(asset.contentHash)}</code></label>)}{selectableAssets.length === 0 && <p className="td-history-empty"><AlertTriangle />当前版本没有 ready 资产版本。</p>}</div>
           {basisIssues.length > 0 && <div className="td-inline-notice danger"><AlertTriangle /><span><b>主依据尚不完整</b><small>{basisIssues.join('；')}</small></span></div>}
         </div>}
       </>}
@@ -659,21 +1050,22 @@ function CreateDesign({ projectVersion, basisMode, setBasisMode, createStep, set
         <div className="td-form-heading"><h3>补充知识与历史用例</h3><p>补充项同样会冻结具体版本、范围与内容 Hash。</p></div>
         <div className="td-form-section">
           <fieldset><legend>知识增强</legend><div className="td-radio-list">
-            {[['disabled', '不启用', '仅使用主依据，不执行补充召回'], ['selected_assets', '指定资料', '从显式选择的固定资料中受控召回'], ['fixed_index', '固定索引', '从知识库固定索引 v12 中召回']].map(option => <label key={option[0]} className={augmentation === option[0] ? 'selected' : ''}><input type="radio" name="augmentation" checked={augmentation === option[0]} onChange={() => setAugmentation(option[0])} /><span><b>{option[1]}</b><small>{option[2]}</small></span></label>)}
-          </div>{augmentation === 'selected_assets' && <div className="td-augmentation-assets">{assets.map(asset => <label key={asset.id}><input type="checkbox" checked={augmentationAssets.includes(asset.id)} onChange={() => toggleAugmentationAsset(asset.id)} /><span>{asset.name}</span><code>{asset.version}</code></label>)}</div>}</fieldset>
-          <fieldset><legend>历史用例</legend><label className="td-switch-row"><input type="checkbox" checked={historyEnabled} onChange={event => setHistoryEnabled(event.target.checked)} /><span><b>使用历史用例作为设计输入</b><small>{historyEnabled ? '已显式选择 6 条与认证能力相关的用例，并将冻结具体来源版本。' : '默认不选择；系统不会自动继承上一项目版本的测试用例。'}</small></span><em className={historyEnabled ? 'on' : ''}><i /></em></label>{historyEnabled ? <div className="td-history-source"><History /><span><b>需求评审工作台回归设计 · TCS v1</b><small>6 条用例 · 来源版本 SmartHub 2026.07 · Hash 17b8...c921</small></span><button className="btn">更改选择</button></div> : <p className="td-history-empty"><LockKeyhole />开启后可从同一项目的已发布用例集中选择；只提供复用候选，不会改写历史用例。</p>}</fieldset>
+            {[['disabled', '不启用', '仅使用主依据，不执行补充召回'], ['selected_assets', '指定资料', '从显式选择的固定资料中受控召回'], ['fixed_index', '固定索引', '从当前项目的活动固定索引中召回']].map(option => <label key={option[0]} className={augmentation === option[0] ? 'selected' : ''}><input type="radio" name="augmentation" checked={augmentation === option[0]} onChange={() => setAugmentation(option[0])} /><span><b>{option[1]}</b><small>{option[2]}</small></span></label>)}
+          </div>{augmentation === 'selected_assets' && <div className="td-augmentation-assets">{selectableAssets.map(asset => <label key={asset.assetVersionId}><input type="checkbox" checked={augmentationAssets.includes(asset.assetVersionId)} onChange={() => toggleAugmentationAsset(asset.assetVersionId)} /><span>{asset.displayName}</span><code>{asset.assetVersionId}</code></label>)}</div>}{augmentation === 'fixed_index' && <label><span>固定索引版本</span><select value={selectedIndexId} onChange={event => setSelectedIndexId(event.target.value)}><option value="">请选择活动索引</option>{selectableIndexes.map(index => <option key={index.id} value={index.id}>{index.id}</option>)}</select><small>{selectableIndexes.length ? `${selectableIndexes.length} 个活动索引可用` : '当前项目没有活动固定索引'}</small></label>}</fieldset>
+          <fieldset><legend>历史用例</legend><label className="td-switch-row"><input type="checkbox" checked={historyEnabled} onChange={event => setHistoryEnabled(event.target.checked)} /><span><b>使用历史用例作为设计输入</b><small>{historyEnabled ? '请选择一个真实的已发布用例集或 ready 测试用例资产。' : '默认不选择；系统不会自动继承上一项目版本的测试用例。'}</small></span><em className={historyEnabled ? 'on' : ''}><i /></em></label>{historyEnabled ? <div className="td-history-source"><History /><span><b>历史用例来源</b><small>{inputs.historicalCaseSets.length} 个用例集 · {inputs.historicalCaseAssets.length} 个资产版本</small></span><select aria-label="历史用例来源" value={historicalSource} onChange={event => setHistoricalSource(event.target.value)}><option value="">请选择来源</option>{inputs.historicalCaseSets.map(item => <option key={item.id} value={`set:${item.id}`}>{item.name} v{item.version} · {item.memberCount} 条</option>)}{inputs.historicalCaseAssets.map(item => <option key={item.assetVersionId} value={`asset:${item.assetVersionId}`}>{item.displayName} · {item.assetVersionId}</option>)}</select></div> : <p className="td-history-empty"><LockKeyhole />开启后可从服务端返回的历史来源中选择；只提供复用候选，不会改写历史用例。</p>}</fieldset>
         </div>
       </>}
       {createStep === 3 && <>
         <div className="td-form-heading"><h3>运行前检查</h3><p>输入快照与四个 Agent 全部就绪后才能开始。</p></div>
-        <div className={`td-preflight-summary ${blockers.length > 0 ? 'blocked' : ''}`}><div>{blockers.length > 0 ? <AlertTriangle /> : <CheckCircle2 />}<span><b>{blockers.length > 0 ? `${blockers.length} 项阻断待处理` : '8 项检查通过'}</b><small>{blockers.length > 0 ? blockers.join('；') : '当前预览输入可以进入创建确认'}</small></span></div><StatusPill tone={blockers.length > 0 ? 'danger' : 'success'}>{blockers.length > 0 ? '禁止开始' : '允许开始'}</StatusPill></div>
+        <div className={`td-preflight-summary ${blockers.length > 0 ? 'blocked' : ''}`}><div>{blockers.length > 0 ? <AlertTriangle /> : <CheckCircle2 />}<span><b>{blockers.length > 0 ? `${blockers.length} 项阻断待处理` : '当前输入检查通过'}</b><small>{blockers.length > 0 ? blockers.join('；') : '服务端会在创建时再次校验输入、来源和 Agent 发布状态。'}</small></span></div><StatusPill tone={blockers.length > 0 ? 'danger' : 'success'}>{blockers.length > 0 ? '禁止开始' : '允许开始'}</StatusPill></div>
         <div className="td-preflight-grid">
-          {[["固定输入", basisMode === 'review_baseline' ? '需求与技术方案基线关系一致' : selectedAssets.length > 0 ? `${selectedAssets.length} 份主依据与测试目标已选择` : '知识主依据不完整', basisIssues.length > 0 ? 'danger' : 'success'], ['知识增强', augmentation === 'disabled' ? '已明确禁用' : augmentation === 'fixed_index' ? '固定索引 v12 已选择' : `${augmentationAssets.length} 份召回资料已选择`, augmentationIssues.length > 0 ? 'danger' : 'success'], ['历史用例', historyEnabled ? '6 条来源用例已选择，创建时将固定版本' : '未选择历史用例', 'success'], ['风险确认', basisMode === 'review_baseline' ? '2 个非阻断 Finding 将保留在快照' : '知识冲突与缺失判定标准将在范围门禁确认', 'warning']].map(item => <article key={item[0]}><span className={item[2]}>{item[2] === 'warning' || item[2] === 'danger' ? <AlertTriangle /> : <Check />}</span><p><b>{item[0]}</b><small>{item[1]}</small></p><ChevronRight /></article>)}
+          {[["固定输入", basisMode === 'review_baseline' ? (selectedBaselineId ? '已选择当前版本成功评审基线' : '未选择评审基线') : selectedAssets.length > 0 ? `${selectedAssets.length} 份 ready 资产已选择` : '未选择 ready 资产', basisIssues.length > 0 ? 'danger' : 'success'], ['知识增强', augmentation === 'disabled' ? '已明确禁用' : augmentation === 'fixed_index' ? (selectedIndexId ? `固定索引 ${selectedIndexId}` : '未选择固定索引') : `${augmentationAssets.length} 份固定资料已选择`, augmentationIssues.length > 0 ? 'danger' : 'success'], ['历史用例', historyEnabled ? (historicalSource ? '已选择真实历史来源' : '未选择来源') : '未选择历史用例', historyEnabled && !historicalSource ? 'danger' : 'success'], ['Agent 就绪', inputs.agentReadiness.ready ? '全部 Agent 已发布并通过门禁' : `${inputs.agentReadiness.agents.filter(item => !item.ready).length} 个 Agent 未就绪`, inputs.agentReadiness.ready ? 'success' : 'danger']].map(item => <article key={item[0]}><span className={item[2]}>{item[2] === 'danger' ? <AlertTriangle /> : <Check />}</span><p><b>{item[0]}</b><small>{item[1]}</small></p><ChevronRight /></article>)}
         </div>
-        <div className="td-agent-check"><header><Bot /><span><b>Agent 就绪状态</b><small>本次运行将固定以下已发布版本</small></span><StatusPill tone="success">4 / 4 就绪</StatusPill></header>{['测试分析 Agent', '功能设计 Agent', '非功能设计 Agent', '用例综合 Agent'].map((agent, index) => <div key={agent}><span className="success"><Check /></span><b>{agent}</b><small>v{index === 0 ? 4 : 3} · glm-4.5-air · 协议校验通过</small><em>已发布</em></div>)}</div>
+        <div className="td-agent-check"><header><Bot /><span><b>Agent 就绪状态</b><small>当前发布快照的服务端检查结果</small></span><StatusPill tone={inputs.agentReadiness.ready ? 'success' : 'danger'}>{inputs.agentReadiness.agents.filter(item => item.ready).length} / {inputs.agentReadiness.agents.length} 就绪</StatusPill></header>{inputs.agentReadiness.agents.map(agent => <div key={agent.agentKey}><span className={agent.ready ? 'success' : 'danger'}>{agent.ready ? <Check /> : <XCircle />}</span><b>{agent.agentKey}</b><small>{agent.reason ?? '已通过就绪检查'}</small><em>{agent.ready ? '已发布' : '未就绪'}</em></div>)}</div>
+        {submitError && <div className="td-inline-notice danger" role="alert"><AlertTriangle /><span><b>创建失败</b><small>{submitError}</small></span></div>}
       </>}
     </div>
-    <footer><button className="btn" onClick={createStep === 1 ? onCancel : () => setCreateStep(createStep - 1)}>{createStep === 1 ? '取消' : '上一步'}</button><span>{canAdvance ? '输入将在创建运行时固定，不使用 latest。' : '请先处理当前步骤的阻断项。'}</span>{createStep < 3 ? <button className="btn primary" disabled={!canAdvance} onClick={() => setCreateStep(createStep + 1)}>继续<ArrowRight /></button> : <button className="btn primary" disabled={!canAdvance} onClick={onStart}><Play />创建预览运行</button>}</footer>
+    <footer><button className="btn" onClick={createStep === 1 ? onCancel : () => setCreateStep(createStep - 1)}>{createStep === 1 ? '取消' : '上一步'}</button><span>{canAdvance ? '输入将在创建运行时固定，不使用 latest。' : '请先处理当前步骤的阻断项。'}</span>{createStep < 3 ? <button className="btn primary" disabled={!canAdvance} onClick={() => setCreateStep(createStep + 1)}>继续<ArrowRight /></button> : <button className="btn primary" disabled={!canAdvance || submitting} onClick={() => void submit()}>{submitting ? <><RefreshCw className="spin" />创建中</> : <><Play />创建并提交真实运行</>}</button>}</footer>
   </section>
 }
 

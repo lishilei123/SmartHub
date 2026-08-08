@@ -84,7 +84,7 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
   }, controlsFor('reviewer-a', [{ projectVersionId: 'authorization-pv-a', permissions: ['project-version:read', 'review:read'] }]))
 })
 
-test('Agent 配置接口返回五类 Agent 的可编辑草稿', async () => {
+test('Agent 配置接口返回九类 Agent 的可编辑草稿', async () => {
   await withServer(async baseUrl => {
     const response = await fetch(`${baseUrl}/agent-configurations/requirement-analysis`)
     assert.equal(response.status, 200)
@@ -98,11 +98,19 @@ test('Agent 配置接口返回五类 Agent 的可编辑草稿', async () => {
     assert.equal(body.agents.reviewQa.draft.revision, 0)
     assert.equal(body.agents.technicalSolutionExtraction.draft.revision, 0)
     assert.equal(body.agents.technicalSolutionReview.draft.revision, 0)
+    assert.equal(body.agents.testAnalysis.draft.revision, 0)
+    assert.equal(body.agents.functionalTestDesign.draft.revision, 0)
+    assert.equal(body.agents.nonFunctionalTestDesign.draft.revision, 0)
+    assert.equal(body.agents.testCaseSynthesis.draft.revision, 0)
     assert.deepEqual(body.agents.requirementPointExtraction.requiredSkillKeys, [])
     assert.deepEqual(body.agents.requirementReview.requiredToolIds, ['review.submit_result'])
     assert.deepEqual(body.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
     assert.deepEqual(body.agents.technicalSolutionExtraction.requiredToolIds, ['technical_solution_points.submit_result'])
     assert.deepEqual(body.agents.technicalSolutionReview.requiredToolIds, ['technical_solution_review.submit_result'])
+    assert.deepEqual(body.agents.testAnalysis.requiredToolIds, ['test_analysis.submit_result'])
+    assert.deepEqual(body.agents.functionalTestDesign.requiredToolIds, ['functional_test_design.submit_result'])
+    assert.deepEqual(body.agents.nonFunctionalTestDesign.requiredToolIds, ['non_functional_test_design.submit_result'])
+    assert.deepEqual(body.agents.testCaseSynthesis.requiredToolIds, ['test_case_synthesis.submit_result'])
     assert.deepEqual(body.agents.requirementReview.requiredMcpServerKeys, [])
     assert.deepEqual(body.agents.requirementReview.draft.definition.skillKeys, [])
     assert.deepEqual(body.agents.requirementReview.draft.definition.mcpServerKeys, [])

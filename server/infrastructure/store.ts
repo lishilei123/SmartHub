@@ -24,6 +24,7 @@ export interface ReviewJob {
   finishedAt?: string
   error?: string
 }
+export interface TestDesignJob { id: string; runId: string; nodeRunId: string; status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'; attempts: number; maxAttempts: number; availableAt: string; createdAt: string; updatedAt: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; cancelRequestedAt?: string; error?: string }
 
 export type RequirementBindingMetadata = ProjectVersionRequirementBinding & {
   asset: {
@@ -118,6 +119,13 @@ export interface StateStore {
   releaseTechnicalSolutionJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
   cancelTechnicalSolutionJob?(runId: string): Promise<boolean>
   transactionWithTechnicalSolutionLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
+  enqueueTestDesignJob?(job: TestDesignJob): Promise<void>
+  claimTestDesignJob?(workerId: string, leaseMs: number): Promise<TestDesignJob | null>
+  heartbeatTestDesignJob?(runId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
+  finishTestDesignJob?(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
+  releaseTestDesignJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
+  cancelTestDesignJob?(runId: string): Promise<boolean>
+  transactionWithTestDesignLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   ensureVectorIndex?(indexVersionId: string, dimensions: number): Promise<void>
   isVectorIndexReady?(indexVersionId: string, dimensions: number): Promise<boolean>
   close?(): Promise<void>

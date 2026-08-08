@@ -1,25 +1,36 @@
-export type TestDesignBasisMode = 'review_baseline' | 'knowledge_assets'
-export type TestDesignViewMode = 'list' | 'create' | 'workspace' | 'route-error'
+export type TestDesignViewMode = 'list' | 'workspace' | 'route-error'
 export type TestDesignCollectionView = 'designs' | 'library' | 'sets'
+export type TestDesignBasisMode = 'review_baseline' | 'knowledge_assets'
 export type TestDesignTabKey = 'overview' | 'workflow' | 'analysis' | 'retrieval' | 'tree' | 'cases' | 'case-set' | 'data' | 'coverage' | 'history' | 'questions'
 
-export const PREVIEW_TEST_DESIGN_ID = 'td-auth-20260807'
-export const PREVIEW_WORKFLOW_RUN_ID = 'wf-20260807-03'
-
-const tabKeys: TestDesignTabKey[] = ['overview', 'workflow', 'analysis', 'retrieval', 'tree', 'cases', 'case-set', 'data', 'coverage', 'history', 'questions']
 const collectionViews: TestDesignCollectionView[] = ['designs', 'library', 'sets']
+const tabKeys: TestDesignTabKey[] = ['overview', 'workflow', 'analysis', 'retrieval', 'tree', 'cases', 'case-set', 'data', 'coverage', 'history', 'questions']
 
 export function resolveTestDesignRoute(url: URL | null) {
-  if (!url) return { view: 'list' as TestDesignViewMode, tab: 'overview' as TestDesignTabKey, collectionView: 'designs' as TestDesignCollectionView }
+  if (!url) return { view: 'list' as TestDesignViewMode, collectionView: 'designs' as TestDesignCollectionView, tab: 'overview' as TestDesignTabKey, testDesignId: null, workflowRunId: null }
+
   const testDesignId = url.searchParams.get('testDesignId')
   const workflowRunId = url.searchParams.get('workflowRunId')
+  const createRequested = url.searchParams.get('create') === '1'
   const routedTab = url.searchParams.get('tab')
   const routedAssetView = url.searchParams.get('assetView')
+  const collectionView = collectionViews.includes(routedAssetView as TestDesignCollectionView)
+    ? routedAssetView as TestDesignCollectionView
+    : 'designs'
   const tab = tabKeys.includes(routedTab as TestDesignTabKey) ? routedTab as TestDesignTabKey : 'overview'
-  const collectionView = collectionViews.includes(routedAssetView as TestDesignCollectionView) ? routedAssetView as TestDesignCollectionView : 'designs'
-  if (!testDesignId && !workflowRunId) return { view: 'list' as TestDesignViewMode, tab, collectionView }
-  if (testDesignId === PREVIEW_TEST_DESIGN_ID && workflowRunId === PREVIEW_WORKFLOW_RUN_ID) return { view: 'workspace' as TestDesignViewMode, tab, collectionView }
-  return { view: 'route-error' as TestDesignViewMode, tab, collectionView }
+  const view = testDesignId && workflowRunId
+    ? 'workspace'
+    : testDesignId || workflowRunId
+      ? 'route-error'
+      : createRequested ? 'create' : 'list'
+
+  return {
+    view: view as TestDesignViewMode,
+    collectionView,
+    tab,
+    testDesignId,
+    workflowRunId,
+  }
 }
 
 export function getTestDesignCreateBlockers(input: { basisMode: TestDesignBasisMode; knowledgeGoal: string; selectedAssets: string[]; augmentation: string; augmentationAssets: string[] }) {

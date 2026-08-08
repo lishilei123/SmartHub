@@ -18,6 +18,8 @@ import { applicationRoot, dataRoot } from './infrastructure/runtime-paths.js'
 import { ReviewGovernanceService } from './application/review-governance-service.js'
 import { createBootstrapAccessControl } from './http/access-control.js'
 import { TechnicalSolutionReviewService } from './application/technical-solution-review-service.js'
+import { TestDesignService } from './application/test-design-service.js'
+import { PiTestDesignRuntimeAdapter } from './agent/pi-test-design-runtime.js'
 
 const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -43,6 +45,8 @@ export const reviewGovernanceService = new ReviewGovernanceService(stateStore)
 export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore, {}, skillPackageStore, reviewGovernanceService)
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService)
 export const technicalSolutionReviewService = new TechnicalSolutionReviewService(stateStore, piAgentRuntime, agentConfigurationService)
+export const testDesignRuntime = new PiTestDesignRuntimeAdapter(stateStore, piAgentRuntime, agentConfigurationService)
+export const testDesignService = new TestDesignService(stateStore, testDesignRuntime, service)
 export const reviewQaRuntime = new PiReviewQaRuntimeAdapter({}, stateStore, skillPackageStore)
 export const reviewQaService = new ReviewQaService(stateStore, reviewQaRuntime, agentConfigurationService)
 export const projectVersionService = new ProjectVersionService(stateStore)

@@ -6,14 +6,16 @@ import type { AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } fr
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { ReviewQuestionQuote } from '../domain/review-qa-types.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, technicalSolutionReviewService, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, technicalSolutionReviewService, testDesignService, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
+import { routeTestDesign } from './test-design-routes.js'
+import { TestDesignError } from '../application/test-design-validation.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, technicalSolutionReviewService }
+export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, technicalSolutionReviewService, testDesignService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -21,8 +23,8 @@ export async function start(port = Number(process.env.PORT ?? 8787), controls: A
   const server = createServer(async (request, response) => {
     try { await route(request, response, controls) }
     catch (error) {
-      const status = error instanceof UnauthenticatedError ? 401 : error instanceof ForbiddenError ? 403 : 400
-      send(response, status, { error: error instanceof Error ? error.message : '未知错误' })
+      const status = error instanceof UnauthenticatedError ? 401 : error instanceof ForbiddenError ? 403 : error instanceof TestDesignError ? error.status : 400
+      send(response, status, error instanceof TestDesignError ? { code: error.code, message: error.message.replace(/^[A-Z][A-Z0-9_]+:\s*/u, ''), details: error.details } : { error: error instanceof Error ? error.message : '未知错误' })
     }
   })
   server.once('close', () => { void aiResourceService.close().then(() => stateStore.close?.()) })
@@ -48,6 +50,7 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'OPTIONS') return send(response, 204, null)
   if (method === 'GET' && url.pathname === '/api/health') return send(response, 200, { status: 'ok' })
   const principal = await controls.authenticate(request).catch(() => { throw new UnauthenticatedError() })
+  if (await routeTestDesign(request, response, { method, url, principal, controls, service: testDesignService, store: stateStore, configurations: agentConfigurationService })) return
   const requireProjectVersion = async (projectVersionId: string, permission: ProjectVersionPermission) => {
     await controls.authorize(principal, projectVersionId, permission)
   }
@@ -344,7 +347,7 @@ async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) 
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {}
 }
-function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type, authorization' }); response.end(body == null ? '' : JSON.stringify(body)) }
+function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type, authorization, idempotency-key' }); response.end(body == null ? '' : JSON.stringify(body)) }
 function sendText(response: ServerResponse, status: number, body: string, type: string, filename?: string) { response.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...(filename ? { 'content-disposition': `attachment; filename="${filename.replaceAll('"', '')}"` } : {}), 'access-control-allow-origin': '*' }); response.end(body) }
 function writeNdjson(response: ServerResponse, body: unknown) { if (!response.writableEnded && !response.destroyed) response.write(`${JSON.stringify(body)}\n`) }
 function sendBinary(response: ServerResponse, status: number, body: Buffer, type: string) { response.writeHead(status, { 'content-type': type, 'content-length': body.length, 'cache-control': 'private, max-age=3600', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'", 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' }); response.end(body) }

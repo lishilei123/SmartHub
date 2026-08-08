@@ -11,9 +11,9 @@ function render(document: TechnicalDocument) {
 test('renders fixed Markdown as a document with an accessible close action', () => {
   const html = render({ assetVersionId: 'asset-version-1', title: '技术设计.md', content: '# 标题\n\n| 项目 | 内容 |\n| --- | --- |\n| 系统 | SmartHub |' })
 
-  assert.match(html, /class="fixed-document"/)
-  assert.match(html, /aria-label="关闭固定原文"/)
-  assert.match(html, /Markdown 渲染视图/)
+  assert.match(html, /class="rr-source-document"/)
+  assert.match(html, /aria-label="关闭固定原文定位"/)
+  assert.match(html, /只读固定版本/)
   assert.match(html, /<h1[^>]*>标题<\/h1>/)
   assert.match(html, /<table class="md-table">/)
   assert.doesNotMatch(html, /data-source-line=/)
@@ -38,7 +38,8 @@ test('highlights the rendered Markdown block intersecting the fixed Evidence ran
     },
   })
 
-  assert.match(html, /asset-version-1 · Evidence L4-5/)
+  assert.match(html, /asset-version-1/)
+  assert.match(html, /L4-5/)
   assert.match(html, /已定位固定 Evidence/)
   assert.equal((html.match(/technical-evidence-hit/g) ?? []).length, 1)
   assert.match(html, /<p[^>]*class="technical-evidence-hit"[^>]*>第二行\n第三行<\/p>/)

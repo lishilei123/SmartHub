@@ -36,7 +36,7 @@ async function fixture() {
   return { store, service: new AgentConfigurationService(store) }
 }
 
-test('五个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
+test('九个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
   const { store, service } = await fixture()
   const initial = await service.get()
   const extractionInitial = initial.agents.requirementPointExtraction.draft
@@ -52,6 +52,15 @@ test('五个 Agent 分别持久化草稿并发布独立不可变版本', async (
   assert.deepEqual(initial.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
   assert.deepEqual(initial.agents.technicalSolutionExtraction.requiredToolIds, ['technical_solution_points.submit_result'])
   assert.deepEqual(initial.agents.technicalSolutionReview.requiredToolIds, ['technical_solution_review.submit_result'])
+  assert.deepEqual(initial.agents.testAnalysis.requiredToolIds, ['test_analysis.submit_result'])
+  assert.deepEqual(initial.agents.functionalTestDesign.requiredToolIds, ['functional_test_design.submit_result'])
+  assert.deepEqual(initial.agents.nonFunctionalTestDesign.requiredToolIds, ['non_functional_test_design.submit_result'])
+  assert.deepEqual(initial.agents.testCaseSynthesis.requiredToolIds, ['test_case_synthesis.submit_result'])
+  const testAnalysisInitial = initial.agents.testAnalysis.draft
+  const testAnalysisSaved = await service.save({ agentKey: 'testAnalysis', revision: testAnalysisInitial.revision, routing: { ...testAnalysisInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 8_192 }, definition: testAnalysisInitial.definition })
+  const testAnalysisPublished = await service.publish({ agentKey: 'testAnalysis', revision: testAnalysisSaved.revision, publishedBy: '测试设计管理员' })
+  assert.equal(testAnalysisPublished.scene, 'test_design')
+  assert.equal(testAnalysisPublished.agentDefinition.modelScene, 'test_design')
 
   const extractionSaved = await service.save({
     agentKey: 'requirementPointExtraction',

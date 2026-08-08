@@ -9,7 +9,7 @@ import { isSkillRuntimeToolId, requiredSkillRuntimeToolIds } from './skill-runti
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 
 const SCENE = 'requirement_analysis' as const
-const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview', 'reviewQa', 'technicalSolutionExtraction', 'technicalSolutionReview'] as const
+const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview', 'reviewQa', 'technicalSolutionExtraction', 'technicalSolutionReview', 'testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'] as const
 const LEGACY_AGENT_KEYS = ['requirementPointExtraction', 'requirementReview'] as const
 const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch'])
 const REQUIRED_EXTRACTION_TOOL = 'requirement-points.submit_result'
@@ -17,12 +17,20 @@ const REQUIRED_REVIEW_TOOL = 'review.submit_result'
 const REQUIRED_REVIEW_QA_TOOL = 'review.answer_submit'
 const REQUIRED_TECHNICAL_EXTRACTION_TOOL = 'technical_solution_points.submit_result'
 const REQUIRED_TECHNICAL_REVIEW_TOOL = 'technical_solution_review.submit_result'
+const REQUIRED_TEST_ANALYSIS_TOOL = 'test_analysis.submit_result'
+const REQUIRED_FUNCTIONAL_TEST_DESIGN_TOOL = 'functional_test_design.submit_result'
+const REQUIRED_NON_FUNCTIONAL_TEST_DESIGN_TOOL = 'non_functional_test_design.submit_result'
+const REQUIRED_TEST_CASE_SYNTHESIS_TOOL = 'test_case_synthesis.submit_result'
 const REQUIRED_SKILLS: Record<AgentConfigurationAgentKey, readonly string[]> = {
   requirementPointExtraction: [],
   requirementReview: [],
   reviewQa: [],
   technicalSolutionExtraction: [],
   technicalSolutionReview: [],
+  testAnalysis: [],
+  functionalTestDesign: [],
+  nonFunctionalTestDesign: [],
+  testCaseSynthesis: [],
 }
 const REQUIRED_MCPS: Record<AgentConfigurationAgentKey, readonly string[]> = {
   requirementPointExtraction: [],
@@ -30,6 +38,10 @@ const REQUIRED_MCPS: Record<AgentConfigurationAgentKey, readonly string[]> = {
   reviewQa: [],
   technicalSolutionExtraction: [],
   technicalSolutionReview: [],
+  testAnalysis: [],
+  functionalTestDesign: [],
+  nonFunctionalTestDesign: [],
+  testCaseSynthesis: [],
 }
 
 export type AgentConfigurationInput = {
@@ -44,10 +56,10 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
 
   async get() {
     const configuration = this.store.getAgentConfigurationState
-      ? await this.store.getAgentConfigurationState(SCENE)
+      ? await Promise.all([this.store.getAgentConfigurationState(SCENE), this.store.getAgentConfigurationState('test_design')]).then(([primary, testDesign]) => ({ draft: primary.draft, versions: [...primary.versions, ...testDesign.versions] }))
       : await this.store.snapshot().then(state => ({
         draft: state.agentConfigurationDrafts.find(item => item.scene === SCENE) ?? null,
-        versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE),
+        versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE || item.scene === 'test_design'),
       }))
     const draft = normalizeStoredDraft(configuration.draft ?? undefined)
     const versions = expandStoredVersions(configuration.versions)
@@ -59,14 +71,18 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
         reviewQa: agentState('reviewQa', draft, versions),
         technicalSolutionExtraction: agentState('technicalSolutionExtraction', draft, versions),
         technicalSolutionReview: agentState('technicalSolutionReview', draft, versions),
+        testAnalysis: agentState('testAnalysis', draft, versions),
+        functionalTestDesign: agentState('functionalTestDesign', draft, versions),
+        nonFunctionalTestDesign: agentState('nonFunctionalTestDesign', draft, versions),
+        testCaseSynthesis: agentState('testCaseSynthesis', draft, versions),
       },
     }
   }
 
   async getVersion(id: string) {
     const configuration = this.store.getAgentConfigurationState
-      ? await this.store.getAgentConfigurationState(SCENE)
-      : await this.store.snapshot().then(state => ({ draft: null, versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE) }))
+      ? await Promise.all([this.store.getAgentConfigurationState(SCENE), this.store.getAgentConfigurationState('test_design')]).then(([primary, testDesign]) => ({ draft: primary.draft, versions: [...primary.versions, ...testDesign.versions] }))
+      : await this.store.snapshot().then(state => ({ draft: null, versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE || item.scene === 'test_design') }))
     const versions = expandStoredVersions(configuration.versions)
     return structuredClone(required(versions.find(item => item.id === id), 'Agent 配置版本不存在'))
   }
@@ -98,13 +114,14 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
       const agentDraft = draft.agents[agentKey]
       if (agentDraft.revision !== input.revision) throw new Error(`${agentLabel(agentKey)}草稿已更新，请刷新后再发布`)
       validatePublishable(agentKey, agentDraft, state)
-      const version = Math.max(0, ...state.agentConfigurationVersions.filter(item => item.scene === SCENE && item.agentKey === agentKey).map(item => item.version)) + 1
+      const scene = configurationScene(agentKey)
+      const version = Math.max(0, ...state.agentConfigurationVersions.filter(item => item.scene === scene && item.agentKey === agentKey).map(item => item.version)) + 1
       const agentDefinition = publishedDefinition(agentKey, agentDraft.definition, version, state)
-      state.agentConfigurationVersions.forEach(item => { if (item.scene === SCENE && item.agentKey === agentKey && item.status === 'active') item.status = 'superseded' })
+      state.agentConfigurationVersions.forEach(item => { if (item.scene === scene && item.agentKey === agentKey && item.status === 'active') item.status = 'superseded' })
       const createdAt = new Date().toISOString()
       const valueWithoutHash = {
         id: `agent_config_${randomUUID()}`,
-        scene: SCENE,
+        scene,
         agentKey,
         version,
         status: 'active' as const,
@@ -124,12 +141,13 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
 
   async resolveActive(agentKey: AgentDefinitionVersion['agentKey']) {
     const key = configurationKey(agentKey)
+    const scene = configurationScene(key)
     if (this.store.getActiveAgentConfiguration) {
-      const value = await this.store.getActiveAgentConfiguration(SCENE, key)
+      const value = await this.store.getActiveAgentConfiguration(scene, key)
       return value ? normalizeStoredVersion(value, key) : null
     }
     const state = await this.store.snapshot()
-    const versions = expandStoredVersions(state.agentConfigurationVersions.filter(item => item.scene === SCENE))
+    const versions = expandStoredVersions(state.agentConfigurationVersions.filter(item => item.scene === scene))
     return structuredClone(versions.find(item => item.agentKey === key && item.status === 'active') ?? null)
   }
 
@@ -167,6 +185,10 @@ function defaultDraft(): AgentConfigurationDraft {
       reviewQa: defaultAgentDraft('reviewQa'),
       technicalSolutionExtraction: defaultAgentDraft('technicalSolutionExtraction'),
       technicalSolutionReview: defaultAgentDraft('technicalSolutionReview'),
+      testAnalysis: defaultAgentDraft('testAnalysis'),
+      functionalTestDesign: defaultAgentDraft('functionalTestDesign'),
+      nonFunctionalTestDesign: defaultAgentDraft('nonFunctionalTestDesign'),
+      testCaseSynthesis: defaultAgentDraft('testCaseSynthesis'),
     },
   }
 }
@@ -348,6 +370,10 @@ function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): Agent
         reviewQa: normalizeStoredAgentDraft(value.agents.reviewQa, 'reviewQa'),
         technicalSolutionExtraction: normalizeStoredAgentDraft((value.agents as unknown as Record<string, AgentConfigurationAgentDraft>).technicalSolutionExtraction, 'technicalSolutionExtraction', legacyTechnical),
         technicalSolutionReview: normalizeStoredAgentDraft((value.agents as unknown as Record<string, AgentConfigurationAgentDraft>).technicalSolutionReview, 'technicalSolutionReview', legacyTechnical),
+        testAnalysis: normalizeStoredAgentDraft((value.agents as unknown as Record<string, AgentConfigurationAgentDraft>).testAnalysis, 'testAnalysis'),
+        functionalTestDesign: normalizeStoredAgentDraft((value.agents as unknown as Record<string, AgentConfigurationAgentDraft>).functionalTestDesign, 'functionalTestDesign'),
+        nonFunctionalTestDesign: normalizeStoredAgentDraft((value.agents as unknown as Record<string, AgentConfigurationAgentDraft>).nonFunctionalTestDesign, 'nonFunctionalTestDesign'),
+        testCaseSynthesis: normalizeStoredAgentDraft((value.agents as unknown as Record<string, AgentConfigurationAgentDraft>).testCaseSynthesis, 'testCaseSynthesis'),
       },
     }
   }
@@ -362,6 +388,10 @@ function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): Agent
       reviewQa: defaultAgentDraft('reviewQa'),
       technicalSolutionExtraction: defaultAgentDraft('technicalSolutionExtraction'),
       technicalSolutionReview: defaultAgentDraft('technicalSolutionReview'),
+      testAnalysis: defaultAgentDraft('testAnalysis'),
+      functionalTestDesign: defaultAgentDraft('functionalTestDesign'),
+      nonFunctionalTestDesign: defaultAgentDraft('nonFunctionalTestDesign'),
+      testCaseSynthesis: defaultAgentDraft('testCaseSynthesis'),
     },
   }
 }
@@ -442,12 +472,21 @@ function configurationAgentKey(agentKey: AgentConfigurationAgentKey): AgentDefin
     ? 'review-qa'
     : agentKey === 'technicalSolutionExtraction'
     ? 'technical-solution-extraction'
-    : 'technical-solution-review'
+    : agentKey === 'technicalSolutionReview'
+    ? 'technical-solution-review'
+    : agentKey === 'testAnalysis'
+    ? 'test-analysis'
+    : agentKey === 'functionalTestDesign'
+    ? 'functional-test-design'
+    : agentKey === 'nonFunctionalTestDesign'
+    ? 'non-functional-test-design'
+    : 'test-case-synthesis'
 }
-function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : agentKey === 'requirement-review' ? 'requirementReview' : agentKey === 'review-qa' ? 'reviewQa' : agentKey === 'technical-solution-extraction' ? 'technicalSolutionExtraction' : 'technicalSolutionReview' }
+function configurationScene(agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion['scene'] { return ['testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'].includes(agentKey) ? 'test_design' : SCENE }
+function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : agentKey === 'requirement-review' ? 'requirementReview' : agentKey === 'review-qa' ? 'reviewQa' : agentKey === 'technical-solution-extraction' ? 'technicalSolutionExtraction' : agentKey === 'technical-solution-review' || agentKey === 'technical-solution-analysis' ? 'technicalSolutionReview' : agentKey === 'test-analysis' ? 'testAnalysis' : agentKey === 'functional-test-design' ? 'functionalTestDesign' : agentKey === 'non-functional-test-design' ? 'nonFunctionalTestDesign' : 'testCaseSynthesis' }
 function normalizeAgentKey(value: AgentConfigurationAgentKey) { if (!AGENT_KEYS.includes(value)) throw new Error('Agent 标识无效'); return value }
-function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : agentKey === 'reviewQa' ? '评审问答 Agent' : agentKey === 'technicalSolutionExtraction' ? '技术方案提取 Agent' : '技术方案评审 Agent' }
-function requiredTool(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? REQUIRED_EXTRACTION_TOOL : agentKey === 'requirementReview' ? REQUIRED_REVIEW_TOOL : agentKey === 'reviewQa' ? REQUIRED_REVIEW_QA_TOOL : agentKey === 'technicalSolutionExtraction' ? REQUIRED_TECHNICAL_EXTRACTION_TOOL : REQUIRED_TECHNICAL_REVIEW_TOOL }
+function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : agentKey === 'reviewQa' ? '评审问答 Agent' : agentKey === 'technicalSolutionExtraction' ? '技术方案提取 Agent' : agentKey === 'technicalSolutionReview' ? '技术方案评审 Agent' : agentKey === 'testAnalysis' ? '测试分析 Agent' : agentKey === 'functionalTestDesign' ? '功能测试设计 Agent' : agentKey === 'nonFunctionalTestDesign' ? '非功能测试设计 Agent' : '测试用例综合 Agent' }
+function requiredTool(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? REQUIRED_EXTRACTION_TOOL : agentKey === 'requirementReview' ? REQUIRED_REVIEW_TOOL : agentKey === 'reviewQa' ? REQUIRED_REVIEW_QA_TOOL : agentKey === 'technicalSolutionExtraction' ? REQUIRED_TECHNICAL_EXTRACTION_TOOL : agentKey === 'technicalSolutionReview' ? REQUIRED_TECHNICAL_REVIEW_TOOL : agentKey === 'testAnalysis' ? REQUIRED_TEST_ANALYSIS_TOOL : agentKey === 'functionalTestDesign' ? REQUIRED_FUNCTIONAL_TEST_DESIGN_TOOL : agentKey === 'nonFunctionalTestDesign' ? REQUIRED_NON_FUNCTIONAL_TEST_DESIGN_TOOL : REQUIRED_TEST_CASE_SYNTHESIS_TOOL }
 function modelReference(value: AgentModelReference | null | undefined) { if (!value) return null; const sourceId = cleanText(value.sourceId, 200); const modelId = cleanText(value.modelId, 200); return sourceId && modelId ? { sourceId, modelId } : null }
 function uniqueModelReferences(values: AgentModelReference[]) { return [...new Map(values.map(item => [modelKey(item), item])).values()] }
 function modelKey(value: AgentModelReference) { return `${value.sourceId}\u0000${value.modelId}` }

@@ -547,6 +547,127 @@ const migrations: Migration[] = [{
       PRIMARY KEY (finding_id, evidence_id)
     );
   `,
+}, {
+  version: 15,
+  name: 'phase4-workflow-runtime',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.workflow_runs (
+      id text PRIMARY KEY, project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      domain_type text NOT NULL, domain_id text NOT NULL, definition_key text NOT NULL, definition_version text NOT NULL,
+      status text NOT NULL CHECK (status IN ('queued','running','waiting_gate','succeeded','failed','cancelled')),
+      stage text NOT NULL, progress integer NOT NULL CHECK (progress BETWEEN 0 AND 100), idempotency_key text NOT NULL,
+      input_sha256 char(64) NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL, started_at timestamptz,
+      finished_at timestamptz, error_code text, error_summary text, data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS workflow_runs_domain_idx ON smarthub.workflow_runs (project_version_id, domain_type, domain_id, created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS workflow_runs_active_idempotency_idx ON smarthub.workflow_runs (domain_id, idempotency_key) WHERE status IN ('queued','running','waiting_gate');
+    CREATE TABLE IF NOT EXISTS smarthub.workflow_node_runs (
+      id text PRIMARY KEY, workflow_run_id text NOT NULL REFERENCES smarthub.workflow_runs(id) ON DELETE CASCADE,
+      node_key text NOT NULL, node_kind text NOT NULL, generation integer NOT NULL, attempt integer NOT NULL, status text NOT NULL,
+      started_at timestamptz, finished_at timestamptz, error_code text, error_summary text, data jsonb NOT NULL,
+      UNIQUE (workflow_run_id, node_key, generation, attempt)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.workflow_task_jobs (
+      id text PRIMARY KEY, node_run_id text NOT NULL UNIQUE REFERENCES smarthub.workflow_node_runs(id) ON DELETE CASCADE,
+      status text NOT NULL, available_at timestamptz NOT NULL, attempt_count integer NOT NULL DEFAULT 0, max_attempts integer NOT NULL DEFAULT 3,
+      lease_owner text, run_token uuid, fencing_token bigint NOT NULL DEFAULT 0, lease_expires_at timestamptz, cancel_requested_at timestamptz,
+      created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, error text, data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS workflow_jobs_claim_idx ON smarthub.workflow_task_jobs (available_at, created_at) WHERE status='queued';
+    CREATE INDEX IF NOT EXISTS workflow_jobs_lease_idx ON smarthub.workflow_task_jobs (lease_expires_at) WHERE status='running';
+    CREATE TABLE IF NOT EXISTS smarthub.workflow_handoff_artifacts (
+      id text PRIMARY KEY, workflow_run_id text NOT NULL REFERENCES smarthub.workflow_runs(id) ON DELETE CASCADE,
+      node_run_id text REFERENCES smarthub.workflow_node_runs(id) ON DELETE CASCADE, artifact_type text NOT NULL, schema_version text NOT NULL,
+      content_sha256 char(64) NOT NULL, validation_status text NOT NULL, created_at timestamptz NOT NULL, content jsonb NOT NULL,
+      UNIQUE (node_run_id, artifact_type, content_sha256)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.workflow_gate_decisions (
+      id text PRIMARY KEY, workflow_run_id text NOT NULL REFERENCES smarthub.workflow_runs(id) ON DELETE CASCADE, gate_key text NOT NULL,
+      target_artifact_id text, target_revision integer NOT NULL, decision text NOT NULL, actor_id text NOT NULL, expected_version integer NOT NULL,
+      created_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (workflow_run_id, gate_key, expected_version)
+    );
+  `,
+}, {
+  version: 16,
+  name: 'phase4-test-design-snapshots',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_state (
+      singleton_id text PRIMARY KEY CHECK (singleton_id='current'), updated_at timestamptz NOT NULL, data jsonb NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_designs (
+      id text PRIMARY KEY, project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE,
+      project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE CASCADE, name text NOT NULL, objective text NOT NULL,
+      basis_mode text NOT NULL CHECK (basis_mode IN ('review_baseline','knowledge_assets')), logical_input_sha256 char(64) NOT NULL,
+      created_by text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS test_designs_version_idx ON smarthub.test_designs (project_version_id, created_at DESC, id DESC);
+    CREATE TABLE IF NOT EXISTS smarthub.frozen_contents (
+      content_sha256 char(64) PRIMARY KEY, media_type text NOT NULL, byte_length bigint NOT NULL, content text NOT NULL, created_at timestamptz NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.frozen_content_refs (
+      owner_type text NOT NULL, owner_id text NOT NULL, role text NOT NULL, ordinal integer NOT NULL,
+      content_sha256 char(64) NOT NULL REFERENCES smarthub.frozen_contents(content_sha256) ON DELETE RESTRICT, locator jsonb NOT NULL,
+      PRIMARY KEY (owner_type, owner_id, role, ordinal)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_basis_snapshots (
+      id text PRIMARY KEY, test_design_id text NOT NULL REFERENCES smarthub.test_designs(id) ON DELETE CASCADE, workflow_run_id text NOT NULL,
+      basis_mode text NOT NULL, snapshot_sha256 char(64) NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_retrieval_snapshots (
+      id text PRIMARY KEY, workflow_run_id text NOT NULL, mode text NOT NULL, snapshot_sha256 char(64) NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_historical_case_snapshots (
+      id text PRIMARY KEY, workflow_run_id text NOT NULL, snapshot_sha256 char(64) NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_snapshot_items (
+      id text PRIMARY KEY, workflow_run_id text NOT NULL, snapshot_kind text NOT NULL, source_kind text NOT NULL, source_id text NOT NULL,
+      content_sha256 char(64) NOT NULL, ordinal integer NOT NULL, data jsonb NOT NULL, UNIQUE (workflow_run_id, snapshot_kind, ordinal)
+    );
+  `,
+}, {
+  version: 17,
+  name: 'phase4-tree-cases-data',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.test_point_trees (id text PRIMARY KEY, workflow_run_id text NOT NULL, current_revision integer NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_point_nodes (id text PRIMARY KEY, tree_id text NOT NULL REFERENCES smarthub.test_point_trees(id) ON DELETE CASCADE, created_at timestamptz NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_point_tree_revisions (id text PRIMARY KEY, tree_id text NOT NULL REFERENCES smarthub.test_point_trees(id) ON DELETE CASCADE, revision integer NOT NULL, parent_revision integer, tree_sha256 char(64) NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (tree_id, revision));
+    CREATE TABLE IF NOT EXISTS smarthub.test_point_node_revisions (tree_revision_id text NOT NULL REFERENCES smarthub.test_point_tree_revisions(id) ON DELETE CASCADE, node_id text NOT NULL REFERENCES smarthub.test_point_nodes(id) ON DELETE CASCADE, parent_id text, sort_key text NOT NULL, data jsonb NOT NULL, PRIMARY KEY (tree_revision_id, node_id));
+    CREATE INDEX IF NOT EXISTS test_point_node_revision_order_idx ON smarthub.test_point_node_revisions (tree_revision_id, parent_id, sort_key);
+    CREATE TABLE IF NOT EXISTS smarthub.test_point_tree_versions (id text PRIMARY KEY, tree_id text NOT NULL REFERENCES smarthub.test_point_trees(id) ON DELETE CASCADE, version integer NOT NULL, revision integer NOT NULL, tree_sha256 char(64) NOT NULL, approved_by text NOT NULL, approved_at timestamptz NOT NULL, data jsonb NOT NULL, UNIQUE (tree_id, version));
+    CREATE TABLE IF NOT EXISTS smarthub.test_cases (id text PRIMARY KEY, workflow_run_id text NOT NULL, tree_version_id text NOT NULL, current_revision integer NOT NULL, lifecycle_status text NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_revisions (id text PRIMARY KEY, case_id text NOT NULL REFERENCES smarthub.test_cases(id) ON DELETE CASCADE, revision integer NOT NULL, content_sha256 char(64) NOT NULL, semantic_sha256 char(64) NOT NULL, created_at timestamptz NOT NULL, content jsonb NOT NULL, data jsonb NOT NULL, UNIQUE (case_id, revision));
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_review_actions (id text PRIMARY KEY, case_id text NOT NULL REFERENCES smarthub.test_cases(id) ON DELETE CASCADE, target_revision integer NOT NULL, decision text NOT NULL, actor_id text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_reuse_relations (id text PRIMARY KEY, case_id text NOT NULL REFERENCES smarthub.test_cases(id) ON DELETE CASCADE, source_type text NOT NULL, source_id text NOT NULL, mode text NOT NULL, source_sha256 char(64) NOT NULL, current_sha256 char(64) NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_dependencies (case_id text NOT NULL REFERENCES smarthub.test_cases(id) ON DELETE CASCADE, target_case_id text NOT NULL REFERENCES smarthub.test_cases(id) ON DELETE RESTRICT, revision integer NOT NULL, PRIMARY KEY (case_id, target_case_id, revision));
+    CREATE TABLE IF NOT EXISTS smarthub.test_data_requirement_sets (id text PRIMARY KEY, workflow_run_id text NOT NULL, current_version integer NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_data_requirement_set_versions (id text PRIMARY KEY, set_id text NOT NULL REFERENCES smarthub.test_data_requirement_sets(id) ON DELETE CASCADE, version integer NOT NULL, content_sha256 char(64) NOT NULL, created_at timestamptz NOT NULL, content jsonb NOT NULL, UNIQUE (set_id, version));
+    CREATE TABLE IF NOT EXISTS smarthub.test_data_requirements (id text PRIMARY KEY, set_version_id text NOT NULL REFERENCES smarthub.test_data_requirement_set_versions(id) ON DELETE CASCADE, readiness text NOT NULL, data jsonb NOT NULL);
+  `,
+}, {
+  version: 18,
+  name: 'phase4-audit-publication',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_basis_relations (id text PRIMARY KEY, workflow_run_id text NOT NULL, subject_kind text NOT NULL, subject_id text NOT NULL, basis_type text NOT NULL, basis_ref text NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_coverage_relations (id text PRIMARY KEY, audit_id text NOT NULL, target_type text NOT NULL, target_ref text NOT NULL, status text NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_findings (id text PRIMARY KEY, workflow_run_id text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_confirmation_items (id text PRIMARY KEY, workflow_run_id text NOT NULL, impact_stage text NOT NULL, blocker boolean NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_design_coverage_audits (id text PRIMARY KEY, workflow_run_id text NOT NULL, input_sha256 char(64) NOT NULL, case_set_sha256 char(64) NOT NULL, status text NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
+    CREATE INDEX IF NOT EXISTS test_design_audits_run_idx ON smarthub.test_design_coverage_audits (workflow_run_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_set_versions (id text PRIMARY KEY, project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE CASCADE, project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE, test_design_id text NOT NULL, version integer NOT NULL, content_sha256 char(64) NOT NULL, published_by text NOT NULL, published_at timestamptz NOT NULL, content jsonb NOT NULL, data jsonb NOT NULL, UNIQUE (test_design_id, version), UNIQUE (test_design_id, content_sha256));
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_set_members (version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE CASCADE, case_id text NOT NULL, case_revision integer NOT NULL, ordinal integer NOT NULL, content_sha256 char(64) NOT NULL, PRIMARY KEY (version_id, case_id), UNIQUE (version_id, ordinal));
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_asset_publications (id text PRIMARY KEY, version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE CASCADE, status text NOT NULL, content_sha256 char(64) NOT NULL, created_at timestamptz NOT NULL, data jsonb NOT NULL);
+  `,
+}, {
+  version: 19,
+  name: 'phase4-suites-handoffs',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.test_suite_versions (id text PRIMARY KEY, project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE CASCADE, suite_key text NOT NULL, suite_type text NOT NULL, version integer NOT NULL, content_sha256 char(64) NOT NULL, published_at timestamptz NOT NULL, content jsonb NOT NULL, data jsonb NOT NULL, UNIQUE (project_id, suite_key, version));
+    CREATE TABLE IF NOT EXISTS smarthub.test_suite_version_members (suite_version_id text NOT NULL REFERENCES smarthub.test_suite_versions(id) ON DELETE CASCADE, test_case_set_version_id text NOT NULL, case_id text NOT NULL, case_revision integer NOT NULL, ordinal integer NOT NULL, execution_methods text[] NOT NULL CHECK (cardinality(execution_methods)>0), data jsonb NOT NULL, PRIMARY KEY (suite_version_id, case_id), UNIQUE (suite_version_id, ordinal));
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_smoke_candidates (test_case_set_version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE CASCADE, case_id text NOT NULL, decision text NOT NULL, execution_methods text[] NOT NULL CHECK (cardinality(execution_methods)>0), updated_at timestamptz NOT NULL, data jsonb NOT NULL, PRIMARY KEY (test_case_set_version_id, case_id));
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_impacted_regression_refs (id text PRIMARY KEY, test_case_set_version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE CASCADE, suite_version_id text NOT NULL REFERENCES smarthub.test_suite_versions(id) ON DELETE RESTRICT, case_id text NOT NULL, execution_methods text[] NOT NULL CHECK (cardinality(execution_methods)>0), created_at timestamptz NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_execution_handoffs (id text PRIMARY KEY, project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE, test_case_set_version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE RESTRICT, strategy text NOT NULL, content_sha256 char(64) NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL, content jsonb NOT NULL, data jsonb NOT NULL);
+    CREATE TABLE IF NOT EXISTS smarthub.test_execution_handoff_members (handoff_id text NOT NULL REFERENCES smarthub.test_execution_handoffs(id) ON DELETE CASCADE, stage text NOT NULL, ordinal integer NOT NULL, source_version_id text NOT NULL, case_id text NOT NULL, case_revision integer NOT NULL, method text NOT NULL, dedup_key text NOT NULL, data jsonb NOT NULL, PRIMARY KEY (handoff_id, stage, ordinal), UNIQUE (handoff_id, dedup_key));
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

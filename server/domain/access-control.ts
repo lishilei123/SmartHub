@@ -9,6 +9,13 @@ export type ProjectVersionPermission =
   | 'review:handle'
   | 'tool:approve'
   | 'audit:read'
+  | 'test-design:create'
+  | 'test-design:read'
+  | 'test-design:cancel'
+  | 'test-design:edit'
+  | 'test-design:review'
+  | 'test-design:publish'
+  | 'test-design:export'
 
 export interface Principal {
   subjectId: string
