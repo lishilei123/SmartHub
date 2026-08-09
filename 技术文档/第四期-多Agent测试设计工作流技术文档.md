@@ -542,7 +542,7 @@ interface TestExecutionHandoffService {
 | Synthesis | `test_case_synthesis.submit_result` | 先提交用例候选并冻结候选 Hash。 |
 | Synthesis | `test_data_requirements.submit_result` | 再引用已冻结候选临时 Ref 提交数据需求。 |
 
-结果提交工具每个阶段独立保留 3 次修正额度。`submit_query_plan` 不计入正式结果提交保留。重复工具调用、参数大小和总调用次数沿用 Tool Runtime 治理。
+结果提交工具每个阶段独立保留 3 次修正额度。`submit_query_plan` 不计入正式结果提交保留。重复工具调用、参数大小和总调用次数沿用 Tool Runtime 治理。非功能 Agent 必须把四维节点放入一个 `nodes[]` 完整提交；若供应商在同一 Assistant 响应中按维度生成多个同名 Tool Call，Pi 适配层在参数校验前补齐固定协议版本、按响应边界合并节点，只执行一次受治理提交，其余调用返回已合并状态。
 
 ### 9.3 召回工具循环
 
@@ -708,6 +708,10 @@ queryPlanSha256, hits[], classification, createdAt, snapshotSha256
 
 `test-analysis/v1` 至少包含：
 
+- 闭合根结构 `schemaVersion + scope + coverageUnits + findings + confirmationItems`；
+- `scope.summary/objectives/inclusions/exclusions`；
+- 非空 `coverageUnits[]`，每项固定 `ref/title/description/basisRefs/entryMethods` 以及 `roles/preconditions/actions/rules/constraints/inputPartitions/boundaryValues/stateTransitions/interfaces/dataSideEffects/oracles/positivePaths/negativePaths/risks/assumptions` 数组；
+
 - 范围摘要、目标、排除范围；
 - entities、actors、terms、actions、rules、constraints、states/transitions、interfaces、oracles；
 - 五类维度适用性；
@@ -721,6 +725,8 @@ queryPlanSha256, hits[], classification, createdAt, snapshotSha256
 KnowledgeBasis Resolver 只在固定主依据正文中定位连续原文。唯一定位后服务端生成 `KBP-*`、AssetVersion、Chunk、标题路径、行/字符范围和 Hash。无法定位或歧义候选进入 Finding/确认项，不生成正式 KBP。
 
 `test_analysis.submit_result` 只接收分析语义和输入内 Ref。固定 Snapshot、原文、Chunk、Hash、locator 与 embedding 均为服务端拥有的输入/索引事实，不属于候选结果；运行时对历史冻结快照生成模型任务时也必须剔除这些向量和重复载荷。
+
+Tool 参数 Schema 与服务端 Validator 双重拒绝根级散落字段、空 `coverageUnits`、重复临时 Ref和缺失 `basisRefs`。依据解构 UI 优先读取当前节点 `outputArtifactId`，对新结构展示 scope 与原子覆盖单元；历史不可变 Artifact 中的 `roles/rules/state/entities/interfaces/verificationOracles` 等根级数组仅在展示层归一化，不回写历史数据。
 
 ### 11.2 功能设计 Submission
 
@@ -745,6 +751,8 @@ performance, stability, compatibility, security
 ```
 
 每个分区必须为 `applicable` 或 `not_applicable`。不适用必须给出依据和检查范围。任何数值阈值都必须引用冻结依据或已批准策略 Ref；缺少来源的确定数值拒绝，改为确认项和 `blocked_by_confirmation`。
+
+四个分区的全部节点必须通过一次 `non_functional_test_design.submit_result` 提交。Validator 在候选冻结和树归并两处检查性能、稳定性、兼容性、安全维度全集；任何单维或缺维候选均返回缺失维度，不得以部分成功覆盖后续提交。
 
 ### 11.4 Synthesis Submission
 

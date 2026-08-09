@@ -2,11 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
 import { buildTestDesignAgentTask } from '../server/agent/pi-test-design-runtime.js'
+import { coalesceNonFunctionalSubmission } from '../server/agent/pi-agent-runtime.js'
 import { defaultAgentDefinitionConfigDictionary } from '../server/agent/agent-definition-config.js'
 import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
 import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
 import { ProjectVersionService } from '../server/application/project-version-service.js'
-import { TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestCaseContent, validateTestCaseSynthesisCandidate } from '../server/application/test-design-validation.js'
+import { TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseContent, validateTestCaseSynthesisCandidate } from '../server/application/test-design-validation.js'
 import type { TestCaseContent, TestPointNodeRevision } from '../server/domain/test-design-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
@@ -29,6 +30,40 @@ test('测试点候选在进入树归并前校验临时引用和分支维度', ()
   assert.throws(() => validateDesignCandidateNodes(missingRef, 'functional'), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_POINT_TREE_SCHEMA_INVALID' && error.message.includes('functional.nodes[0].ref'))
   assert.throws(() => validateDesignCandidateNodes({ nodes: [node('security-1', 'security', [])] }, 'functional'), (error: unknown) => error instanceof TestDesignError && error.message.includes('functional.nodes[0].dimension'))
   assert.equal(validateDesignCandidateNodes({ nodes: [node('root', 'functional', [])] }, 'functional')[0].ref, 'root')
+  assert.throws(
+    () => validateDesignCandidateNodes({ nodes: [node('security-only', 'security', [])] }, 'non_functional'),
+    (error: unknown) => error instanceof TestDesignError && error.message.includes('缺少：performance、stability、compatibility'),
+  )
+  const nonFunctional = ['performance', 'stability', 'compatibility', 'security'].map(dimension => node(`${dimension}-root`, dimension as TestPointNodeRevision['dimension'], []))
+  assert.equal(validateDesignCandidateNodes({ nodes: nonFunctional }, 'non_functional').length, 4)
+})
+
+test('同一响应内按维度拆分的非功能提交合并为一个候选', () => {
+  const calls = ['performance', 'stability', 'compatibility', 'security'].map((dimension, index) => ({
+    type: 'toolCall',
+    id: `call-${index + 1}`,
+    name: 'non_functional_test_design_submit_result',
+    arguments: { nodes: [node(`${dimension}-root`, dimension as TestPointNodeRevision['dimension'], [])], ...(index === 0 ? { schemaVersion: 'non-functional-test-design/v1' } : {}) },
+  }))
+  const batch = coalesceNonFunctionalSubmission({ content: calls }, 'non_functional_test_design_submit_result', 'non-functional-test-design/v1')
+
+  assert.equal(batch?.primaryToolCallId, 'call-1')
+  assert.deepEqual(batch?.redundantToolCallIds, ['call-2', 'call-3', 'call-4'])
+  assert.deepEqual((batch?.arguments.nodes as Array<{ dimension: string }>).map(item => item.dimension), ['performance', 'stability', 'compatibility', 'security'])
+  assert.equal(batch?.callCount, 4)
+})
+
+test('测试分析候选必须提供可展示的原子覆盖单元', () => {
+  assert.throws(
+    () => validateTestAnalysisCandidate({ schemaVersion: 'test-analysis/v1', scope: '认证', roles: ['管理员'], findings: [], confirmationItems: [] }),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_ANALYSIS_SCHEMA_INVALID' && (error.details as { path?: string }).path === '/',
+  )
+  const candidate = testAnalysisCandidate()
+  assert.equal((validateTestAnalysisCandidate(candidate).coverageUnits as unknown[]).length, 1)
+  assert.throws(
+    () => validateTestAnalysisCandidate({ ...candidate, coverageUnits: [{ ...(candidate.coverageUnits as Array<Record<string, unknown>>)[0], basisRefs: [] }] }),
+    (error: unknown) => error instanceof TestDesignError && (error.details as { path?: string }).path === '/coverageUnits/0/basisRefs',
+  )
 })
 
 test('test-case/v1 强制 UI/API 判别联合、稳定步骤和非空方式', () => {
@@ -68,14 +103,16 @@ test('用例综合候选校验数据需求索引并保留规范结构', () => {
 
 test('测试设计内置 Prompt 要求矩阵化发散并在综合前完成全集核对', () => {
   assert.equal(defaultAgentDefinitionConfigDictionary['review-qa'].version, '1.0.0')
-  assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.2.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.3.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['functional-test-design'].version, '1.1.0')
-  assert.equal(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].version, '1.1.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].version, '1.2.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].version, '1.2.0')
   assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /coverage unit/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /所有数组字段即使没有内容也提交空数组/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /不得在 test_analysis_submit_result 中回传/u)
   assert.match(defaultAgentDefinitionConfigDictionary['functional-test-design'].systemPrompt, /角色 × 前置\/当前状态 × 输入等价类或边界/u)
   assert.match(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].systemPrompt, /四个分区均有明确结论/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].systemPrompt, /只调用一次 non_functional_test_design_submit_result/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /全部适用 nodeId 均有映射/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /不得用固定数量配额或同义重复凑数/u)
 })
@@ -134,12 +171,12 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   const analysisArtifact = scopeWaiting.artifacts.find(item => item.nodeKey === 'test_analysis')!
   await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: analysisArtifact.id, targetRevision: analysisArtifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
   const treeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
-  assert.equal(treeWaiting.testPointTree?.revisions[0].nodes.length, 2)
+  assert.equal(treeWaiting.testPointTree?.revisions[0].nodes.length, 5)
   assert.deepEqual(new Set(runtime.stages.slice(1, 3)), new Set(['functional_design', 'non_functional_design']))
   const tree = treeWaiting.testPointTree!
   await service.applyGateDecision('pv-1', design.id, run.id, 'test-point-tree', { targetId: tree.id, targetRevision: tree.currentRevision, expectedVersion: 0, decision: 'approved' }, principal)
   const completed = await waitFor(service, design.id, run.id, value => value.status === 'succeeded')
-  assert.equal(completed.testCases.length, 2)
+  assert.equal(completed.testCases.length, 5)
   assert.equal(completed.testCases[0].revisions[0].content.dataRequirementIds[0], completed.dataSetVersions[0].requirements[0].id)
   assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'test_analysis')?.execution?.modelLabel, 'fake-model')
   assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'functional_design')?.execution?.degraded, false)
@@ -160,11 +197,11 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   }
   const audit = await service.reAudit('pv-1', design.id, run.id)
   assert.deepEqual(audit.blockers, [])
-  assert.equal(audit.statistics.coveredPoints, 2)
+  assert.equal(audit.statistics.coveredPoints, 5)
   const published = await service.publishCaseSet('pv-1', design.id, run.id, { name: '认证新功能用例集', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256 }, principal)
   const repeated = await service.publishCaseSet('pv-1', design.id, run.id, { name: '认证新功能用例集', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256 }, principal)
   assert.equal(repeated.id, published.id)
-  assert.equal(published.members.length, 2)
+  assert.equal(published.members.length, 5)
   const runWithPublishedSet = await service.getRun('pv-1', design.id, run.id)
   assert.deepEqual(runWithPublishedSet.caseSetVersions.map(item => item.id), [published.id])
   const jsonExport = await service.exportCaseSet(published.id, 'json')
@@ -172,7 +209,7 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   assert.match(String(jsonExport.content), /test-case-set\/v1/u)
   assert.ok(Buffer.isBuffer(xlsxExport.content) && xlsxExport.content.subarray(0, 2).toString() === 'PK')
   const catalog = await service.projectCatalog('project-1')
-  assert.equal(catalog.items.length, 2)
+  assert.equal(catalog.items.length, 5)
 
   await store.transaction(state => {
     const aggregate = state.testDesignState!
@@ -277,9 +314,16 @@ class FakeRuntime implements TestDesignAgentRuntime {
     this.stages.push(input.stage)
     const basisRefs = input.run.basisSnapshot.items.map(item => item.id)
     const execution = { agentKey: input.stage === 'test_analysis' ? 'test-analysis' : input.stage === 'functional_design' ? 'functional-test-design' : input.stage === 'non_functional_design' ? 'non-functional-test-design' : 'test-case-synthesis', agentVersion: 'test-v1', modelLabel: 'fake-model', degraded: false, turns: 1, toolCalls: 0, events: [], framework: { name: 'pi-agent-core' as const, version: 'test' } }
-    if (input.stage === 'test_analysis') return { schemaVersion: 'test-analysis/v1', content: { schemaVersion: 'test-analysis/v1', scope: '认证', findings: [], confirmationItems: [] }, execution }
+    if (input.stage === 'test_analysis') return { schemaVersion: 'test-analysis/v1', content: testAnalysisCandidate(), execution }
     if (input.stage === 'functional_design') return { schemaVersion: 'functional-test-design/v1', content: { schemaVersion: 'functional-test-design/v1', nodes: [node('shared-root', 'functional', basisRefs)] }, execution }
-    if (input.stage === 'non_functional_design') return { schemaVersion: 'non-functional-test-design/v1', content: { schemaVersion: 'non-functional-test-design/v1', nodes: [node('shared-root', 'security', basisRefs)] }, execution }
+    if (input.stage === 'non_functional_design') return {
+      schemaVersion: 'non-functional-test-design/v1',
+      content: {
+        schemaVersion: 'non-functional-test-design/v1',
+        nodes: ['performance', 'stability', 'compatibility', 'security'].map(dimension => node(`${dimension}-root`, dimension as TestPointNodeRevision['dimension'], basisRefs)),
+      },
+      execution,
+    }
     const upstream = input.upstream as { treeRevision: { nodes: TestPointNodeRevision[] } }
     return { schemaVersion: 'test-case-synthesis/v1', content: { schemaVersion: 'test-case-synthesis/v1', cases: upstream.treeRevision.nodes.map(point => caseContent([point.nodeId])), dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: [upstream.treeRevision.nodes[0].nodeId], caseIndexes: [0], fieldConstraints: { status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }] }, execution }
   }
@@ -304,6 +348,19 @@ class InvalidBasisRuntime extends FakeRuntime {
     const result = await super.execute(input)
     if (input.stage === 'functional_design') return { ...result, content: { schemaVersion: 'functional-test-design/v1', nodes: [node('invalid-basis', 'functional', ['basis_not_in_snapshot'])] } }
     return result
+  }
+}
+
+function testAnalysisCandidate(): Record<string, unknown> {
+  return {
+    schemaVersion: 'test-analysis/v1',
+    scope: { summary: '认证范围', objectives: ['验证认证行为'], inclusions: ['账号登录'], exclusions: [] },
+    coverageUnits: [{
+      ref: 'login-unit', title: '账号登录', description: '验证账号登录的可观察行为', basisRefs: ['basis-1'], entryMethods: ['api'],
+      roles: ['用户'], preconditions: ['账号有效'], actions: ['提交登录请求'], rules: ['凭据必须正确'], constraints: [], inputPartitions: ['有效凭据', '无效凭据'], boundaryValues: [], stateTransitions: ['未登录到已登录'], interfaces: ['POST /api/login'], dataSideEffects: ['创建会话'], oracles: ['响应与会话状态一致'], positivePaths: ['有效凭据登录'], negativePaths: ['无效凭据被拒绝'], risks: [], assumptions: [],
+    }],
+    findings: [],
+    confirmationItems: [],
   }
 }
 

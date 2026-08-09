@@ -701,7 +701,7 @@
 }
 
 .td-real-basis-panel .td-basis-list button {
-  cursor: default;
+  cursor: pointer;
 }
 
 .td-run-detail-panel .td-detail-callout small {

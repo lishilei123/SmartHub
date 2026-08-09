@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity, AlertTriangle, ArchiveRestore, ArrowDown, ArrowRight, ArrowUp, Bot, Braces, Check,
   CheckCircle2, ChevronDown, ChevronRight, CircleDot, Clock3, Database, Download,
-  FileDiff, FileJson2, FileText, Filter, GitBranch, History, Layers3, Link2, ListChecks,
+  Eye, FileDiff, FileJson2, FileText, Filter, GitBranch, History, Layers3, Link2, ListChecks,
   LockKeyhole, MoreHorizontal, Network, PanelRightClose, Pencil, Play, Plus, RefreshCw,
   MessageSquareText, Search, ShieldCheck, Sparkles, Split, TableProperties, TestTube2,
   Trash2, Users, Wrench, X, XCircle,
@@ -22,6 +22,7 @@ import {
   type ImpactedRegression, type ProjectTestCaseCatalogItem, type SmokeCandidate, type TestSuiteVersion, type TestExecutionHandoff,
 } from './test-design-api'
 import { resolveTestDesignRoute } from './test-design-state'
+import { normalizeTestAnalysisGroups } from './test-design-analysis'
 import './test-design.css'
 import './test-design-collection.css'
 
@@ -254,8 +255,10 @@ function currentNodeArtifact(run: TestDesignWorkflowRun, nodeKey: string) {
   if (outputArtifactId) return run.artifacts.find(item => item.id === outputArtifactId)
   return run.artifacts.filter(item => item.nodeKey === nodeKey).sort((left, right) => right.generation - left.generation || right.createdAt.localeCompare(left.createdAt))[0]
 }
-function analysisScope(run: TestDesignWorkflowRun) { return recordOf(recordOf(currentNodeArtifact(run, 'test_analysis')?.content).scope) }
-function analysisItemCount(run: TestDesignWorkflowRun) { let total = 0; for (const value of Object.values(analysisScope(run))) total += arrayOf(value).length; return total }
+function analysisGroups(run: TestDesignWorkflowRun) {
+  return normalizeTestAnalysisGroups(currentNodeArtifact(run, 'test_analysis')?.content)
+}
+function analysisItemCount(run: TestDesignWorkflowRun) { return analysisGroups(run).reduce((total, group) => total + group.items.length, 0) }
 function dataRequirementCount(run: TestDesignWorkflowRun) { return run.dataSetVersions.at(-1)?.requirements.length ?? 0 }
 function canPublishRun(run?: TestDesignWorkflowRun | null) { const audit = run ? latestCoverageAudit(run) : undefined; return Boolean(run?.status === 'succeeded' && audit?.status === 'valid' && audit.blockers.length === 0 && run.testCases.length > 0) }
 function runTabCount(tab: TabKey, run: TestDesignWorkflowRun) {
@@ -1011,6 +1014,40 @@ function primitiveText(value: unknown) { return typeof value === 'string' || typ
 function uniqueText(values: string[]) { return [...new Set(values.map(value => value.trim()).filter(Boolean))] }
 function dimensionLabel(value: string) { return ({ functional: '功能', performance: '性能', stability: '稳定性', compatibility: '兼容性', security: '安全' } as Record<string, string>)[value] ?? value }
 
+const basisKindLabels: Record<string, string> = {
+  requirement_review: '需求点',
+  technical_solution_review: '技术方案要点',
+  knowledge_asset: '知识库资料',
+  historical_case_set: '历史用例',
+  historical_case_asset: '历史用例资料',
+}
+
+function basisItemPresentation(value: unknown, index: number) {
+  const item = recordOf(value)
+  const content = recordOf(item.content)
+  const locator = recordOf(item.locator)
+  const kind = primitiveText(item.kind)
+  const headingPath = arrayOf(locator.headingPath).map(primitiveText).filter(Boolean)
+  const startLine = primitiveText(locator.startLine)
+  const endLine = primitiveText(locator.endLine)
+  const lineLabel = startLine ? `L${startLine}${endLine && endLine !== startLine ? `-L${endLine}` : ''}` : ''
+  const logicalPath = primitiveText(locator.logicalPath)
+  const pointRef = primitiveText(locator.requirementPointId ?? locator.solutionPointId)
+  const title = primitiveText(content.title ?? content.name ?? content.displayName)
+    || headingPath.at(-1)
+    || pointRef
+    || `固定依据 ${index + 1}`
+  const description = primitiveText(content.description ?? content.problem ?? content.summary ?? content.content)
+  const sourceLabel = [logicalPath, headingPath.length ? headingPath.join(' / ') : '', lineLabel].filter(Boolean).join(' · ')
+    || pointRef
+    || primitiveText(item.sourceId)
+    || primitiveText(item.id)
+    || '未记录来源位置'
+  const sourceType = primitiveText(locator.sourceType)
+  const kindLabel = sourceType === 'user_coverage_objective' ? '用户覆盖目标' : basisKindLabels[kind] ?? kind ?? '固定依据'
+  return { item, content, locator, kind, kindLabel, title, description, sourceLabel }
+}
+
 function FixedInputCard({ run, time }: { run: TestDesignWorkflowRun; time: string }) {
   return <article className="fixed-input"><span><LockKeyhole /></span><p><b>{run.basisSnapshot.basisMode === 'review_baseline' ? '评审基线快照' : '知识库资料快照'}</b><small>{run.basisSnapshot.items.length} 项依据 · Hash 已固定</small><em>{time}</em></p><CheckCircle2 /></article>
 }
@@ -1030,12 +1067,37 @@ function nodeExecutionSummary(node?: TestDesignWorkflowRun['nodeRuns'][number]) 
 function formatNodeTime(value?: string) { return value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '未记录' }
 
 function RunBasisPanel({ run }: { run: TestDesignWorkflowRun }) {
-  return <aside className="td-basis-panel td-real-basis-panel">
+  const [preview, setPreview] = useState<{ value: unknown; index: number } | null>(null)
+  return <><aside className="td-basis-panel td-real-basis-panel">
     <header><div><b>固定测试依据</b><small>{run.basisSnapshot.items.length} 项 · Hash 已固定</small></div><LockKeyhole /></header>
     <section className="td-basis-summary"><Database /><span><b>{run.basisSnapshot.basisMode === 'review_baseline' ? '评审基线' : '知识库资料'}</b><small>{shortHash(run.basisSnapshot.snapshotSha256)}</small></span><CheckCircle2 /></section>
-    <div className="td-basis-list">{run.basisSnapshot.items.map((value, index) => { const item = recordOf(value); return <button key={String(item.id ?? item.sourceId ?? index)}><i className={String(item.kind).includes('technical') ? 'solution' : ''} /><span><small>{String(item.kind ?? `固定依据 ${index + 1}`)}</small><b>{String(item.sourceId ?? item.id ?? `依据 ${index + 1}`)}</b><em>{String(item.contentSha256 ?? '')}</em></span><LockKeyhole /></button> })}</div>
+    <div className="td-basis-list">{run.basisSnapshot.items.map((value, index) => { const view = basisItemPresentation(value, index); return <button type="button" key={primitiveText(view.item.id ?? view.item.sourceId) || String(index)} title={`预览：${view.title}`} aria-label={`预览固定测试依据：${view.title}`} onClick={() => setPreview({ value, index })}><i className={view.kind.includes('technical') ? 'solution' : ''} /><span><small>{view.kindLabel}</small><b>{view.title}</b><em>{view.sourceLabel} · {shortHash(primitiveText(view.item.contentSha256))}</em></span><Eye /></button> })}</div>
     <footer><span><i className="covered" />内容快照已固定</span></footer>
-  </aside>
+  </aside>{preview && <BasisPreviewModal value={preview.value} index={preview.index} onClose={() => setPreview(null)} />}</>
+}
+
+function BasisPreviewModal({ value, index, onClose }: { value: unknown; index: number; onClose: () => void }) {
+  const view = basisItemPresentation(value, index)
+  const itemId = primitiveText(view.item.id) || '未记录'
+  const sourceId = primitiveText(view.item.sourceId) || '未记录'
+  const contentSha256 = primitiveText(view.item.contentSha256) || '未记录'
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="modal td-basis-preview-modal" role="dialog" aria-modal="true" aria-label="固定测试依据预览">
+    <header><div><small>{view.kindLabel}</small><h2>固定测试依据预览</h2></div><button className="icon-btn" type="button" onClick={onClose} aria-label="关闭固定测试依据预览"><X /></button></header>
+    <div className="td-basis-preview-body">
+      <section className="td-basis-preview-title"><span><FileText /></span><div><small>{view.kindLabel}</small><h3>{view.title}</h3><p>{view.sourceLabel}</p></div><StatusPill tone="success"><LockKeyhole />已固定</StatusPill></section>
+      <dl className="td-basis-preview-meta"><div><dt>固定项 ID</dt><dd>{itemId}</dd></div><div><dt>来源 ID</dt><dd>{sourceId}</dd></div><div className="wide"><dt>内容 SHA-256</dt><dd>{contentSha256}</dd></div></dl>
+      <section className="td-basis-preview-content"><header><b>固定内容</b><span>运行创建时快照</span></header>{view.description ? <p>{view.description}</p> : <pre>{JSON.stringify(view.content, null, 2)}</pre>}</section>
+      <details className="td-basis-preview-raw"><summary>查看完整结构化快照</summary><pre>{JSON.stringify(view.content, null, 2)}</pre></details>
+      {Object.keys(view.locator).length > 0 && <details className="td-basis-preview-raw"><summary>查看来源定位信息</summary><pre>{JSON.stringify(view.locator, null, 2)}</pre></details>}
+    </div>
+  </section></div>
 }
 
 function RunDetailPanel({ design, run }: { design: TestDesign | null; run: TestDesignWorkflowRun }) {
@@ -1049,7 +1111,7 @@ function RunDetailPanel({ design, run }: { design: TestDesign | null; run: TestD
 }
 
 const artifactLabels: Record<TabKey, string> = { overview: '概览', workflow: '工作流', analysis: '依据解构', retrieval: '知识召回', tree: '测试点树', cases: '测试用例', 'case-set': '用例集', data: '测试数据', coverage: '覆盖审计', history: '历史复用', questions: '待确认项' }
-const analysisGroupLabels: Record<string, string> = { features: '功能与能力', rules: '规则与约束', states: '状态', roles: '角色', entities: '实体', interfaces: '接口', assertions: '验收断言', risks: '风险', pendingItems: '待确认输入' }
+const analysisGroupLabels: Record<string, string> = { scopeSummary: '范围摘要', objectives: '测试目标', inclusions: '纳入范围', exclusions: '排除范围', coverageUnits: '原子覆盖单元', features: '功能与能力', rules: '规则与约束', constraints: '约束', states: '状态', transitions: '状态迁移', roles: '角色', entities: '实体', terms: '术语', actions: '业务动作', interfaces: '接口', assertions: '验收断言', risks: '风险', pendingItems: '待确认输入' }
 const runDimensionLabels: Record<TestPointNode['dimension'], string> = { functional: '功能', performance: '性能', stability: '稳定性', compatibility: '兼容性', security: '安全' }
 const reviewStateLabels: Record<TestDesignCase['reviewState'], string> = { draft: '草稿', in_review: '审核中', approved: '已批准', rejected: '已拒绝', needs_revision: '需修订' }
 
@@ -1068,7 +1130,7 @@ type RunArtifactViewProps = {
 }
 
 function RunArtifactView({ tab, run, projectId, projectVersionId, designId, notify, onRefresh, selectedCaseId, onSelectCase, onNewCase, onOpenTree }: RunArtifactViewProps) {
-  if (tab === 'analysis') return run.artifacts.some(item => item.nodeKey === 'test_analysis') ? <RunAnalysisArtifact run={run} /> : <RunArtifactState tab={tab} run={run} />
+  if (tab === 'analysis') return currentNodeArtifact(run, 'test_analysis') ? <RunAnalysisArtifact run={run} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'retrieval') return <RunRetrievalArtifact run={run} />
   if (tab === 'tree') return run.testPointTree ? <RunTreeArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'cases') return run.testCases.length || run.status === 'succeeded' ? <RunCasesArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} selectedCaseId={selectedCaseId} onSelectCase={onSelectCase} onNewCase={onNewCase} /> : <RunArtifactState tab={tab} run={run} />
@@ -1095,15 +1157,15 @@ function RunDimensionTag({ dimension }: { dimension: TestPointNode['dimension'] 
 function analysisEntry(value: unknown, index: number) {
   if (typeof value === 'string') return { title: value, description: '' }
   const item = recordOf(value)
-  const id = item.featureId ?? item.ruleId ?? item.stateId ?? item.roleId ?? item.entityId ?? item.interfaceId ?? item.assertionId ?? item.riskId ?? item.id
-  const title = String(item.title ?? item.name ?? id ?? `条目 ${index + 1}`)
-  const description = String(item.description ?? item.objective ?? item.question ?? item.mitigation ?? item.status ?? '')
+  const id = item.ref ?? item.featureId ?? item.ruleId ?? item.stateId ?? item.roleId ?? item.entityId ?? item.interfaceId ?? item.assertionId ?? item.riskId ?? item.id
+  const title = String(item.title ?? item.name ?? item.summary ?? id ?? `条目 ${index + 1}`)
+  const description = String(item.description ?? item.objective ?? item.question ?? item.mitigation ?? item.status ?? item.reason ?? '')
   return { title, description }
 }
 
 function RunAnalysisArtifact({ run }: { run: TestDesignWorkflowRun }) {
   const artifact = currentNodeArtifact(run, 'test_analysis')!
-  const groups = Object.entries(analysisScope(run)).map(([key, value]) => ({ key, items: arrayOf(value) })).filter(group => group.items.length)
+  const groups = analysisGroups(run)
   return <div className="td-run-artifact-view">
     <RunArtifactHeader title="依据解构" description={`${artifact.schemaVersion} · 固定产物 ${shortHash(artifact.contentSha256)}`}><StatusPill tone="success">{analysisItemCount(run)} 项</StatusPill></RunArtifactHeader>
     {groups.length ? <div className="td-run-analysis-grid">{groups.map(group => <section key={group.key}><header><span><Braces /><b>{analysisGroupLabels[group.key] ?? group.key}</b></span><em>{group.items.length}</em></header><div>{group.items.map((value, index) => { const item = analysisEntry(value, index); return <article key={`${group.key}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span><p><b>{item.title}</b>{item.description && <small>{item.description}</small>}</p></article> })}</div></section>)}</div> : <RunIntentionalEmpty icon={<ListChecks />} title="依据解构结果为空" description="该固定产物没有返回可展示的结构化条目。" />}

@@ -35,6 +35,25 @@ test('测试点提交工具向模型声明完整临时引用和节点字段', ()
     assert.ok(schema.properties.nodes.items.required.includes('basisRefs'))
     assert.ok('parentRef' in schema.properties.nodes.items.properties)
   }
+  const nonFunctional = defaultBuiltInToolConfigResolver.toDescriptor('non_functional_test_design.submit_result')
+  assert.equal(nonFunctional.version, '1.2.0')
+  assert.match(nonFunctional.description, /同一个 nodes 数组/u)
+})
+
+test('测试分析提交工具声明可展示的闭合结果结构', () => {
+  const descriptor = defaultBuiltInToolConfigResolver.toDescriptor('test_analysis.submit_result')
+  const schema = descriptor.parameters as unknown as {
+    additionalProperties: boolean
+    required: string[]
+    properties: { coverageUnits: { minItems: number; items: { additionalProperties: boolean; required: string[] } } }
+  }
+  assert.equal(descriptor.version, '1.1.0')
+  assert.equal(schema.additionalProperties, false)
+  assert.deepEqual(schema.required, ['schemaVersion', 'scope', 'coverageUnits', 'findings', 'confirmationItems'])
+  assert.equal(schema.properties.coverageUnits.minItems, 1)
+  assert.equal(schema.properties.coverageUnits.items.additionalProperties, false)
+  assert.ok(schema.properties.coverageUnits.items.required.includes('basisRefs'))
+  assert.ok(schema.properties.coverageUnits.items.required.includes('oracles'))
 })
 
 test('测试用例综合工具声明闭合的 test-case/v1 层级', () => {

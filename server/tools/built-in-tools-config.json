@@ -433,11 +433,11 @@
       }
     },
     "test_analysis.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "test_analysis_submit_result",
       "label": "提交测试依据解构结果",
       "catalogName": "提交测试依据解构结果",
-      "description": "提交 test-analysis/v1 语义候选；正式引用、ID 和覆盖由服务端生成。",
+      "description": "提交 test-analysis/v1 语义候选；必须包含结构化 scope、原子 coverageUnits、findings 和 confirmationItems，正式引用、ID 和覆盖由服务端生成。",
       "catalogDescription": "提交固定测试依据的结构化解构候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -445,7 +445,67 @@
       "sourcePath": "server/tools/test-design-tools.ts",
       "handlerKey": "test_analysis.submit_result",
       "catalogVisible": true,
-      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "test-analysis/v1" } }, "required": ["schemaVersion"], "additionalProperties": true }
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "test-analysis/v1" },
+          "scope": {
+            "type": "object",
+            "properties": {
+              "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+              "objectives": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+              "inclusions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+              "exclusions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+            },
+            "required": ["summary", "objectives", "inclusions", "exclusions"],
+            "additionalProperties": false
+          },
+          "coverageUnits": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "basisRefs": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } },
+                "roles": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "preconditions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "actions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "rules": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "constraints": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "inputPartitions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "boundaryValues": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "stateTransitions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "interfaces": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "dataSideEffects": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "oracles": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "positivePaths": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "negativePaths": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "risks": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "assumptions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+              },
+              "required": ["ref", "title", "description", "basisRefs", "entryMethods", "roles", "preconditions", "actions", "rules", "constraints", "inputPartitions", "boundaryValues", "stateTransitions", "interfaces", "dataSideEffects", "oracles", "positivePaths", "negativePaths", "risks", "assumptions"],
+              "additionalProperties": false
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 500,
+            "items": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "description": { "type": "string", "minLength": 1, "maxLength": 8000 }, "severity": { "enum": ["blocker", "high", "medium", "low"] }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["title", "description", "severity", "basisRefs"], "additionalProperties": false }
+          },
+          "confirmationItems": {
+            "type": "array",
+            "maxItems": 500,
+            "items": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "question": { "type": "string", "minLength": 1, "maxLength": 8000 }, "decisionType": { "type": "string", "minLength": 1, "maxLength": 200 }, "impactStage": { "enum": ["analysis", "tree", "case", "data", "publication"] }, "affectedRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "blocker": { "type": "boolean" } }, "required": ["title", "question", "decisionType", "impactStage", "affectedRefs", "blocker"], "additionalProperties": false }
+          }
+        },
+        "required": ["schemaVersion", "scope", "coverageUnits", "findings", "confirmationItems"],
+        "additionalProperties": false
+      }
     },
     "functional_test_design.submit_result": {
       "version": "1.1.0",
@@ -463,11 +523,11 @@
       "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "功能测试点候选。ref 是本次提交内唯一的临时引用，不是正式节点 ID。", "items": { "type": "object", "properties": { "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一的临时引用。" }, "parentRef": { "type": "string", "minLength": 1, "maxLength": 200, "description": "可选父节点临时引用；根节点省略此字段。" }, "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "objective": { "type": "string", "minLength": 1, "maxLength": 2000 }, "dimension": { "enum": ["functional"] }, "priority": { "enum": ["P0", "P1", "P2", "P3"] }, "applicability": { "enum": ["applicable", "not_applicable", "blocked_by_confirmation"] }, "designTechniques": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } }, "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 }, "dataConditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "assumptions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "historicalRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["ref", "title", "objective", "dimension", "priority", "applicability", "designTechniques", "entryMethods", "oracle", "dataConditions", "risks", "assumptions", "basisRefs", "historicalRefs"], "additionalProperties": false } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": false }
     },
     "non_functional_test_design.submit_result": {
-      "version": "1.1.0",
+      "version": "1.2.0",
       "piName": "non_functional_test_design_submit_result",
       "label": "提交非功能测试点候选",
       "catalogName": "提交非功能测试点候选",
-      "description": "提交 non-functional-test-design/v1 四维专项候选；性能、稳定性、兼容性和安全须逐一给出结论，适用分区按独立负载、故障、矩阵或威胁场景拆分。正式节点 ID 和树版本由服务端生成。",
+      "description": "一次性提交 non-functional-test-design/v1 四维专项候选；性能、稳定性、兼容性和安全的全部节点必须放在同一个 nodes 数组中，不得按维度拆成多次调用。正式节点 ID 和树版本由服务端生成。",
       "catalogDescription": "提交非功能测试点树候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,

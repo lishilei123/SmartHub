@@ -21,7 +21,7 @@ import { RequirementPointExtractionValidator, RequirementReviewValidator } from 
 import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
-import { TestDesignError, validateDesignCandidateNodes, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
+import { TestDesignError, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
 
 const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -34,6 +34,34 @@ export interface PiRuntimeBindings {
   model?: Model<Api>
   streamFn?: StreamFn
   retryBaseDelayMs?: number
+}
+
+type SubmissionBatchState = {
+  mergedArgumentsByPrimaryId: Map<string, Record<string, unknown>>
+  primaryIdByRedundantId: Map<string, string>
+  acceptedPrimaryIds: Set<string>
+  callCountByPrimaryId: Map<string, number>
+}
+
+export function coalesceNonFunctionalSubmission(message: unknown, submitPiName: string, schemaVersion: string) {
+  const content = asRecord(message).content
+  if (!Array.isArray(content)) return undefined
+  const calls = content.flatMap(block => {
+    const value = asRecord(block)
+    return value.type === 'toolCall' && value.name === submitPiName && typeof value.id === 'string' ? [value] : []
+  })
+  if (calls.length < 2) return undefined
+  const nodes = calls.flatMap(call => {
+    const argumentsValue = asRecord(call.arguments)
+    return Array.isArray(argumentsValue.nodes) ? argumentsValue.nodes : []
+  })
+  if (!nodes.length) return undefined
+  return {
+    primaryToolCallId: calls[0].id as string,
+    redundantToolCallIds: calls.slice(1).map(call => call.id as string),
+    arguments: { schemaVersion, nodes },
+    callCount: calls.length,
+  }
 }
 
 export class PiAgentRuntimeAdapter implements AgentRuntime {
@@ -57,6 +85,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           const kind = stage.submitToolId === 'functional_test_design.submit_result' ? 'functional' : stage.submitToolId === 'non_functional_test_design.submit_result' ? 'non_functional' : undefined
           candidate = kind
             ? { ...value, nodes: validateDesignCandidateNodes(value, kind) }
+            : stage.submitToolId === 'test_analysis.submit_result'
+            ? validateTestAnalysisCandidate(value)
             : stage.submitToolId === 'test_case_synthesis.submit_result'
             ? validateTestCaseSynthesisCandidate(value, testDesignPointIds(input.testDesignTask))
             : value
@@ -161,7 +191,13 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         resultSubmissionRequiredRecorded = true
         await record({ type: 'result_submission_required', turn: turns, ...(content ? { content } : {}) })
       }
-      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission))
+      const submissionBatches: SubmissionBatchState = {
+        mergedArgumentsByPrimaryId: new Map(),
+        primaryIdByRedundantId: new Map(),
+        acceptedPrimaryIds: new Set(),
+        callCountByPrimaryId: new Map(),
+      }
+      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission, submissionBatches))
       const primaryToolNames = new Set(stage.isExtraction
         ? descriptors.filter(descriptor => descriptor.id === stage.submitToolId || !['knowledge.search', 'knowledge.read_chunk'].includes(descriptor.id)).map(descriptor => descriptor.piName)
         : descriptors.map(descriptor => descriptor.piName))
@@ -173,7 +209,18 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         getApiKey: () => input.model.apiKey,
         sessionId: `${input.snapshot.runId}:${input.snapshot.agentDefinition.agentKey}`,
         toolExecution: 'sequential',
-        beforeToolCall: async ({ toolCall }) => byPiName.has(toolCall.name) && activeToolNames.has(toolCall.name) ? undefined : { block: true, reason: 'TOOL_NOT_ALLOWED_IN_CURRENT_PHASE' },
+        beforeToolCall: async ({ assistantMessage, toolCall }) => {
+          if (!byPiName.has(toolCall.name) || !activeToolNames.has(toolCall.name)) return { block: true, reason: 'TOOL_NOT_ALLOWED_IN_CURRENT_PHASE' }
+          if (stage.submitToolId === 'non_functional_test_design.submit_result' && toolCall.name === stage.submitPiName) {
+            const batch = coalesceNonFunctionalSubmission(assistantMessage, stage.submitPiName, stage.schemaVersion)
+            if (batch && !submissionBatches.mergedArgumentsByPrimaryId.has(batch.primaryToolCallId)) {
+              submissionBatches.mergedArgumentsByPrimaryId.set(batch.primaryToolCallId, batch.arguments)
+              submissionBatches.callCountByPrimaryId.set(batch.primaryToolCallId, batch.callCount)
+              batch.redundantToolCallIds.forEach(toolCallId => submissionBatches.primaryIdByRedundantId.set(toolCallId, batch.primaryToolCallId))
+            }
+          }
+          return undefined
+        },
       })
       agent.subscribe(async (event, eventSignal) => {
         let resultSubmissionRequired = false
@@ -318,17 +365,32 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     runtime: GovernedToolRuntime,
     input: AgentExecutionInput,
     signal: AbortSignal,
-    requireResultSubmission: (content?: string) => Promise<void>
+    requireResultSubmission: (content?: string) => Promise<void>,
+    submissionBatches: SubmissionBatchState,
   ): AgentTool {
+    const stage = stageConfiguration(input)
     return {
       name: descriptor.piName,
       label: descriptor.label,
       description: `${descriptor.description} 业务工具 ID：${descriptor.id}；版本：${descriptor.version}。`,
       parameters: descriptor.parameters,
       executionMode: 'sequential',
+      ...(stage.isTestDesign && descriptor.id === stage.submitToolId ? {
+        prepareArguments: (args: unknown) => {
+          const value = args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {}
+          return value.schemaVersion === undefined ? { ...value, schemaVersion: stage.schemaVersion } : value
+        },
+      } : {}),
       execute: async (toolCallId, args, toolSignal) => {
-        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: args, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
-        const stage = stageConfiguration(input)
+        const primaryId = submissionBatches.primaryIdByRedundantId.get(toolCallId)
+        if (primaryId) {
+          const accepted = submissionBatches.acceptedPrimaryIds.has(primaryId)
+          const data = { accepted, status: accepted ? 'candidate_validated' : 'batch_validation_failed', coalesced: true, primaryToolCallId: primaryId }
+          return { content: [{ type: 'text', text: JSON.stringify(data) }], details: { toolId: descriptor.id, version: descriptor.version, data }, terminate: accepted }
+        }
+        const executionArguments = submissionBatches.mergedArgumentsByPrimaryId.get(toolCallId) ?? args
+        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        if (result.terminate && submissionBatches.mergedArgumentsByPrimaryId.has(toolCallId)) submissionBatches.acceptedPrimaryIds.add(toolCallId)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
           ? { ...asRecord(result.data), replayed: true, guidance: '这是本次运行已成功读取的固定结果重放；请直接使用返回内容，不要再次提交相同参数。' }
@@ -339,6 +401,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
             toolId: descriptor.id,
             version: descriptor.version,
             data: result.data,
+            ...(submissionBatches.callCountByPrimaryId.has(toolCallId) ? { coalescedCallCount: submissionBatches.callCountByPrimaryId.get(toolCallId) } : {}),
             ...(result.replayed ? { replayed: true } : {}),
             ...(result.policyError ? { policyError: result.policyError } : {}),
           },

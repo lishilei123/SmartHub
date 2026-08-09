@@ -94,6 +94,61 @@ export interface TestCaseSynthesisCandidate extends Record<string, unknown> {
   dataRequirements: TestDataRequirementCandidate[]
 }
 
+export function validateTestAnalysisCandidate(value: unknown): Record<string, unknown> {
+  const input = analysisObject(value, '/', '提交结果必须是对象')
+  analysisRejectUnknown(input, ['schemaVersion', 'scope', 'coverageUnits', 'findings', 'confirmationItems'], '/')
+  if (input.schemaVersion !== 'test-analysis/v1') analysisFail('/schemaVersion', 'schemaVersion 必须为 test-analysis/v1')
+
+  const scope = analysisObject(input.scope, '/scope', 'scope 必须是对象')
+  analysisRejectUnknown(scope, ['summary', 'objectives', 'inclusions', 'exclusions'], '/scope')
+  analysisText(scope.summary, '/scope/summary', 4_000)
+  analysisTexts(scope.objectives, '/scope/objectives', 100, 2_000)
+  analysisTexts(scope.inclusions, '/scope/inclusions', 200, 2_000)
+  analysisTexts(scope.exclusions, '/scope/exclusions', 200, 2_000)
+
+  if (!Array.isArray(input.coverageUnits) || !input.coverageUnits.length || input.coverageUnits.length > 1_000) analysisFail('/coverageUnits', 'coverageUnits 必须包含 1 到 1000 个原子覆盖单元')
+  const refs = new Set<string>()
+  const semanticArrays = ['roles', 'preconditions', 'actions', 'rules', 'constraints', 'inputPartitions', 'boundaryValues', 'stateTransitions', 'interfaces', 'dataSideEffects', 'oracles', 'positivePaths', 'negativePaths', 'risks', 'assumptions']
+  input.coverageUnits.forEach((candidate, index) => {
+    const path = `/coverageUnits/${index}`
+    const unit = analysisObject(candidate, path, '覆盖单元必须是对象')
+    analysisRejectUnknown(unit, ['ref', 'title', 'description', 'basisRefs', 'entryMethods', ...semanticArrays], path)
+    const ref = analysisText(unit.ref, `${path}/ref`, 200)
+    if (refs.has(ref)) analysisFail(`${path}/ref`, `临时引用 ${ref} 重复`)
+    refs.add(ref)
+    analysisText(unit.title, `${path}/title`, 500)
+    analysisText(unit.description, `${path}/description`, 4_000)
+    if (!analysisTexts(unit.basisRefs, `${path}/basisRefs`, 1_000, 500).length) analysisFail(`${path}/basisRefs`, '至少引用一个固定依据')
+    analysisEnumTexts(unit.entryMethods, `${path}/entryMethods`, ['ui', 'api'] as const, 2)
+    semanticArrays.forEach(field => analysisTexts(unit[field], `${path}/${field}`, 200, 2_000))
+  })
+
+  if (!Array.isArray(input.findings) || input.findings.length > 500) analysisFail('/findings', 'findings 必须是最多 500 项的数组')
+  input.findings.forEach((candidate, index) => {
+    const path = `/findings/${index}`
+    const finding = analysisObject(candidate, path, 'Finding 必须是对象')
+    analysisRejectUnknown(finding, ['title', 'description', 'severity', 'basisRefs'], path)
+    analysisText(finding.title, `${path}/title`, 500)
+    analysisText(finding.description, `${path}/description`, 8_000)
+    if (!['blocker', 'high', 'medium', 'low'].includes(String(finding.severity))) analysisFail(`${path}/severity`, '必须为 blocker、high、medium 或 low')
+    analysisTexts(finding.basisRefs, `${path}/basisRefs`, 1_000, 500)
+  })
+
+  if (!Array.isArray(input.confirmationItems) || input.confirmationItems.length > 500) analysisFail('/confirmationItems', 'confirmationItems 必须是最多 500 项的数组')
+  input.confirmationItems.forEach((candidate, index) => {
+    const path = `/confirmationItems/${index}`
+    const item = analysisObject(candidate, path, '待确认项必须是对象')
+    analysisRejectUnknown(item, ['title', 'question', 'decisionType', 'impactStage', 'affectedRefs', 'blocker'], path)
+    analysisText(item.title, `${path}/title`, 500)
+    analysisText(item.question, `${path}/question`, 8_000)
+    analysisText(item.decisionType, `${path}/decisionType`, 200)
+    if (!['analysis', 'tree', 'case', 'data', 'publication'].includes(String(item.impactStage))) analysisFail(`${path}/impactStage`, '取值无效')
+    analysisTexts(item.affectedRefs, `${path}/affectedRefs`, 1_000, 500)
+    if (typeof item.blocker !== 'boolean') analysisFail(`${path}/blocker`, '必须是布尔值')
+  })
+  return structuredClone(input)
+}
+
 const synthesisCaseFields = ['schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'sharedVerificationChecks', 'tags', 'domain']
 const legacySynthesisFieldGuidance: Record<string, string> = {
   preConditions: '改为 preconditions',
@@ -218,6 +273,12 @@ export function validateDesignCandidateNodes(raw: unknown, kind: 'functional' | 
   for (const [index, node] of nodes.entries()) {
     if (node.parentRef && !refs.has(node.parentRef)) candidateFail(`${label}.nodes[${index}].parentRef`, '未引用本次提交内的节点')
   }
+  if (kind === 'non_functional') {
+    const requiredDimensions: TestDimension[] = ['performance', 'stability', 'compatibility', 'security']
+    const dimensions = new Set(nodes.map(node => node.dimension))
+    const missing = requiredDimensions.filter(dimension => !dimensions.has(dimension))
+    if (missing.length) candidateFail('non_functional.nodes', `必须在一次完整提交中覆盖性能、稳定性、兼容性和安全四个维度，缺少：${missing.join('、')}`)
+  }
   return nodes
 }
 
@@ -309,6 +370,12 @@ function candidateText(value: unknown, path: string, max: number) { if (typeof v
 function candidateTextArray(value: unknown, path: string, maxItems: number, maxLength: number) { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => candidateText(item, `${path}[${index}]`, maxLength)) }
 function candidateEnumArray<const T extends string>(value: unknown, path: string, allowed: readonly T[], maxItems: number): T[] { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => { if (typeof item !== 'string' || !allowed.includes(item as T)) candidateFail(`${path}[${index}]`, `必须为 ${allowed.join('、')}`); return item as T }) }
 function candidateFail(path: string, message: string): never { throw new TestDesignError('TEST_POINT_TREE_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
+function analysisObject(value: unknown, path: string, message: string) { if (!value || typeof value !== 'object' || Array.isArray(value)) analysisFail(path, message); return value as Record<string, unknown> }
+function analysisRejectUnknown(value: Record<string, unknown>, allowed: string[], path: string) { const unexpected = Object.keys(value).filter(key => !allowed.includes(key)); if (unexpected.length) analysisFail(path, `包含不允许的字段：${unexpected.join('、')}`) }
+function analysisText(value: unknown, path: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) analysisFail(path, `必须是长度不超过 ${max} 的非空字符串`); return value.trim() }
+function analysisTexts(value: unknown, path: string, maxItems: number, maxLength: number) { if (!Array.isArray(value) || value.length > maxItems) analysisFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => analysisText(item, `${path}/${index}`, maxLength)) }
+function analysisEnumTexts<const T extends string>(value: unknown, path: string, allowed: readonly T[], maxItems: number) { if (!Array.isArray(value) || value.length > maxItems) analysisFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => { if (typeof item !== 'string' || !allowed.includes(item as T)) analysisFail(`${path}/${index}`, `必须为 ${allowed.join('、')}`); return item as T }) }
+function analysisFail(path: string, message: string): never { throw new TestDesignError('TEST_ANALYSIS_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
 function synthesisObject(value: unknown, path: string, message: string) { if (!value || typeof value !== 'object' || Array.isArray(value)) synthesisFail(path, message); return value as Record<string, unknown> }
 function synthesisRejectUnknown(value: Record<string, unknown>, allowed: string[], path: string) { const unexpected = Object.keys(value).filter(key => !allowed.includes(key)); if (unexpected.length) synthesisFail(path, `包含不允许的字段：${unexpected.join('、')}`) }
 function synthesisText(value: unknown, path: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) synthesisFail(path, `必须是长度不超过 ${max} 的非空字符串`); return value.trim() }

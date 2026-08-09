@@ -16,6 +16,7 @@ import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './docume
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 import { createProjectVersion, deleteProjectVersion, loadProjectVersions, updateProjectVersionStatus, type ProjectVersion, type ProjectVersionStatus } from './project-version-api'
 import { loadAgentConfiguration, publishAgentConfiguration, saveAgentConfigurationDraft, type AgentConfigurationAgentDraft, type AgentConfigurationAgentKey, type AgentConfigurationState, type AgentRoutingConfiguration } from './agent-configuration-api'
+import { clampOutputTokens, limitingOutputTokenModel } from './agent-output-token-limit'
 import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, updateAiResource, uploadSkillPackage, type AiResource, type AiResourceCatalog, type AiResourceKind, type McpServerResource, type SkillPackageMetadata, type SkillResource, type ToolResource, type ToolSource } from './ai-resource-api'
 
 const RequirementReviewPage = lazy(() => import('./RequirementReviewPage').then(module => ({ default: module.RequirementReviewPage })))
@@ -1273,10 +1274,31 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
   const modelValue = (sourceId: string, modelId: string) => `${sourceId}\u0000${modelId}`
   const resolveModel = (reference: { sourceId: string; modelId: string } | null) => reference ? allModels.find(model => model.source.id === reference.sourceId && model.id === reference.modelId) : undefined
   const defaultModel = resolveModel(routing.primaryModel)
+  const fallbackRouteModels = routing.fallbackModels.flatMap(reference => {
+    const model = resolveModel(reference)
+    return model ? [model] : []
+  })
+  const outputTokenLimitModel = limitingOutputTokenModel(defaultModel, fallbackRouteModels, routing.fallbackEnabled)
+  const outputTokenLimit = outputTokenLimitModel?.maxOutputTokens ?? 262_144
   const updateCurrent = (value: AgentConfigurationAgentDraft) => updateAgent(current => ({ ...current, [selectedAgent]: value }))
   const updateRouting = <K extends keyof AgentRoutingConfiguration>(key: K, value: AgentRoutingConfiguration[K]) => updateCurrent({ ...currentDraft, routing: { ...routing, [key]: value } })
+  const updateRoute = (patch: Partial<AgentRoutingConfiguration>) => updateCurrent({ ...currentDraft, routing: { ...routing, ...patch } })
   const updateDefinition = (patch: Partial<AgentConfigurationAgentDraft['definition']>) => updateCurrent({ ...currentDraft, definition: { ...definition, ...patch } })
   const updateLimit = (limit: keyof AgentConfigurationAgentDraft['definition']['limits'], value: number | string) => updateDefinition({ limits: { ...definition.limits, [limit]: value } })
+  const selectPrimaryModel = (reference: AgentRoutingConfiguration['primaryModel']) => {
+    const fallbackModels = routing.fallbackModels.filter(fallback => !reference || modelValue(fallback.sourceId, fallback.modelId) !== modelValue(reference.sourceId, reference.modelId))
+    const primary = resolveModel(reference)
+    const fallbacks = fallbackModels.flatMap(fallback => {
+      const model = resolveModel(fallback)
+      return model ? [model] : []
+    })
+    const limit = limitingOutputTokenModel(primary, fallbacks, routing.fallbackEnabled)?.maxOutputTokens ?? 262_144
+    updateRoute({ primaryModel: reference, fallbackModels, maxOutputTokens: clampOutputTokens(routing.maxOutputTokens, limit) })
+  }
+  const toggleFallback = (enabled: boolean) => {
+    const limit = limitingOutputTokenModel(defaultModel, fallbackRouteModels, enabled)?.maxOutputTokens ?? 262_144
+    updateRoute({ fallbackEnabled: enabled, maxOutputTokens: clampOutputTokens(routing.maxOutputTokens, limit) })
+  }
   const moveFallback = (index: number, offset: number) => {
     const target = index + offset
     if (target < 0 || target >= routing.fallbackModels.length) return
@@ -1285,7 +1307,11 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
   }
   const addFallback = () => {
     const model = availableModels.find(item => (!routing.primaryModel || modelValue(item.source.id, item.id) !== modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId)) && !routing.fallbackModels.some(reference => modelValue(reference.sourceId, reference.modelId) === modelValue(item.source.id, item.id)))
-    if (model) updateRouting('fallbackModels', [...routing.fallbackModels, { sourceId: model.source.id, modelId: model.id }])
+    if (model) {
+      const fallbackModels = [...routing.fallbackModels, { sourceId: model.source.id, modelId: model.id }]
+      const limit = limitingOutputTokenModel(defaultModel, [...fallbackRouteModels, model], routing.fallbackEnabled)?.maxOutputTokens ?? 262_144
+      updateRoute({ fallbackModels, maxOutputTokens: clampOutputTokens(routing.maxOutputTokens, limit) })
+    }
   }
   const requiredToolIds = currentState.requiredToolIds
   const requiredSkillKeys = currentState.requiredSkillKeys

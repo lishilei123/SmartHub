@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { normalizeTestAnalysisGroups } from '../src/test-design-analysis.ts'
 import { resolveTestDesignRoute } from '../src/test-design-state.ts'
 
 test('测试设计页面默认展示空列表并保留合法资产视图', () => {
@@ -116,8 +117,16 @@ test('范围重新分析后门禁与产物视图使用当前节点输出', () =>
 
   assert.match(source, /function currentNodeArtifact\b/)
   assert.match(source, /outputArtifactId[^\n]*run\.artifacts\.find\(item => item\.id === outputArtifactId\)/)
-  assert.equal((source.match(/currentNodeArtifact\([^,]+, 'test_analysis'\)/g) ?? []).length, 4)
+  assert.equal((source.match(/currentNodeArtifact\([^,]+, 'test_analysis'\)/g) ?? []).length, 5)
   assert.doesNotMatch(source, /artifacts\.find\(item => item\.nodeKey === 'test_analysis'\)/)
+})
+
+test('依据解构兼容历史根级字段并展示规范 coverageUnits', () => {
+  const legacy = normalizeTestAnalysisGroups({ scope: 'TaskFlow V1', roles: ['所有者'], state: ['待处理'], verificationOracles: ['刷新后可见'], confirmationItems: ['确认状态流转'] })
+  assert.deepEqual(legacy.map(group => [group.key, group.items.length]), [['scopeSummary', 1], ['states', 1], ['roles', 1], ['assertions', 1], ['pendingItems', 1]])
+
+  const canonical = normalizeTestAnalysisGroups({ scope: { summary: '认证', objectives: ['验证登录'], inclusions: ['账号登录'], exclusions: [] }, coverageUnits: [{ ref: 'login-unit', title: '账号登录' }], findings: [] })
+  assert.deepEqual(canonical.map(group => [group.key, group.items.length]), [['scopeSummary', 1], ['objectives', 1], ['inclusions', 1], ['coverageUnits', 1]])
 })
 
 test('活动测试设计运行静默更新且手动刷新不清空工作台', () => {
@@ -147,6 +156,20 @@ test('测试设计工作流每个节点都可查看与评审一致的运行记�
   assert.equal((source.match(/onOpenRecord=\{openNodeRecord\}/g) ?? []).length, 8)
   assert.match(styles, /\.td-node-record-button/)
   assert.match(styles, /\.td-node-record-modal/)
+})
+
+test('固定测试依据展示可读标题并支持单击弹窗预览完整快照', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
+
+  assert.match(source, /function basisItemPresentation\b/)
+  assert.match(source, /function BasisPreviewModal\b/)
+  assert.match(source, /aria-label=\{`预览固定测试依据：\$\{view\.title\}`\}/)
+  assert.match(source, /查看完整结构化快照/)
+  assert.match(source, /查看来源定位信息/)
+  assert.match(source, /event\.key === 'Escape'/)
+  assert.match(styles, /\.td-basis-preview-modal/)
+  assert.match(styles, /\.td-basis-preview-content/)
 })
 
 test('测试设计工作流使用独立滚动视口展示完整长轨道', () => {

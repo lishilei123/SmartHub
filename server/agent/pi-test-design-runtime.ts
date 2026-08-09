@@ -106,7 +106,7 @@ function generationPolicy(stage: Parameters<TestDesignAgentRuntime['execute']>[0
     ? [
         '把每个覆盖目标拆成原子 coverage unit，显式列出角色、规则、状态、输入约束、接口、正向/反向/边界分区和 oracle。',
         '同一依据中的独立动作、分支、权限、异常、状态转换和数据约束不得压缩成一条概述。',
-        '提交结果只包含 scope、coverageUnits、findings 和 confirmationItems 等分析语义；不得回传固定快照、原文、Chunk、Hash、locator、upstream 或 embedding。',
+        '提交根对象只包含 schemaVersion、结构化 scope、coverageUnits、findings 和 confirmationItems；coverageUnits 每项按工具 Schema 填满全部数组字段并保留真实 basisRefs，不得把 roles、rules、states、interfaces 或 oracles 拆到根级。不得回传固定快照、原文、Chunk、Hash、locator、upstream 或 embedding。',
       ]
     : stage === 'functional_design'
     ? [
@@ -117,6 +117,7 @@ function generationPolicy(stage: Parameters<TestDesignAgentRuntime['execute']>[0
     ? [
         '性能、稳定性、兼容性、安全四个分区必须逐一给出适用性，并对适用分区按负载/故障/矩阵/威胁与可观察结果拆分测试点。',
         '固定依据没有阈值或支持矩阵时标记 blocked_by_confirmation 并说明待确认项，不得用一条泛化测试点代替完整分区。',
+        '把四个维度的全部节点放入同一个 nodes 数组，只调用一次 non_functional_test_design_submit_result；不得按维度拆成多次提交。',
       ]
     : [
         '每个已批准且适用的测试点都必须被至少一条候选用例引用；提交前对 nodeId 做全集核对。',
