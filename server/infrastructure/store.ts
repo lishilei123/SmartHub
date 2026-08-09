@@ -121,11 +121,11 @@ export interface StateStore {
   transactionWithTechnicalSolutionLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   enqueueTestDesignJob?(job: TestDesignJob): Promise<void>
   claimTestDesignJob?(workerId: string, leaseMs: number): Promise<TestDesignJob | null>
-  heartbeatTestDesignJob?(runId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
-  finishTestDesignJob?(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
-  releaseTestDesignJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
+  heartbeatTestDesignJob?(nodeRunId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
+  finishTestDesignJob?(nodeRunId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
+  releaseTestDesignJob?(nodeRunId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
   cancelTestDesignJob?(runId: string): Promise<boolean>
-  transactionWithTestDesignLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
+  transactionWithTestDesignLease?<T>(nodeRunId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   ensureVectorIndex?(indexVersionId: string, dimensions: number): Promise<void>
   isVectorIndexReady?(indexVersionId: string, dimensions: number): Promise<boolean>
   close?(): Promise<void>

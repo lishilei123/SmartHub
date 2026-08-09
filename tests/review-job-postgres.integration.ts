@@ -4,9 +4,10 @@ import test from 'node:test'
 import { Pool } from 'pg'
 import type { TechnicalSolutionReview, TechnicalSolutionReviewRun } from '../server/domain/technical-solution-types.js'
 import type { ReviewRun } from '../server/domain/types.js'
+import type { TestDesign, TestDesignWorkflowRun } from '../server/domain/test-design-types.js'
 import { runMigrations } from '../server/infrastructure/migrations.js'
 import { PostgresStore } from '../server/infrastructure/postgres-store.js'
-import type { ReviewJob, TaskLease } from '../server/infrastructure/store.js'
+import type { ReviewJob, TaskLease, TestDesignJob } from '../server/infrastructure/store.js'
 
 const connectionString = process.env.TEST_DATABASE_URL
 if (!connectionString) throw new Error('test:postgres 需要配置指向隔离数据库的 TEST_DATABASE_URL')
@@ -33,6 +34,7 @@ await store.load()
 await seedParents()
 
 test.after(async () => {
+  await database.query('DELETE FROM smarthub.workflow_task_jobs WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.review_jobs WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.technical_solution_review_runs WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.technical_solution_reviews WHERE id LIKE $1', [`${prefix}%`])
@@ -159,6 +161,31 @@ test('PostgreSQL Review Job 的取消标记阻止重试并在失租约后收敛�
   const storedRun = await reviewRun(run.id)
   assert.equal(storedRun.status, 'cancelled')
   assert.equal(storedRun.data.status, 'cancelled')
+})
+
+test('PostgreSQL Phase 4 使用规范化事实表并以 nodeRunId 隔离 fencing token', async () => {
+  const designId = `${prefix}-test-design`
+  const runId = `${prefix}-test-design-run`
+  const nodeRunId = `${prefix}-test-analysis-node`
+  const design: TestDesign = { id: designId, projectVersionId: ids.projectVersion, projectId: ids.project, name: 'PostgreSQL Phase 4', objective: '验证规范化持久化与节点租约', basisMode: 'knowledge_assets', input: { name: 'PostgreSQL Phase 4', objective: '验证规范化持久化与节点租约', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: [ids.assetVersion], knowledgeAugmentation: { mode: 'disabled' } }, logicalInputSha256: '1'.repeat(64), createdBy: 'integration-test', createdAt: now }
+  const run: TestDesignWorkflowRun = { id: runId, testDesignId: designId, projectVersionId: ids.projectVersion, status: 'queued', stage: 'test_analysis', progress: 0, idempotencyKey: `${prefix}-phase4`, basisSnapshot: { schemaVersion: 'test-design-basis-snapshot/v1', basisMode: 'knowledge_assets', projectVersionId: ids.projectVersion, items: [{ id: `${prefix}-basis-item`, kind: 'knowledge_asset', sourceId: ids.assetVersion, contentSha256: '2'.repeat(64), content: { title: '固定依据', description: '固定内容' }, locator: { coverageTarget: true } }], snapshotSha256: '3'.repeat(64), createdAt: now }, retrievalSnapshot: { canonicalVersion: 'retrieval-snapshot/v1', mode: 'disabled', assetVersionIds: [], queryPlan: [], hits: [], snapshotSha256: '4'.repeat(64), createdAt: now }, historicalSnapshot: { schemaVersion: 'historical-case-snapshot/v1', items: [], snapshotSha256: '5'.repeat(64), createdAt: now }, nodeRuns: [{ id: nodeRunId, nodeKey: 'test_analysis', generation: 1, attempt: 0, status: 'queued', dependencies: [] }], artifacts: [], gateDecisions: [], testCases: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], events: [], createdBy: 'integration-test', createdAt: now }
+  await store.transaction(state => { const aggregate = state.testDesignState ??= { designs: [], runs: [], caseSetVersions: [], suiteVersions: [], executionHandoffs: [] }; aggregate.designs.push(design); aggregate.runs.push(run) })
+  const normalized = await database.query<{ designs: string; runs: string; snapshots: string; items: string }>('SELECT (SELECT count(*) FROM smarthub.test_designs WHERE id=$1)::text AS designs, (SELECT count(*) FROM smarthub.workflow_runs WHERE id=$2)::text AS runs, (SELECT count(*) FROM smarthub.test_design_basis_snapshots WHERE workflow_run_id=$2)::text AS snapshots, (SELECT count(*) FROM smarthub.test_design_snapshot_items WHERE workflow_run_id=$2)::text AS items', [designId, runId])
+  assert.deepEqual(normalized.rows[0], { designs: '1', runs: '1', snapshots: '1', items: '1' })
+
+  const job: TestDesignJob = { id: `${prefix}-phase4-job`, runId, nodeRunId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: now, createdAt: now, updatedAt: now }
+  await store.enqueueTestDesignJob?.(job)
+  const first = required(await store.claimTestDesignJob?.('phase4-worker-a', 60_000), '应领取 Phase 4 节点任务')
+  const firstLease: TaskLease = { workerId: 'phase4-worker-a', runToken: required(first.runToken, 'Phase 4 节点缺少 fencing token') }
+  assert.equal(await store.transactionWithTestDesignLease?.(nodeRunId, firstLease, state => { const current = required(state.testDesignState?.runs.find(item => item.id === runId), 'Phase 4 Run 不存在'); current.progress = 33; return true }), true)
+  await database.query("UPDATE smarthub.workflow_task_jobs SET lease_expires_at=now()-interval '1 second' WHERE node_run_id=$1", [nodeRunId])
+  const second = required(await store.claimTestDesignJob?.('phase4-worker-b', 60_000), '失效的 Phase 4 节点任务应重新领取')
+  assert.notEqual(second.runToken, firstLease.runToken)
+  assert.equal(await store.transactionWithTestDesignLease?.(nodeRunId, firstLease, state => { const current = required(state.testDesignState?.runs.find(item => item.id === runId), 'Phase 4 Run 不存在'); current.progress = 99; return true }), null)
+  assert.equal((await store.snapshot()).testDesignState?.runs.find(item => item.id === runId)?.progress, 33)
+  const secondLease: TaskLease = { workerId: 'phase4-worker-b', runToken: required(second.runToken, '第二次 Phase 4 节点缺少 fencing token') }
+  assert.equal(await store.finishTestDesignJob?.(nodeRunId, secondLease, 'succeeded'), true)
+  await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.runs = state.testDesignState.runs.filter(item => item.id !== runId); state.testDesignState.designs = state.testDesignState.designs.filter(item => item.id !== designId) })
 })
 
 async function seedParents() {

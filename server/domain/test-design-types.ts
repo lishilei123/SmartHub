@@ -247,6 +247,7 @@ export interface TestCase {
   runId: string
   treeVersionId: string
   origin: 'ai' | 'manual' | 'historical_unchanged' | 'historical_modified' | 'historical_reference'
+  historicalSourceRef?: string
   currentRevision: number
   reviewState: TestCaseReviewState
   revisions: TestCaseRevision[]
@@ -319,8 +320,8 @@ export interface TestCaseSetVersion {
 
 export interface TestSuiteVersionMember { testCaseSetVersionId: string; caseId: string; revision: number; executionMethods: Array<'ui' | 'api'>; ordinal: number; reason: string }
 export interface TestSuiteVersion { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'functional_domain'; version: number; name: string; members: TestSuiteVersionMember[]; contentSha256: string; publishedBy: string; publishedAt: string }
-export interface SmokeCandidateRelation { caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'pending' | 'accepted' | 'rejected'; actorId?: string; reviewedAt?: string }
-export interface ImpactedRegressionReference { suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; actorId: string; createdAt: string }
+export interface SmokeCandidateRelation { testCaseSetVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'pending' | 'accepted' | 'rejected'; actorId?: string; reviewedAt?: string }
+export interface ImpactedRegressionReference { testCaseSetVersionId?: string; suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; actorId: string; createdAt: string }
 export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression'; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: 'ui' | 'api'; reason: string; dedupKey: string }
 export interface TestExecutionHandoff { id: string; projectId: string; projectVersionId: string; testCaseSetVersionId: string; strategy: 'standard' | 'fast' | 'full'; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; members: TestExecutionHandoffMember[]; contentSha256: string; createdBy: string; createdAt: string }
 

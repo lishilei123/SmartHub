@@ -8,14 +8,18 @@ const pollMs = positiveIntegerEnv('SMARTHUB_TASK_POLL_MS', 1_000)
 const concurrency = positiveIntegerEnv('SMARTHUB_WORKER_CONCURRENCY', 1)
 let stopping = false
 const activeControllers = new Set<AbortController>()
+let nextQueueIndex = 0
 
 async function processOne() {
-  const testDesignClaimed = await processTestDesignOne()
-  if (testDesignClaimed) return true
-  const technicalClaimed = await processTechnicalSolutionOne()
-  if (technicalClaimed) return true
-  const reviewClaimed = await processReviewOne()
-  if (reviewClaimed) return true
+  const queues = [processTestDesignOne, processTechnicalSolutionOne, processReviewOne, processKnowledgeOne]
+  const start = nextQueueIndex++ % queues.length
+  for (let offset = 0; offset < queues.length; offset += 1) {
+    if (await queues[(start + offset) % queues.length]()) return true
+  }
+  return false
+}
+
+async function processKnowledgeOne() {
   let task
   try {
     task = await stateStore.claimTask?.(workerId, leaseMs)
@@ -50,9 +54,9 @@ async function processTestDesignOne() {
   catch (error) { console.error('测试设计任务领取失败：', error instanceof Error ? error.message : error); return false }
   if (!job) return false
   const lease: TaskLease = { workerId, runToken: job.runToken! }; const controller = new AbortController(); activeControllers.add(controller)
-  const heartbeat = setInterval(() => { void stateStore.heartbeatTestDesignJob?.(job.runId, lease, leaseMs).then(renewed => { if (!renewed) controller.abort(new Error('测试设计 Worker 租约已失效或运行已取消')) }).catch(error => console.error(`测试设计任务 ${job.runId} 心跳失败：`, error instanceof Error ? error.message : error)) }, Math.max(1_000, Math.floor(leaseMs / 3)))
-  try { await testDesignService.processPreparedRun(job.runId, controller.signal); await stateStore.finishTestDesignJob?.(job.runId, lease, 'succeeded') }
-  catch (error) { const message = error instanceof Error ? error.message : String(error); if (controller.signal.aborted) await stateStore.finishTestDesignJob?.(job.runId, lease, 'cancelled', message); else if (job.attempts < job.maxAttempts && /^(MODEL_|TEST_DESIGN_RUN_FAILED|MODEL_PROVIDER)/u.test(message)) await stateStore.releaseTestDesignJob?.(job.runId, lease, Math.min(60_000, 1_000 * 2 ** Math.max(0, job.attempts - 1)), message); else await stateStore.finishTestDesignJob?.(job.runId, lease, 'failed', message) }
+  const heartbeat = setInterval(() => { void stateStore.heartbeatTestDesignJob?.(job.nodeRunId, lease, leaseMs).then(renewed => { if (!renewed) controller.abort(new Error('测试设计 Worker 租约已失效或运行已取消')) }).catch(error => console.error(`测试设计节点任务 ${job.nodeRunId} 心跳失败：`, error instanceof Error ? error.message : error)) }, Math.max(1_000, Math.floor(leaseMs / 3)))
+  try { await testDesignService.processPreparedNode(job.runId, job.nodeRunId, lease, controller.signal); await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'succeeded') }
+  catch (error) { const message = error instanceof Error ? error.message : String(error); if (controller.signal.aborted) await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'cancelled', message); else if (job.attempts < job.maxAttempts && /^(MODEL_|TEST_DESIGN_RUN_FAILED|MODEL_PROVIDER)/u.test(message)) await stateStore.releaseTestDesignJob?.(job.nodeRunId, lease, Math.min(60_000, 1_000 * 2 ** Math.max(0, job.attempts - 1)), message); else await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'failed', message) }
   finally { clearInterval(heartbeat); activeControllers.delete(controller) }
   return true
 }

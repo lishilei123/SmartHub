@@ -8,7 +8,19 @@ import {
   Trash2, Users, Wrench, X, XCircle,
 } from 'lucide-react'
 import type { ProjectVersion } from './project-version-api'
-import { applyTestDesignGateDecision, createTestDesign, createTestDesignRun, loadTestCaseSetVersion, loadTestDesign, loadTestDesignInputs, loadTestDesignRun, loadTestDesigns, type TestDesign, type TestDesignInputCandidates, type TestDesignWorkflowRun } from './test-design-api'
+import {
+  actOnTestDesignConfirmation, actOnTestDesignFinding, applyTestDesignGateDecision, batchReviewTestDesignCases,
+  cancelTestDesignRun, createExecutionHandoff, createTestDesign, createTestDesignCase, createTestDesignRun, approveTestPointTree,
+  fullRerunTestDesign,
+  loadExecutionHandoffs, loadImpactedRegression, loadProjectTestCaseCatalog, loadProjectTestSuites, loadSmokeCandidates,
+  loadTestCaseSetVersion, loadTestDesign, loadTestDesignCase, loadTestDesignInputs, loadTestDesignRun,
+  loadTestDesigns, publishTestCaseSet, loadTestPointTree, reAuditTestDesignRun, replaceTestDataRequirements,
+  resynthesizeTestDesign, retryTestDesignNode, reviseTestDesignScope, reviewSmokeCandidate, reviewTestDesignCase,
+  saveImpactedRegression, testCaseSetExportUrl, updateTestDesignCase, updateTestPointTree,
+  type TestCaseContent, type TestDesign, type TestDesignCase, type TestDesignCoverageAudit,
+  type TestDesignInputCandidates, type TestDesignWorkflowRun, type TestPointNode, type TestPointTreeOperation,
+  type ImpactedRegression, type ProjectTestCaseCatalogItem, type SmokeCandidate, type TestSuiteVersion, type TestExecutionHandoff,
+} from './test-design-api'
 import { resolveTestDesignRoute } from './test-design-state'
 import './test-design.css'
 import './test-design-collection.css'
@@ -233,14 +245,22 @@ function formatRunTime(value?: string) { return value ? new Date(value).toLocale
 function shortId(value: string) { return value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value }
 function shortHash(value: string) { return value.length > 20 ? `${value.slice(0, 10)}…${value.slice(-8)}` : value }
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === 'object' ? value as Record<string, unknown> : {} }
+function arrayOf(value: unknown) { return Array.isArray(value) ? value : [] }
+function currentTreeNodes(run: TestDesignWorkflowRun) { return run.testPointTree?.revisions.find(item => item.revision === run.testPointTree?.currentRevision)?.nodes.filter(item => !item.deleted) ?? [] }
+function currentCaseContent(testCase: TestDesignCase) { return testCase.revisions.find(item => item.revision === testCase.currentRevision)?.content }
+function latestCoverageAudit(run: TestDesignWorkflowRun) { return run.coverageAudits.at(-1) }
+function analysisScope(run: TestDesignWorkflowRun) { return recordOf(recordOf(run.artifacts.find(item => item.nodeKey === 'test_analysis')?.content).scope) }
+function analysisItemCount(run: TestDesignWorkflowRun) { let total = 0; for (const value of Object.values(analysisScope(run))) total += arrayOf(value).length; return total }
+function dataRequirementCount(run: TestDesignWorkflowRun) { return run.dataSetVersions.at(-1)?.requirements.length ?? 0 }
+function canPublishRun(run?: TestDesignWorkflowRun | null) { const audit = run ? latestCoverageAudit(run) : undefined; return Boolean(run?.status === 'succeeded' && audit?.status === 'valid' && audit.blockers.length === 0 && run.testCases.length > 0) }
 function runTabCount(tab: TabKey, run: TestDesignWorkflowRun) {
   if (tab === 'overview' || tab === 'workflow') return undefined
-  if (tab === 'analysis') return run.findings.length
+  if (tab === 'analysis') return analysisItemCount(run)
   if (tab === 'retrieval') return run.retrievalSnapshot.hits.length
-  if (tab === 'tree') return run.artifacts.filter(value => recordOf(value).nodeKey === 'tree_merge').length
+  if (tab === 'tree') return currentTreeNodes(run).length
   if (tab === 'cases') return run.testCases.length
-  if (tab === 'case-set') return 0
-  if (tab === 'data') return run.dataSetVersions.length
+  if (tab === 'case-set') return run.caseSetVersions?.length ?? 0
+  if (tab === 'data') return dataRequirementCount(run)
   if (tab === 'coverage') return run.coverageAudits.length
   if (tab === 'history') return run.historicalSnapshot.items.length
   return run.confirmationItems.length
@@ -283,6 +303,8 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   const [caseSaveStates, setCaseSaveStates] = useState<Record<string, SaveState>>(() => Object.fromEntries(cases.map(item => [item.id, 'clean'])))
   const [caseRevisions, setCaseRevisions] = useState<Record<string, number>>(() => Object.fromEntries(cases.map(item => [item.id, 6])))
   const [gateSubmitting, setGateSubmitting] = useState(false)
+  const [selectedRunCaseId, setSelectedRunCaseId] = useState<string | null>(null)
+  const [newCasePointId, setNewCasePointId] = useState<string | null>(null)
 
   const visibleBasisItems = basisMode === 'review_baseline' ? basisItems : knowledgeBasisItems
   const activeBasis = visibleBasisItems.find(item => item.id === selectedBasis) ?? visibleBasisItems[0]
@@ -322,6 +344,13 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
       setWorkspaceError(error instanceof Error ? error.message : '测试设计运行加载失败')
     }).finally(() => setWorkspaceLoading(false))
   }, [activeContext, projectVersion, view])
+
+  useEffect(() => {
+    if (!activeRun) return
+    const available = activeRun.testCases.filter(item => !item.tombstonedAt)
+    if (selectedRunCaseId === '__new__' || available.some(item => item.id === selectedRunCaseId)) return
+    setSelectedRunCaseId(available[0]?.id ?? null)
+  }, [activeRun, selectedRunCaseId])
 
   useEffect(() => {
     const restore = () => {
@@ -375,16 +404,35 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     setView('list')
     setRouteContext({ create: null })
   }
-  const refreshWorkspace = () => {
+  const refreshWorkspace = async () => {
     if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId) return
     setWorkspaceLoading(true)
     setWorkspaceError('')
-    void Promise.all([
+    await Promise.all([
       loadTestDesign(projectVersion.id, activeContext.testDesignId),
       loadTestDesignRun(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId),
     ]).then(([design, run]) => { setActiveDesign(design); setActiveRun(run) })
       .catch(error => setWorkspaceError(error instanceof Error ? error.message : '测试设计运行加载失败'))
       .finally(() => setWorkspaceLoading(false))
+  }
+  const refreshRunOnly = async () => {
+    if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId) return
+    const run = await loadTestDesignRun(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId)
+    setActiveRun(run)
+  }
+  const openRunCase = (caseId: string) => {
+    setSelectedRunCaseId(caseId)
+    setNewCasePointId(null)
+    setTab('cases')
+    setRouteContext({ tab: 'cases' })
+    setRightOpen(true)
+  }
+  const openNewRunCase = (pointId?: string) => {
+    setSelectedRunCaseId('__new__')
+    setNewCasePointId(pointId ?? currentTreeNodes(activeRun!).find(item => item.applicability !== 'not_applicable')?.nodeId ?? null)
+    setTab('cases')
+    setRouteContext({ tab: 'cases' })
+    setRightOpen(true)
   }
   const submitGateDecision = async (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => {
     if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId || !activeRun) return
@@ -413,6 +461,24 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     } finally {
       setGateSubmitting(false)
     }
+  }
+  const runAction = async (action: 'cancel' | 'revise_scope' | 'retry_functional' | 'retry_non_functional' | 'resynthesize' | 'full_rerun') => {
+    if (!projectVersion || !activeRun || !activeContext.testDesignId) return
+    if ((action === 'cancel' || action === 'full_rerun') && !window.confirm(action === 'cancel' ? '取消后当前运行将进入终态，是否继续？' : '全部重跑会创建新的固定输入运行，原运行保留，是否继续？')) return
+    setWorkspaceLoading(true)
+    try {
+      const scope = [projectVersion.id, activeContext.testDesignId, activeRun.id] as const
+      const next = action === 'cancel' ? await cancelTestDesignRun(...scope)
+        : action === 'revise_scope' ? await reviseTestDesignScope(...scope)
+          : action === 'retry_functional' ? await retryTestDesignNode(...scope, 'functional_design')
+            : action === 'retry_non_functional' ? await retryTestDesignNode(...scope, 'non_functional_design')
+              : action === 'resynthesize' ? await resynthesizeTestDesign(...scope)
+                : await fullRerunTestDesign(...scope)
+      setActiveRun(next)
+      if (next.id !== activeRun.id) { setActiveContext({ testDesignId: activeContext.testDesignId, workflowRunId: next.id }); setRouteContext({ testDesignId: activeContext.testDesignId, workflowRunId: next.id, tab: 'workflow' }) }
+      notify(action === 'full_rerun' ? '已创建新的全部重跑 Run，原运行保持不变。' : '运行恢复动作已提交。', 'success')
+    } catch (error) { notify(error instanceof Error ? error.message : '运行恢复动作失败', 'error') }
+    finally { setWorkspaceLoading(false) }
   }
   const startDesign = async (input: Record<string, unknown>) => {
     if (!projectVersion) throw new Error('请先选择项目版本')
@@ -617,7 +683,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
         <button className="icon-btn td-mobile-detail-button" onClick={() => setRightOpen(value => !value)} aria-label={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
         <button className="btn" disabled={workspaceLoading} onClick={refreshWorkspace}><RefreshCw className={workspaceLoading ? 'spin' : ''} />刷新</button>
         <button className="btn" disabled={!activeRun?.testCases.length} onClick={() => notify('当前运行尚未发布用例集，暂无可导出的固定版本。', 'warning')}><Download />导出<ChevronDown /></button>
-        <button className="btn primary" disabled={activeRun?.status !== 'succeeded'} onClick={() => notify('请在用例集视图完成发布门禁。', 'warning')}><LockKeyhole />发布用例集</button>
+        <button className="btn primary" disabled={!canPublishRun(activeRun)} title={activeRun && !canPublishRun(activeRun) ? '请先清除覆盖阻断项并批准全部用例' : '发布当前固定用例集'} onClick={() => { selectTab('case-set'); notify('当前运行已满足发布门禁，请在用例集视图确认固定版本。') }}><LockKeyhole />发布用例集</button>
         <button className="icon-btn" aria-label="更多操作"><MoreHorizontal /></button>
       </div>
     </header>
@@ -638,10 +704,12 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
       <main className="td-main-canvas">
         {workspaceLoading && <RunLoading />}
         {!workspaceLoading && activeRun && tab === 'overview' && <RunOverview design={activeDesign} run={activeRun} onNavigate={selectTab} />}
-        {!workspaceLoading && activeRun && tab === 'workflow' && <RunWorkflowView design={activeDesign} run={activeRun} onGateDecision={submitGateDecision} gateSubmitting={gateSubmitting} />}
-        {!workspaceLoading && activeRun && !['overview', 'workflow'].includes(tab) && <RunArtifactState tab={tab} run={activeRun} />}
+        {!workspaceLoading && activeRun && tab === 'workflow' && <RunWorkflowView design={activeDesign} run={activeRun} onGateDecision={submitGateDecision} onRunAction={runAction} gateSubmitting={gateSubmitting} />}
+        {!workspaceLoading && activeRun && !['overview', 'workflow'].includes(tab) && <RunArtifactView tab={tab} run={activeRun} projectId={projectVersion.projectId} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} notify={notify} onRefresh={refreshRunOnly} selectedCaseId={selectedRunCaseId} onSelectCase={openRunCase} onNewCase={openNewRunCase} onOpenTree={() => selectTab('tree')} />}
       </main>
-      {rightOpen && activeRun && <RunDetailPanel design={activeDesign} run={activeRun} />}
+      {rightOpen && activeRun && tab === 'cases' && selectedRunCaseId
+        ? <RunCaseEditor key={`${activeRun.id}:${selectedRunCaseId}:${newCasePointId ?? ''}`} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} run={activeRun} caseId={selectedRunCaseId} initialPointId={newCasePointId} notify={notify} onRefresh={refreshRunOnly} onCreated={caseId => { setSelectedRunCaseId(caseId); setNewCasePointId(null) }} />
+        : rightOpen && activeRun && <RunDetailPanel design={activeDesign} run={activeRun} />}
     </div>
   </section>
 }
@@ -668,7 +736,7 @@ function RunOverview({ design, run, onNavigate }: { design: TestDesign | null; r
   </div>
 }
 
-function RunWorkflowView({ design, run, onGateDecision, gateSubmitting }: { design: TestDesign | null; run: TestDesignWorkflowRun; onGateDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void>; gateSubmitting: boolean }) {
+function RunWorkflowView({ design, run, onGateDecision, onRunAction, gateSubmitting }: { design: TestDesign | null; run: TestDesignWorkflowRun; onGateDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void>; onRunAction: (action: 'cancel' | 'revise_scope' | 'retry_functional' | 'retry_non_functional' | 'resynthesize' | 'full_rerun') => Promise<void>; gateSubmitting: boolean }) {
   const node = (nodeKey: string) => run.nodeRuns.find(item => item.nodeKey === nodeKey)
   const fixedInputTime = formatRunTime(run.basisSnapshot.createdAt)
   const gateDecision = (gateKey: 'scope' | 'test-point-tree') => [...run.gateDecisions].reverse().find(item => item.gateKey === gateKey)
@@ -689,6 +757,7 @@ function RunWorkflowView({ design, run, onGateDecision, gateSubmitting }: { desi
   const openNodeRecord = (nodeRun: TestDesignWorkflowRun['nodeRuns'][number]) => setRecordNodeId(nodeRun.id)
   return <><div className="td-workflow-view td-real-workflow">
     <header className="td-canvas-toolbar"><div><b>固定工作流</b><small>test-design-workflow/v1 · {run.id} · 服务端真实拓扑</small></div><StatusPill tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</StatusPill><span><i className="done" />成功</span><span><i className="running" />进行中</span><span><i />等待 / 门禁</span>{pendingGate && <a className="btn primary td-gate-entry" href="#test-design-gate-decision"><Users />{pendingGate === 'scope' ? '确认测试范围' : '批准测试点树'}</a>}<button className="btn" onClick={() => setDetailsOpen(value => !value)}>{detailsOpen ? '收起详情' : '运行详情'}</button></header>
+    <div className="td-run-recovery-actions"><span>运行恢复</span>{functional?.status === 'failed' && <button className="btn" onClick={() => void onRunAction('retry_functional')}><RefreshCw />仅重跑功能设计</button>}{nonFunctional?.status === 'failed' && <button className="btn" onClick={() => void onRunAction('retry_non_functional')}><RefreshCw />仅重跑非功能设计</button>}{!['queued', 'running'].includes(run.status) && run.status !== 'cancelled' && <button className="btn" onClick={() => void onRunAction('revise_scope')}><FileDiff />重新分析范围</button>}{['succeeded', 'failed'].includes(synthesis?.status ?? '') && run.status !== 'cancelled' && <button className="btn" onClick={() => void onRunAction('resynthesize')}><Sparkles />重新具象化</button>}{['failed', 'cancelled'].includes(run.status) && <button className="btn" onClick={() => void onRunAction('full_rerun')}><ArchiveRestore />全部重跑</button>}{['queued', 'running', 'waiting_gate'].includes(run.status) && <button className="btn danger" onClick={() => void onRunAction('cancel')}><XCircle />取消运行</button>}</div>
     <div className="td-workflow-canvas td-workflow-sequence td-real-workflow-canvas">
       <div className="td-flow-column start"><small>固定输入</small><FixedInputCard run={run} time={fixedInputTime} /></div>
       <ArrowRight className="td-flow-arrow inline" />
@@ -918,9 +987,344 @@ function RunDetailPanel({ design, run }: { design: TestDesign | null; run: TestD
   </div></aside>
 }
 
+const artifactLabels: Record<TabKey, string> = { overview: '概览', workflow: '工作流', analysis: '依据解构', retrieval: '知识召回', tree: '测试点树', cases: '测试用例', 'case-set': '用例集', data: '测试数据', coverage: '覆盖审计', history: '历史复用', questions: '待确认项' }
+const analysisGroupLabels: Record<string, string> = { features: '功能与能力', rules: '规则与约束', states: '状态', roles: '角色', entities: '实体', interfaces: '接口', assertions: '验收断言', risks: '风险', pendingItems: '待确认输入' }
+const runDimensionLabels: Record<TestPointNode['dimension'], string> = { functional: '功能', performance: '性能', stability: '稳定性', compatibility: '兼容性', security: '安全' }
+const reviewStateLabels: Record<TestDesignCase['reviewState'], string> = { draft: '草稿', in_review: '审核中', approved: '已批准', rejected: '已拒绝', needs_revision: '需修订' }
+
+type RunArtifactViewProps = {
+  tab: TabKey
+  run: TestDesignWorkflowRun
+  projectId: string
+  projectVersionId: string
+  designId: string
+  notify: Notify
+  onRefresh: () => Promise<void>
+  selectedCaseId: string | null
+  onSelectCase: (caseId: string) => void
+  onNewCase: (pointId?: string) => void
+  onOpenTree: () => void
+}
+
+function RunArtifactView({ tab, run, projectId, projectVersionId, designId, notify, onRefresh, selectedCaseId, onSelectCase, onNewCase, onOpenTree }: RunArtifactViewProps) {
+  if (tab === 'analysis') return run.artifacts.some(item => item.nodeKey === 'test_analysis') ? <RunAnalysisArtifact run={run} /> : <RunArtifactState tab={tab} run={run} />
+  if (tab === 'retrieval') return <RunRetrievalArtifact run={run} />
+  if (tab === 'tree') return run.testPointTree ? <RunTreeArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} /> : <RunArtifactState tab={tab} run={run} />
+  if (tab === 'cases') return run.testCases.length || run.status === 'succeeded' ? <RunCasesArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} selectedCaseId={selectedCaseId} onSelectCase={onSelectCase} onNewCase={onNewCase} /> : <RunArtifactState tab={tab} run={run} />
+  if (tab === 'case-set') return <RunCaseSetArtifact run={run} projectId={projectId} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} />
+  if (tab === 'data') return run.dataSetVersions.length ? <RunDataArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} /> : <RunArtifactState tab={tab} run={run} />
+  if (tab === 'coverage') return run.coverageAudits.length ? <RunCoverageArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} /> : <RunArtifactState tab={tab} run={run} />
+  if (tab === 'history') return <RunHistoryArtifact run={run} />
+  if (tab === 'questions') return <RunQuestionsArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} />
+  return <RunArtifactState tab={tab} run={run} />
+}
+
+function RunArtifactHeader({ title, description, children }: { title: string; description: string; children?: ReactNode }) {
+  return <header className="td-canvas-toolbar td-run-artifact-header"><div><b>{title}</b><small>{description}</small></div>{children}</header>
+}
+
+function RunIntentionalEmpty({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
+  return <div className="td-run-intentional-empty"><span>{icon}</span><h2>{title}</h2><p>{description}</p></div>
+}
+
+function RunDimensionTag({ dimension }: { dimension: TestPointNode['dimension'] }) {
+  return <span className={`td-dimension-tag ${dimension}`}>{runDimensionLabels[dimension]}</span>
+}
+
+function analysisEntry(value: unknown, index: number) {
+  if (typeof value === 'string') return { title: value, description: '' }
+  const item = recordOf(value)
+  const id = item.featureId ?? item.ruleId ?? item.stateId ?? item.roleId ?? item.entityId ?? item.interfaceId ?? item.assertionId ?? item.riskId ?? item.id
+  const title = String(item.title ?? item.name ?? id ?? `条目 ${index + 1}`)
+  const description = String(item.description ?? item.objective ?? item.question ?? item.mitigation ?? item.status ?? '')
+  return { title, description }
+}
+
+function RunAnalysisArtifact({ run }: { run: TestDesignWorkflowRun }) {
+  const artifact = run.artifacts.find(item => item.nodeKey === 'test_analysis')!
+  const groups = Object.entries(analysisScope(run)).map(([key, value]) => ({ key, items: arrayOf(value) })).filter(group => group.items.length)
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="依据解构" description={`${artifact.schemaVersion} · 固定产物 ${shortHash(artifact.contentSha256)}`}><StatusPill tone="success">{analysisItemCount(run)} 项</StatusPill></RunArtifactHeader>
+    {groups.length ? <div className="td-run-analysis-grid">{groups.map(group => <section key={group.key}><header><span><Braces /><b>{analysisGroupLabels[group.key] ?? group.key}</b></span><em>{group.items.length}</em></header><div>{group.items.map((value, index) => { const item = analysisEntry(value, index); return <article key={`${group.key}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span><p><b>{item.title}</b>{item.description && <small>{item.description}</small>}</p></article> })}</div></section>)}</div> : <RunIntentionalEmpty icon={<ListChecks />} title="依据解构结果为空" description="该固定产物没有返回可展示的结构化条目。" />}
+    {run.findings.length > 0 && <section className="td-run-findings"><header><b>分析 Finding</b><span>{run.findings.length}</span></header>{run.findings.map(item => <article key={item.id}><AlertTriangle /><p><small>{item.severity} · {item.state}</small><b>{item.title}</b><em>{item.description}</em></p></article>)}</section>}
+  </div>
+}
+
+function RunRetrievalArtifact({ run }: { run: TestDesignWorkflowRun }) {
+  const snapshot = run.retrievalSnapshot
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="固定知识召回" description={`快照 ${shortHash(snapshot.snapshotSha256)} · ${snapshot.assetVersionIds.length} 个固定资产`}><StatusPill tone={snapshot.mode === 'disabled' ? 'neutral' : 'info'}>{snapshot.mode}</StatusPill></RunArtifactHeader>
+    {snapshot.hits.length ? <div className="td-run-retrieval-list">{snapshot.hits.map((value, index) => { const hit = recordOf(value); const locator = recordOf(hit.locator); return <article key={String(hit.id ?? index)}><header><FileText /><b>{String(hit.classification ?? '固定知识')}</b><strong>{typeof hit.score === 'number' ? hit.score.toFixed(3) : '-'}</strong></header><p>{String(hit.content ?? '')}</p><footer><span>{String(locator.logicalPath ?? hit.assetVersionId ?? '')}</span><code>{String(hit.chunkId ?? '')}</code></footer></article> })}</div> : <RunIntentionalEmpty icon={<Search />} title={snapshot.mode === 'disabled' ? '本次未启用补充知识召回' : '固定召回没有命中'} description={snapshot.mode === 'disabled' ? '本次运行仅使用主依据，这是已固定的输入策略，不是产物缺失。' : '快照已成功生成，但固定查询计划没有返回符合条件的内容。'} />}
+  </div>
+}
+
+function RunTreeArtifact({ run, projectVersionId, designId, notify, onRefresh }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void> }) {
+  const tree = run.testPointTree!
+  const nodes = currentTreeNodes(run).sort((left, right) => left.sortKey.localeCompare(right.sortKey))
+  const approved = tree.versions.find(item => item.id === tree.currentApprovedVersionId && item.revision === tree.currentRevision)
+  const [selectedId, setSelectedId] = useState(nodes[0]?.nodeId ?? '')
+  const selected = nodes.find(item => item.nodeId === selectedId) ?? nodes[0]
+  const [draft, setDraft] = useState<TestPointNode | null>(selected ? structuredClone(selected) : null)
+  const [dirty, setDirty] = useState(false)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { if (!selected) return; setDraft(structuredClone(selected)); setDirty(false) }, [selected?.nodeId, tree.currentRevision])
+  const change = (patch: Partial<TestPointNode>) => { if (!draft) return; setDraft({ ...draft, ...patch }); setDirty(true) }
+  const applyOperations = async (operations: TestPointTreeOperation[], reason: string) => {
+    const current = await loadTestPointTree(projectVersionId, designId, run.id)
+    await updateTestPointTree(projectVersionId, designId, run.id, current.etag, operations, reason)
+    await onRefresh()
+  }
+  const save = async () => {
+    if (!draft || !draft.title.trim() || !draft.objective.trim() || !draft.oracle.trim()) return notify('请补齐测试点名称、目标和判定依据。', 'error')
+    setBusy(true)
+    try {
+      await applyOperations([{ op: 'update', nodeId: draft.nodeId, patch: { title: draft.title, objective: draft.objective, dimension: draft.dimension, priority: draft.priority, applicability: draft.applicability, entryMethods: draft.entryMethods, oracle: draft.oracle, basisRefs: draft.basisRefs, designTechniques: draft.designTechniques, dataConditions: draft.dataConditions, risks: draft.risks, assumptions: draft.assumptions, historicalRefs: draft.historicalRefs } }], '人工修订测试点与固定依据关系')
+      setDirty(false); notify('测试点树 revision 已保存，请完成独立批准后继续。', 'success')
+    } catch (error) { notify(error instanceof Error ? error.message : '测试点树保存失败', 'error') }
+    finally { setBusy(false) }
+  }
+  const mutate = async (operations: TestPointTreeOperation[], reason: string) => { setBusy(true); try { await applyOperations(operations, reason); notify('测试点树结构已保存为新 revision。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '测试点树结构修改失败', 'error') } finally { setBusy(false) } }
+  const add = (parentId: string | null) => { if (!selected) return; const value = treeNodeContent(selected); void mutate([{ op: 'add', clientNodeRef: `manual-${Date.now()}`, parentId, sortKey: `${selected.sortKey}.5`, value: { ...value, title: parentId === selected.nodeId ? '新建子测试点' : '新建同级测试点' } }], '人工新增测试点') }
+  const move = (direction: -1 | 1) => { if (!selected) return; const siblings = nodes.filter(item => item.parentId === selected.parentId); const index = siblings.findIndex(item => item.nodeId === selected.nodeId); const target = siblings[index + direction]; if (!target) return notify('当前节点在该层级已无法继续移动。', 'warning'); void mutate([{ op: 'reorder', nodeId: selected.nodeId, sortKey: target.sortKey }, { op: 'reorder', nodeId: target.nodeId, sortKey: selected.sortKey }], '人工调整测试点顺序') }
+  const approve = async () => { setBusy(true); try { const current = await loadTestPointTree(projectVersionId, designId, run.id); await approveTestPointTree(projectVersionId, designId, run.id, current.etag); await onRefresh(); notify('当前测试点树 revision 已批准；关联用例需重新复核。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '测试点树批准失败', 'error') } finally { setBusy(false) } }
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="测试点树" description={`${tree.id} · revision r${tree.currentRevision} · 保存与批准为独立操作`}><StatusPill tone={approved ? 'success' : 'warning'}>{approved ? `已批准 v${approved.version}` : '待批准'}</StatusPill><button className="icon-btn" title="新建同级测试点" aria-label="新建同级测试点" disabled={busy || !selected} onClick={() => add(selected?.parentId ?? null)}><Plus /></button><button className="icon-btn" title="新建子测试点" aria-label="新建子测试点" disabled={busy || !selected} onClick={() => add(selected!.nodeId)}><GitBranch /></button><button className="icon-btn" title="上移" aria-label="上移测试点" disabled={busy || !selected} onClick={() => move(-1)}><ArrowUp /></button><button className="icon-btn" title="下移" aria-label="下移测试点" disabled={busy || !selected} onClick={() => move(1)}><ArrowDown /></button><button className="icon-btn" title="删除测试点" aria-label="删除测试点" disabled={busy || !selected} onClick={() => selected && window.confirm(`删除“${selected.title}”并提升其子节点，是否继续？`) && void mutate([{ op: 'delete', nodeId: selected.nodeId }], '人工删除测试点')}><Trash2 /></button><button className="btn" disabled={!dirty || busy} onClick={() => void save()}>{busy ? <RefreshCw className="spin" /> : <Check />}{busy ? '处理中' : '保存 revision'}</button><button className="btn primary" disabled={Boolean(approved) || dirty || busy} onClick={() => void approve()}><ShieldCheck />批准当前 revision</button></RunArtifactHeader>
+    <div className="td-run-tree-layout"><div className="td-run-table td-run-tree-table"><div className="td-run-table-head"><span>测试点</span><span>维度</span><span>方式</span><span>优先级</span><span>依据</span></div>{nodes.map(node => <button className={node.nodeId === selected?.nodeId ? 'active' : ''} key={node.nodeId} onClick={() => setSelectedId(node.nodeId)}><span><TestTube2 /><p><b>{node.title}</b><small>{node.objective}</small><code>{shortId(node.nodeId)}</code></p></span><RunDimensionTag dimension={node.dimension} /><em>{node.entryMethods.map(value => value.toUpperCase()).join(' + ') || '-'}</em><strong className={node.priority === 'P0' ? 'danger' : ''}>{node.priority}</strong><small>{node.basisRefs.length}</small></button>)}</div>
+    {draft && <section className="td-real-tree-editor"><header><Pencil /><div><small>当前节点</small><b>{shortId(draft.nodeId)}</b></div><StatusPill tone={dirty ? 'warning' : 'neutral'}>{dirty ? '有未保存修改' : '已保存'}</StatusPill></header><label><span>测试点名称</span><input value={draft.title} onChange={event => change({ title: event.target.value })} /></label><label><span>测试目标</span><textarea value={draft.objective} onChange={event => change({ objective: event.target.value })} /></label><div><label><span>测试维度</span><select value={draft.dimension} onChange={event => change({ dimension: event.target.value as TestPointNode['dimension'] })}>{Object.entries(runDimensionLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>优先级</span><select value={draft.priority} onChange={event => change({ priority: event.target.value as TestPointNode['priority'] })}>{['P0', 'P1', 'P2', 'P3'].map(value => <option key={value}>{value}</option>)}</select></label></div><label><span>执行入口</span><div className="td-real-tree-methods"><button className={draft.entryMethods.includes('ui') ? 'active' : ''} onClick={() => change({ entryMethods: draft.entryMethods.includes('ui') ? draft.entryMethods.filter(item => item !== 'ui') : [...draft.entryMethods, 'ui'] })}>UI</button><button className={draft.entryMethods.includes('api') ? 'active' : ''} onClick={() => change({ entryMethods: draft.entryMethods.includes('api') ? draft.entryMethods.filter(item => item !== 'api') : [...draft.entryMethods, 'api'] })}>API</button></div></label><label><span>可判定预期</span><textarea value={draft.oracle} onChange={event => change({ oracle: event.target.value })} /></label><label><span>固定依据引用（逗号或换行分隔）</span><textarea value={draft.basisRefs.join('\n')} onChange={event => change({ basisRefs: textItems(event.target.value) })} placeholder="从左侧固定依据复制 ID，用于修复依据未覆盖阻断" /></label></section>}</div>
+  </div>
+}
+
+function treeNodeContent(node: TestPointNode): Omit<TestPointNode, 'nodeId' | 'parentId' | 'sortKey' | 'deleted'> {
+  const { nodeId: _nodeId, parentId: _parentId, sortKey: _sortKey, deleted: _deleted, ...content } = node
+  return content
+}
+
+function RunCasesArtifact({ run, projectVersionId, designId, notify, onRefresh, selectedCaseId, onSelectCase, onNewCase }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; selectedCaseId: string | null; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void }) {
+  const [query, setQuery] = useState('')
+  const [status, setStatus] = useState('all')
+  const [submitting, setSubmitting] = useState(false)
+  const cases = run.testCases.map(testCase => ({ testCase, content: currentCaseContent(testCase) })).filter((item): item is { testCase: TestDesignCase; content: TestCaseContent } => Boolean(item.content) && !item.testCase.tombstonedAt)
+  const filtered = cases.filter(({ testCase, content }) => (status === 'all' || testCase.reviewState === status) && (!query.trim() || `${testCase.id} ${content.title} ${content.objective}`.toLowerCase().includes(query.trim().toLowerCase())))
+  const completeReviews = async () => {
+    const active = cases.filter(item => item.testCase.reviewState !== 'approved')
+    if (!active.length) return
+    setSubmitting(true)
+    try {
+      const submitTargets = active.filter(item => ['draft', 'rejected', 'needs_revision'].includes(item.testCase.reviewState)).map(item => ({ caseId: item.testCase.id, targetRevision: item.testCase.currentRevision }))
+      if (submitTargets.length) await batchReviewTestDesignCases(projectVersionId, designId, run.id, { targets: submitTargets, decision: 'submit', comment: '批量提交发布前审核' })
+      await batchReviewTestDesignCases(projectVersionId, designId, run.id, { targets: active.map(item => ({ caseId: item.testCase.id, targetRevision: item.testCase.currentRevision })), decision: 'approve', comment: '批量批准当前固定 revision' })
+      await reAuditTestDesignRun(projectVersionId, designId, run.id)
+      await onRefresh()
+      notify(`${active.length} 条用例已批准，并已重新执行覆盖审计。`, 'success')
+    } catch (error) { notify(error instanceof Error ? error.message : '批量审核失败', 'error') }
+    finally { setSubmitting(false) }
+  }
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="测试用例" description={`${cases.length} 条当前用例 · 编辑保存会创建新 revision 并使覆盖审计失效`}><button className="btn" disabled={submitting || cases.every(item => item.testCase.reviewState === 'approved')} onClick={() => void completeReviews()}><Users />{submitting ? '审核中' : '批量完成审核'}</button><button className="btn primary" onClick={() => onNewCase()}><Plus />新建用例</button></RunArtifactHeader>
+    <div className="td-real-case-filters"><label><Search /><input aria-label="搜索真实测试用例" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索用例 ID、标题或目标" /></label><select aria-label="按审核状态筛选" value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部审核状态</option>{Object.entries(reviewStateLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><span>{cases.filter(item => item.testCase.reviewState === 'approved').length} / {cases.length} 已批准</span></div>
+    {filtered.length ? <div className="td-run-table td-run-case-table"><div className="td-run-table-head"><span>用例</span><span>维度</span><span>方式</span><span>优先级</span><span>审核</span></div>{filtered.map(({ testCase, content }) => <button className={testCase.id === selectedCaseId ? 'active' : ''} key={testCase.id} onClick={() => onSelectCase(testCase.id)}><span><ListChecks /><p><b>{content.title}</b><small>{content.objective}</small><code>{shortId(testCase.id)} · r{testCase.currentRevision} · {testCase.origin}</code></p></span><RunDimensionTag dimension={content.dimension} /><em>{content.executionMethods.map(method => method.method.toUpperCase()).join(' + ')}</em><strong className={content.priority === 'P0' ? 'danger' : ''}>{content.priority}</strong><StatusPill tone={testCase.reviewState === 'approved' ? 'success' : testCase.reviewState === 'rejected' || testCase.reviewState === 'needs_revision' ? 'danger' : 'warning'}>{reviewStateLabels[testCase.reviewState]}</StatusPill></button>)}</div> : <RunIntentionalEmpty icon={<ListChecks />} title={cases.length ? '没有匹配的测试用例' : '当前运行没有测试用例'} description={cases.length ? '调整搜索词或审核状态后重试。' : '可以新建一条关联已批准测试点的结构化用例。'} />}
+  </div>
+}
+
+function RunCaseSetArtifact({ run, projectId, projectVersionId, designId, notify, onRefresh, onSelectCase, onNewCase, onOpenTree }: { run: TestDesignWorkflowRun; projectId: string; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void }) {
+  const [name, setName] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const versions = run.caseSetVersions ?? []
+  const audit = latestCoverageAudit(run)
+  const approved = run.testCases.filter(item => item.reviewState === 'approved' && !item.tombstonedAt).length
+  const publish = async () => {
+    if (!audit || !canPublishRun(run) || !name.trim()) return
+    setSubmitting(true)
+    try { await publishTestCaseSet(projectVersionId, designId, run.id, { name: name.trim(), expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256 }); await onRefresh(); notify('新功能用例集已发布为不可变版本。', 'success'); setName('') }
+    catch (error) { notify(error instanceof Error ? error.message : '用例集发布失败', 'error') }
+    finally { setSubmitting(false) }
+  }
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="新功能用例集" description="工作流成功产生候选用例；人工批准并通过覆盖门禁后才能发布不可变版本"><StatusPill tone={versions.length ? 'success' : canPublishRun(run) ? 'info' : 'warning'}>{versions.length ? `已发布 ${versions.length} 个版本` : canPublishRun(run) ? '可发布' : '待发布'}</StatusPill></RunArtifactHeader>
+    <section className="td-run-set-summary"><article><span><ListChecks /></span><p><small>候选用例</small><b>{run.testCases.filter(item => !item.tombstonedAt).length}</b><em>当前运行</em></p></article><article><span><ShieldCheck /></span><p><small>已批准</small><b>{approved}</b><em>发布要求全部批准</em></p></article><article><span><AlertTriangle /></span><p><small>发布阻断</small><b>{audit?.blockers.length ?? 0}</b><em>{audit?.status === 'valid' ? '当前审计有效' : '需要重新审计'}</em></p></article></section>
+    {versions.length > 0 && <section className="td-run-published-sets"><header><b>已发布版本</b><span>不可变固定产物</span></header>{versions.map(version => <article key={version.id}><Layers3 /><p><small>v{version.version} · {formatRunTime(version.publishedAt)}</small><b>{version.name}</b><code>{shortHash(version.contentSha256)}</code></p><StatusPill tone={version.projection.status === 'succeeded' ? 'success' : version.projection.status === 'failed' ? 'danger' : 'info'}>知识投影 {version.projection.status}</StatusPill><strong>{version.members.length} 条</strong><span className="td-export-actions"><a className="btn" href={testCaseSetExportUrl(version.id, 'json')}><FileJson2 />JSON</a><a className="btn" href={testCaseSetExportUrl(version.id, 'markdown')}><FileText />Markdown</a><a className="btn" href={testCaseSetExportUrl(version.id, 'xlsx')}><Download />Excel</a></span></article>)}</section>}
+    {versions.at(-1) && <PublishedCaseSetOperations version={versions.at(-1)!} run={run} projectId={projectId} notify={notify} />}
+    {audit && audit.blockers.length > 0 && <RunBlockerList audit={audit} run={run} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} />}
+    {canPublishRun(run) && <section className="td-real-publish-form"><div><LockKeyhole /><p><b>发布不可变新功能用例集</b><small>固定当前 caseId、revision、树版本、数据版本和覆盖审计 Hash。</small></p></div><input aria-label="用例集名称" value={name} onChange={event => setName(event.target.value)} placeholder="填写用例集名称" /><button className="btn primary" disabled={!name.trim() || submitting} onClick={() => void publish()}>{submitting ? <RefreshCw className="spin" /> : <LockKeyhole />}{submitting ? '发布中' : '确认发布'}</button></section>}
+  </div>
+}
+
+function PublishedCaseSetOperations({ version, run, projectId, notify }: { version: NonNullable<TestDesignWorkflowRun['caseSetVersions']>[number]; run: TestDesignWorkflowRun; projectId: string; notify: Notify }) {
+  const [suites, setSuites] = useState<TestSuiteVersion[]>([])
+  const [candidates, setCandidates] = useState<SmokeCandidate[]>([])
+  const [impacted, setImpacted] = useState<ImpactedRegression[]>([])
+  const [handoffs, setHandoffs] = useState<TestExecutionHandoff[]>([])
+  const [strategy, setStrategy] = useState<'standard' | 'fast' | 'full'>('standard')
+  const [smokeSuiteId, setSmokeSuiteId] = useState('')
+  const [regressionSuiteId, setRegressionSuiteId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const refresh = async () => { const [suiteResponse, candidateResponse, impactResponse, handoffResponse] = await Promise.all([loadProjectTestSuites(projectId), loadSmokeCandidates(version.id), loadImpactedRegression(version.id), loadExecutionHandoffs(version.id)]); setSuites(suiteResponse.items); setCandidates(candidateResponse.items); setImpacted(impactResponse.items); setHandoffs(handoffResponse.items); setSmokeSuiteId(current => current || suiteResponse.items.find(item => item.suiteType === 'smoke')?.id || ''); setRegressionSuiteId(current => current || suiteResponse.items.find(item => item.suiteType === 'regression')?.id || '') }
+  useEffect(() => { void refresh().catch(error => notify(error instanceof Error ? error.message : '发布后操作加载失败', 'error')) }, [projectId, version.id])
+  const decideCandidate = async (caseId: string, decision: 'accepted' | 'rejected') => { const testCase = run.testCases.find(item => item.id === caseId); const content = testCase && currentCaseContent(testCase); const executionMethods = content?.executionMethods.filter(item => item.executionReadiness === 'ready').map(item => item.method) ?? []; if (!executionMethods.length) return notify('该用例没有 ready 的执行方式，不能进入冒烟候选。', 'warning'); setBusy(true); try { await reviewSmokeCandidate(version.id, caseId, { executionMethods, reason: decision === 'accepted' ? '人工确认进入本次冒烟组合' : '人工确认不进入本次冒烟组合', estimatedMinutes: 5, stable: decision === 'accepted', dependencyReady: decision === 'accepted', decision }); await refresh(); notify('冒烟候选决定已保存。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '冒烟候选保存失败', 'error') } finally { setBusy(false) } }
+  const toggleImpact = async (suite: TestSuiteVersion, caseId: string) => { const exists = impacted.some(item => item.suiteVersionId === suite.id && item.caseId === caseId); const next = exists ? impacted.filter(item => item.suiteVersionId !== suite.id || item.caseId !== caseId) : [...impacted, { testCaseSetVersionId: version.id, suiteVersionId: suite.id, caseId, executionMethods: suite.members.find(item => item.caseId === caseId)!.executionMethods, reason: '人工确认本次变更影响该固定回归用例', actorId: '', createdAt: '' }]; setBusy(true); try { await saveImpactedRegression(version.id, next.map(({ suiteVersionId, caseId: id, executionMethods, reason }) => ({ suiteVersionId, caseId: id, executionMethods, reason }))); await refresh(); notify('影响回归引用已保存。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '影响回归保存失败', 'error') } finally { setBusy(false) } }
+  const createHandoff = async () => { setBusy(true); try { await createExecutionHandoff(version.id, { strategy, ...(strategy === 'full' ? {} : { smokeSuiteVersionId: smokeSuiteId }), regressionSuiteVersionId: regressionSuiteId, expectedCaseSetSha256: version.contentSha256 }); await refresh(); notify('不可变执行交接已生成。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '执行交接生成失败', 'error') } finally { setBusy(false) } }
+  const regression = suites.find(item => item.id === regressionSuiteId)
+  return <section className="td-published-operations"><header><b>发布后固定关系与执行交接</b><span>所有选择均绑定明确版本，不使用 latest</span></header><div className="td-smoke-review-list">{version.members.map(member => { const current = candidates.find(item => item.caseId === member.caseId); const testCase = run.testCases.find(item => item.id === member.caseId); return <article key={member.caseId}><TestTube2 /><p><b>{testCase ? currentCaseContent(testCase)?.title : shortId(member.caseId)}</b><small>{current?.decision ?? '尚未确认冒烟候选'}</small></p><button className="btn" disabled={busy} onClick={() => void decideCandidate(member.caseId, 'accepted')}><Check />接受</button><button className="icon-btn" title="拒绝冒烟候选" aria-label="拒绝冒烟候选" disabled={busy} onClick={() => void decideCandidate(member.caseId, 'rejected')}><X /></button></article> })}</div><div className="td-handoff-controls"><select aria-label="执行交接策略" value={strategy} onChange={event => setStrategy(event.target.value as typeof strategy)}><option value="standard">标准流程</option><option value="fast">快速验证</option><option value="full">直接全量</option></select>{strategy !== 'full' && <select aria-label="固定冒烟套件版本" value={smokeSuiteId} onChange={event => setSmokeSuiteId(event.target.value)}><option value="">选择冒烟版本</option>{suites.filter(item => item.suiteType === 'smoke').map(item => <option key={item.id} value={item.id}>{item.name} v{item.version}</option>)}</select>}<select aria-label="固定回归套件版本" value={regressionSuiteId} onChange={event => setRegressionSuiteId(event.target.value)}><option value="">选择回归版本</option>{suites.filter(item => item.suiteType === 'regression').map(item => <option key={item.id} value={item.id}>{item.name} v{item.version}</option>)}</select><button className="btn primary" disabled={busy || !regressionSuiteId || (strategy !== 'full' && !smokeSuiteId)} onClick={() => void createHandoff()}><Play />生成交接</button></div>{regression && <div className="td-impact-list"><b>影响回归引用</b>{regression.members.map(member => <button className={impacted.some(item => item.suiteVersionId === regression.id && item.caseId === member.caseId) ? 'active' : ''} key={member.caseId} disabled={busy} onClick={() => void toggleImpact(regression, member.caseId)}><Link2 />{shortId(member.caseId)}<Check /></button>)}</div>}{handoffs.length > 0 && <div className="td-handoff-list">{handoffs.map(item => <article key={item.id}><Network /><p><b>{item.strategy}</b><small>{item.members.length} 个固定执行成员 · {formatRunTime(item.createdAt)}</small><code>{shortHash(item.contentSha256)}</code></p><StatusPill tone="success">不可变</StatusPill></article>)}</div>}</section>
+}
+
+function RunDataArtifact({ run, projectVersionId, designId, notify, onRefresh }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void> }) {
+  const version = run.dataSetVersions.at(-1)!
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(() => JSON.stringify(version.requirements, null, 2))
+  const [busy, setBusy] = useState(false)
+  useEffect(() => setDraft(JSON.stringify(version.requirements, null, 2)), [version.id])
+  const save = async () => { setBusy(true); try { const value = JSON.parse(draft) as typeof version.requirements; if (!Array.isArray(value)) throw new Error('测试数据需求必须是数组'); await replaceTestDataRequirements(projectVersionId, designId, run.id, value); await onRefresh(); setEditing(false); notify('测试数据需求已保存为新版本，覆盖审计已失效。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '测试数据需求保存失败', 'error') } finally { setBusy(false) } }
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="测试数据需求" description={`v${version.version} · ${shortHash(version.contentSha256)} · 仅保存生成约束，不保存真实测试数据`}><StatusPill tone="info">{version.requirements.length} 项</StatusPill><button className="btn" onClick={() => setEditing(value => !value)}><Pencil />{editing ? '取消编辑' : '编辑约束'}</button></RunArtifactHeader>
+    {editing && <section className="td-real-data-editor"><textarea aria-label="测试数据需求 JSON" value={draft} onChange={event => setDraft(event.target.value)} spellCheck={false} /><button className="btn primary" disabled={busy} onClick={() => void save()}>{busy ? <RefreshCw className="spin" /> : <Check />}{busy ? '保存中' : '保存新版本'}</button></section>}
+    <div className="td-run-table td-run-data-table"><div className="td-run-table-head"><span>数据需求</span><span>实体</span><span>数量</span><span>敏感级别</span><span>Readiness</span><span>用例</span></div>{version.requirements.map(item => <article key={item.id}><span><Database /><p><b>{item.name}</b><small>{item.initialState}</small><code>{shortId(item.id)}</code></p></span><em>{item.entityType}</em><strong>{item.quantity}</strong><StatusPill tone={item.sensitivity === 'sensitive' ? 'warning' : 'neutral'}>{item.sensitivity}</StatusPill><StatusPill tone={item.readiness === 'ready' ? 'success' : item.readiness === 'blocked' ? 'danger' : 'warning'}>{item.readiness}</StatusPill><small>{item.caseIds.length}</small></article>)}</div>
+  </div>
+}
+
+function RunCoverageArtifact({ run, projectVersionId, designId, notify, onRefresh, onSelectCase, onNewCase, onOpenTree }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void }) {
+  const [auditing, setAuditing] = useState(false)
+  const audit = latestCoverageAudit(run)!
+  const basisRatio = audit.statistics.totalBasis ? Math.round(audit.statistics.coveredBasis / audit.statistics.totalBasis * 100) : 100
+  const pointRatio = audit.statistics.totalPoints ? Math.round(audit.statistics.coveredPoints / audit.statistics.totalPoints * 100) : 100
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="覆盖反向审计" description={`${audit.status === 'valid' ? '当前有效' : '已失效'} · ${shortHash(audit.inputSha256)}`}><StatusPill tone={audit.blockers.length ? 'warning' : 'success'}>{audit.blockers.length} 个阻断项</StatusPill><button className="btn primary" disabled={auditing} onClick={async () => { setAuditing(true); try { const next = await reAuditTestDesignRun(projectVersionId, designId, run.id); await onRefresh(); notify(next.blockers.length ? `重新审计完成，仍有 ${next.blockers.length} 个阻断项。` : '重新审计通过，发布阻断已清零。', next.blockers.length ? 'warning' : 'success') } catch (error) { notify(error instanceof Error ? error.message : '重新审计失败', 'error') } finally { setAuditing(false) } }}><RefreshCw className={auditing ? 'spin' : ''} />{auditing ? '审计中' : '重新审计'}</button></RunArtifactHeader>
+    <section className="td-run-coverage-summary"><article><small>依据覆盖</small><b>{basisRatio}%</b><em>{audit.statistics.coveredBasis} / {audit.statistics.totalBasis}</em></article><article><small>测试点覆盖</small><b>{pointRatio}%</b><em>{audit.statistics.coveredPoints} / {audit.statistics.totalPoints}</em></article><article><small>当前用例</small><b>{audit.statistics.totalCases}</b><em>{audit.statistics.approvedCases} 条已批准</em></article><article><small>映射关系</small><b>{audit.relations.length}</b><em>双向可追溯</em></article></section>
+    {audit.blockers.length ? <RunBlockerList audit={audit} run={run} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} /> : <RunIntentionalEmpty icon={<ShieldCheck />} title="覆盖审计已通过" description="当前固定树、用例 revision 集合和数据需求没有发布阻断项。" />}
+  </div>
+}
+
+function RunBlockerList({ audit, run, onSelectCase, onNewCase, onOpenTree }: { audit: TestDesignCoverageAudit; run: TestDesignWorkflowRun; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void }) {
+  const caseIds = new Set(run.testCases.map(item => item.id))
+  return <section className="td-run-blockers"><header><b>发布阻断项</b><span>{audit.blockers.length}</span></header>{audit.blockers.map((blocker, index) => { const isCase = Boolean(blocker.subjectId && caseIds.has(blocker.subjectId)); const isPoint = blocker.code === 'COVERAGE_TEST_POINT_UNCOVERED'; return <article key={`${blocker.code}-${blocker.subjectId ?? index}`}><AlertTriangle /><p><small>{blocker.code}</small><b>{blocker.message}</b>{blocker.subjectId && <code>{shortId(blocker.subjectId)}</code>}</p>{isCase && <button className="btn" onClick={() => onSelectCase(blocker.subjectId!)}><Pencil />修改用例</button>}{isPoint && <button className="btn primary" onClick={() => onNewCase(blocker.subjectId)}><Plus />创建关联用例</button>}{!isCase && !isPoint && <button className="btn" onClick={onOpenTree}><Network />编辑测试点树</button>}</article> })}</section>
+}
+
+function emptyExecutionMethod(method: 'ui' | 'api'): TestCaseContent['executionMethods'][number] {
+  const common = { executionReadiness: 'ready' as const, steps: [{ key: 'step-1', action: '', expected: '' }], verificationChecks: [], automationHint: '' }
+  return method === 'ui'
+    ? { method, uiSpec: { entry: '/', viewport: '', selectors: [] }, ...common }
+    : { method, apiSpec: { method: 'GET', path: '/' }, ...common }
+}
+
+function emptyRunCase(run: TestDesignWorkflowRun, initialPointId?: string | null): TestCaseContent {
+  const point = currentTreeNodes(run).find(item => item.nodeId === initialPointId) ?? currentTreeNodes(run)[0]
+  return { schemaVersion: 'test-case/v1', title: '', objective: '', dimension: point?.dimension ?? 'functional', testPointIds: point ? [point.nodeId] : [], priority: point?.priority ?? 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [emptyExecutionMethod(point?.entryMethods[0] ?? 'ui')], sharedVerificationChecks: [], tags: [], domain: '' }
+}
+
+function textItems(value: string) { return value.split(/\r?\n|,/u).map(item => item.trim()).filter(Boolean) }
+function checksFromText(value: string, prefix: string) { return value.split(/\r?\n/u).map(item => item.trim()).filter(Boolean).map((description, index) => ({ key: `${prefix}-${index + 1}`, description })) }
+
+function RunCaseEditor({ projectVersionId, designId, run, caseId, initialPointId, notify, onRefresh, onCreated }: { projectVersionId: string; designId: string; run: TestDesignWorkflowRun; caseId: string; initialPointId: string | null; notify: Notify; onRefresh: () => Promise<void>; onCreated: (caseId: string) => void }) {
+  const isNew = caseId === '__new__'
+  const [testCase, setTestCase] = useState<TestDesignCase | null>(null)
+  const [etag, setEtag] = useState('')
+  const [draft, setDraft] = useState<TestCaseContent>(() => emptyRunCase(run, initialPointId))
+  const [dirty, setDirty] = useState(isNew)
+  const [busy, setBusy] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [conflict, setConflict] = useState(false)
+  const [reason, setReason] = useState(isNew ? '人工新建测试用例' : '修订测试用例')
+  const [reviewComment, setReviewComment] = useState('')
+  const points = currentTreeNodes(run).filter(item => item.applicability !== 'not_applicable')
+  const dataRequirements = run.dataSetVersions.at(-1)?.requirements ?? []
+
+  useEffect(() => {
+    if (isNew) return
+    setBusy(true)
+    void loadTestDesignCase(projectVersionId, designId, run.id, caseId).then(value => {
+      const content = currentCaseContent(value)
+      if (!content) throw new Error('当前用例 revision 不存在')
+      setTestCase(value); setEtag(value.etag ?? ''); setDraft(structuredClone(content)); setDirty(false); setConflict(false); setLoadError('')
+    }).catch(error => setLoadError(error instanceof Error ? error.message : '用例加载失败')).finally(() => setBusy(false))
+  }, [caseId, designId, isNew, projectVersionId, run.id])
+
+  const change = (patch: Partial<TestCaseContent>) => { setDraft(current => ({ ...current, ...patch })); setDirty(true); setConflict(false) }
+  const changeMethod = (index: number, patch: Partial<TestCaseContent['executionMethods'][number]>) => change({ executionMethods: draft.executionMethods.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } as TestCaseContent['executionMethods'][number] : item) })
+  const toggleMethod = (method: 'ui' | 'api') => {
+    const exists = draft.executionMethods.some(item => item.method === method)
+    if (exists && draft.executionMethods.length === 1) return notify('每条测试用例至少保留一种执行方式。', 'warning')
+    if (exists && !window.confirm(`移除 ${method.toUpperCase()} 执行方式会删除该分支的 Spec、步骤和检查点，是否继续？`)) return
+    change({ executionMethods: exists ? draft.executionMethods.filter(item => item.method !== method) : [...draft.executionMethods, emptyExecutionMethod(method)] })
+  }
+  const save = async () => {
+    if (!draft.title.trim() || !draft.objective.trim() || !draft.domain.trim() || !draft.testPointIds.length || draft.executionMethods.some(method => !method.steps.length || method.steps.some(step => !step.action.trim() || !step.expected.trim()) || (method.method === 'ui' ? !method.uiSpec.entry.trim() : !method.apiSpec.method.trim() || !method.apiSpec.path.trim()))) {
+      notify('请补齐标题、测试目标、业务域、测试点，以及每个执行分支的 Spec、步骤和期望。', 'error'); return
+    }
+    setBusy(true)
+    try {
+      if (isNew) {
+        const created = await createTestDesignCase(projectVersionId, designId, run.id, draft)
+        await onRefresh(); onCreated(created.id); notify('测试用例已创建为 revision 0。', 'success')
+      } else {
+        if (!etag) throw new Error('当前用例缺少 ETag，请重新加载')
+        const saved = await updateTestDesignCase(projectVersionId, designId, run.id, caseId, etag, draft, reason.trim() || '修订测试用例')
+        setTestCase(saved); setEtag(saved.etag ?? ''); setDraft(structuredClone(currentCaseContent(saved)!)); setDirty(false); setConflict(false); await onRefresh(); notify(`已保存 revision r${saved.currentRevision}。`, 'success')
+      }
+    } catch (error) { const message = error instanceof Error ? error.message : '用例保存失败'; setConflict(/revision|etag|冲突/iu.test(message)); notify(message, 'error') }
+    finally { setBusy(false) }
+  }
+  const review = async (decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw') => {
+    if (!testCase || dirty) return
+    setBusy(true)
+    try {
+      const next = await reviewTestDesignCase(projectVersionId, designId, run.id, testCase.id, { decision, targetRevision: testCase.currentRevision, ...(reviewComment.trim() ? { comment: reviewComment.trim() } : {}) })
+      setTestCase(next); setReviewComment(''); await onRefresh(); notify(decision === 'approve' ? '当前 revision 已批准。' : decision === 'submit' ? '当前 revision 已提交审核。' : '审核状态已更新。', decision === 'reject' || decision === 'request_revision' ? 'warning' : 'success')
+    } catch (error) { notify(error instanceof Error ? error.message : '审核操作失败', 'error') }
+    finally { setBusy(false) }
+  }
+  if (busy && !isNew && !testCase && !loadError) return <aside className="td-detail-panel td-case-editor"><RunLoading /></aside>
+  if (loadError) return <aside className="td-detail-panel td-case-editor"><div className="td-run-intentional-empty"><XCircle /><h2>用例加载失败</h2><p>{loadError}</p></div></aside>
+  const state = testCase?.reviewState ?? 'draft'
+  return <aside className="td-detail-panel td-case-editor td-real-case-editor">
+    <header><div><small>{isNew ? '人工新建' : '结构化用例'}</small><b>{isNew ? '新用例草稿' : shortId(caseId)}</b></div><RunDimensionTag dimension={draft.dimension} /><StatusPill tone={state === 'approved' ? 'success' : state === 'rejected' || state === 'needs_revision' ? 'danger' : 'warning'}>{reviewStateLabels[state]}</StatusPill></header>
+    <div className="td-editor-meta"><StatusPill tone="neutral">revision {isNew ? '待创建' : `r${testCase?.currentRevision ?? '-'}`}</StatusPill><span className={conflict ? 'conflict' : dirty ? 'dirty' : 'saved'}>{conflict ? 'revision 冲突' : dirty ? '有未保存修改' : '已保存'}</span></div>
+    {conflict && <div className="td-editor-alert" role="alert"><AlertTriangle /><p><b>服务器 revision 已变化</b><small>当前输入没有覆盖服务器内容。重新打开该用例后再应用修改。</small></p><button onClick={() => window.location.reload()}>重新加载</button></div>}
+    <div className="td-detail-scroll">
+      <label><span>用例标题</span><input value={draft.title} disabled={state === 'in_review'} onChange={event => change({ title: event.target.value })} /></label>
+      <label><span>测试目标</span><textarea value={draft.objective} disabled={state === 'in_review'} onChange={event => change({ objective: event.target.value })} /></label>
+      <div className="td-method-contract-grid"><label><span>测试维度</span><select value={draft.dimension} disabled={state === 'in_review'} onChange={event => change({ dimension: event.target.value as TestCaseContent['dimension'] })}>{Object.entries(runDimensionLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>优先级</span><select value={draft.priority} disabled={state === 'in_review'} onChange={event => change({ priority: event.target.value as TestCaseContent['priority'] })}>{['P0', 'P1', 'P2', 'P3'].map(value => <option key={value}>{value}</option>)}</select></label></div>
+      <label><span>业务域</span><input value={draft.domain} disabled={state === 'in_review'} onChange={event => change({ domain: event.target.value })} placeholder="例如：身份认证" /></label>
+      <fieldset className="td-real-point-selector"><legend>关联测试点</legend>{points.map(point => <label key={point.nodeId}><input type="checkbox" disabled={state === 'in_review'} checked={draft.testPointIds.includes(point.nodeId)} onChange={event => change({ testPointIds: event.target.checked ? [...draft.testPointIds, point.nodeId] : draft.testPointIds.filter(id => id !== point.nodeId) })} /><span><b>{point.title}</b><small>{shortId(point.nodeId)}</small></span></label>)}</fieldset>
+      <div className="td-method-segment" aria-label="执行方式，可多选"><button type="button" disabled={state === 'in_review'} aria-pressed={draft.executionMethods.some(item => item.method === 'ui')} className={draft.executionMethods.some(item => item.method === 'ui') ? 'active' : ''} onClick={() => toggleMethod('ui')}><TableProperties />UI</button><button type="button" disabled={state === 'in_review'} aria-pressed={draft.executionMethods.some(item => item.method === 'api')} className={draft.executionMethods.some(item => item.method === 'api') ? 'active' : ''} onClick={() => toggleMethod('api')}><Braces />API</button></div>
+      <label><span>共同前置条件（每行一项）</span><textarea value={draft.preconditions.join('\n')} disabled={state === 'in_review'} onChange={event => change({ preconditions: textItems(event.target.value) })} /></label>
+      {draft.executionMethods.map((method, methodIndex) => <section className="td-step-editor td-method-editor td-method-contract" key={method.method}><header><b>{method.method === 'ui' ? <TableProperties /> : <Braces />}{method.method.toUpperCase()} 独立执行分支</b><button type="button" disabled={state === 'in_review'} onClick={() => changeMethod(methodIndex, { steps: [...method.steps, { key: `step-${method.steps.length + 1}`, action: '', expected: '' }] })}><Plus />添加步骤</button></header>
+        {method.method === 'ui' ? <><label><span>页面入口</span><input value={method.uiSpec.entry} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { uiSpec: { ...method.uiSpec, entry: event.target.value } } as Partial<typeof method>)} /></label><label><span>视口 / 环境</span><input value={method.uiSpec.viewport ?? ''} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { uiSpec: { ...method.uiSpec, viewport: event.target.value } } as Partial<typeof method>)} /></label></> : <div className="td-method-contract-grid"><label><span>HTTP 方法</span><input value={method.apiSpec.method} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { apiSpec: { ...method.apiSpec, method: event.target.value } } as Partial<typeof method>)} /></label><label><span>接口路径</span><input value={method.apiSpec.path} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { apiSpec: { ...method.apiSpec, path: event.target.value } } as Partial<typeof method>)} /></label></div>}
+        {method.steps.map((step, stepIndex) => <article key={step.key}><em>{stepIndex + 1}</em><div><input aria-label={`${method.method} 步骤 ${stepIndex + 1} 操作`} value={step.action} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { steps: method.steps.map((item, index) => index === stepIndex ? { ...item, action: event.target.value } : item) })} /><textarea aria-label={`${method.method} 步骤 ${stepIndex + 1} 期望`} value={step.expected} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { steps: method.steps.map((item, index) => index === stepIndex ? { ...item, expected: event.target.value } : item) })} /></div><button type="button" className="icon-btn" disabled={state === 'in_review' || method.steps.length === 1} aria-label={`删除步骤 ${stepIndex + 1}`} onClick={() => changeMethod(methodIndex, { steps: method.steps.filter((_, index) => index !== stepIndex).map((item, index) => ({ ...item, key: `step-${index + 1}` })) })}><Trash2 /></button></article>)}
+        <label><span>验证检查点（每行一项）</span><textarea value={method.verificationChecks.map(item => item.description).join('\n')} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { verificationChecks: checksFromText(event.target.value, `${method.method}-check`) })} /></label>
+        <div className="td-method-contract-grid"><label><span>执行就绪</span><select value={method.executionReadiness} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { executionReadiness: event.target.value as typeof method.executionReadiness })}><option value="ready">ready</option><option value="blocked">blocked</option><option value="needs_confirmation">needs_confirmation</option></select></label><label><span>自动化提示</span><input value={method.automationHint} disabled={state === 'in_review'} onChange={event => changeMethod(methodIndex, { automationHint: event.target.value })} /></label></div>
+      </section>)}
+      <label><span>共享验证检查点（每行一项）</span><textarea value={draft.sharedVerificationChecks.map(item => item.description).join('\n')} disabled={state === 'in_review'} onChange={event => change({ sharedVerificationChecks: checksFromText(event.target.value, 'shared-check') })} /></label>
+      <label><span>测试数据需求</span><select multiple value={draft.dataRequirementIds} disabled={state === 'in_review'} onChange={event => change({ dataRequirementIds: [...event.currentTarget.selectedOptions].map(option => option.value) })}>{dataRequirements.map(item => <option key={item.id} value={item.id}>{item.name} · {item.readiness}</option>)}</select></label>
+      <label><span>依赖用例 ID（逗号或换行分隔）</span><textarea value={draft.dependencies.join('\n')} disabled={state === 'in_review'} onChange={event => change({ dependencies: textItems(event.target.value) })} /></label>
+      <label><span>清理要求（每行一项）</span><textarea value={draft.cleanup.join('\n')} disabled={state === 'in_review'} onChange={event => change({ cleanup: textItems(event.target.value) })} /></label>
+      <label><span>标签（逗号或换行分隔）</span><input value={draft.tags.join(', ')} disabled={state === 'in_review'} onChange={event => change({ tags: textItems(event.target.value) })} /></label>
+      {!isNew && <><label><span>保存说明</span><input value={reason} disabled={state === 'in_review'} onChange={event => setReason(event.target.value)} /></label><label><span>审核意见</span><textarea value={reviewComment} onChange={event => setReviewComment(event.target.value)} placeholder="提交、批准或退回时追加记录" /></label></>}
+    </div>
+    <footer>{!isNew && state === 'in_review' && <><button className="btn" disabled={busy} onClick={() => void review('request_revision')}>退回修订</button><button className="btn primary" disabled={busy} onClick={() => void review('approve')}><ShieldCheck />批准</button></>}{!isNew && ['draft', 'rejected', 'needs_revision'].includes(state) && <button className="btn" disabled={busy || dirty} title={dirty ? '请先保存当前修改' : ''} onClick={() => void review('submit')}><Users />提交审核</button>}{!isNew && state === 'approved' && <button className="btn" disabled={busy || dirty} onClick={() => void review('request_revision')}><FileDiff />发起修订</button>}<button className="btn primary" disabled={busy || (!dirty && !isNew) || state === 'in_review'} onClick={() => void save()}>{busy ? <RefreshCw className="spin" /> : <Check />}{isNew ? '创建用例' : '保存 revision'}</button></footer>
+  </aside>
+}
+
+function RunHistoryArtifact({ run }: { run: TestDesignWorkflowRun }) {
+  const items = run.historicalSnapshot.items
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="历史用例复用" description={`固定快照 ${shortHash(run.historicalSnapshot.snapshotSha256)}`}><StatusPill tone={items.length ? 'info' : 'neutral'}>{items.length} 项</StatusPill></RunArtifactHeader>
+    {items.length ? <div className="td-run-history-list">{items.map((value, index) => { const item = recordOf(value); const content = recordOf(item.content); return <article key={String(item.id ?? index)}><History /><p><small>{String(item.kind ?? '历史来源')}</small><b>{String(content.title ?? item.sourceId ?? `历史用例 ${index + 1}`)}</b><code>{shortHash(String(item.contentSha256 ?? ''))}</code></p><LockKeyhole /></article> })}</div> : <RunIntentionalEmpty icon={<History />} title="本次没有复用历史用例" description="创建运行时未选择历史用例来源，这是固定输入结果，不是数据缺失。" />}
+  </div>
+}
+
+function RunQuestionsArtifact({ run, projectVersionId, designId, notify, onRefresh }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void> }) {
+  const items = run.confirmationItems
+  const [busyId, setBusyId] = useState('')
+  const act = async (kind: 'finding' | 'confirmation', id: string, expectedVersion: number, decision: 'resolve' | 'defer' | 'reopen') => { setBusyId(id); try { const comment = window.prompt(decision === 'reopen' ? '填写重新打开原因' : '填写处置说明')?.trim(); if (!comment) return; if (kind === 'finding') await actOnTestDesignFinding(projectVersionId, designId, run.id, id, { expectedVersion, decision, comment }); else await actOnTestDesignConfirmation(projectVersionId, designId, run.id, id, { expectedVersion, decision, comment }); await onRefresh(); notify('处置动作已追加保存，请重新执行覆盖审计。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '处置保存失败', 'error') } finally { setBusyId('') } }
+  return <div className="td-run-artifact-view">
+    <RunArtifactHeader title="Finding 与待确认项" description="处置结论追加保存，不改写固定输入和历史产物"><StatusPill tone={[...run.findings, ...items].some(item => item.state === 'open') ? 'warning' : 'success'}>{[...run.findings, ...items].filter(item => item.state === 'open').length} 项未解决</StatusPill></RunArtifactHeader>
+    {run.findings.length > 0 && <div className="td-run-question-list">{run.findings.map(item => <article key={item.id}><AlertTriangle /><p><small>Finding · {item.severity}</small><b>{item.title}</b><em>{item.description}</em><code>{item.basisRefs.map(shortId).join(' · ')}</code></p><StatusPill tone={item.state === 'open' ? 'danger' : 'success'}>{item.state}</StatusPill><span className="td-disposition-actions">{item.state === 'open' ? <><button className="btn primary" disabled={busyId === item.id} onClick={() => void act('finding', item.id, item.actions.length, 'resolve')}><Check />解决</button><button className="btn" disabled={busyId === item.id} onClick={() => void act('finding', item.id, item.actions.length, 'defer')}><Clock3 />延期</button></> : <button className="btn" disabled={busyId === item.id} onClick={() => void act('finding', item.id, item.actions.length, 'reopen')}><RefreshCw />重新打开</button>}</span></article>)}</div>}
+    {items.length ? <div className="td-run-question-list">{items.map(item => <article key={item.id}><CircleDot /><p><small>{item.decisionType} · 影响 {item.impactStage}</small><b>{item.title}</b><em>{item.question}</em><code>{item.affectedRefs.map(shortId).join(' · ')}</code></p><StatusPill tone={item.blocker && item.state === 'open' ? 'danger' : item.state === 'open' ? 'warning' : 'success'}>{item.blocker ? `阻断 · ${item.state}` : item.state}</StatusPill><span className="td-disposition-actions">{item.state === 'open' ? <><button className="btn primary" disabled={busyId === item.id} onClick={() => void act('confirmation', item.id, item.actions.length, 'resolve')}><Check />确认解决</button><button className="btn" disabled={busyId === item.id} onClick={() => void act('confirmation', item.id, item.actions.length, 'defer')}><Clock3 />延期</button></> : <button className="btn" disabled={busyId === item.id} onClick={() => void act('confirmation', item.id, item.actions.length, 'reopen')}><RefreshCw />重新打开</button>}</span></article>)}</div> : run.findings.length === 0 && <RunIntentionalEmpty icon={<CheckCircle2 />} title="没有待确认项" description="本次分析没有产生需要人工补充结论的事项。" />}
+  </div>
+}
+
 function RunArtifactState({ tab, run }: { tab: TabKey; run: TestDesignWorkflowRun }) {
-  const labels: Record<TabKey, string> = { overview: '概览', workflow: '工作流', analysis: '依据解构', retrieval: '知识召回', tree: '测试点树', cases: '测试用例', 'case-set': '用例集', data: '测试数据', coverage: '覆盖审计', history: '历史复用', questions: '待确认项' }
-  return <div className="td-run-artifact-state"><Layers3 /><StatusPill tone={run.status === 'failed' ? 'danger' : 'neutral'}>{runStatusLabel(run.status)}</StatusPill><h2>{labels[tab]}尚不可用</h2><p>{run.status === 'failed' ? '当前运行在上游节点失败，尚未生成该阶段的固定产物。请先查看概览或工作流中的失败原因。' : '当前运行尚未生成该阶段的固定产物。'}</p></div>
+  const failed = run.status === 'failed'
+  return <div className="td-run-artifact-state"><Layers3 /><StatusPill tone={failed ? 'danger' : 'neutral'}>{runStatusLabel(run.status)}</StatusPill><h2>{artifactLabels[tab]}尚未生成</h2><p>{failed ? '当前运行在上游节点失败，尚未生成该阶段的固定产物。请先查看概览或工作流中的失败原因。' : run.status === 'succeeded' ? '运行已完成，但服务端没有返回该阶段产物，请检查运行记录。' : '工作流尚未执行到该阶段。'}</p></div>
 }
 
 function DesignList({ projectVersion, view, setView, designs, loading, onCreate, onOpen, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; designs: TestDesign[]; loading: boolean; onCreate: () => void; onOpen: (design?: TestDesign) => void; notify: Notify }) {
@@ -966,8 +1370,8 @@ function DesignList({ projectVersion, view, setView, designs, loading, onCreate,
       {loading && designs.length === 0 && <div className="td-collection-empty"><RefreshCw className="spin" /><h2>正在加载测试设计</h2><p>正在读取当前项目版本的真实任务。</p></div>}
     </div>
     </>}
-    {view === 'library' && <ProjectCaseLibrary projectVersion={projectVersion} view={view} setView={setView} />}
-    {view === 'sets' && <CaseSetCatalog projectVersion={projectVersion} view={view} setView={setView} onOpenFeature={() => onOpen()} notify={notify} />}
+    {view === 'library' && <ProjectCaseLibrary projectVersion={projectVersion} view={view} setView={setView} notify={notify} />}
+    {view === 'sets' && <CaseSetCatalog projectVersion={projectVersion} view={view} setView={setView} notify={notify} />}
   </section>
 }
 
@@ -986,72 +1390,35 @@ function AssetViewSelect({ projectVersion, view, setView, description }: { proje
   </div>
 }
 
-function ProjectCaseLibrary({ projectVersion, view, setView }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void }) {
+function ProjectCaseLibrary({ projectVersion, view, setView, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; notify: Notify }) {
   const [query, setQuery] = useState('')
   const [dimensionFilter, setDimensionFilter] = useState('全部维度')
-  const rows = [
-    { id: 'TC-AUTH-001', title: '有效账号密码登录成功', domain: '身份认证', dimension: '功能' as TestDimension, method: 'UI + API', priority: 'P0', sets: '冒烟 · 核心回归 · 身份认证 v2', status: '已批准' },
-    { id: 'TC-AUTH-002', title: '错误密码登录失败并显示明确提示', domain: '身份认证', dimension: '功能' as TestDimension, method: 'UI', priority: 'P0', sets: '冒烟 · 核心回归 · 身份认证 v2', status: '已批准' },
-    { id: 'TC-KB-014', title: '混合检索返回固定资产版本与原文定位', domain: '知识库', dimension: '性能' as TestDimension, method: 'API', priority: 'P0', sets: '核心回归 · 知识库检索 v3', status: '已批准' },
-    { id: 'TC-RR-028', title: '需求评审失败后仅重跑评审阶段', domain: '需求评审', dimension: '稳定性' as TestDimension, method: 'API', priority: 'P1', sets: '核心回归 · 需求评审 v1', status: '已批准' },
-    { id: 'TC-TS-011', title: '技术方案评审引用固定需求基线', domain: '技术方案', dimension: '安全' as TestDimension, method: 'UI', priority: 'P1', sets: '技术方案评审 v1', status: '已批准' },
-    { id: 'TC-AUTH-006', title: 'Safari 最新两个主版本完成登录', domain: '身份认证', dimension: '兼容性' as TestDimension, method: 'UI', priority: 'P2', sets: '身份认证候选集', status: '需修订' },
-    { id: 'TC-AUTH-004', title: '并发刷新令牌时仅一个请求成功', domain: '身份认证', dimension: '稳定性' as TestDimension, method: 'API', priority: 'P1', sets: '身份认证候选集', status: '需修订' },
-  ]
-  const filteredRows = rows.filter(row => {
-    const queryMatches = !query.trim() || `${row.id}${row.title}${row.domain}`.toLowerCase().includes(query.trim().toLowerCase())
-    const dimensionMatches = dimensionFilter === '全部维度' || row.dimension === dimensionFilter
-    return queryMatches && dimensionMatches
-  })
+  const [rows, setRows] = useState<ProjectTestCaseCatalogItem[]>([])
+  const [loading, setLoading] = useState(true)
+  useEffect(() => { setLoading(true); void loadProjectTestCaseCatalog(projectVersion.projectId).then(value => setRows(value.items)).catch(error => notify(error instanceof Error ? error.message : '项目用例库加载失败', 'error')).finally(() => setLoading(false)) }, [notify, projectVersion.projectId])
+  const filteredRows = rows.filter(row => (!query.trim() || `${row.caseId}${row.content.title}${row.content.domain}`.toLowerCase().includes(query.trim().toLowerCase())) && (dimensionFilter === '全部维度' || runDimensionLabels[row.content.dimension] === dimensionFilter))
+  const methodCounts = rows.reduce((counts, row) => { row.content.executionMethods.forEach(item => { counts[item.method] += 1 }); return counts }, { ui: 0, api: 0 })
   return <div className="td-library-view">
-    <section className="td-library-summary">
-      <div><span><TableProperties /></span><AssetViewSelect projectVersion={projectVersion} view={view} setView={setView} description="用例按 caseId 统一管理，可被多个用例集引用，不复制内容。" /></div>
-      <dl><div><dt>有效用例</dt><dd>386</dd></div><div><dt>P0 用例</dt><dd>74</dd></div><div><dt>含 UI / API</dt><dd>221 / 171</dd></div><div><dt>待维护</dt><dd className="warning">9</dd></div></dl>
-    </section>
-    <div className="td-list-toolbar">
-      <div className="td-list-search"><Search /><input aria-label="搜索测试用例库" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索用例 ID、名称或业务域" /></div>
-      <select aria-label="业务域筛选"><option>全部业务域</option><option>身份认证</option><option>知识库</option><option>需求评审</option></select>
-      <select aria-label="测试维度筛选" value={dimensionFilter} onChange={event => setDimensionFilter(event.target.value)}><option>全部维度</option>{testDimensions.map(dimension => <option key={dimension}>{dimension}</option>)}</select>
-      <select aria-label="状态筛选"><option>当前有效版本</option><option>已废弃</option><option>全部版本</option></select>
-      <button className="btn"><Download />导出清单</button>
-    </div>
-    <div className="td-library-table">
-      <div className="td-library-table-head"><span>测试用例</span><span>业务域</span><span>测试维度</span><span>方式</span><span>优先级</span><span>所属用例集</span><span>当前状态</span></div>
-      {filteredRows.map((row, index) => <button key={row.id}>
-        <span><i className={row.method === 'UI' ? 'ui' : row.method === 'API' ? 'api' : 'mixed'}>{row.method.includes('UI') && <TableProperties />}{row.method.includes('API') && <Braces />}</i><p><b>{row.title}</b><small>{row.id} · revision {index + 3}</small></p><span className="td-mobile-dimension"><DimensionTag dimension={row.dimension} /></span></span>
-        <em>{row.domain}</em><DimensionTag dimension={row.dimension} /><strong>{row.method}</strong><strong className={row.priority === 'P0' ? 'p0' : ''}>{row.priority}</strong><small>{row.sets}</small><StatusPill tone={row.status === '已批准' ? 'success' : 'warning'}>{row.status}</StatusPill>
-      </button>)}
-      {filteredRows.length === 0 && <div className="td-empty-filter"><Search /><b>没有匹配的测试用例</b><span>调整测试维度或搜索关键词后重试。</span></div>}
+    <section className="td-library-summary"><div><span><TableProperties /></span><AssetViewSelect projectVersion={projectVersion} view={view} setView={setView} description="只读聚合已发布的不可变用例 revision，不读取候选草稿。" /></div><dl><div><dt>已发布用例</dt><dd>{rows.length}</dd></div><div><dt>P0 用例</dt><dd>{rows.filter(row => row.content.priority === 'P0').length}</dd></div><div><dt>含 UI / API</dt><dd>{methodCounts.ui} / {methodCounts.api}</dd></div><div><dt>固定版本</dt><dd>{new Set(rows.map(row => row.testCaseSetVersionId)).size}</dd></div></dl></section>
+    <div className="td-list-toolbar"><div className="td-list-search"><Search /><input aria-label="搜索测试用例库" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索用例 ID、名称或业务域" /></div><select aria-label="测试维度筛选" value={dimensionFilter} onChange={event => setDimensionFilter(event.target.value)}><option>全部维度</option>{testDimensions.map(dimension => <option key={dimension}>{dimension}</option>)}</select></div>
+    <div className="td-library-table"><div className="td-library-table-head"><span>测试用例</span><span>业务域</span><span>测试维度</span><span>方式</span><span>优先级</span><span>所属用例集</span><span>当前状态</span></div>
+      {filteredRows.map(row => { const methods = row.content.executionMethods.map(item => item.method.toUpperCase()).join(' + '); const dimension = runDimensionLabels[row.content.dimension] as TestDimension; return <button key={`${row.testCaseSetVersionId}:${row.caseId}:${row.revision}`}><span><i className={methods === 'UI' ? 'ui' : methods === 'API' ? 'api' : 'mixed'}>{methods.includes('UI') && <TableProperties />}{methods.includes('API') && <Braces />}</i><p><b>{row.content.title}</b><small>{shortId(row.caseId)} · revision {row.revision}</small></p><span className="td-mobile-dimension"><DimensionTag dimension={dimension} /></span></span><em>{row.content.domain}</em><DimensionTag dimension={dimension} /><strong>{methods}</strong><strong className={row.content.priority === 'P0' ? 'p0' : ''}>{row.content.priority}</strong><small>{row.testCaseSetName}</small><StatusPill tone="success">已发布</StatusPill></button> })}
+      {loading && <div className="td-empty-filter"><RefreshCw className="spin" /><b>正在加载项目用例库</b></div>}{!loading && filteredRows.length === 0 && <div className="td-empty-filter"><Search /><b>没有匹配的测试用例</b><span>调整测试维度或搜索关键词后重试。</span></div>}
     </div>
   </div>
 }
 
-function CaseSetCatalog({ projectVersion, view, setView, onOpenFeature, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; onOpenFeature: () => void; notify: Notify }) {
-  const sets = [
-    { id: 'SET-SMOKE', name: 'SmartHub 冒烟用例集', type: '冒烟基线', cases: 18, version: 'v6', updated: '2026-08-06 18:20', status: '已发布', tone: 'smoke', scope: '登录、知识库访问、评审创建、核心配置读取' },
-    { id: 'SET-REGRESSION', name: 'SmartHub 核心回归用例集', type: '回归基线', cases: 326, version: 'v12', updated: '2026-08-06 18:20', status: '已发布', tone: 'regression', scope: '覆盖当前项目版本全部稳定功能域' },
-    { id: 'SET-AUTH', name: '登录与身份认证新功能用例集', type: '新功能', cases: 28, version: '候选 v2', updated: '今天 14:32', status: '待发布', tone: 'feature', scope: '18 条新增 · 4 条修改 · 6 条历史复用 · 3 条冒烟候选' },
-    { id: 'SET-KB', name: '知识库检索与索引用例集', type: '新功能', cases: 42, version: 'v3', updated: '昨天 18:06', status: '已发布', tone: 'feature', scope: '混合检索、固定版本、索引切换与降级' },
-    { id: 'SET-RR', name: '需求评审工作台用例集', type: '功能域', cases: 35, version: 'v1', updated: '2026-08-02 16:40', status: '已发布', tone: 'domain', scope: '需求提取、评审、Evidence、重跑与人工处置' },
-  ]
-  return <div className="td-set-catalog">
-    <section className="td-set-summary">
-      <div><span><Layers3 /></span><AssetViewSelect projectVersion={projectVersion} view={view} setView={setView} description="用例集保存成员引用与固定 revision，单条用例可以进入多个集合。" /></div>
-      <div className="td-set-legend"><span><i className="smoke" />冒烟基线</span><span><i className="regression" />回归基线</span><span><i className="feature" />新功能用例集</span></div>
-    </section>
-    <div className="td-list-toolbar">
-      <div className="td-list-search"><Search /><input aria-label="搜索测试用例集" placeholder="搜索用例集名称或版本" /></div>
-      <select aria-label="用例集类型筛选"><option>全部类型</option><option>冒烟基线</option><option>回归基线</option><option>新功能</option></select>
-      <button className="btn"><History />版本历史</button>
-    </div>
-    <div className="td-set-grid">
-      {sets.map(set => <article key={set.id} className={set.id === 'SET-AUTH' ? 'current' : ''}>
-        <header><span className={set.tone}><Layers3 /></span><div><small>{set.type} · {set.id}</small><h3>{set.name}</h3></div><StatusPill tone={set.status === '已发布' ? 'success' : 'warning'}>{set.status}</StatusPill></header>
-        <p>{set.scope}</p>
-        <dl><div><dt>用例数量</dt><dd>{set.cases}</dd></div><div><dt>版本</dt><dd>{set.version}</dd></div><div><dt>更新时间</dt><dd>{set.updated}</dd></div></dl>
-        <footer><span>{set.status === '已发布' ? <><LockKeyhole />不可变版本</> : <><CircleDot />来自 TD-20260807-01</>}</span><button onClick={set.id === 'SET-AUTH' ? onOpenFeature : () => notify(`已打开 ${set.name} ${set.version} 的只读成员清单。`)}>查看用例集<ChevronRight /></button></footer>
-      </article>)}
-    </div>
+function CaseSetCatalog({ projectVersion, view, setView, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; notify: Notify }) {
+  const [query, setQuery] = useState('')
+  const [catalog, setCatalog] = useState<ProjectTestCaseCatalogItem[]>([])
+  const [suites, setSuites] = useState<TestSuiteVersion[]>([])
+  const [loading, setLoading] = useState(true)
+  useEffect(() => { setLoading(true); void Promise.all([loadProjectTestCaseCatalog(projectVersion.projectId), loadProjectTestSuites(projectVersion.projectId)]).then(([casesResponse, suitesResponse]) => { setCatalog(casesResponse.items); setSuites(suitesResponse.items) }).catch(error => notify(error instanceof Error ? error.message : '用例集目录加载失败', 'error')).finally(() => setLoading(false)) }, [notify, projectVersion.projectId])
+  const featureSets = [...new Map(catalog.map(item => [item.testCaseSetVersionId, { id: item.testCaseSetVersionId, name: item.testCaseSetName, type: '新功能', cases: catalog.filter(candidate => candidate.testCaseSetVersionId === item.testCaseSetVersionId).length, version: '固定版本', updated: item.publishedAt, tone: 'feature', hash: item.contentSha256 }])).values()]
+  const sets = [...suites.map(suite => ({ id: suite.id, name: suite.name, type: suite.suiteType === 'smoke' ? '冒烟基线' : suite.suiteType === 'regression' ? '回归基线' : '功能域', cases: suite.members.length, version: `v${suite.version}`, updated: suite.publishedAt, tone: suite.suiteType, hash: suite.contentSha256 })), ...featureSets].filter(set => !query.trim() || `${set.id}${set.name}`.toLowerCase().includes(query.trim().toLowerCase()))
+  return <div className="td-set-catalog"><section className="td-set-summary"><div><span><Layers3 /></span><AssetViewSelect projectVersion={projectVersion} view={view} setView={setView} description="用例集保存成员引用与固定 revision，单条用例可以进入多个集合。" /></div><div className="td-set-legend"><span><i className="smoke" />冒烟基线</span><span><i className="regression" />回归基线</span><span><i className="feature" />新功能用例集</span></div></section>
+    <div className="td-list-toolbar"><div className="td-list-search"><Search /><input aria-label="搜索测试用例集" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索用例集名称或版本 ID" /></div></div>
+    <div className="td-set-grid">{sets.map(set => <article key={set.id}><header><span className={set.tone}><Layers3 /></span><div><small>{set.type} · {shortId(set.id)}</small><h3>{set.name}</h3></div><StatusPill tone="success">已发布</StatusPill></header><p><LockKeyhole /> {shortHash(set.hash)}</p><dl><div><dt>用例数量</dt><dd>{set.cases}</dd></div><div><dt>版本</dt><dd>{set.version}</dd></div><div><dt>更新时间</dt><dd>{formatRunTime(set.updated)}</dd></div></dl><footer><span><LockKeyhole />不可变版本</span><button onClick={() => notify(`${set.name} ${set.version} 含 ${set.cases} 条固定成员。`)}>查看成员<ChevronRight /></button></footer></article>)}{loading && <div className="td-collection-empty"><RefreshCw className="spin" /><h2>正在加载用例集</h2></div>}{!loading && sets.length === 0 && <div className="td-collection-empty"><Layers3 /><h2>暂无已发布用例集</h2><p>当前项目尚未形成不可变用例集或套件版本。</p></div>}</div>
   </div>
 }
 

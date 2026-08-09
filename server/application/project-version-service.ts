@@ -39,6 +39,7 @@ export class ProjectVersionService {
     return this.store.transaction(state => {
       const project = platformProject(state)
       const version = required(state.projectVersions.find(item => item.id === projectVersionId && item.projectId === project.id), '项目版本不存在')
+      if (status !== 'open' && (state.testDesignState?.runs ?? []).some(item => item.projectVersionId === version.id && ['queued', 'running', 'waiting_gate'].includes(item.status))) throw new Error('项目版本仍有活动测试设计工作流，请先取消运行后再锁定或归档')
       version.status = status
       version.updatedAt = now()
       return version

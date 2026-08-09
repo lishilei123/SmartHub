@@ -1,8 +1,8 @@
 # SmartHub Phase 1 + Phase 2 + Phase 3 评审闭环 + Phase 4 测试设计后端
 
-当前仓库已实现第一期资料接入与检索闭环、第二期需求评审闭环、第三期技术方案评审闭环和第四期测试设计后端闭环。第三期采用固定双阶段流水线：`TechnicalSolutionExtractionAgent` 从一至多份固定 `technical_design` 资产版本提取方案要点并由服务端固化 Evidence，`TechnicalSolutionReviewAgent` 再基于固定成功需求评审运行与冻结方案要点生成覆盖、Finding、统计和 Markdown 报告。九个 Agent 均拥有独立定义、模型路由、Prompt、工具协议和发布版本；PostgreSQL 模式下需求评审、技术方案评审和测试设计均可由独立 Job/Worker 队列执行，并持久化固定快照、阶段检查点、运行历史、人工处置和正式结果。
+当前仓库已实现第一期资料接入与检索闭环、第二期需求评审闭环、第三期技术方案评审闭环和第四期测试设计闭环。第三期采用固定双阶段流水线：`TechnicalSolutionExtractionAgent` 从一至多份固定 `technical_design` 资产版本提取方案要点并由服务端固化 Evidence，`TechnicalSolutionReviewAgent` 再基于固定成功需求评审运行与冻结方案要点生成覆盖、Finding、统计和 Markdown 报告。九个 Agent 均拥有独立定义、模型路由、Prompt、工具协议和发布版本；PostgreSQL 模式下需求评审、技术方案评审和测试设计均可由独立 Job/Worker 队列执行，并持久化固定快照、阶段检查点、运行历史、人工处置和正式结果。
 
-第四期后端已实现双依据严格输入、固定快照、四 Agent 固定 DAG、范围/测试点树双人工门禁、树与用例追加式 revision/ETag、结构化 UI/API 用例、数据需求、服务端覆盖审计、人工审核、不可变用例集发布、JSON/Markdown/Excel 导出、`test_case` 知识资产投影、项目用例目录、既有套件只读查询、冒烟候选、影响回归和三种执行交接。当前 `TestDesignPage` 仍使用交互预览数据，尚未改接这些 API；本次交付范围是后端，不把预览前端表述为真实闭环。第四期仍不创建真实测试数据、`TestPlanVersion` 或测试任务，不执行脚本，也不发布新的冒烟基线；这些由后续执行阶段基于真实结果和人工决定完成。
+第四期已实现双依据严格输入、原子固定依据、确定性知识召回、四 Agent 固定 DAG、范围/测试点树双人工门禁、节点级租约 fencing、树与用例追加式 revision/ETag、结构化 UI/API 用例、数据需求、服务端覆盖审计、人工审核、不可变用例集发布、JSON/Markdown/Excel 导出、`test_case` 知识资产投影、项目用例目录、既有套件只读查询、冒烟候选、影响回归和三种执行交接。`TestDesignPage` 已接入真实任务创建、运行概览、工作流、人工门禁、各阶段产物、测试点树结构编辑与独立批准、用例新建/结构化编辑/审核、数据约束版本、Finding/待确认项处置、发布阻断修复、重新审计、不可变用例集发布与导出、项目用例库/套件、冒烟候选、影响回归及执行交接。第四期仍不创建真实测试数据、`TestPlanVersion` 或测试任务，不执行脚本，也不发布新的冒烟基线；这些由后续执行阶段基于真实结果和人工决定完成。
 
 ## 阶段文档
 
@@ -17,7 +17,7 @@
 
 ## 已实现
 
-- Phase 4 测试设计后端：迁移 15～19、四 Agent 配置与 Pi Runtime、固定快照/DAG/Worker、双门禁、树/用例/数据/审计/发布、项目目录/套件/冒烟/回归/执行交接 API；前端当前仍使用预览数据，尚未接入真实 API；
+- Phase 4 测试设计：迁移 15～19、四 Agent 配置与 Pi Runtime、原子固定快照、确定性召回、节点级 DAG/公平 Worker、双门禁、树/用例/数据/审计/发布、项目目录/套件/冒烟/回归/执行交接 API 与真实前端闭环；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
 - 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承评审运行与对话；
@@ -52,7 +52,7 @@
 - 前端通过显式 `projectVersionId + technicalReviewId + runId` 恢复评审上下文，提供摘要、覆盖、Finding、风险、Evidence、历史运行、固定原文、人工处置与 Markdown 导出；项目版本或知识资产删除会保护活动运行并级联第三期数据；
 - 本期边界不包含 Git、代码 Diff、代码生成、部署、测试执行、Agent 自由委派和通用多 Agent 编排。
 
-本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、配置版本、资产、不可变版本、资产 Chunk、索引固定 Chunk、同步任务、模型来源、AI 资源目录、Agent 配置草稿/发布版本、ReviewRun、ReviewJob、FindingAction、ReviewQaSession/Turn 和 ToolApproval 分别写入 `smarthub` schema。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除，不再全库 `TRUNCATE + 重写`。Chunk 向量使用 pgvector 的 `vector` 类型，并为默认384维模型建立 HNSW 余弦索引。首次连接时会安装可用的 `vector`、`pg_trgm` 扩展、自动建表或迁移旧向量。未配置 `DATABASE_URL` 时回退到 JSON 文件；JSON 开发模式仍直接执行评审，生产模式必须使用 PostgreSQL Worker。
+本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、配置版本、资产、不可变版本、资产 Chunk、索引固定 Chunk、同步任务、模型来源、AI 资源目录、Agent 配置、ReviewRun/Job、技术方案正式结果以及 Phase 4 的 Workflow、Snapshot、树、用例 revision、数据需求、覆盖关系、用例集、套件和交接分别写入 `smarthub` schema。Phase 4 顶层 JSON 仅保留兼容回退，规范化事实表参与当前读写与删除生命周期。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除，不再全库 `TRUNCATE + 重写`。Chunk 向量使用 pgvector 的 `vector` 类型，并为默认384维模型建立 HNSW 余弦索引。首次连接时会安装可用的 `vector`、`pg_trgm` 扩展、自动建表或迁移旧向量。未配置 `DATABASE_URL` 时回退到 JSON 文件；JSON 开发模式仍直接执行评审，生产模式必须使用 PostgreSQL Worker。
 
 生产 API 注入 SmartHub 内置模型运行池。知识库配置先选择来源，再选择该来源中的生效模型；本地模式下上传解析、索引重建和向量/混合检索均路由到所选模型，发现模型未运行时会自动拉取并启动，同时不会停止池内其他模型。单元测试通过运行时接口注入轻量测试模型，不下载大模型。
 

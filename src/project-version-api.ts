@@ -3,6 +3,7 @@ const apiBase = 'http://127.0.0.1:8787/api'
 export type ProjectVersionStatus = 'open' | 'locked' | 'archived'
 export type ProjectVersion = {
   id: string
+  projectId: string
   name: string
   description?: string
   status: ProjectVersionStatus

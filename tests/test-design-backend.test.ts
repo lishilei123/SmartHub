@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
+import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
 import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
+import { ProjectVersionService } from '../server/application/project-version-service.js'
 import { TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestCaseContent, validateTestCaseSynthesisCandidate } from '../server/application/test-design-validation.js'
 import type { TestCaseContent, TestPointNodeRevision } from '../server/domain/test-design-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
@@ -73,7 +75,8 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   }, principal)
   const run = await service.createRun('pv-1', design.id, 'create-run-1', principal)
   const scopeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate')
-  assert.equal(scopeWaiting.basisSnapshot.items[0].sourceId, 'asset-version-1')
+  assert.equal(scopeWaiting.basisSnapshot.items[0].sourceId, 'asset-version-1:paragraph-1')
+  assert.equal(scopeWaiting.basisSnapshot.items.every(item => item.locator.coverageTarget === true), true)
   assert.equal(scopeWaiting.retrievalSnapshot.mode, 'disabled')
   assert.match(scopeWaiting.basisSnapshot.snapshotSha256, /^[a-f0-9]{64}$/u)
   const analysisArtifact = scopeWaiting.artifacts.find(item => item.nodeKey === 'test_analysis')!
@@ -89,6 +92,15 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'test_analysis')?.execution?.modelLabel, 'fake-model')
   assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'functional_design')?.execution?.degraded, false)
   assert.ok(completed.coverageAudits.at(-1)!.blockers.some(item => item.code === 'TEST_CASE_REVIEW_REQUIRED'))
+  const reusedCase = structuredClone(completed.testCases[0])
+  reusedCase.origin = 'historical_unchanged'
+  reusedCase.historicalSourceRef = 'history-fixed-1'
+  const historical = { ...completed.historicalSnapshot, items: [{ id: 'history-fixed-1', kind: 'historical_case_set' as const, sourceId: 'source-set:case:0', contentSha256: reusedCase.revisions[0].semanticSha256, content: reusedCase.revisions[0].content, locator: {} }], snapshotSha256: canonicalSha256('history-fixed-1') }
+  const historicalAudit = auditTestDesignCoverage({ runId: completed.id, basis: completed.basisSnapshot, retrieval: completed.retrievalSnapshot, historical, tree: completed.testPointTree!, treeVersion: completed.testPointTree!.versions[0], cases: [reusedCase, ...completed.testCases.slice(1)], dataSet: completed.dataSetVersions[0], findings: [], confirmationItems: [] })
+  assert.equal(historicalAudit.blockers.some(item => item.code === 'TEST_CASE_HISTORICAL_SOURCE_INVALID'), false)
+  reusedCase.historicalSourceRef = 'history-outside-snapshot'
+  const invalidHistoricalAudit = auditTestDesignCoverage({ runId: completed.id, basis: completed.basisSnapshot, retrieval: completed.retrievalSnapshot, historical, tree: completed.testPointTree!, treeVersion: completed.testPointTree!.versions[0], cases: [reusedCase, ...completed.testCases.slice(1)], dataSet: completed.dataSetVersions[0], findings: [], confirmationItems: [] })
+  assert.equal(invalidHistoricalAudit.blockers.some(item => item.code === 'TEST_CASE_HISTORICAL_SOURCE_INVALID'), true)
 
   for (const testCase of completed.testCases) {
     await service.reviewCase('pv-1', design.id, run.id, testCase.id, { decision: 'submit', targetRevision: 0 }, principal)
@@ -101,12 +113,45 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   const repeated = await service.publishCaseSet('pv-1', design.id, run.id, { name: '认证新功能用例集', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256 }, principal)
   assert.equal(repeated.id, published.id)
   assert.equal(published.members.length, 2)
+  const runWithPublishedSet = await service.getRun('pv-1', design.id, run.id)
+  assert.deepEqual(runWithPublishedSet.caseSetVersions.map(item => item.id), [published.id])
   const jsonExport = await service.exportCaseSet(published.id, 'json')
   const xlsxExport = await service.exportCaseSet(published.id, 'xlsx')
   assert.match(String(jsonExport.content), /test-case-set\/v1/u)
   assert.ok(Buffer.isBuffer(xlsxExport.content) && xlsxExport.content.subarray(0, 2).toString() === 'PK')
   const catalog = await service.projectCatalog('project-1')
   assert.equal(catalog.items.length, 2)
+
+  await store.transaction(state => {
+    const aggregate = state.testDesignState!
+    aggregate.suiteVersions.push(
+      { id: 'suite-smoke-v1', projectId: 'project-1', suiteKey: 'smoke', suiteType: 'smoke', version: 1, name: '冒烟 v1', members: [{ testCaseSetVersionId: 'baseline-smoke-set', caseId: 'baseline-smoke-case', revision: 3, executionMethods: ['api'], ordinal: 0, reason: '固定冒烟基线' }], contentSha256: canonicalSha256('suite-smoke-v1'), publishedBy: principal.subjectId, publishedAt: new Date().toISOString() },
+      { id: 'suite-regression-v1', projectId: 'project-1', suiteKey: 'regression', suiteType: 'regression', version: 1, name: '回归 v1', members: [{ testCaseSetVersionId: 'baseline-regression-set', caseId: 'baseline-impact-case', revision: 7, executionMethods: ['api'], ordinal: 0, reason: '影响回归' }, { testCaseSetVersionId: 'baseline-regression-set', caseId: 'baseline-full-case', revision: 2, executionMethods: ['api'], ordinal: 1, reason: '全量回归' }], contentSha256: canonicalSha256('suite-regression-v1'), publishedBy: principal.subjectId, publishedAt: new Date().toISOString() },
+    )
+  })
+  await service.reviewSmokeCandidate(published.id, published.members[0].caseId, { executionMethods: ['api'], reason: '主链路稳定', estimatedMinutes: 2, stable: true, dependencyReady: true, decision: 'accepted' }, principal)
+  await service.setImpactedRegression(published.id, [{ suiteVersionId: 'suite-regression-v1', caseId: 'baseline-impact-case', executionMethods: ['api'], reason: '认证变更影响既有登录链路' }], principal)
+  const handoffInput = { strategy: 'standard' as const, smokeSuiteVersionId: 'suite-smoke-v1', regressionSuiteVersionId: 'suite-regression-v1', expectedCaseSetSha256: published.contentSha256 }
+  const handoff = await service.createHandoff(published.id, handoffInput, principal)
+  const repeatedHandoff = await service.createHandoff(published.id, handoffInput, principal)
+  assert.equal(repeatedHandoff.id, handoff.id)
+  assert.deepEqual(new Set(handoff.members.map(item => item.stage)), new Set(['smoke', 'new_feature', 'impacted_regression', 'full_regression']))
+  const fast = await service.createHandoff(published.id, { ...handoffInput, strategy: 'fast' }, principal)
+  assert.equal(fast.members.some(item => item.stage === 'smoke'), true)
+  assert.equal(fast.members.some(item => item.stage === 'full_regression'), false)
+  const full = await service.createHandoff(published.id, { strategy: 'full', regressionSuiteVersionId: 'suite-regression-v1', expectedCaseSetSha256: published.contentSha256 }, principal)
+  assert.deepEqual(new Set(full.members.map(item => item.stage)), new Set(['full_regression']))
+
+  const editableTree = await service.getTree('pv-1', design.id, run.id)
+  const changedTree = await service.patchTree('pv-1', design.id, run.id, editableTree.etag, { operations: [{ op: 'update', nodeId: editableTree.revision.nodes[0].nodeId, patch: { basisRefs: editableTree.revision.nodes[0].basisRefs } }], reason: '人工复核固定依据关系' }, principal)
+  const waitingAfterEdit = await service.getRun('pv-1', design.id, run.id)
+  assert.equal(waitingAfterEdit.status, 'waiting_gate')
+  assert.ok(waitingAfterEdit.coverageAudits.every(item => item.status === 'stale'))
+  await service.approveTree('pv-1', design.id, run.id, changedTree.etag, principal)
+  const approvedAfterEdit = await service.getRun('pv-1', design.id, run.id)
+  assert.equal(approvedAfterEdit.status, 'succeeded')
+  assert.equal(approvedAfterEdit.stage, 'completed')
+  assert.ok(approvedAfterEdit.testCases.every(item => item.reviewState === 'draft'))
 })
 
 test('树和用例编辑要求当前 ETag，编辑后旧审计失效', async () => {
@@ -135,10 +180,42 @@ test('并行设计单节点失败后只重跑失败节点', async () => {
   assert.equal(failed.nodeRuns.find(item => item.nodeKey === 'functional_design')?.status, 'succeeded')
   assert.equal(failed.nodeRuns.find(item => item.nodeKey === 'non_functional_design')?.status, 'failed')
   assert.equal(failed.nodeRuns.find(item => item.nodeKey === 'non_functional_design')?.execution?.modelLabel, 'failed-model')
-  await service.retryDesignNode('pv-1', design.id, run.id, 'non_functional_design')
-  await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
+  await service.processPreparedRun(run.id)
+  const recovered = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
+  assert.equal(recovered.errorCode, undefined)
+  assert.equal(recovered.error, undefined)
   assert.equal(runtime.stages.filter(stage => stage === 'functional_design').length, 1)
   assert.equal(runtime.stages.filter(stage => stage === 'non_functional_design').length, 2)
+})
+
+test('知识增强生成固定查询计划和命中，非法依据引用不能进入测试点树', async () => {
+  const retrievalStore = await seededStore()
+  const retrievalService = new TestDesignService(retrievalStore, new FakeRuntime())
+  const retrievalDesign = await retrievalService.createDesign('pv-1', { name: '固定召回', objective: '验证账号登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'selected_assets', assetVersionIds: ['asset-version-1'] } }, principal)
+  const retrievalRun = await retrievalService.createRun('pv-1', retrievalDesign.id, 'retrieval-run', principal)
+  assert.equal(retrievalRun.retrievalSnapshot.queryPlan.length > 0, true)
+  assert.equal(retrievalRun.retrievalSnapshot.hits.length > 0, true)
+  assert.equal(retrievalRun.retrievalSnapshot.assetVersionIds[0], 'asset-version-1')
+
+  const invalidStore = await seededStore()
+  const invalidService = new TestDesignService(invalidStore, new InvalidBasisRuntime())
+  const invalidDesign = await invalidService.createDesign('pv-1', { name: '非法引用', objective: '拒绝越界依据', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const invalidRun = await invalidService.createRun('pv-1', invalidDesign.id, 'invalid-basis-run', principal)
+  const scope = await waitFor(invalidService, invalidDesign.id, invalidRun.id, value => value.stage === 'scope_gate')
+  const artifact = scope.artifacts.find(item => item.nodeKey === 'test_analysis')!
+  await invalidService.applyGateDecision('pv-1', invalidDesign.id, invalidRun.id, 'scope', { targetId: artifact.id, targetRevision: artifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
+  const failed = await waitFor(invalidService, invalidDesign.id, invalidRun.id, value => value.status === 'failed')
+  assert.match(failed.error ?? '', /固定输入之外/u)
+})
+
+test('锁定项目版本拒绝继续创建测试设计和运行', async () => {
+  const store = await seededStore()
+  const projectVersions = new ProjectVersionService(store)
+  const service = new TestDesignService(store, new FakeRuntime())
+  const design = await service.createDesign('pv-1', { name: '锁定边界', objective: '验证只读门禁', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  await projectVersions.updateStatus('pv-1', 'locked')
+  await assert.rejects(() => service.createRun('pv-1', design.id, 'locked-run', principal), (error: unknown) => error instanceof TestDesignError && error.code === 'PROJECT_VERSION_READ_ONLY')
+  await assert.rejects(() => service.createDesign('pv-1', { name: '不允许创建', objective: '只读版本', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'PROJECT_VERSION_READ_ONLY')
 })
 
 class FakeRuntime implements TestDesignAgentRuntime {
@@ -167,6 +244,14 @@ class FailOnceRuntime extends FakeRuntime {
       throw error
     }
     return super.execute(input)
+  }
+}
+
+class InvalidBasisRuntime extends FakeRuntime {
+  override async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
+    const result = await super.execute(input)
+    if (input.stage === 'functional_design') return { ...result, content: { schemaVersion: 'functional-test-design/v1', nodes: [node('invalid-basis', 'functional', ['basis_not_in_snapshot'])] } }
+    return result
   }
 }
 

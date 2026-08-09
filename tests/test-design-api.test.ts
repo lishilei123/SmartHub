@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyTestDesignGateDecision, createTestDesignRun, loadTestDesignInputs } from '../src/test-design-api.ts'
 import { routeTestDesign } from '../server/http/test-design-routes.ts'
+import { readFileSync } from 'node:fs'
 
 test('测试设计创建表单从真实候选接口聚合依据和 Agent 就绪状态', async () => {
   const originalFetch = globalThis.fetch
@@ -58,6 +59,7 @@ test('范围确认提交固定运行、目标版本和并发版本', async () =>
 })
 
 test('测试设计 HTTP 响应允许浏览器跨端口读取', async () => {
+  const server = readFileSync(new URL('../server/http/server.ts', import.meta.url), 'utf8')
   const headers = new Map<string, string>()
   let body = ''
   const response = {
@@ -77,5 +79,8 @@ test('测试设计 HTTP 响应允许浏览器跨端口读取', async () => {
   assert.equal(handled, true)
   assert.equal(headers.get('access-control-allow-origin'), '*')
   assert.match(headers.get('access-control-allow-headers') ?? '', /idempotency-key/u)
+  assert.match(headers.get('access-control-allow-headers') ?? '', /if-match/u)
+  assert.match(headers.get('access-control-expose-headers') ?? '', /etag/u)
+  assert.match(server, /access-control-allow-headers': 'content-type, authorization, idempotency-key, if-match'/u)
   assert.equal(body, '{"items":[]}')
 })

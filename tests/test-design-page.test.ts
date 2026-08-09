@@ -39,6 +39,55 @@ test('测试设计工作台保留真实运行入口和错误态展示结构', ()
   assert.match(source, /GateDecisionPanel/)
 })
 
+test('测试设计真实产物使用独立视图且仅缺失阶段显示占位态', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  assert.match(source, /<RunArtifactView tab=\{tab\} run=\{activeRun\}/)
+  for (const view of ['RunAnalysisArtifact', 'RunRetrievalArtifact', 'RunTreeArtifact', 'RunCasesArtifact', 'RunCaseSetArtifact', 'RunDataArtifact', 'RunCoverageArtifact', 'RunHistoryArtifact', 'RunQuestionsArtifact']) {
+    assert.match(source, new RegExp(`function ${view}\\b`))
+  }
+  assert.doesNotMatch(source, /!\['overview', 'workflow'\]\.includes\(tab\) && <RunArtifactState/)
+  assert.match(source, /currentTreeNodes\(run\)\.length/)
+  assert.match(source, /dataRequirementCount\(run\)/)
+})
+
+test('真实测试用例支持 ETag 编辑、审核、阻断修复和不可变发布', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const api = readFileSync(new URL('../src/test-design-api.ts', import.meta.url), 'utf8')
+
+  assert.match(source, /function RunCaseEditor\b/)
+  assert.match(source, /保存 revision/)
+  assert.match(source, /提交审核/)
+  assert.match(source, /批量完成审核/)
+  assert.match(source, /创建关联用例/)
+  assert.match(source, /重新审计/)
+  assert.match(source, /确认发布/)
+  assert.match(source, /function RunTreeArtifact[\s\S]*保存 revision/)
+  assert.match(source, /批准当前 revision/)
+  for (const action of ['loadTestDesignCase', 'createTestDesignCase', 'updateTestDesignCase', 'reviewTestDesignCase', 'batchReviewTestDesignCases', 'reAuditTestDesignRun', 'publishTestCaseSet', 'updateTestPointTree', 'approveTestPointTree']) {
+    assert.match(api, new RegExp(`export (?:async function|const) ${action}\\b`))
+  }
+  assert.match(api, /'if-match': etag/)
+})
+
+test('项目用例目录、导出、处置和执行交接使用真实 Phase 4 API', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const api = readFileSync(new URL('../src/test-design-api.ts', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /SET-SMOKE|SET-REGRESSION|有效用例<\/dt><dd>386/u)
+  for (const action of ['loadProjectTestCaseCatalog', 'loadProjectTestSuites', 'reviewSmokeCandidate', 'saveImpactedRegression', 'createExecutionHandoff', 'replaceTestDataRequirements', 'actOnTestDesignFinding', 'actOnTestDesignConfirmation']) assert.match(api, new RegExp(`export const ${action}\\b`))
+  assert.match(source, /testCaseSetExportUrl\(version\.id, 'xlsx'\)/)
+  assert.match(source, /function PublishedCaseSetOperations\b/)
+  for (const label of ['仅重跑功能设计', '仅重跑非功能设计', '重新分析范围', '重新具象化', '全部重跑']) assert.match(source, new RegExp(label))
+  for (const action of ['fullRerunTestDesign', 'reviseTestDesignScope', 'retryTestDesignNode', 'resynthesizeTestDesign']) assert.match(api, new RegExp(`export const ${action}\\b`))
+})
+
+test('测试用例长表单受工作台高度约束并在编辑区内滚动', () => {
+  const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
+
+  assert.match(styles, /\.td-workspace-grid>\.td-detail-panel\{min-height:0;overflow:hidden\}/)
+  assert.match(styles, /\.td-detail-scroll\{min-height:0;flex:1;padding:13px;overflow:auto\}/)
+  assert.match(styles, /\.td-detail-panel>footer\{min-height:52px;flex:0 0 52px;/)
+})
+
 test('范围确认门禁展示可审阅的结构化范围而不是对象字符串', () => {
   const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
   assert.match(source, /本次测试范围明细/)
