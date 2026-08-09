@@ -59,6 +59,24 @@ test('创建页不再展示或提交硬编码候选数据', () => {
   assert.doesNotMatch(source, /RR-20260801-021|TR-20260805-014|ASSET-001|创建预览运行/)
 })
 
+test('每次新建测试设计都会清空上一轮创建草稿并返回第一步', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const resetCreateDraft = source.match(/const resetCreateDraft = \(\) => \{[\s\S]*?\n  \}/)?.[0] ?? ''
+
+  assert.match(resetCreateDraft, /setCreateStep\(1\)/)
+  assert.match(resetCreateDraft, /setDesignName\(''\)/)
+  assert.match(resetCreateDraft, /setKnowledgeGoal\(''\)/)
+  assert.match(resetCreateDraft, /setBasisMode\('review_baseline'\)/)
+  assert.match(resetCreateDraft, /setSelectedAssets\(\[\]\)/)
+  assert.match(resetCreateDraft, /setAugmentation\('disabled'\)/)
+  assert.match(resetCreateDraft, /setAugmentationAssets\(\[\]\)/)
+  assert.match(resetCreateDraft, /setHistoryEnabled\(false\)/)
+  assert.match(source, /const openCreate = \(\) => \{\s*resetCreateDraft\(\)/)
+  assert.match(source, /const closeCreate = \(\) => \{\s*resetCreateDraft\(\)/)
+  assert.match(source, /onCreate=\{openCreate\}/)
+  assert.match(source, /onCancel=\{closeCreate\}/)
+})
+
 test('评审基线单选框不继承普通输入框的满宽尺寸', () => {
   const source = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
   assert.match(source, /label>input:not\(\[type=checkbox\]\):not\(\[type=radio\]\)/)

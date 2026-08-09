@@ -338,6 +338,26 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     setWorkspaceError('')
     setRouteContext({ testDesignId: null, workflowRunId: null, tab: null, create: null })
   }
+  const resetCreateDraft = () => {
+    setCreateStep(1)
+    setDesignName('')
+    setKnowledgeGoal('')
+    setBasisMode('review_baseline')
+    setSelectedAssets([])
+    setAugmentation('disabled')
+    setAugmentationAssets([])
+    setHistoryEnabled(false)
+  }
+  const openCreate = () => {
+    resetCreateDraft()
+    setView('create')
+    setRouteContext({ create: '1' })
+  }
+  const closeCreate = () => {
+    resetCreateDraft()
+    setView('list')
+    setRouteContext({ create: null })
+  }
   const refreshWorkspace = () => {
     if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId) return
     setWorkspaceLoading(true)
@@ -385,6 +405,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     const created: TestDesign = { ...design, latestRun: { id: run.id, testDesignId: design.id, projectVersionId, status: run.status, stage: 'test_analysis', progress: 0, createdAt: new Date().toISOString() } }
     setDesigns(current => [created, ...current.filter(item => item.id !== created.id)])
     notify('测试设计已创建，并已提交真实工作流运行。')
+    resetCreateDraft()
     openWorkspace(created)
   }
   const selectTab = (next: TabKey) => {
@@ -528,7 +549,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   }
 
   if (view === 'create') {
-    if (!designInputs) return <section className="td-create-page"><header><button className="icon-btn" onClick={() => { setView('list'); setRouteContext({ create: null }) }} aria-label="关闭创建页"><X /></button><div><span>创建测试设计</span><h2>正在读取当前版本可选输入</h2></div></header><RunLoading /></section>
+    if (!designInputs) return <section className="td-create-page"><header><button className="icon-btn" onClick={closeCreate} aria-label="关闭创建页"><X /></button><div><span>创建测试设计</span><h2>正在读取当前版本可选输入</h2></div></header><RunLoading /></section>
     return <CreateDesign
       projectVersion={projectVersion}
       inputs={designInputs}
@@ -548,13 +569,13 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
       setAugmentationAssets={setAugmentationAssets}
       historyEnabled={historyEnabled}
       setHistoryEnabled={setHistoryEnabled}
-      onCancel={() => { setView('list'); setRouteContext({ create: null }) }}
+      onCancel={closeCreate}
       onStart={startDesign}
     />
   }
 
   if (view === 'list') {
-    return <DesignList projectVersion={projectVersion} view={collectionView} setView={selectCollectionView} designs={designs} loading={designsLoading} onCreate={() => { setView('create'); setRouteContext({ create: '1' }) }} onOpen={openWorkspace} notify={notify} />
+    return <DesignList projectVersion={projectVersion} view={collectionView} setView={selectCollectionView} designs={designs} loading={designsLoading} onCreate={openCreate} onOpen={openWorkspace} notify={notify} />
   }
 
   if (workspaceError) {
