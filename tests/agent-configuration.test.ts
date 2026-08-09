@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { PiTestDesignRuntimeAdapter } from '../server/agent/pi-test-design-runtime.js'
 import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { JsonStore } from '../server/infrastructure/store.js'
@@ -160,6 +161,25 @@ test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用�
   await assert.rejects(() => service.save({ agentKey: 'requirementReview', revision: 0, routing: saved.routing, definition: saved.definition }), /已被其他操作更新/)
   await store.transaction(state => { state.modelSources[0].models[0].health = 'degraded' })
   await assert.rejects(() => service.publish({ agentKey: 'requirementReview', revision: saved.revision }), /尚未通过健康探测/)
+})
+
+test('测试设计 Agent 保留必需提交工具时允许绑定额外工具', async () => {
+  const { store, service } = await fixture()
+  const initial = (await service.get()).agents.testAnalysis.draft
+  const saved = await service.save({
+    agentKey: 'testAnalysis',
+    revision: initial.revision,
+    routing: { ...initial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
+    definition: { ...initial.definition, toolIds: [...initial.definition.toolIds, 'knowledge.search'] },
+  })
+  await service.publish({ agentKey: 'testAnalysis', revision: saved.revision })
+
+  const runtime = new PiTestDesignRuntimeAdapter(store, null as never, service)
+  const readiness = await runtime.readiness()
+  const testAnalysis = readiness.agents.find(item => item.agentKey === 'test-analysis')
+
+  assert.equal(testAnalysis?.ready, true)
+  assert.equal(testAnalysis?.reason, undefined)
 })
 
 test('Agent 最大输出 Token 独立于模型目录中的历史输出值', async () => {

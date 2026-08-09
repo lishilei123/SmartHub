@@ -754,7 +754,7 @@ function presentRunSummary(run: ReviewRun) {
     retryOfRunId: run.retryOfRunId,
     retryMode: run.retryMode,
     reusedExtractionFromRunId: run.reusedExtractionFromRunId,
-    hasFrozenExtraction: Boolean(run.extractionResult && run.inputDeliveryManifest),
+    hasFrozenExtraction: hasFrozenExtraction(run),
     projectVersionId: run.projectVersionId,
     assetId: run.assetId,
     assetVersionId: run.assetVersionId,
@@ -798,7 +798,7 @@ function presentRun(run: ReviewRun) {
     retryOfRunId: run.retryOfRunId,
     retryMode: run.retryMode,
     reusedExtractionFromRunId: run.reusedExtractionFromRunId,
-    hasFrozenExtraction: Boolean(run.extractionResult && run.inputDeliveryManifest),
+    hasFrozenExtraction: hasFrozenExtraction(run),
     projectVersionId: run.projectVersionId,
     assetId: run.assetId,
     assetVersionId: run.assetVersionId,
@@ -828,6 +828,11 @@ function presentRun(run: ReviewRun) {
     inputDeliveryManifest: response ? undefined : run.inputDeliveryManifest,
     response,
   }
+}
+
+function hasFrozenExtraction(run: ReviewRun) {
+  const projected = (run as ReviewRun & { hasFrozenExtraction?: unknown }).hasFrozenExtraction
+  return typeof projected === 'boolean' ? projected : Boolean(run.extractionResult && run.inputDeliveryManifest)
 }
 
 function reviewIdFor(run: ReviewRun) {

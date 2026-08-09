@@ -18,8 +18,8 @@ import { ReviewQaService } from '../server/application/review-qa-service.js'
 import type { AgentRuntime, InputDeliveryManifest, RequirementInputPlan, ReviewRunSnapshot } from '../server/domain/agent-types.js'
 import type { ReviewQaExecutionInput, ReviewQaRuntime } from '../server/domain/review-qa-types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementPointExtractionV4, CandidateRequirementPointExtractionV5, CandidateRequirementReview, CandidateRequirementReviewV3 } from '../server/domain/review-types.js'
-import { defaultConfig } from '../server/domain/types.js'
-import { JsonStore } from '../server/infrastructure/store.js'
+import { defaultConfig, type ReviewRun } from '../server/domain/types.js'
+import { JsonStore, type StateStore } from '../server/infrastructure/store.js'
 
 test('提取 Agent v5 生成可选标题并提交描述与原文线索，其余字段由服务端生成', () => {
   const definition = defaultAgentDefinitionResolver.resolve('requirement-point-extraction')
@@ -358,6 +358,9 @@ test('普通文档正文在首轮直接进入上下文，模型无需逐 Chunk �
   assert.equal(output.snapshot.extractionInput.mode, 'full_context')
   assert.match(prompts[0], /用户可以取消待支付订单。/u)
   assert.match(prompts[0], /订单超过十五分钟未支付时自动关闭。/u)
+  assert.match(prompts[1], /clientRequirementPointId.*RP-001/u)
+  assert.match(prompts[1], /clientRequirementPointId.*RP-002/u)
+  assert.doesNotMatch(prompts[1], /缺少固定需求点提取结果/u)
   assert.deepEqual(toolSets[0], ['requirement_points_submit_result'])
   assert.ok(!output.executions.requirementPointExtraction.events.some(event => event.toolId === 'knowledge_read_chunk'))
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'input_package_built'))
@@ -408,6 +411,21 @@ test('需求评审失败后可复用冻结需求点只重跑评审，并保留�
   assert.deepEqual(retryRun.inputDeliveryManifest, sourceRun.inputDeliveryManifest)
   assert.deepEqual(retryRun.executions?.requirementPointExtraction, sourceRun.executions?.requirementPointExtraction)
   assert.ok(retryRun.executions?.requirementReview)
+})
+
+test('运行列表使用轻量投影保留冻结需求点状态', async () => {
+  const { store } = await successfulRun()
+  const sourceRun = (await store.snapshot()).reviewRuns[0]
+  const projectedRun = structuredClone(sourceRun) as ReviewRun & { hasFrozenExtraction: boolean }
+  delete projectedRun.extractionResult
+  delete projectedRun.inputDeliveryManifest
+  projectedRun.hasFrozenExtraction = true
+  const pagedStore = store as JsonStore & { listReviewRuns: NonNullable<StateStore['listReviewRuns']> }
+  pagedStore.listReviewRuns = async () => ({ items: [projectedRun] })
+
+  const listed = await new RequirementAnalysisService(pagedStore, new PiAgentRuntimeAdapter(pagedStore)).list(sourceRun.projectVersionId)
+
+  assert.equal(listed.items[0].hasFrozenExtraction, true)
 })
 
 test('没有冻结需求点的失败运行只能全部重跑', async () => {
@@ -704,6 +722,24 @@ test('v3 评审保留模型给出的展示字段和总体摘要，并由服务�
     description: '需求只定义可取消，未定义取消后的订单状态。', impact: '实现和验收口径可能不一致。',
     recommendation: '补充状态迁移、幂等与失败处理。', requirementPointRefs: ['RP-001'],
   })
+})
+
+test('v3 评审拒绝没有任何分析却声明需修订或阻塞', async () => {
+  const { output, snapshot } = await snapshotForValidation()
+  const extraction = output.result as CandidateRequirementPointExtraction
+  const validator = new RequirementReviewValidator()
+  const blocked = validator.normalizeV3({
+    summary: { overallAssessment: 'blocked', score: 0, strengths: [], risks: ['缺少固定需求点提取结果'] },
+    analyses: [],
+  }, extraction, snapshot)
+  const passed = validator.normalizeV3({
+    summary: { overallAssessment: 'pass', score: 100, strengths: ['未发现问题'], risks: [] },
+    analyses: [],
+  }, extraction, snapshot)
+
+  assert.equal(blocked.report.valid, false)
+  assert.ok(blocked.report.issues.some(issue => issue.path === 'analyses'))
+  assert.equal(passed.report.valid, true)
 })
 
 test('v3 评审漏掉展示字段时服务端兜底，但错误需求点引用仍拒绝', async () => {

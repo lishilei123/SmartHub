@@ -258,7 +258,8 @@ export class PostgresStore implements StateStore {
     const limit = Math.min(Math.max(1, options.limit), 100)
     const cursor = decodeReviewRunCursor(options.cursor)
     const result = await this.pool.query<ReviewRunQueueRow>(`
-      SELECT run.data - 'result' - 'extractionResult' - 'execution' - 'executions' AS data,
+      SELECT (run.data - 'result' - 'extractionResult' - 'execution' - 'executions')
+          || jsonb_build_object('hasFrozenExtraction', (run.data ? 'extractionResult') AND (run.data ? 'inputDeliveryManifest')) AS data,
         job.status AS queue_status, job.attempt_count, job.max_attempts,
         job.available_at
       FROM smarthub.review_runs run

@@ -144,7 +144,7 @@ function executionRecord(agentKey: (typeof stageKeys)[keyof typeof stageKeys], a
 function validateConfiguration(configuration: AgentConfigurationVersion, state: DatabaseState) {
   const definition = configuration.agentDefinition
   const requiredTool = submissionTools[definition.agentKey as keyof typeof submissionTools]
-  if (!requiredTool || definition.modelScene !== 'test_design' || definition.toolIds.length !== 1 || definition.toolIds[0] !== requiredTool) throw new Error('测试设计 Agent 只允许绑定对应结果提交工具')
+  if (!requiredTool || definition.modelScene !== 'test_design' || !definition.toolIds.includes(requiredTool)) throw new Error('测试设计 Agent 必须绑定对应结果提交工具')
   if (definition.skillBindings.some(item => item.enabled) || definition.mcpBindings.some(item => item.enabled)) throw new Error('测试设计 Agent 不允许绑定 Skill 或 MCP')
   const tool = state.aiResources.find((item): item is ToolResource => item.kind === 'tool' && item.key === requiredTool && item.enabled)
   if (!tool || tool.risk !== 'internal_write') throw new Error(`结果提交工具 ${requiredTool} 不可用`)

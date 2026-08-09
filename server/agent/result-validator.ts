@@ -364,10 +364,15 @@ export class RequirementReviewValidator {
 
     const analyses = [...deduplicated.values()]
     const modelSummary = input.summary
+    const overallAssessment = assessments.has(String(modelSummary?.overallAssessment)) ? modelSummary!.overallAssessment! : analyses.length ? 'needs_revision' : 'pass'
+    if (!analyses.length && (overallAssessment === 'needs_revision' || overallAssessment === 'blocked')) {
+      issues.push(issue('analyses', `总体结论为 ${overallAssessment} 时必须提交至少一条关联冻结需求点的分析`))
+    }
+    if (issues.length) return { report: { valid: false, issues } }
     const fallbackScore = analyses.length ? Math.max(40, 100 - analyses.length * 8) : 100
     const result: CandidateRequirementReview = {
       summary: {
-        overallAssessment: assessments.has(String(modelSummary?.overallAssessment)) ? modelSummary!.overallAssessment! : analyses.length ? 'needs_revision' : 'pass',
+        overallAssessment,
         score: Number.isFinite(modelSummary?.score) ? Math.min(100, Math.max(0, Number(modelSummary?.score))) : fallbackScore,
         strengths: isStrings(modelSummary?.strengths) ? modelSummary!.strengths.map(value => value.trim()).filter(Boolean) : analyses.length ? [] : ['未发现需要修正的需求问题'],
         risks: isStrings(modelSummary?.risks) ? modelSummary!.risks.map(value => value.trim()).filter(Boolean) : analyses.slice(0, 20).map(item => item.analysis),

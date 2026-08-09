@@ -503,7 +503,7 @@ function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration
     ? renderTechnicalSolutionTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot)
     : stage.isTechnicalReview
     ? renderTechnicalSolutionReviewTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED'))
-    : renderRequirementTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
+    : renderRequirementTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, stage.fixedExtraction)
 }
 
 function testDesignPointIds(task: string | undefined) {
