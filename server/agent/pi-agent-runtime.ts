@@ -21,7 +21,7 @@ import { RequirementPointExtractionValidator, RequirementReviewValidator } from 
 import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
-import { TestDesignError, validateDesignCandidateNodes } from '../application/test-design-validation.js'
+import { TestDesignError, validateDesignCandidateNodes, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
 
 const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -55,7 +55,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       ? createTestDesignToolRegistry(stage.submitToolId, stage.schemaVersion, async value => {
         try {
           const kind = stage.submitToolId === 'functional_test_design.submit_result' ? 'functional' : stage.submitToolId === 'non_functional_test_design.submit_result' ? 'non_functional' : undefined
-          candidate = kind ? { ...value, nodes: validateDesignCandidateNodes(value, kind) } : value
+          candidate = kind
+            ? { ...value, nodes: validateDesignCandidateNodes(value, kind) }
+            : stage.submitToolId === 'test_case_synthesis.submit_result'
+            ? validateTestCaseSynthesisCandidate(value, testDesignPointIds(input.testDesignTask))
+            : value
           lastSubmissionIssues = []
           return { accepted: true }
         } catch (error) {
@@ -251,7 +255,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           activeToolNames = new Set(tools.map(tool => tool.name))
           await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: `原文检索未能为${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}建立 Evidence 后开放 knowledge_search 与 knowledge_read_chunk，用于补充更准确的 sourceTexts。` })
         }
-        const repairGuidance = evidenceRepairRequired
+        const repairGuidance = stage.isTestDesign
+          ? stage.submitToolId === 'test_case_synthesis.submit_result'
+            ? '请严格按工具参数中的 test-case/v1 层级修正：共同前置使用 preconditions；步骤和逐步期望使用 executionMethods[].steps[].action/expected；UI/API 入口分别使用 uiSpec.entry 或 apiSpec.path；数据需求只放在提交根对象 dataRequirements[]，并通过 caseIndexes 关联候选用例。不要提交 preConditions、根级 steps、expectedResults、entryPoints、用例内 dataRequirements 或 testData。'
+            : '请按工具参数声明的字段和错误路径修正测试设计候选，不要添加工具 Schema 之外的字段。'
+          : evidenceRepairRequired
           ? `正文投递覆盖、资产版本、Chunk、${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'} ID、Evidence ID、定位和引用均由服务端负责；请只修正${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}内部的 sourceTexts，必要时可用 knowledge_read_chunk 核对原文。`
           : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
         await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
@@ -433,6 +441,13 @@ function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration
     : stage.isTechnicalReview
     ? renderTechnicalSolutionReviewTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED'))
     : renderRequirementTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
+}
+
+function testDesignPointIds(task: string | undefined) {
+  const value = JSON.parse(required(task, 'TEST_DESIGN_TASK_REQUIRED')) as { upstream?: { treeRevision?: { nodes?: Array<{ nodeId?: unknown; deleted?: unknown; applicability?: unknown }> } } }
+  const nodes = value.upstream?.treeRevision?.nodes
+  if (!Array.isArray(nodes)) throw new TestDesignError('TEST_CASE_SYNTHESIS_SCHEMA_INVALID', '批准测试点树输入不存在', 422, { path: '/cases' })
+  return new Set(nodes.filter(item => !item.deleted && item.applicability !== 'not_applicable' && typeof item.nodeId === 'string').map(item => item.nodeId as string))
 }
 
 function hasEvidenceValidationIssue(issues: Array<{ path: string; message: string }>) {

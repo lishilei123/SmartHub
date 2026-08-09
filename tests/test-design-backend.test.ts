@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
 import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
-import { TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestCaseContent } from '../server/application/test-design-validation.js'
+import { TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestCaseContent, validateTestCaseSynthesisCandidate } from '../server/application/test-design-validation.js'
 import type { TestCaseContent, TestPointNodeRevision } from '../server/domain/test-design-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
@@ -30,6 +30,29 @@ test('测试点候选在进入树归并前校验临时引用和分支维度', ()
 test('test-case/v1 强制 UI/API 判别联合、稳定步骤和非空方式', () => {
   assert.throws(() => validateTestCaseContent({ ...caseContent(['point-1']), executionMethods: [] }, new Set(['point-1'])), /executionMethods/u)
   assert.throws(() => validateTestCaseContent({ ...caseContent(['point-1']), executionMethods: [{ method: 'ui', uiSpec: { entry: '/login' }, apiSpec: { method: 'POST', path: '/login' }, steps: [{ key: 's1', action: '输入', expected: '已输入' }], verificationChecks: [], executionReadiness: 'ready', automationHint: '' }] }, new Set(['point-1'])), /不允许的字段/u)
+})
+
+test('用例综合候选拒绝旧式扁平字段并返回可修正映射', () => {
+  const legacyCase = { ...caseContent(['point-1']), preConditions: [], steps: [], expectedResults: [], entryPoints: [], dataRequirements: [], testData: [] }
+  assert.throws(
+    () => validateTestCaseSynthesisCandidate({ schemaVersion: 'test-case-synthesis/v1', cases: [legacyCase], dataRequirements: [] }, new Set(['point-1'])),
+    (error: unknown) => error instanceof TestDesignError
+      && error.code === 'TEST_CASE_SYNTHESIS_SCHEMA_INVALID'
+      && (error.details as { path?: string }).path === '/cases/0'
+      && error.message.includes('preConditions')
+      && error.message.includes('executionMethods[].steps'),
+  )
+})
+
+test('用例综合候选校验数据需求索引并保留规范结构', () => {
+  const result = validateTestCaseSynthesisCandidate({
+    schemaVersion: 'test-case-synthesis/v1',
+    cases: [caseContent(['point-1'])],
+    dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: ['point-1'], caseIndexes: [0], fieldConstraints: { status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }],
+  }, new Set(['point-1']))
+  assert.equal(result.cases[0].executionMethods[0].steps[0].expected, '返回明确结果')
+  assert.deepEqual(result.dataRequirements[0].caseIndexes, [0])
+  assert.throws(() => validateTestCaseSynthesisCandidate({ ...result, dataRequirements: [{ ...result.dataRequirements[0], caseIndexes: [1] }] }, new Set(['point-1'])), /caseIndexes/u)
 })
 
 test('测试设计候选接口返回真实资产版本和内容 Hash', async () => {
@@ -62,6 +85,7 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   await service.applyGateDecision('pv-1', design.id, run.id, 'test-point-tree', { targetId: tree.id, targetRevision: tree.currentRevision, expectedVersion: 0, decision: 'approved' }, principal)
   const completed = await waitFor(service, design.id, run.id, value => value.status === 'succeeded')
   assert.equal(completed.testCases.length, 2)
+  assert.equal(completed.testCases[0].revisions[0].content.dataRequirementIds[0], completed.dataSetVersions[0].requirements[0].id)
   assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'test_analysis')?.execution?.modelLabel, 'fake-model')
   assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'functional_design')?.execution?.degraded, false)
   assert.ok(completed.coverageAudits.at(-1)!.blockers.some(item => item.code === 'TEST_CASE_REVIEW_REQUIRED'))
@@ -128,7 +152,7 @@ class FakeRuntime implements TestDesignAgentRuntime {
     if (input.stage === 'functional_design') return { schemaVersion: 'functional-test-design/v1', content: { schemaVersion: 'functional-test-design/v1', nodes: [node('shared-root', 'functional', basisRefs)] }, execution }
     if (input.stage === 'non_functional_design') return { schemaVersion: 'non-functional-test-design/v1', content: { schemaVersion: 'non-functional-test-design/v1', nodes: [node('shared-root', 'security', basisRefs)] }, execution }
     const upstream = input.upstream as { treeRevision: { nodes: TestPointNodeRevision[] } }
-    return { schemaVersion: 'test-case-synthesis/v1', content: { schemaVersion: 'test-case-synthesis/v1', cases: upstream.treeRevision.nodes.map(point => caseContent([point.nodeId])), dataRequirements: [] }, execution }
+    return { schemaVersion: 'test-case-synthesis/v1', content: { schemaVersion: 'test-case-synthesis/v1', cases: upstream.treeRevision.nodes.map(point => caseContent([point.nodeId])), dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: [upstream.treeRevision.nodes[0].nodeId], caseIndexes: [0], fieldConstraints: { status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }] }, execution }
   }
 }
 

@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, TestCaseContent, TestDimension, TestPointNodeContent, TestPointNodeRevision } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, TestCaseContent, TestDataRequirement, TestDimension, TestPointNodeContent, TestPointNodeRevision } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 
 export class TestDesignError extends Error {
@@ -81,6 +81,91 @@ export function validateTreeNodes(nodes: TestPointNodeRevision[]) {
 }
 
 export type DesignCandidateNode = TestPointNodeContent & { ref: string; parentRef?: string }
+
+export type TestDataRequirementCandidate = Omit<TestDataRequirement, 'id' | 'caseIds' | 'testPointIds'> & {
+  ref: string
+  caseIndexes: number[]
+  testPointIds: string[]
+}
+
+export interface TestCaseSynthesisCandidate extends Record<string, unknown> {
+  schemaVersion: 'test-case-synthesis/v1'
+  cases: TestCaseContent[]
+  dataRequirements: TestDataRequirementCandidate[]
+}
+
+const synthesisCaseFields = ['schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'sharedVerificationChecks', 'tags', 'domain']
+const legacySynthesisFieldGuidance: Record<string, string> = {
+  preConditions: '改为 preconditions',
+  steps: '移入 executionMethods[].steps，并使用 action/expected',
+  expectedResults: '拆入 executionMethods[].steps[].expected 或 verificationChecks',
+  entryPoints: 'UI 入口写入 uiSpec.entry，API 入口写入 apiSpec.path',
+  dataRequirements: '移到提交根对象 dataRequirements[]',
+  testData: '移到提交根对象 dataRequirements[]',
+}
+
+export function validateTestCaseSynthesisCandidate(value: unknown, validPointIds?: Set<string>): TestCaseSynthesisCandidate {
+  const input = synthesisObject(value, '/', '提交结果必须是对象')
+  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dataRequirements'], '/')
+  if (input.schemaVersion !== 'test-case-synthesis/v1') synthesisFail('/schemaVersion', 'schemaVersion 必须为 test-case-synthesis/v1')
+  if (!Array.isArray(input.cases) || !input.cases.length || input.cases.length > 1_000) synthesisFail('/cases', 'cases 必须包含 1 到 1000 条用例')
+  if (!Array.isArray(input.dataRequirements) || input.dataRequirements.length > 1_000) synthesisFail('/dataRequirements', 'dataRequirements 必须是最多 1000 项的数组')
+
+  const cases = input.cases.map((candidate, index) => {
+    const path = `/cases/${index}`
+    const caseInput = synthesisObject(candidate, path, `cases[${index}] 必须是对象`)
+    const unexpected = Object.keys(caseInput).filter(key => !synthesisCaseFields.includes(key))
+    if (unexpected.length) {
+      const guidance = unexpected.map(key => legacySynthesisFieldGuidance[key]).filter(Boolean)
+      synthesisFail(path, `包含不允许的字段：${unexpected.join('、')}${guidance.length ? `；字段映射：${guidance.join('；')}` : ''}`)
+    }
+    try {
+      const normalized = validateTestCaseContent(caseInput, validPointIds)
+      if (normalized.dataRequirementIds.length) synthesisFail(`${path}/dataRequirementIds`, '综合候选中的 dataRequirementIds 必须为空；服务端根据 dataRequirements[].caseIndexes 生成正式关联')
+      return normalized
+    } catch (error) {
+      if (error instanceof TestDesignError && error.details && typeof error.details === 'object' && 'path' in error.details) throw error
+      synthesisFail(path, errorMessage(error))
+    }
+  })
+
+  const refs = new Set<string>()
+  const dataRequirements = input.dataRequirements.map((candidate, index): TestDataRequirementCandidate => {
+    const path = `/dataRequirements/${index}`
+    const item = synthesisObject(candidate, path, `dataRequirements[${index}] 必须是对象`)
+    synthesisRejectUnknown(item, ['ref', 'name', 'entityType', 'featureTags', 'testPointIds', 'caseIndexes', 'fieldConstraints', 'relationships', 'quantity', 'initialState', 'preparationHint', 'sensitivity', 'isolation', 'resetAndCleanup', 'readiness', 'readinessReason'], path)
+    const ref = synthesisText(item.ref, `${path}/ref`, 200)
+    if (refs.has(ref)) synthesisFail(`${path}/ref`, `临时引用 ${ref} 重复`)
+    refs.add(ref)
+    const testPointIds = synthesisIds(item.testPointIds, `${path}/testPointIds`)
+    if (testPointIds.some(pointId => validPointIds && !validPointIds.has(pointId))) synthesisFail(`${path}/testPointIds`, '包含批准测试点树之外的引用')
+    const caseIndexes = synthesisIndexes(item.caseIndexes, `${path}/caseIndexes`, cases.length)
+    const fieldConstraints = synthesisStringRecord(item.fieldConstraints, `${path}/fieldConstraints`)
+    const sensitivity = synthesisEnum(item.sensitivity, `${path}/sensitivity`, ['public', 'internal', 'sensitive'] as const)
+    const readinessValue = synthesisEnum(item.readiness, `${path}/readiness`, ['ready', 'blocked', 'needs_confirmation'] as const)
+    const readinessReason = item.readinessReason === undefined ? undefined : synthesisText(item.readinessReason, `${path}/readinessReason`, 2_000)
+    if (readinessValue !== 'ready' && !readinessReason) synthesisFail(`${path}/readinessReason`, 'readiness 非 ready 时必须说明原因')
+    return {
+      ref,
+      name: synthesisText(item.name, `${path}/name`, 500),
+      entityType: synthesisText(item.entityType, `${path}/entityType`, 200),
+      featureTags: synthesisTexts(item.featureTags, `${path}/featureTags`, 100, 100),
+      testPointIds,
+      caseIndexes,
+      fieldConstraints,
+      relationships: synthesisTexts(item.relationships, `${path}/relationships`, 100, 1_000),
+      quantity: synthesisPositiveInteger(item.quantity, `${path}/quantity`),
+      initialState: synthesisText(item.initialState, `${path}/initialState`, 2_000),
+      preparationHint: synthesisText(item.preparationHint, `${path}/preparationHint`, 4_000),
+      sensitivity,
+      isolation: synthesisText(item.isolation, `${path}/isolation`, 2_000),
+      resetAndCleanup: synthesisText(item.resetAndCleanup, `${path}/resetAndCleanup`, 2_000),
+      readiness: readinessValue,
+      ...(readinessReason ? { readinessReason } : {}),
+    }
+  })
+  return { schemaVersion: 'test-case-synthesis/v1', cases, dataRequirements }
+}
 
 export function validateDesignCandidateNodes(raw: unknown, kind: 'functional' | 'non_functional'): DesignCandidateNode[] {
   const label = kind === 'functional' ? 'functional' : 'non_functional'
@@ -216,6 +301,17 @@ function candidateText(value: unknown, path: string, max: number) { if (typeof v
 function candidateTextArray(value: unknown, path: string, maxItems: number, maxLength: number) { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => candidateText(item, `${path}[${index}]`, maxLength)) }
 function candidateEnumArray<const T extends string>(value: unknown, path: string, allowed: readonly T[], maxItems: number): T[] { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => { if (typeof item !== 'string' || !allowed.includes(item as T)) candidateFail(`${path}[${index}]`, `必须为 ${allowed.join('、')}`); return item as T }) }
 function candidateFail(path: string, message: string): never { throw new TestDesignError('TEST_POINT_TREE_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
+function synthesisObject(value: unknown, path: string, message: string) { if (!value || typeof value !== 'object' || Array.isArray(value)) synthesisFail(path, message); return value as Record<string, unknown> }
+function synthesisRejectUnknown(value: Record<string, unknown>, allowed: string[], path: string) { const unexpected = Object.keys(value).filter(key => !allowed.includes(key)); if (unexpected.length) synthesisFail(path, `包含不允许的字段：${unexpected.join('、')}`) }
+function synthesisText(value: unknown, path: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) synthesisFail(path, `必须是长度不超过 ${max} 的非空字符串`); return value.trim() }
+function synthesisTexts(value: unknown, path: string, maxItems: number, maxLength: number) { if (!Array.isArray(value) || value.length > maxItems) synthesisFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => synthesisText(item, `${path}/${index}`, maxLength)) }
+function synthesisIds(value: unknown, path: string) { return [...new Set(synthesisTexts(value, path, 1_000, 500).map(item => { if (/^(latest|active)$/iu.test(item)) synthesisFail(path, '不允许动态引用 latest 或 active'); return item }))] }
+function synthesisIndexes(value: unknown, path: string, caseCount: number) { if (!Array.isArray(value) || !value.length || value.length > caseCount) synthesisFail(path, '必须是引用至少一条候选用例的索引数组'); const indexes = value.map((item, index) => { if (!Number.isInteger(item) || Number(item) < 0 || Number(item) >= caseCount) synthesisFail(`${path}/${index}`, `必须是 0 到 ${caseCount - 1} 的整数`); return Number(item) }); if (new Set(indexes).size !== indexes.length) synthesisFail(path, '不能包含重复索引'); return indexes }
+function synthesisStringRecord(value: unknown, path: string) { const input = synthesisObject(value, path, '必须是对象'); return Object.fromEntries(Object.entries(input).map(([key, item]) => [key, synthesisText(item, `${path}/${key}`, 2_000)])) }
+function synthesisPositiveInteger(value: unknown, path: string) { if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 1_000_000) synthesisFail(path, '必须是 1 到 1000000 的整数'); return Number(value) }
+function synthesisEnum<const T extends string>(value: unknown, path: string, allowed: readonly T[]): T { if (typeof value !== 'string' || !allowed.includes(value as T)) synthesisFail(path, `必须为 ${allowed.join('、')}`); return value as T }
+function synthesisFail(path: string, message: string): never { throw new TestDesignError('TEST_CASE_SYNTHESIS_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
+function errorMessage(error: unknown) { return error instanceof TestDesignError ? error.message.replace(/^[A-Z0-9_]+:\s*/u, '') : error instanceof Error ? error.message : String(error) }
 function object(value: unknown, code: string, message: string) { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(code, message); return value as Record<string, unknown> }
 function rejectUnknown(value: Record<string, unknown>, allowed: string[], code: string) { const unexpected = Object.keys(value).filter(key => !allowed.includes(key)); if (unexpected.length) fail(code, `包含不允许的字段：${unexpected.join('、')}`) }
 function fail(code: string, message: string, status = 400, details?: unknown): never { throw new TestDesignError(code, message, status, details) }

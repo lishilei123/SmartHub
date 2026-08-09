@@ -478,11 +478,11 @@
       "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "non-functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "非功能测试点候选。ref 是本次提交内唯一的临时引用，不是正式节点 ID。", "items": { "type": "object", "properties": { "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一的临时引用。" }, "parentRef": { "type": "string", "minLength": 1, "maxLength": 200, "description": "可选父节点临时引用；根节点省略此字段。" }, "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "objective": { "type": "string", "minLength": 1, "maxLength": 2000 }, "dimension": { "enum": ["performance", "stability", "compatibility", "security"] }, "priority": { "enum": ["P0", "P1", "P2", "P3"] }, "applicability": { "enum": ["applicable", "not_applicable", "blocked_by_confirmation"] }, "designTechniques": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } }, "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 }, "dataConditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "assumptions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "historicalRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["ref", "title", "objective", "dimension", "priority", "applicability", "designTechniques", "entryMethods", "oracle", "dataConditions", "risks", "assumptions", "basisRefs", "historicalRefs"], "additionalProperties": false } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": false }
     },
     "test_case_synthesis.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "test_case_synthesis_submit_result",
       "label": "提交测试用例与数据需求候选",
       "catalogName": "提交测试用例候选",
-      "description": "提交 test-case-synthesis/v1；正式用例、数据需求 ID、revision 和关系由服务端生成。",
+      "description": "提交严格的 test-case-synthesis/v1。用例共同字段位于 cases[]，步骤与逐步期望位于 executionMethods[].steps[].action/expected，UI/API 入口位于各自 Spec；数据需求位于根级 dataRequirements[]。正式 ID、revision 和关系由服务端生成。",
       "catalogDescription": "基于批准测试点树提交结构化用例与数据需求候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -490,7 +490,88 @@
       "sourcePath": "server/tools/test-design-tools.ts",
       "handlerKey": "test_case_synthesis.submit_result",
       "catalogVisible": true,
-      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "test-case-synthesis/v1" }, "cases": { "type": "array", "maxItems": 1000, "items": { "type": "object", "properties": {}, "additionalProperties": true } }, "dataRequirements": { "type": "array", "maxItems": 1000, "items": { "type": "object", "properties": {}, "additionalProperties": true } } }, "required": ["schemaVersion", "cases", "dataRequirements"], "additionalProperties": true }
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "test-case-synthesis/v1" },
+          "cases": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "description": "批准测试点树的具象化用例。不要使用 preConditions、根级 steps、expectedResults、entryPoints、用例内 dataRequirements 或 testData。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schemaVersion": { "const": "test-case/v1" },
+                "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "objective": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
+                "testPointIds": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "只能填写批准树中提供的 nodeId。", "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "priority": { "enum": ["P0", "P1", "P2", "P3"] },
+                "preconditions": { "type": "array", "maxItems": 100, "description": "所有执行方式共享的前置条件。", "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "dataRequirementIds": { "type": "array", "maxItems": 0, "description": "综合候选中必须为空；服务端根据 dataRequirements[].caseIndexes 生成正式关联。", "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "cleanup": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "dependencies": { "type": "array", "maxItems": 1000, "description": "依赖的正式用例 ID；首次综合通常为空。", "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "executionMethods": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 2,
+                  "description": "按 method 唯一。ui 只填写 uiSpec，api 只填写 apiSpec；每个分支独立填写步骤、检查点和就绪状态。",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "method": { "enum": ["ui", "api"] },
+                      "uiSpec": { "type": "object", "properties": { "entry": { "type": "string", "minLength": 1, "maxLength": 2000 }, "viewport": { "type": "string", "maxLength": 100 }, "selectors": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 500 } } }, "required": ["entry"], "additionalProperties": false },
+                      "apiSpec": { "type": "object", "properties": { "method": { "type": "string", "minLength": 1, "maxLength": 20 }, "path": { "type": "string", "minLength": 1, "maxLength": 2000 }, "requestSchemaRef": { "type": "string", "maxLength": 500 }, "responseSchemaRef": { "type": "string", "maxLength": 500 } }, "required": ["method", "path"], "additionalProperties": false },
+                      "steps": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "object", "properties": { "key": { "type": "string", "minLength": 1, "maxLength": 500 }, "action": { "type": "string", "minLength": 1, "maxLength": 4000 }, "expected": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["key", "action", "expected"], "additionalProperties": false } },
+                      "verificationChecks": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "key": { "type": "string", "minLength": 1, "maxLength": 500 }, "description": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["key", "description"], "additionalProperties": false } },
+                      "executionReadiness": { "enum": ["ready", "blocked", "needs_confirmation"] },
+                      "automationHint": { "type": "string", "maxLength": 2000 }
+                    },
+                    "required": ["method", "steps", "verificationChecks", "executionReadiness", "automationHint"],
+                    "additionalProperties": false
+                  }
+                },
+                "sharedVerificationChecks": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "key": { "type": "string", "minLength": 1, "maxLength": 500 }, "description": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["key", "description"], "additionalProperties": false } },
+                "tags": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
+                "domain": { "type": "string", "minLength": 1, "maxLength": 200 }
+              },
+              "required": ["schemaVersion", "title", "objective", "dimension", "testPointIds", "priority", "preconditions", "dataRequirementIds", "cleanup", "dependencies", "executionMethods", "sharedVerificationChecks", "tags", "domain"],
+              "additionalProperties": false
+            }
+          },
+          "dataRequirements": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "测试数据需求只在此根级数组提交，并通过零基 caseIndexes 关联 cases[]。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一临时引用，不是正式 ID。" },
+                "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "entityType": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "featureTags": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
+                "testPointIds": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "caseIndexes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "关联 cases[] 的零基索引。", "items": { "type": "integer", "minimum": 0, "maximum": 999 } },
+                "fieldConstraints": { "type": "object", "properties": {}, "additionalProperties": true },
+                "relationships": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+                "quantity": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+                "initialState": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                "preparationHint": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "sensitivity": { "enum": ["public", "internal", "sensitive"] },
+                "isolation": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                "resetAndCleanup": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                "readiness": { "enum": ["ready", "blocked", "needs_confirmation"] },
+                "readinessReason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+              },
+              "required": ["ref", "name", "entityType", "featureTags", "testPointIds", "caseIndexes", "fieldConstraints", "relationships", "quantity", "initialState", "preparationHint", "sensitivity", "isolation", "resetAndCleanup", "readiness"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["schemaVersion", "cases", "dataRequirements"],
+        "additionalProperties": false
+      }
     },
     "skill.execute_script": {
       "version": "1.0.0",

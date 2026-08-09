@@ -37,6 +37,27 @@ test('测试点提交工具向模型声明完整临时引用和节点字段', ()
   }
 })
 
+test('测试用例综合工具声明闭合的 test-case/v1 层级', () => {
+  const schema = defaultBuiltInToolConfigResolver.toDescriptor('test_case_synthesis.submit_result').parameters as unknown as {
+    additionalProperties: boolean
+    properties: {
+      cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
+      dataRequirements: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
+    }
+  }
+  const caseSchema = schema.properties.cases.items
+  const dataSchema = schema.properties.dataRequirements.items
+  assert.equal(schema.additionalProperties, false)
+  assert.equal(schema.properties.cases.minItems, 1)
+  assert.equal(caseSchema.additionalProperties, false)
+  assert.ok(caseSchema.required.includes('preconditions'))
+  assert.ok(caseSchema.required.includes('executionMethods'))
+  assert.ok(!('preConditions' in caseSchema.properties))
+  assert.ok(!('steps' in caseSchema.properties))
+  assert.equal(dataSchema.additionalProperties, false)
+  assert.ok(dataSchema.required.includes('caseIndexes'))
+})
+
 test('legacy technical-review descriptor remains v1 while the default descriptor remains v2', () => {
   const legacy = defaultBuiltInToolConfigResolver.toDescriptor('technical_solution_review.submit_result', 'legacy-candidate').parameters as unknown as { properties: Record<string, unknown>; required: string[] }
   const current = defaultBuiltInToolConfigResolver.toDescriptor('technical_solution_review.submit_result').parameters as unknown as { properties: Record<string, unknown>; required: string[] }

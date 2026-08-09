@@ -742,6 +742,8 @@ performance, stability, compatibility, security
 - `ui` 分支必须且只能包含 `uiSpec`，`api` 分支必须且只能包含 `apiSpec`；
 - 每个分支独立提交 `steps[]`、`verificationChecks[]`、`automationHint` 和 `executionReadiness`；
 - 数据、异步任务和集成结果进入分支或顶层共享检查点，不能成为第三种执行方式；
+- `cases[]` 使用闭合 `test-case/v1` Schema：共同前置字段固定为 `preconditions`，步骤和逐步期望固定为 `executionMethods[].steps[].action/expected`，UI/API 入口固定为 `uiSpec.entry`/`apiSpec.path`；拒绝 `preConditions`、根级 `steps`、`expectedResults`、`entryPoints`、用例内 `dataRequirements` 和 `testData`；
+- 综合候选中的 `dataRequirementIds` 必须为空，数据需求只在提交根级 `dataRequirements[]` 声明并通过 `caseIndexes` 关联候选用例，正式数据需求 ID 与用例关联由服务端生成；
 - 零用例测试点或多测试点合并必须提交理由；
 - 综合 Agent 不得创建树外节点。
 
@@ -771,6 +773,8 @@ Validator 返回机器可修正的公开错误：
 ```
 
 反馈不包含隐藏思维、服务端秘密或其他项目数据。超过阶段保留的提交次数后节点失败，不能把最后一个非法候选落库。
+
+结果提交工具必须在 Agent 会话内完成同一份候选 Schema 校验并返回 JSON Pointer 路径；只有校验通过才终止 Agent。工作流物化前再次执行相同校验，防止工具层和持久化层契约漂移。字段层级错误应同时返回规范字段映射，使 Agent 能在保留的提交次数内修正，不能先接受候选再在 Agent 结束后以 `TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID` 失败。
 
 ---
 
