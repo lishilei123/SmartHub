@@ -78,11 +78,22 @@ export function buildTestDesignAgentTask(input: Parameters<TestDesignAgentRuntim
       userCoverageObjectives: design.input.userCoverageObjectives ?? [],
     },
     generationPolicy: generationPolicy(input.stage),
-    basisSnapshot: input.run.basisSnapshot,
-    retrievalSnapshot: input.run.retrievalSnapshot,
-    historicalSnapshot: input.run.historicalSnapshot,
-    upstream: input.upstream,
+    basisSnapshot: modelFacingSnapshot(input.run.basisSnapshot),
+    retrievalSnapshot: modelFacingSnapshot(input.run.retrievalSnapshot),
+    historicalSnapshot: modelFacingSnapshot(input.run.historicalSnapshot),
+    ...(input.stage === 'test_analysis' ? {} : { upstream: modelFacingSnapshot(input.upstream) }),
   })
+}
+
+function modelFacingSnapshot(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(modelFacingSnapshot)
+  if (!value || typeof value !== 'object') return value
+  const input = value as Record<string, unknown>
+  return Object.fromEntries(Object.entries(input).flatMap(([key, item]) => {
+    if (key === 'embedding') return []
+    if (key === 'chunks' && typeof input.content === 'string') return []
+    return [[key, modelFacingSnapshot(item)]]
+  }))
 }
 
 function generationPolicy(stage: Parameters<TestDesignAgentRuntime['execute']>[0]['stage']) {
@@ -95,6 +106,7 @@ function generationPolicy(stage: Parameters<TestDesignAgentRuntime['execute']>[0
     ? [
         '把每个覆盖目标拆成原子 coverage unit，显式列出角色、规则、状态、输入约束、接口、正向/反向/边界分区和 oracle。',
         '同一依据中的独立动作、分支、权限、异常、状态转换和数据约束不得压缩成一条概述。',
+        '提交结果只包含 scope、coverageUnits、findings 和 confirmationItems 等分析语义；不得回传固定快照、原文、Chunk、Hash、locator、upstream 或 embedding。',
       ]
     : stage === 'functional_design'
     ? [

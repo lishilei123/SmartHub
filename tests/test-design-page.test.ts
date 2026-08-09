@@ -111,6 +111,26 @@ test('范围确认门禁展示可审阅的结构化范围而不是对象字符�
   assert.doesNotMatch(source, /String\(scopeContent\.scope/)
 })
 
+test('范围重新分析后门禁与产物视图使用当前节点输出', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /function currentNodeArtifact\b/)
+  assert.match(source, /outputArtifactId[^\n]*run\.artifacts\.find\(item => item\.id === outputArtifactId\)/)
+  assert.equal((source.match(/currentNodeArtifact\([^,]+, 'test_analysis'\)/g) ?? []).length, 4)
+  assert.doesNotMatch(source, /artifacts\.find\(item => item\.nodeKey === 'test_analysis'\)/)
+})
+
+test('活动测试设计运行静默更新且手动刷新不清空工作台', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /!\['queued', 'running'\]\.includes\(activeRun\.status\)/)
+  assert.match(source, /window\.setTimeout\(\(\) => void poll\(\), 1_500\)/)
+  assert.match(source, /const refreshWorkspace = async \(\) => \{[\s\S]*?setWorkspaceRefreshing\(true\)[\s\S]*?setWorkspaceRefreshing\(false\)/)
+  const refreshWorkspace = source.match(/const refreshWorkspace = async \(\) => \{[\s\S]*?\n  \}/)?.[0] ?? ''
+  assert.doesNotMatch(refreshWorkspace, /setWorkspaceLoading/)
+  assert.match(source, /正在提交决策/)
+})
+
 test('测试设计工作流每个节点都可查看与评审一致的运行记录', () => {
   const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
   const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
@@ -127,6 +147,17 @@ test('测试设计工作流每个节点都可查看与评审一致的运行记�
   assert.equal((source.match(/onOpenRecord=\{openNodeRecord\}/g) ?? []).length, 8)
   assert.match(styles, /\.td-node-record-button/)
   assert.match(styles, /\.td-node-record-modal/)
+})
+
+test('测试设计工作流使用独立滚动视口展示完整长轨道', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
+
+  assert.equal((source.match(/className="td-workflow-track"/g) ?? []).length, 2)
+  assert.match(styles, /\.td-workflow-canvas\.td-workflow-sequence\{width:100%;min-width:0;[^}]*overflow-x:auto/)
+  assert.match(styles, /\.td-workflow-canvas\.td-workflow-sequence::\-webkit-scrollbar\{height:9px\}/)
+  assert.match(styles, /\.td-workflow-track\{[^}]*min-width:1580px;[^}]*display:flex/)
+  assert.doesNotMatch(styles, /\.td-workflow-canvas\.td-workflow-sequence\{min-width:1580px/)
 })
 
 test('创建页不再展示或提交硬编码候选数据', () => {

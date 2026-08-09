@@ -594,7 +594,7 @@
 - 命中内容按 `normative_reference`、`historical_defect`、`domain_practice` 或 `context_only` 分类。召回的缺陷/实践用于 `derived_risk` 或 `external_practice`，不能自动升级为已确认需求、方案或业务 oracle。
 - 没有召回结果是合法状态，不得伪造上下文；主依据完整投递仍是分析成功前提。
 
-服务端生成测试分析检查点 ID、知识基线项 ID、固定定位和正式引用。
+服务端生成测试分析检查点 ID、知识基线项 ID、固定定位和正式引用。Embedding 仅属于服务端索引与固定召回实现，不进入 Agent 结果提交协议；模型不得在 `test_analysis.submit_result` 中回传固定快照、Chunk、Hash、定位或向量。
 
 #### FR-605：测试点发散与测试点树协议
 

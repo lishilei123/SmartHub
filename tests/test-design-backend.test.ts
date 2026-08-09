@@ -68,11 +68,12 @@ test('用例综合候选校验数据需求索引并保留规范结构', () => {
 
 test('测试设计内置 Prompt 要求矩阵化发散并在综合前完成全集核对', () => {
   assert.equal(defaultAgentDefinitionConfigDictionary['review-qa'].version, '1.0.0')
-  assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.1.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.2.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['functional-test-design'].version, '1.1.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].version, '1.1.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].version, '1.2.0')
   assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /coverage unit/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /不得在 test_analysis_submit_result 中回传/u)
   assert.match(defaultAgentDefinitionConfigDictionary['functional-test-design'].systemPrompt, /角色 × 前置\/当前状态 × 输入等价类或边界/u)
   assert.match(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].systemPrompt, /四个分区均有明确结论/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /全部适用 nodeId 均有映射/u)
@@ -85,6 +86,31 @@ test('测试设计候选接口返回真实资产版本和内容 Hash', async () 
   assert.equal(candidates.knowledgeAssets[0].assetVersionId, 'asset-version-1')
   assert.equal(candidates.knowledgeAssets[0].version, 1)
   assert.match(candidates.knowledgeAssets[0].contentHash, /^[a-f0-9]{64}$/u)
+})
+
+test('测试分析 Agent 输入剔除旧快照中的 embedding、Chunk 和重复上游快照', async () => {
+  const store = await seededStore()
+  const service = new TestDesignService(store, new FakeRuntime())
+  const design = await service.createDesign('pv-1', {
+    name: '旧快照兼容', objective: '验证登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'],
+    knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [],
+  }, principal)
+  const run = await service.createRun('pv-1', design.id, 'legacy-snapshot-run', principal)
+  run.basisSnapshot.items[0].content = {
+    content: '# 登录需求\n\n用户可以使用账号密码登录。',
+    chunks: [{ id: 'chunk-1', content: '用户可以使用账号密码登录。', embedding: Array.from({ length: 384 }, () => 0.1) }],
+  }
+  const taskText = buildTestDesignAgentTask({
+    stage: 'test_analysis',
+    run,
+    upstream: { basisSnapshot: run.basisSnapshot, retrievalSnapshot: run.retrievalSnapshot, historicalSnapshot: run.historicalSnapshot },
+  }, design)
+  const task = JSON.parse(taskText) as { basisSnapshot: { items: Array<{ content: { content: string; chunks?: unknown } }> }; upstream?: unknown }
+
+  assert.doesNotMatch(taskText, /"embedding"|"chunks"/u)
+  assert.equal(task.basisSnapshot.items[0].content.content, '# 登录需求\n\n用户可以使用账号密码登录。')
+  assert.equal(task.upstream, undefined)
+  assert.match(taskText, /不得回传固定快照/u)
 })
 
 test('测试设计后端完成固定快照、双门禁、并行设计、用例审核、审计和不可变发布', async () => {

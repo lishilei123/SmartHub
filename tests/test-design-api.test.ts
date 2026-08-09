@@ -80,6 +80,17 @@ test('范围确认提交固定运行、目标版本和并发版本', async () =>
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('测试设计请求展示服务端结构化业务错误', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => Response.json({ code: 'WORKFLOW_GATE_VERSION_CONFLICT', message: '门禁目标已变化' }, { status: 409 })
+  try {
+    await assert.rejects(
+      applyTestDesignGateDecision('pv-1', 'design-1', 'run-1', 'scope', { targetId: 'stale-artifact', targetRevision: 1, expectedVersion: 1, decision: 'approved' }),
+      /门禁目标已变化/u,
+    )
+  } finally { globalThis.fetch = originalFetch }
+})
+
 test('测试设计 HTTP 响应允许浏览器跨端口读取', async () => {
   const server = readFileSync(new URL('../server/http/server.ts', import.meta.url), 'utf8')
   const headers = new Map<string, string>()

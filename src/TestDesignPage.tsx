@@ -249,7 +249,12 @@ function arrayOf(value: unknown) { return Array.isArray(value) ? value : [] }
 function currentTreeNodes(run: TestDesignWorkflowRun) { return run.testPointTree?.revisions.find(item => item.revision === run.testPointTree?.currentRevision)?.nodes.filter(item => !item.deleted) ?? [] }
 function currentCaseContent(testCase: TestDesignCase) { return testCase.revisions.find(item => item.revision === testCase.currentRevision)?.content }
 function latestCoverageAudit(run: TestDesignWorkflowRun) { return run.coverageAudits.at(-1) }
-function analysisScope(run: TestDesignWorkflowRun) { return recordOf(recordOf(run.artifacts.find(item => item.nodeKey === 'test_analysis')?.content).scope) }
+function currentNodeArtifact(run: TestDesignWorkflowRun, nodeKey: string) {
+  const outputArtifactId = run.nodeRuns.find(item => item.nodeKey === nodeKey)?.outputArtifactId
+  if (outputArtifactId) return run.artifacts.find(item => item.id === outputArtifactId)
+  return run.artifacts.filter(item => item.nodeKey === nodeKey).sort((left, right) => right.generation - left.generation || right.createdAt.localeCompare(left.createdAt))[0]
+}
+function analysisScope(run: TestDesignWorkflowRun) { return recordOf(recordOf(currentNodeArtifact(run, 'test_analysis')?.content).scope) }
 function analysisItemCount(run: TestDesignWorkflowRun) { let total = 0; for (const value of Object.values(analysisScope(run))) total += arrayOf(value).length; return total }
 function dataRequirementCount(run: TestDesignWorkflowRun) { return run.dataSetVersions.at(-1)?.requirements.length ?? 0 }
 function canPublishRun(run?: TestDesignWorkflowRun | null) { const audit = run ? latestCoverageAudit(run) : undefined; return Boolean(run?.status === 'succeeded' && audit?.status === 'valid' && audit.blockers.length === 0 && run.testCases.length > 0) }
@@ -281,6 +286,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   const [activeDesign, setActiveDesign] = useState<TestDesign | null>(null)
   const [activeRun, setActiveRun] = useState<TestDesignWorkflowRun | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
+  const [workspaceRefreshing, setWorkspaceRefreshing] = useState(false)
   const [workspaceError, setWorkspaceError] = useState('')
   const [basisMode, setBasisMode] = useState<BasisMode>('review_baseline')
   const [selectedBasis, setSelectedBasis] = useState(basisItems[0].id)
@@ -378,6 +384,24 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   }, [activeRun, selectedRunCaseId])
 
   useEffect(() => {
+    if (!projectVersion || view !== 'workspace' || !activeContext.testDesignId || !activeContext.workflowRunId || !activeRun || !['queued', 'running'].includes(activeRun.status)) return
+    let current = true
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const run = await loadTestDesignRun(projectVersion.id, activeContext.testDesignId!, activeContext.workflowRunId!)
+        if (!current) return
+        setActiveRun(run)
+        if (['queued', 'running'].includes(run.status)) timer = window.setTimeout(() => void poll(), 1_500)
+      } catch {
+        if (current) timer = window.setTimeout(() => void poll(), 3_000)
+      }
+    }
+    timer = window.setTimeout(() => void poll(), 800)
+    return () => { current = false; if (timer !== undefined) window.clearTimeout(timer) }
+  }, [activeContext.testDesignId, activeContext.workflowRunId, activeRun?.status, projectVersion?.id, view])
+
+  useEffect(() => {
     const restore = () => {
       const route = readPreviewRoute()
       setView(route.view)
@@ -431,14 +455,19 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   }
   const refreshWorkspace = async () => {
     if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId) return
-    setWorkspaceLoading(true)
-    setWorkspaceError('')
-    await Promise.all([
-      loadTestDesign(projectVersion.id, activeContext.testDesignId),
-      loadTestDesignRun(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId),
-    ]).then(([design, run]) => { setActiveDesign(design); setActiveRun(run) })
-      .catch(error => setWorkspaceError(error instanceof Error ? error.message : '测试设计运行加载失败'))
-      .finally(() => setWorkspaceLoading(false))
+    setWorkspaceRefreshing(true)
+    try {
+      const [design, run] = await Promise.all([
+        loadTestDesign(projectVersion.id, activeContext.testDesignId),
+        loadTestDesignRun(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId),
+      ])
+      setActiveDesign(design)
+      setActiveRun(run)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '测试设计运行刷新失败', 'error')
+    } finally {
+      setWorkspaceRefreshing(false)
+    }
   }
   const refreshRunOnly = async () => {
     if (!projectVersion || !activeContext.testDesignId || !activeContext.workflowRunId) return
@@ -464,7 +493,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     const gateNodeKey = gateKey === 'scope' ? 'scope_gate' : 'tree_gate'
     const gateNode = activeRun.nodeRuns.find(item => item.nodeKey === gateNodeKey)
     const target = gateKey === 'scope'
-      ? activeRun.artifacts.find(item => item.nodeKey === 'test_analysis')
+      ? currentNodeArtifact(activeRun, 'test_analysis')
       : activeRun.testPointTree
     if (!gateNode || gateNode.status !== 'waiting_gate' || !target) {
       notify('当前门禁已变化，请刷新工作流后再操作。', 'warning')
@@ -707,11 +736,11 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
         <button className="td-back" onClick={returnToList} aria-label="返回测试设计列表"><ChevronRight /></button>
         <span className="td-workbench-icon"><TestTube2 /></span>
         <div><span>测试设计</span><h2>{activeDesign?.name ?? activeRun.testDesignId}</h2></div>
-        <StatusPill tone={runStatusTone(activeRun.status)}>{workspaceLoading ? '正在加载' : runStatusLabel(activeRun.status)}</StatusPill>
+        <StatusPill tone={runStatusTone(activeRun.status)}>{workspaceRefreshing ? '正在同步' : workspaceLoading ? '正在加载' : runStatusLabel(activeRun.status)}</StatusPill>
       </div>
       <div className="td-head-actions">
         <button className="icon-btn td-mobile-detail-button" onClick={() => setRightOpen(value => !value)} aria-label={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
-        <button className="btn" disabled={workspaceLoading} onClick={refreshWorkspace}><RefreshCw className={workspaceLoading ? 'spin' : ''} />刷新</button>
+        <button className="btn" disabled={workspaceLoading || workspaceRefreshing} onClick={refreshWorkspace}><RefreshCw className={workspaceLoading || workspaceRefreshing ? 'spin' : ''} />{workspaceRefreshing ? '同步中' : '刷新'}</button>
         <button className="btn" disabled={!activeRun?.testCases.length} onClick={() => notify('当前运行尚未发布用例集，暂无可导出的固定版本。', 'warning')}><Download />导出<ChevronDown /></button>
         <button className="btn primary" disabled={!canPublishRun(activeRun)} title={activeRun && !canPublishRun(activeRun) ? '请先清除覆盖阻断项并批准全部用例' : '发布当前固定用例集'} onClick={() => { selectTab('case-set'); notify('当前运行已满足发布门禁，请在用例集视图确认固定版本。') }}><LockKeyhole />发布用例集</button>
         <button className="icon-btn" aria-label="更多操作"><MoreHorizontal /></button>
@@ -789,6 +818,7 @@ function RunWorkflowView({ design, run, onGateDecision, onRunAction, gateSubmitt
     <header className="td-canvas-toolbar"><div><b>固定工作流</b><small>test-design-workflow/v1 · {run.id} · 服务端真实拓扑</small></div><StatusPill tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</StatusPill><span><i className="done" />成功</span><span><i className="running" />进行中</span><span><i />等待 / 门禁</span>{pendingGate && <a className="btn primary td-gate-entry" href="#test-design-gate-decision"><Users />{pendingGate === 'scope' ? '确认测试范围' : '批准测试点树'}</a>}<button className="btn" onClick={() => setDetailsOpen(value => !value)}>{detailsOpen ? '收起详情' : '运行详情'}</button></header>
     <div className="td-run-recovery-actions"><span>运行恢复</span>{functional?.status === 'failed' && <button className="btn" onClick={() => void onRunAction('retry_functional')}><RefreshCw />仅重跑功能设计</button>}{nonFunctional?.status === 'failed' && <button className="btn" onClick={() => void onRunAction('retry_non_functional')}><RefreshCw />仅重跑非功能设计</button>}{!['queued', 'running'].includes(run.status) && run.status !== 'cancelled' && <button className="btn" onClick={() => void onRunAction('revise_scope')}><FileDiff />重新分析范围</button>}{['succeeded', 'failed'].includes(synthesis?.status ?? '') && run.status !== 'cancelled' && <button className="btn" onClick={() => void onRunAction('resynthesize')}><Sparkles />重新具象化</button>}{['failed', 'cancelled'].includes(run.status) && <button className="btn" onClick={() => void onRunAction('full_rerun')}><ArchiveRestore />全部重跑</button>}{['queued', 'running', 'waiting_gate'].includes(run.status) && <button className="btn danger" onClick={() => void onRunAction('cancel')}><XCircle />取消运行</button>}</div>
     <div className="td-workflow-canvas td-workflow-sequence td-real-workflow-canvas">
+      <div className="td-workflow-track">
       <div className="td-flow-column start"><small>固定输入</small><FixedInputCard run={run} time={fixedInputTime} /></div>
       <ArrowRight className="td-flow-arrow inline" />
       <div className="td-flow-column analysis"><small>阶段 1</small><RunWorkflowCard node={analysis} nodeKey="test_analysis" kind="agent" subtitle="依据解构与受控知识召回" onOpenRecord={openNodeRecord} /></div>
@@ -804,6 +834,7 @@ function RunWorkflowView({ design, run, onGateDecision, onRunAction, gateSubmitt
       <div className="td-flow-column synthesis"><small>阶段 3-4</small><RunWorkflowCard node={synthesis} nodeKey="test_case_synthesis" kind="agent" subtitle="测试用例与数据需求具象化" onOpenRecord={openNodeRecord} /></div>
       <ArrowRight className="td-flow-arrow inline" />
       <div className="td-flow-column audit server"><small>阶段 5 · 服务端</small><RunWorkflowCard node={coverage} nodeKey="coverage_audit" kind="server" subtitle="覆盖反向审计与候选发布" onOpenRecord={openNodeRecord} /></div>
+      </div>
     </div>
     {pendingGate && <GateDecisionPanel gateKey={pendingGate} design={design} run={run} submitting={gateSubmitting} onDecision={onGateDecision} />}
     {detailsOpen && <section className="td-run-details td-real-run-details" aria-label="工作流节点详情"><header><b>节点执行详情</b><span>来源：workflowRunId 对应的服务端记录；错误仅展示脱敏公开信息</span></header>{run.nodeRuns.map(nodeRun => <div key={nodeRun.id}><b>{nodeLabel(nodeRun.nodeKey)}</b><span><strong>{nodeExecutionSummary(nodeRun)}</strong><small>{nodeRun.error ? `${nodeRun.errorCode ?? '执行失败'}：${runErrorMessage(nodeRun.error, nodeRun.errorCode)}` : nodeRun.dependencies.length ? `依赖：${nodeRun.dependencies.map(nodeLabel).join('、')}` : '无上游依赖'}</small></span><time>{formatNodeTime(nodeRun.startedAt)} → {formatNodeTime(nodeRun.finishedAt)}</time><em>{nodeRun.execution ? (nodeRun.execution.degraded ? '已降级' : '未降级') : isAgentNode(nodeRun.nodeKey) ? '未记录' : '不适用'}</em><StatusPill tone={runStatusTone(nodeRun.status)}>{nodeStatusLabel(nodeRun.status)} · {nodeRun.attempt} 次尝试</StatusPill></div>)}</section>}
@@ -854,7 +885,7 @@ function formatTestDesignTraceValue(value: unknown) { return value === undefined
 
 function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { gateKey: 'scope' | 'test-point-tree'; design: TestDesign | null; run: TestDesignWorkflowRun; submitting: boolean; onDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void> }) {
   const [comment, setComment] = useState('')
-  const scopeArtifact = run.artifacts.find(item => item.nodeKey === 'test_analysis')
+  const scopeArtifact = currentNodeArtifact(run, 'test_analysis')
   const scopeContent = recordOf(scopeArtifact?.content)
   const analysisContent = recordOf(scopeContent.analysis)
   const rangeContent = recordOf(analysisContent.range ?? scopeContent.range)
@@ -893,8 +924,8 @@ function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { g
   const isScope = gateKey === 'scope'
   const targetId = isScope ? scopeArtifact?.id : run.testPointTree?.id
   const targetRevision = isScope ? scopeArtifact?.generation : run.testPointTree?.currentRevision
-  return <section className="td-gate-decision" id="test-design-gate-decision" aria-label={isScope ? '测试范围确认' : '测试点树批准'}>
-    <header><span><Users /></span><div><small>{isScope ? '人工门禁 1' : '人工门禁 2'} · 等待你的决策</small><h2>{isScope ? '确认本次测试范围' : '批准当前测试点树'}</h2><p>{isScope ? scopeText : `当前测试点树 revision r${targetRevision ?? '-'} 已固定，批准后将进入测试用例具象化。`}</p></div><StatusPill tone="warning">等待确认</StatusPill></header>
+  return <section className={`td-gate-decision ${submitting ? 'submitting' : ''}`} id="test-design-gate-decision" aria-label={isScope ? '测试范围确认' : '测试点树批准'} aria-busy={submitting}>
+    <header><span><Users /></span><div><small>{isScope ? '人工门禁 1' : '人工门禁 2'} · {submitting ? '正在提交你的决策' : '等待你的决策'}</small><h2>{isScope ? '确认本次测试范围' : '批准当前测试点树'}</h2><p>{isScope ? scopeText : `当前测试点树 revision r${targetRevision ?? '-'} 已固定，批准后将进入测试用例具象化。`}</p></div><StatusPill tone="warning">{submitting ? '正在提交' : '等待确认'}</StatusPill></header>
     <div className="td-gate-facts">
       <div><small>固定目标</small><b>{targetId ? shortId(targetId) : '目标尚未生成'}</b></div>
       <div><small>目标版本</small><b>{targetRevision ?? '-'}</b></div>
@@ -919,7 +950,7 @@ function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { g
       </div>
     </div>}
     <label><span>决策说明（可选）</span><textarea value={comment} maxLength={4000} placeholder={isScope ? '补充范围边界、风险接受或需要调整的原因' : '补充树版本的批准或驳回说明'} onChange={event => setComment(event.target.value)} disabled={submitting} /></label>
-    <footer><span><LockKeyhole />决策将绑定当前目标 ID 与版本，提交后不可覆盖。</span><button className="btn danger" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'rejected', comment)}><XCircle />驳回{isScope ? '范围' : '测试点树'}</button><button className="btn primary" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'approved', comment)}>{submitting ? <RefreshCw className="spin" /> : <Check />}确认{isScope ? '范围并继续' : '批准并继续'}</button></footer>
+    <footer><span><LockKeyhole />{submitting ? '正在校验目标版本并提交，当前页面会保留。' : '决策将绑定当前目标 ID 与版本，提交后不可覆盖。'}</span><button className="btn danger" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'rejected', comment)}><XCircle />驳回{isScope ? '范围' : '测试点树'}</button><button className="btn primary" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'approved', comment)}>{submitting ? <RefreshCw className="spin" /> : <Check />}{submitting ? '正在提交决策' : `确认${isScope ? '范围并继续' : '批准并继续'}`}</button></footer>
   </section>
 }
 
@@ -1071,7 +1102,7 @@ function analysisEntry(value: unknown, index: number) {
 }
 
 function RunAnalysisArtifact({ run }: { run: TestDesignWorkflowRun }) {
-  const artifact = run.artifacts.find(item => item.nodeKey === 'test_analysis')!
+  const artifact = currentNodeArtifact(run, 'test_analysis')!
   const groups = Object.entries(analysisScope(run)).map(([key, value]) => ({ key, items: arrayOf(value) })).filter(group => group.items.length)
   return <div className="td-run-artifact-view">
     <RunArtifactHeader title="依据解构" description={`${artifact.schemaVersion} · 固定产物 ${shortHash(artifact.contentSha256)}`}><StatusPill tone="success">{analysisItemCount(run)} 项</StatusPill></RunArtifactHeader>
@@ -1587,6 +1618,7 @@ function WorkflowView({ notify }: { notify: Notify }) {
   return <div className="td-workflow-view">
     <header className="td-canvas-toolbar"><div><b>固定工作流</b><small>test-design-workflow/v1 · 当前为只读交互预览</small></div><span><i className="done" />成功</span><span><i className="running" />进行中</span><span><i />等待</span><button className="btn" onClick={() => setDetailsOpen(value => !value)}>{detailsOpen ? '收起详情' : '运行详情'}</button><button className="btn" onClick={() => notify('交互预览：正式取消将调用 workflowRunId 对应的取消 API。', 'warning')}>取消运行</button></header>
     <div className="td-workflow-canvas td-workflow-sequence">
+      <div className="td-workflow-track">
       <div className="td-flow-column start"><small>固定输入</small><article><span><LockKeyhole /></span><p><b>评审基线快照</b><small>64 项依据 · Hash 已校验</small><em>13:08:01 固定</em></p><CheckCircle2 /></article></div>
       <ArrowRight className="td-flow-arrow inline" />
       <div className="td-flow-column analysis"><small>阶段 1</small><WorkflowCard node={workflowNodes[0]} /></div>
@@ -1602,6 +1634,7 @@ function WorkflowView({ notify }: { notify: Notify }) {
       <div className="td-flow-column synthesis"><small>阶段 3-4</small><WorkflowCard node={workflowNodes[3]} /></div>
       <ArrowRight className="td-flow-arrow inline" />
       <div className="td-flow-column audit server"><small>阶段 5 · 服务端</small><article className="running"><span><ShieldCheck /></span><p><b>覆盖反向审计</b><small>等待处理 3 个阻断项</small><em>输入 Hash 已固定</em></p><RefreshCw /></article></div>
+      </div>
     </div>
     {detailsOpen && <section className="td-run-details" aria-label="工作流节点详情"><header><b>节点执行详情</b><span>错误仅展示脱敏公开信息</span></header>{workflowNodes.map(node => <div key={node.role}><b>{node.role}</b><span>{node.meta}</span><time>{node.time}</time><em>{node.degraded}</em><StatusPill tone="success">{node.state}</StatusPill></div>)}<footer><span>分层恢复会创建新执行或新运行，不覆盖当前运行。</span><button className="btn" onClick={() => notify('交互预览：只重新执行失败的设计节点。')}>重试失败节点</button><button className="btn" onClick={() => notify('交互预览：基于已批准树重新具象化用例。')}>重新具象化</button><button className="btn" onClick={() => notify('交互预览：全部重跑会创建新的 workflowRunId。', 'warning')}>全部重跑</button></footer></section>}
     <section className="td-run-timeline"><header><b>最近事件</b><span>不展示模型隐藏思维</span></header>{[['14:28:16', '覆盖审计', '服务端完成覆盖矩阵计算，发现 3 个发布阻断项'], ['14:24:38', '用例综合 Agent', '第 2 次提交通过协议与依据引用校验'], ['14:19:32', '用例综合 Agent', '首次提交缺少 2 个 oracle，返回结构化校验反馈'], ['13:46:05', '人工门禁', '李磊批准测试点树 r12，解锁用例具象化']].map((event, index) => <div key={event[0]}><i className={index === 0 ? 'active' : ''} /><time>{event[0]}</time><b>{event[1]}</b><span>{event[2]}</span></div>)}</section>

@@ -651,7 +651,7 @@ type CreateTestDesignInput = Common & (
 每个所选 AssetVersion 固定：
 
 - project、knowledgeBase、asset、assetVersion、逻辑路径和类型；
-- `ready` 状态、内容 Hash、正文、Chunk 清单和 Chunk Hash；
+- `ready` 状态、内容 Hash、正文、Chunk 清单和 Chunk Hash；模型侧任务投影不携带 Chunk embedding，也不重复投递已由完整正文覆盖的 Chunk 内容；
 - 配置/索引元数据、用户目标、范围和排除项；
 - `KnowledgeInputPackage` 与 `InputDeliveryManifest`；
 - 内容寻址的 frozen content 引用。
@@ -719,6 +719,8 @@ queryPlanSha256, hits[], classification, createdAt, snapshotSha256
 - knowledge 模式下的 `KnowledgeBasisItemCandidate.sourceTexts[]`。
 
 KnowledgeBasis Resolver 只在固定主依据正文中定位连续原文。唯一定位后服务端生成 `KBP-*`、AssetVersion、Chunk、标题路径、行/字符范围和 Hash。无法定位或歧义候选进入 Finding/确认项，不生成正式 KBP。
+
+`test_analysis.submit_result` 只接收分析语义和输入内 Ref。固定 Snapshot、原文、Chunk、Hash、locator 与 embedding 均为服务端拥有的输入/索引事实，不属于候选结果；运行时对历史冻结快照生成模型任务时也必须剔除这些向量和重复载荷。
 
 ### 11.2 功能设计 Submission
 

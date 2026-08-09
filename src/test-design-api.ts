@@ -249,15 +249,15 @@ export type TestExecutionHandoff = { id: string; projectId: string; projectVersi
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, { ...init, headers: { ...(init?.body ? { 'content-type': 'application/json' } : {}), ...init?.headers } })
-  const body = await response.json() as T & { error?: string | { message?: string } }
-  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : body.error?.message ?? '测试设计请求失败')
+  const body = await response.json() as T & { error?: string | { message?: string }; message?: string }
+  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : body.error?.message ?? body.message ?? '测试设计请求失败')
   return body as T
 }
 
 async function requestWithResponse<T>(path: string, init?: RequestInit): Promise<{ value: T; response: Response }> {
   const response = await fetch(`${apiBase}${path}`, { ...init, headers: { ...(init?.body ? { 'content-type': 'application/json' } : {}), ...init?.headers } })
-  const body = await response.json() as T & { error?: string | { message?: string } }
-  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : body.error?.message ?? '测试设计请求失败')
+  const body = await response.json() as T & { error?: string | { message?: string }; message?: string }
+  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : body.error?.message ?? body.message ?? '测试设计请求失败')
   return { value: body as T, response }
 }
 
