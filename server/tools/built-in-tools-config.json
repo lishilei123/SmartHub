@@ -448,7 +448,7 @@
       "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "test-analysis/v1" } }, "required": ["schemaVersion"], "additionalProperties": true }
     },
     "functional_test_design.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "functional_test_design_submit_result",
       "label": "提交功能测试点候选",
       "catalogName": "提交功能测试点候选",
@@ -460,10 +460,10 @@
       "sourcePath": "server/tools/test-design-tools.ts",
       "handlerKey": "functional_test_design.submit_result",
       "catalogVisible": true,
-      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "type": "object", "properties": {}, "additionalProperties": true } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": true }
+      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "功能测试点候选。ref 是本次提交内唯一的临时引用，不是正式节点 ID。", "items": { "type": "object", "properties": { "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一的临时引用。" }, "parentRef": { "type": "string", "minLength": 1, "maxLength": 200, "description": "可选父节点临时引用；根节点省略此字段。" }, "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "objective": { "type": "string", "minLength": 1, "maxLength": 2000 }, "dimension": { "enum": ["functional"] }, "priority": { "enum": ["P0", "P1", "P2", "P3"] }, "applicability": { "enum": ["applicable", "not_applicable", "blocked_by_confirmation"] }, "designTechniques": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } }, "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 }, "dataConditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "assumptions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "historicalRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["ref", "title", "objective", "dimension", "priority", "applicability", "designTechniques", "entryMethods", "oracle", "dataConditions", "risks", "assumptions", "basisRefs", "historicalRefs"], "additionalProperties": false } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": false }
     },
     "non_functional_test_design.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "non_functional_test_design_submit_result",
       "label": "提交非功能测试点候选",
       "catalogName": "提交非功能测试点候选",
@@ -475,7 +475,7 @@
       "sourcePath": "server/tools/test-design-tools.ts",
       "handlerKey": "non_functional_test_design.submit_result",
       "catalogVisible": true,
-      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "non-functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "type": "object", "properties": {}, "additionalProperties": true } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": true }
+      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "non-functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "非功能测试点候选。ref 是本次提交内唯一的临时引用，不是正式节点 ID。", "items": { "type": "object", "properties": { "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一的临时引用。" }, "parentRef": { "type": "string", "minLength": 1, "maxLength": 200, "description": "可选父节点临时引用；根节点省略此字段。" }, "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "objective": { "type": "string", "minLength": 1, "maxLength": 2000 }, "dimension": { "enum": ["performance", "stability", "compatibility", "security"] }, "priority": { "enum": ["P0", "P1", "P2", "P3"] }, "applicability": { "enum": ["applicable", "not_applicable", "blocked_by_confirmation"] }, "designTechniques": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } }, "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 }, "dataConditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "assumptions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "historicalRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["ref", "title", "objective", "dimension", "priority", "applicability", "designTechniques", "entryMethods", "oracle", "dataConditions", "risks", "assumptions", "basisRefs", "historicalRefs"], "additionalProperties": false } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": false }
     },
     "test_case_synthesis.submit_result": {
       "version": "1.0.0",

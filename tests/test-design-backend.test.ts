@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
 import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
-import { TestDesignError, validateCreateTestDesignInput, validateTestCaseContent } from '../server/application/test-design-validation.js'
+import { TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestCaseContent } from '../server/application/test-design-validation.js'
 import type { TestCaseContent, TestPointNodeRevision } from '../server/domain/test-design-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
@@ -18,6 +18,13 @@ test('canonical JSON 固定对象键顺序并拒绝不确定值', () => {
 test('测试设计创建判别联合拒绝错分支字段和 latest 引用', () => {
   assert.throws(() => validateCreateTestDesignInput({ name: '登录', objective: '验证登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-v1'], sourceReviewRunId: '', knowledgeAugmentation: { mode: 'disabled' } }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_BASIS_MODE_INVALID')
   assert.throws(() => validateCreateTestDesignInput({ name: '登录', objective: '验证登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['latest'], knowledgeAugmentation: { mode: 'disabled' } }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_LATEST_REFERENCE_FORBIDDEN')
+})
+
+test('测试点候选在进入树归并前校验临时引用和分支维度', () => {
+  const missingRef = { nodes: [{ ...node('ignored', 'functional', []), ref: undefined }] }
+  assert.throws(() => validateDesignCandidateNodes(missingRef, 'functional'), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_POINT_TREE_SCHEMA_INVALID' && error.message.includes('functional.nodes[0].ref'))
+  assert.throws(() => validateDesignCandidateNodes({ nodes: [node('security-1', 'security', [])] }, 'functional'), (error: unknown) => error instanceof TestDesignError && error.message.includes('functional.nodes[0].dimension'))
+  assert.equal(validateDesignCandidateNodes({ nodes: [node('root', 'functional', [])] }, 'functional')[0].ref, 'root')
 })
 
 test('test-case/v1 强制 UI/API 判别联合、稳定步骤和非空方式', () => {
@@ -118,8 +125,8 @@ class FakeRuntime implements TestDesignAgentRuntime {
     const basisRefs = input.run.basisSnapshot.items.map(item => item.id)
     const execution = { agentKey: input.stage === 'test_analysis' ? 'test-analysis' : input.stage === 'functional_design' ? 'functional-test-design' : input.stage === 'non_functional_design' ? 'non-functional-test-design' : 'test-case-synthesis', agentVersion: 'test-v1', modelLabel: 'fake-model', degraded: false, turns: 1, toolCalls: 0, events: [], framework: { name: 'pi-agent-core' as const, version: 'test' } }
     if (input.stage === 'test_analysis') return { schemaVersion: 'test-analysis/v1', content: { schemaVersion: 'test-analysis/v1', scope: '认证', findings: [], confirmationItems: [] }, execution }
-    if (input.stage === 'functional_design') return { schemaVersion: 'functional-test-design/v1', content: { schemaVersion: 'functional-test-design/v1', nodes: [node('functional-1', 'functional', basisRefs)] }, execution }
-    if (input.stage === 'non_functional_design') return { schemaVersion: 'non-functional-test-design/v1', content: { schemaVersion: 'non-functional-test-design/v1', nodes: [node('security-1', 'security', basisRefs)] }, execution }
+    if (input.stage === 'functional_design') return { schemaVersion: 'functional-test-design/v1', content: { schemaVersion: 'functional-test-design/v1', nodes: [node('shared-root', 'functional', basisRefs)] }, execution }
+    if (input.stage === 'non_functional_design') return { schemaVersion: 'non-functional-test-design/v1', content: { schemaVersion: 'non-functional-test-design/v1', nodes: [node('shared-root', 'security', basisRefs)] }, execution }
     const upstream = input.upstream as { treeRevision: { nodes: TestPointNodeRevision[] } }
     return { schemaVersion: 'test-case-synthesis/v1', content: { schemaVersion: 'test-case-synthesis/v1', cases: upstream.treeRevision.nodes.map(point => caseContent([point.nodeId])), dataRequirements: [] }, execution }
   }

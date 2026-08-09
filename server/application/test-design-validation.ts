@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, TestCaseContent, TestPointNodeRevision } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, TestCaseContent, TestDimension, TestPointNodeContent, TestPointNodeRevision } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 
 export class TestDesignError extends Error {
@@ -78,6 +78,54 @@ export function validateTreeNodes(nodes: TestPointNodeRevision[]) {
     }
   }
   return canonicalSha256(active.map(node => ({ ...node })).sort((left, right) => left.sortKey.localeCompare(right.sortKey) || left.nodeId.localeCompare(right.nodeId)))
+}
+
+export type DesignCandidateNode = TestPointNodeContent & { ref: string; parentRef?: string }
+
+export function validateDesignCandidateNodes(raw: unknown, kind: 'functional' | 'non_functional'): DesignCandidateNode[] {
+  const label = kind === 'functional' ? 'functional' : 'non_functional'
+  if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { nodes?: unknown }).nodes)) candidateFail(label, '结果缺少 nodes')
+  const values = (raw as { nodes: unknown[] }).nodes
+  if (!values.length || values.length > 1_000) candidateFail(`${label}.nodes`, '必须包含 1 到 1000 个节点')
+  const dimensions: TestDimension[] = kind === 'functional' ? ['functional'] : ['performance', 'stability', 'compatibility', 'security']
+  const refs = new Set<string>()
+  const nodes = values.map((value, index): DesignCandidateNode => {
+    const path = `${label}.nodes[${index}]`
+    if (!value || typeof value !== 'object' || Array.isArray(value)) candidateFail(path, '必须是对象')
+    const input = value as Record<string, unknown>
+    const ref = candidateText(input.ref, `${path}.ref`, 200)
+    if (refs.has(ref)) candidateFail(`${path}.ref`, '在本次提交内重复')
+    refs.add(ref)
+    const parentRef = input.parentRef == null || input.parentRef === '' ? undefined : candidateText(input.parentRef, `${path}.parentRef`, 200)
+    const dimension = String(input.dimension) as TestDimension
+    if (!dimensions.includes(dimension)) candidateFail(`${path}.dimension`, `必须为 ${dimensions.join('、')}`)
+    const priority = String(input.priority)
+    if (!['P0', 'P1', 'P2', 'P3'].includes(priority)) candidateFail(`${path}.priority`, '必须为 P0、P1、P2 或 P3')
+    const applicability = String(input.applicability)
+    if (!['applicable', 'not_applicable', 'blocked_by_confirmation'].includes(applicability)) candidateFail(`${path}.applicability`, '取值无效')
+    const entryMethods = candidateEnumArray(input.entryMethods, `${path}.entryMethods`, ['ui', 'api'] as const, 2)
+    return {
+      ref,
+      ...(parentRef ? { parentRef } : {}),
+      title: candidateText(input.title, `${path}.title`, 500),
+      objective: candidateText(input.objective, `${path}.objective`, 2_000),
+      dimension,
+      priority: priority as DesignCandidateNode['priority'],
+      applicability: applicability as DesignCandidateNode['applicability'],
+      designTechniques: candidateTextArray(input.designTechniques, `${path}.designTechniques`, 50, 200),
+      entryMethods,
+      oracle: candidateText(input.oracle, `${path}.oracle`, 4_000),
+      dataConditions: candidateTextArray(input.dataConditions, `${path}.dataConditions`, 100, 1_000),
+      risks: candidateTextArray(input.risks, `${path}.risks`, 100, 1_000),
+      assumptions: candidateTextArray(input.assumptions, `${path}.assumptions`, 100, 1_000),
+      basisRefs: candidateTextArray(input.basisRefs, `${path}.basisRefs`, 1_000, 500),
+      historicalRefs: candidateTextArray(input.historicalRefs, `${path}.historicalRefs`, 1_000, 500),
+    }
+  })
+  for (const [index, node] of nodes.entries()) {
+    if (node.parentRef && !refs.has(node.parentRef)) candidateFail(`${label}.nodes[${index}].parentRef`, '未引用本次提交内的节点')
+  }
+  return nodes
 }
 
 export function validateCaseDependencyGraph(cases: Array<{ id: string; content: TestCaseContent }>) {
@@ -164,6 +212,10 @@ function stringFilters(value: unknown) { const input = object(value, 'TEST_DESIG
 function id(value: unknown, field: string) { const result = requiredText(value, field, 500); if (/^(latest|active)$/iu.test(result)) fail('TEST_DESIGN_LATEST_REFERENCE_FORBIDDEN', `${field} 不允许动态引用`); return result }
 function requiredText(value: unknown, field: string, max: number) { const result = text(value, field, max).trim(); if (!result) fail('TEST_DESIGN_BASIS_MODE_INVALID', `${field} 不能为空`); return result }
 function text(value: unknown, field: string, max: number) { if (typeof value !== 'string' || value.length > max) fail('TEST_DESIGN_BASIS_MODE_INVALID', `${field} 必须是长度不超过 ${max} 的字符串`); return value }
+function candidateText(value: unknown, path: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) candidateFail(path, `必须是长度不超过 ${max} 的非空字符串`); return value.trim() }
+function candidateTextArray(value: unknown, path: string, maxItems: number, maxLength: number) { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => candidateText(item, `${path}[${index}]`, maxLength)) }
+function candidateEnumArray<const T extends string>(value: unknown, path: string, allowed: readonly T[], maxItems: number): T[] { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => { if (typeof item !== 'string' || !allowed.includes(item as T)) candidateFail(`${path}[${index}]`, `必须为 ${allowed.join('、')}`); return item as T }) }
+function candidateFail(path: string, message: string): never { throw new TestDesignError('TEST_POINT_TREE_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
 function object(value: unknown, code: string, message: string) { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(code, message); return value as Record<string, unknown> }
 function rejectUnknown(value: Record<string, unknown>, allowed: string[], code: string) { const unexpected = Object.keys(value).filter(key => !allowed.includes(key)); if (unexpected.length) fail(code, `包含不允许的字段：${unexpected.join('、')}`) }
 function fail(code: string, message: string, status = 400, details?: unknown): never { throw new TestDesignError(code, message, status, details) }

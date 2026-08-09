@@ -26,6 +26,17 @@ test('resolver copies outputs and descriptors register through the governed regi
   assert.deepEqual(registry.descriptors().map(item => item.id), ['knowledge.search', 'knowledge.read_chunk'])
 })
 
+test('测试点提交工具向模型声明完整临时引用和节点字段', () => {
+  for (const key of ['functional_test_design.submit_result', 'non_functional_test_design.submit_result']) {
+    const schema = defaultBuiltInToolConfigResolver.toDescriptor(key).parameters as unknown as { additionalProperties: boolean; properties: { nodes: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } } }
+    assert.equal(schema.additionalProperties, false)
+    assert.equal(schema.properties.nodes.items.additionalProperties, false)
+    assert.ok(schema.properties.nodes.items.required.includes('ref'))
+    assert.ok(schema.properties.nodes.items.required.includes('basisRefs'))
+    assert.ok('parentRef' in schema.properties.nodes.items.properties)
+  }
+})
+
 test('legacy technical-review descriptor remains v1 while the default descriptor remains v2', () => {
   const legacy = defaultBuiltInToolConfigResolver.toDescriptor('technical_solution_review.submit_result', 'legacy-candidate').parameters as unknown as { properties: Record<string, unknown>; required: string[] }
   const current = defaultBuiltInToolConfigResolver.toDescriptor('technical_solution_review.submit_result').parameters as unknown as { properties: Record<string, unknown>; required: string[] }

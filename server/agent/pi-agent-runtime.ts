@@ -21,6 +21,7 @@ import { RequirementPointExtractionValidator, RequirementReviewValidator } from 
 import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
+import { TestDesignError, validateDesignCandidateNodes } from '../application/test-design-validation.js'
 
 const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -52,9 +53,16 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     } : undefined
     const registry = stage.isTestDesign
       ? createTestDesignToolRegistry(stage.submitToolId, stage.schemaVersion, async value => {
-        candidate = value
-        lastSubmissionIssues = []
-        return { accepted: true }
+        try {
+          const kind = stage.submitToolId === 'functional_test_design.submit_result' ? 'functional' : stage.submitToolId === 'non_functional_test_design.submit_result' ? 'non_functional' : undefined
+          candidate = kind ? { ...value, nodes: validateDesignCandidateNodes(value, kind) } : value
+          lastSubmissionIssues = []
+          return { accepted: true }
+        } catch (error) {
+          const details = error instanceof TestDesignError && error.details && typeof error.details === 'object' ? error.details as { path?: unknown } : undefined
+          lastSubmissionIssues = [{ path: typeof details?.path === 'string' ? details.path : '/', message: error instanceof Error ? error.message : String(error) }]
+          return { accepted: false, issues: lastSubmissionIssues }
+        }
       })
       : stage.isExtraction
       ? createRequirementPointExtractionToolRegistry(this.store, async value => {

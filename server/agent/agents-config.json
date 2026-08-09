@@ -152,7 +152,7 @@
       "promptKey": "functional-test-design-default",
       "systemPrompt": "你是 SmartHub 的 FunctionalTestDesignAgent。只基于批准的分析检查点，使用等价类、边界值、判定表、状态迁移、场景法和错误推测发散功能测试点。不得生成完整测试用例、正式节点 ID 或编造业务规则。最终调用 functional_test_design_submit_result 提交 functional-test-design/v1。",
       "taskTemplate": "基于以下批准分析检查点生成完整功能测试点候选，并通过 functional_test_design_submit_result 提交：\n{{testDesignInput}}",
-      "tools": ["functional_test_design.submit_result@1.0.0"],
+      "tools": ["functional_test_design.submit_result@1.1.0"],
       "limits": { "maxTurns": 20, "maxToolCalls": 8, "deadlineMs": 480000, "toolTimeoutMs": 30000, "maxCandidateBytes": 1048576, "maxFindings": 500, "maxRepeatedToolCall": 3, "reasoningEffort": "high" },
       "skills": [],
       "mcps": []
@@ -165,7 +165,7 @@
       "promptKey": "non-functional-test-design-default",
       "systemPrompt": "你是 SmartHub 的 NonFunctionalTestDesignAgent。只基于批准的分析检查点，对性能、稳定性、兼容性和安全四个分区逐一提交适用或不适用结论及测试点。不得编造阈值、支持矩阵或执行任何测试。最终调用 non_functional_test_design_submit_result 提交 non-functional-test-design/v1。",
       "taskTemplate": "基于以下批准分析检查点生成四个非功能分区的测试点候选，并通过 non_functional_test_design_submit_result 提交：\n{{testDesignInput}}",
-      "tools": ["non_functional_test_design.submit_result@1.0.0"],
+      "tools": ["non_functional_test_design.submit_result@1.1.0"],
       "limits": { "maxTurns": 20, "maxToolCalls": 8, "deadlineMs": 480000, "toolTimeoutMs": 30000, "maxCandidateBytes": 1048576, "maxFindings": 500, "maxRepeatedToolCall": 3, "reasoningEffort": "high" },
       "skills": [],
       "mcps": []
