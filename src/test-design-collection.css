@@ -261,6 +261,12 @@
   width: 11px;
 }
 
+.td-workbench-loading {
+  min-height: 520px;
+  background: #fff;
+  border: 1px solid #e7e9ed;
+}
+
 .td-run-loading,
 .td-run-artifact-state {
   min-height: 420px;

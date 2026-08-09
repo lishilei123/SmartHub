@@ -75,18 +75,18 @@ const dimensionClasses: Record<TestDimension, string> = {
   安全: 'security',
 }
 
-const tabs: Array<{ key: TabKey; label: string; count?: number }> = [
+const tabs: Array<{ key: TabKey; label: string }> = [
   { key: 'overview', label: '概览' },
   { key: 'workflow', label: '工作流' },
-  { key: 'analysis', label: '依据解构', count: 18 },
-  { key: 'retrieval', label: '知识召回', count: 12 },
-  { key: 'tree', label: '测试点树', count: 46 },
-  { key: 'cases', label: '测试用例', count: 28 },
-  { key: 'case-set', label: '用例集', count: 1 },
-  { key: 'data', label: '测试数据', count: 9 },
-  { key: 'coverage', label: '覆盖审计', count: 3 },
-  { key: 'history', label: '历史复用', count: 6 },
-  { key: 'questions', label: '待确认项', count: 2 },
+  { key: 'analysis', label: '依据解构' },
+  { key: 'retrieval', label: '知识召回' },
+  { key: 'tree', label: '测试点树' },
+  { key: 'cases', label: '测试用例' },
+  { key: 'case-set', label: '用例集' },
+  { key: 'data', label: '测试数据' },
+  { key: 'coverage', label: '覆盖审计' },
+  { key: 'history', label: '历史复用' },
+  { key: 'questions', label: '待确认项' },
 ]
 
 const stages = [
@@ -275,6 +275,9 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   const [designs, setDesigns] = useState<TestDesign[]>([])
   const [designsLoading, setDesignsLoading] = useState(false)
   const [designInputs, setDesignInputs] = useState<TestDesignInputCandidates | null>(null)
+  const [designInputsLoading, setDesignInputsLoading] = useState(false)
+  const [designInputsError, setDesignInputsError] = useState('')
+  const [designInputsRequest, setDesignInputsRequest] = useState(0)
   const [activeDesign, setActiveDesign] = useState<TestDesign | null>(null)
   const [activeRun, setActiveRun] = useState<TestDesignWorkflowRun | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
@@ -320,30 +323,52 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
 
   useEffect(() => {
     if (!projectVersion) return
+    let current = true
+    setDesigns([])
+    setDesignInputs(null)
+    setDesignInputsError('')
     setDesignsLoading(true)
-    void Promise.all([loadTestDesigns(projectVersion.id), loadTestDesignInputs(projectVersion.id)])
-      .then(([designResponse, inputResponse]) => { setDesigns(designResponse.items); setDesignInputs(inputResponse) })
+    void loadTestDesigns(projectVersion.id)
+      .then(designResponse => { if (current) setDesigns(designResponse.items) })
       .catch(error => notify(error instanceof Error ? error.message : '测试设计数据加载失败', 'error'))
-      .finally(() => setDesignsLoading(false))
-  }, [notify, projectVersion])
+      .finally(() => { if (current) setDesignsLoading(false) })
+    return () => { current = false }
+  }, [notify, projectVersion?.id])
+
+  useEffect(() => {
+    if (!projectVersion || view !== 'create' || designInputs) return
+    let current = true
+    setDesignInputsLoading(true)
+    setDesignInputsError('')
+    void loadTestDesignInputs(projectVersion.id)
+      .then(value => { if (current) setDesignInputs(value) })
+      .catch(error => { if (current) setDesignInputsError(error instanceof Error ? error.message : '测试设计候选数据加载失败') })
+      .finally(() => { if (current) setDesignInputsLoading(false) })
+    return () => { current = false }
+  }, [designInputs, designInputsRequest, projectVersion?.id, view])
 
   useEffect(() => {
     if (!projectVersion || view !== 'workspace' || !activeContext.testDesignId || !activeContext.workflowRunId) return
+    let current = true
+    setActiveRun(null)
     setWorkspaceLoading(true)
     setWorkspaceError('')
     void Promise.all([
       loadTestDesign(projectVersion.id, activeContext.testDesignId),
       loadTestDesignRun(projectVersion.id, activeContext.testDesignId, activeContext.workflowRunId),
     ]).then(([design, run]) => {
+      if (!current) return
       setActiveDesign(design)
       setActiveRun(run)
       setBasisMode(design.basisMode)
     }).catch(error => {
+      if (!current) return
       setActiveDesign(null)
       setActiveRun(null)
       setWorkspaceError(error instanceof Error ? error.message : '测试设计运行加载失败')
-    }).finally(() => setWorkspaceLoading(false))
-  }, [activeContext, projectVersion, view])
+    }).finally(() => { if (current) setWorkspaceLoading(false) })
+    return () => { current = false }
+  }, [activeContext.testDesignId, activeContext.workflowRunId, projectVersion?.id, view])
 
   useEffect(() => {
     if (!activeRun) return
@@ -632,6 +657,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
   }
 
   if (view === 'create') {
+    if (designInputsError) return <section className="td-create-page"><header><button className="icon-btn" onClick={closeCreate} aria-label="关闭创建页"><X /></button><div><span>创建测试设计</span><h2>候选数据加载失败</h2></div></header><div className="td-route-error" role="alert"><XCircle /><p>{designInputsError}</p><button className="btn primary" disabled={designInputsLoading} onClick={() => setDesignInputsRequest(value => value + 1)}><RefreshCw className={designInputsLoading ? 'spin' : ''} />重新加载</button></div></section>
     if (!designInputs) return <section className="td-create-page"><header><button className="icon-btn" onClick={closeCreate} aria-label="关闭创建页"><X /></button><div><span>创建测试设计</span><h2>正在读取当前版本可选输入</h2></div></header><RunLoading /></section>
     return <CreateDesign
       projectVersion={projectVersion}
@@ -671,13 +697,17 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     </section>
   }
 
+  if (!activeRun) {
+    return <section className="td-workbench-loading" aria-live="polite"><RunLoading /></section>
+  }
+
   return <section className={`td-workbench ${rightOpen ? '' : 'detail-collapsed'}`}>
     <header className="td-workbench-head">
       <div className="td-title-block">
         <button className="td-back" onClick={returnToList} aria-label="返回测试设计列表"><ChevronRight /></button>
         <span className="td-workbench-icon"><TestTube2 /></span>
-        <div><span>测试设计</span><h2>{activeDesign?.name ?? '正在加载测试设计'}</h2></div>
-        <StatusPill tone={runStatusTone(activeRun?.status)}>{workspaceLoading ? '正在加载' : runStatusLabel(activeRun?.status)}</StatusPill>
+        <div><span>测试设计</span><h2>{activeDesign?.name ?? activeRun.testDesignId}</h2></div>
+        <StatusPill tone={runStatusTone(activeRun.status)}>{workspaceLoading ? '正在加载' : runStatusLabel(activeRun.status)}</StatusPill>
       </div>
       <div className="td-head-actions">
         <button className="icon-btn td-mobile-detail-button" onClick={() => setRightOpen(value => !value)} aria-label={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
@@ -695,12 +725,12 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     </div>
 
     <nav className="td-tabs" aria-label="测试设计视图">
-      {tabs.map(item => { const count = activeRun ? runTabCount(item.key, activeRun) : item.count; return <button key={item.key} className={tab === item.key ? 'active' : ''} onClick={() => selectTab(item.key)}>{item.label}{count !== undefined && <span>{count}</span>}</button> })}
+      {tabs.map(item => { const count = runTabCount(item.key, activeRun); return <button key={item.key} className={tab === item.key ? 'active' : ''} onClick={() => selectTab(item.key)}>{item.label}{count !== undefined && <span>{count}</span>}</button> })}
       <button className="td-detail-toggle" onClick={() => setRightOpen(value => !value)} title={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
     </nav>
 
     <div className="td-workspace-grid">
-      {activeRun ? <RunBasisPanel run={activeRun} /> : <BasisPanel selected={selectedBasis} onSelect={setSelectedBasis} basisMode={basisMode} />}
+      <RunBasisPanel run={activeRun} />
       <main className="td-main-canvas">
         {workspaceLoading && <RunLoading />}
         {!workspaceLoading && activeRun && tab === 'overview' && <RunOverview design={activeDesign} run={activeRun} onNavigate={selectTab} />}

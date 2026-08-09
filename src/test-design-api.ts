@@ -266,16 +266,7 @@ function runScope(projectVersionId: string, designId: string, runId: string) {
 }
 
 export async function loadTestDesignInputs(projectVersionId: string): Promise<TestDesignInputCandidates> {
-  const scope = `/project-versions/${encodeURIComponent(projectVersionId)}/test-designs`
-  const [reviewBaselines, knowledgeAssets, fixedIndexes, historicalCaseSets, historicalCaseAssets, agentReadiness] = await Promise.all([
-    request<TestDesignInputCandidates['reviewBaselines']>(`${scope}/inputs/review-baselines`),
-    request<TestDesignInputCandidates['knowledgeAssets']>(`${scope}/inputs/knowledge-assets`),
-    request<TestDesignInputCandidates['fixedIndexes']>(`${scope}/inputs/fixed-indexes`),
-    request<TestDesignInputCandidates['historicalCaseSets']>(`${scope}/inputs/historical-case-sets`),
-    request<TestDesignInputCandidates['historicalCaseAssets']>(`${scope}/inputs/historical-case-assets`),
-    request<TestDesignInputCandidates['agentReadiness']>(`${scope}/agent-readiness`),
-  ])
-  return { reviewBaselines, knowledgeAssets, fixedIndexes, historicalCaseSets, historicalCaseAssets, agentReadiness }
+  return request<TestDesignInputCandidates>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs/inputs`)
 }
 export const loadTestDesigns = (projectVersionId: string) => request<{ items: TestDesign[] }>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs`)
 export const loadTestDesign = (projectVersionId: string, designId: string) => request<TestDesign>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs/${encodeURIComponent(designId)}`)

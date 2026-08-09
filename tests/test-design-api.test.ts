@@ -4,18 +4,21 @@ import { applyTestDesignGateDecision, createTestDesignRun, loadTestDesignInputs 
 import { routeTestDesign } from '../server/http/test-design-routes.ts'
 import { readFileSync } from 'node:fs'
 
-test('测试设计创建表单从真实候选接口聚合依据和 Agent 就绪状态', async () => {
+test('测试设计创建表单通过单个聚合接口读取依据和 Agent 就绪状态', async () => {
   const originalFetch = globalThis.fetch
   const paths: string[] = []
   globalThis.fetch = async input => {
     const url = String(input)
     paths.push(new URL(url).pathname)
-    if (url.endsWith('/inputs/review-baselines')) return Response.json([{ sourceReviewRunId: 'rr-1', sourceTechnicalSolutionRunId: 'tr-1', label: '基线', selectable: true }])
-    if (url.endsWith('/inputs/knowledge-assets')) return Response.json([{ assetId: 'asset-1', assetVersionId: 'av-1', version: 2, contentHash: 'a'.repeat(64), displayName: '需求', logicalPath: '需求.md', assetType: 'requirement', status: 'ready', selectable: true }])
-    if (url.endsWith('/inputs/fixed-indexes')) return Response.json([{ id: 'index-1', selectable: true }])
-    if (url.endsWith('/inputs/historical-case-sets')) return Response.json([])
-    if (url.endsWith('/inputs/historical-case-assets')) return Response.json([])
-    if (url.endsWith('/agent-readiness')) return Response.json({ ready: true, agents: [] })
+    if (url.endsWith('/inputs')) return Response.json({
+      projectVersion: { id: 'pv-1', projectId: 'project-1', name: 'v1', status: 'open' },
+      reviewBaselines: [{ sourceReviewRunId: 'rr-1', sourceTechnicalSolutionRunId: 'tr-1', label: '基线', selectable: true }],
+      knowledgeAssets: [{ assetId: 'asset-1', assetVersionId: 'av-1', version: 2, contentHash: 'a'.repeat(64), displayName: '需求', logicalPath: '需求.md', assetType: 'requirement', status: 'ready', selectable: true }],
+      fixedIndexes: [{ id: 'index-1', selectable: true }],
+      historicalCaseSets: [],
+      historicalCaseAssets: [],
+      agentReadiness: { ready: true, agents: [] },
+    })
     return Response.json({ error: 'unexpected request' }, { status: 404 })
   }
   try {
@@ -24,8 +27,27 @@ test('测试设计创建表单从真实候选接口聚合依据和 Agent 就绪�
     assert.equal(result.knowledgeAssets[0].assetVersionId, 'av-1')
     assert.equal(result.agentReadiness.ready, true)
     assert.equal(result.fixedIndexes[0].id, 'index-1')
-    assert.equal(paths.length, 6)
+    assert.deepEqual(paths, ['/api/project-versions/pv-1/test-designs/inputs'])
   } finally { globalThis.fetch = originalFetch }
+})
+
+test('测试设计聚合输入路由只计算一次完整候选数据', async () => {
+  let calls = 0
+  let body = ''
+  const candidates = { reviewBaselines: [], knowledgeAssets: [], fixedIndexes: [], historicalCaseSets: [], historicalCaseAssets: [], agentReadiness: { ready: true, agents: [] } }
+  const response = { statusCode: 0, setHeader() {}, end(value: string) { body = value } }
+  const handled = await routeTestDesign({ headers: {} }, response as never, {
+    method: 'GET',
+    url: new URL('http://127.0.0.1/api/project-versions/pv-1/test-designs/inputs'),
+    principal: { subjectId: 'tester', displayName: '测试人员' },
+    controls: { authenticate: async () => ({ subjectId: 'tester', displayName: '测试人员' }), authorize: async () => undefined, canAccess: async () => true },
+    service: { inputCandidates: async () => { calls += 1; return candidates } } as never,
+    store: {} as never,
+    configurations: {} as never,
+  })
+  assert.equal(handled, true)
+  assert.equal(calls, 1)
+  assert.deepEqual(JSON.parse(body), candidates)
 })
 
 test('提交测试设计运行携带服务端要求的幂等键', async () => {

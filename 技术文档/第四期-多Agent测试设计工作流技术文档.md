@@ -1191,6 +1191,7 @@ Snapshot 主体 JSONB 保留完整版本化协议，常用归属、模式、状�
 ### 16.2 输入候选
 
 ```text
+GET /inputs
 GET /inputs/review-baselines
 GET /inputs/knowledge-assets
 GET /inputs/fixed-indexes
@@ -1199,7 +1200,7 @@ GET /inputs/historical-case-assets
 GET /agent-readiness
 ```
 
-候选 DTO 携带明确不可选原因，不只返回可选项。评审基线 API 只返回引用链一致的组合，服务端创建时仍再次校验。
+创建页优先使用 `GET /inputs` 一次返回全部候选与 Agent 就绪状态，避免对同一项目状态重复读取和计算；其余细分接口保留供按类别读取。候选 DTO 携带明确不可选原因，不只返回可选项。评审基线 API 只返回引用链一致的组合，服务端创建时仍再次校验。
 
 ### 16.3 TestDesign 与 Run
 

@@ -50,6 +50,17 @@ test('测试设计真实产物使用独立视图且仅缺失阶段显示占位�
   assert.match(source, /dataRequirementCount\(run\)/)
 })
 
+test('测试设计列表与创建候选解耦且运行加载期间不展示示例数据', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const listEffect = source.match(/useEffect\(\(\) => \{\s*if \(!projectVersion\) return[\s\S]*?\}, \[notify, projectVersion\?\.id\]\)/)?.[0] ?? ''
+  assert.match(listEffect, /loadTestDesigns\(projectVersion\.id\)/)
+  assert.doesNotMatch(listEffect, /loadTestDesignInputs/)
+  assert.match(source, /view !== 'create' \|\| designInputs/)
+  assert.match(source, /if \(!activeRun\) \{\s*return <section className="td-workbench-loading"/)
+  assert.doesNotMatch(source, /activeRun \? runTabCount\(item\.key, activeRun\) : item\.count/)
+  assert.doesNotMatch(source, /activeRun \? <RunBasisPanel run=\{activeRun\} \/> : <BasisPanel/)
+})
+
 test('真实测试用例支持 ETag 编辑、审核、阻断修复和不可变发布', () => {
   const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
   const api = readFileSync(new URL('../src/test-design-api.ts', import.meta.url), 'utf8')

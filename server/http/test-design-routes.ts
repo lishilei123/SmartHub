@@ -21,6 +21,8 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
     const body = await json(request); return send(response, 201, await configurations.publish({ agentKey: body.agentKey, revision: Number(body.revision), publishedBy: principal.displayName }))
   }
 
+  const allInputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs$/.exec(url.pathname)
+  if (allInputs && method === 'GET') { await authorize(allInputs[1], 'test-design:read'); return send(response, 200, await service.inputCandidates(allInputs[1])) }
   const inputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs\/(review-baselines|knowledge-assets|fixed-indexes|historical-case-sets|historical-case-assets)$/.exec(url.pathname)
   if (inputs && method === 'GET') { await authorize(inputs[1], 'test-design:read'); const candidates = await service.inputCandidates(inputs[1]); const keys = { 'review-baselines': 'reviewBaselines', 'knowledge-assets': 'knowledgeAssets', 'fixed-indexes': 'fixedIndexes', 'historical-case-sets': 'historicalCaseSets', 'historical-case-assets': 'historicalCaseAssets' } as const; return send(response, 200, candidates[keys[inputs[2] as keyof typeof keys]]) }
   const readiness = /^\/api\/project-versions\/([^/]+)\/test-designs\/agent-readiness$/.exec(url.pathname)
