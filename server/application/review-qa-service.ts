@@ -50,7 +50,7 @@ export class ReviewQaService {
     const { source, model } = selectModel(state, run, configuration)
     const quote = normalizeQuote(request.quote, fixedAssetVersionIds, versions, run.result)
     const estimatedTokens = Math.ceil((documentContent.length + JSON.stringify(run.result).length + question.length) / 4) + 2_000
-    const maxOutputTokens = Math.min(model.maxOutputTokens, configuration?.routing.maxOutputTokens ?? 4_096)
+    const maxOutputTokens = configuration?.routing.maxOutputTokens ?? Math.min(model.maxOutputTokens, 4_096)
     if (estimatedTokens + maxOutputTokens > model.contextWindow) throw new Error('固定评审上下文超过模型窗口，暂时无法继续问答')
     const turnId = `review_qa_turn_${crypto.randomUUID()}`
     const createdAt = new Date().toISOString()

@@ -162,6 +162,20 @@ test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用�
   await assert.rejects(() => service.publish({ agentKey: 'requirementReview', revision: saved.revision }), /尚未通过健康探测/)
 })
 
+test('Agent 最大输出 Token 独立于模型目录中的历史输出值', async () => {
+  const { service } = await fixture()
+  const initial = (await service.get()).agents.requirementReview.draft
+  const saved = await service.save({
+    agentKey: 'requirementReview',
+    revision: initial.revision,
+    routing: { ...initial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 32_768 },
+    definition: initial.definition,
+  })
+  const published = await service.publish({ agentKey: 'requirementReview', revision: saved.revision })
+
+  assert.equal(published.routing.maxOutputTokens, 32_768)
+})
+
 test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定资源版本', async () => {
   const { store, service } = await fixture()
   await store.transaction(state => {

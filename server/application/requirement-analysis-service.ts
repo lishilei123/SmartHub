@@ -184,7 +184,7 @@ export class RequirementAnalysisService {
       modelRef: structuredClone(extractionModelRef),
       agentModelRefs: {
         requirementPointExtraction: structuredClone(extractionModelRef),
-        requirementReview: modelSnapshot(reviewModel, Math.min(reviewModel.model.maxOutputTokens, reviewConfiguration?.routing.maxOutputTokens ?? reviewModel.model.maxOutputTokens)),
+        requirementReview: modelSnapshot(reviewModel, reviewConfiguration?.routing.maxOutputTokens ?? reviewModel.model.maxOutputTokens),
       },
       ...(extractionConfigurationRef && reviewConfiguration ? { agentConfigurationRefs: {
         requirementPointExtraction: structuredClone(extractionConfigurationRef),
@@ -270,7 +270,7 @@ export class RequirementAnalysisService {
     const extractionCoveragePlan = buildExtractionCoveragePlan(versions, request.excludedAreas)
     const extractionDefinition = baseExtractionDefinition
     const extractionToolBudget = { directoryCalls: 0, chunkCalls: 0, evidenceCalls: 0, submissionCalls: 3, minimumToolCalls: 3 }
-    const effectiveMaxOutputTokens = Math.min(extractionModel.model.maxOutputTokens, extractionConfiguration?.routing.maxOutputTokens ?? extractionModel.model.maxOutputTokens)
+    const effectiveMaxOutputTokens = extractionConfiguration?.routing.maxOutputTokens ?? extractionModel.model.maxOutputTokens
     const requirementInputPlan = buildRequirementInputPlan({
       assets: assets.map((asset, position) => ({ asset, version: versions[position] })),
       coveragePlan: extractionCoveragePlan,
@@ -297,7 +297,7 @@ export class RequirementAnalysisService {
       modelRef: modelSnapshot(extractionModel, effectiveMaxOutputTokens),
       agentModelRefs: {
         requirementPointExtraction: modelSnapshot(extractionModel, effectiveMaxOutputTokens),
-        requirementReview: modelSnapshot(reviewModel, Math.min(reviewModel.model.maxOutputTokens, reviewConfiguration?.routing.maxOutputTokens ?? reviewModel.model.maxOutputTokens)),
+        requirementReview: modelSnapshot(reviewModel, reviewConfiguration?.routing.maxOutputTokens ?? reviewModel.model.maxOutputTokens),
       },
       ...(extractionConfiguration && reviewConfiguration ? { agentConfigurationRefs: {
         requirementPointExtraction: configurationRef(extractionConfiguration),
@@ -389,7 +389,7 @@ export class RequirementAnalysisService {
       coveragePlan: run.snapshot.extractionCoveragePlan,
       definition: run.snapshot.agentDefinitions.requirementPointExtraction,
       contextWindow: extractionModels[0].model.contextWindow,
-      maxOutputTokens: Math.min(extractionModels[0].model.maxOutputTokens, extractionConfiguration?.routing.maxOutputTokens ?? extractionModels[0].model.maxOutputTokens),
+      maxOutputTokens: extractionConfiguration?.routing.maxOutputTokens ?? extractionModels[0].model.maxOutputTokens,
     })
     if (requirementInputPlan.packageSha256 !== run.snapshot.extractionInput.packageSha256) throw new Error('固定正文输入包 Hash 已漂移')
     await this.reviewTransaction(run.id, lease, draft => {
@@ -637,7 +637,7 @@ export class RequirementAnalysisService {
     for (let index = 0; index < input.models.length; index += 1) {
       const selection = input.models[index]
       input.onAttempt?.(selection)
-      const maxOutputTokens = Math.min(selection.model.maxOutputTokens, input.configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens)
+      const maxOutputTokens = input.configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens
       const modelRef = modelSnapshot(selection, maxOutputTokens)
       const attemptId = `model_attempt_${randomUUID()}`
       const startedAt = new Date().toISOString()
@@ -858,7 +858,7 @@ function selectAgentModels(state: DatabaseState, configuration: AgentConfigurati
 }
 
 function supportsInputPlan(selection: AgentModelSelection, plan: ReturnType<typeof buildRequirementInputPlan>, configuration: AgentConfigurationVersion | null) {
-  const output = Math.min(selection.model.maxOutputTokens, configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens)
+  const output = configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens
   const largestBatch = Math.max(...plan.batches.map(batch => batch.tokenCount), 0)
   const requiredInput = plan.mode === 'full_context' ? plan.estimatedInputTokens : largestBatch + 4_000
   return selection.model.contextWindow >= requiredInput + output

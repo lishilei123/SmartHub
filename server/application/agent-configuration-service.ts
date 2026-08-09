@@ -314,7 +314,6 @@ function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentC
     if (!model.qualityGate?.passed || model.qualityGate.version !== 'model-probe/v2') throw new Error(`${source.name} · ${model.displayName} 尚未通过 model-probe/v2 质量门禁`)
     if (!model.capabilities.includes('tool_calling')) throw new Error(`${source.name} · ${model.displayName} 不支持工具调用`)
     if (draft.routing.structuredOutput && !model.capabilities.includes('structured_output')) throw new Error(`${source.name} · ${model.displayName} 不支持结构化输出`)
-    if (draft.routing.maxOutputTokens > model.maxOutputTokens) throw new Error(`配置的最大输出 Token 超过 ${model.displayName} 的能力上限`)
   })
 }
 

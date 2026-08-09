@@ -425,10 +425,10 @@ test('没有冻结需求点的失败运行只能全部重跑', async () => {
   assert.equal((await store.snapshot()).reviewRuns.length, 1)
 })
 
-test('新评审固定使用已发布 Agent 配置中的模型、Prompt、工具与配置版本', async () => {
+test('新评审固定使用已发布 Agent 配置中的模型、输出额度、Prompt、工具与配置版本', async () => {
   const store = await seededStore()
   await store.transaction(state => {
-    state.modelSources[0].models.push({ ...state.modelSources[0].models[0], id: 'model-2', name: 'review-model', displayName: '评审模型', maxOutputTokens: 8_192 })
+    state.modelSources[0].models.push({ ...state.modelSources[0].models[0], id: 'model-2', name: 'review-model', displayName: '评审模型', maxOutputTokens: 4_096 })
   })
   const configurations = new AgentConfigurationService(store)
   const initial = await configurations.get()
@@ -437,7 +437,7 @@ test('新评审固定使用已发布 Agent 配置中的模型、Prompt、工具�
   const extractionSaved = await configurations.save({
     agentKey: 'requirementPointExtraction',
     revision: extractionDraftState.revision,
-    routing: { ...extractionDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 4_096, temperature: 0.1, retryCount: 1 },
+    routing: { ...extractionDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 8_192, temperature: 0.1, retryCount: 1 },
     definition: extractionDraftState.definition,
   })
   const extractionPublished = await configurations.publish({ agentKey: 'requirementPointExtraction', revision: extractionSaved.revision })
@@ -460,7 +460,7 @@ test('新评审固定使用已发布 Agent 配置中的模型、Prompt、工具�
   assert.equal(output.snapshot.agentConfigurationRefs?.requirementPointExtraction.version, 1)
   assert.equal(output.snapshot.agentConfigurationRefs?.requirementReview.version, 1)
   assert.equal(output.snapshot.modelRef.modelId, 'model-1')
-  assert.equal(output.snapshot.modelRef.maxOutputTokens, 4_096)
+  assert.equal(output.snapshot.modelRef.maxOutputTokens, 8_192)
   assert.equal(output.snapshot.agentModelRefs?.requirementReview.modelId, 'model-2')
   assert.equal(output.snapshot.agentModelRefs?.requirementReview.maxOutputTokens, 8_192)
   assert.match((await configurations.getVersion(reviewPublished.id)).agentDefinition.systemPrompt, /已发布配置标记/u)
