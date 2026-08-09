@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  AlertTriangle, ArchiveRestore, ArrowDown, ArrowRight, ArrowUp, Bot, Braces, Check,
+  Activity, AlertTriangle, ArchiveRestore, ArrowDown, ArrowRight, ArrowUp, Bot, Braces, Check,
   CheckCircle2, ChevronDown, ChevronRight, CircleDot, Clock3, Database, Download,
   FileDiff, FileJson2, FileText, Filter, GitBranch, History, Layers3, Link2, ListChecks,
   LockKeyhole, MoreHorizontal, Network, PanelRightClose, Pencil, Play, Plus, RefreshCw,
-  Search, ShieldCheck, Sparkles, Split, TableProperties, TestTube2, Trash2, Users,
-  X, XCircle,
+  MessageSquareText, Search, ShieldCheck, Sparkles, Split, TableProperties, TestTube2,
+  Trash2, Users, Wrench, X, XCircle,
 } from 'lucide-react'
 import type { ProjectVersion } from './project-version-api'
 import { applyTestDesignGateDecision, createTestDesign, createTestDesignRun, loadTestCaseSetVersion, loadTestDesign, loadTestDesignInputs, loadTestDesignRun, loadTestDesigns, type TestDesign, type TestDesignInputCandidates, type TestDesignWorkflowRun } from './test-design-api'
@@ -204,6 +204,23 @@ const nodeLabels: Record<string, string> = {
   completed: '已完成',
   cancelled: '已取消',
   failed: '执行失败',
+}
+
+const testDesignEventLabels: Record<string, string> = {
+  runtime_initialized: 'Runtime 初始化',
+  agent_start: 'Agent 开始',
+  agent_end: 'Agent 本轮结束',
+  turn_start: 'Turn 开始',
+  turn_end: 'Turn 结束',
+  message_start: '消息开始',
+  message_update: '消息流更新',
+  message_end: '消息完成',
+  tool_execution_start: '工具调用开始',
+  tool_execution_update: '工具调用更新',
+  tool_execution_end: '工具调用结束',
+  result_submission_required: '进入结果提交窗口',
+  result_submission_retry: '要求重新提交结果',
+  model_retry_scheduled: '模型请求自动重试',
 }
 
 function nodeLabel(value: string) { return nodeLabels[value] ?? value }
@@ -666,30 +683,75 @@ function RunWorkflowView({ design, run, onGateDecision, gateSubmitting }: { desi
   const synthesis = node('test_case_synthesis')
   const coverage = node('coverage_audit')
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const [recordNodeId, setRecordNodeId] = useState<string | null>(null)
+  const recordNode = run.nodeRuns.find(item => item.id === recordNodeId && hasNodeRunRecord(item))
   const pendingGate = scopeGate?.status === 'waiting_gate' ? 'scope' : treeGate?.status === 'waiting_gate' ? 'test-point-tree' : null
-  return <div className="td-workflow-view td-real-workflow">
+  const openNodeRecord = (nodeRun: TestDesignWorkflowRun['nodeRuns'][number]) => setRecordNodeId(nodeRun.id)
+  return <><div className="td-workflow-view td-real-workflow">
     <header className="td-canvas-toolbar"><div><b>固定工作流</b><small>test-design-workflow/v1 · {run.id} · 服务端真实拓扑</small></div><StatusPill tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</StatusPill><span><i className="done" />成功</span><span><i className="running" />进行中</span><span><i />等待 / 门禁</span>{pendingGate && <a className="btn primary td-gate-entry" href="#test-design-gate-decision"><Users />{pendingGate === 'scope' ? '确认测试范围' : '批准测试点树'}</a>}<button className="btn" onClick={() => setDetailsOpen(value => !value)}>{detailsOpen ? '收起详情' : '运行详情'}</button></header>
     <div className="td-workflow-canvas td-workflow-sequence td-real-workflow-canvas">
       <div className="td-flow-column start"><small>固定输入</small><FixedInputCard run={run} time={fixedInputTime} /></div>
       <ArrowRight className="td-flow-arrow inline" />
-      <div className="td-flow-column analysis"><small>阶段 1</small><RunWorkflowCard node={analysis} nodeKey="test_analysis" kind="agent" subtitle="依据解构与受控知识召回" /></div>
+      <div className="td-flow-column analysis"><small>阶段 1</small><RunWorkflowCard node={analysis} nodeKey="test_analysis" kind="agent" subtitle="依据解构与受控知识召回" onOpenRecord={openNodeRecord} /></div>
       <ArrowRight className="td-flow-arrow inline" />
-      <div className="td-flow-column gate"><small>人工门禁 1</small><RunWorkflowCard node={scopeGate} nodeKey="scope_gate" kind="gate" subtitle={scopeDecision ? `${scopeDecision.decision === 'approved' ? '已批准' : '已拒绝'} · ${scopeDecision.actorId}` : '等待范围确认'} /></div>
+      <div className="td-flow-column gate"><small>人工门禁 1</small><RunWorkflowCard node={scopeGate} nodeKey="scope_gate" kind="gate" subtitle={scopeDecision ? `${scopeDecision.decision === 'approved' ? '已批准' : '已拒绝'} · ${scopeDecision.actorId}` : '等待范围确认'} onOpenRecord={openNodeRecord} /></div>
       <ArrowRight className="td-flow-arrow inline" />
-      <div className="td-flow-branch"><div><small>阶段 2 · 并行</small><RunWorkflowCard node={functional} nodeKey="functional_design" kind="agent" subtitle="功能测试点发散" /><RunWorkflowCard node={nonFunctional} nodeKey="non_functional_design" kind="agent" subtitle="性能 / 稳定性 / 兼容性 / 安全" /></div></div>
+      <div className="td-flow-branch"><div><small>阶段 2 · 并行</small><RunWorkflowCard node={functional} nodeKey="functional_design" kind="agent" subtitle="功能测试点发散" onOpenRecord={openNodeRecord} /><RunWorkflowCard node={nonFunctional} nodeKey="non_functional_design" kind="agent" subtitle="性能 / 稳定性 / 兼容性 / 安全" onOpenRecord={openNodeRecord} /></div></div>
       <ArrowRight className="td-flow-arrow inline" />
-      <div className="td-flow-column server"><small>服务端阶段</small><RunWorkflowCard node={treeMerge} nodeKey="tree_merge" kind="server" subtitle="合并专项候选并保留来源、重复与冲突" /></div>
+      <div className="td-flow-column server"><small>服务端阶段</small><RunWorkflowCard node={treeMerge} nodeKey="tree_merge" kind="server" subtitle="合并专项候选并保留来源、重复与冲突" onOpenRecord={openNodeRecord} /></div>
       <ArrowRight className="td-flow-arrow inline" />
-      <div className="td-flow-column gate"><small>人工门禁 2</small><RunWorkflowCard node={treeGate} nodeKey="tree_gate" kind="gate" subtitle={treeDecision ? `${treeDecision.decision === 'approved' ? '已批准' : '已拒绝'} · ${treeDecision.actorId}` : '等待测试点树批准'} /></div>
+      <div className="td-flow-column gate"><small>人工门禁 2</small><RunWorkflowCard node={treeGate} nodeKey="tree_gate" kind="gate" subtitle={treeDecision ? `${treeDecision.decision === 'approved' ? '已批准' : '已拒绝'} · ${treeDecision.actorId}` : '等待测试点树批准'} onOpenRecord={openNodeRecord} /></div>
       <ArrowRight className="td-flow-arrow inline" />
-      <div className="td-flow-column synthesis"><small>阶段 3-4</small><RunWorkflowCard node={synthesis} nodeKey="test_case_synthesis" kind="agent" subtitle="测试用例与数据需求具象化" /></div>
+      <div className="td-flow-column synthesis"><small>阶段 3-4</small><RunWorkflowCard node={synthesis} nodeKey="test_case_synthesis" kind="agent" subtitle="测试用例与数据需求具象化" onOpenRecord={openNodeRecord} /></div>
       <ArrowRight className="td-flow-arrow inline" />
-      <div className="td-flow-column audit server"><small>阶段 5 · 服务端</small><RunWorkflowCard node={coverage} nodeKey="coverage_audit" kind="server" subtitle="覆盖反向审计与候选发布" /></div>
+      <div className="td-flow-column audit server"><small>阶段 5 · 服务端</small><RunWorkflowCard node={coverage} nodeKey="coverage_audit" kind="server" subtitle="覆盖反向审计与候选发布" onOpenRecord={openNodeRecord} /></div>
     </div>
     {pendingGate && <GateDecisionPanel gateKey={pendingGate} design={design} run={run} submitting={gateSubmitting} onDecision={onGateDecision} />}
     {detailsOpen && <section className="td-run-details td-real-run-details" aria-label="工作流节点详情"><header><b>节点执行详情</b><span>来源：workflowRunId 对应的服务端记录；错误仅展示脱敏公开信息</span></header>{run.nodeRuns.map(nodeRun => <div key={nodeRun.id}><b>{nodeLabel(nodeRun.nodeKey)}</b><span><strong>{nodeExecutionSummary(nodeRun)}</strong><small>{nodeRun.error ? `${nodeRun.errorCode ?? '执行失败'}：${runErrorMessage(nodeRun.error, nodeRun.errorCode)}` : nodeRun.dependencies.length ? `依赖：${nodeRun.dependencies.map(nodeLabel).join('、')}` : '无上游依赖'}</small></span><time>{formatNodeTime(nodeRun.startedAt)} → {formatNodeTime(nodeRun.finishedAt)}</time><em>{nodeRun.execution ? (nodeRun.execution.degraded ? '已降级' : '未降级') : isAgentNode(nodeRun.nodeKey) ? '未记录' : '不适用'}</em><StatusPill tone={runStatusTone(nodeRun.status)}>{nodeStatusLabel(nodeRun.status)} · {nodeRun.attempt} 次尝试</StatusPill></div>)}</section>}
-  </div>
+  </div>{recordNode && <TestDesignNodeRecordModal run={run} node={recordNode} onClose={() => setRecordNodeId(null)} />}</>
 }
+
+function TestDesignNodeRecordModal({ run, node, onClose }: { run: TestDesignWorkflowRun; node: TestDesignWorkflowRun['nodeRuns'][number]; onClose: () => void }) {
+  const [tab, setTab] = useState<'conversation' | 'events'>('conversation')
+  const execution = node.execution
+  const events = execution?.events ?? []
+  const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
+  const completedToolIds = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
+  const conversation = events.filter(event => (event.type === 'message_end' && (event.role === 'user' || event.role === 'assistant'))
+    || event.type === 'tool_execution_end'
+    || (event.type === 'tool_execution_start' && !completedToolIds.has(event.toolCallId))
+    || event.type === 'result_submission_required'
+    || event.type === 'result_submission_retry')
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="modal rr-run-record-modal td-node-record-modal" role="dialog" aria-modal="true" aria-label={`${nodeLabel(node.nodeKey)}运行记录`}>
+    <header><h2>{nodeLabel(node.nodeKey)}运行记录</h2><button className="icon-btn" onClick={onClose} aria-label="关闭节点运行记录"><XCircle /></button></header>
+    <div className="rr-run-record">
+      <div className="rr-run-record-summary"><div><StatusPill tone={runStatusTone(node.status)}>{nodeStatusLabel(node.status)}</StatusPill><b>{node.id}</b><span>{execution?.modelLabel ?? '测试设计 Agent'} · generation {node.generation} · attempt {node.attempt}</span></div><dl><div><dt>开始</dt><dd>{formatRunTime(node.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? '-'}</dd></div><div><dt>工具调用</dt><dd>{execution ? `${execution.toolCalls}${execution.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}` : '-'}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : '未记录'}</dd></div></dl></div>
+      {node.error && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(node.error, node.errorCode)}</span></div>}
+      <div className="rr-run-record-tabs"><button className={tab === 'conversation' ? 'active' : ''} onClick={() => setTab('conversation')}><MessageSquareText />Agent 对话 <span>{conversation.length}</span></button><button className={tab === 'events' ? 'active' : ''} onClick={() => setTab('events')}><Activity />事件时间线 <span>{events.length}</span></button></div>
+      <div className="rr-run-record-body">{tab === 'conversation' ? <div className="rr-agent-conversation">
+        {conversation.map(event => {
+          if (event.type === 'message_end') return <article className={`rr-agent-message ${event.role}`} key={event.sequence}><header><span>{event.role === 'user' ? <FileText /> : <Bot />}{event.role === 'user' ? '运行任务' : event.model ?? execution?.modelLabel ?? 'Agent'}</span><small>Turn {event.turn ?? 0} · {testDesignEventTime(event.occurredAt)}</small></header>{event.content ? <p>{event.content}</p> : null}{event.toolCalls?.length ? <div className="rr-agent-tool-requests">{event.toolCalls.map(call => <span key={call.id}><Wrench />请求 {call.name}</span>)}</div> : null}{event.usage && <footer>Token：输入 {event.usage.input} · 输出 {event.usage.output} · 缓存读取 {event.usage.cacheRead} · 总计 {event.usage.totalTokens} · {event.stopReason ?? '未知停止原因'}</footer>}</article>
+          if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+            const start = event.type === 'tool_execution_start' ? event : toolStarts.get(event.toolCallId ?? '')
+            return <article className={`rr-agent-tool ${event.isError ? 'failed' : ''}`} key={event.sequence}><header><span><Wrench />{event.toolId ?? start?.toolId ?? '未知工具'}</span><StatusPill tone={event.type === 'tool_execution_start' ? 'warning' : event.isError ? 'danger' : 'success'}>{event.type === 'tool_execution_start' ? '执行中' : event.isError ? '失败' : '完成'}</StatusPill><small>Turn {event.turn ?? start?.turn ?? 0} · {testDesignEventTime(event.occurredAt)}</small></header><div><details><summary>查看调用参数</summary><pre>{formatTestDesignTraceValue(start?.toolArguments) || '该记录未保存参数'}</pre></details>{event.type === 'tool_execution_end' && <details><summary>查看工具返回</summary><pre>{formatTestDesignTraceValue(event.toolResult) || '该记录未保存返回内容'}</pre></details>}</div><footer>{event.toolCallId ?? '未记录 toolCallId'}</footer></article>
+          }
+          return <div className="rr-agent-control" key={event.sequence}><Sparkles /><span><b>{testDesignEventLabels[event.type] ?? event.type}</b><small>Turn {event.turn ?? 0} · {testDesignEventTime(event.occurredAt)}</small></span></div>
+        })}
+        {!conversation.length && <div className="rr-trace-empty"><MessageSquareText /><b>没有可展示的 Agent 对话</b><p>{node.status === 'running' ? '当前节点完成后会固定脱敏执行记录。' : events.length ? '该运行只保存了生命周期事件。' : '该节点没有采集到 Agent 交互。'}</p></div>}
+      </div> : <div className="rr-agent-events">{events.map(event => <article key={event.sequence}><i className={event.isError ? 'failed' : event.type.includes('tool') ? 'tool' : event.type.includes('message') ? 'message' : ''} /><span><b>{testDesignEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0}{event.toolId ? ` · ${event.toolId}` : ''}{event.role ? ` · ${event.role}` : ''}</small></span><time>{testDesignEventTime(event.occurredAt)}</time></article>)}</div>}</div>
+    </div>
+  </section></div>
+}
+
+function testDesignEventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
+function formatTestDesignTraceValue(value: unknown) { return value === undefined ? '' : JSON.stringify(value, null, 2) ?? String(value) }
 
 function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { gateKey: 'scope' | 'test-point-tree'; design: TestDesign | null; run: TestDesignWorkflowRun; submitting: boolean; onDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void> }) {
   const [comment, setComment] = useState('')
@@ -823,15 +885,17 @@ function FixedInputCard({ run, time }: { run: TestDesignWorkflowRun; time: strin
   return <article className="fixed-input"><span><LockKeyhole /></span><p><b>{run.basisSnapshot.basisMode === 'review_baseline' ? '评审基线快照' : '知识库资料快照'}</b><small>{run.basisSnapshot.items.length} 项依据 · Hash 已固定</small><em>{time}</em></p><CheckCircle2 /></article>
 }
 
-function RunWorkflowCard({ node, nodeKey, kind, subtitle }: { node?: TestDesignWorkflowRun['nodeRuns'][number]; nodeKey: string; kind: 'agent' | 'gate' | 'server'; subtitle: string }) {
+function RunWorkflowCard({ node, nodeKey, kind, subtitle, onOpenRecord }: { node?: TestDesignWorkflowRun['nodeRuns'][number]; nodeKey: string; kind: 'agent' | 'gate' | 'server'; subtitle: string; onOpenRecord: (node: TestDesignWorkflowRun['nodeRuns'][number]) => void }) {
   const status = node?.status ?? 'pending'
   const description = node?.error ? `${node.errorCode ?? '执行失败'}：${runErrorMessage(node.error, node.errorCode)}` : subtitle
-  return <article className={`${kind} ${nodeKey} ${status}`} data-node-key={nodeKey}><span>{nodeStatusIcon(status, kind)}</span><p><b>{nodeLabel(nodeKey)}</b><small>{description}</small><em>{nodeExecutionSummary(node)}<br />{node ? `${formatNodeTime(node.startedAt)} → ${formatNodeTime(node.finishedAt)}` : '节点记录未返回'}</em></p><StatusIcon status={status} /></article>
+  const recordAvailable = hasNodeRunRecord(node)
+  return <article className={`${kind} ${nodeKey} ${status}`} data-node-key={nodeKey}><span>{nodeStatusIcon(status, kind)}</span><p><b>{nodeLabel(nodeKey)}</b><small>{description}</small><em>{nodeExecutionSummary(node)}<br />{node ? `${formatNodeTime(node.startedAt)} → ${formatNodeTime(node.finishedAt)}` : '节点记录未返回'}</em></p><StatusIcon status={status} /><button className="td-node-record-button" type="button" disabled={!recordAvailable} title={recordAvailable ? `查看${nodeLabel(nodeKey)}运行记录` : `${nodeLabel(nodeKey)}暂无运行记录`} onClick={() => { if (node && recordAvailable) onOpenRecord(node) }}><Activity />{recordAvailable ? '运行记录' : '暂无记录'}</button></article>
 }
 
 function StatusIcon({ status }: { status: string }) { return status === 'succeeded' ? <CheckCircle2 /> : status === 'failed' ? <XCircle /> : status === 'running' ? <RefreshCw className="spin" /> : null }
 function nodeStatusIcon(status: string, kind: 'agent' | 'gate' | 'server') { if (status === 'succeeded') return <Check />; if (status === 'failed') return <XCircle />; if (status === 'running') return <RefreshCw className="spin" />; return kind === 'gate' ? <Users /> : kind === 'server' ? <Network /> : <Bot /> }
 function isAgentNode(nodeKey: string) { return ['test_analysis', 'functional_design', 'non_functional_design', 'test_case_synthesis'].includes(nodeKey) }
+function hasNodeRunRecord(node?: TestDesignWorkflowRun['nodeRuns'][number]) { return Boolean(node?.execution?.events.length) }
 function nodeExecutionSummary(node?: TestDesignWorkflowRun['nodeRuns'][number]) { if (!node) return '节点记录未返回'; if (!isAgentNode(node.nodeKey)) return node.nodeKey === 'scope_gate' || node.nodeKey === 'tree_gate' ? '人工门禁' : '服务端确定性阶段'; if (!node.execution) return node.attempt ? `attempt ${node.attempt} · 执行详情未记录` : '尚未执行'; return `${node.execution.modelLabel} · ${node.execution.turns} Turn · ${node.execution.toolCalls} 次工具调用${node.execution.toolErrors ? ` · 异常 ${node.execution.toolErrors}` : ''}` }
 function formatNodeTime(value?: string) { return value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '未记录' }
 

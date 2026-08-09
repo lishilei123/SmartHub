@@ -51,6 +51,24 @@ test('范围确认门禁展示可审阅的结构化范围而不是对象字符�
   assert.doesNotMatch(source, /String\(scopeContent\.scope/)
 })
 
+test('测试设计工作流每个节点都可查看与评审一致的运行记录', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
+
+  assert.match(source, /function TestDesignNodeRecordModal/)
+  assert.match(source, /Agent 对话/)
+  assert.match(source, /事件时间线/)
+  assert.match(source, /toolArguments/)
+  assert.match(source, /toolResult/)
+  assert.match(source, /className="td-node-record-button"/)
+  assert.match(source, /hasNodeRunRecord/)
+  assert.match(source, /recordAvailable \? '运行记录' : '暂无记录'/)
+  assert.doesNotMatch(source, /className="td-detail-record-button"/)
+  assert.equal((source.match(/onOpenRecord=\{openNodeRecord\}/g) ?? []).length, 8)
+  assert.match(styles, /\.td-node-record-button/)
+  assert.match(styles, /\.td-node-record-modal/)
+})
+
 test('创建页不再展示或提交硬编码候选数据', () => {
   const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
   assert.match(source, /inputs\.reviewBaselines/)

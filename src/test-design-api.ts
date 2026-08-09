@@ -62,7 +62,24 @@ export type TestDesignNodeRun = {
     toolCalls: number
     toolErrors?: number
     framework?: { name: 'pi-agent-core'; version: string }
-    events: Array<{ type: string; model?: string; occurredAt?: string }>
+    events: Array<{
+      sequence: number
+      type: string
+      occurredAt: string
+      turn?: number
+      toolId?: string
+      toolCallId?: string
+      isError?: boolean
+      role?: 'user' | 'assistant' | 'tool'
+      content?: string
+      toolCalls?: Array<{ id: string; name: string }>
+      toolArguments?: unknown
+      toolResult?: unknown
+      stopReason?: string
+      model?: string
+      usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }
+      framework?: { name: 'pi-agent-core'; version: string }
+    }>
   }
 }
 
@@ -82,7 +99,7 @@ export type TestDesignWorkflowRun = TestDesignRunSummary & {
   historicalSnapshot: { items: unknown[]; snapshotSha256: string; createdAt: string }
   nodeRuns: TestDesignNodeRun[]
   artifacts: TestDesignArtifact[]
-  gateDecisions: Array<{ id: string; gateKey: 'scope' | 'test-point-tree'; decision: 'approved' | 'rejected'; actorId: string; createdAt: string }>
+  gateDecisions: Array<{ id: string; gateKey: 'scope' | 'test-point-tree'; decision: 'approved' | 'rejected'; comment?: string; actorId: string; createdAt: string }>
   testPointTree?: { id: string; currentRevision: number }
   testCases: unknown[]
   dataSetVersions: unknown[]
