@@ -452,7 +452,7 @@
       "piName": "functional_test_design_submit_result",
       "label": "提交功能测试点候选",
       "catalogName": "提交功能测试点候选",
-      "description": "提交 functional-test-design/v1 测试点语义候选；正式节点 ID 和树版本由服务端生成。",
+      "description": "提交 functional-test-design/v1 原子测试点语义候选；先按角色、状态、输入分区/边界、业务分支和独立预期结果拆分，避免用宽泛节点压缩多个场景。正式节点 ID 和树版本由服务端生成。",
       "catalogDescription": "提交功能测试点树候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -467,7 +467,7 @@
       "piName": "non_functional_test_design_submit_result",
       "label": "提交非功能测试点候选",
       "catalogName": "提交非功能测试点候选",
-      "description": "提交 non-functional-test-design/v1 四维专项候选；正式节点 ID 和树版本由服务端生成。",
+      "description": "提交 non-functional-test-design/v1 四维专项候选；性能、稳定性、兼容性和安全须逐一给出结论，适用分区按独立负载、故障、矩阵或威胁场景拆分。正式节点 ID 和树版本由服务端生成。",
       "catalogDescription": "提交非功能测试点树候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -498,7 +498,7 @@
             "type": "array",
             "minItems": 1,
             "maxItems": 1000,
-            "description": "批准测试点树的具象化用例。不要使用 preConditions、根级 steps、expectedResults、entryPoints、用例内 dataRequirements 或 testData。",
+            "description": "批准测试点树的具象化用例。每个适用测试点必须被覆盖；角色、状态、输入分区/边界、业务分支或预期结果不同通常应拆成独立用例，不要用一条宽泛用例引用整棵子树。不要使用 preConditions、根级 steps、expectedResults、entryPoints、用例内 dataRequirements 或 testData。",
             "items": {
               "type": "object",
               "properties": {

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
+import { buildTestDesignAgentTask } from '../server/agent/pi-test-design-runtime.js'
+import { defaultAgentDefinitionConfigDictionary } from '../server/agent/agent-definition-config.js'
 import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
 import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
 import { ProjectVersionService } from '../server/application/project-version-service.js'
@@ -55,6 +57,26 @@ test('用例综合候选校验数据需求索引并保留规范结构', () => {
   assert.equal(result.cases[0].executionMethods[0].steps[0].expected, '返回明确结果')
   assert.deepEqual(result.dataRequirements[0].caseIndexes, [0])
   assert.throws(() => validateTestCaseSynthesisCandidate({ ...result, dataRequirements: [{ ...result.dataRequirements[0], caseIndexes: [1] }] }, new Set(['point-1'])), /caseIndexes/u)
+  assert.throws(
+    () => validateTestCaseSynthesisCandidate({ schemaVersion: 'test-case-synthesis/v1', cases: [caseContent(['point-1'])], dataRequirements: [] }, new Set(['point-1', 'point-2'])),
+    (error: unknown) => error instanceof TestDesignError
+      && error.code === 'TEST_CASE_SYNTHESIS_SCHEMA_INVALID'
+      && (error.details as { path?: string }).path === '/cases'
+      && error.message.includes('point-2'),
+  )
+})
+
+test('测试设计内置 Prompt 要求矩阵化发散并在综合前完成全集核对', () => {
+  assert.equal(defaultAgentDefinitionConfigDictionary['review-qa'].version, '1.0.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.1.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['functional-test-design'].version, '1.1.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].version, '1.1.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].version, '1.2.0')
+  assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /coverage unit/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['functional-test-design'].systemPrompt, /角色 × 前置\/当前状态 × 输入等价类或边界/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].systemPrompt, /四个分区均有明确结论/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /全部适用 nodeId 均有映射/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /不得用固定数量配额或同义重复凑数/u)
 })
 
 test('测试设计候选接口返回真实资产版本和内容 Hash', async () => {
@@ -74,6 +96,10 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
     knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [],
   }, principal)
   const run = await service.createRun('pv-1', design.id, 'create-run-1', principal)
+  const task = JSON.parse(buildTestDesignAgentTask({ stage: 'test_analysis', run, upstream: {} }, design)) as { designContext: { objective: string }; generationPolicy: { version: string; stageRules: string[] } }
+  assert.equal(task.designContext.objective, '验证登录与账号保护')
+  assert.equal(task.generationPolicy.version, 'test-design-generation-policy/v2')
+  assert.match(task.generationPolicy.stageRules.join(' '), /coverage unit/u)
   const scopeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate')
   assert.equal(scopeWaiting.basisSnapshot.items[0].sourceId, 'asset-version-1:paragraph-1')
   assert.equal(scopeWaiting.basisSnapshot.items.every(item => item.locator.coverageTarget === true), true)

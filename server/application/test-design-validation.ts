@@ -128,6 +128,14 @@ export function validateTestCaseSynthesisCandidate(value: unknown, validPointIds
       synthesisFail(path, errorMessage(error))
     }
   })
+  if (validPointIds) {
+    const coveredPointIds = new Set(cases.flatMap(testCase => testCase.testPointIds))
+    const missingPointIds = [...validPointIds].filter(pointId => !coveredPointIds.has(pointId))
+    if (missingPointIds.length) {
+      const preview = missingPointIds.slice(0, 20).join('、')
+      synthesisFail('/cases', `缺少 ${missingPointIds.length} 个已批准适用测试点的用例映射：${preview}${missingPointIds.length > 20 ? ' 等' : ''}`)
+    }
+  }
 
   const refs = new Set<string>()
   const dataRequirements = input.dataRequirements.map((candidate, index): TestDataRequirementCandidate => {
