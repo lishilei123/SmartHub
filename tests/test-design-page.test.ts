@@ -129,6 +129,19 @@ test('依据解构兼容历史根级字段并展示规范 coverageUnits', () => 
   assert.deepEqual(canonical.map(group => [group.key, group.items.length]), [['scopeSummary', 1], ['objectives', 1], ['inclusions', 1], ['coverageUnits', 1]])
 })
 
+test('真实产物页签与依据解构子模块拥有明确的独立滚动容器', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
+
+  assert.match(source, /className="td-run-artifact-view td-run-analysis-view"/)
+  assert.match(styles, /\.td-workspace-grid\{grid-template-rows:minmax\(0,1fr\)\}/)
+  assert.match(styles, /\.td-main-canvas\{display:flex;flex-direction:column\}/)
+  assert.match(styles, /\.td-run-artifact-view\{[^}]*height:100%;[^}]*min-height:0;[^}]*overflow:auto/)
+  assert.match(styles, /\.td-run-analysis-view\{display:flex;flex-direction:column;overflow:hidden\}/)
+  assert.match(styles, /\.td-run-analysis-grid\{[^}]*min-height:0;[^}]*flex:1;[^}]*overflow:auto/)
+  assert.match(styles, /\.td-run-analysis-grid>section>div\{[^}]*min-height:0;[^}]*flex:1;[^}]*overflow:auto/)
+})
+
 test('活动测试设计运行静默更新且手动刷新不清空工作台', () => {
   const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
 

@@ -1166,7 +1166,7 @@ function analysisEntry(value: unknown, index: number) {
 function RunAnalysisArtifact({ run }: { run: TestDesignWorkflowRun }) {
   const artifact = currentNodeArtifact(run, 'test_analysis')!
   const groups = analysisGroups(run)
-  return <div className="td-run-artifact-view">
+  return <div className="td-run-artifact-view td-run-analysis-view">
     <RunArtifactHeader title="依据解构" description={`${artifact.schemaVersion} · 固定产物 ${shortHash(artifact.contentSha256)}`}><StatusPill tone="success">{analysisItemCount(run)} 项</StatusPill></RunArtifactHeader>
     {groups.length ? <div className="td-run-analysis-grid">{groups.map(group => <section key={group.key}><header><span><Braces /><b>{analysisGroupLabels[group.key] ?? group.key}</b></span><em>{group.items.length}</em></header><div>{group.items.map((value, index) => { const item = analysisEntry(value, index); return <article key={`${group.key}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span><p><b>{item.title}</b>{item.description && <small>{item.description}</small>}</p></article> })}</div></section>)}</div> : <RunIntentionalEmpty icon={<ListChecks />} title="依据解构结果为空" description="该固定产物没有返回可展示的结构化条目。" />}
     {run.findings.length > 0 && <section className="td-run-findings"><header><b>分析 Finding</b><span>{run.findings.length}</span></header>{run.findings.map(item => <article key={item.id}><AlertTriangle /><p><small>{item.severity} · {item.state}</small><b>{item.title}</b><em>{item.description}</em></p></article>)}</section>}
