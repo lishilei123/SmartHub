@@ -613,7 +613,7 @@
                 "featureTags": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
                 "testPointIds": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
                 "caseIndexes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "关联 cases[] 的零基索引。", "items": { "type": "integer", "minimum": 0, "maximum": 999 } },
-                "fieldConstraints": { "type": "object", "properties": {}, "additionalProperties": true },
+                "fieldConstraints": { "type": "object", "description": "字段约束键值表。值优先使用长度不超过 2000 的非空字符串，例如 {\"noProductionData\":\"true\",\"status\":\"active\"}；服务端兼容布尔值和有限数值并规范化为字符串，不要提交对象、数组或 null。", "properties": {}, "additionalProperties": true },
                 "relationships": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
                 "quantity": { "type": "integer", "minimum": 1, "maximum": 1000000 },
                 "initialState": { "type": "string", "minLength": 1, "maxLength": 2000 },

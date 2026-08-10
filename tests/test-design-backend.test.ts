@@ -101,12 +101,26 @@ test('用例综合候选校验数据需求索引并保留规范结构', () => {
   )
 })
 
+test('用例综合候选将 fieldConstraints 标量规范化为字符串并拒绝复杂值', () => {
+  const candidate = {
+    schemaVersion: 'test-case-synthesis/v1',
+    cases: [caseContent(['point-1'])],
+    dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: ['point-1'], caseIndexes: [0], fieldConstraints: { noProductionData: true, retryLimit: 3, status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }],
+  }
+  const result = validateTestCaseSynthesisCandidate(candidate, new Set(['point-1']))
+  assert.deepEqual(result.dataRequirements[0].fieldConstraints, { noProductionData: 'true', retryLimit: '3', status: 'active' })
+  assert.throws(
+    () => validateTestCaseSynthesisCandidate({ ...candidate, dataRequirements: [{ ...candidate.dataRequirements[0], fieldConstraints: { nested: { value: true } } }] }, new Set(['point-1'])),
+    /fieldConstraints\/nested.*非空字符串、布尔值或有限数值/u,
+  )
+})
+
 test('测试设计内置 Prompt 要求矩阵化发散并在综合前完成全集核对', () => {
   assert.equal(defaultAgentDefinitionConfigDictionary['review-qa'].version, '1.0.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.3.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['functional-test-design'].version, '1.1.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].version, '1.2.0')
-  assert.equal(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].version, '1.2.0')
+  assert.equal(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].version, '1.3.0')
   assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /coverage unit/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /所有数组字段即使没有内容也提交空数组/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /不得在 test_analysis_submit_result 中回传/u)
@@ -115,6 +129,7 @@ test('测试设计内置 Prompt 要求矩阵化发散并在综合前完成全集
   assert.match(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].systemPrompt, /只调用一次 non_functional_test_design_submit_result/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /全部适用 nodeId 均有映射/u)
   assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /不得用固定数量配额或同义重复凑数/u)
+  assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].taskTemplate, /fieldConstraints.*noProductionData.*true/u)
 })
 
 test('测试设计候选接口返回真实资产版本和内容 Hash', async () => {

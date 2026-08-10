@@ -382,7 +382,14 @@ function synthesisText(value: unknown, path: string, max: number) { if (typeof v
 function synthesisTexts(value: unknown, path: string, maxItems: number, maxLength: number) { if (!Array.isArray(value) || value.length > maxItems) synthesisFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => synthesisText(item, `${path}/${index}`, maxLength)) }
 function synthesisIds(value: unknown, path: string) { return [...new Set(synthesisTexts(value, path, 1_000, 500).map(item => { if (/^(latest|active)$/iu.test(item)) synthesisFail(path, '不允许动态引用 latest 或 active'); return item }))] }
 function synthesisIndexes(value: unknown, path: string, caseCount: number) { if (!Array.isArray(value) || !value.length || value.length > caseCount) synthesisFail(path, '必须是引用至少一条候选用例的索引数组'); const indexes = value.map((item, index) => { if (!Number.isInteger(item) || Number(item) < 0 || Number(item) >= caseCount) synthesisFail(`${path}/${index}`, `必须是 0 到 ${caseCount - 1} 的整数`); return Number(item) }); if (new Set(indexes).size !== indexes.length) synthesisFail(path, '不能包含重复索引'); return indexes }
-function synthesisStringRecord(value: unknown, path: string) { const input = synthesisObject(value, path, '必须是对象'); return Object.fromEntries(Object.entries(input).map(([key, item]) => [key, synthesisText(item, `${path}/${key}`, 2_000)])) }
+function synthesisStringRecord(value: unknown, path: string) {
+  const input = synthesisObject(value, path, '必须是对象')
+  return Object.fromEntries(Object.entries(input).map(([key, item]) => {
+    if (typeof item === 'string') return [key, synthesisText(item, `${path}/${key}`, 2_000)]
+    if (typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item))) return [key, String(item)]
+    synthesisFail(`${path}/${key}`, '必须是非空字符串、布尔值或有限数值')
+  }))
+}
 function synthesisPositiveInteger(value: unknown, path: string) { if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 1_000_000) synthesisFail(path, '必须是 1 到 1000000 的整数'); return Number(value) }
 function synthesisEnum<const T extends string>(value: unknown, path: string, allowed: readonly T[]): T { if (typeof value !== 'string' || !allowed.includes(value as T)) synthesisFail(path, `必须为 ${allowed.join('、')}`); return value as T }
 function synthesisFail(path: string, message: string): never { throw new TestDesignError('TEST_CASE_SYNTHESIS_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }

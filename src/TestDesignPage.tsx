@@ -733,7 +733,10 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
     return <section className="td-workbench-loading" aria-live="polite"><RunLoading /></section>
   }
 
-  return <section className={`td-workbench ${rightOpen ? '' : 'detail-collapsed'}`}>
+  const hasDetailPanel = tab === 'overview' || (tab === 'cases' && selectedRunCaseId !== null)
+  const detailPanelOpen = hasDetailPanel && rightOpen
+
+  return <section className={`td-workbench ${detailPanelOpen ? '' : 'detail-collapsed'}`}>
     <header className="td-workbench-head">
       <div className="td-title-block">
         <button className="td-back" onClick={returnToList} aria-label="返回测试设计列表"><ChevronRight /></button>
@@ -742,7 +745,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
         <StatusPill tone={runStatusTone(activeRun.status)}>{workspaceRefreshing ? '正在同步' : workspaceLoading ? '正在加载' : runStatusLabel(activeRun.status)}</StatusPill>
       </div>
       <div className="td-head-actions">
-        <button className="icon-btn td-mobile-detail-button" onClick={() => setRightOpen(value => !value)} aria-label={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
+        {hasDetailPanel && <button className="icon-btn td-mobile-detail-button" onClick={() => setRightOpen(value => !value)} aria-label={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>}
         <button className="btn" disabled={workspaceLoading || workspaceRefreshing} onClick={refreshWorkspace}><RefreshCw className={workspaceLoading || workspaceRefreshing ? 'spin' : ''} />{workspaceRefreshing ? '同步中' : '刷新'}</button>
         <button className="btn" disabled={!activeRun?.testCases.length} onClick={() => notify('当前运行尚未发布用例集，暂无可导出的固定版本。', 'warning')}><Download />导出<ChevronDown /></button>
         <button className="btn primary" disabled={!canPublishRun(activeRun)} title={activeRun && !canPublishRun(activeRun) ? '请先清除覆盖阻断项并批准全部用例' : '发布当前固定用例集'} onClick={() => { selectTab('case-set'); notify('当前运行已满足发布门禁，请在用例集视图确认固定版本。') }}><LockKeyhole />发布用例集</button>
@@ -758,7 +761,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
 
     <nav className="td-tabs" aria-label="测试设计视图">
       {tabs.map(item => { const count = runTabCount(item.key, activeRun); return <button key={item.key} className={tab === item.key ? 'active' : ''} onClick={() => selectTab(item.key)}>{item.label}{count !== undefined && <span>{count}</span>}</button> })}
-      <button className="td-detail-toggle" onClick={() => setRightOpen(value => !value)} title={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>
+      {hasDetailPanel && <button className="td-detail-toggle" onClick={() => setRightOpen(value => !value)} title={rightOpen ? '收起详情' : '展开详情'}><PanelRightClose /></button>}
     </nav>
 
     <div className="td-workspace-grid">
@@ -766,12 +769,12 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
       <main className="td-main-canvas">
         {workspaceLoading && <RunLoading />}
         {!workspaceLoading && activeRun && tab === 'overview' && <RunOverview design={activeDesign} run={activeRun} onNavigate={selectTab} />}
-        {!workspaceLoading && activeRun && tab === 'workflow' && <RunWorkflowView design={activeDesign} run={activeRun} onGateDecision={submitGateDecision} onRunAction={runAction} gateSubmitting={gateSubmitting} />}
-        {!workspaceLoading && activeRun && !['overview', 'workflow'].includes(tab) && <RunArtifactView tab={tab} run={activeRun} projectId={projectVersion.projectId} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} notify={notify} onRefresh={refreshRunOnly} selectedCaseId={selectedRunCaseId} onSelectCase={openRunCase} onNewCase={openNewRunCase} onOpenTree={() => selectTab('tree')} />}
+        {!workspaceLoading && activeRun && tab === 'workflow' && <RunWorkflowView design={activeDesign} run={activeRun} onNavigate={selectTab} onGateDecision={submitGateDecision} onRunAction={runAction} gateSubmitting={gateSubmitting} />}
+        {!workspaceLoading && activeRun && !['overview', 'workflow'].includes(tab) && <RunArtifactView tab={tab} run={activeRun} projectId={projectVersion.projectId} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} notify={notify} onRefresh={refreshRunOnly} selectedCaseId={selectedRunCaseId} onSelectCase={openRunCase} onNewCase={openNewRunCase} onOpenTree={() => selectTab('tree')} onOpenGate={() => { selectTab('workflow'); window.setTimeout(() => document.getElementById('test-design-gate-decision')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0) }} />}
       </main>
-      {rightOpen && activeRun && tab === 'cases' && selectedRunCaseId
+      {detailPanelOpen && tab === 'cases' && selectedRunCaseId
         ? <RunCaseEditor key={`${activeRun.id}:${selectedRunCaseId}:${newCasePointId ?? ''}`} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} run={activeRun} caseId={selectedRunCaseId} initialPointId={newCasePointId} notify={notify} onRefresh={refreshRunOnly} onCreated={caseId => { setSelectedRunCaseId(caseId); setNewCasePointId(null) }} />
-        : rightOpen && activeRun && <RunDetailPanel design={activeDesign} run={activeRun} />}
+        : detailPanelOpen && tab === 'overview' && <RunDetailPanel design={activeDesign} run={activeRun} />}
     </div>
   </section>
 }
@@ -798,7 +801,7 @@ function RunOverview({ design, run, onNavigate }: { design: TestDesign | null; r
   </div>
 }
 
-function RunWorkflowView({ design, run, onGateDecision, onRunAction, gateSubmitting }: { design: TestDesign | null; run: TestDesignWorkflowRun; onGateDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void>; onRunAction: (action: 'cancel' | 'revise_scope' | 'retry_functional' | 'retry_non_functional' | 'resynthesize' | 'full_rerun') => Promise<void>; gateSubmitting: boolean }) {
+function RunWorkflowView({ design, run, onNavigate, onGateDecision, onRunAction, gateSubmitting }: { design: TestDesign | null; run: TestDesignWorkflowRun; onNavigate: (tab: TabKey) => void; onGateDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void>; onRunAction: (action: 'cancel' | 'revise_scope' | 'retry_functional' | 'retry_non_functional' | 'resynthesize' | 'full_rerun') => Promise<void>; gateSubmitting: boolean }) {
   const node = (nodeKey: string) => run.nodeRuns.find(item => item.nodeKey === nodeKey)
   const fixedInputTime = formatRunTime(run.basisSnapshot.createdAt)
   const gateDecision = (gateKey: 'scope' | 'test-point-tree') => [...run.gateDecisions].reverse().find(item => item.gateKey === gateKey)
@@ -839,7 +842,7 @@ function RunWorkflowView({ design, run, onGateDecision, onRunAction, gateSubmitt
       <div className="td-flow-column audit server"><small>阶段 5 · 服务端</small><RunWorkflowCard node={coverage} nodeKey="coverage_audit" kind="server" subtitle="覆盖反向审计与候选发布" onOpenRecord={openNodeRecord} /></div>
       </div>
     </div>
-    {pendingGate && <GateDecisionPanel gateKey={pendingGate} design={design} run={run} submitting={gateSubmitting} onDecision={onGateDecision} />}
+    {pendingGate && <GateDecisionPanel gateKey={pendingGate} design={design} run={run} onNavigate={onNavigate} submitting={gateSubmitting} onDecision={onGateDecision} />}
     {detailsOpen && <section className="td-run-details td-real-run-details" aria-label="工作流节点详情"><header><b>节点执行详情</b><span>来源：workflowRunId 对应的服务端记录；错误仅展示脱敏公开信息</span></header>{run.nodeRuns.map(nodeRun => <div key={nodeRun.id}><b>{nodeLabel(nodeRun.nodeKey)}</b><span><strong>{nodeExecutionSummary(nodeRun)}</strong><small>{nodeRun.error ? `${nodeRun.errorCode ?? '执行失败'}：${runErrorMessage(nodeRun.error, nodeRun.errorCode)}` : nodeRun.dependencies.length ? `依赖：${nodeRun.dependencies.map(nodeLabel).join('、')}` : '无上游依赖'}</small></span><time>{formatNodeTime(nodeRun.startedAt)} → {formatNodeTime(nodeRun.finishedAt)}</time><em>{nodeRun.execution ? (nodeRun.execution.degraded ? '已降级' : '未降级') : isAgentNode(nodeRun.nodeKey) ? '未记录' : '不适用'}</em><StatusPill tone={runStatusTone(nodeRun.status)}>{nodeStatusLabel(nodeRun.status)} · {nodeRun.attempt} 次尝试</StatusPill></div>)}</section>}
   </div>{recordNode && <TestDesignNodeRecordModal run={run} node={recordNode} onClose={() => setRecordNodeId(null)} />}</>
 }
@@ -886,8 +889,9 @@ function TestDesignNodeRecordModal({ run, node, onClose }: { run: TestDesignWork
 function testDesignEventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
 function formatTestDesignTraceValue(value: unknown) { return value === undefined ? '' : JSON.stringify(value, null, 2) ?? String(value) }
 
-function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { gateKey: 'scope' | 'test-point-tree'; design: TestDesign | null; run: TestDesignWorkflowRun; submitting: boolean; onDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void> }) {
+function GateDecisionPanel({ gateKey, design, run, onNavigate, submitting, onDecision }: { gateKey: 'scope' | 'test-point-tree'; design: TestDesign | null; run: TestDesignWorkflowRun; onNavigate: (tab: TabKey) => void; submitting: boolean; onDecision: (gateKey: 'scope' | 'test-point-tree', decision: 'approved' | 'rejected', comment: string) => Promise<void> }) {
   const [comment, setComment] = useState('')
+  const [scopeDetailKey, setScopeDetailKey] = useState<string | null>(null)
   const scopeArtifact = currentNodeArtifact(run, 'test_analysis')
   const scopeContent = recordOf(scopeArtifact?.content)
   const analysisContent = recordOf(scopeContent.analysis)
@@ -897,12 +901,15 @@ function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { g
   const technicalSolutions = labelScopeRefs(displayValues(rangeContent.technicalSolutions ?? rangeContent.solutions ?? scopeRecord.technicalSolutions ?? scopeContent.technicalSolutions), run, ['solutionPoints', 'technicalSolutionPoints'])
   const includedScopes = uniqueText([
     ...scopeRules(design?.input?.includedScopes),
-    ...displayValues(analysisContent.includedScopes ?? scopeContent.includedScopes ?? scopeRecord.included),
+    ...displayValues(analysisContent.includedScopes ?? scopeContent.includedScopes ?? scopeRecord.inclusions ?? scopeRecord.included),
   ])
   const excludedScopes = uniqueText([
     ...scopeRules(design?.input?.excludedScopes),
-    ...displayValues(analysisContent.excludedScopes ?? scopeContent.excludedScopes ?? scopeRecord.excluded),
+    ...displayValues(analysisContent.excludedScopes ?? scopeContent.excludedScopes ?? scopeRecord.exclusions ?? scopeRecord.excluded),
   ])
+  const scopeObjectives = uniqueText(displayValues(scopeRecord.objectives ?? analysisContent.objectives ?? scopeContent.objectives))
+  const knowledgeBasis = run.basisSnapshot.items.filter(item => recordOf(recordOf(item).locator).coverageTarget !== false).map((item, index) => scopeBasisSummary(item, index))
+  const coverageUnits = Array.isArray(scopeContent.coverageUnits) ? scopeContent.coverageUnits.map((item, index) => scopeCoverageUnitSummary(item, index)) : []
   const focusDimensions = uniqueText([
     ...displayValues(design?.input?.focusDimensions),
     ...displayValues(analysisContent.focusDimensions ?? analysisContent.dimensions ?? scopeContent.focusDimensions),
@@ -915,16 +922,33 @@ function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { g
     ...displayValues(analysisContent.risks ?? scopeContent.risks),
     ...run.findings.map(readableText),
   ])
-  const confirmations = uniqueText([
-    ...displayValues(analysisContent.pendingConfirmations ?? analysisContent.confirmationItems ?? scopeContent.confirmationItems),
-    ...run.confirmationItems.map(item => { const value = recordOf(item); return readableText(value.question ?? value.title) }),
-  ])
+  const artifactConfirmations = displayValues(analysisContent.pendingConfirmations ?? analysisContent.confirmationItems ?? scopeContent.confirmationItems)
+  const openConfirmations = run.confirmationItems.filter(item => item.state === 'open')
+  const confirmations = uniqueText(run.confirmationItems.length
+    ? openConfirmations.map(item => item.question || item.title)
+    : artifactConfirmations)
   const historicalDispositions = displayValues(analysisContent.historicalCaseDispositions ?? analysisContent.historicalCases ?? scopeContent.historicalCaseDispositions)
+  const openBlockingConfirmations = run.confirmationItems.filter(item => item.state === 'open' && item.blocker && item.impactStage === 'analysis')
+  const scopeApprovalBlocked = gateKey === 'scope' && openBlockingConfirmations.length > 0
   const scopeText = readableText(scopeContent.scope)
     || readableText(scopeContent.summary)
     || readableText(scopeContent.overview)
     || `已识别 ${requirements.length} 个需求点、${technicalSolutions.length} 个技术方案要点，请核对下列范围边界后再确认。`
   const isScope = gateKey === 'scope'
+  const basisMode = design?.basisMode ?? run.basisSnapshot.basisMode
+  const scopeGroups: ScopeDetailGroup[] = [
+    { key: 'objectives', title: '分析目标', items: scopeObjectives, empty: '分析产物未声明目标' },
+    ...(basisMode === 'knowledge_assets'
+      ? [{ key: 'knowledge-basis', title: '纳入的知识基线项', items: knowledgeBasis, empty: '没有可展示的知识基线项' }, { key: 'coverage-units', title: '原子覆盖单元', items: coverageUnits, empty: '分析产物未生成原子覆盖单元' }]
+      : [{ key: 'requirements', title: '纳入的需求点', items: requirements, empty: '分析产物未列出需求点' }, { key: 'technical-solutions', title: '纳入的技术方案要点', items: technicalSolutions, empty: '分析产物未列出技术方案要点' }]),
+    { key: 'inclusions', title: '显式包含范围', items: includedScopes, empty: '未额外限定，按固定基线全量分析' },
+    { key: 'exclusions', title: '明确排除范围', items: excludedScopes, empty: '未声明排除项' },
+    { key: 'dimensions', title: '关注维度', items: focusDimensions, empty: '未限定重点维度，后续仍需逐项判断五维适用性' },
+    { key: 'coverage-objectives', title: '用户覆盖目标', items: coverageObjectives, empty: '未额外声明覆盖目标' },
+    { key: 'risks', title: '分析风险', items: risks, empty: '分析产物未报告风险' },
+    { key: 'confirmations', title: '范围待确认项', items: confirmations, empty: '没有未处理的待确认项' },
+    { key: 'history', title: '历史用例处置', items: historicalDispositions, empty: run.historicalSnapshot.items.length ? `已固定 ${run.historicalSnapshot.items.length} 项历史用例，但分析产物未给出处置结论` : '本次未选择历史用例' },
+  ]
   const targetId = isScope ? scopeArtifact?.id : run.testPointTree?.id
   const targetRevision = isScope ? scopeArtifact?.generation : run.testPointTree?.currentRevision
   return <section className={`td-gate-decision ${submitting ? 'submitting' : ''}`} id="test-design-gate-decision" aria-label={isScope ? '测试范围确认' : '测试点树批准'} aria-busy={submitting}>
@@ -937,31 +961,77 @@ function GateDecisionPanel({ gateKey, design, run, submitting, onDecision }: { g
     </div>
     {isScope && <div className="td-scope-review" aria-label="本次测试范围明细">
       <section className="td-scope-objective">
-        <small>测试目标</small>
-        <p>{design?.objective || readableText(analysisContent.objective) || '未声明测试目标'}</p>
+        <div><small>测试目标</small><p>{design?.objective || readableText(analysisContent.objective) || '未声明测试目标'}</p></div>
+        <button type="button" className="btn" onClick={() => setScopeDetailKey(scopeGroups[0]?.key ?? null)}><Eye />查看完整范围</button>
       </section>
       <div className="td-scope-grid">
-        <ScopeReviewSection title="纳入的需求点" count={requirements.length} items={requirements} empty="分析产物未列出需求点" tone="included" />
-        <ScopeReviewSection title="纳入的技术方案要点" count={technicalSolutions.length} items={technicalSolutions} empty="分析产物未列出技术方案要点" tone="included" />
-        <ScopeReviewSection title="显式包含规则" count={includedScopes.length} items={includedScopes} empty="未额外限定，按固定基线全量分析" />
-        <ScopeReviewSection title="明确排除范围" count={excludedScopes.length} items={excludedScopes} empty="未声明排除项" tone="excluded" />
-        <ScopeReviewSection title="关注维度" count={focusDimensions.length} items={focusDimensions} empty="未限定重点维度，后续仍需逐项判断五维适用性" />
-        <ScopeReviewSection title="用户覆盖目标" count={coverageObjectives.length} items={coverageObjectives} empty="未额外声明覆盖目标" />
-        <ScopeReviewSection title="分析风险" count={risks.length} items={risks} empty="分析产物未报告风险" tone={risks.length ? 'warning' : undefined} />
-        <ScopeReviewSection title="范围待确认项" count={confirmations.length} items={confirmations} empty="没有待确认项" tone={confirmations.length ? 'warning' : undefined} />
-        <ScopeReviewSection title="历史用例处置" count={historicalDispositions.length || run.historicalSnapshot.items.length} items={historicalDispositions} empty={run.historicalSnapshot.items.length ? `已固定 ${run.historicalSnapshot.items.length} 项历史用例，但分析产物未给出处置结论` : '本次未选择历史用例'} />
+        <ScopeReviewSection title="分析目标" count={scopeObjectives.length} items={scopeObjectives} empty="分析产物未声明目标" onExpand={() => setScopeDetailKey('objectives')} />
+        {basisMode === 'knowledge_assets' ? <>
+          <ScopeReviewSection title="纳入的知识基线项" count={knowledgeBasis.length} items={knowledgeBasis} empty="没有可展示的知识基线项" tone="included" onExpand={() => setScopeDetailKey('knowledge-basis')} />
+          <ScopeReviewSection title="原子覆盖单元" count={coverageUnits.length} items={coverageUnits} empty="分析产物未生成原子覆盖单元" tone="included" onExpand={() => setScopeDetailKey('coverage-units')} />
+        </> : <>
+          <ScopeReviewSection title="纳入的需求点" count={requirements.length} items={requirements} empty="分析产物未列出需求点" tone="included" onExpand={() => setScopeDetailKey('requirements')} />
+          <ScopeReviewSection title="纳入的技术方案要点" count={technicalSolutions.length} items={technicalSolutions} empty="分析产物未列出技术方案要点" tone="included" onExpand={() => setScopeDetailKey('technical-solutions')} />
+        </>}
+        <ScopeReviewSection title="显式包含范围" count={includedScopes.length} items={includedScopes} empty="未额外限定，按固定基线全量分析" onExpand={() => setScopeDetailKey('inclusions')} />
+        <ScopeReviewSection title="明确排除范围" count={excludedScopes.length} items={excludedScopes} empty="未声明排除项" tone="excluded" onExpand={() => setScopeDetailKey('exclusions')} />
+        <ScopeReviewSection title="关注维度" count={focusDimensions.length} items={focusDimensions} empty="未限定重点维度，后续仍需逐项判断五维适用性" onExpand={() => setScopeDetailKey('dimensions')} />
+        <ScopeReviewSection title="用户覆盖目标" count={coverageObjectives.length} items={coverageObjectives} empty="未额外声明覆盖目标" onExpand={() => setScopeDetailKey('coverage-objectives')} />
+        <ScopeReviewSection title="分析风险" count={risks.length} items={risks} empty="分析产物未报告风险" tone={risks.length ? 'warning' : undefined} onExpand={() => setScopeDetailKey('risks')} />
+        <ScopeReviewSection title="范围待确认项" count={confirmations.length} items={confirmations} empty="没有待确认项" tone={confirmations.length ? 'warning' : undefined} action={confirmations.length ? <button type="button" className="td-scope-action" onClick={() => onNavigate('questions')}><CircleDot />处理待确认项</button> : undefined} onExpand={() => setScopeDetailKey('confirmations')} />
+        <ScopeReviewSection title="历史用例处置" count={historicalDispositions.length || run.historicalSnapshot.items.length} items={historicalDispositions} empty={run.historicalSnapshot.items.length ? `已固定 ${run.historicalSnapshot.items.length} 项历史用例，但分析产物未给出处置结论` : '本次未选择历史用例'} onExpand={() => setScopeDetailKey('history')} />
       </div>
     </div>}
     <label><span>决策说明（可选）</span><textarea value={comment} maxLength={4000} placeholder={isScope ? '补充范围边界、风险接受或需要调整的原因' : '补充树版本的批准或驳回说明'} onChange={event => setComment(event.target.value)} disabled={submitting} /></label>
-    <footer><span><LockKeyhole />{submitting ? '正在校验目标版本并提交，当前页面会保留。' : '决策将绑定当前目标 ID 与版本，提交后不可覆盖。'}</span><button className="btn danger" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'rejected', comment)}><XCircle />驳回{isScope ? '范围' : '测试点树'}</button><button className="btn primary" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'approved', comment)}>{submitting ? <RefreshCw className="spin" /> : <Check />}{submitting ? '正在提交决策' : `确认${isScope ? '范围并继续' : '批准并继续'}`}</button></footer>
+     <footer><span><LockKeyhole />{submitting ? '正在校验目标版本并提交，当前页面会保留。' : scopeApprovalBlocked ? `还有 ${openBlockingConfirmations.length} 项阻断确认未处理，请先完成处置。` : '决策将绑定当前目标 ID 与版本，提交后不可覆盖。'}</span>{scopeApprovalBlocked && <button type="button" className="btn" disabled={submitting} onClick={() => onNavigate('questions')}><CircleDot />查看待确认项</button>}<button className="btn danger" disabled={submitting || !targetId} onClick={() => void onDecision(gateKey, 'rejected', comment)}><XCircle />驳回{isScope ? '范围' : '测试点树'}</button><button className="btn primary" disabled={submitting || !targetId || scopeApprovalBlocked} title={scopeApprovalBlocked ? '请先处理阻断确认项' : undefined} onClick={() => void onDecision(gateKey, 'approved', comment)}>{submitting ? <RefreshCw className="spin" /> : <Check />}{submitting ? '正在提交决策' : `确认${isScope ? '范围并继续' : '批准并继续'}`}</button></footer>
+    {scopeDetailKey && <ScopeDetailModal groups={scopeGroups} initialKey={scopeDetailKey} onClose={() => setScopeDetailKey(null)} />}
   </section>
 }
 
-function ScopeReviewSection({ title, count, items, empty, tone }: { title: string; count: number; items: string[]; empty: string; tone?: 'included' | 'excluded' | 'warning' }) {
+type ScopeDetailGroup = { key: string; title: string; items: string[]; empty: string }
+
+function ScopeReviewSection({ title, count, items, empty, tone, action, onExpand }: { title: string; count: number; items: string[]; empty: string; tone?: 'included' | 'excluded' | 'warning'; action?: ReactNode; onExpand?: () => void }) {
   return <section className={`td-scope-section ${tone ?? ''}`}>
-    <header><b>{title}</b><span>{count} 项</span></header>
+    <header><b>{title}</b><div className="td-scope-section-meta">{action}{onExpand && <button type="button" className="td-scope-expand" onClick={onExpand}><Eye />查看全部</button>}<span>{count} 项</span></div></header>
     {items.length ? <ul>{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p>{empty}</p>}
   </section>
+}
+
+function ScopeDetailModal({ groups, initialKey, onClose }: { groups: ScopeDetailGroup[]; initialKey: string; onClose: () => void }) {
+  const [selectedKey, setSelectedKey] = useState(initialKey)
+  const selected = groups.find(group => group.key === selectedKey) ?? groups[0]
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="modal td-scope-detail-modal" role="dialog" aria-modal="true" aria-labelledby="scope-detail-title">
+    <header><div><small>范围确认门禁 · 完整固定产物</small><h2 id="scope-detail-title">完整测试范围</h2></div><button type="button" className="icon-btn" onClick={onClose} aria-label="关闭完整测试范围"><X /></button></header>
+    <div className="td-scope-detail-layout">
+      <nav aria-label="测试范围分类">{groups.map(group => <button type="button" key={group.key} className={group.key === selected?.key ? 'active' : ''} onClick={() => setSelectedKey(group.key)}><span><b>{group.title}</b><small>{group.items.length ? `${group.items.length} 项` : '无内容'}</small></span><ChevronRight /></button>)}</nav>
+      <section className="td-scope-detail-content"><header><div><b>{selected?.title ?? '范围明细'}</b><small>完整展示，不截断条目内容</small></div><StatusPill tone={selected?.items.length ? 'info' : 'neutral'}>{selected?.items.length ?? 0} 项</StatusPill></header>{selected?.items.length ? <ol>{selected.items.map((item, index) => <li key={`${selected.key}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></li>)}</ol> : <div className="td-scope-detail-empty"><ListChecks /><p>{selected?.empty ?? '当前分类没有内容'}</p></div>}</section>
+    </div>
+  </section></div>
+}
+
+function scopeBasisSummary(value: unknown, index: number) {
+  const item = recordOf(value)
+  const content = recordOf(item.content)
+  const locator = recordOf(item.locator)
+  const title = readableText(content.title) || `固定依据 ${index + 1}`
+  const path = readableText(locator.logicalPath)
+  const lines = locator.startLine === undefined ? '' : `L${String(locator.startLine)}${locator.endLine === undefined ? '' : `-L${String(locator.endLine)}`}`
+  const description = readableText(content.description)
+  return [`${title}${path ? ` · ${path}` : ''}${lines ? ` · ${lines}` : ''}`, description].filter(Boolean).join('\n')
+}
+
+function scopeCoverageUnitSummary(value: unknown, index: number) {
+  const item = recordOf(value)
+  const title = readableText(item.title) || readableText(item.ref) || `覆盖单元 ${index + 1}`
+  const description = readableText(item.description)
+  const basisCount = Array.isArray(item.basisRefs) ? item.basisRefs.length : 0
+  const methods = displayValues(item.entryMethods).map(method => method.toUpperCase()).join(' / ')
+  return [`${readableText(item.ref) ? `${readableText(item.ref)} · ` : ''}${title}`, description, `关联依据 ${basisCount} 项${methods ? ` · ${methods}` : ''}`].filter(Boolean).join('\n')
 }
 
 function scopeRules(value: unknown) {
@@ -1127,9 +1197,10 @@ type RunArtifactViewProps = {
   onSelectCase: (caseId: string) => void
   onNewCase: (pointId?: string) => void
   onOpenTree: () => void
+  onOpenGate: () => void
 }
 
-function RunArtifactView({ tab, run, projectId, projectVersionId, designId, notify, onRefresh, selectedCaseId, onSelectCase, onNewCase, onOpenTree }: RunArtifactViewProps) {
+function RunArtifactView({ tab, run, projectId, projectVersionId, designId, notify, onRefresh, selectedCaseId, onSelectCase, onNewCase, onOpenTree, onOpenGate }: RunArtifactViewProps) {
   if (tab === 'analysis') return currentNodeArtifact(run, 'test_analysis') ? <RunAnalysisArtifact run={run} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'retrieval') return <RunRetrievalArtifact run={run} />
   if (tab === 'tree') return run.testPointTree ? <RunTreeArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} /> : <RunArtifactState tab={tab} run={run} />
@@ -1138,7 +1209,7 @@ function RunArtifactView({ tab, run, projectId, projectVersionId, designId, noti
   if (tab === 'data') return run.dataSetVersions.length ? <RunDataArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'coverage') return run.coverageAudits.length ? <RunCoverageArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'history') return <RunHistoryArtifact run={run} />
-  if (tab === 'questions') return <RunQuestionsArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} />
+  if (tab === 'questions') return <RunQuestionsArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onOpenGate={onOpenGate} />
   return <RunArtifactState tab={tab} run={run} />
 }
 
@@ -1166,10 +1237,19 @@ function analysisEntry(value: unknown, index: number) {
 function RunAnalysisArtifact({ run }: { run: TestDesignWorkflowRun }) {
   const artifact = currentNodeArtifact(run, 'test_analysis')!
   const groups = analysisGroups(run)
+  const [selectedGroupKey, setSelectedGroupKey] = useState(groups[0]?.key ?? '')
+  useEffect(() => setSelectedGroupKey(groups[0]?.key ?? ''), [artifact.id])
+  const selectedGroup = groups.find(group => group.key === selectedGroupKey) ?? groups[0]
   return <div className="td-run-artifact-view td-run-analysis-view">
     <RunArtifactHeader title="依据解构" description={`${artifact.schemaVersion} · 固定产物 ${shortHash(artifact.contentSha256)}`}><StatusPill tone="success">{analysisItemCount(run)} 项</StatusPill></RunArtifactHeader>
-    {groups.length ? <div className="td-run-analysis-grid">{groups.map(group => <section key={group.key}><header><span><Braces /><b>{analysisGroupLabels[group.key] ?? group.key}</b></span><em>{group.items.length}</em></header><div>{group.items.map((value, index) => { const item = analysisEntry(value, index); return <article key={`${group.key}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span><p><b>{item.title}</b>{item.description && <small>{item.description}</small>}</p></article> })}</div></section>)}</div> : <RunIntentionalEmpty icon={<ListChecks />} title="依据解构结果为空" description="该固定产物没有返回可展示的结构化条目。" />}
-    {run.findings.length > 0 && <section className="td-run-findings"><header><b>分析 Finding</b><span>{run.findings.length}</span></header>{run.findings.map(item => <article key={item.id}><AlertTriangle /><p><small>{item.severity} · {item.state}</small><b>{item.title}</b><em>{item.description}</em></p></article>)}</section>}
+    {selectedGroup ? <div className="td-run-analysis-layout">
+      <nav className="td-run-analysis-groups" aria-label="依据解构分组">{groups.map(group => <button type="button" key={group.key} className={selectedGroup.key === group.key ? 'active' : ''} aria-pressed={selectedGroup.key === group.key} onClick={() => setSelectedGroupKey(group.key)}><Braces /><span><b>{analysisGroupLabels[group.key] ?? group.key}</b><small>{group.items.length} 项</small></span></button>)}</nav>
+      <div className="td-run-analysis-evidence">
+        <header><span><Braces /><b>{analysisGroupLabels[selectedGroup.key] ?? selectedGroup.key}</b></span><em>{selectedGroup.items.length} 项</em></header>
+        <div>{selectedGroup.items.map((value, index) => { const item = analysisEntry(value, index); return <article key={`${selectedGroup.key}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span><p><b>{item.title}</b>{item.description && <small>{item.description}</small>}</p></article> })}</div>
+        {run.findings.length > 0 && <section className="td-run-findings"><header><b>分析 Finding</b><span>{run.findings.length}</span></header>{run.findings.map(item => <article key={item.id}><AlertTriangle /><p><small>{item.severity} · {item.state}</small><b>{item.title}</b><em>{item.description}</em></p></article>)}</section>}
+      </div>
+    </div> : <RunIntentionalEmpty icon={<ListChecks />} title="依据解构结果为空" description="该固定产物没有返回可展示的结构化条目。" />}
   </div>
 }
 
@@ -1434,15 +1514,69 @@ function RunHistoryArtifact({ run }: { run: TestDesignWorkflowRun }) {
   </div>
 }
 
-function RunQuestionsArtifact({ run, projectVersionId, designId, notify, onRefresh }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void> }) {
+type TestDesignDispositionDraft = {
+  kind: 'finding' | 'confirmation'
+  id: string
+  title: string
+  description: string
+  meta: string
+  refs: string[]
+  blocker: boolean
+  expectedVersion: number
+  decision: 'resolve' | 'defer' | 'reopen'
+}
+
+function RunQuestionsArtifact({ run, projectVersionId, designId, notify, onRefresh, onOpenGate }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; onOpenGate: () => void }) {
   const items = run.confirmationItems
+  const unresolvedCount = [...run.findings, ...items].filter(item => item.state === 'open').length
+  const scopeGateWaiting = run.stage === 'scope_gate' && run.nodeRuns.some(item => item.nodeKey === 'scope_gate' && item.status === 'waiting_gate')
   const [busyId, setBusyId] = useState('')
-  const act = async (kind: 'finding' | 'confirmation', id: string, expectedVersion: number, decision: 'resolve' | 'defer' | 'reopen') => { setBusyId(id); try { const comment = window.prompt(decision === 'reopen' ? '填写重新打开原因' : '填写处置说明')?.trim(); if (!comment) return; if (kind === 'finding') await actOnTestDesignFinding(projectVersionId, designId, run.id, id, { expectedVersion, decision, comment }); else await actOnTestDesignConfirmation(projectVersionId, designId, run.id, id, { expectedVersion, decision, comment }); await onRefresh(); notify('处置动作已追加保存，请重新执行覆盖审计。', 'success') } catch (error) { notify(error instanceof Error ? error.message : '处置保存失败', 'error') } finally { setBusyId('') } }
-  return <div className="td-run-artifact-view">
-    <RunArtifactHeader title="Finding 与待确认项" description="处置结论追加保存，不改写固定输入和历史产物"><StatusPill tone={[...run.findings, ...items].some(item => item.state === 'open') ? 'warning' : 'success'}>{[...run.findings, ...items].filter(item => item.state === 'open').length} 项未解决</StatusPill></RunArtifactHeader>
-    {run.findings.length > 0 && <div className="td-run-question-list">{run.findings.map(item => <article key={item.id}><AlertTriangle /><p><small>Finding · {item.severity}</small><b>{item.title}</b><em>{item.description}</em><code>{item.basisRefs.map(shortId).join(' · ')}</code></p><StatusPill tone={item.state === 'open' ? 'danger' : 'success'}>{item.state}</StatusPill><span className="td-disposition-actions">{item.state === 'open' ? <><button className="btn primary" disabled={busyId === item.id} onClick={() => void act('finding', item.id, item.actions.length, 'resolve')}><Check />解决</button><button className="btn" disabled={busyId === item.id} onClick={() => void act('finding', item.id, item.actions.length, 'defer')}><Clock3 />延期</button></> : <button className="btn" disabled={busyId === item.id} onClick={() => void act('finding', item.id, item.actions.length, 'reopen')}><RefreshCw />重新打开</button>}</span></article>)}</div>}
-    {items.length ? <div className="td-run-question-list">{items.map(item => <article key={item.id}><CircleDot /><p><small>{item.decisionType} · 影响 {item.impactStage}</small><b>{item.title}</b><em>{item.question}</em><code>{item.affectedRefs.map(shortId).join(' · ')}</code></p><StatusPill tone={item.blocker && item.state === 'open' ? 'danger' : item.state === 'open' ? 'warning' : 'success'}>{item.blocker ? `阻断 · ${item.state}` : item.state}</StatusPill><span className="td-disposition-actions">{item.state === 'open' ? <><button className="btn primary" disabled={busyId === item.id} onClick={() => void act('confirmation', item.id, item.actions.length, 'resolve')}><Check />确认解决</button><button className="btn" disabled={busyId === item.id} onClick={() => void act('confirmation', item.id, item.actions.length, 'defer')}><Clock3 />延期</button></> : <button className="btn" disabled={busyId === item.id} onClick={() => void act('confirmation', item.id, item.actions.length, 'reopen')}><RefreshCw />重新打开</button>}</span></article>)}</div> : run.findings.length === 0 && <RunIntentionalEmpty icon={<CheckCircle2 />} title="没有待确认项" description="本次分析没有产生需要人工补充结论的事项。" />}
-  </div>
+  const [disposition, setDisposition] = useState<TestDesignDispositionDraft | null>(null)
+  const openFindingDisposition = (item: TestDesignWorkflowRun['findings'][number], decision: TestDesignDispositionDraft['decision']) => setDisposition({ kind: 'finding', id: item.id, title: item.title, description: item.description, meta: `Finding · ${item.severity}`, refs: item.basisRefs, blocker: item.severity === 'blocker', expectedVersion: item.actions.length, decision })
+  const openConfirmationDisposition = (item: TestDesignWorkflowRun['confirmationItems'][number], decision: TestDesignDispositionDraft['decision']) => setDisposition({ kind: 'confirmation', id: item.id, title: item.title, description: item.question, meta: `${item.decisionType} · 影响 ${item.impactStage}`, refs: item.affectedRefs, blocker: item.blocker, expectedVersion: item.actions.length, decision })
+  const submitDisposition = async (comment: string) => {
+    if (!disposition) return
+    const returnToScopeGate = scopeGateWaiting && disposition.decision !== 'reopen' && unresolvedCount === 1
+    setBusyId(disposition.id)
+    try {
+      const input = { expectedVersion: disposition.expectedVersion, decision: disposition.decision, comment }
+      if (disposition.kind === 'finding') await actOnTestDesignFinding(projectVersionId, designId, run.id, disposition.id, input)
+      else await actOnTestDesignConfirmation(projectVersionId, designId, run.id, disposition.id, input)
+      await onRefresh()
+      setDisposition(null)
+      notify(returnToScopeGate ? '全部事项已处理，请确认本次测试范围后继续。' : '处置动作已追加保存，请按提示继续范围修订或覆盖审计。', 'success')
+      if (returnToScopeGate) onOpenGate()
+    } catch (error) { notify(error instanceof Error ? error.message : '处置保存失败', 'error') }
+    finally { setBusyId('') }
+  }
+  return <><div className="td-run-artifact-view">
+    <RunArtifactHeader title="Finding 与待确认项" description="处置结论追加保存，不改写固定输入和历史产物"><StatusPill tone={unresolvedCount ? 'warning' : 'success'}>{unresolvedCount} 项未解决</StatusPill></RunArtifactHeader>
+    {scopeGateWaiting && unresolvedCount === 0 && <section className="td-disposition-complete"><CheckCircle2 /><div><b>所有事项已处理</b><p>还需要批准当前测试范围，批准后才会启动功能与非功能测试设计。</p></div><button type="button" className="btn primary" onClick={onOpenGate}>前往确认测试范围<ArrowRight /></button></section>}
+    {run.findings.length > 0 && <div className="td-run-question-list">{run.findings.map(item => <article key={item.id}><AlertTriangle /><p><small>Finding · {item.severity}</small><b>{item.title}</b><em>{item.description}</em><code>{item.basisRefs.map(shortId).join(' · ')}</code></p><StatusPill tone={item.state === 'open' ? 'danger' : 'success'}>{dispositionStateLabel(item.state)}</StatusPill><span className="td-disposition-actions">{item.state === 'open' ? <><button className="btn primary" disabled={busyId === item.id} onClick={() => openFindingDisposition(item, 'resolve')}><Check />解决</button><button className="btn" disabled={busyId === item.id} onClick={() => openFindingDisposition(item, 'defer')}><Clock3 />延期</button></> : <button className="btn" disabled={busyId === item.id} onClick={() => openFindingDisposition(item, 'reopen')}><RefreshCw />重新打开</button>}</span></article>)}</div>}
+    {items.length ? <div className="td-run-question-list">{items.map(item => <article key={item.id}><CircleDot /><p><small>{item.decisionType} · 影响 {item.impactStage}</small><b>{item.title}</b><em>{item.question}</em><code>{item.affectedRefs.map(shortId).join(' · ')}</code></p><StatusPill tone={item.blocker && item.state === 'open' ? 'danger' : item.state === 'open' ? 'warning' : 'success'}>{item.blocker ? `阻断 · ${dispositionStateLabel(item.state)}` : dispositionStateLabel(item.state)}</StatusPill><span className="td-disposition-actions">{item.state === 'open' ? <><button className="btn primary" disabled={busyId === item.id} onClick={() => openConfirmationDisposition(item, 'resolve')}><Check />确认解决</button><button className="btn" disabled={busyId === item.id} onClick={() => openConfirmationDisposition(item, 'defer')}><Clock3 />延期</button></> : <button className="btn" disabled={busyId === item.id} onClick={() => openConfirmationDisposition(item, 'reopen')}><RefreshCw />重新打开</button>}</span></article>)}</div> : run.findings.length === 0 && <RunIntentionalEmpty icon={<CheckCircle2 />} title="没有待确认项" description="本次分析没有产生需要人工补充结论的事项。" />}
+  </div>{disposition && <TestDesignDispositionModal draft={disposition} submitting={busyId === disposition.id} onClose={() => setDisposition(null)} onSubmit={submitDisposition} />}</>
+}
+
+function dispositionStateLabel(state: string) { return ({ open: '未处理', confirmed: '已确认', resolved: '已解决', deferred: '已延期', rejected: '已拒绝' } as Record<string, string>)[state] ?? state }
+
+function TestDesignDispositionModal({ draft, submitting, onClose, onSubmit }: { draft: TestDesignDispositionDraft; submitting: boolean; onClose: () => void; onSubmit: (comment: string) => Promise<void> }) {
+  const [comment, setComment] = useState('')
+  const actionLabel = draft.decision === 'resolve' ? '确认解决' : draft.decision === 'defer' ? '确认延期' : '重新打开'
+  const fieldLabel = draft.decision === 'resolve' ? '解决方案 / 处置说明' : draft.decision === 'defer' ? '延期原因与后续计划' : '重新打开原因'
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !submitting) onClose() }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose, submitting])
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !submitting) onClose() }}><section className="modal td-disposition-modal" role="dialog" aria-modal="true" aria-labelledby="test-design-disposition-title">
+    <header><div><small>{draft.meta}</small><h2 id="test-design-disposition-title">{actionLabel}：{draft.title}</h2></div><button type="button" className="icon-btn" disabled={submitting} onClick={onClose} aria-label="关闭处置弹窗"><X /></button></header>
+    <div className="td-disposition-modal-body">
+      <section className="td-disposition-subject"><span>{draft.kind === 'finding' ? <AlertTriangle /> : <CircleDot />}</span><div><small>{draft.kind === 'finding' ? '问题描述' : '待确认问题'}</small><p>{draft.description}</p></div><StatusPill tone={draft.blocker ? 'danger' : 'warning'}>{draft.blocker ? '阻断项' : '非阻断项'}</StatusPill></section>
+      <dl><div><dt>事项 ID</dt><dd>{draft.id}</dd></div><div><dt>当前版本</dt><dd>{draft.expectedVersion}</dd></div><div className="wide"><dt>关联依据</dt><dd>{draft.refs.length ? draft.refs.join(' · ') : '未关联固定依据'}</dd></div></dl>
+      <label><span>{fieldLabel}</span><textarea autoFocus value={comment} maxLength={4000} placeholder={draft.decision === 'resolve' ? '填写明确结论、采用方案、边界或验收口径' : draft.decision === 'defer' ? '填写延期原因、负责人或后续处理计划' : '说明为什么需要重新处理该事项'} onChange={event => setComment(event.target.value)} disabled={submitting} /><small>{comment.trim().length} / 4000</small></label>
+    </div>
+    <footer><span>{draft.decision === 'resolve' ? '提交后将追加保存解决记录，不改写历史产物。' : '该操作将作为新的处置动作追加保存。'}</span><button type="button" className="btn" disabled={submitting} onClick={onClose}>取消</button><button type="button" className="btn primary" disabled={submitting || !comment.trim()} onClick={() => void onSubmit(comment.trim())}>{submitting ? <RefreshCw className="spin" /> : <Check />}{submitting ? '正在提交' : actionLabel}</button></footer>
+  </section></div>
 }
 
 function RunArtifactState({ tab, run }: { tab: TabKey; run: TestDesignWorkflowRun }) {
@@ -1451,6 +1585,15 @@ function RunArtifactState({ tab, run }: { tab: TabKey; run: TestDesignWorkflowRu
 }
 
 function DesignList({ projectVersion, view, setView, designs, loading, onCreate, onOpen, notify }: { projectVersion: ProjectVersion; view: CollectionView; setView: (view: CollectionView) => void; designs: TestDesign[]; loading: boolean; onCreate: () => void; onOpen: (design?: TestDesign) => void; notify: Notify }) {
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const filteredDesigns = useMemo(() => designs.filter(design => {
+    const queryMatches = !query.trim() || `${design.name}${design.id}${design.latestRun?.id ?? ''}`.toLowerCase().includes(query.trim().toLowerCase())
+    const statusMatches = statusFilter === 'all'
+      || statusFilter === 'no_run' && !design.latestRun
+      || design.latestRun?.status === statusFilter
+    return queryMatches && statusMatches
+  }), [designs, query, statusFilter])
   const runningCount = designs.filter(item => ['queued', 'running', 'waiting_gate'].includes(item.latestRun?.status ?? '')).length
   const failedCount = designs.filter(item => item.latestRun?.status === 'failed').length
   const completedCount = designs.filter(item => item.latestRun?.status === 'succeeded').length
@@ -1469,14 +1612,16 @@ function DesignList({ projectVersion, view, setView, designs, loading, onCreate,
       </dl>
     </section>
     <div className="td-list-toolbar">
-      <div className="td-list-search"><Search /><input aria-label="搜索测试设计" placeholder="搜索名称或运行 ID" /></div>
-      <select aria-label="状态筛选"><option>全部状态</option><option>设计中</option><option>待审核</option><option>已发布</option></select>
+      <div className="td-list-search"><Search /><input aria-label="搜索测试设计" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、设计 ID 或运行 ID" /></div>
+      <select aria-label="状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>
+        <option value="all">全部状态</option><option value="no_run">尚未运行</option><option value="queued">已排队</option><option value="running">运行中</option><option value="waiting_gate">等待确认</option><option value="succeeded">已完成</option><option value="failed">运行失败</option><option value="cancelled">已取消</option>
+      </select>
       <button className="btn primary td-create-design-button" onClick={onCreate}><Plus />创建测试设计</button>
     </div>
     <div className="td-list-table-wrap">
       <table className="td-design-table">
         <thead><tr><th>测试设计</th><th>固定输入</th><th>当前进度</th><th>当期产出</th><th>更新时间</th><th>状态</th><th>操作</th></tr></thead>
-        <tbody>{designs.map((design, index) => {
+        <tbody>{filteredDesigns.map((design, index) => {
           const run = design.latestRun
           return <tr key={design.id} className={index === 0 ? 'td-current-design-row' : undefined} onClick={() => onOpen(design)}>
             <td><span className={`td-row-symbol ${run ? 'active' : ''}`}><TestTube2 /></span><p><b>{design.name}</b><small>{design.id}{run ? ` · ${run.id}` : ''}</small></p></td>
@@ -1490,6 +1635,7 @@ function DesignList({ projectVersion, view, setView, designs, loading, onCreate,
         })}</tbody>
       </table>
       {!loading && designs.length === 0 && <div className="td-collection-empty"><TestTube2 /><h2>暂无测试设计</h2><p>当前项目版本还没有测试设计记录。</p></div>}
+      {!loading && designs.length > 0 && filteredDesigns.length === 0 && <div className="td-collection-empty"><Search /><h2>没有匹配的测试设计</h2><p>请清空搜索词或调整状态筛选后重试。</p></div>}
       {loading && designs.length === 0 && <div className="td-collection-empty"><RefreshCw className="spin" /><h2>正在加载测试设计</h2><p>正在读取当前项目版本的真实任务。</p></div>}
     </div>
     </>}

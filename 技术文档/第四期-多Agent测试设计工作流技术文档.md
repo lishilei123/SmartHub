@@ -773,7 +773,7 @@ performance, stability, compatibility, security
 
 - 临时 data Ref、名称、entityType、featureTags；
 - testPointRefs、caseCandidateRefs；
-- fieldConstraints、relationships、quantity、initialState；
+- fieldConstraints、relationships、quantity、initialState；其中 `fieldConstraints` 持久化为字符串键值表，Agent 应优先提交非空字符串值，服务端兼容将布尔值和有限数值规范化为字符串，复杂对象、数组与 `null` 仍拒绝；
 - preparationHint、sensitivity、isolation；
 - resetAndCleanup、readiness 和原因。
 

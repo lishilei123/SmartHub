@@ -61,7 +61,7 @@ test('测试用例综合工具声明闭合的 test-case/v1 层级', () => {
     additionalProperties: boolean
     properties: {
       cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
-      dataRequirements: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
+      dataRequirements: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { description?: string }> } }
     }
   }
   const caseSchema = schema.properties.cases.items
@@ -75,6 +75,7 @@ test('测试用例综合工具声明闭合的 test-case/v1 层级', () => {
   assert.ok(!('steps' in caseSchema.properties))
   assert.equal(dataSchema.additionalProperties, false)
   assert.ok(dataSchema.required.includes('caseIndexes'))
+  assert.match(dataSchema.properties.fieldConstraints.description ?? '', /noProductionData.*字符串/u)
 })
 
 test('legacy technical-review descriptor remains v1 while the default descriptor remains v2', () => {

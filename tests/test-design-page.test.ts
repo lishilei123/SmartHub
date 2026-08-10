@@ -62,6 +62,42 @@ test('测试设计列表与创建候选解耦且运行加载期间不展示示�
   assert.doesNotMatch(source, /activeRun \? <RunBasisPanel run=\{activeRun\} \/> : <BasisPanel/)
 })
 
+test('非概览产物页不再展示工作流运行侧栏', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /const hasDetailPanel = tab === 'overview' \|\| \(tab === 'cases' && selectedRunCaseId !== null\)/)
+  assert.match(source, /const detailPanelOpen = hasDetailPanel && rightOpen/)
+  assert.match(source, /detailPanelOpen && tab === 'overview' && <RunDetailPanel/)
+  assert.match(source, /detailPanelOpen && tab === 'cases' && selectedRunCaseId/)
+  assert.doesNotMatch(source, /rightOpen && activeRun && <RunDetailPanel/)
+})
+
+test('测试设计列表使用真实运行状态进行受控筛选', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const designList = source.match(/function DesignList\b[\s\S]*?\n\}\n\nfunction AssetViewSelect/)?.[0] ?? ''
+
+  assert.match(designList, /const \[query, setQuery\] = useState\(''\)/)
+  assert.match(designList, /const \[statusFilter, setStatusFilter\] = useState\('all'\)/)
+  assert.match(designList, /const filteredDesigns = useMemo\(\(\) => designs\.filter/)
+  assert.match(designList, /\$\{design\.name\}\$\{design\.id\}\$\{design\.latestRun\?\.id \?\? ''\}/)
+  assert.match(designList, /statusFilter === 'no_run' && !design\.latestRun/)
+  assert.match(designList, /design\.latestRun\?\.status === statusFilter/)
+  assert.match(designList, /aria-label="搜索测试设计" value=\{query\} onChange=\{event => setQuery\(event\.target\.value\)\}/)
+  assert.match(designList, /aria-label="状态筛选" value=\{statusFilter\} onChange=\{event => setStatusFilter\(event\.target\.value\)\}/)
+  assert.match(designList, /<tbody>\{filteredDesigns\.map/)
+  for (const status of ['queued', 'running', 'waiting_gate', 'succeeded', 'failed', 'cancelled']) assert.match(designList, new RegExp(`value="${status}"`))
+  assert.doesNotMatch(designList, />设计中<\/option>|>待审核<\/option>|>已发布<\/option>/)
+  assert.match(designList, /designs\.length > 0 && filteredDesigns\.length === 0/)
+})
+
+test('紧凑桌面保持测试设计固定壳，移动端才使用文档流', () => {
+  const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
+  const compactWorkspace = styles.match(/@media\(max-width:900px\)\{\.td-workspace-grid[^\n]*/)?.[0] ?? ''
+
+  assert.doesNotMatch(compactWorkspace, /\.content\.test-design-content|\.test-design-content>\.td-workbench/)
+  assert.match(styles, /@media\(max-width:760px\)\{\.content\.test-design-content\{height:auto;min-height:calc\(100vh - 20px\);overflow:auto;padding:12px\}\.test-design-content>\.td-workbench\{min-height:760px\}\}/)
+})
+
 test('真实测试用例支持 ETag 编辑、审核、阻断修复和不可变发布', () => {
   const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
   const api = readFileSync(new URL('../src/test-design-api.ts', import.meta.url), 'utf8')
@@ -110,6 +146,51 @@ test('范围确认门禁展示可审阅的结构化范围而不是对象字符�
   assert.match(source, /历史用例处置/)
   assert.match(source, /readableText\(scopeContent\.scope\)/)
   assert.doesNotMatch(source, /String\(scopeContent\.scope/)
+})
+
+test('知识资产范围门禁展示完整基线、原子覆盖单元和规范包含排除字段', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  assert.match(source, /scopeRecord\.inclusions/)
+  assert.match(source, /scopeRecord\.exclusions/)
+  assert.match(source, /纳入的知识基线项/)
+  assert.match(source, /原子覆盖单元/)
+  assert.match(source, /function scopeBasisSummary/)
+  assert.match(source, /function scopeCoverageUnitSummary/)
+  assert.match(source, /function ScopeDetailModal/)
+  assert.match(source, /查看完整范围/)
+  assert.match(source, /完整展示，不截断条目内容/)
+})
+
+test('范围门禁提供待确认项处理入口并阻断未处理的分析阻断项', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  assert.match(source, /处理待确认项/)
+  assert.match(source, /openConfirmations = run\.confirmationItems\.filter\(item => item\.state === 'open'\)/)
+  assert.match(source, /run\.confirmationItems\.length[\s\S]*openConfirmations\.map/)
+  assert.match(source, /openBlockingConfirmations = run\.confirmationItems\.filter/)
+  assert.match(source, /scopeApprovalBlocked/)
+  assert.match(source, /disabled=\{submitting \|\| !targetId \|\| scopeApprovalBlocked\}/)
+})
+
+test('Finding 与待确认项使用可审阅的处置弹窗提交解决方案', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  const questions = source.match(/function RunQuestionsArtifact\b[\s\S]*?\n\}\n\nfunction dispositionStateLabel/)?.[0] ?? ''
+  const modal = source.match(/function TestDesignDispositionModal\b[\s\S]*?\n\}\n\nfunction RunArtifactState/)?.[0] ?? ''
+  assert.doesNotMatch(questions, /window\.prompt/)
+  assert.match(questions, /openConfirmationDisposition/)
+  assert.match(questions, /submitDisposition/)
+  assert.match(modal, /role="dialog"/)
+  assert.match(modal, /解决方案 \/ 处置说明/)
+  assert.match(modal, /关联依据/)
+  assert.match(modal, /disabled=\{submitting \|\| !comment\.trim\(\)\}/)
+})
+
+test('全部处置后明确返回范围门禁完成最终批准', () => {
+  const source = readFileSync(new URL('../src/TestDesignPage.tsx', import.meta.url), 'utf8')
+  assert.match(source, /所有事项已处理/)
+  assert.match(source, /前往确认测试范围/)
+  assert.match(source, /returnToScopeGate/)
+  assert.match(source, /if \(returnToScopeGate\) onOpenGate\(\)/)
+  assert.match(source, /deferred: '已延期'/)
 })
 
 test('范围重新分析后门禁与产物视图使用当前节点输出', () => {
@@ -194,6 +275,11 @@ test('测试设计工作流使用独立滚动视口展示完整长轨道', () =>
   assert.match(styles, /\.td-workflow-canvas\.td-workflow-sequence::\-webkit-scrollbar\{height:9px\}/)
   assert.match(styles, /\.td-workflow-track\{[^}]*min-width:1580px;[^}]*display:flex/)
   assert.doesNotMatch(styles, /\.td-workflow-canvas\.td-workflow-sequence\{min-width:1580px/)
+})
+
+test('工作流门禁内容扩展主画布高度并允许纵向滚动', () => {
+  const styles = readFileSync(new URL('../src/test-design.css', import.meta.url), 'utf8')
+  assert.match(styles, /\.td-main-canvas>\.td-workflow-view\{height:max-content;min-height:100%;flex:0 0 auto;overflow:visible\}/)
 })
 
 test('创建页不再展示或提交硬编码候选数据', () => {
