@@ -5,27 +5,23 @@ import type { CandidateRequirementPointExtraction } from '../domain/review-types
 
 export function renderRequirementTask(snapshot: ReviewRunSnapshot, fixedExtraction?: CandidateRequirementPointExtraction) {
   const template = snapshot.agentDefinition.taskTemplate
-  return template
+  const rendered = template
     .replace('{{projectName}}', snapshot.projectName)
     .replace('{{assetCount}}', String(snapshot.assets.length))
-    .replace('{{logicalPaths}}', snapshot.assets.map(asset => asset.logicalPath).join('、'))
+    .replace('{{logicalPaths}}', '请使用 ls/find 自主查看')
     .replace('{{runId}}', snapshot.runId)
-    .replace('{{assetVersionIds}}', snapshot.assets.map(asset => asset.assetVersionId).join('、'))
+    .replace('{{assetVersionIds}}', '服务端已冻结，不向模型暴露')
     .replace('{{indexVersionId}}', snapshot.indexVersionId)
     .replace('{{focusAreas}}', snapshot.focusAreas.join('、') || '完整性、边界、状态、异常和可测试性')
     .replace('{{excludedAreas}}', snapshot.excludedAreas.join('、') || '无')
-    .replace('{{inputMode}}', snapshot.extractionInput?.mode ?? 'legacy_tool_chunk')
+    .replace('{{inputMode}}', snapshot.extractionInput?.mode ?? 'agent_directory')
     .replace('{{estimatedInputTokens}}', String(snapshot.extractionInput?.estimatedInputTokens ?? 0))
     .replace('{{safeInputBudget}}', String(snapshot.extractionInput?.safeInputBudget ?? 0))
     .replace('{{fixedExtraction}}', fixedExtraction ? JSON.stringify(fixedExtraction) : '缺少固定需求点提取结果')
-}
-
-export function renderSegmentBatchTask(batchNumber: number, batchCount: number, content: string) {
-  return `这是 segmented_context 第 ${batchNumber}/${batchCount} 批固定正文。只分析本批正文并输出紧凑 JSON 草稿；每条 requirementPoint 生成简洁 title，并包含 description 和 sourceTexts，此阶段没有提交工具。sourceTexts 优先复制完整原文句子或条目，供服务端最终检索和跨批去重使用。\n\n${content}`
-}
-
-export function renderSegmentMergeTask(snapshot: ReviewRunSnapshot, drafts: string[]) {
-  return `${renderRequirementTask(snapshot)}\n这是 segmented_context 最终跨批归并阶段。以下批次草稿都来自已成功投递的固定正文。跨批去重并检查主体、条件、状态、异常、权限、数据约束和验收标准是否遗漏；语义完全相同的重复点只保留一个并合并全部 sourceTexts。最终每条需求点生成简洁 title，并提交 description 和 sourceTexts，然后通过 requirement_points_submit_result 提交 requirement-point-extraction/v5。\n\n${drafts.map((draft, index) => `<<<BATCH_DRAFT ${index + 1}>>>\n${draft}\n<<<END_BATCH_DRAFT ${index + 1}>>>`).join('\n\n')}`
+  if (fixedExtraction) return rendered
+  if (snapshot.extractionInput?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: RequirementPointExtractionAgent 只支持 /workspace 文件工作区输入')
+  const workspace = snapshot.documentWorkspace
+  return `${rendered}\n\n本次运行使用 Pi Coding Agent 文件工作区协议。当前工作目录是 /${workspace?.rootLogicalPath ?? workspace?.logicalPath ?? 'workspace'}；活动分支是 /${workspace?.activeBranchLogicalPath ?? 'workspace/branches/unknown'}；本次冻结需求输入目录是 /${workspace?.logicalPath ?? snapshot.logicalPath}；Requirement Agent 目录是 /${workspace?.agentLogicalPath ?? 'workspace/agent_workspace/requirement_agent'}。输入不包含文件清单或正文。请像 Codex 一样先调用 ls，从工作区目录树开始探索；可用 find 查找文件、grep 定位文本，随后必须使用 read 按相对路径读取需要分析或引用的文件。grep 不形成正文投递证明，只有 read 实际返回的固定行范围可用于 sourceTexts。不得调用 Shell、write、edit 或越过 /workspace。`
 }
 
 export function createAgentDefinitionVersion(input: {

@@ -1,17 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, ReviewRunSnapshot } from '../domain/agent-types.js'
+import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, RequirementInputPlan, ReviewRunSnapshot } from '../domain/agent-types.js'
 import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, ReviewRun } from '../domain/types.js'
 import type { CandidateRequirementPointExtraction, CandidateRequirementReview } from '../domain/review-types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator, ReviewResultValidator } from '../agent/result-validator.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
-import { buildRequirementInputPlan } from '../agent/requirement-context-assembler.js'
+import { buildRequirementDirectoryInputPlan } from '../agent/requirement-context-assembler.js'
 
 export interface RequirementAnalysisRequest {
   projectVersionId: string
+  documentDirectoryPath: string
   reviewId?: string
-  assetVersionIds?: string[]
-  assetVersionId?: string
   sourceId?: string
   modelId?: string
   focusAreas?: string[]
@@ -112,6 +111,7 @@ export class RequirementAnalysisService {
     if (mode === 'full') {
       return this.start({
         projectVersionId: sourceRun.projectVersionId,
+        documentDirectoryPath: required(sourceRun.snapshot.documentWorkspace?.logicalPath, 'PI_WORKSPACE_SNAPSHOT_REQUIRED: 旧需求评审运行不能全部重跑'),
         reviewId: reviewIdFor(sourceRun),
         focusAreas: sourceRun.snapshot.focusAreas,
         excludedAreas: sourceRun.snapshot.excludedAreas,
@@ -159,6 +159,7 @@ export class RequirementAnalysisService {
     const sourceRun = required(state.reviewRuns.find(item => item.id === sourceRunId), '需求评审运行不存在')
     if (sourceRun.status === 'running') throw new Error('正在执行的需求评审不能重跑，请先取消运行')
     if (sourceRun.status === 'succeeded') throw new Error('已成功的需求评审不能作为失败重试来源')
+    if (sourceRun.snapshot.extractionInput?.mode !== 'agent_directory' || sourceRun.snapshot.documentWorkspace?.layoutVersion !== 'workspace/v1') throw new Error('PI_WORKSPACE_SNAPSHOT_REQUIRED: 旧需求评审运行不支持重新需求评审')
     const projectVersion = required(state.projectVersions.find(item => item.id === sourceRun.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能重新需求评审')
     const extraction = structuredClone(required(sourceRun.extractionResult, '该运行没有已冻结的需求点提取结果，只能全部重跑'))
@@ -238,24 +239,25 @@ export class RequirementAnalysisService {
     const state = await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求评审')
-    const effectiveBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === projectVersion.id)
-    const effectiveVersionIds = [...new Set(effectiveBindings.map(binding => binding.assetVersionId))]
-    const requestedVersionIds = [...new Set([...(request.assetVersionIds ?? []), ...(request.assetVersionId ? [request.assetVersionId] : [])].map(item => String(item).trim()).filter(Boolean))]
-    if (!requestedVersionIds.length) requestedVersionIds.push(...effectiveVersionIds)
-    if (!requestedVersionIds.length) throw new Error('至少需要一份已绑定的需求文档')
-    if (requestedVersionIds.length !== effectiveVersionIds.length || requestedVersionIds.some(versionId => !effectiveVersionIds.includes(versionId))) throw new Error('评审输入必须包含当前项目版本的全部有效需求绑定')
-    const versions = requestedVersionIds.map(versionId => required(state.versions.find(item => item.id === versionId), `需求资产版本不存在：${versionId}`))
-    if (versions.some(version => version.status !== 'ready')) throw new Error('存在尚未就绪的需求资产版本')
-    const assets = versions.map(version => required(state.assets.find(item => item.id === version.assetId), '需求资产不存在'))
-    if (assets.some(asset => asset.assetType !== 'requirement')) throw new Error('只有 requirement 类型资产可以发起需求评审')
-    const knowledgeBaseIds = new Set(assets.map(asset => asset.knowledgeBaseId))
-    if (knowledgeBaseIds.size !== 1) throw new Error('同一次评审的需求文档必须属于同一知识库')
-    const knowledgeBase = required(state.knowledgeBases.find(item => item.id === assets[0].knowledgeBaseId), '知识库不存在')
-    const project = required(state.projects.find(item => item.id === knowledgeBase.projectId), '项目不存在')
-    if (projectVersion.projectId !== project.id) throw new Error('需求资产不属于当前项目版本')
-    versions.forEach((version, index) => required(state.projectVersionRequirementBindings.find(item => item.projectVersionId === projectVersion.id && item.assetId === assets[index].id && item.assetVersionId === version.id), `需求资产版本未绑定到当前项目版本：${version.id}`))
+    const project = required(state.projects.find(item => item.id === projectVersion.projectId), '项目不存在')
+    const knowledgeBase = required(state.knowledgeBases.find(item => item.projectId === project.id), '知识库不存在')
     const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), '知识库没有活动索引')
-    if (versions.some(version => !index.assetVersionIds.includes(version.id))) throw new Error('存在不属于当前活动索引的需求资产版本')
+    if (request.documentDirectoryPath === undefined) throw new Error('PI_WORKSPACE_DIRECTORY_REQUIRED: 需求评审必须指定 /workspace 下的输入目录')
+    const documentDirectoryPath = normalizeDocumentDirectoryPath(request.documentDirectoryPath)
+    const requiredInputDirectory = `workspace/branches/${safeWorkspaceSegment(projectVersion.name)}/input/requirements`
+    if (documentDirectoryPath !== requiredInputDirectory) throw new Error(`PI_WORKSPACE_INPUT_REQUIRED: 当前版本需求输入目录固定为 /${requiredInputDirectory}`)
+    const workspacePairs = state.assets.flatMap(asset => {
+      if (asset.knowledgeBaseId !== knowledgeBase.id || !isWithinDirectory(asset.logicalPath, 'workspace') || !asset.activeVersionId) return []
+      const version = state.versions.find(item => item.id === asset.activeVersionId && item.assetId === asset.id && item.status === 'ready' && index.assetVersionIds.includes(item.id))
+      return version ? [{ asset, version }] : []
+    }).sort((left, right) => left.asset.logicalPath.localeCompare(right.asset.logicalPath, 'zh-CN') || left.version.id.localeCompare(right.version.id))
+    const inputPairs = workspacePairs.filter(({ asset }) => isWithinDirectory(asset.logicalPath, documentDirectoryPath))
+    if (!inputPairs.length) throw new Error(`Agent 输入目录 /${documentDirectoryPath} 中没有已进入活动索引的 ready 文档`)
+    if (!workspacePairs.length) throw new Error('/workspace 中没有已进入活动索引的 ready 文档')
+    const workspaceAssets = workspacePairs.map(item => item.asset)
+    const workspaceVersions = workspacePairs.map(item => item.version)
+    const inputAssets = inputPairs.map(item => item.asset)
+    const inputVersions = inputPairs.map(item => item.version)
     const [extractionConfiguration, reviewConfiguration] = this.definitions.resolveActive
       ? await Promise.all([this.definitions.resolveActive('requirement-point-extraction'), this.definitions.resolveActive('requirement-review')])
       : [null, null]
@@ -267,17 +269,23 @@ export class RequirementAnalysisService {
     const reviewModel = reviewModels[0]
     const baseExtractionDefinition = extractionConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-point-extraction')
     const reviewDefinition = reviewConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-review')
-    const extractionCoveragePlan = buildExtractionCoveragePlan(versions, request.excludedAreas)
+    requirePiWorkspaceAgentDefinition(baseExtractionDefinition)
+    const extractionCoveragePlan = buildExtractionCoveragePlan(inputVersions, request.excludedAreas)
     const extractionDefinition = baseExtractionDefinition
-    const extractionToolBudget = { directoryCalls: 0, chunkCalls: 0, evidenceCalls: 0, submissionCalls: 3, minimumToolCalls: 3 }
+    const extractionToolBudget = { directoryCalls: Math.max(1, extractionDefinition.limits.maxToolCalls - 3), chunkCalls: Math.max(1, extractionDefinition.limits.maxToolCalls - 3), evidenceCalls: 0, submissionCalls: 3, minimumToolCalls: 3 }
     const effectiveMaxOutputTokens = extractionConfiguration?.routing.maxOutputTokens ?? extractionModel.model.maxOutputTokens
-    const requirementInputPlan = buildRequirementInputPlan({
-      assets: assets.map((asset, position) => ({ asset, version: versions[position] })),
-      coveragePlan: extractionCoveragePlan,
-      definition: extractionDefinition,
-      contextWindow: extractionModel.model.contextWindow,
-      maxOutputTokens: effectiveMaxOutputTokens,
-    })
+    const contextAssets = workspaceAssets.map((asset, position) => ({ asset, version: workspaceVersions[position] }))
+    const documentWorkspace = requirementDocumentWorkspace(projectVersion, state.projectVersions, documentDirectoryPath)
+    const requirementInputPlan = buildRequirementDirectoryInputPlan({
+        workspacePath: documentDirectoryPath,
+        workspaceRootPath: documentWorkspace?.rootLogicalPath,
+        activeBranchPath: documentWorkspace?.activeBranchLogicalPath,
+        agentWorkspacePath: documentWorkspace?.agentLogicalPath,
+        assets: contextAssets,
+        definition: extractionDefinition,
+        contextWindow: extractionModel.model.contextWindow,
+        maxOutputTokens: effectiveMaxOutputTokens,
+      })
     const now = new Date().toISOString()
     const reviewId = request.reviewId ?? `review_${randomUUID()}`
     const snapshot: ReviewRunSnapshot = {
@@ -288,12 +296,13 @@ export class RequirementAnalysisService {
       projectVersionId: projectVersion.id,
       projectVersionName: projectVersion.name,
       knowledgeBaseId: knowledgeBase.id,
-      assetId: assets[0].id,
-      assetVersionId: versions[0].id,
-      assetContentHash: versions[0].contentHash,
+      assetId: inputAssets[0].id,
+      assetVersionId: inputVersions[0].id,
+      assetContentHash: inputVersions[0].contentHash,
       indexVersionId: index.id,
-      logicalPath: assets[0].logicalPath,
-      assets: assets.map((asset, position) => ({ assetId: asset.id, assetVersionId: versions[position].id, assetContentHash: versions[position].contentHash, logicalPath: asset.logicalPath, displayName: asset.displayName })),
+      logicalPath: inputAssets[0].logicalPath,
+      assets: workspaceAssets.map((asset, position) => ({ assetId: asset.id, assetVersionId: workspaceVersions[position].id, assetContentHash: workspaceVersions[position].contentHash, logicalPath: asset.logicalPath, displayName: asset.displayName, assetType: asset.assetType })),
+      documentWorkspace: { ...documentWorkspace, candidateAssetVersionIds: workspaceVersions.map(item => item.id) },
       modelRef: modelSnapshot(extractionModel, effectiveMaxOutputTokens),
       agentModelRefs: {
         requirementPointExtraction: modelSnapshot(extractionModel, effectiveMaxOutputTokens),
@@ -328,11 +337,11 @@ export class RequirementAnalysisService {
       reviewId,
       ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId, retryMode: request.retryMode ?? 'full' } : {}),
       projectVersionId: projectVersion.id,
-      assetId: assets[0].id,
-      assetVersionId: versions[0].id,
-      documentTitle: `${assets.length} 份需求文档`,
-      documentVersion: versions[0].number,
-      logicalPath: assets.map(asset => asset.logicalPath).join('；'),
+      assetId: inputAssets[0].id,
+      assetVersionId: inputVersions[0].id,
+      documentTitle: `${inputAssets.length} 份需求输入文档 · ${workspaceAssets.length} 份工作区文档`,
+      documentVersion: inputVersions[0].number,
+      logicalPath: documentDirectoryPath,
       sourceId: extractionModel.source.id,
       modelId: extractionModel.model.id,
       modelLabel: `需求点提取：${extractionModel.source.name} · ${extractionModel.model.displayName}；需求评审：${reviewModel.source.name} · ${reviewModel.model.displayName}`,
@@ -384,13 +393,29 @@ export class RequirementAnalysisService {
       return version
     })
     const assets = run.snapshot.assets.map(item => required(state.assets.find(candidate => candidate.id === item.assetId), '固定需求资产不存在'))
-    const requirementInputPlan = buildRequirementInputPlan({
-      assets: assets.map((asset, index) => ({ asset, version: versions[index] })),
-      coveragePlan: run.snapshot.extractionCoveragePlan,
-      definition: run.snapshot.agentDefinitions.requirementPointExtraction,
-      contextWindow: extractionModels[0].model.contextWindow,
-      maxOutputTokens: extractionConfiguration?.routing.maxOutputTokens ?? extractionModels[0].model.maxOutputTokens,
-    })
+    const fixedContextAssets = assets.map((asset, index) => ({
+      asset: {
+        ...asset,
+        displayName: run.snapshot.assets[index].displayName,
+        logicalPath: run.snapshot.assets[index].logicalPath,
+        assetType: run.snapshot.assets[index].assetType ?? asset.assetType,
+      },
+      version: versions[index],
+    }))
+    const fixedDefinition = run.snapshot.agentDefinitions.requirementPointExtraction
+    requirePiWorkspaceAgentDefinition(fixedDefinition)
+    const fixedMaxOutputTokens = extractionConfiguration?.routing.maxOutputTokens ?? extractionModels[0].model.maxOutputTokens
+    if (run.snapshot.extractionInput.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_SNAPSHOT_REQUIRED: 旧需求评审输入模式不再支持执行')
+    const requirementInputPlan = buildRequirementDirectoryInputPlan({
+        workspacePath: required(run.snapshot.documentWorkspace?.logicalPath, '固定 Agent 文档工作目录不存在'),
+        workspaceRootPath: run.snapshot.documentWorkspace?.rootLogicalPath,
+        activeBranchPath: run.snapshot.documentWorkspace?.activeBranchLogicalPath,
+        agentWorkspacePath: run.snapshot.documentWorkspace?.agentLogicalPath,
+        assets: fixedContextAssets,
+        definition: fixedDefinition,
+        contextWindow: extractionModels[0].model.contextWindow,
+        maxOutputTokens: fixedMaxOutputTokens,
+      })
     if (requirementInputPlan.packageSha256 !== run.snapshot.extractionInput.packageSha256) throw new Error('固定正文输入包 Hash 已漂移')
     await this.reviewTransaction(run.id, lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求评审运行不存在')
@@ -443,7 +468,7 @@ export class RequirementAnalysisService {
   private async executeStages(input: {
     run: ReviewRun
     snapshot: ReviewRunSnapshot
-    requirementInputPlan: ReturnType<typeof buildRequirementInputPlan>
+    requirementInputPlan: RequirementInputPlan
     extractionModels: AgentModelSelection[]
     reviewModels: AgentModelSelection[]
     extractionConfiguration: AgentConfigurationVersion | null
@@ -835,6 +860,48 @@ function hasFrozenExtraction(run: ReviewRun) {
   return typeof projected === 'boolean' ? projected : Boolean(run.extractionResult && run.inputDeliveryManifest)
 }
 
+function requirementDocumentWorkspace(projectVersion: DatabaseState['projectVersions'][number], projectVersions: DatabaseState['projectVersions'], logicalPath: string): NonNullable<ReviewRunSnapshot['documentWorkspace']> {
+  const rootLogicalPath = 'workspace'
+  if (logicalPath !== rootLogicalPath && !logicalPath.startsWith(`${rootLogicalPath}/`)) return { mode: 'agent_directory', logicalPath, candidateAssetVersionIds: [] }
+  const activeBranchLogicalPath = `${rootLogicalPath}/branches/${safeWorkspaceSegment(projectVersion.name)}`
+  const branchLogicalPaths = [...new Set(projectVersions
+    .filter(item => item.projectId === projectVersion.projectId)
+    .map(item => `${rootLogicalPath}/branches/${safeWorkspaceSegment(item.name)}`))]
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'))
+  return {
+    mode: 'agent_directory',
+    logicalPath,
+    rootLogicalPath,
+    activeBranchLogicalPath,
+    branchLogicalPaths,
+    agentLogicalPath: `${rootLogicalPath}/agent_workspace/requirement_agent`,
+    layoutVersion: 'workspace/v1',
+    candidateAssetVersionIds: [],
+  }
+}
+
+function safeWorkspaceSegment(value: string) {
+  const encodeCharacter = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`
+  const source = value.normalize('NFC').trim() || '未命名版本'
+  let safe = source
+    .replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encodeCharacter)
+    .replace(/[. ]+$/gu, characters => [...characters].map(encodeCharacter).join(''))
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encodeCharacter(source[0])}${safe.slice(1)}`
+  return safe
+}
+
+function normalizeDocumentDirectoryPath(value: unknown) {
+  const normalized = String(value ?? '').trim().replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  const segments = normalized.split('/')
+  if (!normalized || /^[A-Za-z]:/u.test(normalized) || segments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('Agent 文档工作目录必须是知识库内的有效逻辑目录')
+  return normalized
+}
+
+function isWithinDirectory(logicalPath: string, directoryPath: string) {
+  const normalized = logicalPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  return normalized.startsWith(`${directoryPath}/`) && normalized.length > directoryPath.length + 1
+}
+
 function reviewIdFor(run: ReviewRun) {
   return run.reviewId ?? run.snapshot.reviewId ?? `review_${run.retryOfRunId ?? run.id}`
 }
@@ -862,11 +929,21 @@ function selectAgentModels(state: DatabaseState, configuration: AgentConfigurati
   })
 }
 
-function supportsInputPlan(selection: AgentModelSelection, plan: ReturnType<typeof buildRequirementInputPlan>, configuration: AgentConfigurationVersion | null) {
+function supportsInputPlan(selection: AgentModelSelection, plan: RequirementInputPlan, configuration: AgentConfigurationVersion | null) {
+  if (plan.mode !== 'agent_directory') return false
   const output = configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens
   const largestBatch = Math.max(...plan.batches.map(batch => batch.tokenCount), 0)
-  const requiredInput = plan.mode === 'full_context' ? plan.estimatedInputTokens : largestBatch + 4_000
+  const requiredInput = largestBatch + 4_000
   return selection.model.contextWindow >= requiredInput + output
+}
+
+function requirePiWorkspaceAgentDefinition(definition: ReviewRunSnapshot['agentDefinition']) {
+  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'requirement-points.submit_result']
+  const missingTools = requiredTools.filter(toolId => !definition.toolIds.includes(toolId))
+  const retiredTools = definition.toolIds.filter(toolId => toolId === 'knowledge.search' || toolId === 'knowledge.read_chunk')
+  if (definition.resultSchemaVersion !== 'requirement-point-extraction/v5' || missingTools.length || retiredTools.length) {
+    throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布基于 /workspace 的需求点提取 Agent 配置${missingTools.length ? `；缺少工具 ${missingTools.join(', ')}` : ''}${retiredTools.length ? `；不再支持工具 ${retiredTools.join(', ')}` : ''}`)
+  }
 }
 
 function isFallbackEligible(message: string) {

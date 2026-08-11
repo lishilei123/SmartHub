@@ -1,7 +1,7 @@
 import type { AgentCandidateResult, CandidateRequirementPointExtraction } from './review-types.js'
 
 export type AgentReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-export type RequirementInputMode = 'full_context' | 'segmented_context'
+export type RequirementInputMode = 'full_context' | 'segmented_context' | 'agent_directory'
 
 export interface AgentExecutionLimits {
   maxTurns: number
@@ -54,7 +54,17 @@ export interface ReviewRunSnapshot {
   assetContentHash: string
   indexVersionId: string
   logicalPath: string
-  assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }>
+  assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }>
+  documentWorkspace?: {
+    mode: 'agent_directory'
+    logicalPath: string
+    rootLogicalPath?: string
+    activeBranchLogicalPath?: string
+    branchLogicalPaths?: string[]
+    agentLogicalPath?: string
+    layoutVersion?: 'workspace/v1'
+    candidateAssetVersionIds: string[]
+  }
   modelRef: { sourceId: string; modelId: string; providerType: 'openai' | 'anthropic' | 'openai_compatible'; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
   agentModelRefs?: {
     requirementPointExtraction: ReviewRunSnapshot['modelRef']
@@ -121,6 +131,15 @@ export interface InputDeliveryManifest {
   mode: RequirementInputMode
   packageSha256: string
   entries: InputDeliveryManifestEntry[]
+  toolReads?: Array<{
+    toolCallId: string
+    toolId: 'workspace.read_file'
+    relativePath: string
+    assetVersionIds: string[]
+    chunkIds: string[]
+    startLine: number
+    endLine: number
+  }>
   finalMergeCompleted: boolean
 }
 

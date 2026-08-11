@@ -17,6 +17,7 @@ import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from
 import { createProjectVersion, deleteProjectVersion, loadProjectVersions, updateProjectVersionStatus, type ProjectVersion, type ProjectVersionStatus } from './project-version-api'
 import { loadAgentConfiguration, publishAgentConfiguration, saveAgentConfigurationDraft, type AgentConfigurationAgentDraft, type AgentConfigurationAgentKey, type AgentConfigurationState, type AgentRoutingConfiguration } from './agent-configuration-api'
 import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, updateAiResource, uploadSkillPackage, type AiResource, type AiResourceCatalog, type AiResourceKind, type McpServerResource, type SkillPackageMetadata, type SkillResource, type ToolResource, type ToolSource } from './ai-resource-api'
+import { buildWorkspaceKnowledgeTree, type WorkspaceKnowledgeDirectory } from './workspace-knowledge-tree'
 
 const RequirementReviewPage = lazy(() => import('./RequirementReviewPage').then(module => ({ default: module.RequirementReviewPage })))
 const TechnicalSolutionReviewPage = lazy(() => import('./TechnicalSolutionReviewPage').then(module => ({ default: module.TechnicalSolutionReviewPage })))
@@ -28,7 +29,7 @@ type Notify = (message: string, tone?: NotifyTone) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
 type SearchLocation = { assetId: string; assetVersionId: string; startLine: number; endLine: number; nonce: number }
 const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: string; identifier: string; sceneLabel: string; protocolLabel: string; publishTarget: string; runtimeToolIds: string[] }> = {
-  requirementPointExtraction: { label: '需求点提取 Agent', identifier: 'RequirementPointExtractionAgent', sceneLabel: '需求分析', protocolLabel: '提取协议 v5', publishTarget: '新需求评审', runtimeToolIds: ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result'] },
+  requirementPointExtraction: { label: '需求点提取 Agent', identifier: 'RequirementPointExtractionAgent', sceneLabel: '需求分析', protocolLabel: '提取协议 v5', publishTarget: '新需求评审', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'requirement-points.submit_result'] },
   requirementReview: { label: '需求评审 Agent', identifier: 'RequirementReviewAgent', sceneLabel: '需求分析', protocolLabel: '评审协议 v3', publishTarget: '新需求评审', runtimeToolIds: ['review.submit_result'] },
   reviewQa: { label: '评审问答 Agent', identifier: 'ReviewQaAgent', sceneLabel: '需求分析', protocolLabel: '问答协议 v1', publishTarget: '新评审问答', runtimeToolIds: ['review.answer_submit'] },
   technicalSolutionExtraction: { label: '技术方案提取 Agent', identifier: 'TechnicalSolutionExtractionAgent', sceneLabel: '技术方案分析', protocolLabel: '提取协议 v1', publishTarget: '新技术方案评审', runtimeToolIds: ['technical_solution_points.submit_result'] },
@@ -160,6 +161,11 @@ function App() {
     return () => window.removeEventListener('popstate', restore)
   }, [])
   const activeProjectVersion = projectVersions.find(item => item.id === selectedProjectVersionId) ?? null
+  const workspaceKnowledgeTree = useMemo(() => buildWorkspaceKnowledgeTree({
+    directories: knowledgeDirectoryList,
+    documents: knowledgeDocumentList,
+    versionNames: projectVersions.map(version => version.name),
+  }), [knowledgeDirectoryList, knowledgeDocumentList, projectVersions])
   const refreshProjectVersions = useCallback(async () => {
     const versions = await loadProjectVersions()
     setProjectVersions(versions)
@@ -236,7 +242,7 @@ function App() {
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>
         {page === 'dashboard' && <Dashboard navigate={navigate} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
         {page === 'requirements' && <Suspense fallback={<PageLoading label="正在加载需求评审工作台…" />}><RequirementReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
-        {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={knowledgeDirectoryList} documents={knowledgeDocumentList} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
+        {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={workspaceKnowledgeTree.directories} documents={workspaceKnowledgeTree.documents} workspaceRootDirectoryId={workspaceKnowledgeTree.rootDirectoryId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'design' && <Suspense fallback={<PageLoading label="正在加载技术方案评审工作台…" />}><TechnicalSolutionReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onBackToWorkbench={() => {
             updateRoute({ page: 'design', resetReviewContext: true })
             window.dispatchEvent(new PopStateEvent('popstate'))
@@ -303,7 +309,7 @@ function PageLoading({ label }: { label: string }) {
   return <section className="card page-loading" role="status"><RefreshCw /><span>{label}</span></section>
 }
 
-function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, directories, documents, notify, addAudit }: { knowledgeBaseId: string; apiState: 'connecting' | 'ready' | 'offline'; refreshKnowledge: (includeDeleted?: boolean) => Promise<void>; loadDocument: (document: KnowledgeDocument) => Promise<KnowledgeDocument>; directories: KnowledgeDirectory[]; documents: KnowledgeDocument[]; notify: Notify; addAudit: (entry: string) => void }) {
+function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, directories, documents, workspaceRootDirectoryId, notify, addAudit }: { knowledgeBaseId: string; apiState: 'connecting' | 'ready' | 'offline'; refreshKnowledge: (includeDeleted?: boolean) => Promise<void>; loadDocument: (document: KnowledgeDocument) => Promise<KnowledgeDocument>; directories: WorkspaceKnowledgeDirectory[]; documents: KnowledgeDocument[]; workspaceRootDirectoryId: string | null; notify: Notify; addAudit: (entry: string) => void }) {
   const [selectedId, setSelectedId] = useState(documents[0]?.id ?? '')
   const [selectedDirectoryId, setSelectedDirectoryId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -381,6 +387,9 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
   useEffect(() => {
     if (selectedDirectoryId && !directories.some(directory => directory.id === selectedDirectoryId)) setSelectedDirectoryId(null)
   }, [directories, selectedDirectoryId])
+  useEffect(() => {
+    setExpandedDirectoryIds(current => new Set([...current, ...directories.map(directory => directory.id)]))
+  }, [directories])
   useEffect(() => { if (!query.trim() || apiState !== 'ready') { searchRequestRef.current += 1; searchResultQueryRef.current = ''; searchResultStatusRef.current = ''; setSearchResults([]); setSearchMeta(null); setSearchStatus(''); return }; const timer = window.setTimeout(() => void search(), 350); return () => window.clearTimeout(timer) }, [query, apiState, knowledgeBaseId])
   useEffect(() => {
     if (!searchStatus) return
@@ -397,7 +406,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
 
   const directoryById = useMemo(() => new Map(directories.map(directory => [directory.id, directory])), [directories])
   const directoriesByParent = useMemo(() => {
-    const result = new Map<string | null, KnowledgeDirectory[]>()
+    const result = new Map<string | null, WorkspaceKnowledgeDirectory[]>()
     directories.forEach(directory => result.set(directory.parentId, [...(result.get(directory.parentId) ?? []), directory]))
     return result
   }, [directories])
@@ -535,9 +544,9 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
       names.unshift(directory.name)
       currentId = directory.parentId
     }
-    return ['SmartHub 知识库', ...names].join(' / ')
+    return ['知识库', ...names].join(' / ')
   }
-  const getDirectoryLogicalPath = (directoryId: string) => getDirectoryBreadcrumb(directoryId).split(' / ').slice(1).join('/')
+  const getDirectoryLogicalPath = (directoryId: string) => directoryById.get(directoryId)?.logicalPath ?? ''
   const getBreadcrumb = (document: KnowledgeDocument) => `${getDirectoryBreadcrumb(document.parentId ?? '').replace(/ \/ $/, '')} / ${document.name}`
   const isExpanded = (directoryId: string) => queryText ? visibleDirectoryIds.has(directoryId) : expandedDirectoryIds.has(directoryId)
   const toggleDirectory = (directoryId: string) => setExpandedDirectoryIds(current => {
@@ -553,7 +562,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
     setDirectoryName('')
     setDirectoryNameError('')
   }
-  const openRename = (directory: KnowledgeDirectory) => {
+  const openRename = (directory: WorkspaceKnowledgeDirectory) => {
     setDirectoryActionId(null)
     setDirectoryEditor({ mode: 'rename', directoryId: directory.id })
     setDirectoryName(directory.name)
@@ -581,10 +590,10 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
     } catch (error) { setDirectoryNameError(error instanceof Error ? error.message : '目录保存失败') }
     finally { setDirectorySaving(false) }
   }
-  const openDelete = (directory: KnowledgeDirectory) => {
+  const openDelete = (directory: WorkspaceKnowledgeDirectory) => {
     setDirectoryActionId(null)
     setDeleteDirectoryId(directory.id)
-    setMoveTargetId(directory.parentId ?? '')
+    setMoveTargetId(directory.parentId ?? workspaceRootDirectoryId ?? '')
   }
   const closeDelete = () => { setDeleteDirectoryId(null); setMoveTargetId('') }
   const deleteEverything = async () => {
@@ -597,7 +606,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
     const parentId = moveTargetId || null
     const movedDirectories = directories.filter(directory => directory.parentId === deleteTarget.id).length
     const movedDocuments = documents.filter(document => document.parentId === deleteTarget.id).length
-    const destination = parentId ? directoryById.get(parentId)?.name ?? '目标目录' : '知识库根目录'
+    const destination = parentId ? directoryById.get(parentId)?.name ?? (parentId === workspaceRootDirectoryId ? '/workspace' : '目标目录') : '/workspace'
     try { await deleteKnowledgeDirectory(deleteTarget.id, 'move', parentId); await refreshKnowledge(); setExpandedDirectoryIds(current => { const next = new Set(current); next.delete(deleteTarget.id); if (parentId) next.add(parentId); return next }); setSelectedDirectoryId(null); addAudit(`移动“${deleteTarget.name}”的 ${movedDirectories} 个子目录和 ${movedDocuments} 份文档至“${destination}”`); notify('目录内容已移动，目录变更已保存。'); closeDelete() }
     catch (error) { notify(error instanceof Error ? error.message : '目录移动失败') }
   }
@@ -622,7 +631,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
     const selected = [...(event.target.files ?? [])]; event.target.value = ''; if (!selected.length) return
     const archives = selected.filter(file => file.name.toLowerCase().endsWith('.zip'))
     if (archives.length && selected.length > 1) { notify('ZIP 压缩包需要单独上传，不能与 Markdown 文件混选。'); return }
-    setUploadCandidates(selected); const directoryPath = selectedDirectoryId ? getDirectoryLogicalPath(selectedDirectoryId) : ''
+    setUploadCandidates(selected); const directoryPath = selectedDirectoryId ? getDirectoryLogicalPath(selectedDirectoryId) : 'workspace/shared/knowledge'
     setUploadLogicalPath(selected.length === 1 && !archives.length ? directoryPath ? `${directoryPath}/${selected[0].name}` : selected[0].name : directoryPath)
   }
   const upload = async () => {
@@ -690,7 +699,7 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
     if (!linked) { notify(`知识库中未找到链接文档：${logicalPath}`); return }
     selectFile(linked.id)
   }
-  const openFileActions = (target: KnowledgeDocument | undefined = file) => { if (!target) return; setSelectedId(target.id); setFileNameDraft(target.name); setFileTargetDirectoryId(target.parentId ?? ''); setFileActionError(''); setMoreOpen(true) }
+  const openFileActions = (target: KnowledgeDocument | undefined = file) => { if (!target) return; setSelectedId(target.id); setFileNameDraft(target.name); setFileTargetDirectoryId(target.parentId ?? workspaceRootDirectoryId ?? ''); setFileActionError(''); setMoreOpen(true) }
   const renameFile = async () => {
     if (!file) return
     setFileActionBusy(true); setFileActionError('')
@@ -729,9 +738,9 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
     const top = target.getBoundingClientRect().top - preview.getBoundingClientRect().top + preview.scrollTop - 14
     preview.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
   }
-  const renderTask = (task: KnowledgeDocument['task'] | KnowledgeDirectory['task']) => task ? <span className={`tree-task ${task.status}`} title={task.error ?? `${task.step} ${task.progress}%`}><span>{task.status === 'failed' ? '失败' : task.status === 'queued' ? '排队' : task.step === 'file_cleanup' ? '清理中' : `${task.progress}%`}</span>{task.canRetry && <button onClick={event => { event.stopPropagation(); void retryRowTask(task.id) }}>重试</button>}{task.canCancel && <button onClick={event => { event.stopPropagation(); void cancelRowTask(task.id) }}>取消</button>}</span> : null
+  const renderTask = (task: KnowledgeDocument['task'] | WorkspaceKnowledgeDirectory['task']) => task ? <span className={`tree-task ${task.status}`} title={task.error ?? `${task.step} ${task.progress}%`}><span>{task.status === 'failed' ? '失败' : task.status === 'queued' ? '排队' : task.step === 'file_cleanup' ? '清理中' : `${task.progress}%`}</span>{task.canRetry && <button onClick={event => { event.stopPropagation(); void retryRowTask(task.id) }}>重试</button>}{task.canCancel && <button onClick={event => { event.stopPropagation(); void cancelRowTask(task.id) }}>取消</button>}</span> : null
   const renderFile = (document: KnowledgeDocument, paddingLeft: string) => <div className={`tree-file-row ${selectedId === document.id ? 'active' : ''}`} key={document.id}><button className={`tree-file ${selectedId === document.id ? 'active' : ''}`} style={{ paddingLeft }} onClick={() => selectFile(document.id)} title={document.task?.error ?? document.name}><FileText /><span>{document.name}</span></button>{renderTask(document.task)}<button className="icon-btn tree-file-action" aria-label={`${document.name}更多操作`} disabled={Boolean(document.task && document.task.status !== 'failed')} onClick={() => openFileActions(document)}><MoreHorizontal /></button></div>
-  const renderDirectory = (directory: KnowledgeDirectory, depth: number): ReactNode => {
+  const renderDirectory = (directory: WorkspaceKnowledgeDirectory, depth: number): ReactNode => {
     if (queryText && !visibleDirectoryIds.has(directory.id)) return null
     const childDirectories = directoriesByParent.get(directory.id) ?? []
     const childDocuments = (documentsByParent.get(directory.id) ?? []).filter(document => !queryText || matchingDocumentIds.has(document.id))
@@ -743,8 +752,8 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
         <button className="tree-folder-name" onClick={() => { setSelectedDirectoryId(directory.id); if (hasChildren) toggleDirectory(directory.id) }} title={directory.task?.error ?? directory.name}><FolderOpen /><span>{directory.name}</span></button>
         {renderTask(directory.task)}
         <small>{documentCountByDirectory.get(directory.id) ?? 0}</small>
-        <button className="icon-btn tree-action" disabled={Boolean(directory.task && directory.task.status !== 'failed')} aria-label={`${directory.name}更多操作`} onClick={() => setDirectoryActionId(current => current === directory.id ? null : directory.id)}><MoreHorizontal /></button>
-        {directoryActionId === directory.id && <div className="tree-menu" role="menu"><button role="menuitem" onClick={() => openCreate(directory.id)}><FolderPlus />新建子目录</button><button role="menuitem" onClick={() => openRename(directory)}><Pencil />重命名</button><button className="danger" role="menuitem" onClick={() => openDelete(directory)}><Trash2 />删除目录</button></div>}
+        {directory.persisted && <button className="icon-btn tree-action" disabled={Boolean(directory.task && directory.task.status !== 'failed')} aria-label={`${directory.name}更多操作`} onClick={() => setDirectoryActionId(current => current === directory.id ? null : directory.id)}><MoreHorizontal /></button>}
+        {directory.persisted && directoryActionId === directory.id && <div className="tree-menu" role="menu"><button role="menuitem" onClick={() => openCreate(directory.id)}><FolderPlus />新建子目录</button>{!directory.structural && <><button role="menuitem" onClick={() => openRename(directory)}><Pencil />重命名</button><button className="danger" role="menuitem" onClick={() => openDelete(directory)}><Trash2 />删除目录</button></>}</div>}
       </div>
       {expanded && <div className="tree-children">{childDirectories.map(child => renderDirectory(child, depth + 1))}{childDocuments.map(document => renderFile(document, `${47 + depth * 17}px`))}</div>}
     </div>
@@ -753,25 +762,25 @@ function Documents({ knowledgeBaseId, apiState, refreshKnowledge, loadDocument, 
   const rootDocuments = (documentsByParent.get(null) ?? []).filter(document => !queryText || matchingDocumentIds.has(document.id))
   const editorTarget = directoryEditor?.mode === 'rename' ? directoryById.get(directoryEditor.directoryId) : undefined
   const editorParentId = directoryEditor?.mode === 'create' ? directoryEditor.parentId : editorTarget?.parentId
-  const editorParentName = editorParentId ? directoryById.get(editorParentId)?.name : '知识库根目录'
+  const editorParentName = editorParentId ? directoryById.get(editorParentId)?.name ?? '/workspace' : '/workspace'
   const deletedDocumentCount = documents.filter(document => document.parentId && deleteDirectoryIds.has(document.parentId)).length
   const uploadIsArchive = uploadCandidates.length === 1 && uploadCandidates[0].name.toLowerCase().endsWith('.zip')
   const uploadIsMultiple = uploadCandidates.length > 1
-  const uploadDirectorySuggestions = directories.map(directory => getDirectoryLogicalPath(directory.id)).filter(Boolean).sort((left, right) => left.localeCompare(right, 'zh-CN'))
+  const uploadDirectorySuggestions = directories.map(directory => directory.logicalPath).filter(Boolean).sort((left, right) => left.localeCompare(right, 'zh-CN'))
   const uploadPathSuggestions = uploadIsArchive || uploadIsMultiple ? uploadDirectorySuggestions : uploadCandidates.length === 1 ? [uploadCandidates[0].name, ...uploadDirectorySuggestions.map(path => `${path}/${uploadCandidates[0].name}`)] : []
 
   return <section className="card knowledge-page">
     <div className="knowledge-toolbar"><div ref={searchInputRef} className="mini-search wide"><Search size={16} /><input aria-label="搜索知识库" value={query} onChange={event => updateSearchQuery(event.target.value)} onFocus={reopenSearchResults} placeholder="搜索文件名称或文档内容" /></div><Badge tone={apiState === 'ready' ? 'green' : apiState === 'connecting' ? 'orange' : 'gray'}>{apiState === 'ready' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{apiState === 'ready' ? '知识库已连接' : apiState === 'connecting' ? '正在连接' : 'API 未启动'}</Badge>{activeIndexSummary && <Badge tone="blue">活动索引 V{activeIndexSummary.number} · {activeIndexSummary.dimensions} 维 · {activeIndexSummary.chunks} Chunk · {activeIndexSummary.hnswReady === null ? '内存检索' : activeIndexSummary.hnswReady ? 'HNSW 就绪' : '精确检索'}</Badge>}{candidateProgress && <Badge tone="orange">候选索引 {candidateProgress.step} · {candidateProgress.progress}%（旧索引继续服务）</Badge>}<button className="btn ghost" disabled={syncState === 'running' || apiState !== 'ready'} onClick={() => void sync()}><RefreshCw size={16} />{syncState === 'running' ? '刷新中' : '刷新'}</button><button className="btn primary" disabled={uploadState === 'running' || apiState !== 'ready'} onClick={() => uploadRef.current?.click()}><Upload size={16} />{uploadState === 'running' ? '上传中' : '上传资料'}</button><input ref={uploadRef} className="visually-hidden" type="file" multiple accept=".zip,.md,.txt,application/zip,text/markdown,text/plain" onChange={chooseUpload} />{searchStatus && <div ref={searchPopoverRef} className="knowledge-search-results" role="dialog" aria-label="知识库检索结果">{searchMeta && <div className="search-summary"><b>{retrievalModeLabel(searchMeta.mode)}{searchMeta.degraded ? '（已降级）' : ''}</b><span>关键词召回 {searchMeta.keywordCandidates} · 向量召回 {searchMeta.vectorCandidates} · 通过门槛 {searchMeta.eligibleCandidates}</span><em>{searchMeta.degraded ? '向量服务不可用，已使用关键词检索' : `最低相关度 ${Math.round(searchMeta.minimumRelevance * 100)}%`}</em></div>}{searchResults.length ? searchResults.map(result => <button key={`${result.version.id}-${result.chunk.chunkKey}`} onClick={() => openSearchResult(result)}><b>{result.asset.displayName}<em className="final-score">综合 {Math.round(result.score * 100)}%</em></b><span>{result.excerpt}</span><small>{result.asset.logicalPath} · {result.chunk.headingPath.join(' / ') || '正文'} · L{result.chunk.startLine}-{result.chunk.endLine}</small>{result.scores && <div className="score-breakdown"><i className={result.scores.keyword > 0 ? 'active' : ''}>关键词 {Math.round(result.scores.keyword * 100)}%</i><i className={result.scores.vector > 0 ? 'active' : ''}>向量 {Math.round(result.scores.vector * 100)}%</i>{result.scores.reranker != null && <i className="active">重排 {Math.round(result.scores.reranker * 100)}%</i>}</div>}</button>) : <p>{searchStatus === 'no_ready_assets' ? '尚无已就绪资料。' : searchStatus === 'initial_indexing' ? '正在建立首个索引，请稍后重试。' : searchStatus === 'no_active_index' ? '尚未建立活动索引。' : searchStatus === 'vector_unavailable' ? '向量服务暂不可用，可切换关键词检索。' : searchStatus === 'filter_empty' ? '当前筛选范围没有可检索资料。' : '当前范围没有匹配结果。'}</p>}</div>}</div>
-    <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-root"><FolderOpen /><b>SmartHub 知识库</b><small>{documents.length}</small><button className="icon-btn tree-root-action" onClick={() => openCreate(null)} aria-label="在知识库根目录新建目录"><FolderPlus /></button><button className="icon-btn tree-collapse" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{queryText && !matchingDocumentIds.size ? <p className="empty-state">没有匹配的文档。</p> : <div className="tree-content">{rootDirectories.map(directory => renderDirectory(directory, 0))}{rootDocuments.map(document => renderFile(document, '30px'))}</div>}</aside>
+    <div className={`knowledge-layout ${treeCollapsed ? 'tree-collapsed' : ''}`}><aside className={`file-tree ${treeCollapsed ? 'collapsed' : ''}`}><div className="tree-root" title="/workspace"><FolderOpen /><b>知识库</b><small>{documents.length}</small>{workspaceRootDirectoryId && <button className="icon-btn tree-root-action" onClick={() => openCreate(workspaceRootDirectoryId)} aria-label="在 /workspace 新建目录"><FolderPlus /></button>}<button className="icon-btn tree-collapse" title={treeCollapsed ? '展开文件树' : '收起文件树'} aria-label={treeCollapsed ? '展开文件树' : '收起文件树'} onClick={() => setTreeCollapsed(value => !value)}>{treeCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button></div>{queryText && !matchingDocumentIds.size ? <p className="empty-state">没有匹配的文档。</p> : <div className="tree-content">{rootDirectories.map(directory => renderDirectory(directory, 0))}{rootDocuments.map(document => renderFile(document, '30px'))}</div>}</aside>
       <article ref={documentPanelRef} className={`document-preview ${outlineCollapsed ? 'outline-collapsed' : ''}`}><div className="preview-head"><div className="breadcrumb"><Library size={14} /><span title={file ? getBreadcrumb(file) : undefined}>{file ? getBreadcrumb(file) : '尚未选择文档'}</span></div>{file && <div className="preview-actions">{evidenceFile && <Badge tone="purple">检索证据固定版本</Badge>}<Badge tone={file.task?.status === 'failed' ? 'red' : file.task ? 'orange' : file.status === 'ready' ? 'green' : 'gray'}>{file.task?.status === 'failed' ? '入库失败' : file.task ? `${file.task.step} ${file.task.progress}%` : file.status === 'ready' ? '已入库' : '等待入库'}</Badge><div className="view-switch" role="group" aria-label="文档视图"><button className={viewMode === 'preview' ? 'active' : ''} aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><BookOpen />预览</button><button className={viewMode === 'source' ? 'active' : ''} aria-pressed={viewMode === 'source'} onClick={() => setViewMode('source')}><Code2 />源码</button><button className={viewMode === 'split' ? 'active' : ''} aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><Columns2 />分屏</button></div><button className="btn ghost" onClick={() => setHistoryOpen(true)}><Clock3 />版本历史</button><button className="icon-btn" title={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} aria-label={outlineCollapsed ? '显示本文目录' : '隐藏本文目录'} onClick={() => setOutlineCollapsed(value => !value)}>{outlineCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}</button><button className="icon-btn" aria-label="文档更多操作" onClick={() => openFileActions()}><MoreHorizontal /></button></div>}</div>
         {file ? documentContentLoading ? <div className="document-empty" role="status"><RefreshCw className="document-loading-icon" /><h2>正在加载文档正文</h2><p>列表已就绪，正在读取所选固定版本。</p></div> : viewMode === 'preview' ? <div className="preview-body"><DocumentContent ref={previewRef} file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} /><nav ref={outlineRef} className="document-outline" aria-label="本文目录"><b>本文目录</b>{outline.sections.map(section => <button key={section.key} data-outline-section-key={section.key} className={activeSectionKey === section.key ? 'active' : ''} onClick={() => jumpToSection(section.key)}>{section.title}</button>)}</nav></div> : viewMode === 'source' ? <SourceView source={source} /> : <div className="split-view"><section className="split-pane source-pane"><header><Code2 />Markdown 源码 <Badge tone="orange">只读</Badge></header><SourceView source={source} /></section><section className="split-pane rendered-pane"><header><BookOpen />渲染预览</header><DocumentContent file={file} source={source} format={format} outline={outline} knowledgeBaseId={knowledgeBaseId} activeSectionKey={activeSectionKey} onOpenDocument={openLinkedDocument} onOpenImage={() => setImageOpen(true)} compact /></section></div> : <div className="document-empty"><FolderOpen /><h2>暂无可预览文档</h2><p>请上传资料，或检查知识库服务连接后再刷新。</p></div>}
       </article></div>
     {imageOpen && <ImageLightbox onClose={() => setImageOpen(false)} />}
     {uploadCandidates.length > 0 && <Modal title={uploadIsArchive ? '上传 Markdown 压缩包' : uploadIsMultiple ? `批量上传 ${uploadCandidates.length} 个文档` : '上传知识资产'} onClose={() => setUploadCandidates([])}><div className="modal-form"><p>{uploadIsArchive ? '将保留 ZIP 内的目录结构，导入 Markdown/TXT，并保存其中被文档相对路径引用的 PNG、JPG、GIF、WebP 或 SVG 图片。' : uploadIsMultiple ? '所选 Markdown/TXT 将统一上传到目标目录，每个文件独立生成资产版本并进入活动索引。' : '文件将按逻辑路径保存到系统默认知识库目录，并生成不可变版本快照；索引切换完成后进入检索。'}</p><label>{uploadIsMultiple ? '已选文件' : '文件'}<input value={uploadIsMultiple ? `${uploadCandidates.length} 个：${uploadCandidates.map(file => file.name).join('、')}` : uploadCandidates[0].name} readOnly title={uploadCandidates.map(file => file.name).join('\n')} /></label><label>资料类型<input value={uploadAssetType} onChange={event => setUploadAssetType(event.target.value)} placeholder="输入资料类型" /></label><label>{uploadIsArchive || uploadIsMultiple ? '导入到目录（可留空）' : '知识库路径'}<input list="knowledge-upload-paths" value={uploadLogicalPath} onChange={event => setUploadLogicalPath(event.target.value)} placeholder={uploadIsArchive || uploadIsMultiple ? '输入或选择现有目录' : '输入或选择知识库路径'} /><small className="field-hint">可从现有知识库目录中选择，也可以直接输入新路径。</small></label><datalist id="knowledge-upload-paths">{uploadPathSuggestions.map(path => <option key={path} value={path} />)}</datalist><div className="modal-actions"><button className="btn ghost" onClick={() => setUploadCandidates([])}>取消</button><button className="btn primary" disabled={(!uploadIsArchive && !uploadIsMultiple && !uploadLogicalPath.trim()) || !uploadAssetType.trim() || uploadState === 'running'} onClick={() => void upload()}><Upload />确认上传</button></div></div></Modal>}
     {historyOpen && file && <Modal title="文档版本历史" onClose={() => setHistoryOpen(false)}><div className="history-list">{file.versions?.length ? [...file.versions].reverse().map(version => <div key={version.id}><b>V{version.number} · {version.status}</b><span>{new Date(version.createdAt).toLocaleString('zh-CN')} · {version.id}</span></div>) : <div><b>{file.version}</b><span>当前展示版本 · {file.updated}</span></div>}</div></Modal>}
-    {moreOpen && file && <Modal title={`文件操作：${file.name}`} onClose={() => { if (!fileActionBusy) setMoreOpen(false) }}><div className="modal-form"><p>移动、重命名和删除会同步更新 PostgreSQL、系统默认文件目录与活动索引。</p><label>文件名称<input value={fileNameDraft} onChange={event => { setFileNameDraft(event.target.value); setFileActionError('') }} placeholder="document.md" /></label><div className="modal-actions"><button className="btn primary" disabled={fileActionBusy || !fileNameDraft.trim() || fileNameDraft === file.name} onClick={() => void renameFile()}><Pencil />保存名称</button></div><div className="move-directory"><label>移动至<select value={fileTargetDirectoryId} onChange={event => { setFileTargetDirectoryId(event.target.value); setFileActionError('') }}><option value="">知识库根目录</option>{directories.map(directory => <option key={directory.id} value={directory.id}>{getDirectoryBreadcrumb(directory.id)}</option>)}</select></label><button className="btn primary" disabled={fileActionBusy || fileTargetDirectoryId === (file.parentId ?? '')} onClick={() => void moveFile()}><FolderOpen />移动文件</button></div>{fileActionError && <small className="field-error">{fileActionError}</small>}<div className="modal-actions delete-modal-actions"><button className="btn ghost" disabled={fileActionBusy} onClick={() => setMoreOpen(false)}>取消</button><button className="btn danger" disabled={fileActionBusy} onClick={() => void deleteFile()}><Trash2 />删除文件</button></div></div></Modal>}
+    {moreOpen && file && <Modal title={`文件操作：${file.name}`} onClose={() => { if (!fileActionBusy) setMoreOpen(false) }}><div className="modal-form"><p>移动、重命名和删除会同步更新 PostgreSQL、系统默认文件目录与活动索引。</p><label>文件名称<input value={fileNameDraft} onChange={event => { setFileNameDraft(event.target.value); setFileActionError('') }} placeholder="document.md" /></label><div className="modal-actions"><button className="btn primary" disabled={fileActionBusy || !fileNameDraft.trim() || fileNameDraft === file.name} onClick={() => void renameFile()}><Pencil />保存名称</button></div><div className="move-directory"><label>移动至<select value={fileTargetDirectoryId} onChange={event => { setFileTargetDirectoryId(event.target.value); setFileActionError('') }}><option value={workspaceRootDirectoryId ?? ''}>/workspace</option>{directories.filter(directory => directory.persisted).map(directory => <option key={directory.id} value={directory.id}>{getDirectoryBreadcrumb(directory.id)}</option>)}</select></label><button className="btn primary" disabled={fileActionBusy || fileTargetDirectoryId === (file.parentId ?? workspaceRootDirectoryId ?? '')} onClick={() => void moveFile()}><FolderOpen />移动文件</button></div>{fileActionError && <small className="field-error">{fileActionError}</small>}<div className="modal-actions delete-modal-actions"><button className="btn ghost" disabled={fileActionBusy} onClick={() => setMoreOpen(false)}>取消</button><button className="btn danger" disabled={fileActionBusy} onClick={() => void deleteFile()}><Trash2 />删除文件</button></div></div></Modal>}
     {directoryEditor && <Modal title={directoryEditor.mode === 'create' ? '新建目录' : '重命名目录'} onClose={closeEditor}><div className="modal-form"><p>{directoryEditor.mode === 'create' ? `将在“${editorParentName}”中创建目录。` : '目录名称更新后，相关文档路径会同步更新。'} 变更会保存到知识库数据库。</p><label>目录名称<input value={directoryName} onChange={event => { setDirectoryName(event.target.value); setDirectoryNameError('') }} autoFocus placeholder="例如：接口规范" /></label>{directoryNameError && <small className="field-error">{directoryNameError}</small>}<div className="modal-actions"><button className="btn ghost" disabled={directorySaving} onClick={closeEditor}>取消</button><button className="btn primary" disabled={directorySaving} onClick={() => void saveDirectory()}>{directorySaving ? '保存中' : directoryEditor.mode === 'create' ? '创建目录' : '保存名称'}</button></div></div></Modal>}
-    {deleteTarget && <Modal title={`删除目录：${deleteTarget.name}`} onClose={closeDelete}><div className="modal-form"><p>此目录包含 {deleteDirectoryIds.size - 1} 个子目录和 {deletedDocumentCount} 份文档。操作完成后会同步保存到知识库数据库。</p><div className="delete-summary"><span><FolderOpen />目录树</span><b>{deleteDirectoryIds.size} 个目录</b><span><FileText />文档</span><b>{deletedDocumentCount} 份</b></div><div className="move-directory"><label>移动内容至<select value={moveTargetId} onChange={event => setMoveTargetId(event.target.value)}><option value="">知识库根目录</option>{moveCandidates.map(directory => <option key={directory.id} value={directory.id}>{getDirectoryBreadcrumb(directory.id)}</option>)}</select></label><button className="btn primary" onClick={() => void moveContents()}>移动内容并删除目录</button></div><div className="modal-actions delete-modal-actions"><button className="btn ghost" onClick={closeDelete}>取消</button><button className="btn danger" onClick={() => void deleteEverything()}><Trash2 />全部删除</button></div></div></Modal>}
+    {deleteTarget && <Modal title={`删除目录：${deleteTarget.name}`} onClose={closeDelete}><div className="modal-form"><p>此目录包含 {deleteDirectoryIds.size - 1} 个子目录和 {deletedDocumentCount} 份文档。操作完成后会同步保存到知识库数据库。</p><div className="delete-summary"><span><FolderOpen />目录树</span><b>{deleteDirectoryIds.size} 个目录</b><span><FileText />文档</span><b>{deletedDocumentCount} 份</b></div><div className="move-directory"><label>移动内容至<select value={moveTargetId} onChange={event => setMoveTargetId(event.target.value)}><option value={workspaceRootDirectoryId ?? ''}>/workspace</option>{moveCandidates.filter(directory => directory.persisted).map(directory => <option key={directory.id} value={directory.id}>{getDirectoryBreadcrumb(directory.id)}</option>)}</select></label><button className="btn primary" onClick={() => void moveContents()}>移动内容并删除目录</button></div><div className="modal-actions delete-modal-actions"><button className="btn ghost" onClick={closeDelete}>取消</button><button className="btn danger" onClick={() => void deleteEverything()}><Trash2 />全部删除</button></div></div></Modal>}
   </section>
 }
 

@@ -3,7 +3,7 @@ export { RequirementAnalysisService } from './application/requirement-analysis-s
 export { TestDesignService } from './application/test-design-service.js'
 export { PiTestDesignRuntimeAdapter } from './agent/pi-test-design-runtime.js'
 export { PiAgentRuntimeAdapter } from './agent/pi-agent-runtime.js'
-export { createAgentDefinitionVersion, renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './agent/requirement-analysis-agent.js'
+export { createAgentDefinitionVersion, renderRequirementTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './agent/requirement-analysis-agent.js'
 export { DynamicAgentDefinitionResolver, defaultAgentDefinitionResolver } from './agent/dynamic-agent-definition-resolver.js'
 export { defaultAgentDefinitionConfig, defaultAgentDefinitionConfigDictionary, validateAgentDefinitionConfig, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, REQUIREMENT_REVIEW_AGENT_VERSION, REVIEW_QA_AGENT_VERSION } from './agent/agent-definition-config.js'
 export type { AgentDefinitionConfig, AgentDefinitionConfigDictionary, AgentDefinitionConfigFile } from './agent/agent-definition-config.js'

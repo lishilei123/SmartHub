@@ -39,7 +39,7 @@
 - “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent、需求评审 Agent、评审问答 Agent、技术方案提取 Agent 与技术方案评审 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。页面不提供版本记录入口，历史不可变快照仅由服务端保留用于运行追溯。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前除资源和参数校验外，模型必须通过版本化 `model-probe/v2` 长上下文、结构化提交和工具调用质量门禁。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；五个 Agent 分别通过各自的结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
-- 需求分析上传支持 Markdown、TXT 和 ZIP；当前项目版本的文件统一入库到 `版本文档/{项目版本名}/需求文档/`，ZIP 保留包内子目录和图片相对路径；上传区展示文件读取、任务提交、解析/Embedding、向量索引发布和项目版本绑定的真实进度，成功结果展示 15 秒后自动收起，失败结果保留。等待窗口为 10 分钟，批量上传按资产独立绑定并反馈部分失败，避免后端仍在处理却被前端误报整体失败；上传完成的固定需求资产版本自动绑定到当前项目版本。评审接口按 `projectVersionId` 校验版本状态和需求绑定；正式 ReviewRun、固定快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON，页面刷新后按项目版本恢复真实历史；
+- 需求分析上传支持 Markdown、TXT 和 ZIP；知识库页面以“知识库”为根节点，直接展示与 Pi Agent 相同的 `/workspace` 文件树，并补齐各项目版本、`shared` 和 `agent_workspace` 的标准空目录；当前版本需求固定上传到 `workspace/branches/{项目版本名}/input/requirements/`。ZIP 保留包内子目录和图片相对路径；启动评审时服务端固定需求输入范围，并把活动索引中整个 `/workspace` 的 ready 文档版本物化为本次运行的只读文件快照，让 Pi Agent 可自主查看当前分支、其他分支和 `shared` 资料；正式 ReviewRun、工作区快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON；
 - AC-001～AC-009 自动化验收场景。
 
 ## 当前已实现的第三期技术方案评审流程
@@ -58,35 +58,53 @@
 
 ## 当前已实现的第二期双 Agent 需求分析流程
 
-> 实现边界：`requirement-point-extraction/v5` 正文直传与“可选 `title` + `description` + `sourceTexts`”协议已实现。模型正常生成简洁标题，标题缺失或空白时服务端根据描述兜底；正常规模正文通过 `full_context` 在首轮完整投递，超长正文通过 `segmented_context` 确定性分批投递、隔离批次消息并最终跨批归并。模型不再维护其他结构化槽位、归并字段、资产版本、Chunk 或 Evidence 字段；服务端持久化输入包 Hash、批次 Hash 和 `InputDeliveryManifest`，跨全部固定输入检索原文并生成需求点 ID、Evidence ID、`evidenceRefs`、coverage 与 locator。旧 v1～v4 仅作为历史数据语义保留，不再创建新运行。
+> 需求评审已完成破坏性重构，只接受 `/workspace` 文件工作区，不再接受正文直传、分段正文或 `knowledge_search / knowledge_read_chunk` 目录协议。`RequirementPointExtractionAgent` 基于 Pi Agent Core 运行，直接复用 Pi Coding Agent 的只读 `ls / find / grep / read` 能力，像 Codex 一样自主探索文件，再按 `requirement-point-extraction/v5` 提交“可选 `title` + `description` + `sourceTexts`”。
 
-- 使用最新稳定的 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-ai`，实际版本由 `package-lock.json` 固定；
-- 业务层只依赖 `AgentRuntime`，PI 包只出现在 `server/agent/pi-agent-runtime.ts`，后续可替换运行内核而不改需求评审服务；
-- Agent 定义、提示词、Toolset、Skill、MCP 绑定、执行限制和内容 Hash 独立版本化并写入运行快照；需求点提取 Agent 与需求评审 Agent 分别维护模型路由和不可变版本，运行解析器同时固定两者各自的生效版本；任一 Agent 未发布时拒绝创建需求评审运行；
-- 每次运行固定项目版本当前绑定的全部 requirement 资产版本、活动索引版本、两个 Agent 各自实际选中的模型、配置版本与 Agent 定义，不在运行中漂移到最新资料或草稿；每个 Agent 的默认模型不可用时只按该 Agent 已发布的回退顺序选择健康模型；
-- `RequirementPointExtractionAgent` 注册 `knowledge.search`、`knowledge.read_chunk` 和 `requirement-points.submit_result`，但正常全文提取只向模型开放结果提交工具，防止模型把全文理解退化为逐 Chunk 读取；仅当某个需求点完全无法从 `sourceTexts` 建立 Evidence 时，才开放 search/read_chunk 进入定点修复窗口。`RequirementReviewAgent` 只开放 `review.submit_result`；
-- 工具统一经过白名单、超时、调用次数和重复调用门禁，不向 Agent 暴露 Shell、文件系统或任意 HTTP；重复调用默认拒绝，只有 `knowledge.read_chunk` 可在达到阈值后重放一次本次执行已成功读取的固定结果，且不触发底层读取或消耗额度；读取/证据工具不得耗尽提取 Agent 的全部额度，最后 3 次调用独立保留给当前阶段的结果提交工具；
-- `RequirementInputPlan` 根据模型上下文、输出预留、修正预留、Prompt/工具 Schema 和安全余量计算输入预算；`full_context` 包含完整文档边界与 Chunk 目录，存在排除范围时只投递范围内 Chunk；`segmented_context` 按稳定 Chunk 顺序打包，单批超预算或超过 24 批会明确失败；
-- `requirement-points.submit_result` 接受 `requirement-point-extraction/v5`：每条需求点包含模型生成的可选 `title`、必填 `description` 和 `sourceTexts`。标题仅用于展示且具有服务端兜底，不参与失败门禁；服务端在本次全部固定输入中依次执行精确匹配、Markdown 可见文本映射、忽略 Markdown/空白/标点的规范检索、省略片段检索和候选召回；模糊召回保留 `[max(0.45, 最高分 - 0.08), 最高分]` 置信区间内的全部证据位置，同一原文存在多个固定位置时也全部保留。一条线索失败不会拖垮已有有效 Evidence，只有整个需求点完全无可用原文时才要求修复；
+统一逻辑目录如下：
+
+```text
+/workspace/
+├── branches/{release}/
+│   ├── input/{requirements,api,ui,environment}/
+│   ├── requirements/
+│   ├── test_design/
+│   ├── test_cases/
+│   ├── scripts/
+│   ├── execution/
+│   └── reports/
+├── shared/{knowledge,common_scripts,common_docs}/
+└── agent_workspace/{requirement_agent,design_agent,execution_agent,report_agent}/
+```
+
+- `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 和 `@earendil-works/pi-coding-agent` 的实际版本由 `package-lock.json` 固定；业务层继续只依赖 `AgentRuntime`；
+- 当前项目版本的需求输入目录固定为 `workspace/branches/{projectVersion.name}/input/requirements`。新运行冻结该目录中的需求范围，同时冻结活动索引中整个 `workspace/` 的 ready 文档版本；因此 Agent 能查看 `input/api`、`input/ui`、`input/environment`、`shared/knowledge` 等旁证，但正式需求 coverage 只计算需求输入目录；
+- 运行开始时，服务端将固定 `AssetVersion.content` 物化到 run-scoped 临时目录，预建完整工作区层级，并在结束、失败或取消后清理。Agent 只能传相对路径；绝对路径、盘符、UNC、`..` 和越界 Glob 均被拒绝；不开放 Shell、write、edit 或任意文件系统权限；
+- 首轮 Prompt 只投递工作区根、活动分支、需求输入目录、文件数量和快照 Hash，不投递文件名、Chunk 清单或正文。Agent 使用 `ls` 看目录、`find` 找文件、`grep` 定位文本，再用 `read` 的 `offset / limit` 分段读取大文件；
+- 只有 `read` 实际返回的固定文件行范围会写入 `InputDeliveryManifest.toolReads` 并形成 Evidence 候选。`grep` 和 `find` 只用于定位；资产版本、内部 Chunk、Evidence、需求点 ID、`evidenceRefs`、coverage 和 locator 全部由服务端生成和校验；
+- 已发布需求点提取 Agent 必须包含 `workspace.read_file`、`workspace.grep_files`、`workspace.find_files`、`workspace.list_directory` 与 `requirement-points.submit_result`，且不能包含已退役的知识检索读取工具；旧配置会以 `PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED` 被拒绝，必须重新发布；
+- Agent 定义、Prompt、Toolset、Skill、MCP、模型路由、执行限制和内容 Hash 仍独立版本化并写入运行快照；`RequirementReviewAgent` 只引用冻结需求点并通过 `review.submit_result` 提交评审；
+- 工具继续经过白名单、超时、调用次数和重复调用门禁；最后 3 次工具调用独立保留给结果提交。模型不维护服务器 ID 或 Evidence 结构；`requirement-points.submit_result` 只接受需求语义及原文线索；
 - `review.submit_result` 使用 `requirement-review/v3`：模型提交总体摘要和逐条 `analyses`，每条分析只通过一个 `requirementPointRef` 对应冻结需求点，并给出标题、类型、严重度、置信度、分析、影响和建议。服务端校验引用、去重并生成 Finding ID；展示字段偶发缺失或枚举不规范时使用确定性兜底，不反复退回，只有需求点引用不存在或分析内容为空才拒绝；
-- ReviewRun 分别持久化两个 Agent 的模型可见对话、工具参数/返回和语义事件时间线，页面可在“需求点提取 / 需求评审”之间切换查看；同一 ReviewRun 被 Worker 自动重领或重试时，每个 attempt 还会独立冻结当前 Agent、状态、错误和阶段执行快照。需求点提取与需求评审各自形成独立的重试对话序列，切换 Agent 后只显示该 Agent 的“第 N / M 次”、错误、降级和事件，不再共用一组切换或由后一次覆盖前一次。历史数据若只保存过失败摘要，页面明确标注该次对话不可恢复。两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；单模型按发布配置有限重试，耗尽后仅对允许降级、能力和上下文满足的候选模型切换，并保存每次实际尝试和降级原因；
+- ReviewRun 分别持久化两个 Agent 的公开模型消息、工具参数/返回和语义事件时间线；需求评审右侧“Pi Agent 对话”按秒刷新并在同一线程展示任务、阶段、读取文件路径、函数调用、公开结果和错误，流程成功后在同一面板继续评审问答。每个 Worker attempt 独立冻结当前 Agent、状态、错误和阶段执行快照；两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；单模型按发布配置有限重试，耗尽后仅对允许降级、能力和上下文满足的候选模型切换，并保存每次实际尝试和降级原因；
 - 调用评审接口时先创建 `running` ReviewRun 和持久化 ReviewJob 后立即返回；独立 Worker 通过 lease、heartbeat、run token 和 fencing 执行，只有当前租约持有者可以冻结阶段结果或发布正式结果。Worker 失租约后任务可重新领取，超过次数或取消后进入明确终态，晚到结果不能覆盖。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、FindingAction、问答、审批和运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
-- 提取结果通过独立校验后立即作为冻结阶段检查点持久化。若随后需求评审失败或取消，页面同时提供“重新需求评审”和“全部重跑”：前者创建新 ReviewRun，复用并重新校验原需求点、Evidence、coverage 与正文投递证明，只使用当前已发布的需求评审 Agent 执行评审；后者按当前项目版本的全部有效绑定和两个当前 Agent 配置，从需求点提取开始创建完整新运行。提取阶段失败时没有可复用检查点，只允许全部重跑；任何重跑都不覆盖原运行。
+- 提取结果通过独立校验后立即作为冻结阶段检查点持久化。若随后需求评审失败或取消，页面同时提供“重新需求评审”和“全部重跑”：前者创建新 ReviewRun，复用并重新校验原需求点、Evidence、coverage 与读取证明，只使用当前已发布的需求评审 Agent 执行评审；后者沿用来源运行的文档目录、按当前活动索引重新固定候选文档并从需求点提取开始完整运行。提取阶段失败时没有可复用检查点，只允许全部重跑；任何重跑都不覆盖原运行。
 
-当前自动化测试已覆盖正常规模正文首轮直传、读取工具调用为 0、`sourceTexts` 跨固定输入检索、置信区间多证据召回、无效线索局部忽略、服务端需求点去重、Evidence ID/引用生成与共享证据去重、coverage 生成、投递清单校验、评审分析与需求点对应、模型字段保留和容错兜底，以及超长正文确定性切换 `segmented_context`。
+当前自动化测试已覆盖首轮上下文不泄露文件清单与正文、完整目录树、当前分支与 `shared/knowledge` 自主读取、路径穿越拒绝、实际 `read` 行范围形成 `toolReads`、未读范围不可用于 Evidence、需求覆盖、需求点规范化和评审引用。
 
-运行前需要先创建一个状态为 `open` 的项目版本，在该版本上传或继承一份或多份 `ready` 的 requirement 固定资产版本，再到“系统管理 → 模型管理”让生成式模型通过 `model-probe/v2`。随后进入“Agent 配置”，通过下拉框分别选择需求点提取 Agent 和需求评审 Agent，为两者配置模型、提示词、工具与限制，并分别发布首个版本；需求分析页只读展示两个当前配置版本，不提供模型覆盖入口，新运行自动固定这两个版本。任一 Agent 未发布时不允许发起评审。启动 API 会验证并固定当前版本的全部需求绑定，持久化 ReviewRun/ReviewJob 后立即返回；Worker 先按提取 Agent 的模型和版本运行并冻结结果，再按评审 Agent 的独立模型和版本用全新会话启动评审，最终合并为正式结果，页面通过 ReviewRun 接口恢复并轮询两个阶段：
+运行前需要先创建一个状态为 `open` 的项目版本，把至少一份需求文档上传到当前版本的 `input/requirements` 并等待 ready/活动索引，再到“系统管理 → 模型管理”让生成式模型通过 `model-probe/v2`，随后重新发布需求点提取 Agent 与需求评审 Agent。启动 API 固定统一工作区快照并立即创建 ReviewRun/ReviewJob，Worker 先运行提取 Agent，再用独立会话运行评审 Agent：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $body = @{
-  assetVersionIds = @('<ready requirement assetVersionId 1>', '<ready requirement assetVersionId 2>')
+  documentDirectoryPath = 'workspace/branches/V2/input/requirements'
   focusAreas = @('状态与异常', '可测试性')
 } | ConvertTo-Json
 Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/project-versions/<projectVersionId>/requirement-reviews/run' -ContentType 'application/json; charset=utf-8' -Body $body
 ```
 
 ## 本地运行
+
+运行环境要求 Node.js `>=22.19.0`，与当前锁定的 Pi 0.84.1 运行时一致。
 
 安装依赖：
 
@@ -235,4 +253,4 @@ npm run build
 
 需求评审采用独立 Worker 后台运行：启动接口创建 `ReviewRun + ReviewJob` 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page + projectVersionId + reviewId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `reviewId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
 
-评审问答只接受成功完成的 ReviewRun，并要求已发布独立的评审问答 Agent。每轮固定使用该运行的资产版本、评审结果和 Evidence 白名单，同时固定当前生效的问答 Agent 配置版本；问题、回答、引用、实际模型、Agent/Prompt/Toolset 引用、用量和脱敏失败摘要写入 ReviewQaSession/Turn，刷新后从服务端恢复。模型必须通过 `review_answer_submit` 返回答案、Evidence ID 引用和限制项；Skill、网页、MCP 或其他 Tool 的内容可用于辅助解释，但不能扩大 Evidence 白名单。Finding 处置通过带期望版本的追加式 FindingAction 保存，原始 Finding 不改写。报告由服务端按 `projectVersionId + runId` 从正式结果、固定输入、Evidence、降级和处置投影生成 Markdown，不包含候选输出、问答全文、明文凭据或未脱敏日志。
+评审问答只接受成功完成的 ReviewRun，并要求已发布独立的评审问答 Agent。右侧“Pi Agent 对话”在流程轨迹下方直接续接问答，每轮固定使用该运行的目录资产版本、评审结果和 Evidence 白名单，同时固定当前生效的问答 Agent 配置版本；问题、回答、引用、实际模型、Agent/Prompt/Toolset 引用、用量和脱敏失败摘要写入 ReviewQaSession/Turn，刷新后从服务端恢复。模型必须通过 `review_answer_submit` 返回答案、Evidence ID 引用和限制项；Skill、网页、MCP 或其他 Tool 的内容可用于辅助解释，但不能扩大 Evidence 白名单。Finding 处置通过带期望版本的追加式 FindingAction 保存，原始 Finding 不改写。报告由服务端按 `projectVersionId + runId` 从正式结果、固定输入、Evidence、降级和处置投影生成 Markdown，不包含候选输出、问答全文、明文凭据或未脱敏日志。

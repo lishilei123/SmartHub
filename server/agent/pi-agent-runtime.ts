@@ -16,9 +16,10 @@ import { defaultTokenCodec } from '../application/content.js'
 import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
 import { createTechnicalSolutionExtractionToolRegistry, createTechnicalSolutionReviewToolRegistry } from '../tools/technical-solution-tools.js'
 import { createTestDesignToolRegistry } from '../tools/test-design-tools.js'
+import { RequirementDocumentWorkspace } from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
-import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
+import { renderRequirementTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
 import { executableTestPointIds, TestDesignError, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
@@ -72,11 +73,17 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     const stage = stageConfiguration(input)
     const inputPlan = stage.usesInputPlan ? required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划') : undefined
+    if (stage.isExtraction && inputPlan?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: RequirementPointExtractionAgent 只支持 /workspace 文件工作区输入')
+    if (stage.isExtraction) requireWorkspaceToolset(input.snapshot.agentDefinition.toolIds)
+    const piDocumentWorkspace = stage.isExtraction && inputPlan?.mode === 'agent_directory'
+      ? new RequirementDocumentWorkspace(this.store, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
+      : undefined
     const deliveryManifest: InputDeliveryManifest | undefined = inputPlan ? {
       policyVersion: inputPlan.policyVersion,
       mode: inputPlan.mode,
       packageSha256: inputPlan.packageSha256,
       entries: [],
+      ...(inputPlan.mode === 'agent_directory' ? { toolReads: [] } : {}),
       finalMergeCompleted: false,
     } : undefined
     const registry = stage.isTestDesign
@@ -105,7 +112,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         candidate = normalized.result
         lastSubmissionIssues = []
         return { accepted: true }
-      })
+      }, observation => {
+        if (deliveryManifest?.mode !== 'agent_directory') return
+        if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
+        deliveryManifest.toolReads ??= []
+        deliveryManifest.toolReads.push(structuredClone(observation))
+      }, piDocumentWorkspace)
       : stage.isTechnicalExtraction
       ? createTechnicalSolutionExtractionToolRegistry(this.store, async value => {
         const normalized = new TechnicalSolutionExtractionValidator().normalize(value, input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, await this.store.snapshot())
@@ -133,10 +145,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
-    const allowedToolIds = new Set(input.snapshot.agentDefinition.toolIds)
+    const allowedToolIds = runtimeAllowedToolIds(input)
     const descriptors = registry.descriptors(allowedToolIds)
     const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))
-    const unavailableToolIds = input.snapshot.agentDefinition.toolIds.filter(toolId => !registeredToolIds.has(toolId))
+    const unavailableToolIds = [...allowedToolIds].filter(toolId => !registeredToolIds.has(toolId))
     if (!registeredToolIds.has(stage.submitToolId)) {
       await capabilityLoad.close()
       throw new Error(`RESULT_SUBMISSION_TOOL_UNAVAILABLE: ${stage.submitToolId}`)
@@ -197,9 +209,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         callCountByPrimaryId: new Map(),
       }
       const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission, submissionBatches))
-      const primaryToolNames = new Set(stage.isExtraction
-        ? descriptors.filter(descriptor => descriptor.id === stage.submitToolId || !['knowledge.search', 'knowledge.read_chunk'].includes(descriptor.id)).map(descriptor => descriptor.piName)
-        : descriptors.map(descriptor => descriptor.piName))
+      const primaryToolNames = new Set(descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
       agent = new Agent({
@@ -244,7 +254,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       await record({ type: 'runtime_initialized', turn: 0, framework: { name: 'pi-agent-core', version: piVersion } })
       if (stage.usesInputPlan) {
         await record({ type: 'input_package_built', turn: 0, content: JSON.stringify({ mode: inputPlan!.mode, packageSha256: inputPlan!.packageSha256, batches: inputPlan!.batches.length, estimatedInputTokens: inputPlan!.estimatedInputTokens, safeInputBudget: inputPlan!.safeInputBudget }) })
-        if (inputPlan!.mode === 'full_context') {
+        if (inputPlan!.mode === 'full_context' || inputPlan!.mode === 'agent_directory') {
           const current = inputPlan!.batches[0]
           deliveryManifest!.entries.push(manifestEntry(current, 1))
           deliveryManifest!.finalMergeCompleted = true
@@ -252,6 +262,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           await agent.prompt(`${renderInitialTask(input, stage)}\n\n${current.content}`)
           await agent.waitForIdle()
         } else {
+          if (!stage.isTechnicalExtraction) throw new Error('PI_WORKSPACE_INPUT_REQUIRED: RequirementPointExtractionAgent 只支持 /workspace 文件工作区输入')
           const drafts: string[] = []
           inDraftStage = true
           agent.state.tools = []
@@ -262,7 +273,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
             latestModelFailure = undefined
             deliveryManifest!.entries.push(manifestEntry(current, current.ordinal + 1))
             await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
-            await agent.prompt(stage.isTechnicalExtraction ? renderTechnicalSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content) : renderSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content))
+            await agent.prompt(renderTechnicalSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content))
             await agent.waitForIdle()
             if (latestModelFailure) throw modelProviderError(latestModelFailure)
             if (!latestAssistantText.trim()) throw new Error(`SEGMENT_DRAFT_REQUIRED: 批次 ${current.batchId} 未返回可归并草稿`)
@@ -278,7 +289,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           inDraftStage = false
           deliveryManifest!.finalMergeCompleted = true
           await record({ type: 'input_final_merge_started', turn: turns, content: JSON.stringify({ batchCount: drafts.length }) })
-          await agent.prompt(stage.isTechnicalExtraction ? renderTechnicalSegmentMergeTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, drafts) : renderSegmentMergeTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, drafts))
+          await agent.prompt(renderTechnicalSegmentMergeTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, drafts))
           await agent.waitForIdle()
         }
       } else {
@@ -299,14 +310,18 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         if (evidenceRepairRequired) {
           agent.state.tools = tools
           activeToolNames = new Set(tools.map(tool => tool.name))
-          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: `原文检索未能为${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}建立 Evidence 后开放 knowledge_search 与 knowledge_read_chunk，用于补充更准确的 sourceTexts。` })
+          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: piDocumentWorkspace
+            ? '原文定位未能建立 Evidence；继续使用 grep 定位并用 read 核对固定工作区文件，然后修正 sourceTexts。'
+            : `原文检索未能为${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}建立 Evidence 后开放 knowledge_search 与 knowledge_read_chunk，用于补充更准确的 sourceTexts。` })
         }
         const repairGuidance = stage.isTestDesign
           ? stage.submitToolId === 'test_case_synthesis.submit_result'
             ? '请严格按工具参数中的 test-case/v1 层级修正：共同前置使用 preconditions；步骤和逐步期望使用 executionMethods[].steps[].action/expected；UI/API 入口分别使用 uiSpec.entry 或 apiSpec.path；数据需求只放在提交根对象 dataRequirements[]，并通过 caseIndexes 关联候选用例。不要提交 preConditions、根级 steps、expectedResults、entryPoints、用例内 dataRequirements 或 testData。'
             : '请按工具参数声明的字段和错误路径修正测试设计候选，不要添加工具 Schema 之外的字段。'
           : evidenceRepairRequired
-          ? `正文投递覆盖、资产版本、Chunk、${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'} ID、Evidence ID、定位和引用均由服务端负责；请只修正${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}内部的 sourceTexts，必要时可用 knowledge_read_chunk 核对原文。`
+          ? piDocumentWorkspace
+            ? '工作区文件版本、内部证据范围、需求点 ID、Evidence ID、定位和引用均由服务端负责；请只修正需求点内部的 sourceTexts，必要时用 grep 定位后通过 read 核对原文。'
+            : `正文投递覆盖、资产版本、Chunk、${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'} ID、Evidence ID、定位和引用均由服务端负责；请只修正${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}内部的 sourceTexts，必要时可用 knowledge_read_chunk 核对原文。`
           : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
         await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
         await agent.waitForIdle()
@@ -356,6 +371,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       signal.removeEventListener('abort', abort)
       if (agent?.state.isStreaming) agent.abort()
       await capabilityLoad.close()
+      await piDocumentWorkspace?.dispose()
     }
   }
 
@@ -388,7 +404,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           return { content: [{ type: 'text', text: JSON.stringify(data) }], details: { toolId: descriptor.id, version: descriptor.version, data }, terminate: accepted }
         }
         const executionArguments = submissionBatches.mergedArgumentsByPrimaryId.get(toolCallId) ?? args
-        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, allowedToolIds: new Set(input.snapshot.agentDefinition.toolIds) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, allowedToolIds: runtimeAllowedToolIds(input) } }, AbortSignal.any([signal, toolSignal ?? signal]))
         if (result.terminate && submissionBatches.mergedArgumentsByPrimaryId.has(toolCallId)) submissionBatches.acceptedPrimaryIds.add(toolCallId)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
@@ -425,6 +441,17 @@ function manifestEntry(batch: RequirementInputBatch, modelCallSequence: number) 
 
 function sha256(value: string) { return createHash('sha256').update(value).digest('hex') }
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }
+
+function runtimeAllowedToolIds(input: AgentExecutionInput) {
+  return new Set(input.snapshot.agentDefinition.toolIds)
+}
+
+function requireWorkspaceToolset(toolIds: string[]) {
+  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'requirement-points.submit_result']
+  const missing = requiredTools.filter(toolId => !toolIds.includes(toolId))
+  const retired = toolIds.filter(toolId => toolId === 'knowledge.search' || toolId === 'knowledge.read_chunk')
+  if (missing.length || retired.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: RequirementPointExtractionAgent 工具配置不符合 /workspace 协议${missing.length ? `；缺少 ${missing.join(', ')}` : ''}${retired.length ? `；不再支持 ${retired.join(', ')}` : ''}`)
+}
 
 type StageConfiguration = {
   isExtraction: boolean

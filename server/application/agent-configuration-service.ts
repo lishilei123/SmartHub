@@ -531,6 +531,10 @@ function resolveTools(toolIds: string[], state: DatabaseState): Array<ToolResour
 }
 function builtInToolReference(key: string): ToolResource {
   const definitions: Record<string, { version: string; risk: ToolResource['risk']; timeoutMs: number }> = {
+    'workspace.read_file': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
+    'workspace.grep_files': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
+    'workspace.find_files': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
+    'workspace.list_directory': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
     'knowledge.search': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
     'knowledge.read_chunk': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
     'requirement-points.submit_result': { version: '5.1.0', risk: 'internal_write', timeoutMs: 30_000 },

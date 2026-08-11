@@ -1,6 +1,105 @@
 {
   "schemaVersion": 1,
   "tools": {
+    "workspace.read_file": {
+      "version": "1.0.0",
+      "piName": "read",
+      "label": "读取工作区文件",
+      "catalogName": "Pi 工作区文件读取",
+      "description": "使用 Pi Coding Agent 的 read 语义，按工作区相对路径读取固定文件。支持 offset/limit 续读大文件；只允许当前 ReviewRun 的只读 /workspace，实际 read 范围才可形成 Evidence。",
+      "catalogDescription": "像 Codex 一样按相对路径读取 ReviewRun 固定的只读工作区文件。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "repeatPolicy": "replay_success_once",
+      "sourcePath": "server/tools/requirement-document-workspace.ts",
+      "handlerKey": "workspace.read_file",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "相对于 /workspace 的文件路径。" },
+          "offset": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "从第几行开始读取，1 开始。" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "本次最多读取多少行。" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    "workspace.grep_files": {
+      "version": "1.0.0",
+      "piName": "grep",
+      "label": "搜索工作区正文",
+      "catalogName": "Pi 工作区正文搜索",
+      "description": "使用 Pi Coding Agent 的 grep 语义在只读 /workspace 内搜索文本，返回相对文件路径和行号。grep 只用于定位，引用前必须通过 read 读取文件。",
+      "catalogDescription": "像 Codex 一样在固定工作区中按文本和文件模式搜索。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "sourcePath": "server/tools/requirement-document-workspace.ts",
+      "handlerKey": "workspace.grep_files",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "glob": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "ignoreCase": { "type": "boolean" },
+          "literal": { "type": "boolean" },
+          "context": { "type": "integer", "minimum": 0, "maximum": 20 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+      }
+    },
+    "workspace.find_files": {
+      "version": "1.0.0",
+      "piName": "find",
+      "label": "查找工作区文件",
+      "catalogName": "Pi 工作区文件查找",
+      "description": "使用 Pi Coding Agent 的 find 语义，在只读 /workspace 内按 glob 查找文件和目录。只接受不会越过工作区的相对路径与模式。",
+      "catalogDescription": "像 Codex 一样在固定工作区中按名称查找文件。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "sourcePath": "server/tools/requirement-document-workspace.ts",
+      "handlerKey": "workspace.find_files",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 2000 }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+      }
+    },
+    "workspace.list_directory": {
+      "version": "1.0.0",
+      "piName": "ls",
+      "label": "列出工作区目录",
+      "catalogName": "Pi 工作区目录查看",
+      "description": "使用 Pi Coding Agent 的 ls 语义列出只读 /workspace 中的目录内容。只接受工作区内相对路径。",
+      "catalogDescription": "像 Codex 一样浏览固定工作区目录树。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "sourcePath": "server/tools/requirement-document-workspace.ts",
+      "handlerKey": "workspace.list_directory",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 2000 }
+        },
+        "additionalProperties": false
+      }
+    },
     "knowledge.search": {
       "version": "1.0.0",
       "piName": "knowledge_search",

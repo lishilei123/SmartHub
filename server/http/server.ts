@@ -130,7 +130,7 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'POST' && projectVersionRun) {
     await requireProjectVersion(projectVersionRun[1], 'review:create')
     const body = await json(request)
-    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], assetVersionIds: stringList(body.assetVersionIds), assetVersionId: body.assetVersionId ? String(body.assetVersionId) : undefined, focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
+    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], documentDirectoryPath: String(body.documentDirectoryPath ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
   }
   const projectVersionReviewRuns = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs$/.exec(url.pathname)
   if (method === 'GET' && projectVersionReviewRuns) {

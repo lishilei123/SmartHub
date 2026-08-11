@@ -7,7 +7,7 @@ import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
 import { PiReviewQaRuntimeAdapter } from '../server/agent/pi-review-qa-runtime.js'
 import { resolveEvidenceQuote, resolveEvidenceSourceText, searchEvidenceCandidates } from '../server/agent/evidence-locator.js'
-import { buildRequirementInputPlan } from '../server/agent/requirement-context-assembler.js'
+import { buildRequirementDirectoryInputPlan } from '../server/agent/requirement-context-assembler.js'
 import { defaultAgentDefinitionResolver, DynamicAgentDefinitionResolver } from '../server/agent/dynamic-agent-definition-resolver.js'
 import { defaultAgentDefinitionConfigDictionary, REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, REQUIREMENT_REVIEW_AGENT_VERSION } from '../server/agent/agent-definition-config.js'
 import { RequirementPointExtractionValidator, RequirementReviewValidator } from '../server/agent/result-validator.js'
@@ -21,27 +21,41 @@ import type { CandidateRequirementPointExtraction, CandidateRequirementPointExtr
 import { defaultConfig, type ReviewRun } from '../server/domain/types.js'
 import { JsonStore, type StateStore } from '../server/infrastructure/store.js'
 
+const TEST_REQUIREMENT_DIRECTORY = 'workspace/branches/V1.0/input/requirements'
+
 test('提取 Agent v5 生成可选标题并提交描述与原文线索，其余字段由服务端生成', () => {
   const definition = defaultAgentDefinitionResolver.resolve('requirement-point-extraction')
-  assert.equal(REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, '7.1.0')
+  assert.equal(REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION, '9.1.0')
   assert.equal(definition.resultSchemaVersion, 'requirement-point-extraction/v5')
-  assert.match(definition.systemPrompt, /正文会以 full_context 一次完整投递/u)
+  assert.match(definition.systemPrompt, /基于 Pi Agent Core/u)
+  assert.match(definition.systemPrompt, /ls.*find.*grep.*read/u)
+  assert.match(definition.systemPrompt, /Pi Coding Agent/u)
   assert.match(definition.systemPrompt, /正常应提交 title、description 和 sourceTexts/u)
   assert.match(definition.systemPrompt, /title 是容错可选字段/u)
-  assert.match(definition.systemPrompt, /置信区间内保留全部证据位置/u)
+  assert.match(definition.systemPrompt, /只有 read 实际返回的固定文件范围/u)
+  assert.match(definition.systemPrompt, /逐份读完范围内候选文件/u)
+  assert.match(definition.systemPrompt, /互相冲突的要求分别保留/u)
+  assert.match(definition.systemPrompt, /sourceTexts 至少一条，只能复制 read 已返回的连续逐字原文/u)
+  assert.match(definition.systemPrompt, /每条明确需求均已覆盖/u)
   assert.match(definition.systemPrompt, /sourceTexts/u)
   assert.match(definition.systemPrompt, /不要提交 actor、action、object/u)
-  assert.deepEqual(definition.toolIds, ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result'])
+  assert.doesNotMatch(definition.systemPrompt, /full_context|segmented_context|knowledge_search|knowledge_read_chunk/u)
+  assert.deepEqual(definition.toolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'requirement-points.submit_result'])
   assert.equal(definition.limits.reasoningEffort, 'medium')
 })
 
 test('评审 Agent v3 只强制分析内容对应冻结需求点，展示与摘要字段由模型给出', () => {
   const definition = defaultAgentDefinitionResolver.resolve('requirement-review')
-  assert.equal(REQUIREMENT_REVIEW_AGENT_VERSION, '4.0.0')
+  assert.equal(REQUIREMENT_REVIEW_AGENT_VERSION, '4.1.0')
   assert.equal(definition.resultSchemaVersion, 'requirement-review/v3')
   assert.match(definition.systemPrompt, /每条分析必须通过 requirementPointRef/u)
   assert.match(definition.systemPrompt, /title、type、severity、confidence、analysis、impact 和 recommendation/u)
   assert.match(definition.systemPrompt, /Finding ID 和正式引用结构由 SmartHub 生成/u)
+  assert.match(definition.systemPrompt, /analyses 只承载真实、独立且需要处理的问题，不是需求点清单/u)
+  assert.match(definition.systemPrompt, /blocker 表示基线矛盾或关键决策缺失/u)
+  assert.match(definition.systemPrompt, /summary 必须与 analyses 一致/u)
+  assert.match(definition.taskTemplate, /同一需求点可以有零条或多条 analysis/u)
+  assert.doesNotMatch(definition.taskTemplate, /一一对应/u)
   assert.deepEqual(definition.toolIds, ['review.submit_result'])
 })
 
@@ -337,10 +351,11 @@ test('评审问答提示将 Evidence 白名单与 Finding、需求点 ID 区分�
   assert.ok(!executionOutput.execution.events.some(event => event.content?.includes('用户可以取消待支付订单。')))
 })
 
-test('普通文档正文在首轮直接进入上下文，模型无需逐 Chunk 读取', async () => {
+test('需求评审只通过 Pi 文件工作区读取正文，首轮上下文不投递文件清单或正文', async () => {
   const store = await seededStore()
   const faux = fauxProvider()
   faux.setResponses([
+    ...workspaceReadResponses(),
     fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionDraft()), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
   ])
@@ -355,16 +370,91 @@ test('普通文档正文在首轮直接进入上下文，模型无需逐 Chunk �
   const output = await service.analyze(request())
 
   assert.equal(output.status, 'candidate_validated')
-  assert.equal(output.snapshot.extractionInput.mode, 'full_context')
-  assert.match(prompts[0], /用户可以取消待支付订单。/u)
-  assert.match(prompts[0], /订单超过十五分钟未支付时自动关闭。/u)
-  assert.match(prompts[1], /clientRequirementPointId.*RP-001/u)
-  assert.match(prompts[1], /clientRequirementPointId.*RP-002/u)
-  assert.doesNotMatch(prompts[1], /缺少固定需求点提取结果/u)
-  assert.deepEqual(toolSets[0], ['requirement_points_submit_result'])
+  assert.equal(output.snapshot.extractionInput.mode, 'agent_directory')
+  assert.doesNotMatch(prompts[0], /用户可以取消待支付订单。/u)
+  assert.doesNotMatch(prompts[0], /cancel\.md/u)
+  assert.match(prompts.at(-1) ?? '', /clientRequirementPointId.*RP-001/u)
+  assert.match(prompts.at(-1) ?? '', /clientRequirementPointId.*RP-002/u)
+  assert.deepEqual(toolSets[0], ['read', 'grep', 'find', 'ls', 'requirement_points_submit_result'])
+  assert.ok(output.executions.requirementPointExtraction.events.some(event => event.toolId === 'read'))
   assert.ok(!output.executions.requirementPointExtraction.events.some(event => event.toolId === 'knowledge_read_chunk'))
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'input_package_built'))
   assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'input_batch_delivered'))
+})
+
+test('Pi Agent 在统一工作区中自主读取需求与 shared 文档后才生成 Evidence 与覆盖记录', async () => {
+  const store = await seededStore()
+  const requirementDirectory = 'workspace/branches/V1.0/input/requirements'
+  await store.transaction(state => {
+    state.assets.forEach(asset => { asset.logicalPath = `${requirementDirectory}/${asset.id === 'asset-1' ? 'cancel.md' : 'payment.md'}` })
+    state.indexes[0].indexedChunks?.forEach(chunk => { if (chunk.assetMetadata) chunk.assetMetadata.logicalPath = `${requirementDirectory}/${chunk.assetVersionId === 'version-1' ? 'cancel.md' : 'payment.md'}` })
+    const version = state.versions.find(item => item.id === 'version-1')!
+    const extraContent = '退款申请必须记录操作原因。'
+    const extraChunk = { id: 'chunk-search-only', chunkKey: 'search-only', assetVersionId: version.id, ordinal: 1, headingPath: ['退款'], content: extraContent, contentHash: 'search-only-hash', tokenCount: 12, startLine: 5, endLine: 5, startChar: version.content.length + 1, endChar: version.content.length + 1 + extraContent.length, embedding: [], reused: false }
+    version.content = `${version.content}\n${extraContent}`
+    version.contentHash = createHash('sha256').update(version.content).digest('hex')
+    version.chunks.push(extraChunk)
+    state.indexes[0].indexedChunks?.push({ ...extraChunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${requirementDirectory}/cancel.md` } })
+    const knowledgeContent = '# 订单领域知识\n\n取消订单需要保留审计记录。'
+    const knowledgeChunk = { id: 'chunk-knowledge', chunkKey: 'knowledge', assetVersionId: 'version-knowledge', ordinal: 0, headingPath: ['订单领域知识'], content: '取消订单需要保留审计记录。', contentHash: 'knowledge-chunk-hash', tokenCount: 12, startLine: 3, endLine: 3, startChar: 9, endChar: 23, embedding: [], reused: false }
+    state.assets.push({ id: 'asset-knowledge', knowledgeBaseId: 'kb-1', displayName: '订单领域知识', logicalPath: 'workspace/shared/knowledge/order-domain.md', assetType: 'domain', sourceType: 'upload', sourceKey: 'order-domain.md', activeVersionId: 'version-knowledge', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
+    state.versions.push({ id: 'version-knowledge', assetId: 'asset-knowledge', number: 1, content: knowledgeContent, contentHash: createHash('sha256').update(knowledgeContent).digest('hex'), status: 'ready', configVersionId: 'config-1', createdAt: '2026-07-23T00:00:00.000Z', readyAt: '2026-07-23T00:00:01.000Z', chunks: [knowledgeChunk] })
+    state.indexes[0].assetVersionIds.push('version-knowledge')
+    state.indexes[0].indexedChunks?.push({ ...knowledgeChunk, assetMetadata: { assetId: 'asset-knowledge', displayName: '订单领域知识', assetType: 'domain', sourceType: 'upload', logicalPath: 'workspace/shared/knowledge/order-domain.md' } })
+  })
+  const faux = fauxProvider()
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('read', { path: '../package.json' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('ls', { path: '.' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('find', { pattern: '**/*.md', path: 'branches/V1.0/input/requirements' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('grep', { pattern: '订单', path: 'branches/V1.0/input/requirements' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/cancel.md', offset: 1, limit: 3 }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/payment.md' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('read', { path: 'shared/knowledge/order-domain.md' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionDraft()), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
+  ])
+  const prompts: string[] = []
+  const toolSets: string[][] = []
+  const stream: StreamFn = (model, context, options) => {
+    prompts.push(context.messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content)).join('\n'))
+    toolSets.push((context.tools ?? []).map(tool => tool.name))
+    return (faux.provider.streamSimple.bind(faux.provider) as StreamFn)(model, context, options)
+  }
+  const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: stream }))
+  const output = await service.analyze({ projectVersionId: 'project-version-1', documentDirectoryPath: requirementDirectory, sourceId: 'source-1', modelId: 'model-1' })
+
+  assert.equal(output.status, 'candidate_validated')
+  assert.equal(output.snapshot.extractionInput.mode, 'agent_directory')
+  assert.equal(output.snapshot.documentWorkspace?.logicalPath, requirementDirectory)
+  assert.equal(output.snapshot.documentWorkspace?.rootLogicalPath, 'workspace')
+  assert.equal(output.snapshot.documentWorkspace?.activeBranchLogicalPath, 'workspace/branches/V1.0')
+  assert.equal(output.snapshot.documentWorkspace?.agentLogicalPath, 'workspace/agent_workspace/requirement_agent')
+  assert.deepEqual(output.snapshot.documentWorkspace?.candidateAssetVersionIds, ['version-1', 'version-2', 'version-knowledge'])
+  assert.match(prompts[0], /SMARTHUB_PI_DOCUMENT_WORKSPACE_BEGIN/u)
+  assert.match(prompts[0], /rootLogicalPath.*workspace/u)
+  assert.match(prompts[0], /activeBranchPath.*workspace\\?\/branches\\?\/V1\.0/u)
+  assert.doesNotMatch(prompts[0], /cancel\.md/u)
+  assert.doesNotMatch(prompts[0], /用户可以取消待支付订单。/u)
+  assert.doesNotMatch(prompts[0], /订单超过十五分钟未支付时自动关闭。/u)
+  assert.doesNotMatch(prompts[0], /order-domain\.md/u)
+  assert.doesNotMatch(prompts[0], /取消订单需要保留审计记录/u)
+  assert.deepEqual(toolSets[0], ['read', 'grep', 'find', 'ls', 'requirement_points_submit_result'])
+  assert.deepEqual(output.inputDeliveryManifest?.toolReads?.map(read => ({ toolId: read.toolId, relativePath: read.relativePath, chunkIds: read.chunkIds, startLine: read.startLine, endLine: read.endLine })), [
+    { toolId: 'workspace.read_file', relativePath: 'branches/V1.0/input/requirements/cancel.md', chunkIds: ['chunk-1'], startLine: 1, endLine: 3 },
+    { toolId: 'workspace.read_file', relativePath: 'branches/V1.0/input/requirements/payment.md', chunkIds: ['chunk-2'], startLine: 1, endLine: 3 },
+    { toolId: 'workspace.read_file', relativePath: 'shared/knowledge/order-domain.md', chunkIds: [], startLine: 1, endLine: 3 },
+  ])
+  assert.deepEqual(output.result.coverage.assets.map(asset => ({ assetVersionId: asset.assetVersionId, deliveredChunkIds: asset.deliveredChunkIds })), [
+    { assetVersionId: 'version-1', deliveredChunkIds: ['chunk-1'] },
+    { assetVersionId: 'version-2', deliveredChunkIds: ['chunk-2'] },
+  ])
+  assert.deepEqual(output.result.coverage.assets[0].excludedChunks, [{ chunkId: 'chunk-search-only', reason: 'Pi Agent 未通过 read 读取此固定原文范围' }])
+  assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'tool_execution_start' && event.toolId === 'ls' && event.toolArguments?.path === '.'))
+  assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'ls' && event.toolResult && JSON.stringify(event.toolResult).includes('agent_workspace/')))
+  assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'grep' && event.toolResult && JSON.stringify(event.toolResult).includes('payment.md')))
+  assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'read' && event.isError && JSON.stringify(event.toolResult).includes('PI_WORKSPACE_PATH_OUTSIDE_ROOT')))
+  assert.ok(output.executions.requirementPointExtraction.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'read' && !event.isError && event.toolResult && JSON.stringify(event.toolResult).includes('shared/knowledge/order-domain.md')))
 })
 
 test('需求评审失败后可复用冻结需求点只重跑评审，并保留原运行与提取执行', async () => {
@@ -439,7 +529,7 @@ test('没有冻结需求点的失败运行只能全部重跑', async () => {
     })
   })
   const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store))
-  await assert.rejects(() => service.retryReview('review-run-extraction-failed'), /没有已冻结的需求点提取结果，只能全部重跑/u)
+  await assert.rejects(() => service.retryReview('review-run-extraction-failed'), /PI_WORKSPACE_SNAPSHOT_REQUIRED/u)
   assert.equal((await store.snapshot()).reviewRuns.length, 1)
 })
 
@@ -468,11 +558,12 @@ test('新评审固定使用已发布 Agent 配置中的模型、输出额度、P
   const reviewPublished = await configurations.publish({ agentKey: 'requirementReview', revision: reviewSaved.revision })
   const faux = fauxProvider()
   faux.setResponses([
+    ...workspaceReadResponses(),
     fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionDraft()), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
   ])
   const service = new RequirementAnalysisService(store, new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn }), configurations)
-  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'] })
+  const output = await service.analyze(request())
   assert.equal(output.snapshot.agentConfigurationRefs?.requirementPointExtraction.id, extractionPublished.id)
   assert.equal(output.snapshot.agentConfigurationRefs?.requirementReview.id, reviewPublished.id)
   assert.equal(output.snapshot.agentConfigurationRefs?.requirementPointExtraction.version, 1)
@@ -483,6 +574,11 @@ test('新评审固定使用已发布 Agent 配置中的模型、输出额度、P
   assert.equal(output.snapshot.agentModelRefs?.requirementReview.maxOutputTokens, 8_192)
   assert.match((await configurations.getVersion(reviewPublished.id)).agentDefinition.systemPrompt, /已发布配置标记/u)
   assert.match(output.snapshot.agentDefinitions.requirementReview.version, /\+config\.1$/u)
+  await store.transaction(state => {
+    const active = state.agentConfigurationVersions.find(item => item.id === extractionPublished.id)!
+    active.agentDefinition.toolIds = ['knowledge.search', 'knowledge.read_chunk', 'requirement-points.submit_result']
+  })
+  await assert.rejects(() => service.analyze(request()), /PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED/u)
 })
 
 test('主模型临时失败后按发布路由降级并持久化实际模型尝试', async () => {
@@ -518,7 +614,7 @@ test('主模型临时失败后按发布路由降级并持久化实际模型尝�
     },
   }
   const service = new RequirementAnalysisService(store, runtime, configurations)
-  const output = await service.analyze({ projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'] })
+  const output = await service.analyze(request())
   assert.equal(output.status, 'candidate_validated')
   assert.deepEqual(calls, ['model-1', 'model-fallback', 'model-1'])
   const run = (await store.snapshot()).reviewRuns.find(item => item.id === output.runId)!
@@ -575,9 +671,11 @@ test('需求点完全检索不到原文时才开放定点补读工具并允许�
   invalid.requirementPoints[0] = { description: '数据库备份必须跨区域保留七年。', sourceTexts: ['数据库备份必须跨区域保留七年。'] }
   const faux = fauxProvider()
   faux.setResponses([
+    ...workspaceReadResponses(),
     fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', invalid), { stopReason: 'toolUse' }),
     fauxAssistantMessage('我需要按服务端问题定点修复原文线索。'),
-    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('grep', { pattern: '取消', path: 'branches/V1.0/input/requirements' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/cancel.md' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionDraft()), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
   ])
@@ -588,7 +686,7 @@ test('需求点完全检索不到原文时才开放定点补读工具并允许�
   assert.ok(execution)
   assert.ok(execution.events.some(event => event.type === 'tool_execution_end' && event.toolId === 'requirement_points_submit_result' && JSON.stringify(event.toolResult).includes('validation_failed')))
   assert.ok(execution.events.some(event => event.type === 'evidence_repair_tools_enabled'))
-  assert.ok(execution.events.some(event => event.toolId === 'knowledge_read_chunk'))
+  assert.ok(execution.events.some(event => event.toolId === 'read'))
 })
 
 test('v5 重复需求点由服务端自动去重且不要求模型维护归并字段', async () => {
@@ -597,6 +695,7 @@ test('v5 重复需求点由服务端自动去重且不要求模型维护归并�
   invalid.requirementPoints.push(structuredClone(invalid.requirementPoints[0]))
   const faux = fauxProvider()
   faux.setResponses([
+    ...workspaceReadResponses(),
     fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', invalid), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
   ])
@@ -633,7 +732,7 @@ test('正式覆盖缺失固定 Chunk 时仍会被独立校验拒绝', async () =
   invalid.coverage.assets[0].deliveredChunkIds = []
   const report = await new RequirementPointExtractionValidator(store).validate(invalid, snapshot)
   assert.equal(report.valid, false)
-  assert.ok(report.issues.some(issue => issue.message.includes('投递覆盖不完整')))
+  assert.ok(report.issues.some(issue => issue.message.includes('记录不一致')))
 })
 
 test('v5 允许可选 title，但拒绝模型提交 title、description 和 sourceTexts 之外的字段', async () => {
@@ -762,42 +861,37 @@ test('v3 评审漏掉展示字段时服务端兜底，但错误需求点引用�
   assert.ok(invalid.report.issues.some(issue => issue.path === 'analyses[0].requirementPointRef'))
 })
 
-test('超长正文确定性切换 segmented_context 并为每批生成哈希边界', () => {
+test('Pi Agent 文档工作区输入包只含根目录和快照元数据，不含文件清单与正文', () => {
   const definition = defaultAgentDefinitionResolver.resolve('requirement-point-extraction')
-  const repeated = '订单状态变化后必须记录审计日志。'.repeat(180)
-  const chunks = [0, 1, 2].map(index => ({ id: `chunk-${index}`, content: repeated, contentHash: `hash-${index}`, ordinal: index, headingPath: [`章节${index}`], tokenCount: 2000, startLine: index + 1, endLine: index + 1, startChar: index * repeated.length, endChar: (index + 1) * repeated.length, embedding: [], reused: false, chunkKey: `key-${index}`, assetVersionId: 'version-large' }))
-  const plan = buildRequirementInputPlan({
-    assets: [{ asset: { id: 'asset-large', displayName: '超长需求', logicalPath: 'requirements/large.md' }, version: { id: 'version-large', content: chunks.map(chunk => chunk.content).join('\n'), contentHash: 'large-hash', chunks } }],
-    coveragePlan: [{ assetVersionId: 'version-large', chunks: chunks.map(chunk => ({ chunkId: chunk.id, contentHash: chunk.contentHash, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine })) }],
-    definition, contextWindow: 18_000, maxOutputTokens: 2_048,
+  const content = '# 私密正文\n\n只有调用工作区 read 工具后才能看到这段正文。'
+  const plan = buildRequirementDirectoryInputPlan({
+    workspacePath: 'workspace/branches/V2/input/requirements',
+    workspaceRootPath: 'workspace',
+    activeBranchPath: 'workspace/branches/V2',
+    agentWorkspacePath: 'workspace/agent_workspace/requirement_agent',
+    assets: [{
+      asset: { id: 'asset-directory', displayName: '订单需求', logicalPath: 'workspace/branches/V2/input/requirements/order.md', assetType: 'requirement' },
+      version: { id: 'version-directory', content, contentHash: createHash('sha256').update(content).digest('hex'), chunks: [{ id: 'chunk-directory', content: '只有调用工作区 read 工具后才能看到这段正文。', contentHash: 'directory-chunk-hash', ordinal: 0, headingPath: ['私密正文'], tokenCount: 20, startLine: 3, endLine: 3, startChar: 8, endChar: 31, embedding: [], reused: false, chunkKey: 'directory', assetVersionId: 'version-directory' }] },
+    }],
+    definition,
+    contextWindow: 32_768,
+    maxOutputTokens: 4_096,
   })
-  assert.equal(plan.mode, 'segmented_context')
-  assert.ok(plan.batches.length > 1)
-  assert.deepEqual(plan.batches.flatMap(batch => batch.chunkIds), chunks.map(chunk => chunk.id))
-  assert.ok(plan.batches.every(batch => /SMARTHUB_SEGMENTED_INPUT/u.test(batch.content)))
+
+  assert.equal(plan.mode, 'agent_directory')
+  assert.deepEqual(plan.batches[0].assetVersionIds, ['version-directory'])
+  assert.deepEqual(plan.batches[0].chunkIds, [])
+  assert.equal(plan.policyVersion, '3.0.0')
+  assert.match(plan.batches[0].content, /SMARTHUB_PI_DOCUMENT_WORKSPACE_BEGIN/u)
+  assert.match(plan.batches[0].content, /"rootLogicalPath":"workspace"/u)
+  assert.match(plan.batches[0].content, /"activeBranchPath":"workspace\/branches\/V2"/u)
+  assert.match(plan.batches[0].content, /"fileCount":1/u)
+  assert.doesNotMatch(plan.batches[0].content, /order\.md/u)
+  assert.doesNotMatch(plan.batches[0].content, /chunkCount/u)
+  assert.doesNotMatch(plan.batches[0].content, /只有调用工作区 read 工具后才能看到这段正文/u)
 })
 
-test('用户排除的 Chunk 不会混入 full_context 正文输入包', () => {
-  const definition = defaultAgentDefinitionResolver.resolve('requirement-point-extraction')
-  const chunks = [
-    { id: 'included', content: '应当投递的订单规则。', contentHash: 'included-hash', ordinal: 0, headingPath: ['订单'], tokenCount: 10, startLine: 1, endLine: 1, startChar: 0, endChar: 10, embedding: [], reused: false, chunkKey: 'included', assetVersionId: 'version-scope' },
-    { id: 'excluded', content: '禁止进入模型的排除内容。', contentHash: 'excluded-hash', ordinal: 1, headingPath: ['排除章节'], tokenCount: 10, startLine: 2, endLine: 2, startChar: 11, endChar: 22, embedding: [], reused: false, chunkKey: 'excluded', assetVersionId: 'version-scope' },
-  ]
-  const plan = buildRequirementInputPlan({
-    assets: [{ asset: { id: 'asset-scope', displayName: '范围需求', logicalPath: 'requirements/scope.md' }, version: { id: 'version-scope', content: chunks.map(chunk => chunk.content).join('\n'), contentHash: 'scope-hash', chunks } }],
-    coveragePlan: [{ assetVersionId: 'version-scope', chunks: [
-      { chunkId: 'included', contentHash: 'included-hash', headingPath: ['订单'], startLine: 1, endLine: 1 },
-      { chunkId: 'excluded', contentHash: 'excluded-hash', headingPath: ['排除章节'], startLine: 2, endLine: 2, excludedReason: '用户排除范围：排除章节' },
-    ] }],
-    definition, contextWindow: 32_768, maxOutputTokens: 4_096,
-  })
-  assert.equal(plan.mode, 'full_context')
-  assert.match(plan.batches[0].content, /应当投递的订单规则/u)
-  assert.doesNotMatch(plan.batches[0].content, /禁止进入模型的排除内容/u)
-  assert.deepEqual(plan.batches[0].chunkIds, ['included'])
-})
-
-test('segmented_context 逐批隔离草稿后恢复提交工具并完成最终归并', async () => {
+test('RequirementPointExtractionAgent 拒绝旧 segmented_context 输入', async () => {
   const { snapshot, store } = await snapshotForValidation()
   const contents = ['第一批：用户可以取消待支付订单。', '第二批：订单超过十五分钟未支付时自动关闭。']
   const batches = contents.map((content, ordinal) => ({
@@ -814,29 +908,18 @@ test('segmented_context 逐批隔离草稿后恢复提交工具并完成最终�
       batches: batches.map(batch => ({ ...batch, contentSha256: createHash('sha256').update(batch.content).digest('hex'), content: undefined })).map(({ content: _content, ...batch }) => batch),
     },
   }
-  const faux = fauxProvider()
-  faux.setResponses([
-    fauxAssistantMessage('{"requirementPoints":[{"description":"第一批需求","sourceTexts":["第一批原文"]}]}'),
-    fauxAssistantMessage('{"requirementPoints":[{"description":"第二批需求","sourceTexts":["第二批原文"]}]}'),
-    fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionDraft()), { stopReason: 'toolUse' }),
-  ])
-  const output = await new PiAgentRuntimeAdapter(store, { model: faux.getModel() as Model<Api>, streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn }).execute({
+  await assert.rejects(() => new PiAgentRuntimeAdapter(store).execute({
     snapshot: extractionSnapshot,
     requirementInputPlan: plan,
     model: { sourceId: 'source-1', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', modelId: 'model-1', modelName: 'review-model', contextWindow: 32_768, maxOutputTokens: 4_096, supportsReasoning: false },
-  }, new AbortController().signal)
-
-  assert.equal(output.inputDeliveryManifest?.finalMergeCompleted, true)
-  assert.equal(output.inputDeliveryManifest?.entries.length, 2)
-  assert.ok(output.events.some(event => event.type === 'input_final_merge_started'))
-  assert.ok(output.events.some(event => event.type === 'tool_bindings_unavailable' && event.content?.includes('catalog.tool.pending-runtime')))
-  assert.deepEqual((output.candidate as CandidateRequirementPointExtraction).coverage.assets.map(asset => asset.deliveredChunkIds), [['chunk-1'], ['chunk-2']])
+  }, new AbortController().signal), /PI_WORKSPACE_INPUT_REQUIRED/u)
 })
 
 async function successfulRun() {
   const store = await seededStore()
   const faux = fauxProvider()
   faux.setResponses([
+    ...workspaceReadResponses(),
     fauxAssistantMessage(fauxToolCall('requirement_points_submit_result', extractionDraft()), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('review_submit_result', reviewDraft()), { stopReason: 'toolUse' }),
   ])
@@ -865,16 +948,36 @@ async function snapshotForValidation() {
 }
 
 function deliveryManifest(snapshot: ReviewRunSnapshot): InputDeliveryManifest {
+  const root = snapshot.documentWorkspace?.rootLogicalPath ?? snapshot.documentWorkspace?.logicalPath ?? 'workspace'
   return {
     policyVersion: snapshot.extractionInput.policyVersion,
     mode: snapshot.extractionInput.mode,
     packageSha256: snapshot.extractionInput.packageSha256,
     finalMergeCompleted: true,
     entries: snapshot.extractionInput.batches.map((batch, index) => ({ ...structuredClone(batch), modelCallSequence: index + 1 })),
+    toolReads: snapshot.assets.map((asset, index) => {
+      const chunks = snapshot.extractionCoveragePlan.find(item => item.assetVersionId === asset.assetVersionId)?.chunks.filter(chunk => !chunk.excludedReason) ?? []
+      return {
+        toolCallId: `test-read-${index + 1}`,
+        toolId: 'workspace.read_file' as const,
+        relativePath: asset.logicalPath.slice(root.length + 1),
+        assetVersionIds: [asset.assetVersionId],
+        chunkIds: chunks.map(chunk => chunk.chunkId),
+        startLine: 1,
+        endLine: Math.max(1, ...chunks.map(chunk => chunk.endLine)),
+      }
+    }),
   }
 }
 
-function request() { return { projectVersionId: 'project-version-1', assetVersionIds: ['version-1', 'version-2'], sourceId: 'source-1', modelId: 'model-1' } }
+function request() { return { projectVersionId: 'project-version-1', documentDirectoryPath: TEST_REQUIREMENT_DIRECTORY, sourceId: 'source-1', modelId: 'model-1' } }
+
+function workspaceReadResponses() {
+  return [
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/cancel.md' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/payment.md' }), { stopReason: 'toolUse' }),
+  ]
+}
 
 function formalExtraction(value: CandidateRequirementPointExtraction) {
   return structuredClone({ requirementPoints: value.requirementPoints, evidence: value.evidence, coverage: value.coverage })
@@ -922,15 +1025,15 @@ async function seededStore() {
     state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1.0', status: 'open', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
     state.configs.push({ id: 'config-1', knowledgeBaseId: 'kb-1', version: 1, config: structuredClone(defaultConfig), createdAt: '2026-07-23T00:00:00.000Z', compatibilityFingerprint: 'config-hash', requiresRebuild: false })
     state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', createdAt: '2026-07-23T00:00:00.000Z', activeIndexVersionId: 'index-1', activeConfigVersionId: 'config-1' })
-    state.assets.push({ id: 'asset-1', knowledgeBaseId: 'kb-1', displayName: '取消订单需求', logicalPath: 'requirements/cancel.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'cancel.md', activeVersionId: 'version-1', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
-    state.assets.push({ id: 'asset-2', knowledgeBaseId: 'kb-1', displayName: '支付超时需求', logicalPath: 'requirements/payment.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'payment.md', activeVersionId: 'version-2', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
+    state.assets.push({ id: 'asset-1', knowledgeBaseId: 'kb-1', displayName: '取消订单需求', logicalPath: `${TEST_REQUIREMENT_DIRECTORY}/cancel.md`, assetType: 'requirement', sourceType: 'upload', sourceKey: 'cancel.md', activeVersionId: 'version-1', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
+    state.assets.push({ id: 'asset-2', knowledgeBaseId: 'kb-1', displayName: '支付超时需求', logicalPath: `${TEST_REQUIREMENT_DIRECTORY}/payment.md`, assetType: 'requirement', sourceType: 'upload', sourceKey: 'payment.md', activeVersionId: 'version-2', createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
     const chunk = { id: 'chunk-1', chunkKey: 'cancel', assetVersionId: 'version-1', ordinal: 0, headingPath: ['取消订单'], content: '用户可以取消待支付订单。', contentHash: 'chunk-hash', tokenCount: 10, startLine: 3, endLine: 3, startChar: 8, endChar: 20, embedding: [], reused: false }
     const paymentChunk = { id: 'chunk-2', chunkKey: 'payment', assetVersionId: 'version-2', ordinal: 0, headingPath: ['支付超时'], content: '订单超过十五分钟未支付时自动关闭。', contentHash: 'payment-chunk-hash', tokenCount: 12, startLine: 3, endLine: 3, startChar: 8, endChar: 25, embedding: [], reused: false }
     state.versions.push({ id: 'version-1', assetId: 'asset-1', number: 1, content, contentHash: createHash('sha256').update(content).digest('hex'), status: 'ready', configVersionId: 'config-1', createdAt: '2026-07-23T00:00:00.000Z', readyAt: '2026-07-23T00:00:01.000Z', chunks: [chunk] })
     state.versions.push({ id: 'version-2', assetId: 'asset-2', number: 1, content: paymentContent, contentHash: createHash('sha256').update(paymentContent).digest('hex'), status: 'ready', configVersionId: 'config-1', createdAt: '2026-07-23T00:00:00.000Z', readyAt: '2026-07-23T00:00:01.000Z', chunks: [paymentChunk] })
     state.projectVersionRequirementBindings.push({ id: 'binding-1', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-1', createdAt: '2026-07-23T00:00:01.000Z' })
     state.projectVersionRequirementBindings.push({ id: 'binding-2', projectVersionId: 'project-version-1', assetId: 'asset-2', assetVersionId: 'version-2', createdAt: '2026-07-23T00:00:01.000Z' })
-    state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', assetVersionIds: ['version-1', 'version-2'], configVersionId: 'config-1', indexedChunks: [{ ...chunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/cancel.md' } }, { ...paymentChunk, assetMetadata: { assetId: 'asset-2', displayName: '支付超时需求', assetType: 'requirement', sourceType: 'upload', logicalPath: 'requirements/payment.md' } }], createdAt: '2026-07-23T00:00:00.000Z', activatedAt: '2026-07-23T00:00:01.000Z' })
+    state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', assetVersionIds: ['version-1', 'version-2'], configVersionId: 'config-1', indexedChunks: [{ ...chunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${TEST_REQUIREMENT_DIRECTORY}/cancel.md` } }, { ...paymentChunk, assetMetadata: { assetId: 'asset-2', displayName: '支付超时需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${TEST_REQUIREMENT_DIRECTORY}/payment.md` } }], createdAt: '2026-07-23T00:00:00.000Z', activatedAt: '2026-07-23T00:00:01.000Z' })
     state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'review-model', displayName: 'Review Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling', 'structured_output'], enabled: true, health: 'healthy', qualityGate: { version: 'model-probe/v2', checkedAt: '2026-07-23T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } } }], createdAt: '2026-07-23T00:00:00.000Z', updatedAt: '2026-07-23T00:00:00.000Z' })
   })
   return store

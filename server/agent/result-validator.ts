@@ -2,10 +2,12 @@ import type { InputDeliveryManifest, ReviewRunSnapshot } from '../domain/agent-t
 import type { CandidateEvidence, CandidateRequirementPoint, CandidateRequirementPointExtraction, CandidateRequirementPointExtractionV3, CandidateRequirementPointExtractionV4, CandidateRequirementPointExtractionV5, CandidateRequirementReview, CandidateRequirementReviewV3, CandidateReviewResult, ReviewFindingType, ReviewSeverity, ValidationIssue, ValidationReport } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { resolveEvidenceQuote, resolveEvidenceSourceText, searchEvidenceCandidates } from './evidence-locator.js'
+import { posix } from 'node:path'
 
 const assessments = new Set(['pass', 'pass_with_notes', 'needs_revision', 'blocked'])
 const findingTypes = new Set(['missing_requirement', 'ambiguity', 'conflict', 'boundary_gap', 'state_gap', 'exception_gap', 'security_risk', 'testability_gap', 'dependency_risk', 'other'])
 const severities = new Set(['blocker', 'high', 'medium', 'low'])
+const DIRECTORY_NOT_READ_REASON = 'Pi Agent 未通过 read 读取此固定原文范围'
 
 export class RequirementPointExtractionValidator {
   constructor(private readonly store: StateStore) {}
@@ -62,7 +64,7 @@ export class RequirementPointExtractionValidator {
     const index = state.indexes.find(item => item.id === snapshot.indexVersionId && item.knowledgeBaseId === snapshot.knowledgeBaseId)
     if (!index) return { report: invalid('$', '本次运行固定索引不存在') }
     const allowedVersions = new Set(snapshot.assets.map(asset => asset.assetVersionId))
-    const chunks = (index.indexedChunks ?? []).filter(chunk => allowedVersions.has(chunk.assetVersionId))
+    const chunks = fixedEvidenceChunks(index.indexedChunks ?? [], snapshot, manifest).filter(chunk => allowedVersions.has(chunk.assetVersionId))
     const requirementPoints: CandidateRequirementPoint[] = []
     const evidence: CandidateEvidence[] = []
     const evidenceIds = new Set<string>()
@@ -140,7 +142,7 @@ export class RequirementPointExtractionValidator {
     const index = state.indexes.find(item => item.id === snapshot.indexVersionId && item.knowledgeBaseId === snapshot.knowledgeBaseId)
     if (!index) return { report: invalid('$', '本次运行固定索引不存在') }
     const allowedVersions = new Set(snapshot.assets.map(asset => asset.assetVersionId))
-    const chunks = (index.indexedChunks ?? []).filter(chunk => allowedVersions.has(chunk.assetVersionId))
+    const chunks = fixedEvidenceChunks(index.indexedChunks ?? [], snapshot, manifest).filter(chunk => allowedVersions.has(chunk.assetVersionId))
     const requirementPoints: CandidateRequirementPoint[] = []
     const evidence: CandidateEvidence[] = []
     const evidenceIds = new Set<string>()
@@ -222,8 +224,11 @@ export class RequirementPointExtractionValidator {
 
     const state = await this.store.snapshot()
     const index = state.indexes.find(item => item.id === snapshot.indexVersionId && item.knowledgeBaseId === snapshot.knowledgeBaseId)
-    const allowedChunks = new Map((index?.indexedChunks ?? []).map(chunk => [chunk.id, chunk]))
     const allowedVersions = new Set(snapshot.assets.map(asset => asset.assetVersionId))
+    const deliveredChunks = snapshot.extractionInput.mode === 'agent_directory'
+      ? new Set(input.coverage.assets.flatMap(asset => asset.deliveredChunkIds))
+      : undefined
+    const allowedChunks = new Map((index?.indexedChunks ?? []).filter(chunk => allowedVersions.has(chunk.assetVersionId) && (!deliveredChunks || deliveredChunks.has(chunk.id))).map(chunk => [chunk.id, chunk]))
     const evidenceIds = new Set<string>()
     const evidenceById = new Map<string, CandidateRequirementPointExtraction['evidence'][number]>()
     input.evidence.forEach((value, position) => {
@@ -242,10 +247,10 @@ export class RequirementPointExtractionValidator {
       }
     })
     validateRequirementPoints(input.requirementPoints, evidenceIds, issues)
-    validateCoverage(input, snapshot, issues)
+    validateCoverage(input, snapshot, issues, manifest)
     const referenced = new Set(input.requirementPoints.flatMap(point => point.evidenceRefs ?? []))
     snapshot.assets.forEach(asset => {
-      const requiresEvidence = snapshot.extractionCoveragePlan.find(item => item.assetVersionId === asset.assetVersionId)?.chunks.some(chunk => !chunk.excludedReason)
+      const requiresEvidence = input.coverage.assets.find(item => item.assetVersionId === asset.assetVersionId)?.deliveredChunkIds.length
       if (requiresEvidence && ![...referenced].some(id => evidenceById.get(id)?.sourceRef.assetVersionId === asset.assetVersionId)) issues.push(issue('requirementPoints', `输入文档 ${asset.logicalPath} 缺少被需求点引用的固定证据`))
     })
     return { valid: issues.length === 0, issues }
@@ -265,22 +270,52 @@ function validateManifest(manifest: InputDeliveryManifest, snapshot: ReviewRunSn
     const entry = entries.get(batch.batchId)
     if (!entry || entry.ordinal !== batch.ordinal || entry.tokenCount !== batch.tokenCount || entry.contentSha256 !== batch.contentSha256 || !sameStrings(entry.assetVersionIds, batch.assetVersionIds) || !sameStrings(entry.chunkIds, batch.chunkIds)) issues.push(issue(`inputDeliveryManifest.entries.${batch.batchId}`, '输入批次投递证明与快照不一致'))
   })
+  if (expected.mode === 'agent_directory') {
+    const plannedChunks = new Map(snapshot.extractionCoveragePlan.flatMap(asset => asset.chunks.map(chunk => [chunk.chunkId, asset.assetVersionId] as const)))
+    const reads = manifest.toolReads ?? []
+    if (!reads.some(read => read.toolId === 'workspace.read_file' && read.startLine !== undefined && read.endLine !== undefined)) issues.push(issue('inputDeliveryManifest.toolReads', 'Pi Agent 必须使用 read 从固定 /workspace 读取至少一个文件范围'))
+    const toolCallIds = new Set<string>()
+    reads.forEach((read, position) => {
+      const path = `inputDeliveryManifest.toolReads[${position}]`
+      if (!read.toolCallId || toolCallIds.has(read.toolCallId)) issues.push(issue(`${path}.toolCallId`, '读取工具调用 ID 为空或重复'))
+      toolCallIds.add(read.toolCallId)
+      if (read.toolId !== 'workspace.read_file') issues.push(issue(`${path}.toolId`, 'Pi 文件工作区协议只允许 read 形成正文投递证明'))
+      const observedVersions = new Set<string>()
+      read.chunkIds.forEach(chunkId => {
+        const versionId = plannedChunks.get(chunkId)
+        if (!versionId) issues.push(issue(`${path}.chunkIds`, `Chunk ${chunkId} 不属于固定文档工作目录`))
+        else observedVersions.add(versionId)
+      })
+      if (read.assetVersionIds.length !== 1 || !snapshot.assets.some(asset => asset.assetVersionId === read.assetVersionIds[0])) issues.push(issue(`${path}.assetVersionIds`, 'read 必须且只能对应一份固定文件版本'))
+      if (!Number.isInteger(read.startLine) || !Number.isInteger(read.endLine) || Number(read.startLine) < 1 || Number(read.endLine) < Number(read.startLine)) issues.push(issue(`${path}.startLine`, 'read 的实际行范围无效'))
+      const asset = snapshot.assets.find(item => item.assetVersionId === read.assetVersionIds[0])
+      if (!asset || read.relativePath !== workspaceRelativePath(snapshot, asset.logicalPath)) issues.push(issue(`${path}.relativePath`, 'read 路径与固定 /workspace 文件不一致'))
+      if ([...observedVersions].some(versionId => versionId !== read.assetVersionIds[0])) issues.push(issue(`${path}.chunkIds`, 'read 返回的内部 Chunk 与固定文件版本不一致'))
+    })
+    const delivered = workspaceDeliveredChunkIds(snapshot, manifest)
+    reads.flatMap(read => read.chunkIds).forEach(chunkId => { if (!delivered.has(chunkId)) issues.push(issue('inputDeliveryManifest.toolReads.chunkIds', `Chunk ${chunkId} 未被 read 行范围完整覆盖`)) })
+  } else if (manifest.toolReads?.length) issues.push(issue('inputDeliveryManifest.toolReads', '正文直传模式不得伪造目录读取记录'))
 }
 
 function buildCoverage(snapshot: ReviewRunSnapshot, manifest: InputDeliveryManifest) {
-  const delivered = new Set(manifest.entries.flatMap(entry => entry.chunkIds))
+  const delivered = new Set(snapshot.extractionInput.mode === 'agent_directory'
+    ? [...directoryDeliveredChunkIds(snapshot, manifest)]
+    : manifest.entries.flatMap(entry => entry.chunkIds))
   return {
     assets: snapshot.extractionCoveragePlan.map(asset => ({
       assetVersionId: asset.assetVersionId,
       deliveredChunkIds: asset.chunks.filter(chunk => !chunk.excludedReason && delivered.has(chunk.chunkId)).map(chunk => chunk.chunkId),
-      excludedChunks: asset.chunks.filter(chunk => chunk.excludedReason).map(chunk => ({ chunkId: chunk.chunkId, reason: chunk.excludedReason! })),
+      excludedChunks: asset.chunks.filter(chunk => chunk.excludedReason || (snapshot.extractionInput.mode === 'agent_directory' && !delivered.has(chunk.chunkId))).map(chunk => ({ chunkId: chunk.chunkId, reason: chunk.excludedReason ?? DIRECTORY_NOT_READ_REASON })),
     })),
     limitations: [] as string[],
   }
 }
 
-function validateCoverage(input: CandidateRequirementPointExtraction, snapshot: ReviewRunSnapshot, issues: ValidationIssue[]) {
+function validateCoverage(input: CandidateRequirementPointExtraction, snapshot: ReviewRunSnapshot, issues: ValidationIssue[], manifest?: InputDeliveryManifest) {
   const coverageByAsset = new Map(input.coverage.assets.map(asset => [asset.assetVersionId, asset]))
+  const directoryDelivered = snapshot.extractionInput.mode === 'agent_directory' && manifest
+    ? directoryDeliveredChunkIds(snapshot, manifest)
+    : undefined
   if (coverageByAsset.size !== input.coverage.assets.length || coverageByAsset.size !== snapshot.extractionCoveragePlan.length) issues.push(issue('coverage.assets', '覆盖记录必须与全部固定输入资产一一对应'))
   snapshot.extractionCoveragePlan.forEach((planned, position) => {
     const actual = coverageByAsset.get(planned.assetVersionId)
@@ -292,11 +327,63 @@ function validateCoverage(input: CandidateRequirementPointExtraction, snapshot: 
     planned.chunks.forEach(chunk => {
       if (chunk.excludedReason) {
         if (excluded.get(chunk.chunkId) !== chunk.excludedReason || delivered.has(chunk.chunkId)) issues.push(issue(`coverage.assets[${position}]`, `排除 Chunk ${chunk.chunkId} 与服务端计划不一致`))
+      } else if (snapshot.extractionInput.mode === 'agent_directory') {
+        const shouldBeDelivered = directoryDelivered ? directoryDelivered.has(chunk.chunkId) : delivered.has(chunk.chunkId)
+        if (shouldBeDelivered && (!delivered.has(chunk.chunkId) || excluded.has(chunk.chunkId))) issues.push(issue(`coverage.assets[${position}]`, `Agent 已读 Chunk 的覆盖记录不一致：${chunk.chunkId}`))
+        if (!shouldBeDelivered && (delivered.has(chunk.chunkId) || excluded.get(chunk.chunkId) !== DIRECTORY_NOT_READ_REASON)) issues.push(issue(`coverage.assets[${position}]`, `Agent 未读 Chunk 的排除记录不一致：${chunk.chunkId}`))
       } else if (!delivered.has(chunk.chunkId) || excluded.has(chunk.chunkId)) issues.push(issue(`coverage.assets[${position}]`, `投递覆盖不完整：${chunk.chunkId}`))
     })
     if ([...delivered, ...excluded.keys()].some(id => !planned.chunks.some(chunk => chunk.chunkId === id))) issues.push(issue(`coverage.assets[${position}]`, '包含固定覆盖计划之外的 Chunk'))
   })
 }
+
+function fixedEvidenceChunks<T extends { id: string; assetVersionId: string }>(chunks: T[], snapshot: ReviewRunSnapshot, manifest: InputDeliveryManifest) {
+  if (snapshot.extractionInput.mode !== 'agent_directory') return chunks
+  const delivered = directoryDeliveredChunkIds(snapshot, manifest)
+  return chunks.filter(chunk => delivered.has(chunk.id))
+}
+
+function directoryDeliveredChunkIds(snapshot: ReviewRunSnapshot, manifest: InputDeliveryManifest) {
+  return workspaceDeliveredChunkIds(snapshot, manifest)
+}
+
+function workspaceDeliveredChunkIds(snapshot: ReviewRunSnapshot, manifest: InputDeliveryManifest) {
+  const rangesByVersion = new Map<string, Array<{ start: number; end: number }>>()
+  for (const read of manifest.toolReads ?? []) {
+    if (read.toolId !== 'workspace.read_file' || read.assetVersionIds.length !== 1 || !Number.isInteger(read.startLine) || !Number.isInteger(read.endLine)) continue
+    const ranges = rangesByVersion.get(read.assetVersionIds[0]) ?? []
+    ranges.push({ start: Number(read.startLine), end: Number(read.endLine) })
+    rangesByVersion.set(read.assetVersionIds[0], ranges)
+  }
+  const delivered = new Set<string>()
+  snapshot.extractionCoveragePlan.forEach(asset => {
+    const ranges = mergeLineRanges(rangesByVersion.get(asset.assetVersionId) ?? [])
+    asset.chunks.forEach(chunk => {
+      if (!chunk.excludedReason && ranges.some(range => range.start <= chunk.startLine && range.end >= chunk.endLine)) delivered.add(chunk.chunkId)
+    })
+  })
+  return delivered
+}
+
+function mergeLineRanges(ranges: Array<{ start: number; end: number }>) {
+  const merged: Array<{ start: number; end: number }> = []
+  for (const range of [...ranges].sort((left, right) => left.start - right.start || left.end - right.end)) {
+    const previous = merged.at(-1)
+    if (!previous || range.start > previous.end + 1) merged.push({ ...range })
+    else previous.end = Math.max(previous.end, range.end)
+  }
+  return merged
+}
+
+function workspaceRelativePath(snapshot: ReviewRunSnapshot, logicalPath: string) {
+  const workspace = snapshot.documentWorkspace
+  const root = normalizeLogicalPath(workspace?.rootLogicalPath ?? workspace?.logicalPath ?? '')
+  const file = normalizeLogicalPath(logicalPath)
+  const value = posix.relative(root, file)
+  return value && value !== '..' && !value.startsWith('../') && !posix.isAbsolute(value) ? value : ''
+}
+
+function normalizeLogicalPath(value: string) { return posix.normalize(value.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')) }
 
 function validateRequirementPoints(points: CandidateRequirementPointExtraction['requirementPoints'], evidenceIds: Set<string>, issues: ValidationIssue[]) {
   const pointIds = new Set<string>()

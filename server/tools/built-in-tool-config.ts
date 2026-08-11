@@ -34,6 +34,10 @@ export interface BuiltInToolConfigFile {
 }
 
 export const BUILT_IN_HANDLER_KEYS = [
+  'workspace.read_file',
+  'workspace.grep_files',
+  'workspace.find_files',
+  'workspace.list_directory',
   'knowledge.search',
   'knowledge.read_chunk',
   'requirement-points.submit_result',

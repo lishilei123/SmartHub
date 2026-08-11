@@ -59,3 +59,35 @@ test('Embedding 进行中取消任务不会切换旧活动索引', async () => {
   assert.equal((await service.version(first.version.id)).status, 'ready')
   assert.equal((await service.version(second.version.id)).status, 'failed')
 })
+
+test('索引版本存在删除空洞时按历史最大版本递增，不会复用已存在版本号', async () => {
+  const store = new JsonStore(null)
+  const service = new KnowledgeService(store); await service.initialize()
+  const created = await service.createProject('索引版本空洞验收'); const kbId = created.knowledgeBase!.id
+  const first = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'first.md', assetType: '需求', displayName: 'first.md', logicalPath: 'first.md', content: '# 第一版\n必须保留历史版本号。' })
+  await service.processTask(first.task!.id)
+  const second = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'second.md', assetType: '需求', displayName: 'second.md', logicalPath: 'second.md', content: '# 第二版\n索引版本号必须继续递增。' })
+  await service.processTask(second.task!.id)
+  await store.transaction(state => { state.indexes = state.indexes.filter(index => index.knowledgeBaseId !== kbId || index.number !== 1) })
+
+  const third = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'third.md', assetType: '需求', displayName: 'third.md', logicalPath: 'third.md', content: '# 第三版\n删除旧索引后也不能复用版本号。' })
+  await service.processTask(third.task!.id)
+  const indexes = (await store.snapshot()).indexes.filter(index => index.knowledgeBaseId === kbId)
+  assert.equal((await service.task(third.task!.id)).status, 'succeeded')
+  assert.equal(Math.max(...indexes.map(index => index.number)), 3)
+  assert.equal(new Set(indexes.map(index => index.number)).size, indexes.length)
+})
+
+test('同步任务准备阶段失败也会收口为 failed，不会停在 waiting 或 claimed', async () => {
+  const store = new JsonStore(null)
+  const service = new KnowledgeService(store); await service.initialize()
+  const created = await service.createProject('同步准备失败验收'); const kbId = created.knowledgeBase!.id
+  const queued = await service.ingest({ knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'broken.md', assetType: '需求', displayName: 'broken.md', logicalPath: 'broken.md', content: '# 准备失败\n任务必须明确失败。' })
+  await store.transaction(state => { state.tasks.find(task => task.id === queued.task!.id)!.configVersionId = 'missing-config-version' })
+
+  const completed = await service.processTask(queued.task!.id)
+  assert.equal(completed?.status, 'failed')
+  assert.equal((await service.task(queued.task!.id)).step, 'failed')
+  assert.match((await service.task(queued.task!.id)).error ?? '', /配置不存在/u)
+  assert.equal((await service.version(queued.version.id)).status, 'failed')
+})

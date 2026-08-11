@@ -120,9 +120,10 @@ export type ReviewRunExecutionAttempt = {
 
 export type InputDeliveryManifest = {
   policyVersion: string
-  mode: 'full_context' | 'segmented_context'
+  mode: 'full_context' | 'segmented_context' | 'agent_directory'
   packageSha256: string
   entries: Array<{ batchId: string; ordinal: number; assetVersionIds: string[]; chunkIds: string[]; contentSha256: string; tokenCount: number; modelCallSequence: number }>
+  toolReads?: Array<{ toolCallId: string; toolId: 'workspace.read_file'; relativePath: string; assetVersionIds: string[]; chunkIds: string[]; startLine: number; endLine: number }>
   finalMergeCompleted: boolean
 }
 
@@ -140,7 +141,8 @@ export type RequirementAnalysisResponse = {
     assetContentHash: string
     indexVersionId: string
     logicalPath: string
-    assets: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }[]
+    assets: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }[]
+    documentWorkspace?: { mode: 'agent_directory'; logicalPath: string; rootLogicalPath?: string; activeBranchLogicalPath?: string; branchLogicalPaths?: string[]; agentLogicalPath?: string; layoutVersion?: 'workspace/v1'; candidateAssetVersionIds: string[] }
     modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
     agentModelRefs?: {
       requirementPointExtraction: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
@@ -155,7 +157,7 @@ export type RequirementAnalysisResponse = {
     excludedAreas: string[]
     extractionInput: {
       policyVersion: string
-      mode: 'full_context' | 'segmented_context'
+      mode: 'full_context' | 'segmented_context' | 'agent_directory'
       estimatedInputTokens: number
       safeInputBudget: number
       packageSha256: string
@@ -269,7 +271,7 @@ export type ReviewQuestionHistory = {
 }
 export type ToolApproval = { id: string; runId: string; toolId: string; toolVersion: string; risk: 'write_reversible' | 'write_high_risk'; parameterSummary: string; parameterHash: string; status: 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'; requestedAt: string; expiresAt: string; decidedAt?: string; decidedByDisplayName?: string; decisionComment?: string; consumedAt?: string }
 
-export async function startRequirementAnalysis(projectVersionId: string, input: { assetVersionIds: string[]; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
+export async function startRequirementAnalysis(projectVersionId: string, input: { documentDirectoryPath: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
   const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-reviews/run`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

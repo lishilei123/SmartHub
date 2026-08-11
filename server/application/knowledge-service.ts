@@ -354,21 +354,21 @@ export class KnowledgeService {
   }
 
   async processQueuedSync(taskId: string, lease?: TaskLease, signal?: AbortSignal) {
-    const work = await this.taskTransaction(taskId, lease, state => {
-      const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
-      if (!canRunTask(task, lease) || task.type !== 'sync') return null
-      const version = required(state.versions.find(item => item.id === task.input.assetVersionId), '资产版本不存在')
-      const asset = required(state.assets.find(item => item.id === version.assetId), '知识资产不存在')
-      const config = required(state.configs.find(item => item.id === task.configVersionId), '配置不存在')
-      const previous = state.versions.find(item => item.id === asset.activeVersionId)?.chunks ?? []
-      const kb = required(state.knowledgeBases.find(item => item.id === task.knowledgeBaseId), '知识库不存在')
-      const candidate = createCandidateIndex(state, task.knowledgeBaseId, task.configVersionId)
-      task.status = 'running'; task.step = 'embedding'; task.progress = 35; task.startedAt ??= now(); task.updatedAt = now(); task.input.candidateIndexVersionId = candidate.id; task.input.baseIndexVersionId = kb.activeIndexVersionId
-      version.status = 'syncing'
-      return { content: version.content, versionId: version.id, assetId: asset.id, previous, config: config.config, candidateId: candidate.id, assetMetadata: { assetId: asset.id, displayName: String(task.input.displayName), assetType: String(task.input.assetType), sourceType: task.input.sourceType as SourceType, logicalPath: String(task.input.logicalPath) } satisfies IndexAssetMetadata, simulateFailureAt: task.input.simulateFailureAt }
-    })
-    if (!work) return null
     try {
+      const work = await this.taskTransaction(taskId, lease, state => {
+        const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
+        if (!canRunTask(task, lease) || task.type !== 'sync') return null
+        const version = required(state.versions.find(item => item.id === task.input.assetVersionId), '资产版本不存在')
+        const asset = required(state.assets.find(item => item.id === version.assetId), '知识资产不存在')
+        const config = required(state.configs.find(item => item.id === task.configVersionId), '配置不存在')
+        const previous = state.versions.find(item => item.id === asset.activeVersionId)?.chunks ?? []
+        const kb = required(state.knowledgeBases.find(item => item.id === task.knowledgeBaseId), '知识库不存在')
+        const candidate = createCandidateIndex(state, task.knowledgeBaseId, task.configVersionId)
+        task.status = 'running'; task.step = 'embedding'; task.progress = 35; task.startedAt ??= now(); task.updatedAt = now(); task.input.candidateIndexVersionId = candidate.id; task.input.baseIndexVersionId = kb.activeIndexVersionId
+        version.status = 'syncing'
+        return { content: version.content, versionId: version.id, assetId: asset.id, previous, config: config.config, candidateId: candidate.id, assetMetadata: { assetId: asset.id, displayName: String(task.input.displayName), assetType: String(task.input.assetType), sourceType: task.input.sourceType as SourceType, logicalPath: String(task.input.logicalPath) } satisfies IndexAssetMetadata, simulateFailureAt: task.input.simulateFailureAt }
+      })
+      if (!work) return null
       const chunks = (await this.createChunks(work.content, work.config, work.previous, signal)).map(chunk => ({ ...chunk, assetVersionId: work.versionId }))
       const indexedChunks = chunks.map(chunk => ({ ...chunk, assetMetadata: work.assetMetadata } satisfies IndexChunk))
       throwIfAborted(signal)
@@ -417,12 +417,13 @@ export class KnowledgeService {
       if (signal?.aborted) return await this.task(taskId)
       return this.taskTransaction(taskId, lease, state => {
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
-        const candidate = state.indexes.find(item => item.id === work.candidateId)
+        const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null
+        const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null
         if (candidate?.status === 'candidate') candidate.status = 'failed'
         if (task.status === 'cancelled') return task
-        const version = state.versions.find(item => item.id === work.versionId)
+        const version = state.versions.find(item => item.id === task.input.assetVersionId)
         if (version) { version.status = 'failed'; version.error = error instanceof Error ? safeErrorMessage(error.message) : '同步失败' }
-        task.status = 'failed'; task.step = String(task.input.simulateFailureAt ?? 'embedding'); task.error = error instanceof Error ? safeErrorMessage(error.message) : '同步失败'; task.finishedAt = now(); task.updatedAt = now()
+        task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '同步失败'; task.finishedAt = now(); task.updatedAt = now()
         return task
       })
     }
@@ -1174,7 +1175,8 @@ function publishIndex(state: DatabaseState, knowledgeBaseId: string, configVersi
 }
 function createCandidateIndex(state: DatabaseState, knowledgeBaseId: string, configVersionId: string) {
   required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
-  const index = { id: id('idx'), knowledgeBaseId, number: state.indexes.filter(item => item.knowledgeBaseId === knowledgeBaseId).length + 1, status: 'candidate' as const, assetVersionIds: [] as string[], configVersionId, indexedChunks: [] as IndexChunk[], createdAt: now() }
+  const number = Math.max(0, ...state.indexes.filter(item => item.knowledgeBaseId === knowledgeBaseId).map(item => item.number)) + 1
+  const index = { id: id('idx'), knowledgeBaseId, number, status: 'candidate' as const, assetVersionIds: [] as string[], configVersionId, indexedChunks: [] as IndexChunk[], createdAt: now() }
   state.indexes.push(index)
   return index
 }

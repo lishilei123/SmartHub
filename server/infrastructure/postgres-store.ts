@@ -457,16 +457,24 @@ export class PostgresStore implements StateStore {
       await client.query('BEGIN')
       await client.query(`
         WITH expired AS (
-          SELECT id, data->>'candidateIndexVersionId' AS candidate_id
+          SELECT id, data #>> '{input,candidateIndexVersionId}' AS candidate_id, attempt_count, max_attempts
           FROM smarthub.sync_tasks
           WHERE status = 'running' AND lease_expires_at < now() AND cancel_requested_at IS NULL
           FOR UPDATE
-        ), requeued AS (
+        ), recovered AS (
           UPDATE smarthub.sync_tasks
-          SET status = 'queued', step = 'waiting', progress = 0, updated_at = now(), finished_at = NULL,
+          SET status = CASE WHEN attempt_count >= max_attempts THEN 'failed' ELSE 'queued' END,
+              step = CASE WHEN attempt_count >= max_attempts THEN 'failed' ELSE 'waiting' END,
+              progress = CASE WHEN attempt_count >= max_attempts THEN progress ELSE 0 END,
+              updated_at = now(),
+              finished_at = CASE WHEN attempt_count >= max_attempts THEN now() ELSE NULL END,
               lease_owner = NULL, run_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-              available_at = now(),
-              data = jsonb_set(jsonb_set(jsonb_set(data - 'candidateIndexVersionId' - 'error' - 'finishedAt', '{status}', to_jsonb('queued'::text)), '{step}', to_jsonb('waiting'::text)), '{progress}', to_jsonb(0))
+              available_at = CASE WHEN attempt_count >= max_attempts THEN available_at ELSE now() END,
+              data = CASE WHEN attempt_count >= max_attempts THEN
+                jsonb_set(jsonb_set(jsonb_set(data #- '{input,candidateIndexVersionId}', '{status}', to_jsonb('failed'::text)), '{step}', to_jsonb('failed'::text)), '{error}', to_jsonb('TASK_LEASE_EXHAUSTED: Worker 租约多次失效'::text))
+              ELSE
+                jsonb_set(jsonb_set(jsonb_set((data #- '{input,candidateIndexVersionId}') - 'error' - 'finishedAt', '{status}', to_jsonb('queued'::text)), '{step}', to_jsonb('waiting'::text)), '{progress}', to_jsonb(0))
+              END
           WHERE id IN (SELECT id FROM expired)
           RETURNING id
         )
@@ -475,12 +483,19 @@ export class PostgresStore implements StateStore {
         WHERE index_version.id IN (SELECT candidate_id FROM expired WHERE candidate_id IS NOT NULL)
           AND index_version.status = 'candidate'
       `)
+      await client.query(`
+        UPDATE smarthub.sync_tasks
+        SET status = 'failed', step = 'failed', finished_at = now(), updated_at = now(),
+            data = jsonb_set(jsonb_set(jsonb_set(data, '{status}', to_jsonb('failed'::text)), '{step}', to_jsonb('failed'::text)), '{error}', to_jsonb('TASK_ATTEMPTS_EXHAUSTED: 知识库任务已达到最大重试次数'::text))
+        WHERE status = 'queued' AND attempt_count >= max_attempts
+      `)
       const result = await client.query<{ id: string; data: SyncTask }>(`
         WITH next_task AS (
           SELECT id
           FROM smarthub.sync_tasks
           WHERE status = 'queued'
             AND available_at <= now()
+            AND attempt_count < max_attempts
           ORDER BY priority DESC, available_at, created_at
           FOR UPDATE SKIP LOCKED
           LIMIT 1
@@ -496,7 +511,7 @@ export class PostgresStore implements StateStore {
             run_token = $3::uuid,
             lease_expires_at = now() + ($2::text || ' milliseconds')::interval,
             heartbeat_at = now(),
-            data = jsonb_set(jsonb_set(task.data, '{status}', to_jsonb('running'::text)), '{step}', to_jsonb('claimed'::text))
+            data = jsonb_set(jsonb_set(jsonb_set(task.data, '{status}', to_jsonb('running'::text)), '{step}', to_jsonb('claimed'::text)), '{progress}', to_jsonb(1))
         FROM next_task
         WHERE task.id = next_task.id
         RETURNING task.id, task.data

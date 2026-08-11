@@ -1,4 +1,5 @@
 const versionDocumentRoot = '版本文档'
+const workspaceRoot = 'workspace'
 
 function safeLogicalPathSegment(value: string, label: string) {
   const encodeCharacter = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`
@@ -22,4 +23,14 @@ export function versionDocumentDirectory(versionName: string, documentDirectory:
 
 export function versionDocumentPath(versionName: string, documentDirectory: string, fileName: string) {
   return `${versionDocumentDirectory(versionName, documentDirectory)}/${safeLogicalPathSegment(fileName, '文件名')}`
+}
+
+export function requirementWorkspaceDirectory(versionName: string) {
+  return `${workspaceRoot}/branches/${safeLogicalPathSegment(versionName, '项目版本名称')}/input/requirements`
+}
+
+export function documentPathInDirectory(directoryPath: string, fileName: string) {
+  const normalizedDirectory = directoryPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  if (!normalizedDirectory || normalizedDirectory.split('/').some(segment => !segment || segment === '.' || segment === '..')) throw new Error('知识库目录路径不合法')
+  return `${normalizedDirectory}/${safeLogicalPathSegment(fileName, '文件名')}`
 }
