@@ -226,16 +226,16 @@ export interface TechnicalSolutionRunSnapshot {
   }>
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string }>
   indexVersionId: string
-  modelRef: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>
+  modelRef: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'requestTimeoutMs' | 'retryCount'>
   agentModelRefs?: {
-    technicalSolutionExtraction: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>
-    technicalSolutionReview: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>
+    technicalSolutionExtraction: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'requestTimeoutMs' | 'retryCount'>
+    technicalSolutionReview: Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'requestTimeoutMs' | 'retryCount'>
   }
   agentModelRoutes?: {
-    technicalSolutionExtraction: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>>
-    technicalSolutionReview: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>>
+    technicalSolutionExtraction: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'requestTimeoutMs' | 'retryCount'>>
+    technicalSolutionReview: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'requestTimeoutMs' | 'retryCount'>>
   }
-  modelRoute?: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'temperature' | 'requestTimeoutMs' | 'retryCount'>>
+  modelRoute?: Array<Omit<AgentModelConnection, 'baseUrl' | 'apiKey' | 'requestTimeoutMs' | 'retryCount'>>
   agentConfigurationRef?: { id: string; version: number; contentSha256: string }
   agentConfigurationRefs?: {
     technicalSolutionExtraction: { id: string; version: number; contentSha256: string }

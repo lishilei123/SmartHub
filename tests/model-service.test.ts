@@ -50,11 +50,11 @@ test('模型发现和连通性探测使用数据库连接并记录真实健康�
   const service = new ModelService(store)
   await service.replaceSources([source])
   const originalFetch = globalThis.fetch
-  const calls: { url: string; authorization: string }[] = []
+  const calls: { url: string; authorization: string; body?: Record<string, unknown> }[] = []
   globalThis.fetch = async (input, init) => {
     const url = String(input)
     const headers = new Headers(init?.headers)
-    calls.push({ url, authorization: headers.get('authorization') ?? '' })
+    calls.push({ url, authorization: headers.get('authorization') ?? '', ...(init?.body ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {}) })
     if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'review-model' }, { id: 'backup-model' }] }), { status: 200, headers: { 'content-type': 'application/json' } })
     return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ type: 'function', function: { name: 'smarthub_requirement_submit_probe', arguments: '{"schemaVersion":"model-probe/v2","contextMarker":"SMARTHUB-CONTEXT-END-7F3A","finding":{"title":"缺少失败补偿","severity":"blocker"}}' } }] } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
   }
@@ -69,6 +69,7 @@ test('模型发现和连通性探测使用数据库连接并记录真实健康�
     assert.equal(probed.source.models[0].qualityGate?.checks.longContext, true)
     assert.deepEqual(calls.map(call => call.url), ['https://provider.example/v1/models', 'https://provider.example/v1/chat/completions'])
     assert.ok(calls.every(call => call.authorization === 'Bearer actual-secret'))
+    assert.equal('temperature' in (calls[1].body ?? {}), false)
     assert.doesNotMatch(JSON.stringify(await service.listSources()), /actual-secret/u)
   } finally {
     globalThis.fetch = originalFetch

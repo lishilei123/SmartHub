@@ -455,14 +455,14 @@ test('新评审固定使用已发布 Agent 配置中的模型、输出额度、P
   const extractionSaved = await configurations.save({
     agentKey: 'requirementPointExtraction',
     revision: extractionDraftState.revision,
-    routing: { ...extractionDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 8_192, temperature: 0.1, retryCount: 1 },
+    routing: { ...extractionDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-1' }, maxOutputTokens: 8_192, retryCount: 1 },
     definition: extractionDraftState.definition,
   })
   const extractionPublished = await configurations.publish({ agentKey: 'requirementPointExtraction', revision: extractionSaved.revision })
   const reviewSaved = await configurations.save({
     agentKey: 'requirementReview',
     revision: reviewDraftState.revision,
-    routing: { ...reviewDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-2' }, maxOutputTokens: 8_192, temperature: 0.3, retryCount: 2 },
+    routing: { ...reviewDraftState.routing, primaryModel: { sourceId: 'source-1', modelId: 'model-2' }, maxOutputTokens: 8_192, retryCount: 2 },
     definition: { ...reviewDraftState.definition, systemPrompt: `${reviewDraftState.definition.systemPrompt}\n已发布配置标记。` },
   })
   const reviewPublished = await configurations.publish({ agentKey: 'requirementReview', revision: reviewSaved.revision })

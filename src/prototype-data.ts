@@ -90,7 +90,6 @@ export type GenerativeSourceDraft = {
 
 export type SettingsDraft = {
   mainModel: string
-  temperature: number
   intelligentRouting: boolean
   fallbackEnabled: boolean
   maxOutputTokens: number
@@ -130,7 +129,6 @@ export type SettingsDraft = {
 
 export const initialSettings: SettingsDraft = {
   mainModel: '',
-  temperature: 0.2,
   intelligentRouting: true,
   fallbackEnabled: true,
   maxOutputTokens: 8192,

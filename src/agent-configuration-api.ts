@@ -29,7 +29,6 @@ export type AgentRoutingConfiguration = {
   fallbackModels: AgentModelReference[]
   intelligentRouting: boolean
   fallbackEnabled: boolean
-  temperature: number
   maxOutputTokens: number
   requestTimeoutSeconds: number
   retryCount: number

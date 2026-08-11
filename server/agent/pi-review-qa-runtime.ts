@@ -77,7 +77,6 @@ export class PiReviewQaRuntimeAdapter implements ReviewQaRuntime {
         : options?.signal
       const configured = {
         ...options,
-        ...(input.model.temperature == null ? {} : { temperature: input.model.temperature }),
         maxTokens: input.model.maxOutputTokens,
         ...(requestSignal ? { signal: requestSignal } : {}),
       }

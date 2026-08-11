@@ -172,7 +172,6 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         : options?.signal
       const configuredOptions = {
         ...options,
-        ...(input.model.temperature == null ? {} : { temperature: input.model.temperature }),
         maxTokens: input.model.maxOutputTokens,
         ...(requestSignal ? { signal: requestSignal } : {}),
       }

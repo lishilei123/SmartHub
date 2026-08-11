@@ -248,7 +248,7 @@ function probeOpenAi(endpoint: string, credential: string, model: string, requir
   return fetch(chatUrl(endpoint), {
     method: 'POST',
     headers: { ...(credential ? { authorization: `Bearer ${credential}` } : {}), 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? sample : 'Reply with OK.' }], max_tokens: requireToolCall ? 256 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'function', function: { name: 'smarthub_requirement_submit_probe' } } } : {}) }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? sample : 'Reply with OK.' }], max_tokens: requireToolCall ? 256 : 1, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'function', function: { name: 'smarthub_requirement_submit_probe' } } } : {}) }),
     signal: AbortSignal.timeout(30_000),
   })
 }
@@ -257,7 +257,7 @@ function probeAnthropic(endpoint: string, credential: string, model: string, req
   return fetch(anthropicUrl(endpoint), {
     method: 'POST',
     headers: { 'x-api-key': credential, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? sample : 'Reply with OK.' }], max_tokens: requireToolCall ? 256 : 1, temperature: 0, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'tool', name: 'smarthub_requirement_submit_probe' } } : {}) }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: requireToolCall ? sample : 'Reply with OK.' }], max_tokens: requireToolCall ? 256 : 1, ...(requireToolCall ? { tools: [tool], tool_choice: { type: 'tool', name: 'smarthub_requirement_submit_probe' } } : {}) }),
     signal: AbortSignal.timeout(30_000),
   })
 }

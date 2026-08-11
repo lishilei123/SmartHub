@@ -208,7 +208,6 @@ function defaultRouting(): AgentRoutingConfiguration {
     fallbackModels: [],
     intelligentRouting: true,
     fallbackEnabled: true,
-    temperature: 0.2,
     maxOutputTokens: 8_192,
     requestTimeoutSeconds: 120,
     retryCount: 2,
@@ -230,7 +229,6 @@ function normalizeAgentDraft(agentKey: AgentConfigurationAgentKey, input: AgentC
 
 function normalizeRouting(value: AgentRoutingConfiguration): AgentRoutingConfiguration {
   if (!value || typeof value !== 'object') throw new Error('模型与路由配置不能为空')
-  const temperature = finiteNumber(value.temperature, '模型温度', 0, 2)
   const maxOutputTokens = integer(value.maxOutputTokens, '最大输出 Token', 1_024, 262_144)
   const requestTimeoutSeconds = integer(value.requestTimeoutSeconds, '请求超时', 10, 3_600)
   const retryCount = integer(value.retryCount, '失败重试次数', 0, 5)
@@ -242,7 +240,6 @@ function normalizeRouting(value: AgentRoutingConfiguration): AgentRoutingConfigu
     fallbackModels,
     intelligentRouting: value.intelligentRouting === true,
     fallbackEnabled: value.fallbackEnabled === true,
-    temperature,
     maxOutputTokens,
     requestTimeoutSeconds,
     retryCount,
@@ -410,6 +407,7 @@ function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft | undefin
   return {
     ...fallback,
     ...structuredClone(value),
+    routing: normalizeRouting(value?.routing ?? fallback.routing),
     definition: {
       ...fallback.definition,
       ...structuredClone(definition),
@@ -429,7 +427,7 @@ function expandStoredVersions(values: AgentConfigurationVersion[]): AgentConfigu
 }
 
 function normalizeStoredVersion(value: AgentConfigurationVersion, agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion {
-  return { ...structuredClone(value), agentKey }
+  return { ...structuredClone(value), agentKey, routing: normalizeRouting(value.routing) }
 }
 
 function legacyVersion(value: AgentConfigurationVersion, raw: { agentDefinitions?: Record<string, AgentDefinitionVersion> }, agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion {
@@ -440,7 +438,7 @@ function legacyVersion(value: AgentConfigurationVersion, raw: { agentDefinitions
     agentKey,
     version: legacy.version,
     status: legacy.status,
-    routing: structuredClone(legacy.routing),
+    routing: normalizeRouting(legacy.routing),
     agentDefinition: structuredClone(raw.agentDefinitions?.[agentKey] ?? defaultDefinition(agentKey)),
     contentSha256: legacy.contentSha256,
     createdAt: legacy.createdAt,
@@ -548,6 +546,5 @@ function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ?
 function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key) && !isSkillRuntimeToolId(key)) }
 function cleanRequired(value: unknown, name: string, max: number) { const result = cleanText(value, max); if (!result) throw new Error(`${name}不能为空`); return result }
 function cleanText(value: unknown, max: number) { const result = String(value ?? '').trim(); if (result.length > max) throw new Error(`文本长度不能超过 ${max}`); return result }
-function finiteNumber(value: unknown, name: string, min: number, max: number) { const result = Number(value); if (!Number.isFinite(result) || result < min || result > max) throw new Error(`${name}必须在 ${min} 到 ${max} 之间`); return result }
 function integer(value: unknown, name: string, min: number, max: number) { const result = Number(value); if (!Number.isInteger(result) || result < min || result > max) throw new Error(`${name}必须是 ${min} 到 ${max} 之间的整数`); return result }
 function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }

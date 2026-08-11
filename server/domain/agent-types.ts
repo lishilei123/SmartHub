@@ -134,7 +134,6 @@ export interface AgentModelConnection {
   contextWindow: number
   maxOutputTokens: number
   supportsReasoning: boolean
-  temperature?: number
   requestTimeoutMs?: number
   retryCount?: number
 }
