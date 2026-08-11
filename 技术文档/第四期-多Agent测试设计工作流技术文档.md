@@ -211,13 +211,17 @@
 
 `CoverageAuditor` 从数据库当前关系和规范化内容计算审计结果。综合 Agent 的遗漏/重复建议只作为输入提示，不进入正式统计。审计输入包含依据、召回、树、用例 revision 集合和数据需求 Hash，任一变化都使结果 `stale`。
 
+审计器先从批准树中排除父级分组节点，只将没有未删除子节点且未标记 `not_applicable` 的叶子节点纳入可执行覆盖分母；综合提交校验与数据需求引用使用同一集合。审计器同时确定 blocker 的处置归属。`COVERAGE_TEST_POINT_UNCOVERED`、`TEST_CASE_DUPLICATE`、`TEST_CASE_OVER_AGGREGATED`、`TEST_CASE_POINT_DIMENSION_MISMATCH`、`TEST_CASE_NON_EXECUTABLE_POINT_REFERENCE` 属于 `agent_repair`；未审核用例属于 `human_review`；Finding、待确认项、依据缺口和非 ready 状态属于 `human_decision`；其余引用或沿革错误属于 `manual_edit`。多叶子用例的每种执行方式若独立步骤数少于关联叶子数，即判为过度合并；已经落库的旧候选若仍引用父级分组、已删除、不适用或当前树之外的节点，则通过非可执行引用 blocker 进入相同修复链。首次候选仍为 revision 0 且没有人工审核动作时，服务端把 `agent_repair` 项、上一轮完整候选和固定树封装为 `test-case-repair/v1`，最多自动推进两次新的 `test_case_synthesis` generation。Agent 只能重新提交完整候选，服务端重新生成 ID、校验并审计。
+
 ### 5.9 ADR-409：候选成功、人工审核与正式发布分离
 
-- Workflow `succeeded`：固定 DAG 完成，revision 0 候选原子保存且初始审计无 blocker；
+- Workflow `succeeded`：固定 DAG 完成，revision 0 候选原子保存；可修复的 Agent 质量 blocker 已清零或两轮自动修复已耗尽，人工门禁类 blocker 可继续保留并阻止发布；
 - 用例 `approved`：人工审核了某个明确 revision；
 - `TestCaseSetVersion` 发布：当前全部用例 approved、全部已声明执行方式 ready，审计仍 valid 且 Hash 相等，人工执行发布。
 
 运行成功后人工编辑不会改写历史 Agent 产物；测试点树保存后生成新 revision 并重新批准，运行恢复为完成态，同时当前用例审核和审计失效，直到重新审核和重新审计。
+
+自动修复状态持久化为 `idle | queued | running | succeeded | exhausted | not_needed`，记录当前轮次、两轮上限、触发 Audit 和 blocker code。PostgreSQL Worker 在当前节点租约事务提交后，为新的 synthesis generation 创建独立 Job；JSON Store 在同一受控运行中继续下一轮。两种执行模式使用相同修复输入和终止条件。
 
 ### 5.10 ADR-410：只读 Agent 权限由服务端硬限制
 
@@ -323,7 +327,7 @@ API -----------> 冻结内容存储 / 报告生成
 | `merge_test_point_tree` | service | 两个设计节点 | `TestPointTreeMerger` | Tree Draft revision 0 |
 | `tree_gate` | gate | `merge_test_point_tree` | 人工 | 不可变 Tree Version |
 | `synthesize_cases` | agent | `tree_gate` | `TestCaseSynthesisAgent` | 用例候选、数据需求候选 |
-| `coverage_audit` | service | `synthesize_cases` | `CoverageAuditor` + `CandidatePublisher` | 审计结果；无 blocker 时在同一事务发布 Case revision 0 和数据集合 |
+| `coverage_audit` | service | `synthesize_cases` | `CoverageAuditor` + `CandidatePublisher` | 原子保存 Case revision 0、数据集合与审计；Agent 质量 blocker 可触发限次重新具象化 |
 
 页面五阶段映射：
 
@@ -335,7 +339,7 @@ API -----------> 冻结内容存储 / 报告生成
 | 测试数据资产定义 | `synthesize_cases` 的第二产物及服务端规范化 |
 | 覆盖反向审计 | `coverage_audit`，内部完成审计与候选原子发布 |
 
-`coverage_audit` 在事务外只执行无副作用计算，随后在一个数据库事务中重新锁定 Run、复核全部输入 Hash、写入 Audit，并在无 blocker 时同时写入 Case revision 0、数据需求集合和节点终态。不得先把 Audit 节点标成成功，再由另一个可失败节点补写候选。
+`coverage_audit` 在事务外只执行无副作用计算，随后在一个数据库事务中重新锁定 Run、复核全部输入 Hash、写入 Case revision 0、数据需求集合、Audit 和节点终态。若存在可修复的 Agent 质量 blocker，同一事务把综合与审计节点推进到新 generation，事务提交后才调度下一轮；不得先把 Audit 节点标成成功，再由另一个可失败节点补写候选。
 
 ### 7.2 调度事务
 

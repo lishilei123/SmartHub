@@ -206,7 +206,7 @@ export type TestDesignCoverageAudit = {
   inputSha256: string
   statistics: { totalBasis: number; coveredBasis: number; totalPoints: number; coveredPoints: number; totalCases: number; approvedCases: number }
   relations: Array<{ basisRef: string; testPointId: string; caseId?: string; status: 'covered' | 'partially_covered' | 'not_covered' | 'needs_confirmation'; reason: string }>
-  blockers: Array<{ code: string; message: string; subjectId?: string }>
+  blockers: Array<{ code: string; message: string; subjectId?: string; resolution?: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' }>
   createdAt: string
 }
 
@@ -238,6 +238,7 @@ export type TestDesignWorkflowRun = TestDesignRunSummary & {
   coverageAudits: TestDesignCoverageAudit[]
   findings: Array<{ id: string; title: string; description: string; severity: 'blocker' | 'high' | 'medium' | 'low'; basisRefs: string[]; state: string; actions: Array<{ id: string }> }>
   confirmationItems: Array<{ id: string; title: string; question: string; decisionType: string; impactStage: string; affectedRefs: string[]; blocker: boolean; state: string; actions: Array<{ id: string }> }>
+  automaticRepair?: { status: 'idle' | 'queued' | 'running' | 'succeeded' | 'exhausted' | 'not_needed'; attempt: number; maxAttempts: number; blockerCodes: string[]; triggerAuditId?: string; startedAt?: string; finishedAt?: string }
   caseSetVersions?: TestCaseSetVersion[]
 }
 

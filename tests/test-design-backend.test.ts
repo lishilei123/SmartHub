@@ -7,7 +7,7 @@ import { defaultAgentDefinitionConfigDictionary } from '../server/agent/agent-de
 import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
 import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
 import { ProjectVersionService } from '../server/application/project-version-service.js'
-import { TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseContent, validateTestCaseSynthesisCandidate } from '../server/application/test-design-validation.js'
+import { executableTestPointIds, TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseContent, validateTestCaseSynthesisCandidate } from '../server/application/test-design-validation.js'
 import type { TestCaseContent, TestPointNodeRevision } from '../server/domain/test-design-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
@@ -99,6 +99,14 @@ test('用例综合候选校验数据需求索引并保留规范结构', () => {
       && (error.details as { path?: string }).path === '/cases'
       && error.message.includes('point-2'),
   )
+})
+
+test('用例覆盖分母只包含可执行叶子测试点', () => {
+  const parent = { nodeId: 'point-parent', parentId: null, applicability: 'applicable' as const }
+  const child = { nodeId: 'point-child', parentId: 'point-parent', applicability: 'applicable' as const }
+  const standalone = { nodeId: 'point-standalone', parentId: null, applicability: 'blocked_by_confirmation' as const }
+  const excluded = { nodeId: 'point-excluded', parentId: null, applicability: 'not_applicable' as const }
+  assert.deepEqual(executableTestPointIds([parent, child, standalone, excluded]), new Set(['point-child', 'point-standalone']))
 })
 
 test('用例综合候选将 fieldConstraints 标量规范化为字符串并拒绝复杂值', () => {
@@ -205,6 +213,10 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   reusedCase.historicalSourceRef = 'history-outside-snapshot'
   const invalidHistoricalAudit = auditTestDesignCoverage({ runId: completed.id, basis: completed.basisSnapshot, retrieval: completed.retrievalSnapshot, historical, tree: completed.testPointTree!, treeVersion: completed.testPointTree!.versions[0], cases: [reusedCase, ...completed.testCases.slice(1)], dataSet: completed.dataSetVersions[0], findings: [], confirmationItems: [] })
   assert.equal(invalidHistoricalAudit.blockers.some(item => item.code === 'TEST_CASE_HISTORICAL_SOURCE_INVALID'), true)
+  const invalidPointCase = structuredClone(completed.testCases[0])
+  invalidPointCase.revisions[0].content.testPointIds.push('grouping-or-retired-point')
+  const invalidPointAudit = auditTestDesignCoverage({ runId: completed.id, basis: completed.basisSnapshot, retrieval: completed.retrievalSnapshot, historical: completed.historicalSnapshot, tree: completed.testPointTree!, treeVersion: completed.testPointTree!.versions[0], cases: [invalidPointCase, ...completed.testCases.slice(1)], dataSet: completed.dataSetVersions[0], findings: [], confirmationItems: [] })
+  assert.ok(invalidPointAudit.blockers.some(item => item.code === 'TEST_CASE_NON_EXECUTABLE_POINT_REFERENCE' && item.resolution === 'agent_repair'))
 
   for (const testCase of completed.testCases) {
     await service.reviewCase('pv-1', design.id, run.id, testCase.id, { decision: 'submit', targetRevision: 0 }, principal)
@@ -256,6 +268,56 @@ test('测试设计后端完成固定快照、双门禁、并行设计、用例�
   assert.equal(approvedAfterEdit.status, 'succeeded')
   assert.equal(approvedAfterEdit.stage, 'completed')
   assert.ok(approvedAfterEdit.testCases.every(item => item.reviewState === 'draft'))
+})
+
+test('覆盖审计将 Agent 可修复阻断自动反馈给综合 Agent 并限次重试', async () => {
+  const store = await seededStore()
+  const runtime = new DuplicateThenRepairRuntime()
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('pv-1', {
+    name: '自动修复测试设计', objective: '验证审计反馈闭环', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'],
+    knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [],
+  }, principal)
+  const run = await service.createRun('pv-1', design.id, 'automatic-repair-run', principal)
+  const scopeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate')
+  const analysisArtifact = scopeWaiting.artifacts.find(item => item.nodeKey === 'test_analysis')!
+  await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: analysisArtifact.id, targetRevision: analysisArtifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
+  const treeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
+  await service.applyGateDecision('pv-1', design.id, run.id, 'test-point-tree', { targetId: treeWaiting.testPointTree!.id, targetRevision: treeWaiting.testPointTree!.currentRevision, expectedVersion: 0, decision: 'approved' }, principal)
+
+  const completed = await waitFor(service, design.id, run.id, value => value.status === 'succeeded')
+  assert.equal(runtime.stages.filter(stage => stage === 'test_case_synthesis').length, 2)
+  assert.equal(completed.automaticRepair?.status, 'succeeded')
+  assert.equal(completed.automaticRepair?.attempt, 1)
+  assert.equal(completed.coverageAudits.length, 2)
+  assert.equal(completed.coverageAudits[0].status, 'stale')
+  assert.ok(completed.coverageAudits[0].blockers.some(item => item.code === 'TEST_CASE_DUPLICATE' && item.resolution === 'agent_repair'))
+  assert.ok(completed.coverageAudits[0].blockers.some(item => item.code === 'TEST_CASE_OVER_AGGREGATED' && item.resolution === 'agent_repair'))
+  assert.equal(completed.coverageAudits[1].blockers.some(item => item.code === 'TEST_CASE_DUPLICATE'), false)
+  assert.equal(completed.coverageAudits[1].blockers.some(item => item.code === 'TEST_CASE_OVER_AGGREGATED'), false)
+  assert.equal(runtime.repairContexts.length, 1)
+  assert.match(JSON.stringify(runtime.repairContexts[0]), /TEST_CASE_DUPLICATE/u)
+  assert.match(JSON.stringify(runtime.repairContexts[0]), /TEST_CASE_OVER_AGGREGATED/u)
+})
+
+test('Agent 自动修复两轮后停止并保留最后一次发布阻断', async () => {
+  const store = await seededStore()
+  const runtime = new AlwaysDuplicateRuntime()
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('pv-1', { name: '修复上限', objective: '验证自动修复终止条件', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('pv-1', design.id, 'automatic-repair-exhausted', principal)
+  const scopeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate')
+  const analysisArtifact = scopeWaiting.artifacts.find(item => item.nodeKey === 'test_analysis')!
+  await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: analysisArtifact.id, targetRevision: analysisArtifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
+  const treeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
+  await service.applyGateDecision('pv-1', design.id, run.id, 'test-point-tree', { targetId: treeWaiting.testPointTree!.id, targetRevision: treeWaiting.testPointTree!.currentRevision, expectedVersion: 0, decision: 'approved' }, principal)
+
+  const completed = await waitFor(service, design.id, run.id, value => value.status === 'succeeded')
+  assert.equal(runtime.stages.filter(stage => stage === 'test_case_synthesis').length, 3)
+  assert.equal(completed.automaticRepair?.status, 'exhausted')
+  assert.equal(completed.automaticRepair?.attempt, 2)
+  assert.equal(completed.coverageAudits.length, 3)
+  assert.ok(completed.coverageAudits.at(-1)!.blockers.some(item => item.code === 'TEST_CASE_DUPLICATE'))
 })
 
 test('树和用例编辑要求当前 ETag，编辑后旧审计失效', async () => {
@@ -340,7 +402,7 @@ class FakeRuntime implements TestDesignAgentRuntime {
       execution,
     }
     const upstream = input.upstream as { treeRevision: { nodes: TestPointNodeRevision[] } }
-    return { schemaVersion: 'test-case-synthesis/v1', content: { schemaVersion: 'test-case-synthesis/v1', cases: upstream.treeRevision.nodes.map(point => caseContent([point.nodeId])), dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: [upstream.treeRevision.nodes[0].nodeId], caseIndexes: [0], fieldConstraints: { status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }] }, execution }
+    return { schemaVersion: 'test-case-synthesis/v1', content: { schemaVersion: 'test-case-synthesis/v1', cases: upstream.treeRevision.nodes.map(point => caseContent([point.nodeId], point.dimension)), dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: [upstream.treeRevision.nodes[0].nodeId], caseIndexes: [0], fieldConstraints: { status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }] }, execution }
   }
 }
 
@@ -366,6 +428,36 @@ class InvalidBasisRuntime extends FakeRuntime {
   }
 }
 
+class DuplicateThenRepairRuntime extends FakeRuntime {
+  readonly repairContexts: unknown[] = []
+  private synthesisCalls = 0
+  override async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
+    const result = await super.execute(input)
+    if (input.stage !== 'test_case_synthesis') return result
+    const upstream = input.upstream as { repairContext?: unknown }
+    if (upstream.repairContext) this.repairContexts.push(structuredClone(upstream.repairContext))
+    this.synthesisCalls += 1
+    if (this.synthesisCalls > 1) return result
+    const content = structuredClone(result.content) as { cases: TestCaseContent[]; dataRequirements: unknown[] }
+    content.cases[0].testPointIds.push(...content.cases[1].testPointIds)
+    content.cases.splice(1, 1)
+    content.cases.splice(1, 0, structuredClone(content.cases[0]))
+    content.dataRequirements = []
+    return { ...result, content }
+  }
+}
+
+class AlwaysDuplicateRuntime extends FakeRuntime {
+  override async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
+    const result = await super.execute(input)
+    if (input.stage !== 'test_case_synthesis') return result
+    const content = structuredClone(result.content) as { cases: TestCaseContent[]; dataRequirements: unknown[] }
+    content.cases.splice(1, 0, structuredClone(content.cases[0]))
+    content.dataRequirements = []
+    return { ...result, content }
+  }
+}
+
 function testAnalysisCandidate(): Record<string, unknown> {
   return {
     schemaVersion: 'test-analysis/v1',
@@ -383,8 +475,8 @@ function node(ref: string, dimension: TestPointNodeRevision['dimension'], basisR
   return { ref, title: `${dimension} 测试点`, objective: '验证认证行为', dimension, priority: 'P1', applicability: 'applicable', designTechniques: ['场景法'], entryMethods: ['api'], oracle: '响应与状态一致', dataConditions: [], risks: [], assumptions: [], basisRefs, historicalRefs: [] }
 }
 
-function caseContent(testPointIds: string[]): TestCaseContent {
-  return { schemaVersion: 'test-case/v1', title: `验证 ${testPointIds[0]}`, objective: '验证认证行为', dimension: 'functional', testPointIds, priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'api', apiSpec: { method: 'POST', path: '/api/login' }, steps: [{ key: 'step-1', action: '提交登录请求', expected: '返回明确结果' }], verificationChecks: [{ key: 'check-1', description: '响应结构正确' }], executionReadiness: 'ready', automationHint: '接口自动化' }], sharedVerificationChecks: [], tags: ['认证'], domain: '身份认证' }
+function caseContent(testPointIds: string[], dimension: TestCaseContent['dimension'] = 'functional'): TestCaseContent {
+  return { schemaVersion: 'test-case/v1', title: `验证 ${testPointIds[0]}`, objective: '验证认证行为', dimension, testPointIds, priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'api', apiSpec: { method: 'POST', path: '/api/login' }, steps: [{ key: 'step-1', action: '提交登录请求', expected: '返回明确结果' }], verificationChecks: [{ key: 'check-1', description: '响应结构正确' }], executionReadiness: 'ready', automationHint: '接口自动化' }], sharedVerificationChecks: [], tags: ['认证'], domain: '身份认证' }
 }
 
 async function seededStore() {

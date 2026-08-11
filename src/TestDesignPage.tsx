@@ -250,6 +250,14 @@ function arrayOf(value: unknown) { return Array.isArray(value) ? value : [] }
 function currentTreeNodes(run: TestDesignWorkflowRun) { return run.testPointTree?.revisions.find(item => item.revision === run.testPointTree?.currentRevision)?.nodes.filter(item => !item.deleted) ?? [] }
 function currentCaseContent(testCase: TestDesignCase) { return testCase.revisions.find(item => item.revision === testCase.currentRevision)?.content }
 function latestCoverageAudit(run: TestDesignWorkflowRun) { return run.coverageAudits.at(-1) }
+type BlockerResolution = NonNullable<TestDesignCoverageAudit['blockers'][number]['resolution']>
+function coverageBlockerResolution(blocker: TestDesignCoverageAudit['blockers'][number]): BlockerResolution {
+  if (blocker.resolution) return blocker.resolution
+  if (blocker.code === 'COVERAGE_TEST_POINT_UNCOVERED' || blocker.code === 'TEST_CASE_DUPLICATE' || blocker.code === 'TEST_CASE_OVER_AGGREGATED' || blocker.code === 'TEST_CASE_POINT_DIMENSION_MISMATCH' || blocker.code === 'TEST_CASE_NON_EXECUTABLE_POINT_REFERENCE') return 'agent_repair'
+  if (blocker.code === 'TEST_CASE_REVIEW_REQUIRED') return 'human_review'
+  if (blocker.code === 'TEST_DESIGN_FINDING_UNRESOLVED' || blocker.code === 'TEST_DESIGN_CONFIRMATION_UNRESOLVED' || blocker.code === 'COVERAGE_BASIS_UNCOVERED' || blocker.code === 'TEST_CASE_NOT_READY') return 'human_decision'
+  return 'manual_edit'
+}
 function currentNodeArtifact(run: TestDesignWorkflowRun, nodeKey: string) {
   const outputArtifactId = run.nodeRuns.find(item => item.nodeKey === nodeKey)?.outputArtifactId
   if (outputArtifactId) return run.artifacts.find(item => item.id === outputArtifactId)
@@ -770,7 +778,7 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify }: Pro
         {workspaceLoading && <RunLoading />}
         {!workspaceLoading && activeRun && tab === 'overview' && <RunOverview design={activeDesign} run={activeRun} onNavigate={selectTab} />}
         {!workspaceLoading && activeRun && tab === 'workflow' && <RunWorkflowView design={activeDesign} run={activeRun} onNavigate={selectTab} onGateDecision={submitGateDecision} onRunAction={runAction} gateSubmitting={gateSubmitting} />}
-        {!workspaceLoading && activeRun && !['overview', 'workflow'].includes(tab) && <RunArtifactView tab={tab} run={activeRun} projectId={projectVersion.projectId} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} notify={notify} onRefresh={refreshRunOnly} selectedCaseId={selectedRunCaseId} onSelectCase={openRunCase} onNewCase={openNewRunCase} onOpenTree={() => selectTab('tree')} onOpenGate={() => { selectTab('workflow'); window.setTimeout(() => document.getElementById('test-design-gate-decision')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0) }} />}
+        {!workspaceLoading && activeRun && !['overview', 'workflow'].includes(tab) && <RunArtifactView tab={tab} run={activeRun} projectId={projectVersion.projectId} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} notify={notify} onRefresh={refreshRunOnly} selectedCaseId={selectedRunCaseId} onSelectCase={openRunCase} onNewCase={openNewRunCase} onOpenTree={() => selectTab('tree')} onOpenQuestions={() => selectTab('questions')} onOpenGate={() => { selectTab('workflow'); window.setTimeout(() => document.getElementById('test-design-gate-decision')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0) }} />}
       </main>
       {detailPanelOpen && tab === 'cases' && selectedRunCaseId
         ? <RunCaseEditor key={`${activeRun.id}:${selectedRunCaseId}:${newCasePointId ?? ''}`} projectVersionId={projectVersion.id} designId={activeContext.testDesignId!} run={activeRun} caseId={selectedRunCaseId} initialPointId={newCasePointId} notify={notify} onRefresh={refreshRunOnly} onCreated={caseId => { setSelectedRunCaseId(caseId); setNewCasePointId(null) }} />
@@ -1197,17 +1205,18 @@ type RunArtifactViewProps = {
   onSelectCase: (caseId: string) => void
   onNewCase: (pointId?: string) => void
   onOpenTree: () => void
+  onOpenQuestions: () => void
   onOpenGate: () => void
 }
 
-function RunArtifactView({ tab, run, projectId, projectVersionId, designId, notify, onRefresh, selectedCaseId, onSelectCase, onNewCase, onOpenTree, onOpenGate }: RunArtifactViewProps) {
+function RunArtifactView({ tab, run, projectId, projectVersionId, designId, notify, onRefresh, selectedCaseId, onSelectCase, onNewCase, onOpenTree, onOpenQuestions, onOpenGate }: RunArtifactViewProps) {
   if (tab === 'analysis') return currentNodeArtifact(run, 'test_analysis') ? <RunAnalysisArtifact run={run} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'retrieval') return <RunRetrievalArtifact run={run} />
   if (tab === 'tree') return run.testPointTree ? <RunTreeArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'cases') return run.testCases.length || run.status === 'succeeded' ? <RunCasesArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} selectedCaseId={selectedCaseId} onSelectCase={onSelectCase} onNewCase={onNewCase} /> : <RunArtifactState tab={tab} run={run} />
-  if (tab === 'case-set') return <RunCaseSetArtifact run={run} projectId={projectId} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} />
+  if (tab === 'case-set') return <RunCaseSetArtifact run={run} projectId={projectId} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} onOpenQuestions={onOpenQuestions} />
   if (tab === 'data') return run.dataSetVersions.length ? <RunDataArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} /> : <RunArtifactState tab={tab} run={run} />
-  if (tab === 'coverage') return run.coverageAudits.length ? <RunCoverageArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} /> : <RunArtifactState tab={tab} run={run} />
+  if (tab === 'coverage') return run.coverageAudits.length ? <RunCoverageArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} onOpenQuestions={onOpenQuestions} /> : <RunArtifactState tab={tab} run={run} />
   if (tab === 'history') return <RunHistoryArtifact run={run} />
   if (tab === 'questions') return <RunQuestionsArtifact run={run} projectVersionId={projectVersionId} designId={designId} notify={notify} onRefresh={onRefresh} onOpenGate={onOpenGate} />
   return <RunArtifactState tab={tab} run={run} />
@@ -1329,7 +1338,7 @@ function RunCasesArtifact({ run, projectVersionId, designId, notify, onRefresh, 
   </div>
 }
 
-function RunCaseSetArtifact({ run, projectId, projectVersionId, designId, notify, onRefresh, onSelectCase, onNewCase, onOpenTree }: { run: TestDesignWorkflowRun; projectId: string; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void }) {
+function RunCaseSetArtifact({ run, projectId, projectVersionId, designId, notify, onRefresh, onSelectCase, onNewCase, onOpenTree, onOpenQuestions }: { run: TestDesignWorkflowRun; projectId: string; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void; onOpenQuestions: () => void }) {
   const [name, setName] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const versions = run.caseSetVersions ?? []
@@ -1347,7 +1356,7 @@ function RunCaseSetArtifact({ run, projectId, projectVersionId, designId, notify
     <section className="td-run-set-summary"><article><span><ListChecks /></span><p><small>候选用例</small><b>{run.testCases.filter(item => !item.tombstonedAt).length}</b><em>当前运行</em></p></article><article><span><ShieldCheck /></span><p><small>已批准</small><b>{approved}</b><em>发布要求全部批准</em></p></article><article><span><AlertTriangle /></span><p><small>发布阻断</small><b>{audit?.blockers.length ?? 0}</b><em>{audit?.status === 'valid' ? '当前审计有效' : '需要重新审计'}</em></p></article></section>
     {versions.length > 0 && <section className="td-run-published-sets"><header><b>已发布版本</b><span>不可变固定产物</span></header>{versions.map(version => <article key={version.id}><Layers3 /><p><small>v{version.version} · {formatRunTime(version.publishedAt)}</small><b>{version.name}</b><code>{shortHash(version.contentSha256)}</code></p><StatusPill tone={version.projection.status === 'succeeded' ? 'success' : version.projection.status === 'failed' ? 'danger' : 'info'}>知识投影 {version.projection.status}</StatusPill><strong>{version.members.length} 条</strong><span className="td-export-actions"><a className="btn" href={testCaseSetExportUrl(version.id, 'json')}><FileJson2 />JSON</a><a className="btn" href={testCaseSetExportUrl(version.id, 'markdown')}><FileText />Markdown</a><a className="btn" href={testCaseSetExportUrl(version.id, 'xlsx')}><Download />Excel</a></span></article>)}</section>}
     {versions.at(-1) && <PublishedCaseSetOperations version={versions.at(-1)!} run={run} projectId={projectId} notify={notify} />}
-    {audit && audit.blockers.length > 0 && <RunBlockerList audit={audit} run={run} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} />}
+    {audit && audit.blockers.length > 0 && <RunBlockerList audit={audit} run={run} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} onOpenQuestions={onOpenQuestions} />}
     {canPublishRun(run) && <section className="td-real-publish-form"><div><LockKeyhole /><p><b>发布不可变新功能用例集</b><small>固定当前 caseId、revision、树版本、数据版本和覆盖审计 Hash。</small></p></div><input aria-label="用例集名称" value={name} onChange={event => setName(event.target.value)} placeholder="填写用例集名称" /><button className="btn primary" disabled={!name.trim() || submitting} onClick={() => void publish()}>{submitting ? <RefreshCw className="spin" /> : <LockKeyhole />}{submitting ? '发布中' : '确认发布'}</button></section>}
   </div>
 }
@@ -1384,21 +1393,36 @@ function RunDataArtifact({ run, projectVersionId, designId, notify, onRefresh }:
   </div>
 }
 
-function RunCoverageArtifact({ run, projectVersionId, designId, notify, onRefresh, onSelectCase, onNewCase, onOpenTree }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void }) {
+function RunCoverageArtifact({ run, projectVersionId, designId, notify, onRefresh, onSelectCase, onNewCase, onOpenTree, onOpenQuestions }: { run: TestDesignWorkflowRun; projectVersionId: string; designId: string; notify: Notify; onRefresh: () => Promise<void>; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void; onOpenQuestions: () => void }) {
   const [auditing, setAuditing] = useState(false)
   const audit = latestCoverageAudit(run)!
+  const automaticRepair = run.automaticRepair
+  const showAutomaticRepair = Boolean(automaticRepair && automaticRepair.attempt > 0)
   const basisRatio = audit.statistics.totalBasis ? Math.round(audit.statistics.coveredBasis / audit.statistics.totalBasis * 100) : 100
   const pointRatio = audit.statistics.totalPoints ? Math.round(audit.statistics.coveredPoints / audit.statistics.totalPoints * 100) : 100
   return <div className="td-run-artifact-view">
     <RunArtifactHeader title="覆盖反向审计" description={`${audit.status === 'valid' ? '当前有效' : '已失效'} · ${shortHash(audit.inputSha256)}`}><StatusPill tone={audit.blockers.length ? 'warning' : 'success'}>{audit.blockers.length} 个阻断项</StatusPill><button className="btn primary" disabled={auditing} onClick={async () => { setAuditing(true); try { const next = await reAuditTestDesignRun(projectVersionId, designId, run.id); await onRefresh(); notify(next.blockers.length ? `重新审计完成，仍有 ${next.blockers.length} 个阻断项。` : '重新审计通过，发布阻断已清零。', next.blockers.length ? 'warning' : 'success') } catch (error) { notify(error instanceof Error ? error.message : '重新审计失败', 'error') } finally { setAuditing(false) } }}><RefreshCw className={auditing ? 'spin' : ''} />{auditing ? '审计中' : '重新审计'}</button></RunArtifactHeader>
     <section className="td-run-coverage-summary"><article><small>依据覆盖</small><b>{basisRatio}%</b><em>{audit.statistics.coveredBasis} / {audit.statistics.totalBasis}</em></article><article><small>测试点覆盖</small><b>{pointRatio}%</b><em>{audit.statistics.coveredPoints} / {audit.statistics.totalPoints}</em></article><article><small>当前用例</small><b>{audit.statistics.totalCases}</b><em>{audit.statistics.approvedCases} 条已批准</em></article><article><small>映射关系</small><b>{audit.relations.length}</b><em>双向可追溯</em></article></section>
-    {audit.blockers.length ? <RunBlockerList audit={audit} run={run} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} /> : <RunIntentionalEmpty icon={<ShieldCheck />} title="覆盖审计已通过" description="当前固定树、用例 revision 集合和数据需求没有发布阻断项。" />}
+    {showAutomaticRepair && <section className={`td-automatic-repair ${automaticRepair!.status}`}><Bot /><div><small>Agent 自动修复</small><b>{automaticRepair!.status === 'queued' || automaticRepair!.status === 'running' ? `正在执行第 ${automaticRepair!.attempt} / ${automaticRepair!.maxAttempts} 轮` : automaticRepair!.status === 'succeeded' ? `已在 ${automaticRepair!.attempt} 轮内完成修复` : `已用尽 ${automaticRepair!.maxAttempts} 轮自动修复`}</b><p>{automaticRepair!.status === 'exhausted' ? '剩余 Agent 质量问题需要人工修改，或在工作流中明确选择重新具象化。' : automaticRepair!.status === 'succeeded' ? '服务端已重新审计修订候选；人工审核与业务确认仍需独立完成。' : `正在根据 ${automaticRepair!.blockerCodes.join('、')} 修订完整候选，正式 ID、审核和发布门禁仍由服务端控制。`}</p></div><StatusPill tone={automaticRepair!.status === 'exhausted' ? 'danger' : automaticRepair!.status === 'succeeded' ? 'success' : 'info'}>{automaticRepair!.status === 'running' ? '修复中' : automaticRepair!.status === 'queued' ? '已排队' : automaticRepair!.status === 'succeeded' ? '已修复' : '需人工处理'}</StatusPill></section>}
+    {audit.blockers.length ? <RunBlockerList audit={audit} run={run} onSelectCase={onSelectCase} onNewCase={onNewCase} onOpenTree={onOpenTree} onOpenQuestions={onOpenQuestions} /> : <RunIntentionalEmpty icon={<ShieldCheck />} title="覆盖审计已通过" description="当前固定树、用例 revision 集合和数据需求没有发布阻断项。" />}
   </div>
 }
 
-function RunBlockerList({ audit, run, onSelectCase, onNewCase, onOpenTree }: { audit: TestDesignCoverageAudit; run: TestDesignWorkflowRun; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void }) {
+function RunBlockerList({ audit, run, onSelectCase, onNewCase, onOpenTree, onOpenQuestions }: { audit: TestDesignCoverageAudit; run: TestDesignWorkflowRun; onSelectCase: (caseId: string) => void; onNewCase: (pointId?: string) => void; onOpenTree: () => void; onOpenQuestions: () => void }) {
   const caseIds = new Set(run.testCases.map(item => item.id))
-  return <section className="td-run-blockers"><header><b>发布阻断项</b><span>{audit.blockers.length}</span></header>{audit.blockers.map((blocker, index) => { const isCase = Boolean(blocker.subjectId && caseIds.has(blocker.subjectId)); const isPoint = blocker.code === 'COVERAGE_TEST_POINT_UNCOVERED'; return <article key={`${blocker.code}-${blocker.subjectId ?? index}`}><AlertTriangle /><p><small>{blocker.code}</small><b>{blocker.message}</b>{blocker.subjectId && <code>{shortId(blocker.subjectId)}</code>}</p>{isCase && <button className="btn" onClick={() => onSelectCase(blocker.subjectId!)}><Pencil />修改用例</button>}{isPoint && <button className="btn primary" onClick={() => onNewCase(blocker.subjectId)}><Plus />创建关联用例</button>}{!isCase && !isPoint && <button className="btn" onClick={onOpenTree}><Network />编辑测试点树</button>}</article> })}</section>
+  const labels: Record<BlockerResolution, string> = { agent_repair: 'Agent 质量阻断', human_review: '待人工审核', human_decision: '待人工决策', manual_edit: '需人工修订' }
+  const order: BlockerResolution[] = ['agent_repair', 'human_review', 'human_decision', 'manual_edit']
+  const automaticActive = run.automaticRepair?.status === 'queued' || run.automaticRepair?.status === 'running'
+  return <div className="td-run-blocker-groups">{order.map(resolution => {
+    const items = audit.blockers.filter(item => coverageBlockerResolution(item) === resolution)
+    if (!items.length) return null
+    return <section className={`td-run-blockers ${resolution}`} key={resolution}><header><b>{labels[resolution]}</b><span>{items.length}</span></header>{items.map((blocker, index) => {
+      const isCase = Boolean(blocker.subjectId && caseIds.has(blocker.subjectId))
+      const isPoint = blocker.code === 'COVERAGE_TEST_POINT_UNCOVERED'
+      const isQuestion = blocker.code === 'TEST_DESIGN_FINDING_UNRESOLVED' || blocker.code === 'TEST_DESIGN_CONFIRMATION_UNRESOLVED'
+      return <article key={`${blocker.code}-${blocker.subjectId ?? index}`}><AlertTriangle /><p><small>{blocker.code}</small><b>{blocker.message}</b>{blocker.subjectId && <code>{shortId(blocker.subjectId)}</code>}</p>{isCase && <button className="btn" disabled={automaticActive} onClick={() => onSelectCase(blocker.subjectId!)}>{resolution === 'human_review' ? <Users /> : <Pencil />}{resolution === 'human_review' ? '审核用例' : '查看用例'}</button>}{isPoint && <button className="btn primary" disabled={automaticActive} onClick={() => onNewCase(blocker.subjectId)}><Plus />创建关联用例</button>}{isQuestion && <button className="btn" onClick={onOpenQuestions}><CircleDot />处理待确认项</button>}{!isCase && !isPoint && !isQuestion && <button className="btn" onClick={onOpenTree}><Network />编辑测试点树</button>}</article>
+    })}</section>
+  })}</div>
 }
 
 function emptyExecutionMethod(method: 'ui' | 'api'): TestCaseContent['executionMethods'][number] {

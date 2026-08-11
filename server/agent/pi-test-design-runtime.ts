@@ -121,8 +121,11 @@ function generationPolicy(stage: Parameters<TestDesignAgentRuntime['execute']>[0
       ]
     : [
         '每个已批准且适用的测试点都必须被至少一条候选用例引用；提交前对 nodeId 做全集核对。',
+        '只把没有未删除子节点的可执行叶子节点作为用例覆盖目标；父级分组节点用于组织测试点树，不得塞进 testPointIds 制造重复覆盖。',
         '当角色、前置状态、数据分区/边界、触发动作、预期结果或清理方式任一不同，拆成独立用例；不要用一条用例批量引用整棵子树来制造覆盖。',
+        '一条用例确需合并多个高度重合叶子测试点时，每种 UI/API 执行方式都至少为每个叶子测试点提供一个可独立执行和判断的步骤；否则拆成多条用例。',
         '同一业务目标只有在前置、数据和最终判定一致时才合并 UI/API 执行方式；目标或生命周期不同则拆分用例。',
+        'upstream.repairContext 存在时，这是服务端覆盖审计触发的自动修复轮次；逐项修复其中 blockers，在保留无关正确内容的基础上提交一份完整、去重且可重新审计的候选，不得只提交局部补丁。',
       ]
   return { version: 'test-design-generation-policy/v2', common, stageRules }
 }

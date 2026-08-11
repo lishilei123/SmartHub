@@ -80,6 +80,12 @@ export function validateTreeNodes(nodes: TestPointNodeRevision[]) {
   return canonicalSha256(active.map(node => ({ ...node })).sort((left, right) => left.sortKey.localeCompare(right.sortKey) || left.nodeId.localeCompare(right.nodeId)))
 }
 
+export function executableTestPointIds(nodes: Array<{ nodeId: string; parentId: string | null; deleted?: boolean; applicability: TestPointNodeContent['applicability'] }>) {
+  const active = nodes.filter(node => !node.deleted)
+  const parentIds = new Set(active.flatMap(node => node.parentId ? [node.parentId] : []))
+  return new Set(active.filter(node => node.applicability !== 'not_applicable' && !parentIds.has(node.nodeId)).map(node => node.nodeId))
+}
+
 export type DesignCandidateNode = TestPointNodeContent & { ref: string; parentRef?: string }
 
 export type TestDataRequirementCandidate = Omit<TestDataRequirement, 'id' | 'caseIds' | 'testPointIds'> & {

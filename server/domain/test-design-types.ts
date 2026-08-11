@@ -293,8 +293,23 @@ export interface CoverageAudit {
   status: 'valid' | 'stale'
   statistics: { totalBasis: number; coveredBasis: number; totalPoints: number; coveredPoints: number; totalCases: number; approvedCases: number }
   relations: Array<{ basisRef: string; testPointId: string; caseId?: string; status: 'covered' | 'partially_covered' | 'not_covered' | 'needs_confirmation'; reason: string }>
-  blockers: Array<{ code: string; message: string; subjectId?: string }>
+  blockers: Array<{
+    code: string
+    message: string
+    subjectId?: string
+    resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit'
+  }>
   createdAt: string
+}
+
+export interface TestDesignAutomaticRepairState {
+  status: 'idle' | 'queued' | 'running' | 'succeeded' | 'exhausted' | 'not_needed'
+  attempt: number
+  maxAttempts: number
+  blockerCodes: string[]
+  triggerAuditId?: string
+  startedAt?: string
+  finishedAt?: string
 }
 
 export interface TestCaseSetMember { caseId: string; revision: number; ordinal: number; contentSha256: string }
@@ -351,6 +366,7 @@ export interface TestDesignWorkflowRun {
   impactedRegression: ImpactedRegressionReference[]
   findings: DesignFinding[]
   confirmationItems: ConfirmationItem[]
+  automaticRepair?: TestDesignAutomaticRepairState
   events: AgentExecutionEvent[]
   createdBy: string
   createdAt: string

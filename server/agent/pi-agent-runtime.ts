@@ -21,7 +21,7 @@ import { RequirementPointExtractionValidator, RequirementReviewValidator } from 
 import { renderRequirementTask, renderSegmentBatchTask, renderSegmentMergeTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
-import { TestDesignError, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
+import { executableTestPointIds, TestDesignError, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
 
 const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -506,10 +506,16 @@ function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration
 }
 
 function testDesignPointIds(task: string | undefined) {
-  const value = JSON.parse(required(task, 'TEST_DESIGN_TASK_REQUIRED')) as { upstream?: { treeRevision?: { nodes?: Array<{ nodeId?: unknown; deleted?: unknown; applicability?: unknown }> } } }
+  const value = JSON.parse(required(task, 'TEST_DESIGN_TASK_REQUIRED')) as { upstream?: { treeRevision?: { nodes?: Array<{ nodeId?: unknown; parentId?: unknown; deleted?: unknown; applicability?: unknown }> } } }
   const nodes = value.upstream?.treeRevision?.nodes
   if (!Array.isArray(nodes)) throw new TestDesignError('TEST_CASE_SYNTHESIS_SCHEMA_INVALID', '批准测试点树输入不存在', 422, { path: '/cases' })
-  return new Set(nodes.filter(item => !item.deleted && item.applicability !== 'not_applicable' && typeof item.nodeId === 'string').map(item => item.nodeId as string))
+  const normalized = nodes.filter((item): item is { nodeId: string; parentId?: unknown; deleted?: unknown; applicability?: unknown } => typeof item.nodeId === 'string').map(item => ({
+    nodeId: item.nodeId,
+    parentId: typeof item.parentId === 'string' ? item.parentId : null,
+    deleted: item.deleted === true,
+    applicability: (item.applicability === 'not_applicable' || item.applicability === 'blocked_by_confirmation' ? item.applicability : 'applicable') as 'applicable' | 'blocked_by_confirmation' | 'not_applicable',
+  }))
+  return executableTestPointIds(normalized)
 }
 
 function hasEvidenceValidationIssue(issues: Array<{ path: string; message: string }>) {
