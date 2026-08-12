@@ -27,9 +27,13 @@ const builtInSkills: SkillResource[] = [
   builtInSkill('requirement.repair', '需求修复', '针对人工确认的 Finding 生成基于固定原文且可安全应用的 Patch 草稿。', '1.0.0', 'server/skills/requirement-repair/SKILL.md', [], ['需求分析', '修复', 'patch'], undefined),
   builtInSkill('requirement.verification', '需求复验', '完整复查修复后的需求版本并判定原 Finding 是否真正完成闭环。', '1.0.0', 'server/skills/requirement-verification/SKILL.md', [], ['需求分析', '复验', 'verification'], undefined),
   builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact'], undefined),
+  builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release 与 Workspace 建立测试设计事实和风险基线。', '1.0.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace'], undefined),
+  builtInSkill('test-point-design', '测试点设计', '基于冻结需求基线直接设计完整且可审核的 Test Point Tree 候选。', '1.0.0', 'server/skills/test-point-design/SKILL.md', [], ['测试设计', '测试点', 'tree'], undefined),
+  builtInSkill('test-case-design', '测试用例设计', '把批准的 TestPointTreeVersion 转换为可执行 UI/API 用例与数据需求。', '1.0.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'UI', 'API'], undefined),
+  builtInSkill('test-design-repair', '测试设计修复', '仅修复 Coverage Audit 标记为 agent_repair 的测试设计质量问题。', '1.0.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage'], undefined),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
-const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', ...SKILL_RUNTIME_TOOL_IDS])
+const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', ...SKILL_RUNTIME_TOOL_IDS])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 

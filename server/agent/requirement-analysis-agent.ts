@@ -47,22 +47,3 @@ export function createAgentDefinitionVersion(input: {
   }
   return { ...value, contentSha256: createHash('sha256').update(JSON.stringify(value)).digest('hex') }
 }
-
-export function renderTechnicalSolutionTask(snapshot: import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot) {
-  return `${snapshot.agentDefinition.taskTemplate}\n\n运行：${snapshot.runId}\n项目版本：${snapshot.projectVersionName}\n固定技术方案：${snapshot.solutionInputs.map(item => `${item.displayName}(${item.assetVersionId})`).join('、')}`
-}
-
-export function renderTechnicalSegmentBatchTask(batchNumber: number, batchCount: number, content: string) {
-  return `这是技术方案 segmented_context 第 ${batchNumber}/${batchCount} 批固定正文。只分析本批资料并输出紧凑 JSON 草稿，记录与冻结需求的覆盖线索、接口/数据/异常/非功能缺口及逐字原文；此阶段没有提交工具。\n\n${content}`
-}
-
-export function renderTechnicalSegmentMergeTask(snapshot: import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, drafts: string[]) {
-  return `${renderTechnicalSolutionTask(snapshot)}\n\n这是最终跨批归并阶段。合并以下全部批次草稿，按原子粒度去重技术方案要点，并通过 technical_solution_points_submit_result 提交完整 technical-solution-extraction/v1。\n\n${drafts.map((draft, index) => `<<<BATCH_DRAFT ${index + 1}>>>\n${draft}\n<<<END_BATCH_DRAFT ${index + 1}>>>`).join('\n\n')}`
-}
-
-export function renderTechnicalSolutionReviewTask(snapshot: import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, extraction: import('../domain/technical-solution-types.js').TechnicalSolutionExtractionResult) {
-  const baseline = snapshot.requirementBaseline
-  const requirements = baseline.requirementPoints.map(point => ({ id: point.id, title: point.title, description: point.description, findingContext: baseline.findings.filter(item => item.requirementPointIds.includes(point.id)).map(item => ({ id: item.id, severity: item.severity, state: item.state, title: item.title, description: item.description })) }))
-  const solutionPoints = extraction.solutionPoints.map(point => ({ id: point.id, title: point.title, description: point.description, evidence: extraction.evidence.filter(item => point.evidenceIds.includes(item.id)).map(item => item.quote) }))
-  return `${snapshot.agentDefinition.taskTemplate}\n\n运行：${snapshot.runId}\n以下 JSON 已由 SmartHub 校验并冻结，只能引用，禁止改写：\n<<<FROZEN_REQUIREMENTS>>>\n${JSON.stringify(requirements)}\n<<<END_FROZEN_REQUIREMENTS>>>\n\n<<<FROZEN_TECHNICAL_SOLUTION_POINTS>>>\n${JSON.stringify(solutionPoints)}\n<<<END_FROZEN_TECHNICAL_SOLUTION_POINTS>>>`
-}

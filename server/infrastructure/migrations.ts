@@ -705,6 +705,110 @@ const migrations: Migration[] = [{
     DELETE FROM smarthub.ai_resources
     WHERE resource_key IN ('requirement-points.submit_result', 'review.submit_result');
   `,
+}, {
+  version: 22,
+  name: 'replace-test-design-dag-with-single-agent',
+  sql: `
+    DELETE FROM smarthub.test_execution_handoffs;
+    DELETE FROM smarthub.test_case_impacted_regression_refs;
+    DELETE FROM smarthub.test_case_smoke_candidates;
+    DELETE FROM smarthub.test_suite_version_members;
+    DELETE FROM smarthub.test_suite_versions;
+    DELETE FROM smarthub.test_case_asset_publications;
+    DELETE FROM smarthub.test_case_set_members;
+    DELETE FROM smarthub.test_case_set_versions;
+    DELETE FROM smarthub.test_design_coverage_relations;
+    DELETE FROM smarthub.test_design_coverage_audits;
+    DELETE FROM smarthub.test_design_basis_relations;
+    DELETE FROM smarthub.test_design_findings;
+    DELETE FROM smarthub.test_design_confirmation_items;
+    DELETE FROM smarthub.test_data_requirements;
+    DELETE FROM smarthub.test_data_requirement_set_versions;
+    DELETE FROM smarthub.test_data_requirement_sets;
+    DELETE FROM smarthub.test_case_dependencies;
+    DELETE FROM smarthub.test_case_review_actions;
+    DELETE FROM smarthub.test_case_reuse_relations;
+    DELETE FROM smarthub.test_case_revisions;
+    DELETE FROM smarthub.test_cases;
+    DELETE FROM smarthub.test_point_node_revisions;
+    DELETE FROM smarthub.test_point_tree_versions;
+    DELETE FROM smarthub.test_point_tree_revisions;
+    DELETE FROM smarthub.test_point_nodes;
+    DELETE FROM smarthub.test_point_trees;
+    DELETE FROM smarthub.test_design_snapshot_items;
+    DELETE FROM smarthub.test_design_basis_snapshots;
+    DELETE FROM smarthub.test_design_retrieval_snapshots;
+    DELETE FROM smarthub.test_design_historical_case_snapshots;
+    DELETE FROM smarthub.frozen_content_refs
+    WHERE owner_type = 'workflow_run'
+      AND owner_id IN (SELECT id FROM smarthub.workflow_runs WHERE domain_type = 'test_design');
+    DELETE FROM smarthub.workflow_runs WHERE domain_type = 'test_design';
+    DELETE FROM smarthub.test_designs;
+    DELETE FROM smarthub.test_design_state;
+
+    ALTER TABLE smarthub.test_designs DROP CONSTRAINT IF EXISTS test_designs_basis_mode_check;
+    ALTER TABLE smarthub.test_designs ALTER COLUMN basis_mode SET DEFAULT 'project_workspace';
+    ALTER TABLE smarthub.test_designs ADD CONSTRAINT test_designs_basis_mode_check CHECK (basis_mode = 'project_workspace');
+
+    DELETE FROM smarthub.agent_configuration_versions
+    WHERE agent_key IN ('testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis')
+       OR data->>'agentKey' IN ('testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis')
+       OR data->'agentDefinition'->>'agentKey' IN ('test-analysis', 'functional-test-design', 'non-functional-test-design', 'test-case-synthesis');
+    UPDATE smarthub.agent_configuration_drafts
+    SET data = jsonb_set(
+          data,
+          '{agents}',
+          (((COALESCE(data->'agents', '{}'::jsonb) - 'testAnalysis') - 'functionalTestDesign') - 'nonFunctionalTestDesign') - 'testCaseSynthesis',
+          true
+        ),
+        updated_at = now()
+    WHERE COALESCE(data->'agents', '{}'::jsonb) ?| ARRAY['testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'];
+    DELETE FROM smarthub.ai_resources
+    WHERE resource_key IN (
+      'test_analysis.submit_result',
+      'functional_test_design.submit_result',
+      'non_functional_test_design.submit_result',
+      'test_case_synthesis.submit_result'
+    );
+  `,
+}, {
+  version: 23,
+  name: 'retire-technical-solution-review',
+  sql: `
+    DELETE FROM smarthub.agent_configuration_versions
+    WHERE agent_key IN ('technicalSolutionExtraction', 'technicalSolutionReview', 'technicalSolutionAnalysis')
+       OR data->>'agentKey' IN ('technicalSolutionExtraction', 'technicalSolutionReview', 'technicalSolutionAnalysis')
+       OR data->'agentDefinition'->>'agentKey' IN ('technical-solution-extraction', 'technical-solution-review', 'technical-solution-analysis');
+    UPDATE smarthub.agent_configuration_drafts
+    SET data = jsonb_set(
+          data,
+          '{agents}',
+          (((COALESCE(data->'agents', '{}'::jsonb) - 'technicalSolutionExtraction') - 'technicalSolutionReview') - 'technicalSolutionAnalysis'),
+          true
+        ),
+        updated_at = now()
+    WHERE COALESCE(data->'agents', '{}'::jsonb) ?| ARRAY['technicalSolutionExtraction', 'technicalSolutionReview', 'technicalSolutionAnalysis'];
+    DELETE FROM smarthub.ai_resources
+    WHERE resource_key IN (
+      'technical_solution.input.read',
+      'technical_solution.evidence.preview',
+      'technical_solution_points.submit_result',
+      'technical_solution_review.submit_result'
+    );
+
+    DROP TABLE IF EXISTS smarthub.technical_solution_coverage_evidence;
+    DROP TABLE IF EXISTS smarthub.technical_solution_finding_evidence;
+    DROP TABLE IF EXISTS smarthub.technical_solution_finding_requirements;
+    DROP TABLE IF EXISTS smarthub.technical_solution_coverage;
+    DROP TABLE IF EXISTS smarthub.technical_solution_findings;
+    DROP TABLE IF EXISTS smarthub.technical_solution_evidence;
+    DROP TABLE IF EXISTS smarthub.technical_solution_review_results;
+    DROP TABLE IF EXISTS smarthub.technical_solution_finding_actions;
+    DROP TABLE IF EXISTS smarthub.technical_solution_review_jobs;
+    DROP TABLE IF EXISTS smarthub.technical_solution_review_inputs;
+    DROP TABLE IF EXISTS smarthub.technical_solution_review_runs;
+    DROP TABLE IF EXISTS smarthub.technical_solution_reviews;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

@@ -1,7 +1,7 @@
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import {
   Activity, AlertTriangle, ArrowDown, ArrowUp, BookOpen, Bot, BrainCircuit, Check, CheckCircle2, ChevronDown,
-  ChevronRight, CircleHelp, Clock3, Code2, Columns2, Database, Download, FileCode2, FileText,
+  ChevronRight, CircleHelp, Clock3, Code2, Columns2, Database, Download, FileText,
   FolderOpen, FolderPlus, GitBranch, LayoutDashboard, Library, ListChecks, MessageSquareText, MoreHorizontal,
   PanelLeftClose, PanelLeftOpen, Pencil, Play, Plus, RefreshCw, Search, Server, Settings, ShieldCheck, Sparkles,
   TestTube2, Trash2, Upload, Users, XCircle, Zap,
@@ -20,33 +20,26 @@ import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, up
 import { buildWorkspaceKnowledgeTree, type WorkspaceKnowledgeDirectory } from './workspace-knowledge-tree'
 
 const RequirementReviewPage = lazy(() => import('./RequirementReviewPage').then(module => ({ default: module.RequirementReviewPage })))
-const TechnicalSolutionReviewPage = lazy(() => import('./TechnicalSolutionReviewPage').then(module => ({ default: module.TechnicalSolutionReviewPage })))
-const TestDesignPage = lazy(() => import('./TestDesignPage').then(module => ({ default: module.TestDesignPage })))
+const TestDesignPage = lazy(() => import('./test-design/TestDesignPage').then(module => ({ default: module.TestDesignPage })))
 
-type PageKey = 'dashboard' | 'requirements' | 'documents' | 'design' | 'test-design' | 'execution' | 'reports' | 'settings'
+type PageKey = 'dashboard' | 'requirements' | 'documents' | 'test-design' | 'execution' | 'reports' | 'settings'
 type NotifyTone = 'success' | 'error' | 'warning'
 type Notify = (message: string, tone?: NotifyTone) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
 type SearchLocation = { assetId: string; assetVersionId: string; startLine: number; endLine: number; nonce: number }
 const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: string; identifier: string; sceneLabel: string; protocolLabel: string; publishTarget: string; runtimeToolIds: string[] }> = {
   requirementAnalysis: { label: '需求分析 Agent', identifier: 'RequirementAnalysisAgent', sceneLabel: '需求分析', protocolLabel: '统一分析协议 v1', publishTarget: '新需求分析', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result'] },
-  technicalSolutionExtraction: { label: '技术方案提取 Agent', identifier: 'TechnicalSolutionExtractionAgent', sceneLabel: '技术方案分析', protocolLabel: '提取协议 v1', publishTarget: '新技术方案评审', runtimeToolIds: ['technical_solution_points.submit_result'] },
-  technicalSolutionReview: { label: '技术方案评审 Agent', identifier: 'TechnicalSolutionReviewAgent', sceneLabel: '技术方案分析', protocolLabel: '评审协议 v2', publishTarget: '新技术方案评审', runtimeToolIds: ['technical_solution_review.submit_result'] },
-  testAnalysis: { label: '测试分析 Agent', identifier: 'TestAnalysisAgent', sceneLabel: '测试设计', protocolLabel: '分析协议 v1', publishTarget: '新测试设计运行', runtimeToolIds: ['test_analysis.submit_result'] },
-  functionalTestDesign: { label: '功能测试设计 Agent', identifier: 'FunctionalTestDesignAgent', sceneLabel: '测试设计', protocolLabel: '设计协议 v1', publishTarget: '新测试设计运行', runtimeToolIds: ['functional_test_design.submit_result'] },
-  nonFunctionalTestDesign: { label: '非功能测试设计 Agent', identifier: 'NonFunctionalTestDesignAgent', sceneLabel: '测试设计', protocolLabel: '设计协议 v1', publishTarget: '新测试设计运行', runtimeToolIds: ['non_functional_test_design.submit_result'] },
-  testCaseSynthesis: { label: '测试用例综合 Agent', identifier: 'TestCaseSynthesisAgent', sceneLabel: '测试设计', protocolLabel: '综合协议 v1', publishTarget: '新测试设计运行', runtimeToolIds: ['test_case_synthesis.submit_result'] },
+  testDesign: { label: '测试设计 Agent', identifier: 'TestDesignAgent', sceneLabel: '测试设计', protocolLabel: 'Workspace + Skills v1', publishTarget: '新测试设计运行', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'] },
 }
 const agentConfigurationGroups: Array<{ label: string; agentKeys: AgentConfigurationAgentKey[] }> = [
   { label: '需求分析', agentKeys: ['requirementAnalysis'] },
-  { label: '技术方案分析', agentKeys: ['technicalSolutionExtraction', 'technicalSolutionReview'] },
-  { label: '测试设计', agentKeys: ['testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'] },
+  { label: '测试设计', agentKeys: ['testDesign'] },
 ]
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 
 const pageStorageKey = 'smarthub-current-page'
 const projectVersionStorageKey = 'smarthub-project-version-id'
-const pageKeys: PageKey[] = ['dashboard', 'requirements', 'documents', 'design', 'test-design', 'execution', 'reports', 'settings']
+const pageKeys: PageKey[] = ['dashboard', 'requirements', 'documents', 'test-design', 'execution', 'reports', 'settings']
 const restorePage = (): PageKey => {
   if (typeof window === 'undefined') return 'dashboard'
   const routed = new URL(window.location.href).searchParams.get('page')
@@ -62,7 +55,6 @@ const restoreProjectVersion = () => {
 const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: string }[] = [
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard },
   { key: 'requirements', label: '需求评审', icon: Sparkles },
-  { key: 'design', label: '技术方案评审', icon: FileCode2 },
   { key: 'test-design', label: '测试设计', icon: TestTube2 },
   { key: 'execution', label: '测试执行', icon: Play },
   { key: 'reports', label: '报告与诊断', icon: Activity },
@@ -72,8 +64,7 @@ const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   dashboard: { title: '工作台', desc: '掌握项目质量状态与 AI 任务进展' },
   requirements: { title: '需求评审', desc: '让 AI 帮你发现需求缺口、边界与测试风险' },
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
-  design: { title: '技术方案评审', desc: '基于固定需求基线与技术方案资料完成可追溯评审' },
-  'test-design': { title: '测试设计', desc: '多 Agent 协作完成可追溯的测试点、用例与覆盖设计' },
+  'test-design': { title: '测试设计', desc: '由 TestDesignAgent 与按阶段 Skill 完成可追溯的测试点、用例与覆盖设计' },
   execution: { title: '测试执行', desc: '跟踪计划、套件和用例的实时执行状态' },
   reports: { title: '报告与诊断', desc: '聚合质量趋势、失败原因与发布建议' },
   settings: { title: '系统管理', desc: '配置模型、集成、权限与平台策略' },
@@ -139,7 +130,7 @@ function App() {
     if (next.page) url.searchParams.set('page', next.page)
     if (next.projectVersionId) url.searchParams.set('projectVersionId', next.projectVersionId)
     else if (next.projectVersionId === '') url.searchParams.delete('projectVersionId')
-    if (next.resetReviewContext) ['reviewId', 'technicalReviewId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'tab', 'assetView'].forEach(key => url.searchParams.delete(key))
+    if (next.resetReviewContext) ['reviewId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'tab', 'assetView'].forEach(key => url.searchParams.delete(key))
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', url)
   }, [])
   const navigate = useCallback((nextPage: PageKey) => {
@@ -236,15 +227,11 @@ function App() {
       <button className="sidebar-foot" onClick={() => notify('帮助与反馈为静态原型说明：当前数据仅保留在本次会话中。')}><CircleHelp size={17} /><span>帮助与反馈</span><span className="version">v0.1</span></button>
     </aside>
     <main>
-      <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'design' ? 'technical-content' : ''} ${page === 'test-design' ? 'test-design-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
+      <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'test-design' ? 'test-design-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>
         {page === 'dashboard' && <Dashboard navigate={navigate} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
         {page === 'requirements' && <Suspense fallback={<PageLoading label="正在加载需求评审工作台…" />}><RequirementReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={workspaceKnowledgeTree.directories} documents={workspaceKnowledgeTree.documents} workspaceRootDirectoryId={workspaceKnowledgeTree.rootDirectoryId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
-        {page === 'design' && <Suspense fallback={<PageLoading label="正在加载技术方案评审工作台…" />}><TechnicalSolutionReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onBackToWorkbench={() => {
-            updateRoute({ page: 'design', resetReviewContext: true })
-            window.dispatchEvent(new PopStateEvent('popstate'))
-          }} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
         {page === 'test-design' && <Suspense fallback={<PageLoading label="正在加载测试设计工作台…" />}><TestDesignPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'execution' && <StaticNotice title="测试执行" text="测试执行页面仍展示示例执行数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
         {page === 'reports' && <StaticNotice title="报告与诊断" text="报告页面仍展示示例质量数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
@@ -258,7 +245,7 @@ function App() {
 }
 
 function Dashboard({ navigate, projectVersion, onManageVersions }: { navigate: (page: PageKey) => void; projectVersion: ProjectVersion | null; onManageVersions: () => void }) {
-  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> {projectVersion ? `当前版本 ${projectVersion.name}` : '尚未创建项目版本'}</Badge><h2>{projectVersion ? '当前项目空间已按版本隔离' : '先创建项目版本，再开始需求分析'}</h2><p>{projectVersion ? '需求基线、技术方案输入、测试设计运行与处置上下文都固定在当前版本。' : '平台固定服务 SmartHub 单项目，项目空间通过版本切换。'}</p><div><button className="btn primary" onClick={projectVersion ? () => navigate('test-design') : onManageVersions}>{projectVersion ? '进入测试设计' : '新建项目版本'}</button><button className="btn ghost" onClick={() => navigate('design')}>技术方案评审</button></div></section><section className="card quick-card"><Sparkles /><h3>需求评审</h3><p>从当前项目版本绑定的 ready 需求发起分析，版本间结果互不可见。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求评审 <ChevronRight /></button></section><section className="card quick-card"><FileCode2 /><h3>技术方案评审</h3><p>固定成功需求基线与 technical_design 资产，识别覆盖缺口和技术风险。</p><button className="text-btn" onClick={() => navigate('design')}>打开技术评审 <ChevronRight /></button></section><section className="card quick-card"><TestTube2 /><h3>测试设计</h3><p>由四个 Agent 协作生成测试点树、结构化用例和覆盖审计。</p><button className="text-btn" onClick={() => navigate('test-design')}>打开测试设计 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>知识库由平台单项目共享，不随项目版本复制。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>模型与平台配置为全局资源，不参与版本隔离。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
+  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> {projectVersion ? `当前版本 ${projectVersion.name}` : '尚未创建项目版本'}</Badge><h2>{projectVersion ? '当前项目空间已按版本隔离' : '先创建项目版本，再开始需求分析'}</h2><p>{projectVersion ? '需求发布、测试设计运行与处置上下文都固定在当前版本。' : '平台固定服务 SmartHub 单项目，项目空间通过版本切换。'}</p><div><button className="btn primary" onClick={projectVersion ? () => navigate('test-design') : onManageVersions}>{projectVersion ? '进入测试设计' : '新建项目版本'}</button></div></section><section className="card quick-card"><Sparkles /><h3>需求评审</h3><p>从当前项目版本绑定的 ready 需求发起分析，版本间结果互不可见。</p><button className="text-btn" onClick={() => navigate('requirements')}>打开需求评审 <ChevronRight /></button></section><section className="card quick-card"><TestTube2 /><h3>测试设计</h3><p>由 TestDesignAgent 按固定阶段生成测试点树、结构化用例并接受服务端覆盖审计。</p><button className="text-btn" onClick={() => navigate('test-design')}>打开测试设计 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>知识库由平台单项目共享，不随项目版本复制。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>模型与平台配置为全局资源，不参与版本隔离。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
 }
 
 function ProjectVersionManager({ versions, selectedId, onSelect, onRefresh, onClose, notify }: { versions: ProjectVersion[]; selectedId: string; onSelect: (id: string) => void; onRefresh: () => Promise<ProjectVersion[]>; onClose: () => void; notify: Notify }) {
@@ -290,7 +277,7 @@ function ProjectVersionManager({ versions, selectedId, onSelect, onRefresh, onCl
     try {
       const deleted = await deleteProjectVersion(deleteTarget.id)
       const remaining = await onRefresh()
-      notify(`项目版本 ${deleted.name} 已删除，同时移除 ${deleted.deletedBindings} 条需求绑定、${deleted.deletedReviewRuns} 条需求评审运行和 ${deleted.deletedTechnicalReviews} 个技术方案评审。`)
+      notify(`项目版本 ${deleted.name} 已删除，同时移除 ${deleted.deletedBindings} 条需求绑定、${deleted.deletedReviewRuns} 条需求评审运行和 ${deleted.deletedTestDesigns} 个测试设计。`)
       if (deleteTarget.id === selectedId) onSelect(remaining[0]?.id ?? '')
       else setDeleteTarget(null)
     } catch (error) { notify(error instanceof Error ? error.message : '项目版本删除失败', 'error') }
@@ -873,12 +860,7 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
       if (requestId !== agentConfigRequestRef.current) return configuration
       const agentDrafts = {
         requirementAnalysis: configuration.agents.requirementAnalysis.draft,
-        technicalSolutionExtraction: configuration.agents.technicalSolutionExtraction.draft,
-        technicalSolutionReview: configuration.agents.technicalSolutionReview.draft,
-        testAnalysis: configuration.agents.testAnalysis.draft,
-        functionalTestDesign: configuration.agents.functionalTestDesign.draft,
-        nonFunctionalTestDesign: configuration.agents.nonFunctionalTestDesign.draft,
-        testCaseSynthesis: configuration.agents.testCaseSynthesis.draft,
+        testDesign: configuration.agents.testDesign.draft,
       }
       setAgentConfiguration(configuration)
       setSavedAgentDraft(agentDrafts)

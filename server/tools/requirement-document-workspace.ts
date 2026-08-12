@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { createReadOnlyTools } from '@earendil-works/pi-coding-agent'
 import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { glob as globFiles } from 'glob'
-import type { InputDeliveryManifest, ReviewRunSnapshot } from '../domain/agent-types.js'
+import type { InputDeliveryManifest, ReviewRunSnapshot, TestDesignAgentSnapshot } from '../domain/agent-types.js'
 import type { ToolExecutionRequest, ToolExecutionResult } from '../domain/tool-types.js'
 import type { AssetVersion } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -25,11 +25,12 @@ export type RequirementDocumentReadObservation = NonNullable<InputDeliveryManife
 
 type WorkspaceFile = {
   relativePath: string
-  assetId: string
-  assetVersionId: string
+  assetId?: string
+  assetVersionId?: string
   contentHash: string
   displayName: string
-  version: AssetVersion
+  content: string
+  version?: AssetVersion
 }
 
 type MaterializedWorkspace = {
@@ -55,7 +56,7 @@ const toolIdByName = new Map(Object.entries(toolNameById).map(([id, name]) => [n
 export class RequirementDocumentWorkspace {
   private materialized?: Promise<MaterializedWorkspace>
 
-  constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot) {}
+  constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot) {}
 
   async execute(toolId: RequirementWorkspaceToolId, request: ToolExecutionRequest, signal: AbortSignal, onRead?: (observation: RequirementDocumentReadObservation) => void): Promise<ToolExecutionResult> {
     const workspace = await this.ensureMaterialized()
@@ -67,8 +68,10 @@ export class RequirementDocumentWorkspace {
       if (toolId !== 'workspace.read_file') return { data: { tool: tool.name, output, ...(result.details === undefined ? {} : { details: result.details }) } }
 
       const file = required(workspace.filesByPath.get(pathKey(String(args.path))), `PI_WORKSPACE_FILE_NOT_FOUND: ${String(args.path)}`)
-      const range = observedReadRange(file.version.content, args, result.details)
-      const planned = this.snapshot.analysisCoveragePlan.find(item => item.assetVersionId === file.assetVersionId)?.chunks ?? []
+      const range = observedReadRange(file.content, args, result.details)
+       const planned = 'analysisCoveragePlan' in this.snapshot && file.assetVersionId
+         ? this.snapshot.analysisCoveragePlan.find(item => item.assetVersionId === file.assetVersionId)?.chunks ?? []
+         : []
       const chunkIds = range
         ? planned.filter(chunk => !chunk.excludedReason && chunk.startLine >= range.startLine && chunk.endLine <= range.endLine).map(chunk => chunk.chunkId)
         : []
@@ -76,7 +79,7 @@ export class RequirementDocumentWorkspace {
         toolCallId: request.toolCallId,
         toolId: 'workspace.read_file',
         relativePath: file.relativePath,
-        assetVersionIds: [file.assetVersionId],
+         assetVersionIds: file.assetVersionId ? [file.assetVersionId] : [],
         chunkIds,
         ...range,
       })
@@ -88,7 +91,7 @@ export class RequirementDocumentWorkspace {
           assetVersionId: file.assetVersionId,
           contentHash: file.contentHash,
           ...(range ?? {}),
-          totalLines: lineCount(file.version.content),
+           totalLines: lineCount(file.content),
           output,
           ...(result.details === undefined ? {} : { details: result.details }),
         },
@@ -106,7 +109,7 @@ export class RequirementDocumentWorkspace {
     const temporaryRoot = resolve(tmpdir())
     const target = resolve(workspace.root)
     const relation = relative(temporaryRoot, target)
-    if (!relation || relation.startsWith('..') || isAbsolute(relation) || !target.split(/[\\/]/u).at(-1)?.startsWith('smarthub-review-')) throw new Error('PI_WORKSPACE_CLEANUP_TARGET_INVALID')
+    if (!relation || relation.startsWith('..') || isAbsolute(relation) || !target.split(/[\\/]/u).at(-1)?.startsWith('smarthub-workspace-')) throw new Error('PI_WORKSPACE_CLEANUP_TARGET_INVALID')
     await rm(target, { recursive: true, force: true })
   }
 
@@ -117,21 +120,33 @@ export class RequirementDocumentWorkspace {
 
   private async materialize(): Promise<MaterializedWorkspace> {
     const workspace = required(this.snapshot.documentWorkspace, 'PI_DOCUMENT_WORKSPACE_REQUIRED')
-    const root = await mkdtemp(join(tmpdir(), 'smarthub-review-'))
+    const root = await mkdtemp(join(tmpdir(), 'smarthub-workspace-'))
     try {
       const state = await this.store.snapshot()
       const filesByPath = new Map<string, WorkspaceFile>()
       for (const directory of workspaceDirectories(workspace)) await mkdir(join(root, ...directory.split('/')), { recursive: true })
       const logicalRoot = workspace.rootLogicalPath ?? workspace.logicalPath
-      for (const fixed of this.snapshot.assets) {
-        const version = required(state.versions.find(item => item.id === fixed.assetVersionId && item.status === 'ready'), `PI_WORKSPACE_VERSION_UNAVAILABLE: ${fixed.assetVersionId}`)
-        if (version.assetId !== fixed.assetId || version.contentHash !== fixed.assetContentHash) throw new Error(`PI_WORKSPACE_VERSION_DRIFT: ${fixed.assetVersionId}`)
+      const fixedFiles: Array<{ logicalPath: string; assetId?: string; assetVersionId?: string; contentHash: string; displayName: string; content: string; version?: AssetVersion }> = 'workspaceFiles' in this.snapshot
+        ? this.snapshot.workspaceFiles.map(file => ({
+            logicalPath: file.logicalPath,
+            assetId: file.assetId,
+            assetVersionId: file.assetVersionId,
+            contentHash: file.contentSha256,
+            displayName: file.displayName,
+            content: file.content,
+          }))
+        : this.snapshot.assets.map(fixed => {
+            const version = required(state.versions.find(item => item.id === fixed.assetVersionId && item.status === 'ready'), `PI_WORKSPACE_VERSION_UNAVAILABLE: ${fixed.assetVersionId}`)
+            if (version.assetId !== fixed.assetId || version.contentHash !== fixed.assetContentHash) throw new Error(`PI_WORKSPACE_VERSION_DRIFT: ${fixed.assetVersionId}`)
+            return { ...fixed, contentHash: fixed.assetContentHash, content: version.content, version }
+          })
+      for (const fixed of fixedFiles) {
         const relativePath = relativeLogicalPath(logicalRoot, fixed.logicalPath)
         const key = pathKey(relativePath)
         if (filesByPath.has(key)) throw new Error(`PI_WORKSPACE_PATH_COLLISION: ${relativePath}`)
         const target = join(root, ...relativePath.split('/'))
         await mkdir(dirname(target), { recursive: true })
-        await writeFile(target, version.content, { encoding: 'utf8', flag: 'wx' })
+        await writeFile(target, fixed.content, { encoding: 'utf8', flag: 'wx' })
         await access(target, constants.R_OK)
         const targetStat = await stat(target)
         if (!targetStat.isFile()) throw new Error(`PI_WORKSPACE_FILE_INVALID: ${relativePath}`)
@@ -139,9 +154,10 @@ export class RequirementDocumentWorkspace {
           relativePath,
           assetId: fixed.assetId,
           assetVersionId: fixed.assetVersionId,
-          contentHash: fixed.assetContentHash,
+          contentHash: fixed.contentHash,
           displayName: fixed.displayName,
-          version,
+          content: fixed.content,
+          ...(fixed.version ? { version: fixed.version } : {}),
         })
       }
 

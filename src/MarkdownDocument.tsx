@@ -38,7 +38,7 @@ export function MarkdownDocument({ source, format, knowledgeBaseId = '', logical
   if (format === 'text') return <pre className="plain-text-document">{source.split(/\r?\n/u).map((line, index) => {
     const lineNumber = index + 1
     const highlighted = highlightSourceRange && lineNumber >= highlightSourceRange.startLine && lineNumber <= highlightSourceRange.endLine
-    return <span key={lineNumber} className={highlighted ? 'technical-evidence-hit' : undefined} data-source-start-line={lineNumber} data-source-end-line={lineNumber}>{line || ' '}</span>
+    return <span key={lineNumber} className={highlighted ? 'source-range-highlight' : undefined} data-source-start-line={lineNumber} data-source-end-line={lineNumber}>{line || ' '}</span>
   })}</pre>
 
   const sectionsByOffset = new Map(outline.sections.map(section => [section.sourceOffset, section]))
@@ -46,7 +46,7 @@ export function MarkdownDocument({ source, format, knowledgeBaseId = '', logical
     const startLine = node?.position?.start?.line
     const endLine = node?.position?.end?.line ?? startLine
     const highlighted = highlightSourceRange && typeof startLine === 'number' && typeof endLine === 'number' && startLine <= highlightSourceRange.endLine && endLine >= highlightSourceRange.startLine
-    return [className, highlighted ? 'technical-evidence-hit' : ''].filter(Boolean).join(' ') || undefined
+    return [className, highlighted ? 'source-range-highlight' : ''].filter(Boolean).join(' ') || undefined
   }
   const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => ({ children, className, node, ...props }: ComponentPropsWithoutRef<'h2'> & { node?: PositionedNode }) => {
     const section = sectionsByOffset.get(node?.position?.start?.offset ?? -1)

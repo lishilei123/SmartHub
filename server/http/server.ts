@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import type { AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, technicalSolutionReviewService, testDesignService, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
@@ -14,7 +14,7 @@ import { TestDesignError } from '../application/test-design-validation.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, technicalSolutionReviewService, testDesignService }
+export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -81,15 +81,6 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   const toolSource = /^\/api\/ai-resources\/tool\/([^/]+)\/source$/.exec(url.pathname)
   if (method === 'GET' && toolSource) return send(response, 200, await aiResourceService.source(toolSource[1]))
   if (method === 'GET' && url.pathname === '/api/agent-configurations/requirement-analysis') return send(response, 200, await agentConfigurationService.get())
-  if (method === 'GET' && url.pathname === '/api/agent-configurations/technical-solution-analysis') { const agents = (await agentConfigurationService.get()).agents; return send(response, 200, { scene: 'technical_solution_analysis', agents: { extraction: agents.technicalSolutionExtraction, review: agents.technicalSolutionReview } }) }
-  if (method === 'PUT' && url.pathname === '/api/agent-configurations/technical-solution-analysis/draft') {
-    const body = await json(request)
-    return send(response, 200, await agentConfigurationService.save({ ...(body as unknown as AgentConfigurationInput), agentKey: body.agentKey === 'technicalSolutionExtraction' ? 'technicalSolutionExtraction' : 'technicalSolutionReview' }))
-  }
-  if (method === 'POST' && url.pathname === '/api/agent-configurations/technical-solution-analysis/publish') {
-    const body = await json(request)
-    return send(response, 201, await agentConfigurationService.publish({ agentKey: body.agentKey === 'technicalSolutionExtraction' ? 'technicalSolutionExtraction' : 'technicalSolutionReview', revision: Number(body.revision), publishedBy: body.publishedBy ? String(body.publishedBy) : undefined }))
-  }
   if (method === 'PUT' && url.pathname === '/api/agent-configurations/requirement-analysis/draft') return send(response, 200, await agentConfigurationService.save(await json(request) as unknown as AgentConfigurationInput))
   if (method === 'POST' && url.pathname === '/api/agent-configurations/requirement-analysis/publish') {
     const body = await json(request)
@@ -97,34 +88,6 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   }
   const agentConfigurationVersion = /^\/api\/agent-configuration-versions\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && agentConfigurationVersion) return send(response, 200, await agentConfigurationService.getVersion(agentConfigurationVersion[1]))
-  const technicalInputs = /^\/api\/project-versions\/([^/]+)\/technical-solution-review-inputs\/(baselines|solution-assets)$/.exec(url.pathname)
-  if (method === 'GET' && technicalInputs) {
-    await requireProjectVersion(technicalInputs[1], 'review:read')
-    const candidates = await technicalSolutionReviewService.inputCandidates(technicalInputs[1])
-    return send(response, 200, technicalInputs[2] === 'baselines' ? { projectVersion: candidates.projectVersion, items: candidates.baselines, agentConfiguration: candidates.agentConfiguration } : { projectVersion: candidates.projectVersion, items: candidates.solutionAssets, agentConfiguration: candidates.agentConfiguration })
-  }
-  const technicalReviews = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews$/.exec(url.pathname)
-  if (method === 'GET' && technicalReviews) { await requireProjectVersion(technicalReviews[1], 'review:read'); return send(response, 200, { items: await technicalSolutionReviewService.listReviews(technicalReviews[1]) }) }
-  if (method === 'POST' && technicalReviews) { await requireProjectVersion(technicalReviews[1], 'review:create'); const body = await json(request); return send(response, 201, await technicalSolutionReviewService.createReview(technicalReviews[1], { name: String(body.name ?? ''), sourceReviewRunId: String(body.sourceReviewRunId ?? ''), solutionAssetVersionIds: stringList(body.solutionAssetVersionIds) ?? [], principal })) }
-  const technicalReview = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)$/.exec(url.pathname)
-  if (method === 'GET' && technicalReview) { await requireProjectVersion(technicalReview[1], 'review:read'); return send(response, 200, await technicalSolutionReviewService.getReview(technicalReview[1], technicalReview[2])) }
-  const technicalRuns = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs$/.exec(url.pathname)
-  if (method === 'GET' && technicalRuns) { await requireProjectVersion(technicalRuns[1], 'review:read'); return send(response, 200, await technicalSolutionReviewService.listRuns(technicalRuns[1], technicalRuns[2])) }
-  if (method === 'POST' && technicalRuns) { await requireProjectVersion(technicalRuns[1], 'review:create'); return send(response, 202, await technicalSolutionReviewService.createRun(technicalRuns[1], technicalRuns[2])) }
-  const technicalRun = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs\/([^/]+)$/.exec(url.pathname)
-  if (method === 'GET' && technicalRun) { await requireProjectVersion(technicalRun[1], 'review:read'); return send(response, 200, await technicalSolutionReviewService.getRun(technicalRun[1], technicalRun[2], technicalRun[3])) }
-  const technicalCancel = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs\/([^/]+)\/cancel$/.exec(url.pathname)
-  if (method === 'POST' && technicalCancel) { await requireProjectVersion(technicalCancel[1], 'review:cancel'); return send(response, 202, await technicalSolutionReviewService.cancelRun(technicalCancel[1], technicalCancel[2], technicalCancel[3])) }
-  const technicalActions = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs\/([^/]+)\/finding-actions$/.exec(url.pathname)
-  if (method === 'GET' && technicalActions) { await requireProjectVersion(technicalActions[1], 'review:read'); return send(response, 200, await technicalSolutionReviewService.listFindingActions(technicalActions[1], technicalActions[2], technicalActions[3])) }
-  const technicalAction = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
-  if (method === 'POST' && technicalAction) { await requireProjectVersion(technicalAction[1], 'review:handle'); const body = await json(request); return send(response, 201, await technicalSolutionReviewService.actOnFinding(technicalAction[1], technicalAction[2], technicalAction[3], technicalAction[4], { action: String(body.action ?? '') as FindingActionType, comment: body.comment === undefined ? undefined : String(body.comment), expectedVersion: body.expectedVersion === undefined ? undefined : Number(body.expectedVersion), principal })) }
-  const technicalEvidence = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs\/([^/]+)\/evidence\/([^/]+)$/.exec(url.pathname)
-  if (method === 'GET' && technicalEvidence) { await requireProjectVersion(technicalEvidence[1], 'review:read'); return send(response, 200, await technicalSolutionReviewService.evidence(technicalEvidence[1], technicalEvidence[2], technicalEvidence[3], technicalEvidence[4])) }
-  const technicalContent = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs\/([^/]+)\/asset-versions\/([^/]+)\/content$/.exec(url.pathname)
-  if (method === 'GET' && technicalContent) { await requireProjectVersion(technicalContent[1], 'review:read'); return send(response, 200, await technicalSolutionReviewService.fixedContent(technicalContent[1], technicalContent[2], technicalContent[3], technicalContent[4])) }
-  const technicalReport = /^\/api\/project-versions\/([^/]+)\/technical-solution-reviews\/([^/]+)\/runs\/([^/]+)\/report\.md$/.exec(url.pathname)
-  if (method === 'GET' && technicalReport) { await requireProjectVersion(technicalReport[1], 'review:read'); return sendText(response, 200, await technicalSolutionReviewService.exportMarkdown(technicalReport[1], technicalReport[2], technicalReport[3]), 'text/markdown; charset=utf-8', `technical-solution-review-${technicalReport[3]}.md`) }
   const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
   if (method === 'POST' && projectVersionRun) {
     await requireProjectVersion(projectVersionRun[1], 'review:create')

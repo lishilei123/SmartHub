@@ -3,12 +3,7 @@ const apiBase = 'http://127.0.0.1:8787/api'
 export type AgentModelReference = { sourceId: string; modelId: string }
 export type AgentConfigurationAgentKey =
   | 'requirementAnalysis'
-  | 'technicalSolutionExtraction'
-  | 'technicalSolutionReview'
-  | 'testAnalysis'
-  | 'functionalTestDesign'
-  | 'nonFunctionalTestDesign'
-  | 'testCaseSynthesis'
+  | 'testDesign'
 export type AgentExecutionLimits = {
   maxTurns: number
   maxToolCalls: number
@@ -49,7 +44,7 @@ export type AgentConfigurationVersionSummary = {
   primaryModel: AgentModelReference | null
 }
 export type AgentConfigurationVersion = AgentConfigurationVersionSummary & {
-  scene: 'requirement_analysis' | 'technical_solution_analysis' | 'test_design'
+  scene: 'requirement_analysis' | 'test_design'
   routing: AgentRoutingConfiguration
   agentDefinition: { version: string; promptRef: { version: string }; skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>; mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>; toolIds: string[]; limits: AgentExecutionLimits; contentSha256: string }
 }

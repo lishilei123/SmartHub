@@ -1,0 +1,32 @@
+import { ArrowLeft, Bot, Boxes, CalendarClock, ChevronRight, FileCheck2, LockKeyhole, Plus, RefreshCw, TestTube2 } from 'lucide-react'
+import { useState } from 'react'
+import type { ProjectVersion } from '../project-version-api'
+import { CoverageAuditPanel } from './CoverageAuditPanel'
+import { ExecutionHandoffPanel } from './ExecutionHandoffPanel'
+import { TestCasePanel } from './TestCasePanel'
+import { TestDesignCreatePanel } from './TestDesignCreatePanel'
+import { TestDesignRunPanel } from './TestDesignRunPanel'
+import { TestPointReviewPanel } from './TestPointReviewPanel'
+import { useTestDesign } from './hooks/useTestDesign'
+import './test-design.css'
+
+type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
+
+export function TestDesignPage({ projectVersion, onManageVersions, notify }: { projectVersion: ProjectVersion | null; onManageVersions: () => void; notify: Notify }) {
+  const model = useTestDesign(projectVersion?.id, notify)
+  const [creating, setCreating] = useState(false)
+  if (!projectVersion) return <main className="td2-shell"><section className="td2-card td2-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>测试设计的 Requirement Release、Workspace 与正式产物都按项目版本隔离。</p><button className="td2-button primary" onClick={onManageVersions}>管理项目版本</button></section></main>
+  if (!model.inputs) return <main className="td2-shell"><section className="td2-card td2-empty"><RefreshCw className="spin" /><h2>正在读取测试设计上下文</h2><p>检查 Requirement Release 绑定、Workspace 与 TestDesignAgent 配置。</p>{model.error && <div className="td2-error">{model.error}</div>}</section></main>
+  if (creating) return <main className="td2-shell"><PageHeader projectVersion={projectVersion} releaseId={model.inputs.requirementRelease?.id} onBack={() => setCreating(false)} onManageVersions={onManageVersions} /><TestDesignCreatePanel inputs={model.inputs} busy={Boolean(model.busy)} onCancel={() => setCreating(false)} onCreate={async input => { await model.create(input); setCreating(false) }} /></main>
+  if (!model.design) return <main className="td2-shell"><PageHeader projectVersion={projectVersion} releaseId={model.inputs.requirementRelease?.id} onManageVersions={onManageVersions} /><section className="td2-collection-head"><div><p className="td2-kicker">TestDesignAgent</p><h1>测试设计</h1><p>单 Agent + Stage Skills，由服务端控制版本、审计与正式资产。</p></div><button className="td2-button primary" onClick={() => setCreating(true)}><Plus />创建测试设计</button></section>{model.error && <div className="td2-error">{model.error}</div>}<DesignCollection designs={model.designs} releaseBound={Boolean(model.inputs.requirementRelease)} onOpen={design => void model.openDesign(design)} onCreate={() => setCreating(true)} /></main>
+  return <main className="td2-shell"><PageHeader projectVersion={projectVersion} releaseId={model.run?.basisSnapshot.requirementReleaseId ?? model.inputs.requirementRelease?.id} onBack={model.closeDesign} onManageVersions={onManageVersions} />{model.error && <div className="td2-error"><b>操作未完成</b><span>{model.error}</span></div>}<TestDesignRunPanel design={model.design} run={model.run} busy={Boolean(model.busy)} onStartRun={() => void model.startRun()} onRefresh={() => void model.refreshRun()} />{model.run && model.tree && <TestPointReviewPanel run={model.run} nodes={model.tree.revision.nodes} busy={Boolean(model.busy)} onOperation={(operations, reason) => void model.updateTree(operations, reason)} onApprove={() => void model.approve()} onRedesign={() => void model.redesign()} />}{model.run && model.run.testPointTree?.currentApprovedVersionId && <TestCasePanel run={model.run} busy={Boolean(model.busy)} onSubmit={() => void model.reviewCases('submit')} onApprove={() => void model.reviewCases('approve')} onResynthesize={() => void model.resynthesize()} />}{model.run && <CoverageAuditPanel run={model.run} busy={Boolean(model.busy)} onAudit={() => void model.reAudit()} onResolve={(kind, id, version) => void model.resolveIssue(kind, id, version)} />}{model.run && <ExecutionHandoffPanel run={model.run} suites={model.suites} handoffs={model.handoffs} busy={Boolean(model.busy)} onPublish={model.publish} onHandoff={(version, strategy, smoke, regression) => void model.handoff(version, strategy, smoke, regression)} />}</main>
+}
+
+function PageHeader({ projectVersion, releaseId, onBack, onManageVersions }: { projectVersion: ProjectVersion; releaseId?: string; onBack?: () => void; onManageVersions: () => void }) { return <header className="td2-topbar">{onBack && <button className="td2-icon-button" onClick={onBack}><ArrowLeft /></button>}<div className="td2-brand"><span><TestTube2 /></span><div><b>SmartHub · 测试设计</b><small>{projectVersion.name} · {projectVersion.status}</small></div></div><div className={releaseId ? 'td2-bound-release' : 'td2-bound-release missing'}><LockKeyhole /><span><small>当前绑定 Requirement Release</small><b>{releaseId ?? '未绑定'}</b></span></div><button className="td2-button ghost" onClick={onManageVersions}>项目版本</button></header> }
+
+function DesignCollection({ designs, releaseBound, onOpen, onCreate }: { designs: ReturnType<typeof useTestDesign>['designs']; releaseBound: boolean; onOpen: (design: ReturnType<typeof useTestDesign>['designs'][number]) => void; onCreate: () => void }) {
+  if (!designs.length) return <section className="td2-card td2-empty"><Bot /><h2>还没有测试设计</h2><p>{releaseBound ? '创建后将以当前绑定需求发布包为事实基线。' : '请先发布并绑定当前 ProjectVersion 的 Requirement Release。'}</p><button className="td2-button primary" disabled={!releaseBound} onClick={onCreate}><Plus />创建第一条测试设计</button></section>
+  return <section className="td2-design-list">{designs.map(design => <button key={design.id} onClick={() => onOpen(design)}><span className="td2-design-icon"><FileCheck2 /></span><div><b>{design.name}</b><p>{design.objective}</p><small><CalendarClock />{new Date(design.createdAt).toLocaleString('zh-CN')} · {design.latestRun ? `${stageLabel(design.latestRun.stage)} / ${design.latestRun.status}` : '尚未运行'}</small><code>{design.id}</code></div><span className="td2-progress-ring">{design.latestRun?.progress ?? 0}%</span><ChevronRight /></button>)}</section>
+}
+
+function stageLabel(value: string) { return ({ test_point_design: '测试点设计', test_point_review: '测试点审核', test_case_design: '用例生成', coverage_audit: 'Coverage 检查', test_design_repair: '自动修复', completed: '已完成' } as Record<string, string>)[value] ?? value }

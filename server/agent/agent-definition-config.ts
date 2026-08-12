@@ -1,7 +1,7 @@
 import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import rawConfig from './agents-config.json' with { type: 'json' }
 
-export type AgentDefinitionConfigKey = Exclude<AgentDefinitionVersion['agentKey'], 'technical-solution-analysis'>
+export type AgentDefinitionConfigKey = AgentDefinitionVersion['agentKey']
 
 export interface AgentDefinitionConfig {
   agentType: AgentDefinitionVersion['agentType']
@@ -26,8 +26,7 @@ export type AgentDefinitionConfigDictionary = Record<string, AgentDefinitionConf
 
 const expectedKeys: readonly AgentDefinitionConfigKey[] = [
   'requirement-analysis',
-  'technical-solution-extraction',
-  'technical-solution-review',
+  'test-design',
 ]
 
 export function validateAgentDefinitionConfig(value: unknown): AgentDefinitionConfigFile {

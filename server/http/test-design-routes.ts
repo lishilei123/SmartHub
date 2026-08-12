@@ -12,7 +12,7 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
 
   if (url.pathname === '/api/agent-configurations/test-design' && method === 'GET') {
     const agents = (await configurations.get()).agents
-    return send(response, 200, { scene: 'test_design', agents: { testAnalysis: agents.testAnalysis, functionalTestDesign: agents.functionalTestDesign, nonFunctionalTestDesign: agents.nonFunctionalTestDesign, testCaseSynthesis: agents.testCaseSynthesis } })
+    return send(response, 200, { scene: 'test_design', agents: { testDesign: agents.testDesign } })
   }
   if (url.pathname === '/api/agent-configurations/test-design/draft' && method === 'PUT') {
     const body = await json(request); return send(response, 200, await configurations.save(body as unknown as AgentConfigurationInput))
@@ -23,13 +23,13 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
 
   const allInputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs$/.exec(url.pathname)
   if (allInputs && method === 'GET') { await authorize(allInputs[1], 'test-design:read'); return send(response, 200, await service.inputCandidates(allInputs[1])) }
-  const inputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs\/(review-baselines|knowledge-assets|fixed-indexes|historical-case-sets|historical-case-assets)$/.exec(url.pathname)
-  if (inputs && method === 'GET') { await authorize(inputs[1], 'test-design:read'); const candidates = await service.inputCandidates(inputs[1]); const keys = { 'review-baselines': 'reviewBaselines', 'knowledge-assets': 'knowledgeAssets', 'fixed-indexes': 'fixedIndexes', 'historical-case-sets': 'historicalCaseSets', 'historical-case-assets': 'historicalCaseAssets' } as const; return send(response, 200, candidates[keys[inputs[2] as keyof typeof keys]]) }
+  const inputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs\/(requirement-release|knowledge-assets|fixed-indexes|historical-case-sets|historical-case-assets)$/.exec(url.pathname)
+  if (inputs && method === 'GET') { await authorize(inputs[1], 'test-design:read'); const candidates = await service.inputCandidates(inputs[1]); const keys = { 'requirement-release': 'requirementRelease', 'knowledge-assets': 'knowledgeAssets', 'fixed-indexes': 'fixedIndexes', 'historical-case-sets': 'historicalCaseSets', 'historical-case-assets': 'historicalCaseAssets' } as const; return send(response, 200, candidates[keys[inputs[2] as keyof typeof keys]]) }
   const readiness = /^\/api\/project-versions\/([^/]+)\/test-designs\/agent-readiness$/.exec(url.pathname)
   if (readiness && method === 'GET') { await authorize(readiness[1], 'test-design:read'); return send(response, 200, (await service.inputCandidates(readiness[1])).agentReadiness) }
   const designs = /^\/api\/project-versions\/([^/]+)\/test-designs$/.exec(url.pathname)
   if (designs && method === 'POST') { await authorize(designs[1], 'test-design:create'); return send(response, 201, await service.createDesign(designs[1], await json(request), principal)) }
-  if (designs && method === 'GET') { await authorize(designs[1], 'test-design:read'); return send(response, 200, { items: await service.listDesigns(designs[1], { basisMode: url.searchParams.get('basisMode') ?? undefined }) }) }
+  if (designs && method === 'GET') { await authorize(designs[1], 'test-design:read'); return send(response, 200, { items: await service.listDesigns(designs[1]) }) }
   const design = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)$/.exec(url.pathname)
   if (design && method === 'GET') { await authorize(design[1], 'test-design:read'); return send(response, 200, await service.getDesign(design[1], design[2])) }
   const runs = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs$/.exec(url.pathname)
@@ -39,14 +39,10 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (run && method === 'GET') { await authorize(run[1], 'test-design:read'); return send(response, 200, await service.getRun(run[1], run[2], run[3])) }
   const cancel = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/cancel$/.exec(url.pathname)
   if (cancel && method === 'POST') { await authorize(cancel[1], 'test-design:cancel'); return send(response, 200, await service.cancelRun(cancel[1], cancel[2], cancel[3], principal)) }
-  const gate = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/gates\/(scope|test-point-tree)\/decisions$/.exec(url.pathname)
-  if (gate && method === 'POST') { await authorize(gate[1], 'test-design:review'); return send(response, 200, await service.applyGateDecision(gate[1], gate[2], gate[3], gate[4] as 'scope' | 'test-point-tree', await json(request) as never, principal)) }
   const fullRerun = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/full-rerun$/.exec(url.pathname)
   if (fullRerun && method === 'POST') { await authorize(fullRerun[1], 'test-design:create'); return send(response, 202, await service.fullRerun(fullRerun[1], fullRerun[2], fullRerun[3], header(request, 'idempotency-key'), principal)) }
-  const reviseScope = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/revise-scope$/.exec(url.pathname)
-  if (reviseScope && method === 'POST') { await authorize(reviseScope[1], 'test-design:edit'); return send(response, 202, await service.reviseScope(reviseScope[1], reviseScope[2], reviseScope[3])) }
-  const retryDesign = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/retry-design-node$/.exec(url.pathname)
-  if (retryDesign && method === 'POST') { await authorize(retryDesign[1], 'test-design:edit'); const body = await json(request); return send(response, 202, await service.retryDesignNode(retryDesign[1], retryDesign[2], retryDesign[3], body.nodeKey)) }
+  const redesignPoints = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/redesign-test-points$/.exec(url.pathname)
+  if (redesignPoints && method === 'POST') { await authorize(redesignPoints[1], 'test-design:edit'); return send(response, 202, await service.redesignTestPoints(redesignPoints[1], redesignPoints[2], redesignPoints[3])) }
   const resynthesize = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/resynthesize$/.exec(url.pathname)
   if (resynthesize && method === 'POST') { await authorize(resynthesize[1], 'test-design:edit'); return send(response, 202, await service.resynthesize(resynthesize[1], resynthesize[2], resynthesize[3])) }
   const reaudit = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/re-audit$/.exec(url.pathname)

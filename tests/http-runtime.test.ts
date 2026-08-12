@@ -97,20 +97,11 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
     assert.equal('requirementPointExtraction' in body.agents, false)
     assert.equal('requirementReview' in body.agents, false)
     assert.equal('reviewQa' in body.agents, false)
-    assert.equal(body.agents.technicalSolutionExtraction.draft.revision, 0)
-    assert.equal(body.agents.technicalSolutionReview.draft.revision, 0)
-    assert.equal(body.agents.testAnalysis.draft.revision, 0)
-    assert.equal(body.agents.functionalTestDesign.draft.revision, 0)
-    assert.equal(body.agents.nonFunctionalTestDesign.draft.revision, 0)
-    assert.equal(body.agents.testCaseSynthesis.draft.revision, 0)
-    assert.deepEqual(body.agents.technicalSolutionExtraction.requiredToolIds, ['technical_solution_points.submit_result'])
-    assert.deepEqual(body.agents.technicalSolutionReview.requiredToolIds, ['technical_solution_review.submit_result'])
-    assert.deepEqual(body.agents.testAnalysis.requiredToolIds, ['test_analysis.submit_result'])
-    assert.deepEqual(body.agents.functionalTestDesign.requiredToolIds, ['functional_test_design.submit_result'])
-    assert.deepEqual(body.agents.nonFunctionalTestDesign.requiredToolIds, ['non_functional_test_design.submit_result'])
-    assert.deepEqual(body.agents.testCaseSynthesis.requiredToolIds, ['test_case_synthesis.submit_result'])
-    assert.deepEqual(body.agents.technicalSolutionExtraction.versions, [])
-    assert.deepEqual(body.agents.technicalSolutionReview.versions, [])
+    assert.equal(body.agents.testDesign.draft.revision, 0)
+    assert.deepEqual(body.agents.testDesign.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
+    assert.deepEqual(body.agents.testDesign.requiredSkillKeys, ['test-design-baseline', 'test-point-design', 'test-case-design', 'test-design-repair'])
+    assert.equal('technicalSolutionExtraction' in body.agents, false)
+    assert.equal('technicalSolutionReview' in body.agents, false)
 
     const retiredQaEndpoint = await fetch(`${baseUrl}/requirement-review-runs/retired-review/questions`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: '已删除入口' }),
@@ -134,17 +125,18 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
       body: JSON.stringify({ key: 'http.agent.tool', name: 'HTTP Agent Tool', version: '1.0.0', enabled: true, source: 'mcp', risk: 'network_read', timeoutMs: 30_000, mcpServerId: mcp.id }),
     })
     assert.equal(toolResponse.status, 201)
-    const draft = body.agents.technicalSolutionReview.draft
+    const draft = body.agents.testDesign.draft
     const savedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agentKey: 'technicalSolutionReview', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: ['http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
+      body: JSON.stringify({ agentKey: 'testDesign', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: [...draft.definition.skillKeys, 'http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
     })
     assert.equal(savedResponse.status, 200)
     const saved = await savedResponse.json() as { definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }
-    assert.deepEqual(saved.definition.skillKeys, ['http.agent.skill'])
+    assert.ok(saved.definition.skillKeys.includes('http.agent.skill'))
     assert.deepEqual(saved.definition.mcpServerKeys, ['http.agent.mcp'])
-    assert.deepEqual(saved.definition.toolIds, ['technical_solution_review.submit_result', 'http.agent.tool'])
+    assert.ok(saved.definition.toolIds.includes('test_design_points.submit_result'))
+    assert.ok(saved.definition.toolIds.includes('http.agent.tool'))
   })
 })
 

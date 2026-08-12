@@ -15,7 +15,6 @@ import { SkillPackageStore } from './infrastructure/skill-package-store.js'
 import { applicationRoot, dataRoot } from './infrastructure/runtime-paths.js'
 import { ReviewGovernanceService } from './application/review-governance-service.js'
 import { createBootstrapAccessControl } from './http/access-control.js'
-import { TechnicalSolutionReviewService } from './application/technical-solution-review-service.js'
 import { TestDesignService } from './application/test-design-service.js'
 import { PiTestDesignRuntimeAdapter } from './agent/pi-test-design-runtime.js'
 
@@ -42,7 +41,6 @@ export const agentConfigurationService = new AgentConfigurationService(stateStor
 export const reviewGovernanceService = new ReviewGovernanceService(stateStore)
 export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore, {}, skillPackageStore, reviewGovernanceService)
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService, service)
-export const technicalSolutionReviewService = new TechnicalSolutionReviewService(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignRuntime = new PiTestDesignRuntimeAdapter(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignService = new TestDesignService(stateStore, testDesignRuntime, service)
 export const projectVersionService = new ProjectVersionService(stateStore)

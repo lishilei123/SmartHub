@@ -1,8 +1,8 @@
-# SmartHub Phase 1 + Phase 2 + Phase 3 评审闭环 + Phase 4 测试设计后端
+# SmartHub 需求分析与测试设计闭环
 
-当前仓库已实现第一期资料接入与检索闭环、第二期需求评审闭环、第三期技术方案评审闭环和第四期测试设计闭环。第三期采用固定双阶段流水线：`TechnicalSolutionExtractionAgent` 从一至多份固定 `technical_design` 资产版本提取方案要点并由服务端固化 Evidence，`TechnicalSolutionReviewAgent` 再基于固定成功需求评审运行与冻结方案要点生成覆盖、Finding、统计和 Markdown 报告。九个 Agent 均拥有独立定义、模型路由、Prompt、工具协议和发布版本；PostgreSQL 模式下需求评审、技术方案评审和测试设计均可由独立 Job/Worker 队列执行，并持久化固定快照、阶段检查点、运行历史、人工处置和正式结果。
+当前仓库已实现资料接入与检索、统一需求分析、需求发布和测试设计闭环。需求分析使用 `RequirementAnalysisAgent`，测试设计使用唯一的 `TestDesignAgent`；两者都采用 Pi Coding Agent 的只读 `/workspace` 模式，由 Skill 提供方法、Workflow 固定阶段、人工控制关键决策、服务端负责校验、版本、Hash 和正式资产投影。PostgreSQL 模式下 ReviewRun 与 TestDesign Run 均由独立 Job/Worker 队列执行并持久化冻结快照、运行事件、人工处置和正式结果。
 
-第四期已实现双依据严格输入、原子固定依据、确定性知识召回、四 Agent 固定 DAG、范围/测试点树双人工门禁、节点级租约 fencing、树与用例追加式 revision/ETag、结构化 UI/API 用例、数据需求、仅以可执行叶子测试点为分母的服务端覆盖审计、过度合并/维度错配等 Agent 质量阻断限次自修复、人工审核、不可变用例集发布、JSON/Markdown/Excel 导出、`test_case` 知识资产投影、项目用例目录、既有套件只读查询、冒烟候选、影响回归和三种执行交接。`TestDesignPage` 已接入真实任务创建、运行概览、工作流、人工门禁、各阶段产物、测试点树结构编辑与独立批准、用例新建/结构化编辑/审核、数据约束版本、Finding/待确认项处置、按 Agent 修复/人工审核/人工决策/人工修订分类的发布阻断、重新审计、不可变用例集发布与导出、项目用例库/套件、冒烟候选、影响回归及执行交接。第四期仍不创建真实测试数据、`TestPlanVersion` 或测试任务，不执行脚本，也不发布新的冒烟基线；这些由后续执行阶段基于真实结果和人工决定完成。
+测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`requirements.json` Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。测试点阶段人工批准后，服务端创建正式 `TestPointTreeVersion` 和 Asset/AssetVersion；测试用例阶段由同一个 Agent 生成 UI/API 用例和数据需求，确定性 Coverage Auditor 审计后只把 `resolution=agent_repair` 的质量问题送回最多两轮修复，业务决策缺失直接等待人工处理。人工发布后创建不可变 `TestCaseSetVersion`、正式 Workspace 资产、套件/冒烟/影响回归与 Execution Handoff。
 
 ## 阶段文档
 
@@ -10,14 +10,10 @@
 - [一期技术方案（含架构设计）](技术文档/第一期-项目知识库构建与配置技术文档.md)
 - [第二期需求文档](需求文档/第二期-需求评审与大模型配置需求文档.md)
 - [第二期技术方案](技术文档/第二期-需求评审与大模型配置技术文档.md)
-- [第三期技术方案分析模块需求文档](需求文档/第三期-技术方案分析模块需求文档.md)
-- [第三期技术方案分析模块技术文档](技术文档/第三期-技术方案分析模块技术文档.md)
-- [第四期多 Agent 测试设计工作流需求文档](需求文档/第四期-多Agent测试设计工作流需求文档.md)
-- [第四期多 Agent 测试设计工作流技术文档](技术文档/第四期-多Agent测试设计工作流技术文档.md)
 
 ## 已实现
 
-- Phase 4 测试设计：迁移 15～19、四 Agent 配置与 Pi Runtime、原子固定快照、确定性召回、矩阵化测试点/用例发散、测试分析闭合协议与历史产物兼容展示、综合提交前的适用测试点全集校验、非功能四维完整性门禁与同响应拆分提交合并、节点级 DAG/公平 Worker、双门禁、树/用例/数据/审计/发布、项目目录/套件/冒烟/回归/执行交接 API 与真实前端闭环；模型输入使用不含 embedding 和重复 Chunk 正文的业务投影，结果提交也不得回传固定快照或向量；
+- 测试设计：唯一 `TestDesignAgent`、四个内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、测试点树唯一人工门禁、服务端 Coverage Audit、最多两轮 Agent Repair、人工用例集发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
 - 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承评审运行与对话；
@@ -36,23 +32,21 @@
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
 - “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。随应用发布的内置 Tool 和 Skill 始终启用，管理页不允许关闭，服务端也会拒绝停用请求并自动修复历史停用状态；是否授权给具体 Agent 仍由 Agent 配置及必需能力约束决定。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。随应用发布的内置 Skill 位于 `server/skills`，当前包含 `system.query-local-ip` 和 `system.structured-summary` 示例；项目外置 Skill/Tool 分别位于 `ai/skills`、`ai/tools`，服务启动和目录读取时扫描，并默认每 1 秒自动重扫。外置 Skill 通过同目录 `skill.json` 登记；外置 Tool 可使用无 JSON 的单文件静态清单、`*.tool.json`、目录 `tool.json`、批量 `tools.json` 或 `package.json` 的 SmartHub 声明。管理页标记为“外置”，只允许启停，编辑或删除应修改文件。Skill ZIP、内置 Skill 或外置 Skill 都会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent；可执行 Skill 还可在入口同目录提供 `skill-runtime.json`，显式声明 PowerShell 脚本及 GET/HEAD 网络 Origin。脚本和网络权限归属 Skill，不出现在可独立管理的 Tool 目录；选择 Skill 发布时服务端自动派生内部调用协议，并实施相对路径、参数、精确 Origin、无重定向、超时、取消、受限环境和 256 KB 结果上限。自定义 Tool 仍支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
-- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：需求分析只配置统一的 `RequirementAnalysisAgent`，技术方案分析与测试设计仍按各自职责配置专用 Agent；每个 Agent 独立持久化默认/回退模型、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前除资源和参数校验外，模型必须通过版本化 `model-probe/v2` 长上下文、结构化提交和工具调用质量门禁。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
+- “系统管理 → Agent 配置”只展示 `RequirementAnalysisAgent` 与 `TestDesignAgent`。每个 Agent 独立持久化模型路由、输出上限、超时、重试、Prompt、Tool/MCP/Skill 和运行限制，并拥有不可变发布版本。运行时固定 Toolset、MCP 策略与 Skill 内容 Hash；测试设计再按 Stage 把能力收窄到指定 Skill Catalog 和唯一 Submit Tool。
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；各 Agent 通过自身结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
 - 需求分析上传支持 Markdown、TXT 和 ZIP；知识库页面以“知识库”为根节点，直接展示与 Pi Agent 相同的 `/workspace` 文件树，并补齐各项目版本、`shared` 和 `agent_workspace` 的标准空目录；当前版本需求固定上传到 `workspace/branches/{项目版本名}/input/requirements/`。ZIP 保留包内子目录和图片相对路径；启动评审时服务端固定需求输入范围，并把活动索引中整个 `/workspace` 的 ready 文档版本物化为本次运行的只读文件快照，让 Pi Agent 可自主查看当前分支、其他分支和 `shared` 资料；正式 ReviewRun、工作区快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON；
 - AC-001～AC-009 自动化验收场景。
 
-## 当前已实现的第三期技术方案评审流程
+## 当前已实现的单 Agent 测试设计流程
 
-- “技术方案评审”创建页沿用需求分析的三栏工作台：左侧可直接上传 Markdown、TXT 或 ZIP 到 `版本文档/{项目版本名}/技术方案/`，等待真实入库/索引任务完成后刷新并自动勾选 ready 的 `technical_design` 资产版本；中间选择成功 ReviewRun 作为固定需求基线并确认一至十份固定输入，右侧恢复历史评审；
-- `TechnicalSolutionExtractionAgent` 使用 `technical-solution-extraction/v1` 提交方案要点和原文线索，服务端生成 `TSP-*` 与 Evidence；`TechnicalSolutionReviewAgent` 使用 `technical-solution-review/v2` 只引用冻结 `RP-*` 与 `TSP-*`，服务端归一化模型语义并生成正式 ID、需求关系和覆盖统计；
-- 正常正文以 `full_context` 投递，超长正文确定性切换 `segmented_context`；成功发布前强制校验 `InputDeliveryManifest`、固定输入 Hash、Evidence 唯一性及需求覆盖全量唯一；
-- Evidence 仍以固定输入中的逐字原文为准；若模型提交“章节提示 + ... + 逐字片段”，服务端只提取并保存可唯一定位的连续原文，忽略同组冗余说明，歧义、越界或完全无法定位仍会结构化拒绝；
-- PostgreSQL 使用 `technical_solution_reviews`、输入、Run、Job、正式结果、Coverage、Finding、Evidence、关系表和追加写 FindingAction；Worker 使用 lease、heartbeat、run token 与 fencing，支持排队、取消、有限重试和迟到结果隔离；
-- 前端通过显式 `projectVersionId + technicalReviewId + runId` 恢复评审上下文，提供摘要、覆盖、Finding、风险、Evidence、历史运行、固定原文、人工处置与 Markdown 导出；项目版本或知识资产删除会保护活动运行并级联第三期数据；
-- 本期边界不包含 Git、代码 Diff、代码生成、部署、测试执行、Agent 自由委派和通用多 Agent 编排。
+- `test_point_design` 固定开放 `test-design-baseline`、`test-point-design` 与 `test_design_points.submit_result`；Agent 从冻结 Workspace 自主读取正式需求发布包和按需增强资料，直接生成 Test Point Tree Candidate，不存在 CoverageUnit 中间层。
+- 测试点树是唯一人工门禁。批准、修改、增加、删除、拆分、合并或要求 AI 重新设计均由人工触发；只有批准后的 `TestPointTreeVersion` 能进入用例设计。
+- `test_case_design` 固定开放 `test-case-design` 与 `test_design_cases.submit_result`；`test_design_repair` 固定开放 `test-design-repair` 与 `test_design_repair.submit_result`。Agent 和 Skill 均不能切换 Stage、扩大权限或发布版本。
+- Coverage Audit 是服务端确定性步骤，不是 Agent Stage。引用、覆盖、重复、过度合并、维度一致性、UI/API 与数据 readiness、Finding/Confirmation 闭环均由服务端判断。
+- 批准树投影到 `workspace/branches/{version}/test_design/test-point-tree.json|test-design.md`；发布用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|test-data.json|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
 
-本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、配置版本、资产、不可变版本、资产 Chunk、索引固定 Chunk、同步任务、模型来源、AI 资源目录、Agent 配置、ReviewRun/Job、技术方案正式结果以及 Phase 4 的 Workflow、Snapshot、树、用例 revision、数据需求、覆盖关系、用例集、套件和交接分别写入 `smarthub` schema。Phase 4 顶层 JSON 仅保留兼容回退，规范化事实表参与当前读写与删除生命周期。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除，不再全库 `TRUNCATE + 重写`。Chunk 向量使用 pgvector 的 `vector` 类型，并为默认384维模型建立 HNSW 余弦索引。首次连接时会安装可用的 `vector`、`pg_trgm` 扩展、自动建表或迁移旧向量。未配置 `DATABASE_URL` 时回退到 JSON 文件；JSON 开发模式仍直接执行评审，生产模式必须使用 PostgreSQL Worker。
+本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、资产版本、索引、同步任务、模型与 AI 资源、Agent 配置、ReviewRun/Job，以及 TestDesign Workflow、Snapshot、树、用例 revision、Coverage、用例集、套件和交接均写入 `smarthub` schema。旧技术方案表和旧测试设计数据由迁移直接删除。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除；未配置 `DATABASE_URL` 时回退到 JSON 文件，生产模式必须使用 PostgreSQL Worker。
 
 生产 API 注入 SmartHub 内置模型运行池。知识库配置先选择来源，再选择该来源中的生效模型；本地模式下上传解析、索引重建和向量/混合检索均路由到所选模型，发现模型未运行时会自动拉取并启动，同时不会停止池内其他模型。单元测试通过运行时接口注入轻量测试模型，不下载大模型。
 
@@ -146,7 +140,7 @@ Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文�
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
-进入“系统管理 → Agent 配置”后，需求分析场景只提供“需求分析 Agent（RequirementAnalysisAgent）”；技术方案分析和测试设计场景继续提供各自的专用 Agent。页面只提供模型与路由、提示词、Tool/MCP/Skill 三类配置；Tool/MCP/Skill 页面在资源清单底部集中维护最大轮次、最大工具调用、总截止时间和推理强度。资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布”会先保存当前 Agent 草稿，再发布该 Agent 的下一不可变版本；发布会校验资源依赖及模型的 `model-probe/v2` 质量门禁。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；`write-reversible`/`write-high-risk` 会按参数 SHA-256 建立 Approval，运行记录窗口可批准或拒绝，高风险写操作必须逐次批准；参数变化、拒绝、过期、取消都会阻止执行。
+进入“系统管理 → Agent 配置”后只提供 `RequirementAnalysisAgent` 与 `TestDesignAgent`。页面维护模型路由、Prompt、Tool/MCP/Skill 和运行限制；必需能力不可取消，发布时固定 Toolset、Skill 内容 Hash 与 MCP Policy Hash。`TestDesignAgent` 的发布配置包含三个提交工具和四个 Skill，但 Runtime 仍按当前 Stage 只展示规定的 Skill Catalog 和一个提交工具。
 
 ## 生产构建与运行
 
@@ -182,7 +176,7 @@ npm test
 npm run build
 ```
 
-测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、候选索引切换、远程 Embedding、生成式模型连接和 `model-probe/v2`、Agent 草稿/发布、需求与技术方案双阶段 Agent、检索降级、Reranker、不可变原文快照、固定版本 Evidence、PI Agent 工具循环、候选结果校验、ReviewRun 持久化、配置/Prompt/Toolset/Skill/MCP 快照、问答 Turn 持久化、FindingAction 并发控制、参数 Hash 审批和服务端报告导出。
+测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、两个单 Agent 配置发布、只读 Workspace、Requirement Release 冻结、Stage/Skill/Submit Tool 映射、测试点人工批准、Coverage Audit/Repair、正式资产投影、TestCaseSet 发布、执行交接、检索降级、FindingAction 并发控制和参数 Hash 审批。
 
 ## 接口摘要
 
@@ -208,9 +202,9 @@ npm run build
 - `GET /api/agent-configurations/requirement-analysis`
 - `PUT /api/agent-configurations/requirement-analysis/draft`
 - `POST /api/agent-configurations/requirement-analysis/publish`
-- `GET /api/agent-configurations/technical-solution-analysis`
-- `PUT /api/agent-configurations/technical-solution-analysis/draft`（`agentKey=technicalSolutionExtraction|technicalSolutionReview`）
-- `POST /api/agent-configurations/technical-solution-analysis/publish`（分别发布提取与评审 Agent）
+- `GET /api/agent-configurations/test-design`
+- `PUT /api/agent-configurations/test-design/draft`
+- `POST /api/agent-configurations/test-design/publish`
 - `GET /api/agent-configuration-versions/:id`
 - `POST /api/project-versions/:id/requirement-reviews/run`
 - `GET /api/project-versions/:id/requirement-review-runs`
@@ -221,15 +215,15 @@ npm run build
 - `GET /api/requirement-review-runs/:id/approvals`
 - `POST /api/tool-approvals/:id/decision`
 - `GET /api/project-versions/:projectVersionId/requirement-review-runs/:runId/report.md`
-- `GET /api/project-versions/:projectVersionId/technical-solution-review-inputs/baselines`
-- `GET /api/project-versions/:projectVersionId/technical-solution-review-inputs/solution-assets`
-- `GET|POST /api/project-versions/:projectVersionId/technical-solution-reviews`
-- `GET|POST /api/project-versions/:projectVersionId/technical-solution-reviews/:technicalReviewId/runs`
-- `GET /api/project-versions/:projectVersionId/technical-solution-reviews/:technicalReviewId/runs/:runId`
-- `POST /api/project-versions/:projectVersionId/technical-solution-reviews/:technicalReviewId/runs/:runId/cancel`
-- `GET /api/project-versions/:projectVersionId/technical-solution-reviews/:technicalReviewId/runs/:runId/finding-actions`
-- `POST /api/project-versions/:projectVersionId/technical-solution-reviews/:technicalReviewId/runs/:runId/findings/:findingId/actions`
-- `GET /api/project-versions/:projectVersionId/technical-solution-reviews/:technicalReviewId/runs/:runId/report.md`
+- `GET /api/project-versions/:projectVersionId/test-designs/inputs`
+- `GET|POST /api/project-versions/:projectVersionId/test-designs`
+- `GET|POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs`
+- `GET /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId`
+- `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/test-point-tree/approve`
+- `GET /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/coverage-audits`
+- `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/actions/re-audit`
+- `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/test-case-set-versions`
+- `POST /api/test-case-set-versions/:versionId/execution-handoffs`
 - `GET /api/knowledge-bases/:id/overview`
 - `GET|PUT /api/knowledge-bases/:id/config`
 - `POST /api/knowledge-bases/:id/embedding/test`

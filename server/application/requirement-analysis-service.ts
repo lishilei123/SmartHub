@@ -349,6 +349,15 @@ export class RequirementAnalysisService {
       release.status = 'published'
       release.publishedAt = new Date().toISOString()
       release.publishedBy = principalId(input.principal)
+      const requirementsArtifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), '需求发布包缺少 requirements.json')
+      const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), '项目版本不存在')
+      projectVersion.requirementReleaseBinding = {
+        releaseId: release.id,
+        verificationRunId: run.id,
+        requirementsJsonSha256: requirementsArtifact.contentSha256,
+        boundAt: release.publishedAt,
+      }
+      projectVersion.updatedAt = release.publishedAt
       return structuredClone(release)
     })
   }

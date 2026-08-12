@@ -1,11 +1,10 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, ReviewRunQueueState, SyncTask } from '../domain/types.js'
-import type { TechnicalSolutionFormalResult, TechnicalSolutionReview, TechnicalSolutionReviewJob, TechnicalSolutionReviewRun } from '../domain/technical-solution-types.js'
 import { normalizeReviewSeverities, type ChunkSearchInput, type ConfigurationTransactionScope, type DefaultKnowledgeBase, type KnowledgeReadState, type RequirementBindingMetadata, type ReviewJob, type ReviewRunPage, type StateStore, type StoredChunkCandidate, type TaskLease, type TestDesignJob } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [], technicalSolutionReviews: [], technicalSolutionRuns: [], technicalSolutionFindingActions: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [] })
 
 export class PostgresStore implements StateStore {
   private state: DatabaseState = emptyState()
@@ -287,55 +286,6 @@ export class PostgresStore implements StateStore {
       WHERE run.id=$1
     `, [runId])
     return result.rows[0] ? reviewRunFromQueueRow(result.rows[0]) : null
-  }
-
-  async loadTechnicalSolutionInputState(projectVersionId: string): Promise<Pick<DatabaseState, 'projects' | 'projectVersions' | 'knowledgeBases' | 'assets' | 'versions' | 'indexes' | 'reviewRuns' | 'findingActions'>> {
-    const projectVersion = await this.pool.query<{ data: ProjectVersion }>('SELECT data FROM smarthub.project_versions WHERE id=$1', [projectVersionId])
-    if (!projectVersion.rows[0]) return { projects: [], projectVersions: [], knowledgeBases: [], assets: [], versions: [], indexes: [], reviewRuns: [], findingActions: [] }
-    const projectId = projectVersion.rows[0].data.projectId
-    const projects = await this.pool.query<{ data: DatabaseState['projects'][number] }>('SELECT data FROM smarthub.projects WHERE id=$1', [projectId])
-    const knowledgeBases = await this.pool.query<{ data: DatabaseState['knowledgeBases'][number] }>('SELECT data FROM smarthub.knowledge_bases WHERE project_id=$1', [projectId])
-    const assets = await this.pool.query<{ data: DatabaseState['assets'][number] }>(`SELECT asset.data FROM smarthub.knowledge_assets asset JOIN smarthub.knowledge_bases kb ON kb.id=asset.knowledge_base_id WHERE kb.project_id=$1 AND asset.asset_type='technical_design'`, [projectId])
-    const versions = await this.pool.query<{ data: DatabaseState['versions'][number] }>(`SELECT version.data || jsonb_build_object('chunks', COALESCE(chunks.items, '[]'::jsonb)) AS data FROM smarthub.asset_versions version JOIN smarthub.knowledge_assets asset ON asset.id=version.asset_id LEFT JOIN LATERAL (SELECT jsonb_agg(chunk.data ORDER BY chunk.ordinal) AS items FROM smarthub.asset_chunks chunk WHERE chunk.asset_version_id=version.id) chunks ON true WHERE asset.knowledge_base_id = ANY($1::text[]) AND asset.asset_type='technical_design' AND version.status='ready'`, [knowledgeBases.rows.map(row => row.data.id)])
-    const indexes = await this.pool.query<{ data: DatabaseState['indexes'][number] }>(`SELECT data FROM smarthub.index_versions WHERE knowledge_base_id = ANY($1::text[]) AND status='active'`, [knowledgeBases.rows.map(row => row.data.id)])
-    const reviewRuns = await this.pool.query<{ data: ReviewRun }>(`SELECT data - 'inputDeliveryManifest' - 'execution' - 'executions' - 'modelRouteAttempts' - 'degradations' AS data FROM smarthub.review_runs WHERE project_version_id=$1 AND status='succeeded' AND data ? 'result' ORDER BY created_at DESC, id DESC`, [projectVersionId])
-    const findingActions = await this.pool.query<{ data: DatabaseState['findingActions'][number] }>(`SELECT action.data FROM smarthub.finding_actions action JOIN smarthub.review_runs run ON run.id=action.run_id WHERE run.project_version_id=$1`, [projectVersionId])
-    return { projects: projects.rows.map(row => row.data), projectVersions: [projectVersion.rows[0].data], knowledgeBases: knowledgeBases.rows.map(row => row.data), assets: assets.rows.map(row => row.data), versions: versions.rows.map(row => row.data), indexes: indexes.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data) }
-  }
-
-  async listTechnicalSolutionReviews(projectVersionId: string): Promise<TechnicalSolutionReview[]> {
-    const result = await this.pool.query<{ data: TechnicalSolutionReview }>('SELECT data FROM smarthub.technical_solution_reviews WHERE project_version_id=$1 ORDER BY created_at DESC, id DESC', [projectVersionId])
-    return result.rows.map(row => row.data)
-  }
-
-  async getTechnicalSolutionReview(technicalReviewId: string): Promise<TechnicalSolutionReview | null> {
-    const result = await this.pool.query<{ data: TechnicalSolutionReview }>('SELECT data FROM smarthub.technical_solution_reviews WHERE id=$1', [technicalReviewId])
-    return result.rows[0]?.data ?? null
-  }
-
-  async listTechnicalSolutionRuns(projectVersionId: string, technicalReviewId?: string): Promise<TechnicalSolutionReviewRun[]> {
-    const result = await this.pool.query<TechnicalRunQueueRow>(`
-      SELECT run.data, job.status AS queue_status,
-        job.attempt_count, job.max_attempts, job.available_at
-      FROM smarthub.technical_solution_review_runs run
-      LEFT JOIN smarthub.technical_solution_review_jobs job ON job.run_id=run.id
-      WHERE run.project_version_id=$1 AND ($2::text IS NULL OR run.technical_review_id=$2)
-      ORDER BY run.created_at DESC, run.id DESC
-    `, [projectVersionId, technicalReviewId ?? null])
-    const runs = await hydrateTechnicalSolutionRuns(this.pool, result.rows.map(row => row.data))
-    return result.rows.map((row, index) => technicalRunFromQueueRow({ ...row, data: runs[index] }))
-  }
-
-  async getTechnicalSolutionRun(runId: string): Promise<TechnicalSolutionReviewRun | null> {
-    const result = await this.pool.query<TechnicalRunQueueRow>(`
-      SELECT run.data, job.status AS queue_status, job.attempt_count, job.max_attempts, job.available_at
-      FROM smarthub.technical_solution_review_runs run
-      LEFT JOIN smarthub.technical_solution_review_jobs job ON job.run_id=run.id
-      WHERE run.id=$1
-    `, [runId])
-    if (!result.rows[0]) return null
-    const [run] = await hydrateTechnicalSolutionRuns(this.pool, [result.rows[0].data])
-    return technicalRunFromQueueRow({ ...result.rows[0], data: run })
   }
 
   async getToolApproval(approvalId: string) {
@@ -644,66 +594,6 @@ export class PostgresStore implements StateStore {
     return Boolean(result.rowCount)
   }
 
-  async enqueueTechnicalSolutionJob(job: TechnicalSolutionReviewJob) {
-    await this.pool.query(`INSERT INTO smarthub.technical_solution_review_jobs (id,run_id,technical_review_id,project_version_id,status,attempt_count,max_attempts,available_at,created_at,updated_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT (run_id) DO NOTHING`, [job.id, job.runId, job.technicalReviewId, job.projectVersionId, job.status, job.attempts, job.maxAttempts, job.availableAt, job.createdAt, job.updatedAt, JSON.stringify(job)])
-    await this.notifyTask()
-  }
-
-  async claimTechnicalSolutionJob(workerId: string, leaseMs: number): Promise<TechnicalSolutionReviewJob | null> {
-    const runToken = crypto.randomUUID()
-    const client = await this.pool.connect()
-    try {
-      await client.query('BEGIN')
-      const expired = await client.query<{ run_id: string; status: 'queued' | 'failed' | 'cancelled'; error: string | null }>(`
-        UPDATE smarthub.technical_solution_review_jobs SET
-          status=CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' WHEN attempt_count>=max_attempts THEN 'failed' ELSE 'queued' END,
-          available_at=CASE WHEN cancel_requested_at IS NULL AND attempt_count<max_attempts THEN now() ELSE available_at END,
-          finished_at=CASE WHEN cancel_requested_at IS NULL AND attempt_count<max_attempts THEN NULL ELSE now() END,
-          updated_at=now(), lease_owner=NULL, run_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL,
-          error=CASE WHEN cancel_requested_at IS NOT NULL THEN '用户已取消技术方案评审' WHEN attempt_count>=max_attempts THEN 'TECH_JOB_LEASE_EXHAUSTED' ELSE error END
-        WHERE status='running' AND lease_expires_at<now() RETURNING run_id,status,error
-      `)
-      for (const row of expired.rows) await client.query(`UPDATE smarthub.technical_solution_review_runs SET status=CASE WHEN $2='queued' THEN 'queued' ELSE $2 END, step=CASE WHEN $2='queued' THEN 'waiting_worker' ELSE $2 END, finished_at=CASE WHEN $2='queued' THEN NULL ELSE now() END, error_summary=$3, data=jsonb_set(jsonb_set(data,'{status}',to_jsonb($2::text)),'{step}',to_jsonb(CASE WHEN $2='queued' THEN 'waiting_worker' ELSE $2 END::text)) WHERE id=$1 AND status IN ('queued','running')`, [row.run_id, row.status, row.error])
-      const result = await client.query<{ data: TechnicalSolutionReviewJob; attempt_count: number }>(`
-        WITH next_job AS (SELECT id FROM smarthub.technical_solution_review_jobs WHERE status='queued' AND available_at<=now() AND attempt_count<max_attempts ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-        UPDATE smarthub.technical_solution_review_jobs job SET status='running',attempt_count=attempt_count+1,lease_owner=$1,run_token=$3::uuid,lease_expires_at=now()+($2::text||' milliseconds')::interval,heartbeat_at=now(),started_at=COALESCE(started_at,now()),updated_at=now(),data=jsonb_set(job.data,'{status}',to_jsonb('running'::text)) FROM next_job WHERE job.id=next_job.id RETURNING job.data,job.attempt_count
-      `, [workerId, Math.max(1_000, leaseMs), runToken])
-      await client.query('COMMIT')
-      const claimed = result.rows[0]
-      return claimed ? { ...claimed.data, status: 'running', attempts: Number(claimed.attempt_count), leaseOwner: workerId, runToken } : null
-    } catch (error) { await client.query('ROLLBACK'); throw error }
-    finally { client.release() }
-  }
-
-  async heartbeatTechnicalSolutionJob(runId: string, lease: TaskLease, leaseMs: number) {
-    const result = await this.pool.query(`UPDATE smarthub.technical_solution_review_jobs SET lease_expires_at=now()+($4::text||' milliseconds')::interval,heartbeat_at=now(),updated_at=now() WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL`, [runId, lease.workerId, lease.runToken, Math.max(1_000, leaseMs)])
-    return result.rowCount === 1
-  }
-
-  async finishTechnicalSolutionJob(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string) {
-    const result = await this.pool.query(`UPDATE smarthub.technical_solution_review_jobs SET status=$4,finished_at=now(),updated_at=now(),error=$5,lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,data=jsonb_set(data,'{status}',to_jsonb($4::text)) WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now()`, [runId, lease.workerId, lease.runToken, status, error ?? null])
-    return result.rowCount === 1
-  }
-
-  async releaseTechnicalSolutionJob(runId: string, lease: TaskLease, retryDelayMs: number, error: string) {
-    const result = await this.pool.query(`WITH released AS (
-      UPDATE smarthub.technical_solution_review_jobs
-      SET status='queued',available_at=now()+($4::text||' milliseconds')::interval,updated_at=now(),error=$5,lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,data=jsonb_set(data,'{status}',to_jsonb('queued'::text))
-      WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL AND attempt_count<max_attempts
-      RETURNING run_id
-    )
-    UPDATE smarthub.technical_solution_review_runs run
-    SET status='queued',step='waiting_worker',finished_at=NULL,error_code=NULL,error_summary=NULL,
-      data=jsonb_set(jsonb_set(run.data - 'finishedAt' - 'errorCode' - 'error','{status}',to_jsonb('queued'::text)),'{step}',to_jsonb('waiting_worker'::text))
-    FROM released WHERE run.id=released.run_id`, [runId, lease.workerId, lease.runToken, Math.max(0, retryDelayMs), error])
-    return result.rowCount === 1
-  }
-
-  async cancelTechnicalSolutionJob(runId: string) {
-    const result = await this.pool.query(`UPDATE smarthub.technical_solution_review_jobs SET cancel_requested_at=now(),updated_at=now(),status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,finished_at=CASE WHEN status='queued' THEN now() ELSE finished_at END WHERE run_id=$1 AND status IN ('queued','running')`, [runId])
-    return Boolean(result.rowCount)
-  }
-
   async enqueueTestDesignJob(job: TestDesignJob) {
     await this.pool.query(`INSERT INTO smarthub.workflow_task_jobs (id,node_run_id,status,available_at,attempt_count,max_attempts,created_at,updated_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (node_run_id) DO UPDATE SET status='queued',available_at=EXCLUDED.available_at,attempt_count=0,max_attempts=EXCLUDED.max_attempts,updated_at=EXCLUDED.updated_at,lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,cancel_requested_at=NULL,error=NULL,data=EXCLUDED.data WHERE smarthub.workflow_task_jobs.status IN ('succeeded','failed','cancelled')`, [job.id, job.nodeRunId, job.status, job.availableAt, job.attempts, job.maxAttempts, job.createdAt, job.updatedAt, JSON.stringify(job)])
     await this.notifyTask()
@@ -799,15 +689,11 @@ export class PostgresStore implements StateStore {
     return this.runTransaction(operation, { kind: 'review', id: runId, lease })
   }
 
-  async transactionWithTechnicalSolutionLease<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
-    return this.runTransaction(operation, { kind: 'technical', id: runId, lease })
-  }
-
   async transactionWithTestDesignLease<T>(nodeRunId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
     return this.runTransaction(operation, { kind: 'test_design', id: nodeRunId, lease })
   }
 
-  private async runTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>, fencing?: { kind: 'sync' | 'review' | 'technical' | 'test_design'; id: string; lease: TaskLease }): Promise<T | null> {
+  private async runTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>, fencing?: { kind: 'sync' | 'review' | 'test_design'; id: string; lease: TaskLease }): Promise<T | null> {
     let result: T | null = null
     let failure: unknown
     this.queue = this.queue.then(async () => {
@@ -816,7 +702,7 @@ export class PostgresStore implements StateStore {
         await client.query('BEGIN')
         await client.query("SELECT pg_advisory_xact_lock(hashtext('smarthub_state'))")
         if (fencing) {
-          const table = fencing.kind === 'sync' ? 'sync_tasks' : fencing.kind === 'review' ? 'review_jobs' : fencing.kind === 'technical' ? 'technical_solution_review_jobs' : 'workflow_task_jobs'
+          const table = fencing.kind === 'sync' ? 'sync_tasks' : fencing.kind === 'review' ? 'review_jobs' : 'workflow_task_jobs'
           const key = fencing.kind === 'sync' ? 'id' : fencing.kind === 'test_design' ? 'node_run_id' : 'run_id'
           const owned = await client.query(`
             SELECT 1 FROM smarthub.${table}
@@ -831,7 +717,7 @@ export class PostgresStore implements StateStore {
         const draft = structuredClone(before)
         result = await operation(draft)
         if (fencing) {
-          const table = fencing.kind === 'sync' ? 'sync_tasks' : fencing.kind === 'review' ? 'review_jobs' : fencing.kind === 'technical' ? 'technical_solution_review_jobs' : 'workflow_task_jobs'
+          const table = fencing.kind === 'sync' ? 'sync_tasks' : fencing.kind === 'review' ? 'review_jobs' : 'workflow_task_jobs'
           const key = fencing.kind === 'sync' ? 'id' : fencing.kind === 'test_design' ? 'node_run_id' : 'run_id'
           const stillOwned = await client.query(`
             SELECT 1 FROM smarthub.${table}
@@ -865,14 +751,6 @@ export function toIsoTimestamp(value: Date | string | null | undefined) {
 type ReviewRunQueueRow = {
   data: ReviewRun
   queue_status: ReviewRunQueueState['status'] | null
-  attempt_count: number | null
-  max_attempts: number | null
-  available_at: Date | string | null
-}
-
-type TechnicalRunQueueRow = {
-  data: TechnicalSolutionReviewRun
-  queue_status: TechnicalSolutionReviewRun['status'] | null
   attempt_count: number | null
   max_attempts: number | null
   available_at: Date | string | null
@@ -913,46 +791,6 @@ function reviewRunFromQueueRow(row: ReviewRunQueueRow): ReviewRun {
       availableAt: toIsoTimestamp(row.available_at)!,
     },
   }
-}
-
-function technicalRunFromQueueRow(row: TechnicalRunQueueRow): TechnicalSolutionReviewRun {
-  if (row.queue_status == null || row.attempt_count == null || row.max_attempts == null || row.available_at == null) return row.data
-  return { ...row.data, queue: { status: row.queue_status, attempts: Number(row.attempt_count), maxAttempts: Number(row.max_attempts), availableAt: toIsoTimestamp(row.available_at)! } }
-}
-
-async function hydrateTechnicalSolutionRuns(client: Queryable, runs: TechnicalSolutionReviewRun[]) {
-  if (!runs.length) return runs
-  const runIds = runs.map(run => run.id)
-  const results = await client.query<{ run_id: string; schema_version: string; data: Pick<TechnicalSolutionFormalResult, 'summary' | 'statistics' | 'risks' | 'questions'> }>('SELECT run_id, schema_version, data FROM smarthub.technical_solution_review_results WHERE run_id = ANY($1::text[])', [runIds])
-  if (!results.rows.length) return runs
-  const coverage = await client.query<{ run_id: string; id: string; ordinal: number; data: TechnicalSolutionFormalResult['coverage'][number] }>('SELECT run_id, id, ordinal, data FROM smarthub.technical_solution_coverage WHERE run_id = ANY($1::text[]) ORDER BY run_id, ordinal, id', [runIds])
-  const findings = await client.query<{ run_id: string; id: string; ordinal: number; data: TechnicalSolutionFormalResult['findings'][number] }>('SELECT run_id, id, ordinal, data FROM smarthub.technical_solution_findings WHERE run_id = ANY($1::text[]) ORDER BY run_id, ordinal, id', [runIds])
-  const evidence = await client.query<{ run_id: string; data: TechnicalSolutionFormalResult['evidence'][number] }>('SELECT run_id, data FROM smarthub.technical_solution_evidence WHERE run_id = ANY($1::text[]) ORDER BY run_id, id', [runIds])
-  const coverageEvidence = await client.query<{ coverage_id: string; evidence_id: string }>('SELECT coverage_id, evidence_id FROM smarthub.technical_solution_coverage_evidence WHERE coverage_id = ANY($1::text[])', [coverage.rows.map(row => row.id)])
-  const findingEvidence = await client.query<{ finding_id: string; evidence_id: string }>('SELECT finding_id, evidence_id FROM smarthub.technical_solution_finding_evidence WHERE finding_id = ANY($1::text[])', [findings.rows.map(row => row.id)])
-  const findingRequirements = await client.query<{ finding_id: string; requirement_point_id: string }>('SELECT finding_id, requirement_point_id FROM smarthub.technical_solution_finding_requirements WHERE finding_id = ANY($1::text[])', [findings.rows.map(row => row.id)])
-  const resultByRun = new Map(results.rows.map(row => [row.run_id, row]))
-  const coverageEvidenceById = groupRelationIds(coverageEvidence.rows, 'coverage_id', 'evidence_id')
-  const findingEvidenceById = groupRelationIds(findingEvidence.rows, 'finding_id', 'evidence_id')
-  const findingRequirementsById = groupRelationIds(findingRequirements.rows, 'finding_id', 'requirement_point_id')
-  const coverageByRun = groupRows(coverage.rows)
-  const findingsByRun = groupRows(findings.rows)
-  const evidenceByRun = groupRows(evidence.rows)
-  return runs.map(run => {
-    const formal = resultByRun.get(run.id)
-    if (!formal) return run
-    const result: TechnicalSolutionFormalResult = {
-      schemaVersion: formal.schema_version as TechnicalSolutionFormalResult['schemaVersion'],
-      summary: formal.data.summary,
-      statistics: formal.data.statistics,
-      risks: formal.data.risks,
-      questions: formal.data.questions,
-      coverage: (coverageByRun.get(run.id) ?? []).map(row => ({ ...row.data, evidenceIds: coverageEvidenceById.get(row.id) ?? [] })),
-      findings: (findingsByRun.get(run.id) ?? []).map(row => ({ ...row.data, requirementPointIds: findingRequirementsById.get(row.id) ?? [], evidenceIds: findingEvidenceById.get(row.id) ?? [] })),
-      evidence: (evidenceByRun.get(run.id) ?? []).map(row => row.data),
-    }
-    return { ...run, result }
-  })
 }
 
 function groupRows<T extends { run_id: string }>(rows: T[]) {
@@ -1081,10 +919,6 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const reviewRuns = await client.query<{ data: DatabaseState['reviewRuns'][number] }>('SELECT data FROM smarthub.review_runs ORDER BY created_at DESC, id')
   const findingActions = await client.query<{ data: DatabaseState['findingActions'][number] }>('SELECT data FROM smarthub.finding_actions ORDER BY run_id, finding_id, version')
   const toolApprovals = await client.query<{ data: DatabaseState['toolApprovals'][number] }>('SELECT data FROM smarthub.tool_approvals ORDER BY requested_at, id')
-  const technicalSolutionReviews = await client.query<{ data: DatabaseState['technicalSolutionReviews'][number] }>('SELECT data FROM smarthub.technical_solution_reviews ORDER BY created_at DESC, id')
-  const technicalSolutionRunsRows = await client.query<{ data: DatabaseState['technicalSolutionRuns'][number] }>('SELECT data FROM smarthub.technical_solution_review_runs ORDER BY created_at DESC, id')
-  const technicalSolutionRuns = await hydrateTechnicalSolutionRuns(client, technicalSolutionRunsRows.rows.map(row => row.data))
-  const technicalSolutionFindingActions = await client.query<{ data: DatabaseState['technicalSolutionFindingActions'][number] }>('SELECT data FROM smarthub.technical_solution_finding_actions ORDER BY run_id, finding_id, version')
   const legacyTestDesignState = await client.query<{ data: NonNullable<DatabaseState['testDesignState']> }>("SELECT data FROM smarthub.test_design_state WHERE singleton_id='current'")
   const normalizedDesigns = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['designs'][number] }>('SELECT data FROM smarthub.test_designs ORDER BY created_at DESC, id')
   const normalizedRuns = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['runs'][number] }>("SELECT data FROM smarthub.workflow_runs WHERE domain_type='test_design' ORDER BY created_at DESC, id")
@@ -1094,22 +928,20 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const legacyDesignState = legacyTestDesignState.rows[0]?.data
   const hasAnyTestDesignState = Boolean(legacyDesignState) || (normalizedDesigns.rowCount ?? 0) > 0 || (normalizedRuns.rowCount ?? 0) > 0 || (normalizedCaseSets.rowCount ?? 0) > 0 || (normalizedSuites.rowCount ?? 0) > 0 || (normalizedHandoffs.rowCount ?? 0) > 0
   const testDesignState = hasAnyTestDesignState ? {
+    architectureVersion: 'single-agent-skills/v1' as const,
     designs: (normalizedDesigns.rowCount ?? 0) > 0 ? normalizedDesigns.rows.map(row => row.data) : legacyDesignState?.designs ?? [],
     runs: (normalizedRuns.rowCount ?? 0) > 0 ? normalizedRuns.rows.map(row => row.data) : legacyDesignState?.runs ?? [],
     caseSetVersions: (normalizedCaseSets.rowCount ?? 0) > 0 ? normalizedCaseSets.rows.map(row => row.data) : legacyDesignState?.caseSetVersions ?? [],
     suiteVersions: (normalizedSuites.rowCount ?? 0) > 0 ? normalizedSuites.rows.map(row => row.data) : legacyDesignState?.suiteVersions ?? [],
     executionHandoffs: (normalizedHandoffs.rowCount ?? 0) > 0 ? normalizedHandoffs.rows.map(row => row.data) : legacyDesignState?.executionHandoffs ?? [],
   } : undefined
-  const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data), technicalSolutionReviews: technicalSolutionReviews.rows.map(row => row.data), technicalSolutionRuns, technicalSolutionFindingActions: technicalSolutionFindingActions.rows.map(row => row.data), testDesignState }
+  const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data), testDesignState }
   normalizeReviewSeverities(state)
   return state
 }
 
 async function persistChanges(client: PoolClient, before: DatabaseState, state: DatabaseState) {
   await deleteRemovedTestDesignState(client, before, state)
-  await deleteMissing(client, 'technical_solution_finding_actions', before.technicalSolutionFindingActions, state.technicalSolutionFindingActions)
-  await deleteMissing(client, 'technical_solution_review_runs', before.technicalSolutionRuns, state.technicalSolutionRuns)
-  await deleteMissing(client, 'technical_solution_reviews', before.technicalSolutionReviews, state.technicalSolutionReviews)
   await deleteMissing(client, 'finding_actions', before.findingActions, state.findingActions)
   await deleteMissing(client, 'tool_approvals', before.toolApprovals, state.toolApprovals)
   await deleteMissing(client, 'review_runs', before.reviewRuns, state.reviewRuns)
@@ -1158,25 +990,15 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   for (const item of changed(before.reviewRuns, state.reviewRuns)) await client.query('INSERT INTO smarthub.review_runs (id, project_version_id, asset_id, asset_version_id, status, created_at, finished_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, finished_at=EXCLUDED.finished_at, data=EXCLUDED.data', [item.id, item.projectVersionId, item.assetId, item.assetVersionId, item.status, item.createdAt, item.finishedAt ?? null, JSON.stringify(item)])
   for (const item of changed(before.findingActions, state.findingActions)) await client.query('INSERT INTO smarthub.finding_actions (id, project_version_id, run_id, finding_id, version, created_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO NOTHING', [item.id, item.projectVersionId, item.runId, item.findingId, item.version, item.createdAt, JSON.stringify(item)])
   for (const item of changed(before.toolApprovals, state.toolApprovals)) await client.query('INSERT INTO smarthub.tool_approvals (id, project_version_id, run_id, tool_id, parameter_hash, status, requested_at, expires_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, expires_at=EXCLUDED.expires_at, data=EXCLUDED.data', [item.id, item.projectVersionId, item.runId, item.toolId, item.parameterHash, item.status, item.requestedAt, item.expiresAt, JSON.stringify(item)])
-  for (const item of changed(before.technicalSolutionReviews, state.technicalSolutionReviews)) {
-    await client.query('INSERT INTO smarthub.technical_solution_reviews (id,project_version_id,source_review_run_id,name,input_set_sha256,created_by,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,data=EXCLUDED.data', [item.id,item.projectVersionId,item.sourceReviewRunId,item.name,item.inputSetSha256,item.createdBy,item.createdAt,JSON.stringify(item)])
-    await client.query('DELETE FROM smarthub.technical_solution_review_inputs WHERE technical_review_id=$1', [item.id])
-    for (let ordinal=0; ordinal<item.solutionAssetVersionIds.length; ordinal += 1) await client.query('INSERT INTO smarthub.technical_solution_review_inputs (technical_review_id,project_version_id,asset_version_id,ordinal) VALUES ($1,$2,$3,$4)', [item.id,item.projectVersionId,item.solutionAssetVersionIds[ordinal],ordinal])
-  }
-  for (const item of changed(before.technicalSolutionRuns, state.technicalSolutionRuns)) {
-    await client.query('INSERT INTO smarthub.technical_solution_review_runs (id,technical_review_id,project_version_id,source_review_run_id,status,step,progress,snapshot_sha256,created_at,started_at,finished_at,error_code,error_summary,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,step=EXCLUDED.step,progress=EXCLUDED.progress,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,data=EXCLUDED.data', [item.id,item.technicalReviewId,item.projectVersionId,item.sourceReviewRunId,item.status,item.step,item.progress,item.snapshotSha256,item.createdAt,item.startedAt??null,item.finishedAt??null,item.errorCode??null,item.error??null,JSON.stringify(item)])
-    await persistTechnicalSolutionFormalResult(client, item)
-  }
-  for (const item of changed(before.technicalSolutionFindingActions, state.technicalSolutionFindingActions)) await client.query('INSERT INTO smarthub.technical_solution_finding_actions (id,project_version_id,technical_review_id,run_id,finding_id,version,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO NOTHING', [item.id,item.projectVersionId,item.technicalReviewId,item.runId,item.findingId,item.version,item.createdAt,JSON.stringify(item)])
-  for (const item of state.testDesignState?.designs ?? []) await client.query('INSERT INTO smarthub.test_designs (id,project_version_id,project_id,name,objective,basis_mode,logical_input_sha256,created_by,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,objective=EXCLUDED.objective,data=EXCLUDED.data', [item.id,item.projectVersionId,item.projectId,item.name,item.objective,item.basisMode,item.logicalInputSha256,item.createdBy,item.createdAt,JSON.stringify(item)])
+  for (const item of state.testDesignState?.designs ?? []) await client.query('INSERT INTO smarthub.test_designs (id,project_version_id,project_id,name,objective,basis_mode,logical_input_sha256,created_by,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,objective=EXCLUDED.objective,data=EXCLUDED.data', [item.id,item.projectVersionId,item.projectId,item.name,item.objective,'project_workspace',item.logicalInputSha256,item.createdBy,item.createdAt,JSON.stringify(item)])
   for (const run of state.testDesignState?.runs ?? []) {
     const design = state.testDesignState?.designs.find(item => item.id === run.testDesignId)
-    await client.query('INSERT INTO smarthub.workflow_runs (id,project_version_id,domain_type,domain_id,definition_key,definition_version,status,stage,progress,idempotency_key,input_sha256,created_by,created_at,started_at,finished_at,error_code,error_summary,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,stage=EXCLUDED.stage,progress=EXCLUDED.progress,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,data=EXCLUDED.data', [run.id,run.projectVersionId,'test_design',run.testDesignId,'test-design-workflow','1',run.status,run.stage,run.progress,run.idempotencyKey,design?.logicalInputSha256 ?? run.basisSnapshot.snapshotSha256,run.createdBy,run.createdAt,run.startedAt??null,run.finishedAt??null,run.errorCode??null,run.error??null,JSON.stringify(run)])
-    for (const item of run.nodeRuns) await client.query('INSERT INTO smarthub.workflow_node_runs (id,workflow_run_id,node_key,node_kind,generation,attempt,status,started_at,finished_at,error_code,error_summary,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) ON CONFLICT (id) DO UPDATE SET generation=EXCLUDED.generation,attempt=EXCLUDED.attempt,status=EXCLUDED.status,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,data=EXCLUDED.data', [item.id,run.id,item.nodeKey,item.nodeKey.includes('gate')?'gate':item.nodeKey==='tree_merge'||item.nodeKey==='coverage_audit'?'deterministic':'agent',item.generation,item.attempt,item.status,item.startedAt??null,item.finishedAt??null,item.errorCode??null,item.error??null,JSON.stringify(item)])
+    await client.query('INSERT INTO smarthub.workflow_runs (id,project_version_id,domain_type,domain_id,definition_key,definition_version,status,stage,progress,idempotency_key,input_sha256,created_by,created_at,started_at,finished_at,error_code,error_summary,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,stage=EXCLUDED.stage,progress=EXCLUDED.progress,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,data=EXCLUDED.data', [run.id,run.projectVersionId,'test_design',run.testDesignId,'test-design-workflow','2',run.status,run.stage,run.progress,run.idempotencyKey,design?.logicalInputSha256 ?? run.basisSnapshot.snapshotSha256,run.createdBy,run.createdAt,run.startedAt??null,run.finishedAt??null,run.errorCode??null,run.error??null,JSON.stringify(run)])
+    for (const item of run.nodeRuns) await client.query('INSERT INTO smarthub.workflow_node_runs (id,workflow_run_id,node_key,node_kind,generation,attempt,status,started_at,finished_at,error_code,error_summary,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) ON CONFLICT (id) DO UPDATE SET generation=EXCLUDED.generation,attempt=EXCLUDED.attempt,status=EXCLUDED.status,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,data=EXCLUDED.data', [item.id,run.id,item.nodeKey,item.nodeKey==='test_point_review'?'gate':item.nodeKey==='coverage_audit'?'deterministic':'agent',item.generation,item.attempt,item.status,item.startedAt??null,item.finishedAt??null,item.errorCode??null,item.error??null,JSON.stringify(item)])
   }
   if (JSON.stringify(before.testDesignState) !== JSON.stringify(state.testDesignState)) {
     await persistTestDesignNormalizedDetails(client, state)
-    await client.query("INSERT INTO smarthub.test_design_state (singleton_id, updated_at, data) VALUES ('current', now(), $1::jsonb) ON CONFLICT (singleton_id) DO UPDATE SET updated_at=EXCLUDED.updated_at, data=EXCLUDED.data", [JSON.stringify(state.testDesignState ?? { designs: [], runs: [], caseSetVersions: [], suiteVersions: [], executionHandoffs: [] })])
+    await client.query("INSERT INTO smarthub.test_design_state (singleton_id, updated_at, data) VALUES ('current', now(), $1::jsonb) ON CONFLICT (singleton_id) DO UPDATE SET updated_at=EXCLUDED.updated_at, data=EXCLUDED.data", [JSON.stringify(state.testDesignState ?? { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], suiteVersions: [], executionHandoffs: [] })])
   }
   for (const item of changed(before.indexes, state.indexes)) {
     const previous = before.indexes.find(index => index.id === item.id)
@@ -1211,7 +1033,7 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
       { kind: 'retrieval', id: `${run.id}:retrieval`, value: run.retrievalSnapshot, hash: run.retrievalSnapshot.snapshotSha256 },
       { kind: 'historical', id: `${run.id}:historical`, value: run.historicalSnapshot, hash: run.historicalSnapshot.snapshotSha256 },
     ] as const
-    await client.query('INSERT INTO smarthub.test_design_basis_snapshots (id,test_design_id,workflow_run_id,basis_mode,snapshot_sha256,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET snapshot_sha256=EXCLUDED.snapshot_sha256,data=EXCLUDED.data', [snapshots[0].id,run.testDesignId,run.id,run.basisSnapshot.basisMode,snapshots[0].hash,run.basisSnapshot.createdAt,JSON.stringify(run.basisSnapshot)])
+    await client.query('INSERT INTO smarthub.test_design_basis_snapshots (id,test_design_id,workflow_run_id,basis_mode,snapshot_sha256,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET snapshot_sha256=EXCLUDED.snapshot_sha256,data=EXCLUDED.data', [snapshots[0].id,run.testDesignId,run.id,'project_workspace',snapshots[0].hash,run.basisSnapshot.createdAt,JSON.stringify(run.basisSnapshot)])
     await client.query('INSERT INTO smarthub.test_design_retrieval_snapshots (id,workflow_run_id,mode,snapshot_sha256,created_at,data) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET snapshot_sha256=EXCLUDED.snapshot_sha256,data=EXCLUDED.data', [snapshots[1].id,run.id,run.retrievalSnapshot.mode,snapshots[1].hash,run.retrievalSnapshot.createdAt,JSON.stringify(run.retrievalSnapshot)])
     await client.query('INSERT INTO smarthub.test_design_historical_case_snapshots (id,workflow_run_id,snapshot_sha256,created_at,data) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (id) DO UPDATE SET snapshot_sha256=EXCLUDED.snapshot_sha256,data=EXCLUDED.data', [snapshots[2].id,run.id,snapshots[2].hash,run.historicalSnapshot.createdAt,JSON.stringify(run.historicalSnapshot)])
     const snapshotItems = [
@@ -1289,7 +1111,7 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
 async function deleteRemovedTestDesignState(client: PoolClient, before: DatabaseState, state: DatabaseState) {
   const previous = before.testDesignState
   if (!previous) return
-  const current = state.testDesignState ?? { designs: [], runs: [], caseSetVersions: [], suiteVersions: [], executionHandoffs: [] }
+  const current = state.testDesignState ?? { architectureVersion: 'single-agent-skills/v1' as const, designs: [], runs: [], caseSetVersions: [], suiteVersions: [], executionHandoffs: [] }
   const removedHandoffs = previous.executionHandoffs.filter(item => !current.executionHandoffs.some(candidate => candidate.id === item.id)).map(item => item.id)
   if (removedHandoffs.length) await client.query('DELETE FROM smarthub.test_execution_handoffs WHERE id = ANY($1::text[])', [removedHandoffs])
   const removedCaseSets = previous.caseSetVersions.filter(item => !current.caseSetVersions.some(candidate => candidate.id === item.id)).map(item => item.id)
@@ -1326,30 +1148,6 @@ async function persistTestPointTree(client: PoolClient, run: NonNullable<Databas
     for (const node of revision.nodes) await client.query('INSERT INTO smarthub.test_point_node_revisions (tree_revision_id,node_id,parent_id,sort_key,data) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (tree_revision_id,node_id) DO UPDATE SET parent_id=EXCLUDED.parent_id,sort_key=EXCLUDED.sort_key,data=EXCLUDED.data', [revisionId,node.nodeId,node.parentId,node.sortKey,JSON.stringify(node)])
   }
   for (const version of tree.versions) await client.query('INSERT INTO smarthub.test_point_tree_versions (id,tree_id,version,revision,tree_sha256,approved_by,approved_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET tree_sha256=EXCLUDED.tree_sha256,data=EXCLUDED.data', [version.id,tree.id,version.version,version.revision,version.treeSha256,version.approvedBy,version.approvedAt,JSON.stringify(version)])
-}
-
-async function persistTechnicalSolutionFormalResult(client: PoolClient, run: TechnicalSolutionReviewRun) {
-  await client.query('DELETE FROM smarthub.technical_solution_review_results WHERE run_id=$1', [run.id])
-  await client.query('DELETE FROM smarthub.technical_solution_coverage WHERE run_id=$1', [run.id])
-  await client.query('DELETE FROM smarthub.technical_solution_findings WHERE run_id=$1', [run.id])
-  await client.query('DELETE FROM smarthub.technical_solution_evidence WHERE run_id=$1', [run.id])
-  if (!run.result || run.status !== 'succeeded') return
-  const result = run.result
-  const publishedAt = run.finishedAt ?? new Date().toISOString()
-  const candidateSha256 = createHash('sha256').update(JSON.stringify(result)).digest('hex')
-  await client.query('INSERT INTO smarthub.technical_solution_review_results (run_id,schema_version,candidate_sha256,published_at,data) VALUES ($1,$2,$3,$4,$5::jsonb)', [run.id,result.schemaVersion,candidateSha256,publishedAt,JSON.stringify({ summary: result.summary, statistics: result.statistics, risks: result.risks, questions: result.questions })])
-  for (const evidence of result.evidence) await client.query('INSERT INTO smarthub.technical_solution_evidence (id,run_id,source_kind,asset_id,asset_version_id,chunk_id,content_sha256,start_line,end_line,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)', [evidence.id,run.id,evidence.sourceKind,evidence.assetId,evidence.assetVersionId,evidence.chunkId,evidence.contentSha256,evidence.startLine,evidence.endLine,JSON.stringify(evidence)])
-  for (let ordinal = 0; ordinal < result.coverage.length; ordinal += 1) {
-    const coverage = result.coverage[ordinal]
-    await client.query('INSERT INTO smarthub.technical_solution_coverage (id,run_id,requirement_point_id,status,ordinal,data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [coverage.id,run.id,coverage.requirementPointId,coverage.status,ordinal,JSON.stringify(coverage)])
-    for (const evidenceId of coverage.evidenceIds) await client.query('INSERT INTO smarthub.technical_solution_coverage_evidence (coverage_id,evidence_id) VALUES ($1,$2)', [coverage.id,evidenceId])
-  }
-  for (let ordinal = 0; ordinal < result.findings.length; ordinal += 1) {
-    const finding = result.findings[ordinal]
-    await client.query('INSERT INTO smarthub.technical_solution_findings (id,run_id,finding_type,severity,confidence,ordinal,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [finding.id,run.id,finding.type,finding.severity,finding.confidence,ordinal,JSON.stringify(finding)])
-    for (const requirementPointId of finding.requirementPointIds) await client.query('INSERT INTO smarthub.technical_solution_finding_requirements (finding_id,requirement_point_id) VALUES ($1,$2)', [finding.id,requirementPointId])
-    for (const evidenceId of finding.evidenceIds) await client.query('INSERT INTO smarthub.technical_solution_finding_evidence (finding_id,evidence_id) VALUES ($1,$2)', [finding.id,evidenceId])
-  }
 }
 
 async function insertChunk(client: PoolClient, table: 'asset_chunks' | 'index_chunks', ownerId: string, chunk: Chunk | IndexChunk) {

@@ -186,7 +186,7 @@ export interface RequirementAnalysisResult extends CandidateRequirementPointExtr
 export interface CandidateReviewResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
 }
 
-export type AgentCandidateResult = CandidateRequirementAnalysisV1 | RequirementAnalysisResult | CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementPointExtractionV4 | CandidateRequirementPointExtractionV5 | CandidateRequirementReview | CandidateRequirementReviewV3 | import('./technical-solution-types.js').TechnicalSolutionExtractionResult | import('./technical-solution-types.js').TechnicalSolutionFormalResult
+export type AgentCandidateResult = CandidateRequirementAnalysisV1 | RequirementAnalysisResult | CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementPointExtractionV4 | CandidateRequirementPointExtractionV5 | CandidateRequirementReview | CandidateRequirementReviewV3
 
 export interface ValidationIssue { path: string; message: string }
 export interface ValidationReport { valid: boolean; issues: ValidationIssue[] }

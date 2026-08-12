@@ -2,7 +2,6 @@ import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
-import type { TechnicalSolutionReview, TechnicalSolutionReviewJob, TechnicalSolutionReviewRun } from '../domain/technical-solution-types.js'
 
 export interface TaskLease { workerId: string; runToken: string }
 export interface ReviewJob {
@@ -67,7 +66,7 @@ export type DefaultKnowledgeBase = {
   knowledgeBase: DatabaseState['knowledgeBases'][number]
 }
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [], technicalSolutionReviews: [], technicalSolutionRuns: [], technicalSolutionFindingActions: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -107,18 +106,6 @@ export interface StateStore {
   releaseReviewJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
   cancelReviewJob?(runId: string): Promise<boolean>
   transactionWithReviewLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
-  loadTechnicalSolutionInputState?(projectVersionId: string): Promise<Pick<DatabaseState, 'projects' | 'projectVersions' | 'knowledgeBases' | 'assets' | 'versions' | 'indexes' | 'reviewRuns' | 'findingActions'>>
-  listTechnicalSolutionReviews?(projectVersionId: string): Promise<TechnicalSolutionReview[]>
-  getTechnicalSolutionReview?(technicalReviewId: string): Promise<TechnicalSolutionReview | null>
-  listTechnicalSolutionRuns?(projectVersionId: string, technicalReviewId?: string): Promise<TechnicalSolutionReviewRun[]>
-  getTechnicalSolutionRun?(runId: string): Promise<TechnicalSolutionReviewRun | null>
-  enqueueTechnicalSolutionJob?(job: TechnicalSolutionReviewJob): Promise<void>
-  claimTechnicalSolutionJob?(workerId: string, leaseMs: number): Promise<TechnicalSolutionReviewJob | null>
-  heartbeatTechnicalSolutionJob?(runId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
-  finishTechnicalSolutionJob?(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
-  releaseTechnicalSolutionJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
-  cancelTechnicalSolutionJob?(runId: string): Promise<boolean>
-  transactionWithTechnicalSolutionLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   enqueueTestDesignJob?(job: TestDesignJob): Promise<void>
   claimTestDesignJob?(workerId: string, leaseMs: number): Promise<TestDesignJob | null>
   heartbeatTestDesignJob?(nodeRunId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
@@ -156,9 +143,9 @@ export class JsonStore implements StateStore {
   async load() {
     if (!this.file) return
     try {
-      const loaded = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[] }
+      const loaded = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[]; technicalSolutionReviews?: unknown[]; technicalSolutionRuns?: unknown[]; technicalSolutionFindingActions?: unknown[] }
       this.state = loaded
-      this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []; this.state.technicalSolutionReviews ??= []; this.state.technicalSolutionRuns ??= []; this.state.technicalSolutionFindingActions ??= []
+      this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []
       const retiredDataRemoved = removeRetiredAgentData(loaded)
       normalizeReviewSeverities(this.state)
       if (retiredDataRemoved) await this.transaction(() => undefined)
@@ -206,25 +193,32 @@ export class JsonStore implements StateStore {
   }
 }
 
-function removeRetiredAgentData(state: DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[] }) {
+function removeRetiredAgentData(state: DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[]; technicalSolutionReviews?: unknown[]; technicalSolutionRuns?: unknown[]; technicalSolutionFindingActions?: unknown[] }) {
   let changed = false
+  if (state.testDesignState && state.testDesignState.architectureVersion !== 'single-agent-skills/v1') { state.testDesignState = undefined; changed = true }
   if ('reviewQaSessions' in state) { delete state.reviewQaSessions; changed = true }
   if ('reviewQaTurns' in state) { delete state.reviewQaTurns; changed = true }
+  if ('technicalSolutionReviews' in state) { delete state.technicalSolutionReviews; changed = true }
+  if ('technicalSolutionRuns' in state) { delete state.technicalSolutionRuns; changed = true }
+  if ('technicalSolutionFindingActions' in state) { delete state.technicalSolutionFindingActions; changed = true }
   for (const draft of state.agentConfigurationDrafts) {
     const agents = draft.agents as unknown as Record<string, unknown>
-    for (const key of ['reviewQa', 'requirementPointExtraction', 'requirementReview']) {
+    for (const key of ['reviewQa', 'requirementPointExtraction', 'requirementReview', 'technicalSolutionExtraction', 'technicalSolutionReview', 'technicalSolutionAnalysis', 'testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis']) {
       if (key in agents) { delete agents[key]; changed = true }
     }
   }
   const versions = state.agentConfigurationVersions.filter(item => {
     const legacy = item as unknown as { agentKey?: string; agentDefinition?: { agentKey?: string }; agentDefinitions?: Record<string, unknown> }
-    return !['reviewQa', 'requirementPointExtraction', 'requirementReview'].includes(legacy.agentKey ?? '')
-      && !['review-qa', 'requirement-point-extraction', 'requirement-review'].includes(legacy.agentDefinition?.agentKey ?? '')
+    return !['reviewQa', 'requirementPointExtraction', 'requirementReview', 'technicalSolutionExtraction', 'technicalSolutionReview', 'technicalSolutionAnalysis', 'testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'].includes(legacy.agentKey ?? '')
+      && !['review-qa', 'requirement-point-extraction', 'requirement-review', 'technical-solution-analysis', 'technical-solution-extraction', 'technical-solution-review', 'test-analysis', 'functional-test-design', 'non-functional-test-design', 'test-case-synthesis'].includes(legacy.agentDefinition?.agentKey ?? '')
       && !legacy.agentDefinitions?.requirementPointExtraction
       && !legacy.agentDefinitions?.requirementReview
+      && !legacy.agentDefinitions?.technicalSolutionExtraction
+      && !legacy.agentDefinitions?.technicalSolutionReview
+      && !legacy.agentDefinitions?.technicalSolutionAnalysis
   })
   if (versions.length !== state.agentConfigurationVersions.length) { state.agentConfigurationVersions = versions; changed = true }
-  const resources = state.aiResources.filter(item => !['review.answer_submit', 'requirement-points.submit_result', 'review.submit_result'].includes(item.key))
+  const resources = state.aiResources.filter(item => !['review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result'].includes(item.key))
   if (resources.length !== state.aiResources.length) { state.aiResources = resources; changed = true }
   return changed
 }

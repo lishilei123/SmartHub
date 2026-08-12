@@ -7,15 +7,15 @@ import { ToolRegistry } from '../server/tools/registry.js'
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
 test('checked-in built-in Tool config includes the unified requirement-analysis submission tool', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 20)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 18)
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 15)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 13)
   assert.ok(!defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).includes('skill.execute_script'))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.list_directory').piName, 'ls')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('skill.http_request').piName, 'skill_http_request')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('skill.activate').piName, 'skill_activate')
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_case_synthesis.submit_result').piName, 'test_case_synthesis_submit_result')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
 })
 
@@ -31,37 +31,26 @@ test('resolver copies outputs and descriptors register through the governed regi
 })
 
 test('测试点提交工具向模型声明完整临时引用和节点字段', () => {
-  for (const key of ['functional_test_design.submit_result', 'non_functional_test_design.submit_result']) {
-    const schema = defaultBuiltInToolConfigResolver.toDescriptor(key).parameters as unknown as { additionalProperties: boolean; properties: { nodes: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } } }
-    assert.equal(schema.additionalProperties, false)
-    assert.equal(schema.properties.nodes.items.additionalProperties, false)
-    assert.ok(schema.properties.nodes.items.required.includes('ref'))
-    assert.ok(schema.properties.nodes.items.required.includes('basisRefs'))
-    assert.ok('parentRef' in schema.properties.nodes.items.properties)
-  }
-  const nonFunctional = defaultBuiltInToolConfigResolver.toDescriptor('non_functional_test_design.submit_result')
-  assert.equal(nonFunctional.version, '1.2.0')
-  assert.match(nonFunctional.description, /同一个 nodes 数组/u)
-})
-
-test('测试分析提交工具声明可展示的闭合结果结构', () => {
-  const descriptor = defaultBuiltInToolConfigResolver.toDescriptor('test_analysis.submit_result')
+  const descriptor = defaultBuiltInToolConfigResolver.toDescriptor('test_design_points.submit_result')
   const schema = descriptor.parameters as unknown as {
     additionalProperties: boolean
     required: string[]
-    properties: { coverageUnits: { minItems: number; items: { additionalProperties: boolean; required: string[] } } }
+    properties: { nodes: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
   }
-  assert.equal(descriptor.version, '1.1.0')
+  assert.equal(descriptor.version, '1.0.0')
   assert.equal(schema.additionalProperties, false)
-  assert.deepEqual(schema.required, ['schemaVersion', 'scope', 'coverageUnits', 'findings', 'confirmationItems'])
-  assert.equal(schema.properties.coverageUnits.minItems, 1)
-  assert.equal(schema.properties.coverageUnits.items.additionalProperties, false)
-  assert.ok(schema.properties.coverageUnits.items.required.includes('basisRefs'))
-  assert.ok(schema.properties.coverageUnits.items.required.includes('oracles'))
+  assert.deepEqual(schema.required, ['schemaVersion', 'nodes', 'findings', 'confirmationItems'])
+  assert.equal(schema.properties.nodes.minItems, 1)
+  assert.equal(schema.properties.nodes.items.additionalProperties, false)
+  assert.ok(schema.properties.nodes.items.required.includes('ref'))
+  assert.ok(schema.properties.nodes.items.required.includes('basisRefs'))
+  assert.ok(schema.properties.nodes.items.required.includes('entryMethods'))
+  assert.ok('parentRef' in schema.properties.nodes.items.properties)
 })
 
-test('测试用例综合工具声明闭合的 test-case/v1 层级', () => {
-  const schema = defaultBuiltInToolConfigResolver.toDescriptor('test_case_synthesis.submit_result').parameters as unknown as {
+test('测试用例与修复提交工具声明闭合的 test-case/v1 层级', () => {
+  for (const toolId of ['test_design_cases.submit_result', 'test_design_repair.submit_result']) {
+  const schema = defaultBuiltInToolConfigResolver.toDescriptor(toolId).parameters as unknown as {
     additionalProperties: boolean
     properties: {
       cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
@@ -78,19 +67,9 @@ test('测试用例综合工具声明闭合的 test-case/v1 层级', () => {
   assert.ok(!('preConditions' in caseSchema.properties))
   assert.ok(!('steps' in caseSchema.properties))
   assert.equal(dataSchema.additionalProperties, false)
-  assert.ok(dataSchema.required.includes('caseIndexes'))
-  assert.match(dataSchema.properties.fieldConstraints.description ?? '', /noProductionData.*字符串/u)
-})
-
-test('legacy technical-review descriptor remains v1 while the default descriptor remains v2', () => {
-  const legacy = defaultBuiltInToolConfigResolver.toDescriptor('technical_solution_review.submit_result', 'legacy-candidate').parameters as unknown as { properties: Record<string, unknown>; required: string[] }
-  const current = defaultBuiltInToolConfigResolver.toDescriptor('technical_solution_review.submit_result').parameters as unknown as { properties: Record<string, unknown>; required: string[] }
-  assert.equal((legacy.properties.schemaVersion as { const: string }).const, 'technical-solution-review/v1')
-  assert.equal((current.properties.schemaVersion as { const: string }).const, 'technical-solution-review/v2')
-  assert.ok('coverageCandidates' in legacy.properties)
-  assert.ok('coverage' in current.properties)
-  assert.deepEqual((legacy.properties.summary as { additionalProperties: boolean }).additionalProperties, false)
-  assert.deepEqual((legacy.properties.findings as { items: { additionalProperties: boolean } }).items.additionalProperties, false)
+  assert.ok(dataSchema.required.includes('caseRefs'))
+  assert.ok(dataSchema.required.includes('fieldConstraints'))
+  }
 })
 
 test('configuration validation rejects unsafe paths, unknown handlers, duplicate Pi names, and privileged variants', () => {
@@ -107,10 +86,16 @@ test('configuration validation rejects unsafe paths, unknown handlers, duplicate
   assert.throws(() => validateBuiltInToolConfig(duplicatePiName), /piName/u)
 
   const privilegedVariant = cloneConfig()
-  privilegedVariant.tools['technical_solution_review.submit_result'].variants!['legacy-candidate'] = {
-    ...privilegedVariant.tools['technical_solution_review.submit_result'].variants!['legacy-candidate'],
-    piName: 'other_name',
-  } as never
+  privilegedVariant.tools['knowledge.search'].variants = {
+    unsafe: {
+      ...privilegedVariant.tools['knowledge.search'],
+      version: '2.0.0',
+      label: 'unsafe',
+      description: 'unsafe',
+      parameters: privilegedVariant.tools['knowledge.search'].parameters,
+      piName: 'other_name',
+    },
+  }
   assert.throws(() => validateBuiltInToolConfig(privilegedVariant), /不允许/u)
 })
 

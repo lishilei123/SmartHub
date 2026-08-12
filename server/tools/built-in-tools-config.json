@@ -18,11 +18,28 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "相对于 /workspace 的文件路径。" },
-          "offset": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "从第几行开始读取，1 开始。" },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "本次最多读取多少行。" }
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "相对于 /workspace 的文件路径。"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000000,
+            "description": "从第几行开始读取，1 开始。"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "description": "本次最多读取多少行。"
+          }
         },
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false
       }
     },
@@ -42,15 +59,41 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "pattern": { "type": "string", "minLength": 1, "maxLength": 1000 },
-          "path": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "glob": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "ignoreCase": { "type": "boolean" },
-          "literal": { "type": "boolean" },
-          "context": { "type": "integer", "minimum": 0, "maximum": 20 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          "pattern": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "glob": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "ignoreCase": {
+            "type": "boolean"
+          },
+          "literal": {
+            "type": "boolean"
+          },
+          "context": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          }
         },
-        "required": ["pattern"],
+        "required": [
+          "pattern"
+        ],
         "additionalProperties": false
       }
     },
@@ -70,11 +113,25 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "pattern": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "path": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 2000 }
+          "pattern": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000
+          }
         },
-        "required": ["pattern"],
+        "required": [
+          "pattern"
+        ],
         "additionalProperties": false
       }
     },
@@ -94,8 +151,16 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 2000 }
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000
+          }
         },
         "additionalProperties": false
       }
@@ -116,10 +181,20 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "query": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 20 }
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
         },
-        "required": ["query"],
+        "required": [
+          "query"
+        ],
         "additionalProperties": false
       }
     },
@@ -140,9 +215,15 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "chunkId": { "type": "string", "minLength": 1, "maxLength": 200 }
+          "chunkId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
         },
-        "required": ["chunkId"],
+        "required": [
+          "chunkId"
+        ],
         "additionalProperties": false
       }
     },
@@ -162,8 +243,14 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": { "const": "requirement-repair/v1" },
-          "summary": { "type": "string", "minLength": 1, "maxLength": 12000 },
+          "schemaVersion": {
+            "const": "requirement-repair/v1"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 12000
+          },
           "patches": {
             "type": "array",
             "minItems": 1,
@@ -171,18 +258,53 @@
             "items": {
               "type": "object",
               "properties": {
-                "assetVersionId": { "type": "string", "minLength": 1, "maxLength": 200 },
-                "before": { "type": "string", "minLength": 1, "maxLength": 50000 },
-                "after": { "type": "string", "minLength": 1, "maxLength": 50000 },
-                "reason": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "findingRefs": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
+                "assetVersionId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "before": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 50000
+                },
+                "after": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 50000
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "findingRefs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 50,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
               },
-              "required": ["assetVersionId", "before", "after", "reason", "findingRefs"],
+              "required": [
+                "assetVersionId",
+                "before",
+                "after",
+                "reason",
+                "findingRefs"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["schemaVersion", "summary", "patches"],
+        "required": [
+          "schemaVersion",
+          "summary",
+          "patches"
+        ],
         "additionalProperties": false
       }
     },
@@ -202,11 +324,30 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": { "const": "requirement-release-candidate/v1" },
-          "sourceAssetVersionIds": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
-          "refinedRequirementsMarkdown": { "type": "string", "minLength": 1, "maxLength": 1000000 }
+          "schemaVersion": {
+            "const": "requirement-release-candidate/v1"
+          },
+          "sourceAssetVersionIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "refinedRequirementsMarkdown": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000000
+          }
         },
-        "required": ["schemaVersion", "sourceAssetVersionIds", "refinedRequirementsMarkdown"],
+        "required": [
+          "schemaVersion",
+          "sourceAssetVersionIds",
+          "refinedRequirementsMarkdown"
+        ],
         "additionalProperties": false
       }
     },
@@ -227,9 +368,16 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "skillKey": { "type": "string", "minLength": 1, "maxLength": 200, "description": "必须来自当前 Stage 暴露的 Skill Catalog。" }
+          "skillKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "必须来自当前 Stage 暴露的 Skill Catalog。"
+          }
         },
-        "required": ["skillKey"],
+        "required": [
+          "skillKey"
+        ],
         "additionalProperties": false
       }
     },
@@ -252,12 +400,45 @@
           "summary": {
             "type": "object",
             "properties": {
-              "overview": { "type": "string", "maxLength": 12000 },
-              "businessGoals": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-              "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100 },
-              "score": { "type": "number" },
-              "strengths": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-              "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+              "overview": {
+                "type": "string",
+                "maxLength": 12000
+              },
+              "businessGoals": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                }
+              },
+              "overallAssessment": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "score": {
+                "type": "number"
+              },
+              "strengths": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              },
+              "risks": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              }
             },
             "additionalProperties": false
           },
@@ -267,12 +448,37 @@
             "items": {
               "type": "object",
               "properties": {
-                "id": { "type": "string", "minLength": 6, "maxLength": 32, "description": "本次提交内唯一的临时需求点 ID，格式 RP-001；Finding 和 Test Focus 使用它建立引用，正式 ID 由服务端生成。" },
-                "title": { "type": "string", "maxLength": 1000 },
-                "description": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "sourceTexts": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
+                "id": {
+                  "type": "string",
+                  "minLength": 6,
+                  "maxLength": 32,
+                  "description": "本次提交内唯一的临时需求点 ID，格式 RP-001；Finding 和 Test Focus 使用它建立引用，正式 ID 由服务端生成。"
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "sourceTexts": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "type": "string",
+                    "minLength": 4,
+                    "maxLength": 4000
+                  }
+                }
               },
-              "required": ["id", "description", "sourceTexts"],
+              "required": [
+                "id",
+                "description",
+                "sourceTexts"
+              ],
               "additionalProperties": false
             }
           },
@@ -282,16 +488,49 @@
             "items": {
               "type": "object",
               "properties": {
-                "title": { "type": "string", "maxLength": 300 },
-                "type": { "type": "string", "maxLength": 100 },
-                "severity": { "type": "string", "maxLength": 100 },
-                "confidence": { "type": "number" },
-                "requirementPointRefs": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 6, "maxLength": 32 }, "description": "单需求或跨需求问题填写一个或多个临时 RP ID；整体问题填写空数组。" },
-                "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "impact": { "type": "string", "maxLength": 4000 },
-                "suggestion": { "type": "string", "maxLength": 4000 }
+                "title": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "type": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "severity": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "confidence": {
+                  "type": "number"
+                },
+                "requirementPointRefs": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 32
+                  },
+                  "description": "单需求或跨需求问题填写一个或多个临时 RP ID；整体问题填写空数组。"
+                },
+                "analysis": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "impact": {
+                  "type": "string",
+                  "maxLength": 4000
+                },
+                "suggestion": {
+                  "type": "string",
+                  "maxLength": 4000
+                }
               },
-              "required": ["requirementPointRefs", "analysis"],
+              "required": [
+                "requirementPointRefs",
+                "analysis"
+              ],
               "additionalProperties": false
             }
           },
@@ -301,494 +540,1422 @@
             "items": {
               "type": "object",
               "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 300 },
-                "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "requirementPointRefs": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 6, "maxLength": 32 } }
-              },
-              "required": ["title", "description", "requirementPointRefs"],
-              "additionalProperties": false
-            }
-          },
-          "analysisDocument": { "type": "string", "maxLength": 200000 }
-        },
-        "required": ["summary", "requirementPoints", "findings", "testFocus"],
-        "additionalProperties": false
-      }
-    },
-    "technical_solution.input.read": {
-      "version": "1.0.0",
-      "piName": "technical_solution_input_read",
-      "label": "补读固定技术方案正文",
-      "catalogName": "读取技术方案固定输入",
-      "description": "仅按本次运行快照中的技术方案资产版本补读固定正文，不读取最新版本。",
-      "catalogDescription": "按本次运行快照读取技术方案正文批次，不访问运行外内容。",
-      "risk": "read",
-      "timeoutMs": 30000,
-      "idempotent": true,
-      "repeatPolicy": "replay_success_once",
-      "sourcePath": "server/tools/technical-solution-tools.ts",
-      "handlerKey": "technical_solution.input.read",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "assetVersionId": { "type": "string", "minLength": 1, "maxLength": 200 },
-          "chunkId": { "type": "string", "minLength": 1, "maxLength": 200 }
-        },
-        "required": ["assetVersionId"],
-        "additionalProperties": false
-      }
-    },
-    "technical_solution.evidence.preview": {
-      "version": "1.0.0",
-      "piName": "technical_solution_evidence_preview",
-      "label": "预校验技术方案原文线索",
-      "catalogName": "预览技术方案 Evidence",
-      "description": "检查逐字原文线索在固定技术方案输入中是否唯一出现；只返回候选匹配，不生成正式 Evidence。",
-      "catalogDescription": "在提交前校验需求基线或技术方案原文引用能否唯一解析。",
-      "risk": "read",
-      "timeoutMs": 30000,
-      "idempotent": true,
-      "sourcePath": "server/tools/technical-solution-tools.ts",
-      "handlerKey": "technical_solution.evidence.preview",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "sourceText": { "type": "string", "minLength": 4, "maxLength": 4000 }
-        },
-        "required": ["sourceText"],
-        "additionalProperties": false
-      }
-    },
-    "technical_solution_points.submit_result": {
-      "version": "1.0.0",
-      "piName": "technical_solution_points_submit_result",
-      "label": "提交技术方案要点",
-      "catalogName": "提交技术方案要点",
-      "description": "提交 technical-solution-extraction/v1；正式技术方案要点 ID、Evidence、引用和定位由服务端生成。",
-      "catalogDescription": "提交提取出的技术方案要点和原文线索，由服务端生成 ID 与 Evidence。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/technical-solution-tools.ts",
-      "handlerKey": "technical_solution_points.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "schemaVersion": { "const": "technical-solution-extraction/v1" },
-          "solutionPoints": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 500,
-            "items": {
-              "type": "object",
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 200 },
-                "description": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "sourceTexts": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
-              },
-              "required": ["description", "sourceTexts"],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": ["schemaVersion", "solutionPoints"],
-        "additionalProperties": false
-      }
-    },
-    "technical_solution_review.submit_result": {
-      "version": "2.0.0",
-      "piName": "technical_solution_review_submit_result",
-      "label": "提交技术方案评审结果",
-      "catalogName": "提交技术方案评审结果",
-      "description": "提交 technical-solution-review/v2；只能引用冻结需求点和冻结技术方案要点，正式 ID、Evidence 和统计由服务端生成。",
-      "catalogDescription": "引用冻结需求点和技术方案要点提交评审语义，由服务端生成 ID、Evidence、覆盖关系和统计。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/technical-solution-tools.ts",
-      "handlerKey": "technical_solution_review.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "schemaVersion": { "const": "technical-solution-review/v2" },
-          "summary": {
-            "type": "object",
-            "properties": {
-              "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100 },
-              "overview": { "type": "string", "minLength": 1, "maxLength": 8000 },
-              "majorGaps": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-              "majorRisks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-              "recommendedOrder": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
-            },
-            "required": ["overallAssessment", "overview", "majorGaps", "majorRisks", "recommendedOrder"],
-            "additionalProperties": false
-          },
-          "coverage": {
-            "type": "array",
-            "maxItems": 500,
-            "items": {
-              "type": "object",
-              "properties": {
-                "requirementPointRef": { "type": "string", "minLength": 1, "maxLength": 100 },
-                "status": { "type": "string", "minLength": 1, "maxLength": 100 },
-                "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
-              },
-              "required": ["requirementPointRef", "status", "analysis", "solutionPointRefs"],
-              "additionalProperties": false
-            }
-          },
-          "findings": {
-            "type": "array",
-            "maxItems": 200,
-            "items": {
-              "type": "object",
-              "properties": {
-                "type": { "type": "string", "minLength": 1, "maxLength": 100 },
-                "severity": { "type": "string", "minLength": 1, "maxLength": 100 },
-                "title": { "type": "string", "minLength": 1, "maxLength": 300 },
-                "problem": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "recommendation": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-                "requirementPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
-                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
-              },
-              "required": ["type", "severity", "title", "problem", "impact", "recommendation", "confidence", "requirementPointRefs", "solutionPointRefs"],
-              "additionalProperties": false
-            }
-          },
-          "risks": {
-            "type": "array",
-            "maxItems": 200,
-            "items": {
-              "type": "object",
-              "properties": {
-                "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "mitigation": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "requirementPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
-                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
-              },
-              "required": ["description", "impact", "mitigation", "requirementPointRefs", "solutionPointRefs"],
-              "additionalProperties": false
-            }
-          },
-          "questions": {
-            "type": "array",
-            "maxItems": 200,
-            "items": {
-              "type": "object",
-              "properties": {
-                "question": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "requirementPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
-                "solutionPointRefs": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
-              },
-              "required": ["question", "reason", "requirementPointRefs", "solutionPointRefs"],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": ["schemaVersion", "summary", "coverage", "findings", "risks", "questions"],
-        "additionalProperties": false
-      },
-      "variants": {
-        "legacy-candidate": {
-          "version": "1.0.0",
-          "label": "提交技术方案评审候选",
-          "description": "提交 technical-solution-review/v1 的语义内容和原文线索；正式 ID、Evidence、需求关系和统计由服务端生成。",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "schemaVersion": { "const": "technical-solution-review/v1" },
-              "summary": {
-                "type": "object",
-                "properties": {
-                  "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 pass、pass_with_notes、needs_revision 或 blocked；常见近义值由服务端确定性归一化。" },
-                  "overview": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                  "majorGaps": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                  "majorRisks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                  "recommendedOrder": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
                 },
-                "required": ["overallAssessment", "overview", "majorGaps", "majorRisks", "recommendedOrder"],
-                "additionalProperties": false
-              },
-              "coverageCandidates": {
-                "type": "array",
-                "maxItems": 500,
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
-                    "status": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 covered、partially_covered、not_covered 或 needs_confirmation；常见近义值由服务端确定性归一化。" },
-                    "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
-                  },
-                  "required": ["requirementSourceTexts", "status", "analysis", "solutionSourceTexts"],
-                  "additionalProperties": false
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "requirementPointRefs": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 32
+                  }
                 }
               },
-              "findings": {
-                "type": "array",
-                "maxItems": 200,
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "type": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 requirement_coverage_gap、architecture_gap、interface_gap、data_gap、exception_gap、non_functional_gap、conflict、risk 或 other；常见近义值由服务端确定性归一化。" },
-                    "severity": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 blocker、high、medium 或 low；常见近义值由服务端确定性归一化。" },
-                    "title": { "type": "string", "minLength": 1, "maxLength": 300 },
-                    "problem": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                    "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "recommendation": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
-                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
-                  },
-                  "required": ["type", "severity", "title", "problem", "impact", "recommendation", "confidence", "requirementSourceTexts", "solutionSourceTexts"],
-                  "additionalProperties": false
-                }
-              },
-              "risks": {
-                "type": "array",
-                "maxItems": 200,
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "mitigation": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
-                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
-                  },
-                  "required": ["description", "impact", "mitigation", "requirementSourceTexts", "solutionSourceTexts"],
-                  "additionalProperties": false
-                }
-              },
-              "questions": {
-                "type": "array",
-                "maxItems": 200,
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "question": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "requirementSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } },
-                    "solutionSourceTexts": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
-                  },
-                  "required": ["question", "reason", "requirementSourceTexts", "solutionSourceTexts"],
-                  "additionalProperties": false
-                }
-              }
-            },
-            "required": ["schemaVersion", "summary", "coverageCandidates", "findings", "risks", "questions"],
-            "additionalProperties": false
+              "required": [
+                "title",
+                "description",
+                "requirementPointRefs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "analysisDocument": {
+            "type": "string",
+            "maxLength": 200000
           }
-        }
+        },
+        "required": [
+          "summary",
+          "requirementPoints",
+          "findings",
+          "testFocus"
+        ],
+        "additionalProperties": false
       }
     },
-    "test_analysis.submit_result": {
-      "version": "1.1.0",
-      "piName": "test_analysis_submit_result",
-      "label": "提交测试依据解构结果",
-      "catalogName": "提交测试依据解构结果",
-      "description": "提交 test-analysis/v1 语义候选；必须包含结构化 scope、原子 coverageUnits、findings 和 confirmationItems，正式引用、ID 和覆盖由服务端生成。",
-      "catalogDescription": "提交固定测试依据的结构化解构候选。",
+    "test_design_points.submit_result": {
+      "version": "1.0.0",
+      "piName": "test_design_points_submit_result",
+      "label": "提交测试点树候选",
+      "catalogName": "提交测试点树候选",
+      "description": "提交 test-point-design/v1 完整语义候选；正式 TP ID、Revision、Version 与 Hash 由服务端生成。",
+      "catalogDescription": "提交 test-point-design/v1 完整语义候选；正式 TP ID、Revision、Version 与 Hash 由服务端生成。",
       "risk": "internal_write",
       "timeoutMs": 30000,
       "idempotent": false,
-      "sourcePath": "server/tools/test-design-tools.ts",
-      "handlerKey": "test_analysis.submit_result",
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "test_design_points.submit_result",
       "catalogVisible": true,
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": { "const": "test-analysis/v1" },
-          "scope": {
-            "type": "object",
-            "properties": {
-              "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
-              "objectives": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-              "inclusions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-              "exclusions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
-            },
-            "required": ["summary", "objectives", "inclusions", "exclusions"],
-            "additionalProperties": false
+          "schemaVersion": {
+            "const": "test-point-design/v1"
           },
-          "coverageUnits": {
+          "nodes": {
             "type": "array",
             "minItems": 1,
             "maxItems": 1000,
             "items": {
               "type": "object",
               "properties": {
-                "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
-                "title": { "type": "string", "minLength": 1, "maxLength": 500 },
-                "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "basisRefs": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } },
-                "roles": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "preconditions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "actions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "rules": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "constraints": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "inputPartitions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "boundaryValues": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "stateTransitions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "interfaces": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "dataSideEffects": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "oracles": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "positivePaths": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "negativePaths": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "risks": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "assumptions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "本次提交内唯一临时引用，不是正式 TP ID。"
+                },
+                "parentRef": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "可选父节点临时引用。"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "objective": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "dimension": {
+                  "enum": [
+                    "functional",
+                    "performance",
+                    "stability",
+                    "compatibility",
+                    "security"
+                  ]
+                },
+                "priority": {
+                  "enum": [
+                    "P0",
+                    "P1",
+                    "P2",
+                    "P3"
+                  ]
+                },
+                "applicability": {
+                  "enum": [
+                    "applicable",
+                    "not_applicable",
+                    "blocked_by_confirmation"
+                  ]
+                },
+                "designTechniques": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "entryMethods": {
+                  "type": "array",
+                  "maxItems": 2,
+                  "items": {
+                    "enum": [
+                      "ui",
+                      "api"
+                    ]
+                  }
+                },
+                "oracle": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "dataConditions": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                },
+                "risks": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                },
+                "assumptions": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                },
+                "basisRefs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1000,
+                  "description": "必须引用冻结 Run 提供的需求依据。",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "historicalRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
               },
-              "required": ["ref", "title", "description", "basisRefs", "entryMethods", "roles", "preconditions", "actions", "rules", "constraints", "inputPartitions", "boundaryValues", "stateTransitions", "interfaces", "dataSideEffects", "oracles", "positivePaths", "negativePaths", "risks", "assumptions"],
+              "required": [
+                "ref",
+                "title",
+                "objective",
+                "dimension",
+                "priority",
+                "applicability",
+                "designTechniques",
+                "entryMethods",
+                "oracle",
+                "dataConditions",
+                "risks",
+                "assumptions",
+                "basisRefs",
+                "historicalRefs"
+              ],
               "additionalProperties": false
             }
           },
           "findings": {
             "type": "array",
             "maxItems": 500,
-            "items": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "description": { "type": "string", "minLength": 1, "maxLength": 8000 }, "severity": { "enum": ["blocker", "high", "medium", "low"] }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["title", "description", "severity", "basisRefs"], "additionalProperties": false }
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "severity": {
+                  "enum": [
+                    "blocker",
+                    "high",
+                    "medium",
+                    "low"
+                  ]
+                },
+                "basisRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              },
+              "required": [
+                "title",
+                "description",
+                "severity",
+                "basisRefs"
+              ],
+              "additionalProperties": false
+            }
           },
           "confirmationItems": {
             "type": "array",
             "maxItems": 500,
-            "items": { "type": "object", "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "question": { "type": "string", "minLength": 1, "maxLength": 8000 }, "decisionType": { "type": "string", "minLength": 1, "maxLength": 200 }, "impactStage": { "enum": ["analysis", "tree", "case", "data", "publication"] }, "affectedRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "blocker": { "type": "boolean" } }, "required": ["title", "question", "decisionType", "impactStage", "affectedRefs", "blocker"], "additionalProperties": false }
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "decisionType": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "impactStage": {
+                  "enum": [
+                    "tree",
+                    "case",
+                    "data",
+                    "publication"
+                  ]
+                },
+                "affectedRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "blocker": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "title",
+                "question",
+                "decisionType",
+                "impactStage",
+                "affectedRefs",
+                "blocker"
+              ],
+              "additionalProperties": false
+            }
           }
         },
-        "required": ["schemaVersion", "scope", "coverageUnits", "findings", "confirmationItems"],
+        "required": [
+          "schemaVersion",
+          "nodes",
+          "findings",
+          "confirmationItems"
+        ],
         "additionalProperties": false
       }
     },
-    "functional_test_design.submit_result": {
-      "version": "1.1.0",
-      "piName": "functional_test_design_submit_result",
-      "label": "提交功能测试点候选",
-      "catalogName": "提交功能测试点候选",
-      "description": "提交 functional-test-design/v1 原子测试点语义候选；先按角色、状态、输入分区/边界、业务分支和独立预期结果拆分，避免用宽泛节点压缩多个场景。正式节点 ID 和树版本由服务端生成。",
-      "catalogDescription": "提交功能测试点树候选。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/test-design-tools.ts",
-      "handlerKey": "functional_test_design.submit_result",
-      "catalogVisible": true,
-      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "功能测试点候选。ref 是本次提交内唯一的临时引用，不是正式节点 ID。", "items": { "type": "object", "properties": { "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一的临时引用。" }, "parentRef": { "type": "string", "minLength": 1, "maxLength": 200, "description": "可选父节点临时引用；根节点省略此字段。" }, "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "objective": { "type": "string", "minLength": 1, "maxLength": 2000 }, "dimension": { "enum": ["functional"] }, "priority": { "enum": ["P0", "P1", "P2", "P3"] }, "applicability": { "enum": ["applicable", "not_applicable", "blocked_by_confirmation"] }, "designTechniques": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } }, "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 }, "dataConditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "assumptions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "historicalRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["ref", "title", "objective", "dimension", "priority", "applicability", "designTechniques", "entryMethods", "oracle", "dataConditions", "risks", "assumptions", "basisRefs", "historicalRefs"], "additionalProperties": false } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": false }
-    },
-    "non_functional_test_design.submit_result": {
-      "version": "1.2.0",
-      "piName": "non_functional_test_design_submit_result",
-      "label": "提交非功能测试点候选",
-      "catalogName": "提交非功能测试点候选",
-      "description": "一次性提交 non-functional-test-design/v1 四维专项候选；性能、稳定性、兼容性和安全的全部节点必须放在同一个 nodes 数组中，不得按维度拆成多次调用。正式节点 ID 和树版本由服务端生成。",
-      "catalogDescription": "提交非功能测试点树候选。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/test-design-tools.ts",
-      "handlerKey": "non_functional_test_design.submit_result",
-      "catalogVisible": true,
-      "parameters": { "type": "object", "properties": { "schemaVersion": { "const": "non-functional-test-design/v1" }, "nodes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "非功能测试点候选。ref 是本次提交内唯一的临时引用，不是正式节点 ID。", "items": { "type": "object", "properties": { "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一的临时引用。" }, "parentRef": { "type": "string", "minLength": 1, "maxLength": 200, "description": "可选父节点临时引用；根节点省略此字段。" }, "title": { "type": "string", "minLength": 1, "maxLength": 500 }, "objective": { "type": "string", "minLength": 1, "maxLength": 2000 }, "dimension": { "enum": ["performance", "stability", "compatibility", "security"] }, "priority": { "enum": ["P0", "P1", "P2", "P3"] }, "applicability": { "enum": ["applicable", "not_applicable", "blocked_by_confirmation"] }, "designTechniques": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "entryMethods": { "type": "array", "maxItems": 2, "items": { "enum": ["ui", "api"] } }, "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 }, "dataConditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "assumptions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "basisRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }, "historicalRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } } }, "required": ["ref", "title", "objective", "dimension", "priority", "applicability", "designTechniques", "entryMethods", "oracle", "dataConditions", "risks", "assumptions", "basisRefs", "historicalRefs"], "additionalProperties": false } } }, "required": ["schemaVersion", "nodes"], "additionalProperties": false }
-    },
-    "test_case_synthesis.submit_result": {
-      "version": "1.1.0",
-      "piName": "test_case_synthesis_submit_result",
-      "label": "提交测试用例与数据需求候选",
+    "test_design_cases.submit_result": {
+      "version": "1.0.0",
+      "piName": "test_design_cases_submit_result",
+      "label": "提交测试用例候选",
       "catalogName": "提交测试用例候选",
-      "description": "提交严格的 test-case-synthesis/v1。用例共同字段位于 cases[]，步骤与逐步期望位于 executionMethods[].steps[].action/expected，UI/API 入口位于各自 Spec；数据需求位于根级 dataRequirements[]。正式 ID、revision 和关系由服务端生成。",
-      "catalogDescription": "基于批准测试点树提交结构化用例与数据需求候选。",
+      "description": "提交 test-case-design/v1 完整用例与测试数据候选；正式 ID 和 Revision 由服务端生成。",
+      "catalogDescription": "提交 test-case-design/v1 完整用例与测试数据候选；正式 ID 和 Revision 由服务端生成。",
       "risk": "internal_write",
       "timeoutMs": 30000,
       "idempotent": false,
-      "sourcePath": "server/tools/test-design-tools.ts",
-      "handlerKey": "test_case_synthesis.submit_result",
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "test_design_cases.submit_result",
       "catalogVisible": true,
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": { "const": "test-case-synthesis/v1" },
+          "schemaVersion": {
+            "const": "test-case-design/v1"
+          },
           "cases": {
             "type": "array",
             "minItems": 1,
             "maxItems": 1000,
-            "description": "批准测试点树的具象化用例。每个适用测试点必须被覆盖；角色、状态、输入分区/边界、业务分支或预期结果不同通常应拆成独立用例，不要用一条宽泛用例引用整棵子树。不要使用 preConditions、根级 steps、expectedResults、entryPoints、用例内 dataRequirements 或 testData。",
             "items": {
               "type": "object",
               "properties": {
-                "schemaVersion": { "const": "test-case/v1" },
-                "title": { "type": "string", "minLength": 1, "maxLength": 500 },
-                "objective": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
-                "testPointIds": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "只能填写批准树中提供的 nodeId。", "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "priority": { "enum": ["P0", "P1", "P2", "P3"] },
-                "preconditions": { "type": "array", "maxItems": 100, "description": "所有执行方式共享的前置条件。", "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "dataRequirementIds": { "type": "array", "maxItems": 0, "description": "综合候选中必须为空；服务端根据 dataRequirements[].caseIndexes 生成正式关联。", "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "cleanup": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "dependencies": { "type": "array", "maxItems": 1000, "description": "依赖的正式用例 ID；首次综合通常为空。", "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "本次提交内唯一临时引用，不是正式 TestCase ID。"
+                },
+                "schemaVersion": {
+                  "const": "test-case/v1"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "objective": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "dimension": {
+                  "enum": [
+                    "functional",
+                    "performance",
+                    "stability",
+                    "compatibility",
+                    "security"
+                  ]
+                },
+                "testPointIds": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "priority": {
+                  "enum": [
+                    "P0",
+                    "P1",
+                    "P2",
+                    "P3"
+                  ]
+                },
+                "preconditions": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "dataRequirementIds": {
+                  "type": "array",
+                  "maxItems": 0,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "description": "必须为空；服务端根据 dataRequirements[].caseRefs 生成。"
+                },
+                "cleanup": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "dependencies": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "description": "依赖本次提交中的 case ref。",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
                 "executionMethods": {
                   "type": "array",
                   "minItems": 1,
                   "maxItems": 2,
-                  "description": "按 method 唯一。ui 只填写 uiSpec，api 只填写 apiSpec；每个分支独立填写步骤、检查点和就绪状态。",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "method": { "enum": ["ui", "api"] },
-                      "uiSpec": { "type": "object", "properties": { "entry": { "type": "string", "minLength": 1, "maxLength": 2000 }, "viewport": { "type": "string", "maxLength": 100 }, "selectors": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 500 } } }, "required": ["entry"], "additionalProperties": false },
-                      "apiSpec": { "type": "object", "properties": { "method": { "type": "string", "minLength": 1, "maxLength": 20 }, "path": { "type": "string", "minLength": 1, "maxLength": 2000 }, "requestSchemaRef": { "type": "string", "maxLength": 500 }, "responseSchemaRef": { "type": "string", "maxLength": 500 } }, "required": ["method", "path"], "additionalProperties": false },
-                      "steps": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "object", "properties": { "key": { "type": "string", "minLength": 1, "maxLength": 500 }, "action": { "type": "string", "minLength": 1, "maxLength": 4000 }, "expected": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["key", "action", "expected"], "additionalProperties": false } },
-                      "verificationChecks": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "key": { "type": "string", "minLength": 1, "maxLength": 500 }, "description": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["key", "description"], "additionalProperties": false } },
-                      "executionReadiness": { "enum": ["ready", "blocked", "needs_confirmation"] },
-                      "automationHint": { "type": "string", "maxLength": 2000 }
+                      "method": {
+                        "enum": [
+                          "ui",
+                          "api"
+                        ]
+                      },
+                      "uiSpec": {
+                        "type": "object",
+                        "properties": {
+                          "entry": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "viewport": {
+                            "type": "string",
+                            "minLength": 0,
+                            "maxLength": 100
+                          },
+                          "selectors": {
+                            "type": "array",
+                            "maxItems": 100,
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          }
+                        },
+                        "required": [
+                          "entry"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "apiSpec": {
+                        "type": "object",
+                        "properties": {
+                          "method": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 20
+                          },
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "requestSchemaRef": {
+                            "type": "string",
+                            "minLength": 0,
+                            "maxLength": 500
+                          },
+                          "responseSchemaRef": {
+                            "type": "string",
+                            "minLength": 0,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "method",
+                          "path"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 200,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "action": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4000
+                            },
+                            "expected": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4000
+                            }
+                          },
+                          "required": [
+                            "key",
+                            "action",
+                            "expected"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "verificationChecks": {
+                        "type": "array",
+                        "maxItems": 200,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "description": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4000
+                            }
+                          },
+                          "required": [
+                            "key",
+                            "description"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "executionReadiness": {
+                        "enum": [
+                          "ready",
+                          "blocked",
+                          "needs_confirmation"
+                        ]
+                      },
+                      "automationHint": {
+                        "type": "string",
+                        "minLength": 0,
+                        "maxLength": 2000
+                      }
                     },
-                    "required": ["method", "steps", "verificationChecks", "executionReadiness", "automationHint"],
+                    "required": [
+                      "method",
+                      "steps",
+                      "verificationChecks",
+                      "executionReadiness",
+                      "automationHint"
+                    ],
                     "additionalProperties": false
                   }
                 },
-                "sharedVerificationChecks": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "key": { "type": "string", "minLength": 1, "maxLength": 500 }, "description": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["key", "description"], "additionalProperties": false } },
-                "tags": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
-                "domain": { "type": "string", "minLength": 1, "maxLength": 200 }
+                "sharedVerificationChecks": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "description"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                },
+                "domain": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
               },
-              "required": ["schemaVersion", "title", "objective", "dimension", "testPointIds", "priority", "preconditions", "dataRequirementIds", "cleanup", "dependencies", "executionMethods", "sharedVerificationChecks", "tags", "domain"],
+              "required": [
+                "ref",
+                "schemaVersion",
+                "title",
+                "objective",
+                "dimension",
+                "testPointIds",
+                "priority",
+                "preconditions",
+                "dataRequirementIds",
+                "cleanup",
+                "dependencies",
+                "executionMethods",
+                "sharedVerificationChecks",
+                "tags",
+                "domain"
+              ],
               "additionalProperties": false
             }
           },
           "dataRequirements": {
             "type": "array",
             "maxItems": 1000,
-            "description": "测试数据需求只在此根级数组提交，并通过零基 caseIndexes 关联 cases[]。",
             "items": {
               "type": "object",
               "properties": {
-                "ref": { "type": "string", "minLength": 1, "maxLength": 200, "description": "本次提交内唯一临时引用，不是正式 ID。" },
-                "name": { "type": "string", "minLength": 1, "maxLength": 500 },
-                "entityType": { "type": "string", "minLength": 1, "maxLength": 200 },
-                "featureTags": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
-                "testPointIds": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "caseIndexes": { "type": "array", "minItems": 1, "maxItems": 1000, "description": "关联 cases[] 的零基索引。", "items": { "type": "integer", "minimum": 0, "maximum": 999 } },
-                "fieldConstraints": { "type": "object", "description": "字段约束键值表。值优先使用长度不超过 2000 的非空字符串，例如 {\"noProductionData\":\"true\",\"status\":\"active\"}；服务端兼容布尔值和有限数值并规范化为字符串，不要提交对象、数组或 null。", "properties": {}, "additionalProperties": true },
-                "relationships": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
-                "quantity": { "type": "integer", "minimum": 1, "maximum": 1000000 },
-                "initialState": { "type": "string", "minLength": 1, "maxLength": 2000 },
-                "preparationHint": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "sensitivity": { "enum": ["public", "internal", "sensitive"] },
-                "isolation": { "type": "string", "minLength": 1, "maxLength": 2000 },
-                "resetAndCleanup": { "type": "string", "minLength": 1, "maxLength": 2000 },
-                "readiness": { "enum": ["ready", "blocked", "needs_confirmation"] },
-                "readinessReason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "entityType": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "featureTags": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                },
+                "testPointIds": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "caseRefs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1000,
+                  "description": "关联本次提交中的 case ref。",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "fieldConstraints": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                },
+                "relationships": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "initialState": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "preparationHint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "sensitivity": {
+                  "enum": [
+                    "public",
+                    "internal",
+                    "sensitive"
+                  ]
+                },
+                "isolation": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "resetAndCleanup": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "readiness": {
+                  "enum": [
+                    "ready",
+                    "blocked",
+                    "needs_confirmation"
+                  ]
+                },
+                "readinessReason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                }
               },
-              "required": ["ref", "name", "entityType", "featureTags", "testPointIds", "caseIndexes", "fieldConstraints", "relationships", "quantity", "initialState", "preparationHint", "sensitivity", "isolation", "resetAndCleanup", "readiness"],
+              "required": [
+                "ref",
+                "name",
+                "entityType",
+                "featureTags",
+                "testPointIds",
+                "caseRefs",
+                "fieldConstraints",
+                "relationships",
+                "quantity",
+                "initialState",
+                "preparationHint",
+                "sensitivity",
+                "isolation",
+                "resetAndCleanup",
+                "readiness"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "severity": {
+                  "enum": [
+                    "blocker",
+                    "high",
+                    "medium",
+                    "low"
+                  ]
+                },
+                "basisRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              },
+              "required": [
+                "title",
+                "description",
+                "severity",
+                "basisRefs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "confirmationItems": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "decisionType": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "impactStage": {
+                  "enum": [
+                    "tree",
+                    "case",
+                    "data",
+                    "publication"
+                  ]
+                },
+                "affectedRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "blocker": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "title",
+                "question",
+                "decisionType",
+                "impactStage",
+                "affectedRefs",
+                "blocker"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["schemaVersion", "cases", "dataRequirements"],
+        "required": [
+          "schemaVersion",
+          "cases",
+          "dataRequirements",
+          "findings",
+          "confirmationItems"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "test_design_repair.submit_result": {
+      "version": "1.0.0",
+      "piName": "test_design_repair_submit_result",
+      "label": "提交测试设计修复候选",
+      "catalogName": "提交测试设计修复候选",
+      "description": "提交 test-design-repair/v1 完整修复候选；只处理服务端标记 resolution=agent_repair 的问题。",
+      "catalogDescription": "提交 test-design-repair/v1 完整修复候选；只处理服务端标记 resolution=agent_repair 的问题。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "test_design_repair.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "const": "test-design-repair/v1"
+          },
+          "cases": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "本次提交内唯一临时引用，不是正式 TestCase ID。"
+                },
+                "schemaVersion": {
+                  "const": "test-case/v1"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "objective": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "dimension": {
+                  "enum": [
+                    "functional",
+                    "performance",
+                    "stability",
+                    "compatibility",
+                    "security"
+                  ]
+                },
+                "testPointIds": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "priority": {
+                  "enum": [
+                    "P0",
+                    "P1",
+                    "P2",
+                    "P3"
+                  ]
+                },
+                "preconditions": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "dataRequirementIds": {
+                  "type": "array",
+                  "maxItems": 0,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "description": "必须为空；服务端根据 dataRequirements[].caseRefs 生成。"
+                },
+                "cleanup": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "dependencies": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "description": "依赖本次提交中的 case ref。",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "executionMethods": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 2,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "method": {
+                        "enum": [
+                          "ui",
+                          "api"
+                        ]
+                      },
+                      "uiSpec": {
+                        "type": "object",
+                        "properties": {
+                          "entry": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "viewport": {
+                            "type": "string",
+                            "minLength": 0,
+                            "maxLength": 100
+                          },
+                          "selectors": {
+                            "type": "array",
+                            "maxItems": 100,
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          }
+                        },
+                        "required": [
+                          "entry"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "apiSpec": {
+                        "type": "object",
+                        "properties": {
+                          "method": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 20
+                          },
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "requestSchemaRef": {
+                            "type": "string",
+                            "minLength": 0,
+                            "maxLength": 500
+                          },
+                          "responseSchemaRef": {
+                            "type": "string",
+                            "minLength": 0,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "method",
+                          "path"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 200,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "action": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4000
+                            },
+                            "expected": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4000
+                            }
+                          },
+                          "required": [
+                            "key",
+                            "action",
+                            "expected"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "verificationChecks": {
+                        "type": "array",
+                        "maxItems": 200,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            },
+                            "description": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4000
+                            }
+                          },
+                          "required": [
+                            "key",
+                            "description"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "executionReadiness": {
+                        "enum": [
+                          "ready",
+                          "blocked",
+                          "needs_confirmation"
+                        ]
+                      },
+                      "automationHint": {
+                        "type": "string",
+                        "minLength": 0,
+                        "maxLength": 2000
+                      }
+                    },
+                    "required": [
+                      "method",
+                      "steps",
+                      "verificationChecks",
+                      "executionReadiness",
+                      "automationHint"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "sharedVerificationChecks": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "description"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                },
+                "domain": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "ref",
+                "schemaVersion",
+                "title",
+                "objective",
+                "dimension",
+                "testPointIds",
+                "priority",
+                "preconditions",
+                "dataRequirementIds",
+                "cleanup",
+                "dependencies",
+                "executionMethods",
+                "sharedVerificationChecks",
+                "tags",
+                "domain"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "dataRequirements": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "entityType": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "featureTags": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                },
+                "testPointIds": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "caseRefs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1000,
+                  "description": "关联本次提交中的 case ref。",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "fieldConstraints": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                },
+                "relationships": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "initialState": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "preparationHint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "sensitivity": {
+                  "enum": [
+                    "public",
+                    "internal",
+                    "sensitive"
+                  ]
+                },
+                "isolation": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "resetAndCleanup": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "readiness": {
+                  "enum": [
+                    "ready",
+                    "blocked",
+                    "needs_confirmation"
+                  ]
+                },
+                "readinessReason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "ref",
+                "name",
+                "entityType",
+                "featureTags",
+                "testPointIds",
+                "caseRefs",
+                "fieldConstraints",
+                "relationships",
+                "quantity",
+                "initialState",
+                "preparationHint",
+                "sensitivity",
+                "isolation",
+                "resetAndCleanup",
+                "readiness"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "severity": {
+                  "enum": [
+                    "blocker",
+                    "high",
+                    "medium",
+                    "low"
+                  ]
+                },
+                "basisRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              },
+              "required": [
+                "title",
+                "description",
+                "severity",
+                "basisRefs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "confirmationItems": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "decisionType": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "impactStage": {
+                  "enum": [
+                    "tree",
+                    "case",
+                    "data",
+                    "publication"
+                  ]
+                },
+                "affectedRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "blocker": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "title",
+                "question",
+                "decisionType",
+                "impactStage",
+                "affectedRefs",
+                "blocker"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "cases",
+          "dataRequirements",
+          "findings",
+          "confirmationItems"
+        ],
         "additionalProperties": false
       }
     },
@@ -808,11 +1975,28 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "skillKey": { "type": "string", "minLength": 1, "maxLength": 100 },
-          "script": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "args": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 500 } }
+          "skillKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "script": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "args": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "maxLength": 500
+            }
+          }
         },
-        "required": ["script"],
+        "required": [
+          "script"
+        ],
         "additionalProperties": false
       }
     },
@@ -832,11 +2016,27 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "skillKey": { "type": "string", "minLength": 1, "maxLength": 100 },
-          "url": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "method": { "enum": ["GET", "HEAD"] }
+          "skillKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "HEAD"
+            ]
+          }
         },
-        "required": ["skillKey", "url"],
+        "required": [
+          "skillKey",
+          "url"
+        ],
         "additionalProperties": false
       }
     }

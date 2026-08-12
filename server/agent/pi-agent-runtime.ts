@@ -12,16 +12,10 @@ import type { StateStore } from '../infrastructure/store.js'
 import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { AgentCapabilityLoader } from '../tools/capability-loader.js'
-import { defaultTokenCodec } from '../application/content.js'
 import { createWorkspaceAgentToolRegistry } from '../tools/requirement-tools.js'
-import { createTechnicalSolutionExtractionToolRegistry, createTechnicalSolutionReviewToolRegistry } from '../tools/technical-solution-tools.js'
-import { createTestDesignToolRegistry } from '../tools/test-design-tools.js'
 import { RequirementDocumentWorkspace } from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
-import { renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
-import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
-import { executableTestPointIds, TestDesignError, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
 
 const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -43,27 +37,6 @@ type SubmissionBatchState = {
   callCountByPrimaryId: Map<string, number>
 }
 
-export function coalesceNonFunctionalSubmission(message: unknown, submitPiName: string, schemaVersion: string) {
-  const content = asRecord(message).content
-  if (!Array.isArray(content)) return undefined
-  const calls = content.flatMap(block => {
-    const value = asRecord(block)
-    return value.type === 'toolCall' && value.name === submitPiName && typeof value.id === 'string' ? [value] : []
-  })
-  if (calls.length < 2) return undefined
-  const nodes = calls.flatMap(call => {
-    const argumentsValue = asRecord(call.arguments)
-    return Array.isArray(argumentsValue.nodes) ? argumentsValue.nodes : []
-  })
-  if (!nodes.length) return undefined
-  return {
-    primaryToolCallId: calls[0].id as string,
-    redundantToolCallIds: calls.slice(1).map(call => call.id as string),
-    arguments: { schemaVersion, nodes },
-    callCount: calls.length,
-  }
-}
-
 export class PiAgentRuntimeAdapter implements AgentRuntime {
   constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore, private readonly approvalGate?: ToolApprovalGate) {}
 
@@ -71,73 +44,33 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let candidate: AgentCandidateResult | Record<string, unknown> | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     const stage = stageConfiguration(input)
-    const inputPlan = stage.usesInputPlan ? required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划') : undefined
-    if (stage.isWorkspaceAnalysis && inputPlan?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: Workspace Analysis Agent 只支持 /workspace 文件工作区输入')
-    if (stage.isWorkspaceAnalysis) requireWorkspaceToolset(input.snapshot.agentDefinition.toolIds, stage.submitToolId)
-    const piDocumentWorkspace = stage.isWorkspaceAnalysis && inputPlan?.mode === 'agent_directory'
-      ? new RequirementDocumentWorkspace(this.store, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
-      : undefined
-    const workspaceProfile = stage.isWorkspaceAnalysis ? required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED') : undefined
+    const inputPlan = required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划')
+    if (inputPlan.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: Workspace Agent 只支持 /workspace 文件工作区输入')
+    requireWorkspaceToolset(input.snapshot.agentDefinition.toolIds, stage.submitToolId)
+    const piDocumentWorkspace = new RequirementDocumentWorkspace(this.store, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/agent-types.js').TestDesignAgentSnapshot)
+    const workspaceProfile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
     const skillRuntime = new AgentSkillRuntime(this.store, this.skillPackages)
-    const skillSession = workspaceProfile
-      ? await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage, workspaceProfile.allowedSkillKeys)
-      : undefined
-    const deliveryManifest: InputDeliveryManifest | undefined = inputPlan ? {
+    const skillSession = await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage, workspaceProfile.allowedSkillKeys)
+    const deliveryManifest: InputDeliveryManifest = {
       policyVersion: inputPlan.policyVersion,
       mode: inputPlan.mode,
       packageSha256: inputPlan.packageSha256,
       entries: [],
       ...(inputPlan.mode === 'agent_directory' ? { toolReads: [] } : {}),
       finalMergeCompleted: false,
-    } : undefined
-    const registry = stage.isTestDesign
-      ? createTestDesignToolRegistry(stage.submitToolId, stage.schemaVersion, async value => {
-        try {
-          const kind = stage.submitToolId === 'functional_test_design.submit_result' ? 'functional' : stage.submitToolId === 'non_functional_test_design.submit_result' ? 'non_functional' : undefined
-          candidate = kind
-            ? { ...value, nodes: validateDesignCandidateNodes(value, kind) }
-            : stage.submitToolId === 'test_analysis.submit_result'
-            ? validateTestAnalysisCandidate(value)
-            : stage.submitToolId === 'test_case_synthesis.submit_result'
-            ? validateTestCaseSynthesisCandidate(value, testDesignPointIds(input.testDesignTask))
-            : value
-          lastSubmissionIssues = []
-          return { accepted: true }
-        } catch (error) {
-          const details = error instanceof TestDesignError && error.details && typeof error.details === 'object' ? error.details as { path?: unknown } : undefined
-          lastSubmissionIssues = [{ path: typeof details?.path === 'string' ? details.path : '/', message: error instanceof Error ? error.message : String(error) }]
-          return { accepted: false, issues: lastSubmissionIssues }
-        }
-      })
-      : stage.isWorkspaceAnalysis
-      ? createWorkspaceAgentToolRegistry(this.store, stage.submitToolId, async value => {
-        const profile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
-        const normalized = await profile.validateCandidate(value, required(deliveryManifest, '输入投递证明不存在'))
-        if (!normalized.valid || !normalized.result) { lastSubmissionIssues = normalized.issues; return { accepted: false, issues: normalized.issues } }
-        candidate = normalized.result
-        lastSubmissionIssues = []
-        return { accepted: true }
-      }, observation => {
-        if (deliveryManifest?.mode !== 'agent_directory') return
-        if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
-        deliveryManifest.toolReads ??= []
-        deliveryManifest.toolReads.push(structuredClone(observation))
-      }, piDocumentWorkspace, skillSession)
-      : stage.isTechnicalExtraction
-      ? createTechnicalSolutionExtractionToolRegistry(this.store, async value => {
-        const normalized = new TechnicalSolutionExtractionValidator().normalize(value, input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, await this.store.snapshot())
-        if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
-        candidate = normalized.result
-        lastSubmissionIssues = []
-        return { accepted: true }
-      })
-      : createTechnicalSolutionReviewToolRegistry(async value => {
-        const normalized = new TechnicalSolutionReviewValidatorV2().normalize(value, input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED: TechnicalSolutionReviewAgent 缺少冻结提取结果'))
-        if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
-        candidate = normalized.result
-        lastSubmissionIssues = []
-        return { accepted: true }
-      })
+    }
+    const registry = createWorkspaceAgentToolRegistry(this.store, stage.submitToolId, async value => {
+      const normalized = await workspaceProfile.validateCandidate(value, required(deliveryManifest, '输入投递证明不存在'))
+      if (!normalized.valid || !normalized.result) { lastSubmissionIssues = normalized.issues; return { accepted: false, issues: normalized.issues } }
+      candidate = normalized.result
+      lastSubmissionIssues = []
+      return { accepted: true }
+    }, observation => {
+      if (deliveryManifest.mode !== 'agent_directory') return
+      if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
+      deliveryManifest.toolReads ??= []
+      deliveryManifest.toolReads.push(structuredClone(observation))
+    }, piDocumentWorkspace, skillSession)
     const skillPrompt = skillSession?.renderCatalogPrompt() ?? await skillRuntime.render(input.snapshot.agentDefinition)
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
@@ -171,9 +104,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const model = this.bindings.model ?? createModel(input)
     const providerStreamFn = this.bindings.streamFn ?? createStreamFn(input)
     let forceResultSubmission = false
-    let inDraftStage = false
     let latestModelFailure: ModelFailure | undefined
-    let latestAssistantText = ''
     let resultSubmissionRequiredRecorded = false
     const resultSubmissionTurn = Math.max(1, limits.maxTurns - RESULT_SUBMISSION_TURN_RESERVE + 1)
     const streamFn: StreamFn = (streamModel, context, options) => {
@@ -185,7 +116,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         maxTokens: input.model.maxOutputTokens,
         ...(requestSignal ? { signal: requestSignal } : {}),
       }
-      return providerStreamFn(streamModel, context, forceResultSubmission && !inDraftStage ? {
+      return providerStreamFn(streamModel, context, forceResultSubmission ? {
         ...configuredOptions,
         toolChoice: input.model.providerType === 'anthropic'
           ? { type: 'tool', name: stage.submitPiName }
@@ -216,16 +147,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         getApiKey: () => input.model.apiKey,
         sessionId: `${input.snapshot.runId}:${input.snapshot.agentDefinition.agentKey}`,
         toolExecution: 'sequential',
-        beforeToolCall: async ({ assistantMessage, toolCall }) => {
+        beforeToolCall: async ({ toolCall }) => {
           if (!byPiName.has(toolCall.name) || !activeToolNames.has(toolCall.name)) return { block: true, reason: 'TOOL_NOT_ALLOWED_IN_CURRENT_PHASE' }
-          if (stage.submitToolId === 'non_functional_test_design.submit_result' && toolCall.name === stage.submitPiName) {
-            const batch = coalesceNonFunctionalSubmission(assistantMessage, stage.submitPiName, stage.schemaVersion)
-            if (batch && !submissionBatches.mergedArgumentsByPrimaryId.has(batch.primaryToolCallId)) {
-              submissionBatches.mergedArgumentsByPrimaryId.set(batch.primaryToolCallId, batch.arguments)
-              submissionBatches.callCountByPrimaryId.set(batch.primaryToolCallId, batch.callCount)
-              batch.redundantToolCallIds.forEach(toolCallId => submissionBatches.primaryIdByRedundantId.set(toolCallId, batch.primaryToolCallId))
-            }
-          }
           return undefined
         },
       })
@@ -233,12 +156,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         let resultSubmissionRequired = false
         if (event.type === 'message_end' && event.message.role === 'assistant') {
           latestModelFailure = modelFailure(event.message)
-          latestAssistantText = textFromContent((event.message as { content?: unknown }).content)
         }
         if (event.type === 'turn_start') {
           turns += 1
           if (turns > limits.maxTurns) agent?.abort()
-          else if (!inDraftStage && turns >= resultSubmissionTurn && !forceResultSubmission) {
+          else if (turns >= resultSubmissionTurn && !forceResultSubmission) {
             forceResultSubmission = true
             resultSubmissionRequiredRecorded = true
             resultSubmissionRequired = true
@@ -256,50 +178,13 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       })
       controller.signal.addEventListener('abort', () => agent?.abort(), { once: true })
       await record({ type: 'runtime_initialized', turn: 0, framework: { name: 'pi-agent-core', version: piVersion } })
-      if (stage.usesInputPlan) {
-        await record({ type: 'input_package_built', turn: 0, content: JSON.stringify({ mode: inputPlan!.mode, packageSha256: inputPlan!.packageSha256, batches: inputPlan!.batches.length, estimatedInputTokens: inputPlan!.estimatedInputTokens, safeInputBudget: inputPlan!.safeInputBudget }) })
-        if (inputPlan!.mode === 'full_context' || inputPlan!.mode === 'agent_directory') {
-          const current = inputPlan!.batches[0]
-          deliveryManifest!.entries.push(manifestEntry(current, 1))
-          deliveryManifest!.finalMergeCompleted = true
-          await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
-          await agent.prompt(`${renderInitialTask(input, stage)}\n\n${current.content}`)
-          await agent.waitForIdle()
-        } else {
-          if (!stage.isTechnicalExtraction) throw new Error('SEGMENTED_CONTEXT_UNSUPPORTED: 只有技术方案提取 Agent 支持分段正文归并')
-          const drafts: string[] = []
-          inDraftStage = true
-          agent.state.tools = []
-          activeToolNames = new Set()
-          for (const current of inputPlan!.batches) {
-            agent.state.messages = []
-            latestAssistantText = ''
-            latestModelFailure = undefined
-            deliveryManifest!.entries.push(manifestEntry(current, current.ordinal + 1))
-            await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
-            await agent.prompt(renderTechnicalSegmentBatchTask(current.ordinal + 1, inputPlan!.batches.length, current.content))
-            await agent.waitForIdle()
-            if (latestModelFailure) throw modelProviderError(latestModelFailure)
-            if (!latestAssistantText.trim()) throw new Error(`SEGMENT_DRAFT_REQUIRED: 批次 ${current.batchId} 未返回可归并草稿`)
-            const draftBudget = Math.floor(inputPlan!.safeInputBudget * 0.75 / inputPlan!.batches.length)
-            if (draftBudget < 64) throw new Error(`SEGMENT_MERGE_BUDGET_EXCEEDED: ${inputPlan!.batches.length} 个批次无法在 ${inputPlan!.safeInputBudget} Token 安全预算内完成最终归并`)
-            const draftTokens = defaultTokenCodec.count(latestAssistantText)
-            if (draftTokens > draftBudget) throw new Error(`SEGMENT_DRAFT_TOO_LARGE: 批次 ${current.batchId} 草稿 ${draftTokens} Token 超过归并预算 ${draftBudget}`)
-            drafts.push(latestAssistantText)
-          }
-          agent.state.messages = []
-          agent.state.tools = primaryTools
-          activeToolNames = new Set(primaryToolNames)
-          inDraftStage = false
-          deliveryManifest!.finalMergeCompleted = true
-          await record({ type: 'input_final_merge_started', turn: turns, content: JSON.stringify({ batchCount: drafts.length }) })
-          await agent.prompt(renderTechnicalSegmentMergeTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, drafts))
-          await agent.waitForIdle()
-        }
-      } else {
-        await agent.prompt(renderInitialTask(input, stage))
-        await agent.waitForIdle()
-      }
+      await record({ type: 'input_package_built', turn: 0, content: JSON.stringify({ mode: inputPlan.mode, packageSha256: inputPlan.packageSha256, batches: inputPlan.batches.length, estimatedInputTokens: inputPlan.estimatedInputTokens, safeInputBudget: inputPlan.safeInputBudget }) })
+      const current = inputPlan.batches[0]
+      deliveryManifest!.entries.push(manifestEntry(current, 1))
+      deliveryManifest!.finalMergeCompleted = true
+      await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
+      await agent.prompt(`${renderInitialTask(input)}\n\n${current.content}`)
+      await agent.waitForIdle()
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
       if (!candidate && latestModelFailure && !lastSubmissionIssues.length) throw modelProviderError(latestModelFailure)
       if (turns > limits.maxTurns) {
@@ -310,22 +195,16 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         await record({ type: 'result_validation_repair_required', turn: turns, content: formatValidationIssues(lastSubmissionIssues) })
         forceResultSubmission = false
         latestModelFailure = undefined
-        const evidenceRepairRequired = (stage.isWorkspaceAnalysis || stage.isTechnicalExtraction) && hasEvidenceValidationIssue(lastSubmissionIssues)
+        const evidenceRepairRequired = hasEvidenceValidationIssue(lastSubmissionIssues)
         if (evidenceRepairRequired) {
           agent.state.tools = tools
           activeToolNames = new Set(tools.map(tool => tool.name))
-          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: piDocumentWorkspace
-            ? '原文定位未能建立 Evidence；继续使用 grep 定位并用 read 核对固定工作区文件，然后修正 sourceTexts。'
-            : `原文检索未能为${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}建立 Evidence 后开放 knowledge_search 与 knowledge_read_chunk，用于补充更准确的 sourceTexts。` })
+          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: '原文定位未能建立 Evidence；继续使用 grep 定位并用 read 核对固定工作区文件，然后修正 sourceTexts。' })
         }
         const repairGuidance = stage.isTestDesign
-          ? stage.submitToolId === 'test_case_synthesis.submit_result'
-            ? '请严格按工具参数中的 test-case/v1 层级修正：共同前置使用 preconditions；步骤和逐步期望使用 executionMethods[].steps[].action/expected；UI/API 入口分别使用 uiSpec.entry 或 apiSpec.path；数据需求只放在提交根对象 dataRequirements[]，并通过 caseIndexes 关联候选用例。不要提交 preConditions、根级 steps、expectedResults、entryPoints、用例内 dataRequirements 或 testData。'
-            : '请按工具参数声明的字段和错误路径修正测试设计候选，不要添加工具 Schema 之外的字段。'
+          ? '请严格按当前 Stage 的提交工具 Schema 和错误路径修正完整候选；临时 ref 仅用于本次提交，正式 ID、Revision、Version 与 Hash 由服务端生成。'
           : evidenceRepairRequired
-          ? piDocumentWorkspace
-            ? '工作区文件版本、内部证据范围、需求点 ID、Evidence ID、定位和引用均由服务端负责；请只修正需求点内部的 sourceTexts，必要时用 grep 定位后通过 read 核对原文。'
-            : `正文投递覆盖、资产版本、Chunk、${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'} ID、Evidence ID、定位和引用均由服务端负责；请只修正${stage.isTechnicalExtraction ? '技术方案要点' : '需求点'}内部的 sourceTexts，必要时可用 knowledge_read_chunk 核对原文。`
+          ? '工作区文件版本、内部证据范围、需求点 ID、Evidence ID、定位和引用均由服务端负责；请只修正需求点内部的 sourceTexts，必要时用 grep 定位后通过 read 核对原文。'
           : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
         await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
         await agent.waitForIdle()
@@ -408,7 +287,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           return { content: [{ type: 'text', text: JSON.stringify(data) }], details: { toolId: descriptor.id, version: descriptor.version, data }, terminate: accepted }
         }
         const executionArguments = submissionBatches.mergedArgumentsByPrimaryId.get(toolCallId) ?? args
-        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, allowedToolIds: runtimeAllowedToolIds(input) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/agent-types.js').TestDesignAgentSnapshot, allowedToolIds: runtimeAllowedToolIds(input) } }, AbortSignal.any([signal, toolSignal ?? signal]))
         if (result.terminate && submissionBatches.mergedArgumentsByPrimaryId.has(toolCallId)) submissionBatches.acceptedPrimaryIds.add(toolCallId)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
@@ -447,7 +326,9 @@ function sha256(value: string) { return createHash('sha256').update(value).diges
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }
 
 function runtimeAllowedToolIds(input: AgentExecutionInput) {
-  return new Set(input.snapshot.agentDefinition.toolIds)
+  const profile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
+  const stageTools = new Set(['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', profile.submitToolId])
+  return new Set(input.snapshot.agentDefinition.toolIds.filter(toolId => stageTools.has(toolId)))
 }
 
 function requireWorkspaceToolset(toolIds: string[], submitToolId: string) {
@@ -457,11 +338,7 @@ function requireWorkspaceToolset(toolIds: string[], submitToolId: string) {
 }
 
 type StageConfiguration = {
-  isWorkspaceAnalysis: boolean
-  isTechnicalExtraction: boolean
-  isTechnicalReview: boolean
   isTestDesign: boolean
-  usesInputPlan: boolean
   submitToolId: string
   submitPiName: string
   schemaVersion: string
@@ -469,73 +346,22 @@ type StageConfiguration = {
 }
 
 function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
-  const testDesignStages: Partial<Record<string, { submitToolId: string; schemaVersion: string; agentLabel: string }>> = {
-    'test-analysis': { submitToolId: 'test_analysis.submit_result', schemaVersion: 'test-analysis/v1', agentLabel: 'TestAnalysisAgent' },
-    'functional-test-design': { submitToolId: 'functional_test_design.submit_result', schemaVersion: 'functional-test-design/v1', agentLabel: 'FunctionalTestDesignAgent' },
-    'non-functional-test-design': { submitToolId: 'non_functional_test_design.submit_result', schemaVersion: 'non-functional-test-design/v1', agentLabel: 'NonFunctionalTestDesignAgent' },
-    'test-case-synthesis': { submitToolId: 'test_case_synthesis.submit_result', schemaVersion: 'test-case-synthesis/v1', agentLabel: 'TestCaseSynthesisAgent' },
-  }
-  const testDesign = testDesignStages[input.snapshot.agentDefinition.agentKey]
-  if (testDesign) return stage({ isWorkspaceAnalysis: false, isTechnicalExtraction: false, isTechnicalReview: false, isTestDesign: true, usesInputPlan: false, ...testDesign })
   const workspaceStage = input.executionProfile
-  if (workspaceStage?.mode === 'workspace_tools') return stage({
-    isWorkspaceAnalysis: true,
-    isTechnicalExtraction: false,
-    isTechnicalReview: false,
-    isTestDesign: false,
-    usesInputPlan: true,
+  if (workspaceStage?.mode !== 'workspace_tools') throw new Error(`AGENT_STAGE_UNSUPPORTED: ${input.snapshot.agentDefinition.agentKey}`)
+  return stage({
+    isTestDesign: input.snapshot.agentDefinition.agentKey === 'test-design',
     submitToolId: workspaceStage.submitToolId,
     schemaVersion: workspaceStage.schemaVersion,
     agentLabel: workspaceStage.agentLabel,
   })
-  if (input.snapshot.agentDefinition.agentKey === 'technical-solution-extraction') return stage({
-    isWorkspaceAnalysis: false,
-    isTechnicalExtraction: true,
-    isTechnicalReview: false,
-    isTestDesign: false,
-    usesInputPlan: true,
-    submitToolId: 'technical_solution_points.submit_result',
-    schemaVersion: 'technical-solution-extraction/v1',
-    agentLabel: 'TechnicalSolutionExtractionAgent',
-  })
-  if (input.snapshot.agentDefinition.agentKey === 'technical-solution-review' || input.snapshot.agentDefinition.agentKey === 'technical-solution-analysis') return stage({
-    isWorkspaceAnalysis: false,
-    isTechnicalExtraction: false,
-    isTechnicalReview: true,
-    isTestDesign: false,
-    usesInputPlan: false,
-    submitToolId: 'technical_solution_review.submit_result',
-    schemaVersion: 'technical-solution-review/v2',
-    agentLabel: 'TechnicalSolutionReviewAgent',
-  })
-  throw new Error(`AGENT_STAGE_UNSUPPORTED: ${input.snapshot.agentDefinition.agentKey}`)
 }
 
 function stage<T extends Omit<StageConfiguration, 'submitPiName'>>(value: T): T & { submitPiName: string } {
   return { ...value, submitPiName: defaultBuiltInToolConfigResolver.toDescriptor(value.submitToolId).piName }
 }
 
-function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration) {
-  return stage.isTestDesign
-    ? required(input.testDesignTask, 'TEST_DESIGN_TASK_REQUIRED')
-    : stage.isTechnicalExtraction
-    ? renderTechnicalSolutionTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot)
-    : stage.isTechnicalReview
-    ? renderTechnicalSolutionReviewTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED'))
-    : required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED').initialTask
-}
-
-function testDesignPointIds(task: string | undefined) {
-  const value = JSON.parse(required(task, 'TEST_DESIGN_TASK_REQUIRED')) as { upstream?: { treeRevision?: { nodes?: Array<{ nodeId?: unknown; parentId?: unknown; deleted?: unknown; applicability?: unknown }> } } }
-  const nodes = value.upstream?.treeRevision?.nodes
-  if (!Array.isArray(nodes)) throw new TestDesignError('TEST_CASE_SYNTHESIS_SCHEMA_INVALID', '批准测试点树输入不存在', 422, { path: '/cases' })
-  const normalized = nodes.filter((item): item is { nodeId: string; parentId?: unknown; deleted?: unknown; applicability?: unknown } => typeof item.nodeId === 'string').map(item => ({
-    nodeId: item.nodeId,
-    parentId: typeof item.parentId === 'string' ? item.parentId : null,
-    deleted: item.deleted === true,
-    applicability: (item.applicability === 'not_applicable' || item.applicability === 'blocked_by_confirmation' ? item.applicability : 'applicable') as 'applicable' | 'blocked_by_confirmation' | 'not_applicable',
-  }))
-  return executableTestPointIds(normalized)
+function renderInitialTask(input: AgentExecutionInput) {
+  return required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED').initialTask
 }
 
 function hasEvidenceValidationIssue(issues: Array<{ path: string; message: string }>) {

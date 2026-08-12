@@ -1,497 +1,149 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
-import { buildTestDesignAgentTask } from '../server/agent/pi-test-design-runtime.js'
-import { coalesceNonFunctionalSubmission } from '../server/agent/pi-agent-runtime.js'
 import { defaultAgentDefinitionConfigDictionary } from '../server/agent/agent-definition-config.js'
-import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
-import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
-import { ProjectVersionService } from '../server/application/project-version-service.js'
-import { executableTestPointIds, TestDesignError, validateCreateTestDesignInput, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseContent, validateTestCaseSynthesisCandidate } from '../server/application/test-design-validation.js'
-import type { TestCaseContent, TestPointNodeRevision } from '../server/domain/test-design-types.js'
+import { TEST_DESIGN_STAGE_BINDINGS } from '../server/agent/pi-test-design-runtime.js'
+import { TestDesignService, type TestCaseAssetProjector, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
+import { TestDesignError, validateCreateTestDesignInput, validateTestCaseDesignCandidate, validateTestPointDesignCandidate } from '../server/application/test-design-validation.js'
+import type { TestDesignWorkflowRun } from '../server/domain/test-design-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
-const principal = { subjectId: 'tester-1', displayName: '测试负责人' }
+const principal = { subjectId: 'tester', displayName: '测试负责人' }
 
-test('canonical JSON 固定对象键顺序并拒绝不确定值', () => {
-  assert.equal(canonicalJson({ z: 1, a: ['x', true] }), '{"a":["x",true],"z":1}')
-  assert.equal(canonicalSha256({ a: 1, b: 2 }), canonicalSha256({ b: 2, a: 1 }))
-  assert.throws(() => canonicalJson({ invalid: undefined }), /CANONICAL_JSON_UNDEFINED/u)
-  assert.throws(() => canonicalJson(Number.NaN), /CANONICAL_JSON_NON_FINITE_NUMBER/u)
+test('创建协议删除旧依据模式并保留范围、维度与执行入口', () => {
+  const value = validateCreateTestDesignInput({ name: '登录测试', objective: '验证登录风险', includedScopes: [{ kind: 'module', value: '登录' }], excludedScopes: [], focusDimensions: ['functional', 'security'], executionMethods: ['ui', 'api'], userCoverageObjectives: ['异常恢复'], knowledgeAugmentation: { mode: 'disabled' } })
+  assert.deepEqual(value.executionMethods, ['ui', 'api'])
+  assert.deepEqual(value.focusDimensions, ['functional', 'security'])
+  assert.throws(() => validateCreateTestDesignInput({ name: '旧协议', objective: '必须删除旧协议', basisMode: 'review_baseline', sourceReviewRunId: 'review-1', knowledgeAugmentation: { mode: 'disabled' } }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_INPUT_INVALID')
 })
 
-test('测试设计创建判别联合拒绝错分支字段和 latest 引用', () => {
-  assert.throws(() => validateCreateTestDesignInput({ name: '登录', objective: '验证登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-v1'], sourceReviewRunId: '', knowledgeAugmentation: { mode: 'disabled' } }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_BASIS_MODE_INVALID')
-  assert.throws(() => validateCreateTestDesignInput({ name: '登录', objective: '验证登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['latest'], knowledgeAugmentation: { mode: 'disabled' } }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_LATEST_REFERENCE_FORBIDDEN')
-})
-
-test('测试点候选在进入树归并前校验临时引用和分支维度', () => {
-  const missingRef = { nodes: [{ ...node('ignored', 'functional', []), ref: undefined }] }
-  assert.throws(() => validateDesignCandidateNodes(missingRef, 'functional'), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_POINT_TREE_SCHEMA_INVALID' && error.message.includes('functional.nodes[0].ref'))
-  assert.throws(() => validateDesignCandidateNodes({ nodes: [node('security-1', 'security', [])] }, 'functional'), (error: unknown) => error instanceof TestDesignError && error.message.includes('functional.nodes[0].dimension'))
-  assert.equal(validateDesignCandidateNodes({ nodes: [node('root', 'functional', [])] }, 'functional')[0].ref, 'root')
-  assert.throws(
-    () => validateDesignCandidateNodes({ nodes: [node('security-only', 'security', [])] }, 'non_functional'),
-    (error: unknown) => error instanceof TestDesignError && error.message.includes('缺少：performance、stability、compatibility'),
-  )
-  const nonFunctional = ['performance', 'stability', 'compatibility', 'security'].map(dimension => node(`${dimension}-root`, dimension as TestPointNodeRevision['dimension'], []))
-  assert.equal(validateDesignCandidateNodes({ nodes: nonFunctional }, 'non_functional').length, 4)
-})
-
-test('同一响应内按维度拆分的非功能提交合并为一个候选', () => {
-  const calls = ['performance', 'stability', 'compatibility', 'security'].map((dimension, index) => ({
-    type: 'toolCall',
-    id: `call-${index + 1}`,
-    name: 'non_functional_test_design_submit_result',
-    arguments: { nodes: [node(`${dimension}-root`, dimension as TestPointNodeRevision['dimension'], [])], ...(index === 0 ? { schemaVersion: 'non-functional-test-design/v1' } : {}) },
-  }))
-  const batch = coalesceNonFunctionalSubmission({ content: calls }, 'non_functional_test_design_submit_result', 'non-functional-test-design/v1')
-
-  assert.equal(batch?.primaryToolCallId, 'call-1')
-  assert.deepEqual(batch?.redundantToolCallIds, ['call-2', 'call-3', 'call-4'])
-  assert.deepEqual((batch?.arguments.nodes as Array<{ dimension: string }>).map(item => item.dimension), ['performance', 'stability', 'compatibility', 'security'])
-  assert.equal(batch?.callCount, 4)
-})
-
-test('测试分析候选必须提供可展示的原子覆盖单元', () => {
-  assert.throws(
-    () => validateTestAnalysisCandidate({ schemaVersion: 'test-analysis/v1', scope: '认证', roles: ['管理员'], findings: [], confirmationItems: [] }),
-    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_ANALYSIS_SCHEMA_INVALID' && (error.details as { path?: string }).path === '/',
-  )
-  const candidate = testAnalysisCandidate()
-  assert.equal((validateTestAnalysisCandidate(candidate).coverageUnits as unknown[]).length, 1)
-  assert.throws(
-    () => validateTestAnalysisCandidate({ ...candidate, coverageUnits: [{ ...(candidate.coverageUnits as Array<Record<string, unknown>>)[0], basisRefs: [] }] }),
-    (error: unknown) => error instanceof TestDesignError && (error.details as { path?: string }).path === '/coverageUnits/0/basisRefs',
-  )
-})
-
-test('test-case/v1 强制 UI/API 判别联合、稳定步骤和非空方式', () => {
-  assert.throws(() => validateTestCaseContent({ ...caseContent(['point-1']), executionMethods: [] }, new Set(['point-1'])), /executionMethods/u)
-  assert.throws(() => validateTestCaseContent({ ...caseContent(['point-1']), executionMethods: [{ method: 'ui', uiSpec: { entry: '/login' }, apiSpec: { method: 'POST', path: '/login' }, steps: [{ key: 's1', action: '输入', expected: '已输入' }], verificationChecks: [], executionReadiness: 'ready', automationHint: '' }] }, new Set(['point-1'])), /不允许的字段/u)
-})
-
-test('用例综合候选拒绝旧式扁平字段并返回可修正映射', () => {
-  const legacyCase = { ...caseContent(['point-1']), preConditions: [], steps: [], expectedResults: [], entryPoints: [], dataRequirements: [], testData: [] }
-  assert.throws(
-    () => validateTestCaseSynthesisCandidate({ schemaVersion: 'test-case-synthesis/v1', cases: [legacyCase], dataRequirements: [] }, new Set(['point-1'])),
-    (error: unknown) => error instanceof TestDesignError
-      && error.code === 'TEST_CASE_SYNTHESIS_SCHEMA_INVALID'
-      && (error.details as { path?: string }).path === '/cases/0'
-      && error.message.includes('preConditions')
-      && error.message.includes('executionMethods[].steps'),
-  )
-})
-
-test('用例综合候选校验数据需求索引并保留规范结构', () => {
-  const result = validateTestCaseSynthesisCandidate({
-    schemaVersion: 'test-case-synthesis/v1',
-    cases: [caseContent(['point-1'])],
-    dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: ['point-1'], caseIndexes: [0], fieldConstraints: { status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }],
-  }, new Set(['point-1']))
-  assert.equal(result.cases[0].executionMethods[0].steps[0].expected, '返回明确结果')
-  assert.deepEqual(result.dataRequirements[0].caseIndexes, [0])
-  assert.throws(() => validateTestCaseSynthesisCandidate({ ...result, dataRequirements: [{ ...result.dataRequirements[0], caseIndexes: [1] }] }, new Set(['point-1'])), /caseIndexes/u)
-  assert.throws(
-    () => validateTestCaseSynthesisCandidate({ schemaVersion: 'test-case-synthesis/v1', cases: [caseContent(['point-1'])], dataRequirements: [] }, new Set(['point-1', 'point-2'])),
-    (error: unknown) => error instanceof TestDesignError
-      && error.code === 'TEST_CASE_SYNTHESIS_SCHEMA_INVALID'
-      && (error.details as { path?: string }).path === '/cases'
-      && error.message.includes('point-2'),
-  )
-})
-
-test('用例覆盖分母只包含可执行叶子测试点', () => {
-  const parent = { nodeId: 'point-parent', parentId: null, applicability: 'applicable' as const }
-  const child = { nodeId: 'point-child', parentId: 'point-parent', applicability: 'applicable' as const }
-  const standalone = { nodeId: 'point-standalone', parentId: null, applicability: 'blocked_by_confirmation' as const }
-  const excluded = { nodeId: 'point-excluded', parentId: null, applicability: 'not_applicable' as const }
-  assert.deepEqual(executableTestPointIds([parent, child, standalone, excluded]), new Set(['point-child', 'point-standalone']))
-})
-
-test('用例综合候选将 fieldConstraints 标量规范化为字符串并拒绝复杂值', () => {
-  const candidate = {
-    schemaVersion: 'test-case-synthesis/v1',
-    cases: [caseContent(['point-1'])],
-    dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: ['point-1'], caseIndexes: [0], fieldConstraints: { noProductionData: true, retryLimit: 3, status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }],
-  }
-  const result = validateTestCaseSynthesisCandidate(candidate, new Set(['point-1']))
-  assert.deepEqual(result.dataRequirements[0].fieldConstraints, { noProductionData: 'true', retryLimit: '3', status: 'active' })
-  assert.throws(
-    () => validateTestCaseSynthesisCandidate({ ...candidate, dataRequirements: [{ ...candidate.dataRequirements[0], fieldConstraints: { nested: { value: true } } }] }, new Set(['point-1'])),
-    /fieldConstraints\/nested.*非空字符串、布尔值或有限数值/u,
-  )
-})
-
-test('测试设计内置 Prompt 要求矩阵化发散并在综合前完成全集核对', () => {
-  assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.3.0')
-  assert.equal(defaultAgentDefinitionConfigDictionary['functional-test-design'].version, '1.1.0')
-  assert.equal(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].version, '1.2.0')
-  assert.equal(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].version, '1.3.0')
-  assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /coverage unit/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /所有数组字段即使没有内容也提交空数组/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['test-analysis'].systemPrompt, /不得在 test_analysis_submit_result 中回传/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['functional-test-design'].systemPrompt, /角色 × 前置\/当前状态 × 输入等价类或边界/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].systemPrompt, /四个分区均有明确结论/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].systemPrompt, /只调用一次 non_functional_test_design_submit_result/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /全部适用 nodeId 均有映射/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].systemPrompt, /不得用固定数量配额或同义重复凑数/u)
-  assert.match(defaultAgentDefinitionConfigDictionary['test-case-synthesis'].taskTemplate, /fieldConstraints.*noProductionData.*true/u)
-})
-
-test('测试设计候选接口返回真实资产版本和内容 Hash', async () => {
-  const service = new TestDesignService(await seededStore(), new FakeRuntime())
-  const candidates = await service.inputCandidates('pv-1')
-  assert.equal(candidates.knowledgeAssets[0].assetVersionId, 'asset-version-1')
-  assert.equal(candidates.knowledgeAssets[0].version, 1)
-  assert.match(candidates.knowledgeAssets[0].contentHash, /^[a-f0-9]{64}$/u)
-})
-
-test('测试分析 Agent 输入剔除旧快照中的 embedding、Chunk 和重复上游快照', async () => {
-  const store = await seededStore()
-  const service = new TestDesignService(store, new FakeRuntime())
-  const design = await service.createDesign('pv-1', {
-    name: '旧快照兼容', objective: '验证登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'],
-    knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [],
-  }, principal)
-  const run = await service.createRun('pv-1', design.id, 'legacy-snapshot-run', principal)
-  run.basisSnapshot.items[0].content = {
-    content: '# 登录需求\n\n用户可以使用账号密码登录。',
-    chunks: [{ id: 'chunk-1', content: '用户可以使用账号密码登录。', embedding: Array.from({ length: 384 }, () => 0.1) }],
-  }
-  const taskText = buildTestDesignAgentTask({
-    stage: 'test_analysis',
-    run,
-    upstream: { basisSnapshot: run.basisSnapshot, retrievalSnapshot: run.retrievalSnapshot, historicalSnapshot: run.historicalSnapshot },
-  }, design)
-  const task = JSON.parse(taskText) as { basisSnapshot: { items: Array<{ content: { content: string; chunks?: unknown } }> }; upstream?: unknown }
-
-  assert.doesNotMatch(taskText, /"embedding"|"chunks"/u)
-  assert.equal(task.basisSnapshot.items[0].content.content, '# 登录需求\n\n用户可以使用账号密码登录。')
-  assert.equal(task.upstream, undefined)
-  assert.match(taskText, /不得回传固定快照/u)
-})
-
-test('测试设计后端完成固定快照、双门禁、并行设计、用例审核、审计和不可变发布', async () => {
-  const store = await seededStore()
-  const runtime = new FakeRuntime()
-  const service = new TestDesignService(store, runtime)
-  const design = await service.createDesign('pv-1', {
-    name: '认证测试设计', objective: '验证登录与账号保护', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'],
-    knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [],
-  }, principal)
-  const run = await service.createRun('pv-1', design.id, 'create-run-1', principal)
-  const task = JSON.parse(buildTestDesignAgentTask({ stage: 'test_analysis', run, upstream: {} }, design)) as { designContext: { objective: string }; generationPolicy: { version: string; stageRules: string[] } }
-  assert.equal(task.designContext.objective, '验证登录与账号保护')
-  assert.equal(task.generationPolicy.version, 'test-design-generation-policy/v2')
-  assert.match(task.generationPolicy.stageRules.join(' '), /coverage unit/u)
-  const scopeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate')
-  assert.equal(scopeWaiting.basisSnapshot.items[0].sourceId, 'asset-version-1:paragraph-1')
-  assert.equal(scopeWaiting.basisSnapshot.items.every(item => item.locator.coverageTarget === true), true)
-  assert.equal(scopeWaiting.retrievalSnapshot.mode, 'disabled')
-  assert.match(scopeWaiting.basisSnapshot.snapshotSha256, /^[a-f0-9]{64}$/u)
-  const analysisArtifact = scopeWaiting.artifacts.find(item => item.nodeKey === 'test_analysis')!
-  await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: analysisArtifact.id, targetRevision: analysisArtifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
-  const treeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
-  assert.equal(treeWaiting.testPointTree?.revisions[0].nodes.length, 5)
-  assert.deepEqual(new Set(runtime.stages.slice(1, 3)), new Set(['functional_design', 'non_functional_design']))
-  const tree = treeWaiting.testPointTree!
-  await service.applyGateDecision('pv-1', design.id, run.id, 'test-point-tree', { targetId: tree.id, targetRevision: tree.currentRevision, expectedVersion: 0, decision: 'approved' }, principal)
-  const completed = await waitFor(service, design.id, run.id, value => value.status === 'succeeded')
-  assert.equal(completed.testCases.length, 5)
-  assert.equal(completed.testCases[0].revisions[0].content.dataRequirementIds[0], completed.dataSetVersions[0].requirements[0].id)
-  assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'test_analysis')?.execution?.modelLabel, 'fake-model')
-  assert.equal(completed.nodeRuns.find(item => item.nodeKey === 'functional_design')?.execution?.degraded, false)
-  assert.ok(completed.coverageAudits.at(-1)!.blockers.some(item => item.code === 'TEST_CASE_REVIEW_REQUIRED'))
-  const reusedCase = structuredClone(completed.testCases[0])
-  reusedCase.origin = 'historical_unchanged'
-  reusedCase.historicalSourceRef = 'history-fixed-1'
-  const historical = { ...completed.historicalSnapshot, items: [{ id: 'history-fixed-1', kind: 'historical_case_set' as const, sourceId: 'source-set:case:0', contentSha256: reusedCase.revisions[0].semanticSha256, content: reusedCase.revisions[0].content, locator: {} }], snapshotSha256: canonicalSha256('history-fixed-1') }
-  const historicalAudit = auditTestDesignCoverage({ runId: completed.id, basis: completed.basisSnapshot, retrieval: completed.retrievalSnapshot, historical, tree: completed.testPointTree!, treeVersion: completed.testPointTree!.versions[0], cases: [reusedCase, ...completed.testCases.slice(1)], dataSet: completed.dataSetVersions[0], findings: [], confirmationItems: [] })
-  assert.equal(historicalAudit.blockers.some(item => item.code === 'TEST_CASE_HISTORICAL_SOURCE_INVALID'), false)
-  reusedCase.historicalSourceRef = 'history-outside-snapshot'
-  const invalidHistoricalAudit = auditTestDesignCoverage({ runId: completed.id, basis: completed.basisSnapshot, retrieval: completed.retrievalSnapshot, historical, tree: completed.testPointTree!, treeVersion: completed.testPointTree!.versions[0], cases: [reusedCase, ...completed.testCases.slice(1)], dataSet: completed.dataSetVersions[0], findings: [], confirmationItems: [] })
-  assert.equal(invalidHistoricalAudit.blockers.some(item => item.code === 'TEST_CASE_HISTORICAL_SOURCE_INVALID'), true)
-  const invalidPointCase = structuredClone(completed.testCases[0])
-  invalidPointCase.revisions[0].content.testPointIds.push('grouping-or-retired-point')
-  const invalidPointAudit = auditTestDesignCoverage({ runId: completed.id, basis: completed.basisSnapshot, retrieval: completed.retrievalSnapshot, historical: completed.historicalSnapshot, tree: completed.testPointTree!, treeVersion: completed.testPointTree!.versions[0], cases: [invalidPointCase, ...completed.testCases.slice(1)], dataSet: completed.dataSetVersions[0], findings: [], confirmationItems: [] })
-  assert.ok(invalidPointAudit.blockers.some(item => item.code === 'TEST_CASE_NON_EXECUTABLE_POINT_REFERENCE' && item.resolution === 'agent_repair'))
-
-  for (const testCase of completed.testCases) {
-    await service.reviewCase('pv-1', design.id, run.id, testCase.id, { decision: 'submit', targetRevision: 0 }, principal)
-    await service.reviewCase('pv-1', design.id, run.id, testCase.id, { decision: 'approve', targetRevision: 0 }, principal)
-  }
-  const audit = await service.reAudit('pv-1', design.id, run.id)
-  assert.deepEqual(audit.blockers, [])
-  assert.equal(audit.statistics.coveredPoints, 5)
-  const published = await service.publishCaseSet('pv-1', design.id, run.id, { name: '认证新功能用例集', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256 }, principal)
-  const repeated = await service.publishCaseSet('pv-1', design.id, run.id, { name: '认证新功能用例集', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256 }, principal)
-  assert.equal(repeated.id, published.id)
-  assert.equal(published.members.length, 5)
-  const runWithPublishedSet = await service.getRun('pv-1', design.id, run.id)
-  assert.deepEqual(runWithPublishedSet.caseSetVersions.map(item => item.id), [published.id])
-  const jsonExport = await service.exportCaseSet(published.id, 'json')
-  const xlsxExport = await service.exportCaseSet(published.id, 'xlsx')
-  assert.match(String(jsonExport.content), /test-case-set\/v1/u)
-  assert.ok(Buffer.isBuffer(xlsxExport.content) && xlsxExport.content.subarray(0, 2).toString() === 'PK')
-  const catalog = await service.projectCatalog('project-1')
-  assert.equal(catalog.items.length, 5)
-
-  await store.transaction(state => {
-    const aggregate = state.testDesignState!
-    aggregate.suiteVersions.push(
-      { id: 'suite-smoke-v1', projectId: 'project-1', suiteKey: 'smoke', suiteType: 'smoke', version: 1, name: '冒烟 v1', members: [{ testCaseSetVersionId: 'baseline-smoke-set', caseId: 'baseline-smoke-case', revision: 3, executionMethods: ['api'], ordinal: 0, reason: '固定冒烟基线' }], contentSha256: canonicalSha256('suite-smoke-v1'), publishedBy: principal.subjectId, publishedAt: new Date().toISOString() },
-      { id: 'suite-regression-v1', projectId: 'project-1', suiteKey: 'regression', suiteType: 'regression', version: 1, name: '回归 v1', members: [{ testCaseSetVersionId: 'baseline-regression-set', caseId: 'baseline-impact-case', revision: 7, executionMethods: ['api'], ordinal: 0, reason: '影响回归' }, { testCaseSetVersionId: 'baseline-regression-set', caseId: 'baseline-full-case', revision: 2, executionMethods: ['api'], ordinal: 1, reason: '全量回归' }], contentSha256: canonicalSha256('suite-regression-v1'), publishedBy: principal.subjectId, publishedAt: new Date().toISOString() },
-    )
+test('Stage、Skill 与 Submit Tool 映射固定且配置只包含 TestDesignAgent', () => {
+  assert.deepEqual(TEST_DESIGN_STAGE_BINDINGS, {
+    test_point_design: { skills: ['test-design-baseline', 'test-point-design'], submitToolId: 'test_design_points.submit_result', schemaVersion: 'test-point-design/v1' },
+    test_case_design: { skills: ['test-case-design'], submitToolId: 'test_design_cases.submit_result', schemaVersion: 'test-case-design/v1' },
+    test_design_repair: { skills: ['test-design-repair'], submitToolId: 'test_design_repair.submit_result', schemaVersion: 'test-design-repair/v1' },
   })
-  await service.reviewSmokeCandidate(published.id, published.members[0].caseId, { executionMethods: ['api'], reason: '主链路稳定', estimatedMinutes: 2, stable: true, dependencyReady: true, decision: 'accepted' }, principal)
-  await service.setImpactedRegression(published.id, [{ suiteVersionId: 'suite-regression-v1', caseId: 'baseline-impact-case', executionMethods: ['api'], reason: '认证变更影响既有登录链路' }], principal)
-  const handoffInput = { strategy: 'standard' as const, smokeSuiteVersionId: 'suite-smoke-v1', regressionSuiteVersionId: 'suite-regression-v1', expectedCaseSetSha256: published.contentSha256 }
-  const handoff = await service.createHandoff(published.id, handoffInput, principal)
-  const repeatedHandoff = await service.createHandoff(published.id, handoffInput, principal)
-  assert.equal(repeatedHandoff.id, handoff.id)
-  assert.deepEqual(new Set(handoff.members.map(item => item.stage)), new Set(['smoke', 'new_feature', 'impacted_regression', 'full_regression']))
-  const fast = await service.createHandoff(published.id, { ...handoffInput, strategy: 'fast' }, principal)
-  assert.equal(fast.members.some(item => item.stage === 'smoke'), true)
-  assert.equal(fast.members.some(item => item.stage === 'full_regression'), false)
-  const full = await service.createHandoff(published.id, { strategy: 'full', regressionSuiteVersionId: 'suite-regression-v1', expectedCaseSetSha256: published.contentSha256 }, principal)
-  assert.deepEqual(new Set(full.members.map(item => item.stage)), new Set(['full_regression']))
-
-  const editableTree = await service.getTree('pv-1', design.id, run.id)
-  const changedTree = await service.patchTree('pv-1', design.id, run.id, editableTree.etag, { operations: [{ op: 'update', nodeId: editableTree.revision.nodes[0].nodeId, patch: { basisRefs: editableTree.revision.nodes[0].basisRefs } }], reason: '人工复核固定依据关系' }, principal)
-  const waitingAfterEdit = await service.getRun('pv-1', design.id, run.id)
-  assert.equal(waitingAfterEdit.status, 'waiting_gate')
-  assert.ok(waitingAfterEdit.coverageAudits.every(item => item.status === 'stale'))
-  await service.approveTree('pv-1', design.id, run.id, changedTree.etag, principal)
-  const approvedAfterEdit = await service.getRun('pv-1', design.id, run.id)
-  assert.equal(approvedAfterEdit.status, 'succeeded')
-  assert.equal(approvedAfterEdit.stage, 'completed')
-  assert.ok(approvedAfterEdit.testCases.every(item => item.reviewState === 'draft'))
+  assert.deepEqual(Object.keys(defaultAgentDefinitionConfigDictionary).filter(key => key.includes('test')), ['test-design'])
+  assert.equal(defaultAgentDefinitionConfigDictionary['test-design'].agentType, 'test_design')
+  assert.match(defaultAgentDefinitionConfigDictionary['test-design'].systemPrompt, /TestDesignAgent/u)
 })
 
-test('覆盖审计将 Agent 可修复阻断自动反馈给综合 Agent 并限次重试', async () => {
-  const store = await seededStore()
-  const runtime = new DuplicateThenRepairRuntime()
-  const service = new TestDesignService(store, runtime)
-  const design = await service.createDesign('pv-1', {
-    name: '自动修复测试设计', objective: '验证审计反馈闭环', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'],
-    knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [],
-  }, principal)
-  const run = await service.createRun('pv-1', design.id, 'automatic-repair-run', principal)
-  const scopeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate')
-  const analysisArtifact = scopeWaiting.artifacts.find(item => item.nodeKey === 'test_analysis')!
-  await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: analysisArtifact.id, targetRevision: analysisArtifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
-  const treeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
-  await service.applyGateDecision('pv-1', design.id, run.id, 'test-point-tree', { targetId: treeWaiting.testPointTree!.id, targetRevision: treeWaiting.testPointTree!.currentRevision, expectedVersion: 0, decision: 'approved' }, principal)
-
-  const completed = await waitFor(service, design.id, run.id, value => value.status === 'succeeded')
-  assert.equal(runtime.stages.filter(stage => stage === 'test_case_synthesis').length, 2)
-  assert.equal(completed.automaticRepair?.status, 'succeeded')
-  assert.equal(completed.automaticRepair?.attempt, 1)
-  assert.equal(completed.coverageAudits.length, 2)
-  assert.equal(completed.coverageAudits[0].status, 'stale')
-  assert.ok(completed.coverageAudits[0].blockers.some(item => item.code === 'TEST_CASE_DUPLICATE' && item.resolution === 'agent_repair'))
-  assert.ok(completed.coverageAudits[0].blockers.some(item => item.code === 'TEST_CASE_OVER_AGGREGATED' && item.resolution === 'agent_repair'))
-  assert.equal(completed.coverageAudits[1].blockers.some(item => item.code === 'TEST_CASE_DUPLICATE'), false)
-  assert.equal(completed.coverageAudits[1].blockers.some(item => item.code === 'TEST_CASE_OVER_AGGREGATED'), false)
-  assert.equal(runtime.repairContexts.length, 1)
-  assert.match(JSON.stringify(runtime.repairContexts[0]), /TEST_CASE_DUPLICATE/u)
-  assert.match(JSON.stringify(runtime.repairContexts[0]), /TEST_CASE_OVER_AGGREGATED/u)
+test('候选协议直接生成测试点和用例，不存在 coverageUnits 中间层', () => {
+  const points = validateTestPointDesignCandidate({ schemaVersion: 'test-point-design/v1', nodes: [{ ref: 'login', title: '登录主流程', objective: '验证登录', dimension: 'functional', priority: 'P0', applicability: 'applicable', designTechniques: ['主流程'], entryMethods: ['ui'], oracle: '进入首页', dataConditions: ['有效账号'], risks: [], assumptions: [], basisRefs: ['requirement-1'], historicalRefs: [] }], findings: [], confirmationItems: [] })
+  assert.equal(points.nodes[0].ref, 'login')
+  assert.equal('coverageUnits' in points, false)
+  const cases = validateTestCaseDesignCandidate(caseCandidate('test-case-design/v1', ['tp-1']), new Set(['tp-1']))
+  assert.equal(cases.cases[0].content.testPointIds[0], 'tp-1')
+  assert.equal(cases.dataRequirements.length, 0)
 })
 
-test('Agent 自动修复两轮后停止并保留最后一次发布阻断', async () => {
-  const store = await seededStore()
-  const runtime = new AlwaysDuplicateRuntime()
-  const service = new TestDesignService(store, runtime)
-  const design = await service.createDesign('pv-1', { name: '修复上限', objective: '验证自动修复终止条件', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
-  const run = await service.createRun('pv-1', design.id, 'automatic-repair-exhausted', principal)
-  const scopeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate')
-  const analysisArtifact = scopeWaiting.artifacts.find(item => item.nodeKey === 'test_analysis')!
-  await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: analysisArtifact.id, targetRevision: analysisArtifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
-  const treeWaiting = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
-  await service.applyGateDecision('pv-1', design.id, run.id, 'test-point-tree', { targetId: treeWaiting.testPointTree!.id, targetRevision: treeWaiting.testPointTree!.currentRevision, expectedVersion: 0, decision: 'approved' }, principal)
+test('运行冻结当前绑定 Requirement Release 与 Workspace，后续发布不影响既有 Run', async () => {
+  const { store, service } = await fixture(new FakeRuntime())
+  const design = await service.createDesign('pv-1', createInput(), principal)
+  const first = await service.createRun('pv-1', design.id, 'freeze-release-1', principal)
+  assert.equal(first.basisSnapshot.requirementReleaseId, 'release-1')
+  assert.equal(first.basisSnapshot.verificationRunId, 'review-1')
+  assert.equal(first.workspaceSnapshot.requirementsJsonSha256, first.basisSnapshot.requirementsJsonSha256)
+  await bindSecondRelease(store)
+  const persisted = await service.getRun('pv-1', design.id, first.id)
+  assert.equal(persisted.basisSnapshot.requirementReleaseId, 'release-1')
+  assert.equal(persisted.workspaceSnapshot.requirementReleaseId, 'release-1')
+  const second = await service.createRun('pv-1', design.id, 'freeze-release-2', principal)
+  assert.equal(second.basisSnapshot.requirementReleaseId, 'release-2')
+})
 
-  const completed = await waitFor(service, design.id, run.id, value => value.status === 'succeeded')
-  assert.equal(runtime.stages.filter(stage => stage === 'test_case_synthesis').length, 3)
-  assert.equal(completed.automaticRepair?.status, 'exhausted')
+test('单 Agent 固定流程完成测试点人工批准、服务端审计、用例发布与正式资产投影', async () => {
+  const runtime = new FakeRuntime()
+  const projected: string[] = []
+  const projector: TestCaseAssetProjector = { ingest: async input => { projected.push(input.logicalPath); return { version: { id: `asset-version-${projected.length}` }, task: { id: `task-${projected.length}` } } } }
+  const { service } = await fixture(runtime, projector)
+  const design = await service.createDesign('pv-1', createInput(), principal)
+  const created = await service.createRun('pv-1', design.id, 'happy-path', principal)
+  const review = await waitFor(service, design.id, created.id, run => run.stage === 'test_point_review')
+  assert.deepEqual(runtime.stages, ['test_point_design'])
+  assert.equal(review.nodeRuns.find(item => item.nodeKey === 'test_point_review')?.status, 'waiting_gate')
+  const tree = await service.getTree('pv-1', design.id, created.id)
+  await service.approveTree('pv-1', design.id, created.id, tree.etag, principal)
+  const designed = await waitFor(service, design.id, created.id, run => run.status === 'succeeded' && run.testCases.length > 0)
+  assert.deepEqual(runtime.stages, ['test_point_design', 'test_case_design'])
+  assert.ok(projected.includes('workspace/branches/V1/test_design/test-point-tree.json'))
+  assert.ok(projected.includes('workspace/branches/V1/test_design/test-design.md'))
+  assert.equal(designed.coverageAudits.at(-1)?.blockers.every(item => item.resolution === 'human_review'), true)
+  const targets = designed.testCases.map(item => ({ caseId: item.id, targetRevision: item.currentRevision }))
+  await service.batchReview('pv-1', design.id, created.id, { targets, decision: 'submit' }, principal)
+  await service.batchReview('pv-1', design.id, created.id, { targets, decision: 'approve' }, principal)
+  const audit = await service.reAudit('pv-1', design.id, created.id)
+  assert.deepEqual(audit.blockers, [])
+  const published = await service.publishCaseSet('pv-1', design.id, created.id, { name: 'V1 正式用例', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256 }, principal)
+  assert.equal(published.version, 1)
+  assert.equal(published.projection.files.length, 4)
+  assert.ok(projected.includes('workspace/branches/V1/test_cases/test-cases.json'))
+  assert.ok(projected.includes('workspace/branches/V1/test_cases/test-cases.md'))
+  assert.ok(projected.includes('workspace/branches/V1/test_cases/test-data.json'))
+  assert.ok(projected.includes('workspace/branches/V1/test_cases/manifest.json'))
+})
+
+test('Coverage Audit 仅将 agent_repair 问题送回同一 Agent，自动修复最多两轮', async () => {
+  const runtime = new FakeRuntime({ uncoveredPoint: true, keepUncoveredDuringRepair: true })
+  const { service } = await fixture(runtime, { ingest: async input => ({ version: { id: `asset-${sha256(input.logicalPath).slice(0, 8)}` }, task: null }) })
+  const design = await service.createDesign('pv-1', createInput(), principal)
+  const created = await service.createRun('pv-1', design.id, 'repair-limit', principal)
+  await waitFor(service, design.id, created.id, run => run.stage === 'test_point_review')
+  const tree = await service.getTree('pv-1', design.id, created.id)
+  await service.approveTree('pv-1', design.id, created.id, tree.etag, principal)
+  const completed = await waitFor(service, design.id, created.id, run => run.status === 'succeeded' && run.automaticRepair?.status === 'exhausted')
+  assert.equal(runtime.stages.filter(stage => stage === 'test_design_repair').length, 2)
   assert.equal(completed.automaticRepair?.attempt, 2)
-  assert.equal(completed.coverageAudits.length, 3)
-  assert.ok(completed.coverageAudits.at(-1)!.blockers.some(item => item.code === 'TEST_CASE_DUPLICATE'))
-})
-
-test('树和用例编辑要求当前 ETag，编辑后旧审计失效', async () => {
-  const store = await seededStore()
-  const service = new TestDesignService(store, new FakeRuntime())
-  const design = await service.createDesign('pv-1', { name: '并发测试', objective: '验证并发编辑', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
-  const run = await service.createRun('pv-1', design.id, 'etag-run', principal)
-  const scope = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate'); const artifact = scope.artifacts.find(item => item.nodeKey === 'test_analysis')!
-  await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: artifact.id, targetRevision: artifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
-  const waiting = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
-  const currentTree = await service.getTree('pv-1', design.id, run.id)
-  await assert.rejects(() => service.patchTree('pv-1', design.id, run.id, '"stale"', { operations: [{ op: 'rename', nodeId: currentTree.revision.nodes[0].nodeId, title: '新标题' }], reason: '修正名称' }, principal), (error: unknown) => error instanceof TestDesignError && error.status === 412)
-  const patched = await service.patchTree('pv-1', design.id, run.id, currentTree.etag, { operations: [{ op: 'rename', nodeId: currentTree.revision.nodes[0].nodeId, title: '登录正常路径' }], reason: '修正名称' }, principal)
-  assert.equal(patched.revision.revision, 1)
-  assert.notEqual(patched.etag, currentTree.etag)
-  assert.equal(waiting.testPointTree?.currentRevision, 0)
-})
-
-test('并行设计单节点失败后只重跑失败节点', async () => {
-  const store = await seededStore(); const runtime = new FailOnceRuntime(); const service = new TestDesignService(store, runtime)
-  const design = await service.createDesign('pv-1', { name: '节点恢复', objective: '验证节点级恢复', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
-  const run = await service.createRun('pv-1', design.id, 'node-retry', principal)
-  const scope = await waitFor(service, design.id, run.id, value => value.stage === 'scope_gate'); const analysis = scope.artifacts.find(item => item.nodeKey === 'test_analysis')!
-  await service.applyGateDecision('pv-1', design.id, run.id, 'scope', { targetId: analysis.id, targetRevision: analysis.generation, expectedVersion: 0, decision: 'approved' }, principal)
-  const failed = await waitFor(service, design.id, run.id, value => value.status === 'failed')
-  assert.equal(failed.nodeRuns.find(item => item.nodeKey === 'functional_design')?.status, 'succeeded')
-  assert.equal(failed.nodeRuns.find(item => item.nodeKey === 'non_functional_design')?.status, 'failed')
-  assert.equal(failed.nodeRuns.find(item => item.nodeKey === 'non_functional_design')?.execution?.modelLabel, 'failed-model')
-  await service.processPreparedRun(run.id)
-  const recovered = await waitFor(service, design.id, run.id, value => value.stage === 'tree_gate')
-  assert.equal(recovered.errorCode, undefined)
-  assert.equal(recovered.error, undefined)
-  assert.equal(runtime.stages.filter(stage => stage === 'functional_design').length, 1)
-  assert.equal(runtime.stages.filter(stage => stage === 'non_functional_design').length, 2)
-})
-
-test('知识增强生成固定查询计划和命中，非法依据引用不能进入测试点树', async () => {
-  const retrievalStore = await seededStore()
-  const retrievalService = new TestDesignService(retrievalStore, new FakeRuntime())
-  const retrievalDesign = await retrievalService.createDesign('pv-1', { name: '固定召回', objective: '验证账号登录', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'selected_assets', assetVersionIds: ['asset-version-1'] } }, principal)
-  const retrievalRun = await retrievalService.createRun('pv-1', retrievalDesign.id, 'retrieval-run', principal)
-  assert.equal(retrievalRun.retrievalSnapshot.queryPlan.length > 0, true)
-  assert.equal(retrievalRun.retrievalSnapshot.hits.length > 0, true)
-  assert.equal(retrievalRun.retrievalSnapshot.assetVersionIds[0], 'asset-version-1')
-
-  const invalidStore = await seededStore()
-  const invalidService = new TestDesignService(invalidStore, new InvalidBasisRuntime())
-  const invalidDesign = await invalidService.createDesign('pv-1', { name: '非法引用', objective: '拒绝越界依据', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
-  const invalidRun = await invalidService.createRun('pv-1', invalidDesign.id, 'invalid-basis-run', principal)
-  const scope = await waitFor(invalidService, invalidDesign.id, invalidRun.id, value => value.stage === 'scope_gate')
-  const artifact = scope.artifacts.find(item => item.nodeKey === 'test_analysis')!
-  await invalidService.applyGateDecision('pv-1', invalidDesign.id, invalidRun.id, 'scope', { targetId: artifact.id, targetRevision: artifact.generation, expectedVersion: 0, decision: 'approved' }, principal)
-  const failed = await waitFor(invalidService, invalidDesign.id, invalidRun.id, value => value.status === 'failed')
-  assert.match(failed.error ?? '', /固定输入之外/u)
-})
-
-test('锁定项目版本拒绝继续创建测试设计和运行', async () => {
-  const store = await seededStore()
-  const projectVersions = new ProjectVersionService(store)
-  const service = new TestDesignService(store, new FakeRuntime())
-  const design = await service.createDesign('pv-1', { name: '锁定边界', objective: '验证只读门禁', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
-  await projectVersions.updateStatus('pv-1', 'locked')
-  await assert.rejects(() => service.createRun('pv-1', design.id, 'locked-run', principal), (error: unknown) => error instanceof TestDesignError && error.code === 'PROJECT_VERSION_READ_ONLY')
-  await assert.rejects(() => service.createDesign('pv-1', { name: '不允许创建', objective: '只读版本', basisMode: 'knowledge_assets', knowledgeAssetVersionIds: ['asset-version-1'], knowledgeAugmentation: { mode: 'disabled' } }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'PROJECT_VERSION_READ_ONLY')
+  assert.equal(completed.coverageAudits.at(-1)?.blockers.some(item => item.resolution === 'agent_repair'), true)
 })
 
 class FakeRuntime implements TestDesignAgentRuntime {
-  readonly stages: string[] = []
-  async readiness() { return { ready: true, agents: [] } }
-  async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
+  stages: string[] = []
+  constructor(private readonly behavior: { uncoveredPoint?: boolean; keepUncoveredDuringRepair?: boolean } = {}) {}
+  readiness = async () => ({ ready: true, agents: [{ agentKey: 'test-design', ready: true }] })
+  freezeConfiguration = async () => ({ configurationId: 'agent-config-1', configurationVersion: 1, configurationSha256: 'c'.repeat(64), agentDefinition: {} as never, routing: {} as never, primaryModel: { sourceId: 'source-1', modelId: 'model-1', modelName: '测试模型' }, createdAt: '2026-08-12T00:00:00.000Z', snapshotSha256: 'd'.repeat(64) })
+  execute = async (input: { stage: 'test_point_design' | 'test_case_design' | 'test_design_repair'; run: TestDesignWorkflowRun }) => {
     this.stages.push(input.stage)
-    const basisRefs = input.run.basisSnapshot.items.map(item => item.id)
-    const execution = { agentKey: input.stage === 'test_analysis' ? 'test-analysis' : input.stage === 'functional_design' ? 'functional-test-design' : input.stage === 'non_functional_design' ? 'non-functional-test-design' : 'test-case-synthesis', agentVersion: 'test-v1', modelLabel: 'fake-model', degraded: false, turns: 1, toolCalls: 0, events: [], framework: { name: 'pi-agent-core' as const, version: 'test' } }
-    if (input.stage === 'test_analysis') return { schemaVersion: 'test-analysis/v1', content: testAnalysisCandidate(), execution }
-    if (input.stage === 'functional_design') return { schemaVersion: 'functional-test-design/v1', content: { schemaVersion: 'functional-test-design/v1', nodes: [node('shared-root', 'functional', basisRefs)] }, execution }
-    if (input.stage === 'non_functional_design') return {
-      schemaVersion: 'non-functional-test-design/v1',
-      content: {
-        schemaVersion: 'non-functional-test-design/v1',
-        nodes: ['performance', 'stability', 'compatibility', 'security'].map(dimension => node(`${dimension}-root`, dimension as TestPointNodeRevision['dimension'], basisRefs)),
-      },
-      execution,
+    if (input.stage === 'test_point_design') {
+      const refs = input.run.basisSnapshot.items.map(item => item.id)
+      const nodes = refs.map((basisRef, index) => ({ ref: `point-${index + 1}`, title: `需求 ${index + 1} 测试点`, objective: `验证需求 ${index + 1}`, dimension: 'functional', priority: 'P0', applicability: 'applicable', designTechniques: ['主流程'], entryMethods: ['ui'], oracle: '结果符合需求', dataConditions: [], risks: [], assumptions: [], basisRefs: [basisRef], historicalRefs: [] }))
+      if (this.behavior.uncoveredPoint) nodes.push({ ...nodes[0], ref: 'point-extra', title: '额外风险测试点' })
+      return { schemaVersion: 'test-point-design/v1', content: { schemaVersion: 'test-point-design/v1', nodes, findings: [], confirmationItems: [] } }
     }
-    const upstream = input.upstream as { treeRevision: { nodes: TestPointNodeRevision[] } }
-    return { schemaVersion: 'test-case-synthesis/v1', content: { schemaVersion: 'test-case-synthesis/v1', cases: upstream.treeRevision.nodes.map(point => caseContent([point.nodeId], point.dimension)), dataRequirements: [{ ref: 'account-data', name: '登录账号', entityType: 'account', featureTags: ['login'], testPointIds: [upstream.treeRevision.nodes[0].nodeId], caseIndexes: [0], fieldConstraints: { status: 'active' }, relationships: [], quantity: 1, initialState: '已启用', preparationHint: '通过测试数据工厂创建', sensitivity: 'internal', isolation: '每条用例独立账号', resetAndCleanup: '用后删除', readiness: 'ready' }] }, execution }
+    const pointIds = approvedPointIds(input.run)
+    const covered = this.behavior.keepUncoveredDuringRepair ? pointIds.slice(0, 1) : pointIds
+    return { schemaVersion: input.stage === 'test_design_repair' ? 'test-design-repair/v1' : 'test-case-design/v1', content: caseCandidate(input.stage === 'test_design_repair' ? 'test-design-repair/v1' : 'test-case-design/v1', covered) }
   }
 }
 
-class FailOnceRuntime extends FakeRuntime {
-  private failed = false
-  override async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
-    if (input.stage === 'non_functional_design' && !this.failed) {
-      this.failed = true
-      this.stages.push(input.stage)
-      const error = new Error('MODEL_PROVIDER_UNAVAILABLE: transient') as Error & { execution?: NonNullable<Awaited<ReturnType<FakeRuntime['execute']>>['execution']> }
-      error.execution = { agentKey: 'non-functional-test-design', agentVersion: 'test-v1', modelLabel: 'failed-model', degraded: false, turns: 2, toolCalls: 1, toolErrors: 1, events: [], framework: { name: 'pi-agent-core', version: 'test' } }
-      throw error
-    }
-    return super.execute(input)
-  }
-}
-
-class InvalidBasisRuntime extends FakeRuntime {
-  override async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
-    const result = await super.execute(input)
-    if (input.stage === 'functional_design') return { ...result, content: { schemaVersion: 'functional-test-design/v1', nodes: [node('invalid-basis', 'functional', ['basis_not_in_snapshot'])] } }
-    return result
-  }
-}
-
-class DuplicateThenRepairRuntime extends FakeRuntime {
-  readonly repairContexts: unknown[] = []
-  private synthesisCalls = 0
-  override async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
-    const result = await super.execute(input)
-    if (input.stage !== 'test_case_synthesis') return result
-    const upstream = input.upstream as { repairContext?: unknown }
-    if (upstream.repairContext) this.repairContexts.push(structuredClone(upstream.repairContext))
-    this.synthesisCalls += 1
-    if (this.synthesisCalls > 1) return result
-    const content = structuredClone(result.content) as { cases: TestCaseContent[]; dataRequirements: unknown[] }
-    content.cases[0].testPointIds.push(...content.cases[1].testPointIds)
-    content.cases.splice(1, 1)
-    content.cases.splice(1, 0, structuredClone(content.cases[0]))
-    content.dataRequirements = []
-    return { ...result, content }
-  }
-}
-
-class AlwaysDuplicateRuntime extends FakeRuntime {
-  override async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0]) {
-    const result = await super.execute(input)
-    if (input.stage !== 'test_case_synthesis') return result
-    const content = structuredClone(result.content) as { cases: TestCaseContent[]; dataRequirements: unknown[] }
-    content.cases.splice(1, 0, structuredClone(content.cases[0]))
-    content.dataRequirements = []
-    return { ...result, content }
-  }
-}
-
-function testAnalysisCandidate(): Record<string, unknown> {
-  return {
-    schemaVersion: 'test-analysis/v1',
-    scope: { summary: '认证范围', objectives: ['验证认证行为'], inclusions: ['账号登录'], exclusions: [] },
-    coverageUnits: [{
-      ref: 'login-unit', title: '账号登录', description: '验证账号登录的可观察行为', basisRefs: ['basis-1'], entryMethods: ['api'],
-      roles: ['用户'], preconditions: ['账号有效'], actions: ['提交登录请求'], rules: ['凭据必须正确'], constraints: [], inputPartitions: ['有效凭据', '无效凭据'], boundaryValues: [], stateTransitions: ['未登录到已登录'], interfaces: ['POST /api/login'], dataSideEffects: ['创建会话'], oracles: ['响应与会话状态一致'], positivePaths: ['有效凭据登录'], negativePaths: ['无效凭据被拒绝'], risks: [], assumptions: [],
-    }],
-    findings: [],
-    confirmationItems: [],
-  }
-}
-
-function node(ref: string, dimension: TestPointNodeRevision['dimension'], basisRefs: string[]) {
-  return { ref, title: `${dimension} 测试点`, objective: '验证认证行为', dimension, priority: 'P1', applicability: 'applicable', designTechniques: ['场景法'], entryMethods: ['api'], oracle: '响应与状态一致', dataConditions: [], risks: [], assumptions: [], basisRefs, historicalRefs: [] }
-}
-
-function caseContent(testPointIds: string[], dimension: TestCaseContent['dimension'] = 'functional'): TestCaseContent {
-  return { schemaVersion: 'test-case/v1', title: `验证 ${testPointIds[0]}`, objective: '验证认证行为', dimension, testPointIds, priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'api', apiSpec: { method: 'POST', path: '/api/login' }, steps: [{ key: 'step-1', action: '提交登录请求', expected: '返回明确结果' }], verificationChecks: [{ key: 'check-1', description: '响应结构正确' }], executionReadiness: 'ready', automationHint: '接口自动化' }], sharedVerificationChecks: [], tags: ['认证'], domain: '身份认证' }
-}
-
-async function seededStore() {
-  const store = new JsonStore(null); await store.load(); const createdAt = new Date().toISOString(); const content = '# 登录需求\n\n用户可以使用账号密码登录。'
+async function fixture(runtime: TestDesignAgentRuntime, projector?: TestCaseAssetProjector) {
+  const store = new JsonStore(null); await store.load()
+  const release = releasePackage('release-1', 'review-1', ['REQ-1'])
   await store.transaction(state => {
-    state.projects.push({ id: 'project-1', name: 'SmartHub', createdAt })
-    state.projectVersions.push({ id: 'pv-1', projectId: 'project-1', name: 'V4.0', status: 'open', createdAt, updatedAt: createdAt })
-    state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', activeIndexVersionId: 'index-1', activeConfigVersionId: null, createdAt })
-    state.assets.push({ id: 'asset-1', knowledgeBaseId: 'kb-1', directoryId: null, displayName: '登录需求', logicalPath: 'requirements/login.md', assetType: 'requirement', sourceType: 'upload', activeVersionId: 'asset-version-1', syncStatus: 'ready', createdAt, updatedAt: createdAt })
-    state.versions.push({ id: 'asset-version-1', assetId: 'asset-1', number: 1, status: 'ready', content, contentHash: canonicalSha256(content), configVersionId: 'config-1', chunks: [], createdAt, readyAt: createdAt })
-    state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', version: 1, status: 'active', configVersionId: 'config-1', assetVersionIds: ['asset-version-1'], createdAt, activatedAt: createdAt, indexedChunks: [] })
+    state.projects.push({ id: 'project-1', name: '测试项目', createdAt: '2026-08-12T00:00:00.000Z' })
+    state.projectVersions.push({ id: 'pv-1', projectId: 'project-1', name: 'V1', status: 'open', requirementReleaseBinding: { releaseId: release.id, verificationRunId: 'review-1', requirementsJsonSha256: release.requirementsHash, boundAt: '2026-08-12T00:00:00.000Z' }, createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' })
+    state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', createdAt: '2026-08-12T00:00:00.000Z', activeIndexVersionId: 'index-1', activeConfigVersionId: 'config-1' })
+    state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', configVersionId: 'config-1', assetVersionIds: [], indexedChunks: [], createdAt: '2026-08-12T00:00:00.000Z' } as never)
+    state.reviewRuns.push(release.review as never)
   })
-  return store
+  return { store, service: new TestDesignService(store, runtime, projector) }
 }
 
-async function waitFor(service: TestDesignService, designId: string, runId: string, predicate: (run: Awaited<ReturnType<TestDesignService['getRun']>>) => boolean) {
-  for (let attempt = 0; attempt < 100; attempt += 1) { const run = await service.getRun('pv-1', designId, runId); if (predicate(run)) return run; await new Promise(resolve => setTimeout(resolve, 5)) }
-  throw new Error('等待测试设计运行超时')
+async function bindSecondRelease(store: JsonStore) {
+  const release = releasePackage('release-2', 'review-2', ['REQ-2'])
+  await store.transaction(state => { state.reviewRuns.push(release.review as never); const version = state.projectVersions.find(item => item.id === 'pv-1')!; version.requirementReleaseBinding = { releaseId: release.id, verificationRunId: 'review-2', requirementsJsonSha256: release.requirementsHash, boundAt: '2026-08-12T01:00:00.000Z' } })
 }
+
+function releasePackage(releaseId: string, reviewId: string, requirementIds: string[]) {
+  const requirements = `${JSON.stringify({ schemaVersion: 'requirements/v1', releaseId, projectVersionId: 'pv-1', verificationRunId: reviewId, sourceAssetVersions: [], requirements: requirementIds.map(id => ({ clientRequirementPointId: id, title: id, description: `需求 ${id}`, evidenceRefs: [] })) })}\n`
+  const requirementsHash = sha256(requirements)
+  const manifest = `${JSON.stringify({ schemaVersion: 'requirement-release-manifest/v1', releaseId, projectVersionId: 'pv-1', verificationRunId: reviewId, artifacts: [{ fileName: 'requirements.json', mediaType: 'application/json', contentSha256: requirementsHash }], machineReadableEntryPoints: { requirements: 'requirements.json' } })}\n`
+  const release = { id: releaseId, schemaVersion: 'requirement-release-package/v1', status: 'published', projectVersionId: 'pv-1', verificationRunId: reviewId, sourceAssetVersionIds: [], artifacts: [{ fileName: 'requirements.json', mediaType: 'application/json', content: requirements, contentSha256: requirementsHash }, { fileName: 'manifest.json', mediaType: 'application/json', content: manifest, contentSha256: sha256(manifest) }], contentSha256: sha256(manifest), publishedAt: '2026-08-12T00:00:00.000Z' }
+  return { id: releaseId, requirementsHash, review: { id: reviewId, projectVersionId: 'pv-1', status: 'succeeded', workflow: { release }, result: { requirementPoints: [] }, createdAt: '2026-08-12T00:00:00.000Z' } }
+}
+
+function createInput() { return { name: '认证测试设计', objective: '验证正式需求', includedScopes: [{ kind: 'module', value: '认证' }], excludedScopes: [], focusDimensions: ['functional'], executionMethods: ['ui'], userCoverageObjectives: [], knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [] } }
+function caseCandidate(schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1', pointIds: string[]) { return { schemaVersion, cases: pointIds.map((pointId, index) => ({ ref: `case-${index + 1}`, schemaVersion: 'test-case/v1', title: `用例 ${index + 1}`, objective: `验证 ${pointId}`, dimension: 'functional', testPointIds: [pointId], priority: 'P0', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/login' }, steps: [{ key: 'step-1', action: '执行操作', expected: '结果符合需求' }], verificationChecks: [{ key: 'check-1', description: '页面结果正确' }], executionReadiness: 'ready', automationHint: '使用 UI 自动化' }], sharedVerificationChecks: [], tags: ['smoke'], domain: '认证' })), dataRequirements: [], findings: [], confirmationItems: [] } }
+function approvedPointIds(run: TestDesignWorkflowRun) { const tree = run.testPointTree!; const version = tree.versions.find(item => item.id === tree.currentApprovedVersionId)!; const revision = tree.revisions.find(item => item.revision === version.revision)!; const parents = new Set(revision.nodes.flatMap(item => item.parentId ? [item.parentId] : [])); return revision.nodes.filter(item => !item.deleted && item.applicability !== 'not_applicable' && !parents.has(item.nodeId)).map(item => item.nodeId) }
+async function waitFor(service: TestDesignService, designId: string, runId: string, predicate: (run: TestDesignWorkflowRun) => boolean) { for (let attempt = 0; attempt < 200; attempt += 1) { const value = await service.getRun('pv-1', designId, runId) as TestDesignWorkflowRun; if (predicate(value)) return value; await new Promise(resolve => setTimeout(resolve, 5)) } throw new Error('等待测试设计状态超时') }
+function sha256(value: string) { return createHash('sha256').update(value).digest('hex') }

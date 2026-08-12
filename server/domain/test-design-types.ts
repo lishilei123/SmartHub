@@ -1,7 +1,7 @@
-import type { AgentExecutionEvent } from './agent-types.js'
+import type { AgentDefinitionVersion, AgentExecutionEvent } from './agent-types.js'
 import type { AgentExecutionRecord } from './types.js'
+import type { AgentRoutingConfiguration } from './types.js'
 
-export type TestDesignBasisMode = 'review_baseline' | 'knowledge_assets'
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
 export type WorkflowStatus = 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled'
 export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled' | 'stale'
@@ -27,15 +27,13 @@ export interface CreateTestDesignCommon {
   includedScopes?: ScopeRule[]
   excludedScopes?: ScopeRule[]
   focusDimensions?: TestDimension[]
+  executionMethods?: Array<'ui' | 'api'>
   userCoverageObjectives?: string[]
   knowledgeAugmentation: KnowledgeAugmentation
   historicalCaseSelections?: HistoricalCaseSelection[]
 }
 
-export type CreateTestDesignInput = CreateTestDesignCommon & (
-  | { basisMode: 'review_baseline'; sourceReviewRunId: string; sourceTechnicalSolutionRunId: string }
-  | { basisMode: 'knowledge_assets'; knowledgeAssetVersionIds: string[] }
-)
+export type CreateTestDesignInput = CreateTestDesignCommon
 
 export interface TestDesign {
   id: string
@@ -43,7 +41,6 @@ export interface TestDesign {
   projectId: string
   name: string
   objective: string
-  basisMode: TestDesignBasisMode
   input: CreateTestDesignInput
   logicalInputSha256: string
   createdBy: string
@@ -52,7 +49,7 @@ export interface TestDesign {
 
 export interface FrozenContentRef {
   id: string
-  kind: 'requirement_review' | 'technical_solution_review' | 'knowledge_asset' | 'historical_case_set' | 'historical_case_asset'
+  kind: 'requirement_release' | 'knowledge_asset' | 'historical_case_set' | 'historical_case_asset'
   sourceId: string
   contentSha256: string
   content: unknown
@@ -60,10 +57,51 @@ export interface FrozenContentRef {
 }
 
 export interface TestDesignBasisSnapshot {
-  schemaVersion: 'test-design-basis-snapshot/v1'
-  basisMode: TestDesignBasisMode
+  schemaVersion: 'test-design-basis-snapshot/v2'
   projectVersionId: string
+  requirementReleaseId: string
+  verificationRunId: string
+  requirementsJsonSha256: string
   items: FrozenContentRef[]
+  createdAt: string
+  snapshotSha256: string
+}
+
+export interface TestDesignWorkspaceFile {
+  logicalPath: string
+  sourceType: 'asset_version' | 'requirement_release' | 'test_point_tree_version' | 'test_case_set_version' | 'run_candidate'
+  sourceId: string
+  contentSha256: string
+  content: string
+  assetId?: string
+  assetVersionId?: string
+  displayName: string
+}
+
+export interface TestDesignWorkspaceSnapshot {
+  schemaVersion: 'test-design-workspace-snapshot/v1'
+  rootLogicalPath: 'workspace'
+  activeBranchLogicalPath: string
+  agentLogicalPath: 'workspace/agent_workspace/design_agent'
+  projectVersionId: string
+  projectVersionName: string
+  knowledgeBaseId: string
+  indexVersionId: string
+  requirementReleaseId: string
+  verificationRunId: string
+  requirementsJsonSha256: string
+  files: TestDesignWorkspaceFile[]
+  createdAt: string
+  snapshotSha256: string
+}
+
+export interface TestDesignRunAgentConfigurationSnapshot {
+  configurationId: string
+  configurationVersion: number
+  configurationSha256: string
+  agentDefinition: AgentDefinitionVersion
+  routing: AgentRoutingConfiguration
+  primaryModel: { sourceId: string; modelId: string; modelName: string }
   createdAt: string
   snapshotSha256: string
 }
@@ -87,9 +125,10 @@ export interface HistoricalCaseSnapshot {
   snapshotSha256: string
 }
 
-export type TestDesignNodeKey = 'test_analysis' | 'scope_gate' | 'functional_design' | 'non_functional_design' | 'tree_merge' | 'tree_gate' | 'test_case_synthesis' | 'coverage_audit'
-export type TestDesignAgentExecutionRecord = Omit<AgentExecutionRecord, 'agentKey'> & {
-  agentKey: 'test-analysis' | 'functional-test-design' | 'non-functional-test-design' | 'test-case-synthesis'
+export type TestDesignNodeKey = 'test_point_design' | 'test_point_review' | 'test_case_design' | 'coverage_audit' | 'test_design_repair'
+export type TestDesignAgentExecutionRecord = Omit<AgentExecutionRecord, 'agentKey' | 'workflowStage'> & {
+  agentKey: 'test-design'
+  workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'
   agentVersion: string
   modelLabel: string
   degraded: boolean
@@ -122,7 +161,7 @@ export interface WorkflowArtifact {
 
 export interface WorkflowGateDecision {
   id: string
-  gateKey: 'scope' | 'test-point-tree'
+  gateKey: 'test-point-tree'
   targetId: string
   targetRevision: number
   version: number
@@ -173,6 +212,7 @@ export interface TestPointTreeVersion {
   treeSha256: string
   approvedBy: string
   approvedAt: string
+  projection: WorkspaceArtifactProjection
 }
 
 export interface TestPointTree {
@@ -247,6 +287,7 @@ export interface TestCase {
   runId: string
   treeVersionId: string
   origin: 'ai' | 'manual' | 'historical_unchanged' | 'historical_modified' | 'historical_reference'
+  candidateRef?: string
   historicalSourceRef?: string
   currentRevision: number
   reviewState: TestCaseReviewState
@@ -330,7 +371,13 @@ export interface TestCaseSetVersion {
   contentSha256: string
   publishedBy: string
   publishedAt: string
-  projection: { status: 'pending' | 'succeeded' | 'failed'; assetVersionId?: string; error?: string }
+  projection: WorkspaceArtifactProjection
+}
+
+export interface WorkspaceArtifactProjection {
+  status: 'pending' | 'succeeded' | 'failed'
+  files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>
+  error?: string
 }
 
 export interface TestSuiteVersionMember { testCaseSetVersionId: string; caseId: string; revision: number; executionMethods: Array<'ui' | 'api'>; ordinal: number; reason: string }
@@ -353,6 +400,9 @@ export interface TestDesignWorkflowRun {
   progress: number
   idempotencyKey: string
   basisSnapshot: TestDesignBasisSnapshot
+  agentConfigurationSnapshot: TestDesignRunAgentConfigurationSnapshot
+  workspaceSnapshot: TestDesignWorkspaceSnapshot
+  formalWorkspaceFiles: TestDesignWorkspaceFile[]
   retrievalSnapshot: RetrievalSnapshot
   historicalSnapshot: HistoricalCaseSnapshot
   nodeRuns: WorkflowNodeRun[]
@@ -377,6 +427,7 @@ export interface TestDesignWorkflowRun {
 }
 
 export interface TestDesignState {
+  architectureVersion: 'single-agent-skills/v1'
   designs: TestDesign[]
   runs: TestDesignWorkflowRun[]
   caseSetVersions: TestCaseSetVersion[]

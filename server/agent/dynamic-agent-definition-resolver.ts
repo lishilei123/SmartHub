@@ -3,16 +3,12 @@ import { createAgentDefinitionVersion } from './requirement-analysis-agent.js'
 import type { AgentDefinitionConfigDictionary } from './agent-definition-config.js'
 import { defaultAgentDefinitionConfigDictionary } from './agent-definition-config.js'
 
-const legacyAliases: Record<string, keyof AgentDefinitionConfigDictionary> = {
-  'technical-solution-analysis': 'technical-solution-review',
-}
-
 export class DynamicAgentDefinitionResolver implements AgentDefinitionResolver {
   constructor(private readonly configurations: AgentDefinitionConfigDictionary) {}
 
   resolve(agentKey: AgentDefinitionVersion['agentKey']): AgentDefinitionVersion {
-    const configKey = legacyAliases[agentKey] ?? agentKey
-    const config = this.configurations[configKey]
+    const configKey = agentKey
+    const config = this.configurations[agentKey]
     if (!config) throw new Error(`AGENT_DEFINITION_NOT_FOUND: ${agentKey as string}`)
     return createAgentDefinitionVersion({
       agentKey: configKey as AgentDefinitionVersion['agentKey'],

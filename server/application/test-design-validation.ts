@@ -9,27 +9,25 @@ export class TestDesignError extends Error {
 }
 
 export function validateCreateTestDesignInput(value: unknown): CreateTestDesignInput {
-  const input = object(value, 'TEST_DESIGN_BASIS_MODE_INVALID', '创建参数必须是对象')
-  const basisMode = input.basisMode
-  if (basisMode !== 'review_baseline' && basisMode !== 'knowledge_assets') fail('TEST_DESIGN_BASIS_MODE_INVALID', 'basisMode 必须为 review_baseline 或 knowledge_assets')
-  const common = ['name', 'objective', 'basisMode', 'includedScopes', 'excludedScopes', 'focusDimensions', 'userCoverageObjectives', 'knowledgeAugmentation', 'historicalCaseSelections']
-  const branch = basisMode === 'review_baseline' ? ['sourceReviewRunId', 'sourceTechnicalSolutionRunId'] : ['knowledgeAssetVersionIds']
-  rejectUnknown(input, [...common, ...branch], 'TEST_DESIGN_BASIS_MODE_INVALID')
-  const normalized = {
+  const input = object(value, 'TEST_DESIGN_INPUT_INVALID', '创建参数必须是对象')
+  rejectUnknown(input, ['name', 'objective', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation', 'historicalCaseSelections'], 'TEST_DESIGN_INPUT_INVALID')
+  return {
     name: requiredText(input.name, 'name', 200),
     objective: requiredText(input.objective, 'objective', 4_000),
-    basisMode,
     includedScopes: optionalScopeRules(input.includedScopes),
     excludedScopes: optionalScopeRules(input.excludedScopes),
     focusDimensions: optionalDimensions(input.focusDimensions),
+    executionMethods: optionalExecutionMethods(input.executionMethods),
     userCoverageObjectives: optionalTexts(input.userCoverageObjectives, 'userCoverageObjectives', 100, 2_000),
-    knowledgeAugmentation: validateAugmentation(input.knowledgeAugmentation),
+    knowledgeAugmentation: validateAugmentation(input.knowledgeAugmentation ?? { mode: 'disabled' }),
     historicalCaseSelections: validateHistoricalSelections(input.historicalCaseSelections),
   }
-  if (basisMode === 'review_baseline') return { ...normalized, basisMode, sourceReviewRunId: id(input.sourceReviewRunId, 'sourceReviewRunId'), sourceTechnicalSolutionRunId: id(input.sourceTechnicalSolutionRunId, 'sourceTechnicalSolutionRunId') }
-  const knowledgeAssetVersionIds = uniqueIds(input.knowledgeAssetVersionIds, 'knowledgeAssetVersionIds')
-  if (!knowledgeAssetVersionIds.length) fail('TEST_DESIGN_BASIS_MODE_INVALID', 'knowledge_assets 模式至少选择一个资产版本')
-  return { ...normalized, basisMode, knowledgeAssetVersionIds }
+}
+
+function optionalExecutionMethods(value: unknown): Array<'ui' | 'api'> {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.some(item => item !== 'ui' && item !== 'api')) fail('TEST_DESIGN_INPUT_INVALID', 'executionMethods 只能包含 ui、api', 422)
+  return [...new Set(value)] as Array<'ui' | 'api'>
 }
 
 export function validateTestCaseContent(value: unknown, validPointIds?: Set<string>): TestCaseContent {
@@ -90,72 +88,35 @@ export type DesignCandidateNode = TestPointNodeContent & { ref: string; parentRe
 
 export type TestDataRequirementCandidate = Omit<TestDataRequirement, 'id' | 'caseIds' | 'testPointIds'> & {
   ref: string
-  caseIndexes: number[]
+  caseRefs: string[]
   testPointIds: string[]
 }
 
-export interface TestCaseSynthesisCandidate extends Record<string, unknown> {
-  schemaVersion: 'test-case-synthesis/v1'
-  cases: TestCaseContent[]
+export interface TestPointDesignCandidate extends Record<string, unknown> {
+  schemaVersion: 'test-point-design/v1'
+  nodes: DesignCandidateNode[]
+  findings: Record<string, unknown>[]
+  confirmationItems: Record<string, unknown>[]
+}
+
+export interface TestCaseDesignCandidate extends Record<string, unknown> {
+  schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1'
+  cases: Array<{ ref: string; content: TestCaseContent }>
   dataRequirements: TestDataRequirementCandidate[]
+  findings: Record<string, unknown>[]
+  confirmationItems: Record<string, unknown>[]
 }
 
-export function validateTestAnalysisCandidate(value: unknown): Record<string, unknown> {
-  const input = analysisObject(value, '/', '提交结果必须是对象')
-  analysisRejectUnknown(input, ['schemaVersion', 'scope', 'coverageUnits', 'findings', 'confirmationItems'], '/')
-  if (input.schemaVersion !== 'test-analysis/v1') analysisFail('/schemaVersion', 'schemaVersion 必须为 test-analysis/v1')
-
-  const scope = analysisObject(input.scope, '/scope', 'scope 必须是对象')
-  analysisRejectUnknown(scope, ['summary', 'objectives', 'inclusions', 'exclusions'], '/scope')
-  analysisText(scope.summary, '/scope/summary', 4_000)
-  analysisTexts(scope.objectives, '/scope/objectives', 100, 2_000)
-  analysisTexts(scope.inclusions, '/scope/inclusions', 200, 2_000)
-  analysisTexts(scope.exclusions, '/scope/exclusions', 200, 2_000)
-
-  if (!Array.isArray(input.coverageUnits) || !input.coverageUnits.length || input.coverageUnits.length > 1_000) analysisFail('/coverageUnits', 'coverageUnits 必须包含 1 到 1000 个原子覆盖单元')
-  const refs = new Set<string>()
-  const semanticArrays = ['roles', 'preconditions', 'actions', 'rules', 'constraints', 'inputPartitions', 'boundaryValues', 'stateTransitions', 'interfaces', 'dataSideEffects', 'oracles', 'positivePaths', 'negativePaths', 'risks', 'assumptions']
-  input.coverageUnits.forEach((candidate, index) => {
-    const path = `/coverageUnits/${index}`
-    const unit = analysisObject(candidate, path, '覆盖单元必须是对象')
-    analysisRejectUnknown(unit, ['ref', 'title', 'description', 'basisRefs', 'entryMethods', ...semanticArrays], path)
-    const ref = analysisText(unit.ref, `${path}/ref`, 200)
-    if (refs.has(ref)) analysisFail(`${path}/ref`, `临时引用 ${ref} 重复`)
-    refs.add(ref)
-    analysisText(unit.title, `${path}/title`, 500)
-    analysisText(unit.description, `${path}/description`, 4_000)
-    if (!analysisTexts(unit.basisRefs, `${path}/basisRefs`, 1_000, 500).length) analysisFail(`${path}/basisRefs`, '至少引用一个固定依据')
-    analysisEnumTexts(unit.entryMethods, `${path}/entryMethods`, ['ui', 'api'] as const, 2)
-    semanticArrays.forEach(field => analysisTexts(unit[field], `${path}/${field}`, 200, 2_000))
-  })
-
-  if (!Array.isArray(input.findings) || input.findings.length > 500) analysisFail('/findings', 'findings 必须是最多 500 项的数组')
-  input.findings.forEach((candidate, index) => {
-    const path = `/findings/${index}`
-    const finding = analysisObject(candidate, path, 'Finding 必须是对象')
-    analysisRejectUnknown(finding, ['title', 'description', 'severity', 'basisRefs'], path)
-    analysisText(finding.title, `${path}/title`, 500)
-    analysisText(finding.description, `${path}/description`, 8_000)
-    if (!['blocker', 'high', 'medium', 'low'].includes(String(finding.severity))) analysisFail(`${path}/severity`, '必须为 blocker、high、medium 或 low')
-    analysisTexts(finding.basisRefs, `${path}/basisRefs`, 1_000, 500)
-  })
-
-  if (!Array.isArray(input.confirmationItems) || input.confirmationItems.length > 500) analysisFail('/confirmationItems', 'confirmationItems 必须是最多 500 项的数组')
-  input.confirmationItems.forEach((candidate, index) => {
-    const path = `/confirmationItems/${index}`
-    const item = analysisObject(candidate, path, '待确认项必须是对象')
-    analysisRejectUnknown(item, ['title', 'question', 'decisionType', 'impactStage', 'affectedRefs', 'blocker'], path)
-    analysisText(item.title, `${path}/title`, 500)
-    analysisText(item.question, `${path}/question`, 8_000)
-    analysisText(item.decisionType, `${path}/decisionType`, 200)
-    if (!['analysis', 'tree', 'case', 'data', 'publication'].includes(String(item.impactStage))) analysisFail(`${path}/impactStage`, '取值无效')
-    analysisTexts(item.affectedRefs, `${path}/affectedRefs`, 1_000, 500)
-    if (typeof item.blocker !== 'boolean') analysisFail(`${path}/blocker`, '必须是布尔值')
-  })
-  return structuredClone(input)
+export function validateTestPointDesignCandidate(value: unknown): TestPointDesignCandidate {
+  const input = synthesisObject(value, '/', '提交结果必须是对象')
+  synthesisRejectUnknown(input, ['schemaVersion', 'nodes', 'findings', 'confirmationItems'], '/')
+  if (input.schemaVersion !== 'test-point-design/v1') synthesisFail('/schemaVersion', 'schemaVersion 必须为 test-point-design/v1')
+  const nodes = validateCandidateNodes(input.nodes)
+  const { findings, confirmationItems } = validateDesignIssues(input)
+  return { schemaVersion: 'test-point-design/v1', nodes, findings, confirmationItems }
 }
 
-const synthesisCaseFields = ['schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'sharedVerificationChecks', 'tags', 'domain']
+const synthesisCaseFields = ['ref', 'schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'sharedVerificationChecks', 'tags', 'domain']
 const legacySynthesisFieldGuidance: Record<string, string> = {
   preConditions: '改为 preconditions',
   steps: '移入 executionMethods[].steps，并使用 action/expected',
@@ -165,13 +126,15 @@ const legacySynthesisFieldGuidance: Record<string, string> = {
   testData: '移到提交根对象 dataRequirements[]',
 }
 
-export function validateTestCaseSynthesisCandidate(value: unknown, validPointIds?: Set<string>): TestCaseSynthesisCandidate {
+export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: Set<string>, repair = false): TestCaseDesignCandidate {
   const input = synthesisObject(value, '/', '提交结果必须是对象')
-  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dataRequirements'], '/')
-  if (input.schemaVersion !== 'test-case-synthesis/v1') synthesisFail('/schemaVersion', 'schemaVersion 必须为 test-case-synthesis/v1')
+  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dataRequirements', 'findings', 'confirmationItems'], '/')
+  const schemaVersion = repair ? 'test-design-repair/v1' : 'test-case-design/v1'
+  if (input.schemaVersion !== schemaVersion) synthesisFail('/schemaVersion', `schemaVersion 必须为 ${schemaVersion}`)
   if (!Array.isArray(input.cases) || !input.cases.length || input.cases.length > 1_000) synthesisFail('/cases', 'cases 必须包含 1 到 1000 条用例')
   if (!Array.isArray(input.dataRequirements) || input.dataRequirements.length > 1_000) synthesisFail('/dataRequirements', 'dataRequirements 必须是最多 1000 项的数组')
 
+  const caseRefs = new Set<string>()
   const cases = input.cases.map((candidate, index) => {
     const path = `/cases/${index}`
     const caseInput = synthesisObject(candidate, path, `cases[${index}] 必须是对象`)
@@ -181,34 +144,30 @@ export function validateTestCaseSynthesisCandidate(value: unknown, validPointIds
       synthesisFail(path, `包含不允许的字段：${unexpected.join('、')}${guidance.length ? `；字段映射：${guidance.join('；')}` : ''}`)
     }
     try {
-      const normalized = validateTestCaseContent(caseInput, validPointIds)
-      if (normalized.dataRequirementIds.length) synthesisFail(`${path}/dataRequirementIds`, '综合候选中的 dataRequirementIds 必须为空；服务端根据 dataRequirements[].caseIndexes 生成正式关联')
-      return normalized
+      const ref = synthesisText(caseInput.ref, `${path}/ref`, 200)
+      if (caseRefs.has(ref)) synthesisFail(`${path}/ref`, `临时引用 ${ref} 重复`)
+      caseRefs.add(ref)
+      const { ref: _ref, ...contentInput } = caseInput
+      const normalized = validateTestCaseContent(contentInput, validPointIds)
+      if (normalized.dataRequirementIds.length) synthesisFail(`${path}/dataRequirementIds`, '候选中的 dataRequirementIds 必须为空；服务端根据 dataRequirements[].caseRefs 生成正式关联')
+      return { ref, content: normalized }
     } catch (error) {
       if (error instanceof TestDesignError && error.details && typeof error.details === 'object' && 'path' in error.details) throw error
       synthesisFail(path, errorMessage(error))
     }
   })
-  if (validPointIds) {
-    const coveredPointIds = new Set(cases.flatMap(testCase => testCase.testPointIds))
-    const missingPointIds = [...validPointIds].filter(pointId => !coveredPointIds.has(pointId))
-    if (missingPointIds.length) {
-      const preview = missingPointIds.slice(0, 20).join('、')
-      synthesisFail('/cases', `缺少 ${missingPointIds.length} 个已批准适用测试点的用例映射：${preview}${missingPointIds.length > 20 ? ' 等' : ''}`)
-    }
-  }
-
   const refs = new Set<string>()
   const dataRequirements = input.dataRequirements.map((candidate, index): TestDataRequirementCandidate => {
     const path = `/dataRequirements/${index}`
     const item = synthesisObject(candidate, path, `dataRequirements[${index}] 必须是对象`)
-    synthesisRejectUnknown(item, ['ref', 'name', 'entityType', 'featureTags', 'testPointIds', 'caseIndexes', 'fieldConstraints', 'relationships', 'quantity', 'initialState', 'preparationHint', 'sensitivity', 'isolation', 'resetAndCleanup', 'readiness', 'readinessReason'], path)
+    synthesisRejectUnknown(item, ['ref', 'name', 'entityType', 'featureTags', 'testPointIds', 'caseRefs', 'fieldConstraints', 'relationships', 'quantity', 'initialState', 'preparationHint', 'sensitivity', 'isolation', 'resetAndCleanup', 'readiness', 'readinessReason'], path)
     const ref = synthesisText(item.ref, `${path}/ref`, 200)
     if (refs.has(ref)) synthesisFail(`${path}/ref`, `临时引用 ${ref} 重复`)
     refs.add(ref)
     const testPointIds = synthesisIds(item.testPointIds, `${path}/testPointIds`)
     if (testPointIds.some(pointId => validPointIds && !validPointIds.has(pointId))) synthesisFail(`${path}/testPointIds`, '包含批准测试点树之外的引用')
-    const caseIndexes = synthesisIndexes(item.caseIndexes, `${path}/caseIndexes`, cases.length)
+    const referencedCaseRefs = synthesisIds(item.caseRefs, `${path}/caseRefs`)
+    if (!referencedCaseRefs.length || referencedCaseRefs.some(caseRef => !caseRefs.has(caseRef))) synthesisFail(`${path}/caseRefs`, '必须引用本次提交中的有效用例 ref')
     const fieldConstraints = synthesisStringRecord(item.fieldConstraints, `${path}/fieldConstraints`)
     const sensitivity = synthesisEnum(item.sensitivity, `${path}/sensitivity`, ['public', 'internal', 'sensitive'] as const)
     const readinessValue = synthesisEnum(item.readiness, `${path}/readiness`, ['ready', 'blocked', 'needs_confirmation'] as const)
@@ -220,7 +179,7 @@ export function validateTestCaseSynthesisCandidate(value: unknown, validPointIds
       entityType: synthesisText(item.entityType, `${path}/entityType`, 200),
       featureTags: synthesisTexts(item.featureTags, `${path}/featureTags`, 100, 100),
       testPointIds,
-      caseIndexes,
+      caseRefs: referencedCaseRefs,
       fieldConstraints,
       relationships: synthesisTexts(item.relationships, `${path}/relationships`, 100, 1_000),
       quantity: synthesisPositiveInteger(item.quantity, `${path}/quantity`),
@@ -233,20 +192,21 @@ export function validateTestCaseSynthesisCandidate(value: unknown, validPointIds
       ...(readinessReason ? { readinessReason } : {}),
     }
   })
-  return { schemaVersion: 'test-case-synthesis/v1', cases, dataRequirements }
+  const { findings, confirmationItems } = validateDesignIssues(input)
+  return { schemaVersion, cases, dataRequirements, findings, confirmationItems }
 }
 
-export function validateDesignCandidateNodes(raw: unknown, kind: 'functional' | 'non_functional'): DesignCandidateNode[] {
-  const label = kind === 'functional' ? 'functional' : 'non_functional'
-  if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { nodes?: unknown }).nodes)) candidateFail(label, '结果缺少 nodes')
-  const values = (raw as { nodes: unknown[] }).nodes
-  if (!values.length || values.length > 1_000) candidateFail(`${label}.nodes`, '必须包含 1 到 1000 个节点')
-  const dimensions: TestDimension[] = kind === 'functional' ? ['functional'] : ['performance', 'stability', 'compatibility', 'security']
+function validateCandidateNodes(raw: unknown): DesignCandidateNode[] {
+  if (!Array.isArray(raw) || !raw.length || raw.length > 1_000) candidateFail('/nodes', '必须包含 1 到 1000 个节点')
+  const dimensions: TestDimension[] = ['functional', 'performance', 'stability', 'compatibility', 'security']
   const refs = new Set<string>()
-  const nodes = values.map((value, index): DesignCandidateNode => {
-    const path = `${label}.nodes[${index}]`
+  const nodes = raw.map((value, index): DesignCandidateNode => {
+    const path = `/nodes/${index}`
     if (!value || typeof value !== 'object' || Array.isArray(value)) candidateFail(path, '必须是对象')
     const input = value as Record<string, unknown>
+    const allowed = ['ref', 'parentRef', 'title', 'objective', 'dimension', 'priority', 'applicability', 'designTechniques', 'entryMethods', 'oracle', 'dataConditions', 'risks', 'assumptions', 'basisRefs', 'historicalRefs']
+    const unexpected = Object.keys(input).filter(key => !allowed.includes(key))
+    if (unexpected.length) candidateFail(path, `包含不允许的字段：${unexpected.join('、')}`)
     const ref = candidateText(input.ref, `${path}.ref`, 200)
     if (refs.has(ref)) candidateFail(`${path}.ref`, '在本次提交内重复')
     refs.add(ref)
@@ -276,16 +236,32 @@ export function validateDesignCandidateNodes(raw: unknown, kind: 'functional' | 
       historicalRefs: candidateTextArray(input.historicalRefs, `${path}.historicalRefs`, 1_000, 500),
     }
   })
+  if (nodes.some(node => !node.basisRefs.length)) candidateFail('/nodes', '每个测试点必须至少引用一项固定需求依据')
   for (const [index, node] of nodes.entries()) {
-    if (node.parentRef && !refs.has(node.parentRef)) candidateFail(`${label}.nodes[${index}].parentRef`, '未引用本次提交内的节点')
-  }
-  if (kind === 'non_functional') {
-    const requiredDimensions: TestDimension[] = ['performance', 'stability', 'compatibility', 'security']
-    const dimensions = new Set(nodes.map(node => node.dimension))
-    const missing = requiredDimensions.filter(dimension => !dimensions.has(dimension))
-    if (missing.length) candidateFail('non_functional.nodes', `必须在一次完整提交中覆盖性能、稳定性、兼容性和安全四个维度，缺少：${missing.join('、')}`)
+    if (node.parentRef && !refs.has(node.parentRef)) candidateFail(`/nodes/${index}/parentRef`, '未引用本次提交内的节点')
   }
   return nodes
+}
+
+function validateDesignIssues(input: Record<string, unknown>) {
+  if (!Array.isArray(input.findings) || input.findings.length > 500) synthesisFail('/findings', 'findings 必须是最多 500 项的数组')
+  const findings = input.findings.map((candidate, index) => {
+    const path = `/findings/${index}`
+    const finding = synthesisObject(candidate, path, 'Finding 必须是对象')
+    synthesisRejectUnknown(finding, ['title', 'description', 'severity', 'basisRefs'], path)
+    const severity = synthesisEnum(finding.severity, `${path}/severity`, ['blocker', 'high', 'medium', 'low'] as const)
+    return { title: synthesisText(finding.title, `${path}/title`, 500), description: synthesisText(finding.description, `${path}/description`, 8_000), severity, basisRefs: synthesisIds(finding.basisRefs, `${path}/basisRefs`) }
+  })
+  if (!Array.isArray(input.confirmationItems) || input.confirmationItems.length > 500) synthesisFail('/confirmationItems', 'confirmationItems 必须是最多 500 项的数组')
+  const confirmationItems = input.confirmationItems.map((candidate, index) => {
+    const path = `/confirmationItems/${index}`
+    const item = synthesisObject(candidate, path, '待确认项必须是对象')
+    synthesisRejectUnknown(item, ['title', 'question', 'decisionType', 'impactStage', 'affectedRefs', 'blocker'], path)
+    const impactStage = synthesisEnum(item.impactStage, `${path}/impactStage`, ['tree', 'case', 'data', 'publication'] as const)
+    if (typeof item.blocker !== 'boolean') synthesisFail(`${path}/blocker`, '必须是布尔值')
+    return { title: synthesisText(item.title, `${path}/title`, 500), question: synthesisText(item.question, `${path}/question`, 8_000), decisionType: synthesisText(item.decisionType, `${path}/decisionType`, 200), impactStage, affectedRefs: synthesisIds(item.affectedRefs, `${path}/affectedRefs`), blocker: item.blocker }
+  })
+  return { findings, confirmationItems }
 }
 
 export function validateCaseDependencyGraph(cases: Array<{ id: string; content: TestCaseContent }>) {
@@ -363,8 +339,8 @@ function checks(value: unknown, field: string) { if (!Array.isArray(value) || va
 function readiness(value: unknown): ExecutionReadiness { if (value !== 'ready' && value !== 'blocked' && value !== 'needs_confirmation') fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'executionReadiness 无效', 422); return value }
 function dimension(value: unknown) { if (!['functional', 'performance', 'stability', 'compatibility', 'security'].includes(String(value))) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'dimension 无效', 422); return value as TestCaseContent['dimension'] }
 function priority(value: unknown) { if (!['P0', 'P1', 'P2', 'P3'].includes(String(value))) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'priority 无效', 422); return value as TestCaseContent['priority'] }
-function optionalDimensions(value: unknown) { if (value === undefined) return []; if (!Array.isArray(value)) fail('TEST_DESIGN_BASIS_MODE_INVALID', 'focusDimensions 必须是数组'); return [...new Set(value.map(dimension))] }
-function optionalScopeRules(value: unknown) { if (value === undefined) return []; if (!Array.isArray(value) || value.length > 100) fail('TEST_DESIGN_BASIS_MODE_INVALID', '范围规则必须是数组'); return value.map(candidate => { const input = object(candidate, 'TEST_DESIGN_BASIS_MODE_INVALID', '范围规则必须是对象'); rejectUnknown(input, ['kind', 'value'], 'TEST_DESIGN_BASIS_MODE_INVALID'); return { kind: requiredText(input.kind, 'scope.kind', 100), value: requiredText(input.value, 'scope.value', 1_000) } }) }
+function optionalDimensions(value: unknown) { if (value === undefined) return []; if (!Array.isArray(value)) fail('TEST_DESIGN_INPUT_INVALID', 'focusDimensions 必须是数组'); return [...new Set(value.map(dimension))] }
+function optionalScopeRules(value: unknown) { if (value === undefined) return []; if (!Array.isArray(value) || value.length > 100) fail('TEST_DESIGN_INPUT_INVALID', '范围规则必须是数组'); return value.map(candidate => { const input = object(candidate, 'TEST_DESIGN_INPUT_INVALID', '范围规则必须是对象'); rejectUnknown(input, ['kind', 'value'], 'TEST_DESIGN_INPUT_INVALID'); return { kind: requiredText(input.kind, 'scope.kind', 100), value: requiredText(input.value, 'scope.value', 1_000) } }) }
 function optionalTexts(value: unknown, field: string, max: number, length: number) { return value === undefined ? [] : texts(value, field, max, length) }
 function texts(value: unknown, field: string, max: number, length: number) { if (!Array.isArray(value) || value.length > max) fail('TEST_DESIGN_BASIS_MODE_INVALID', `${field} 必须是数组`); return value.map((item, index) => requiredText(item, `${field}[${index}]`, length)) }
 function uniqueIds(value: unknown, field: string) { if (!Array.isArray(value) || value.length > 1_000) fail('TEST_DESIGN_BASIS_MODE_INVALID', `${field} 必须是数组`); return [...new Set(value.map((item, index) => id(item, `${field}[${index}]`)))] }
@@ -398,7 +374,7 @@ function synthesisStringRecord(value: unknown, path: string) {
 }
 function synthesisPositiveInteger(value: unknown, path: string) { if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 1_000_000) synthesisFail(path, '必须是 1 到 1000000 的整数'); return Number(value) }
 function synthesisEnum<const T extends string>(value: unknown, path: string, allowed: readonly T[]): T { if (typeof value !== 'string' || !allowed.includes(value as T)) synthesisFail(path, `必须为 ${allowed.join('、')}`); return value as T }
-function synthesisFail(path: string, message: string): never { throw new TestDesignError('TEST_CASE_SYNTHESIS_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
+function synthesisFail(path: string, message: string): never { throw new TestDesignError('TEST_DESIGN_CANDIDATE_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
 function errorMessage(error: unknown) { return error instanceof TestDesignError ? error.message.replace(/^[A-Z0-9_]+:\s*/u, '') : error instanceof Error ? error.message : String(error) }
 function object(value: unknown, code: string, message: string) { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(code, message); return value as Record<string, unknown> }
 function rejectUnknown(value: Record<string, unknown>, allowed: string[], code: string) { const unexpected = Object.keys(value).filter(key => !allowed.includes(key)); if (unexpected.length) fail(code, `包含不允许的字段：${unexpected.join('、')}`) }

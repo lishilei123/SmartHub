@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-analysis' | 'technical-solution-extraction' | 'technical-solution-review' | 'technical-solution-analysis' | 'test-analysis' | 'functional-test-design' | 'non-functional-test-design' | 'test-case-synthesis'
-  agentType: 'requirement_analysis' | 'technical_solution_extraction' | 'technical_solution_review' | 'technical_solution_analysis' | 'test_analysis' | 'functional_test_design' | 'non_functional_test_design' | 'test_case_synthesis'
+  agentKey: 'requirement-analysis' | 'test-design'
+  agentType: 'requirement_analysis' | 'test_design'
   version: string
   status: 'published'
-  modelScene: 'requirement_analysis' | 'technical_solution_analysis' | 'test_design'
-  resultSchemaVersion: 'requirement-analysis/v1' | 'technical-solution-extraction/v1' | 'technical-solution-review/v1' | 'technical-solution-review/v2' | 'test-analysis/v1' | 'functional-test-design/v1' | 'non-functional-test-design/v1' | 'test-case-synthesis/v1'
+  modelScene: 'requirement_analysis' | 'test_design'
+  resultSchemaVersion: 'requirement-analysis/v1' | 'test-design/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -165,13 +165,12 @@ export interface AgentExecutionEvent {
 }
 
 export interface AgentExecutionInput {
-  snapshot: ReviewRunSnapshot | import('./technical-solution-types.js').TechnicalSolutionRunSnapshot | TestDesignAgentSnapshot
+  snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot
   model: AgentModelConnection
-  fixedTechnicalSolutionExtraction?: import('./technical-solution-types.js').TechnicalSolutionExtractionResult
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
-    workflowStage: 'analysis' | 'repair' | 'verification' | 'release'
+    workflowStage: 'analysis' | 'repair' | 'verification' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair'
     allowedSkillKeys: string[]
     submitToolId: string
     schemaVersion: string
@@ -179,7 +178,6 @@ export interface AgentExecutionInput {
     initialTask: string
     validateCandidate: (candidate: Record<string, unknown>, manifest: InputDeliveryManifest) => Promise<{ valid: boolean; result?: AgentCandidateResult | Record<string, unknown>; issues: Array<{ path: string; message: string }> }>
   }
-  testDesignTask?: string
   onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
 }
 
@@ -195,7 +193,15 @@ export interface AgentExecutionOutput {
 
 export interface TestDesignAgentSnapshot {
   runId: string
+  projectId: string
+  projectName: string
   projectVersionId: string
+  projectVersionName: string
+  knowledgeBaseId: string
+  indexVersionId: string
+  assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }>
+  documentWorkspace: NonNullable<ReviewRunSnapshot['documentWorkspace']>
+  workspaceFiles: import('./test-design-types.js').TestDesignWorkspaceFile[]
   agentDefinition: AgentDefinitionVersion
   taskSha256: string
   createdAt: string

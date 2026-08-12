@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { defaultTokenCodec } from '../application/content.js'
 import type { AgentDefinitionVersion, RequirementInputPlan } from '../domain/agent-types.js'
+import type { TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
 import type { Asset, AssetVersion } from '../domain/types.js'
 
 const TOOL_SCHEMA_RESERVE_TOKENS = 2_000
@@ -55,6 +56,47 @@ export function buildRequirementDirectoryInputPlan(input: {
       ordinal: 0,
       tokenCount: estimatedInputTokens,
       assetVersionIds: input.assets.map(item => item.version.id),
+      chunkIds: [],
+      content,
+    }],
+  }
+}
+
+export function buildTestDesignDirectoryInputPlan(input: {
+  workspace: TestDesignWorkspaceSnapshot
+  definition: AgentDefinitionVersion
+  contextWindow: number
+  maxOutputTokens: number
+}): RequirementInputPlan {
+  const safeInputBudget = safeBudget(input)
+  const content = [
+    '<<<SMARTHUB_PI_TEST_DESIGN_WORKSPACE_BEGIN>>>',
+    JSON.stringify({
+      mode: 'agent_directory',
+      cwd: '/',
+      rootLogicalPath: input.workspace.rootLogicalPath,
+      activeBranchPath: input.workspace.activeBranchLogicalPath,
+      agentWorkspacePath: input.workspace.agentLogicalPath,
+      fileCount: input.workspace.files.length,
+      workspaceSnapshotSha256: input.workspace.snapshotSha256,
+      requirementReleaseId: input.workspace.requirementReleaseId,
+      instructions: '从工作区根目录使用 ls/find/grep 探索，再用 read 读取事实资料。不得调用 Shell、write、edit 或越过工作区。',
+    }),
+    '<<<SMARTHUB_PI_TEST_DESIGN_WORKSPACE_END>>>',
+  ].join('\n')
+  const estimatedInputTokens = defaultTokenCodec.count(content)
+  if (estimatedInputTokens > safeInputBudget) throw new Error(`INPUT_CONTEXT_BUDGET_EXCEEDED: 测试设计工作区清单需要 ${estimatedInputTokens} Token，超过安全输入预算 ${safeInputBudget}`)
+  return {
+    policyVersion: 'test-design-workspace/v1',
+    mode: 'agent_directory',
+    estimatedInputTokens,
+    safeInputBudget,
+    packageSha256: sha256(content),
+    batches: [{
+      batchId: 'test_design_workspace_manifest',
+      ordinal: 0,
+      tokenCount: estimatedInputTokens,
+      assetVersionIds: input.workspace.files.flatMap(file => file.assetVersionId ? [file.assetVersionId] : []),
       chunkIds: [],
       content,
     }],

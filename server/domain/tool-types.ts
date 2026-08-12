@@ -18,7 +18,7 @@ export interface ToolDescriptor {
 }
 
 export interface ToolExecutionContext {
-  snapshot: ReviewRunSnapshot | import('./technical-solution-types.js').TechnicalSolutionRunSnapshot
+  snapshot: ReviewRunSnapshot | import('./agent-types.js').TestDesignAgentSnapshot
   allowedToolIds: ReadonlySet<string>
 }
 
