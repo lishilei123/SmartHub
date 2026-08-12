@@ -1,5 +1,6 @@
-import { useMemo, useRef, useState, type ChangeEvent } from 'react'
-import { Archive, Eye, FileText, LoaderCircle, Trash2, Upload, XCircle } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { createPortal } from 'react-dom'
+import { Archive, Eye, LoaderCircle, Trash2, Upload, XCircle } from 'lucide-react'
 import { RequirementAnalysisPageV2 } from './RequirementAnalysisPageV2'
 import { deleteKnowledgeAsset, loadAssetVersion, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
@@ -45,19 +46,26 @@ function safeFileName(file: File) {
 
 export function RequirementReviewPage(props: Props) {
   const { projectVersion, documents, knowledgeBaseId, apiState, refreshKnowledge, notify, addAudit } = props
+  const shellRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const archiveInputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
-  const [managerOpen, setManagerOpen] = useState(false)
   const [preview, setPreview] = useState<PreviewState | null>(null)
+  const [workspaceHeader, setWorkspaceHeader] = useState<HTMLElement | null>(null)
+  const [selectedDocumentId, setSelectedDocumentId] = useState('')
 
   const workspaceDirectoryPath = projectVersion ? requirementWorkspaceDirectory(projectVersion.name) : ''
   const inputDocuments = useMemo(() => documents.filter(document => {
     const logicalPath = document.logicalPath?.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '') ?? ''
-    return Boolean(workspaceDirectoryPath) && logicalPath.startsWith(`${workspaceDirectoryPath}/`)
+    return document.status === 'ready' && Boolean(document.assetVersionId) && Boolean(workspaceDirectoryPath) && logicalPath.startsWith(`${workspaceDirectoryPath}/`)
   }), [documents, workspaceDirectoryPath])
 
+  const selectedDocument = inputDocuments.find(document => document.id === selectedDocumentId) ?? inputDocuments[0]
   const canManage = Boolean(projectVersion?.status === 'open' && knowledgeBaseId && apiState === 'ready' && !busy)
+
+  useEffect(() => {
+    if (!selectedDocumentId || !inputDocuments.some(document => document.id === selectedDocumentId)) setSelectedDocumentId(inputDocuments[0]?.id ?? '')
+  }, [inputDocuments, selectedDocumentId])
 
   const uploadFiles = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.currentTarget.files ?? [])
@@ -106,6 +114,7 @@ export function RequirementReviewPage(props: Props) {
       notify('该文档尚未生成可预览的 AssetVersion。', 'warning')
       return
     }
+    setSelectedDocumentId(document.id)
     setPreview({ document, content: '', loading: true })
     try {
       const version = await loadAssetVersion(document.assetVersionId)
@@ -134,45 +143,42 @@ export function RequirementReviewPage(props: Props) {
     }
   }
 
-  return <div className="requirement-review-v2-shell">
-    {projectVersion && <section className="requirement-input-toolbar">
-      <div className="requirement-input-title">
-        <FileText />
-        <span><b>需求输入</b><small>固定目录：/{workspaceDirectoryPath}</small></span>
-        <em>{inputDocuments.length} 份</em>
-      </div>
-      <div className="requirement-input-actions">
-        <button className="btn ghost" onClick={() => setManagerOpen(true)}><Eye />预览 / 管理</button>
-        <button className="btn ghost" disabled={!canManage} onClick={() => fileInputRef.current?.click()}><Upload />上传需求文档</button>
-        <button className="btn ghost" disabled={!canManage} onClick={() => archiveInputRef.current?.click()}><Archive />上传 ZIP</button>
-        {busy && <span className="requirement-input-busy"><LoaderCircle className="rotating" />处理中</span>}
-        <input ref={fileInputRef} type="file" hidden multiple accept=".md,.txt,text/markdown,text/plain" onChange={uploadFiles} />
-        <input ref={archiveInputRef} type="file" hidden accept=".zip,application/zip" onChange={uploadArchive} />
-      </div>
-    </section>}
+  useEffect(() => {
+    const root = shellRef.current
+    if (!root) return
+    const header = root.querySelector<HTMLElement>('.rav2-workspace > header')
+    const list = root.querySelector<HTMLElement>('.rav2-docs')
+    setWorkspaceHeader(header)
+    if (!list) return
 
+    const handleDocumentClick = (event: Event) => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const row = target.closest<HTMLButtonElement>('.rav2-docs > button')
+      if (!row || row.parentElement !== list) return
+      const rows = Array.from(list.querySelectorAll<HTMLButtonElement>(':scope > button'))
+      const index = rows.indexOf(row)
+      const document = inputDocuments[index]
+      if (document) void openPreview(document)
+    }
+
+    list.addEventListener('click', handleDocumentClick)
+    return () => list.removeEventListener('click', handleDocumentClick)
+  }, [inputDocuments])
+
+  return <div className="requirement-review-v2-shell" ref={shellRef}>
     <RequirementAnalysisPageV2 {...props} />
 
-    {managerOpen && <div className="requirement-input-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setManagerOpen(false) }}>
-      <section className="requirement-input-manager">
-        <header><div><FileText /><span><b>需求文档</b><small>点击文档即可预览；开放版本支持删除。</small></span></div><button onClick={() => setManagerOpen(false)}><XCircle /></button></header>
-        <div className="requirement-input-manager-path">/{workspaceDirectoryPath}</div>
-        <div className="requirement-input-manager-list">
-          {inputDocuments.map(document => <article key={document.id}>
-            <button className="requirement-input-document" onClick={() => void openPreview(document)}>
-              <FileText />
-              <span><b>{document.title || document.name}</b><small>{document.version} · {document.status ?? 'unknown'}</small><em>{document.logicalPath}</em></span>
-            </button>
-            <div className="requirement-input-row-actions">
-              <button title="预览" onClick={() => void openPreview(document)}><Eye /></button>
-              <button className="danger" title="删除" disabled={!canManage} onClick={() => void removeDocument(document)}><Trash2 /></button>
-            </div>
-          </article>)}
-          {!inputDocuments.length && <div className="requirement-input-empty"><FileText /><b>暂无需求文档</b><p>点击“上传需求文档”或“上传 ZIP”导入当前版本需求。</p></div>}
-        </div>
-        <footer><button className="btn ghost" disabled={!canManage} onClick={() => fileInputRef.current?.click()}><Upload />上传需求文档</button><button className="btn ghost" disabled={!canManage} onClick={() => archiveInputRef.current?.click()}><Archive />上传 ZIP</button></footer>
-      </section>
-    </div>}
+    {workspaceHeader && createPortal(<div className="requirement-workspace-inline-actions">
+      <button title="上传需求文档" aria-label="上传需求文档" disabled={!canManage} onClick={() => fileInputRef.current?.click()}><Upload /></button>
+      <button title="上传 ZIP" aria-label="上传 ZIP" disabled={!canManage} onClick={() => archiveInputRef.current?.click()}><Archive /></button>
+      <button title="预览当前文档" aria-label="预览当前文档" disabled={!selectedDocument} onClick={() => selectedDocument && void openPreview(selectedDocument)}><Eye /></button>
+      <button className="danger" title="删除当前文档" aria-label="删除当前文档" disabled={!canManage || !selectedDocument} onClick={() => selectedDocument && void removeDocument(selectedDocument)}><Trash2 /></button>
+      {busy && <LoaderCircle className="rotating requirement-workspace-busy" />}
+    </div>, workspaceHeader)}
+
+    <input ref={fileInputRef} type="file" hidden multiple accept=".md,.txt,text/markdown,text/plain" onChange={uploadFiles} />
+    <input ref={archiveInputRef} type="file" hidden accept=".zip,application/zip" onChange={uploadArchive} />
 
     {preview && <div className="requirement-input-backdrop preview" onMouseDown={event => { if (event.currentTarget === event.target) setPreview(null) }}>
       <section className="requirement-input-preview">
