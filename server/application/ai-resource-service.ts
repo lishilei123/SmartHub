@@ -21,6 +21,7 @@ const builtInSkills: SkillResource[] = [
     scripts: [{ path: 'scripts/get-local-ip.ps1', runner: 'powershell', timeoutMs: 15_000 }],
   }),
   builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例'], undefined),
+  builtInSkill('system.requirement-analysis', '需求分析方法论', '单 Agent 需求分析的整体理解、基线、跨需求评审、Test Focus 与自检方法论。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['系统', '需求分析', '评审'], undefined),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
 const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', ...SKILL_RUNTIME_TOOL_IDS])

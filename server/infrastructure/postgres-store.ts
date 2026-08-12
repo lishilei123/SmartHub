@@ -258,8 +258,7 @@ export class PostgresStore implements StateStore {
     const limit = Math.min(Math.max(1, options.limit), 100)
     const cursor = decodeReviewRunCursor(options.cursor)
     const result = await this.pool.query<ReviewRunQueueRow>(`
-      SELECT (run.data - 'result' - 'extractionResult' - 'execution' - 'executions')
-          || jsonb_build_object('hasFrozenExtraction', (run.data ? 'extractionResult') AND (run.data ? 'inputDeliveryManifest')) AS data,
+      SELECT (run.data - 'result' - 'execution' - 'executions') AS data,
         job.status AS queue_status, job.attempt_count, job.max_attempts,
         job.available_at
       FROM smarthub.review_runs run
@@ -299,7 +298,7 @@ export class PostgresStore implements StateStore {
     const assets = await this.pool.query<{ data: DatabaseState['assets'][number] }>(`SELECT asset.data FROM smarthub.knowledge_assets asset JOIN smarthub.knowledge_bases kb ON kb.id=asset.knowledge_base_id WHERE kb.project_id=$1 AND asset.asset_type='technical_design'`, [projectId])
     const versions = await this.pool.query<{ data: DatabaseState['versions'][number] }>(`SELECT version.data || jsonb_build_object('chunks', COALESCE(chunks.items, '[]'::jsonb)) AS data FROM smarthub.asset_versions version JOIN smarthub.knowledge_assets asset ON asset.id=version.asset_id LEFT JOIN LATERAL (SELECT jsonb_agg(chunk.data ORDER BY chunk.ordinal) AS items FROM smarthub.asset_chunks chunk WHERE chunk.asset_version_id=version.id) chunks ON true WHERE asset.knowledge_base_id = ANY($1::text[]) AND asset.asset_type='technical_design' AND version.status='ready'`, [knowledgeBases.rows.map(row => row.data.id)])
     const indexes = await this.pool.query<{ data: DatabaseState['indexes'][number] }>(`SELECT data FROM smarthub.index_versions WHERE knowledge_base_id = ANY($1::text[]) AND status='active'`, [knowledgeBases.rows.map(row => row.data.id)])
-    const reviewRuns = await this.pool.query<{ data: ReviewRun }>(`SELECT data - 'extractionResult' - 'inputDeliveryManifest' - 'execution' - 'executions' - 'modelRouteAttempts' - 'degradations' AS data FROM smarthub.review_runs WHERE project_version_id=$1 AND status='succeeded' AND data ? 'result' ORDER BY created_at DESC, id DESC`, [projectVersionId])
+    const reviewRuns = await this.pool.query<{ data: ReviewRun }>(`SELECT data - 'inputDeliveryManifest' - 'execution' - 'executions' - 'modelRouteAttempts' - 'degradations' AS data FROM smarthub.review_runs WHERE project_version_id=$1 AND status='succeeded' AND data ? 'result' ORDER BY created_at DESC, id DESC`, [projectVersionId])
     const findingActions = await this.pool.query<{ data: DatabaseState['findingActions'][number] }>(`SELECT action.data FROM smarthub.finding_actions action JOIN smarthub.review_runs run ON run.id=action.run_id WHERE run.project_version_id=$1`, [projectVersionId])
     return { projects: projects.rows.map(row => row.data), projectVersions: [projectVersion.rows[0].data], knowledgeBases: knowledgeBases.rows.map(row => row.data), assets: assets.rows.map(row => row.data), versions: versions.rows.map(row => row.data), indexes: indexes.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data) }
   }

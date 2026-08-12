@@ -84,7 +84,7 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
   }, controlsFor('reviewer-a', [{ projectVersionId: 'authorization-pv-a', permissions: ['project-version:read', 'review:read'] }]))
 })
 
-test('Agent 配置接口返回九类 Agent 的可编辑草稿', async () => {
+  test('Agent 配置接口返回需求分析及各场景 Agent 的可编辑草稿', async () => {
   await withServer(async baseUrl => {
     const response = await fetch(`${baseUrl}/agent-configurations/requirement-analysis`)
     assert.equal(response.status, 200)
@@ -93,6 +93,9 @@ test('Agent 配置接口返回九类 Agent 的可编辑草稿', async () => {
       agents: Record<string, { draft: { revision: number; routing: unknown; definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }; requiredToolIds: string[]; requiredSkillKeys: string[]; requiredMcpServerKeys: string[]; versions: unknown[] }>
     }
     assert.equal(body.scene, 'requirement_analysis')
+    assert.equal(body.agents.requirementAnalysis.draft.revision, 0)
+    assert.deepEqual(body.agents.requirementAnalysis.requiredToolIds, ['requirement-analysis.submit_result'])
+    assert.deepEqual(body.agents.requirementAnalysis.requiredSkillKeys, ['system.requirement-analysis'])
     assert.equal(body.agents.requirementPointExtraction.draft.revision, 0)
     assert.equal(body.agents.requirementReview.draft.revision, 0)
     assert.equal(body.agents.reviewQa.draft.revision, 0)

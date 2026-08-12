@@ -13,13 +13,13 @@ import type { SkillPackageStore } from '../infrastructure/skill-package-store.js
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { defaultTokenCodec } from '../application/content.js'
-import { createRequirementPointExtractionToolRegistry, createRequirementReviewToolRegistry } from '../tools/requirement-tools.js'
+import { createRequirementReviewToolRegistry, createWorkspaceAgentToolRegistry } from '../tools/requirement-tools.js'
 import { createTechnicalSolutionExtractionToolRegistry, createTechnicalSolutionReviewToolRegistry } from '../tools/technical-solution-tools.js'
 import { createTestDesignToolRegistry } from '../tools/test-design-tools.js'
 import { RequirementDocumentWorkspace } from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
-import { RequirementPointExtractionValidator, RequirementReviewValidator } from './result-validator.js'
-import { renderRequirementTask, renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
+import { RequirementReviewValidator } from './result-validator.js'
+import { renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
 import { executableTestPointIds, TestDesignError, validateDesignCandidateNodes, validateTestAnalysisCandidate, validateTestCaseSynthesisCandidate } from '../application/test-design-validation.js'
@@ -73,9 +73,9 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     const stage = stageConfiguration(input)
     const inputPlan = stage.usesInputPlan ? required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划') : undefined
-    if (stage.isExtraction && inputPlan?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: RequirementPointExtractionAgent 只支持 /workspace 文件工作区输入')
-    if (stage.isExtraction) requireWorkspaceToolset(input.snapshot.agentDefinition.toolIds)
-    const piDocumentWorkspace = stage.isExtraction && inputPlan?.mode === 'agent_directory'
+    if (stage.isWorkspaceAnalysis && inputPlan?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: Workspace Analysis Agent 只支持 /workspace 文件工作区输入')
+    if (stage.isWorkspaceAnalysis) requireWorkspaceToolset(input.snapshot.agentDefinition.toolIds, stage.submitToolId)
+    const piDocumentWorkspace = stage.isWorkspaceAnalysis && inputPlan?.mode === 'agent_directory'
       ? new RequirementDocumentWorkspace(this.store, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
       : undefined
     const deliveryManifest: InputDeliveryManifest | undefined = inputPlan ? {
@@ -105,10 +105,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           return { accepted: false, issues: lastSubmissionIssues }
         }
       })
-      : stage.isExtraction
-      ? createRequirementPointExtractionToolRegistry(this.store, async value => {
-        const normalized = await new RequirementPointExtractionValidator(this.store).normalizeV5(value, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, required(deliveryManifest, '输入投递证明不存在'))
-        if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
+      : stage.isWorkspaceAnalysis
+      ? createWorkspaceAgentToolRegistry(this.store, stage.submitToolId, async value => {
+        const profile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
+        const normalized = await profile.validateCandidate(value, required(deliveryManifest, '输入投递证明不存在'))
+        if (!normalized.valid || !normalized.result) { lastSubmissionIssues = normalized.issues; return { accepted: false, issues: normalized.issues } }
         candidate = normalized.result
         lastSubmissionIssues = []
         return { accepted: true }
@@ -306,7 +307,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         await record({ type: 'result_validation_repair_required', turn: turns, content: formatValidationIssues(lastSubmissionIssues) })
         forceResultSubmission = false
         latestModelFailure = undefined
-        const evidenceRepairRequired = (stage.isExtraction || stage.isTechnicalExtraction) && hasEvidenceValidationIssue(lastSubmissionIssues)
+        const evidenceRepairRequired = (stage.isWorkspaceAnalysis || stage.isTechnicalExtraction) && hasEvidenceValidationIssue(lastSubmissionIssues)
         if (evidenceRepairRequired) {
           agent.state.tools = tools
           activeToolNames = new Set(tools.map(tool => tool.name))
@@ -446,15 +447,14 @@ function runtimeAllowedToolIds(input: AgentExecutionInput) {
   return new Set(input.snapshot.agentDefinition.toolIds)
 }
 
-function requireWorkspaceToolset(toolIds: string[]) {
-  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'requirement-points.submit_result']
+function requireWorkspaceToolset(toolIds: string[], submitToolId: string) {
+  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', submitToolId]
   const missing = requiredTools.filter(toolId => !toolIds.includes(toolId))
-  const retired = toolIds.filter(toolId => toolId === 'knowledge.search' || toolId === 'knowledge.read_chunk')
-  if (missing.length || retired.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: RequirementPointExtractionAgent 工具配置不符合 /workspace 协议${missing.length ? `；缺少 ${missing.join(', ')}` : ''}${retired.length ? `；不再支持 ${retired.join(', ')}` : ''}`)
+  if (missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: Workspace Agent 工具配置不符合 /workspace + Knowledge 协议；缺少 ${missing.join(', ')}`)
 }
 
 type StageConfiguration = {
-  isExtraction: boolean
+  isWorkspaceAnalysis: boolean
   isTechnicalExtraction: boolean
   isTechnicalReview: boolean
   isTestDesign: boolean
@@ -474,19 +474,20 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     'test-case-synthesis': { submitToolId: 'test_case_synthesis.submit_result', schemaVersion: 'test-case-synthesis/v1', agentLabel: 'TestCaseSynthesisAgent' },
   }
   const testDesign = testDesignStages[input.snapshot.agentDefinition.agentKey]
-  if (testDesign) return stage({ isExtraction: false, isTechnicalExtraction: false, isTechnicalReview: false, isTestDesign: true, usesInputPlan: false, ...testDesign })
-  if (input.snapshot.agentDefinition.agentKey === 'requirement-point-extraction') return stage({
-    isExtraction: true,
+  if (testDesign) return stage({ isWorkspaceAnalysis: false, isTechnicalExtraction: false, isTechnicalReview: false, isTestDesign: true, usesInputPlan: false, ...testDesign })
+  const workspaceStage = input.executionProfile
+  if (workspaceStage?.mode === 'workspace_tools') return stage({
+    isWorkspaceAnalysis: true,
     isTechnicalExtraction: false,
     isTechnicalReview: false,
     isTestDesign: false,
     usesInputPlan: true,
-    submitToolId: 'requirement-points.submit_result',
-    schemaVersion: 'requirement-point-extraction/v5',
-    agentLabel: 'RequirementPointExtractionAgent',
+    submitToolId: workspaceStage.submitToolId,
+    schemaVersion: workspaceStage.schemaVersion,
+    agentLabel: workspaceStage.agentLabel,
   })
   if (input.snapshot.agentDefinition.agentKey === 'technical-solution-extraction') return stage({
-    isExtraction: false,
+    isWorkspaceAnalysis: false,
     isTechnicalExtraction: true,
     isTechnicalReview: false,
     isTestDesign: false,
@@ -496,7 +497,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     agentLabel: 'TechnicalSolutionExtractionAgent',
   })
   if (input.snapshot.agentDefinition.agentKey === 'technical-solution-review' || input.snapshot.agentDefinition.agentKey === 'technical-solution-analysis') return stage({
-    isExtraction: false,
+    isWorkspaceAnalysis: false,
     isTechnicalExtraction: false,
     isTechnicalReview: true,
     isTestDesign: false,
@@ -507,7 +508,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
   })
   if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
   return { ...stage({
-    isExtraction: false,
+    isWorkspaceAnalysis: false,
     isTechnicalExtraction: false,
     isTechnicalReview: false,
     isTestDesign: false,
@@ -529,7 +530,19 @@ function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration
     ? renderTechnicalSolutionTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot)
     : stage.isTechnicalReview
     ? renderTechnicalSolutionReviewTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED'))
-    : renderRequirementTask(input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot, stage.fixedExtraction)
+    : stage.isWorkspaceAnalysis
+    ? required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED').initialTask
+    : renderRequirementTaskLegacy(input, stage)
+}
+
+function renderRequirementTaskLegacy(input: AgentExecutionInput, stage: StageConfiguration) {
+  if (!stage.fixedExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
+  const snapshot = input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot
+  return snapshot.agentDefinition.taskTemplate
+    .replace('{{projectName}}', snapshot.projectName)
+    .replace('{{runId}}', snapshot.runId)
+    .replace('{{indexVersionId}}', snapshot.indexVersionId)
+    .replace('{{fixedExtraction}}', JSON.stringify(stage.fixedExtraction))
 }
 
 function testDesignPointIds(task: string | undefined) {

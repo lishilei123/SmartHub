@@ -40,6 +40,7 @@ export const BUILT_IN_HANDLER_KEYS = [
   'workspace.list_directory',
   'knowledge.search',
   'knowledge.read_chunk',
+  'requirement-analysis.submit_result',
   'requirement-points.submit_result',
   'review.submit_result',
   'review.answer_submit',

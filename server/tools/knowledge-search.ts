@@ -14,8 +14,16 @@ export function registerKnowledgeSearchTool(registry: ToolRegistry, store: State
       const hits = terms.reduce((count, term) => count + (haystack.includes(term) ? 1 : 0), 0)
       return { chunk, score: terms.length ? hits / terms.length : 0 }
     }).filter(item => item.score > 0).sort((left, right) => right.score - left.score || left.chunk.ordinal - right.chunk.ordinal).slice(0, args.limit ?? 8)
-    return { data: { retrievalMode: 'fixed_index_keyword', degraded: true, degradedReason: '当前固定索引工具仅启用关键词召回', results: results.map(({ chunk, score }) => ({ chunkId: chunk.id, assetVersionId: chunk.assetVersionId, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, score, excerpt: chunk.content.slice(0, 1000) })) } }
+    return { data: { retrievalMode: 'fixed_index_keyword', degraded: true, degradedReason: '当前固定索引工具仅启用关键词召回', results: results.map(({ chunk, score }) => {
+      const source = request.context.snapshot.assets.find(item => item.assetVersionId === chunk.assetVersionId)
+      const currentRequirementPath = 'documentWorkspace' in request.context.snapshot ? request.context.snapshot.documentWorkspace?.logicalPath : undefined
+      return { chunkId: chunk.id, assetVersionId: chunk.assetVersionId, logicalPath: source?.logicalPath, sourceScope: sourceScope(source?.logicalPath, currentRequirementPath), headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, score, excerpt: chunk.content.slice(0, 1000) }
+    }) } }
   })
+}
+
+function sourceScope(logicalPath: string | undefined, currentRequirementPath: string | undefined) {
+  return logicalPath && currentRequirementPath && logicalPath.startsWith(`${currentRequirementPath}/`) ? 'current_requirement' : 'knowledge_reference'
 }
 
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }

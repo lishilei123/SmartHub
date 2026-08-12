@@ -166,7 +166,7 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     return send(response, 200, await reviewGovernanceService.decideApproval(approvalDecision[1], { decision: String(body.decision ?? '') as 'approved' | 'rejected', comment: body.comment === undefined ? undefined : String(body.comment), principal }))
   }
   const reportExport = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs\/([^/]+)\/report\.md$/.exec(url.pathname)
-  if (method === 'GET' && reportExport) { await requireProjectVersion(reportExport[1], 'review:read'); await requireRun(reportExport[2], 'review:read'); return sendText(response, 200, await reviewGovernanceService.exportMarkdown(reportExport[2], reportExport[1]), 'text/markdown; charset=utf-8', `requirement-review-${reportExport[2]}.md`) }
+  if (method === 'GET' && reportExport) { await requireProjectVersion(reportExport[1], 'review:read'); await requireRun(reportExport[2], 'review:read'); return sendText(response, 200, await reviewGovernanceService.exportMarkdown(reportExport[2], reportExport[1]), 'text/markdown; charset=utf-8', `requirement-analysis-${reportExport[2]}.md`) }
   const requirementReviewRunCancel = /^\/api\/requirement-review-runs\/([^/]+)\/cancel$/.exec(url.pathname)
   if (method === 'POST' && requirementReviewRunCancel) { await requireRun(requirementReviewRunCancel[1], 'review:cancel'); return send(response, 202, await requirementAnalysisService.cancel(requirementReviewRunCancel[1])) }
   const requirementReviewRunRetry = /^\/api\/requirement-review-runs\/([^/]+)\/retry$/.exec(url.pathname)
@@ -174,8 +174,8 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     await requireRun(requirementReviewRunRetry[1], 'review:retry')
     const body = await json(request)
     const mode = String(body.mode ?? '')
-    if (mode !== 'full' && mode !== 'review_only') throw new Error('重跑模式必须是 full 或 review_only')
-    return send(response, 202, await requirementAnalysisService.retry(requirementReviewRunRetry[1], mode))
+    if (mode !== 'full') throw new Error('单 Agent 需求分析只支持 full 全部重跑')
+    return send(response, 202, await requirementAnalysisService.retry(requirementReviewRunRetry[1], 'full'))
   }
   const requirementReviewQuestions = /^\/api\/requirement-review-runs\/([^/]+)\/questions$/.exec(url.pathname)
   if (method === 'GET' && requirementReviewQuestions) { await requireRun(requirementReviewQuestions[1], 'review:read'); return send(response, 200, await reviewQaService.list(requirementReviewQuestions[1])) }

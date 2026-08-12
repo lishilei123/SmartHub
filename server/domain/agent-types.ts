@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'technical-solution-extraction' | 'technical-solution-review' | 'technical-solution-analysis' | 'test-analysis' | 'functional-test-design' | 'non-functional-test-design' | 'test-case-synthesis'
-  agentType: 'requirement_point_extraction' | 'requirement_review' | 'review_qa' | 'technical_solution_extraction' | 'technical_solution_review' | 'technical_solution_analysis' | 'test_analysis' | 'functional_test_design' | 'non_functional_test_design' | 'test_case_synthesis'
+  agentKey: 'requirement-analysis' | 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'technical-solution-extraction' | 'technical-solution-review' | 'technical-solution-analysis' | 'test-analysis' | 'functional-test-design' | 'non-functional-test-design' | 'test-case-synthesis'
+  agentType: 'requirement_analysis' | 'requirement_point_extraction' | 'requirement_review' | 'review_qa' | 'technical_solution_extraction' | 'technical_solution_review' | 'technical_solution_analysis' | 'test_analysis' | 'functional_test_design' | 'non_functional_test_design' | 'test_case_synthesis'
   version: string
   status: 'published'
   modelScene: 'requirement_analysis' | 'technical_solution_analysis' | 'test_design'
-  resultSchemaVersion: 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1' | 'technical-solution-extraction/v1' | 'technical-solution-review/v1' | 'technical-solution-review/v2' | 'test-analysis/v1' | 'functional-test-design/v1' | 'non-functional-test-design/v1' | 'test-case-synthesis/v1'
+  resultSchemaVersion: 'requirement-analysis/v1' | 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1' | 'technical-solution-extraction/v1' | 'technical-solution-review/v1' | 'technical-solution-review/v2' | 'test-analysis/v1' | 'functional-test-design/v1' | 'non-functional-test-design/v1' | 'test-case-synthesis/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -66,28 +66,16 @@ export interface ReviewRunSnapshot {
     candidateAssetVersionIds: string[]
   }
   modelRef: { sourceId: string; modelId: string; providerType: 'openai' | 'anthropic' | 'openai_compatible'; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
-  agentModelRefs?: {
-    requirementPointExtraction: ReviewRunSnapshot['modelRef']
-    requirementReview: ReviewRunSnapshot['modelRef']
-  }
   agentConfigurationRef?: { id: string; version: number; contentSha256: string }
-  agentConfigurationRefs?: {
-    requirementPointExtraction: { id: string; version: number; contentSha256: string }
-    requirementReview: { id: string; version: number; contentSha256: string }
-  }
   focusAreas: string[]
   excludedAreas: string[]
   agentDefinition: AgentDefinitionVersion
-  agentDefinitions: {
-    requirementPointExtraction: AgentDefinitionVersion
-    requirementReview: AgentDefinitionVersion
-  }
-  extractionCoveragePlan: Array<{
+  analysisCoveragePlan: Array<{
     assetVersionId: string
     chunks: Array<{ chunkId: string; contentHash: string; headingPath: string[]; startLine: number; endLine: number; excludedReason?: string }>
   }>
-  extractionToolBudget: { directoryCalls: number; chunkCalls: number; evidenceCalls: number; submissionCalls: number; minimumToolCalls: number }
-  extractionInput: {
+  analysisToolBudget: { directoryCalls: number; chunkCalls: number; knowledgeCalls: number; submissionCalls: number; minimumToolCalls: number }
+  analysisInput: {
     policyVersion: string
     mode: RequirementInputMode
     estimatedInputTokens: number
@@ -182,6 +170,14 @@ export interface AgentExecutionInput {
   fixedRequirementPointExtraction?: CandidateRequirementPointExtraction
   fixedTechnicalSolutionExtraction?: import('./technical-solution-types.js').TechnicalSolutionExtractionResult
   requirementInputPlan?: RequirementInputPlan
+  executionProfile?: {
+    mode: 'workspace_tools'
+    submitToolId: string
+    schemaVersion: string
+    agentLabel: string
+    initialTask: string
+    validateCandidate: (candidate: Record<string, unknown>, manifest: InputDeliveryManifest) => Promise<{ valid: boolean; result?: AgentCandidateResult | Record<string, unknown>; issues: Array<{ path: string; message: string }> }>
+  }
   testDesignTask?: string
   onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
 }

@@ -68,7 +68,7 @@ export class RequirementDocumentWorkspace {
 
       const file = required(workspace.filesByPath.get(pathKey(String(args.path))), `PI_WORKSPACE_FILE_NOT_FOUND: ${String(args.path)}`)
       const range = observedReadRange(file.version.content, args, result.details)
-      const planned = this.snapshot.extractionCoveragePlan.find(item => item.assetVersionId === file.assetVersionId)?.chunks ?? []
+      const planned = this.snapshot.analysisCoveragePlan.find(item => item.assetVersionId === file.assetVersionId)?.chunks ?? []
       const chunkIds = range
         ? planned.filter(chunk => !chunk.excludedReason && chunk.startLine >= range.startLine && chunk.endLine <= range.endLine).map(chunk => chunk.chunkId)
         : []

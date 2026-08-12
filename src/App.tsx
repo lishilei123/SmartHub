@@ -29,6 +29,7 @@ type Notify = (message: string, tone?: NotifyTone) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
 type SearchLocation = { assetId: string; assetVersionId: string; startLine: number; endLine: number; nonce: number }
 const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: string; identifier: string; sceneLabel: string; protocolLabel: string; publishTarget: string; runtimeToolIds: string[] }> = {
+  requirementAnalysis: { label: '需求分析 Agent', identifier: 'RequirementAnalysisAgent', sceneLabel: '需求分析', protocolLabel: '统一分析协议 v1', publishTarget: '新需求分析', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result'] },
   requirementPointExtraction: { label: '需求点提取 Agent', identifier: 'RequirementPointExtractionAgent', sceneLabel: '需求分析', protocolLabel: '提取协议 v5', publishTarget: '新需求评审', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'requirement-points.submit_result'] },
   requirementReview: { label: '需求评审 Agent', identifier: 'RequirementReviewAgent', sceneLabel: '需求分析', protocolLabel: '评审协议 v3', publishTarget: '新需求评审', runtimeToolIds: ['review.submit_result'] },
   reviewQa: { label: '评审问答 Agent', identifier: 'ReviewQaAgent', sceneLabel: '需求分析', protocolLabel: '问答协议 v1', publishTarget: '新评审问答', runtimeToolIds: ['review.answer_submit'] },
@@ -40,7 +41,7 @@ const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: st
   testCaseSynthesis: { label: '测试用例综合 Agent', identifier: 'TestCaseSynthesisAgent', sceneLabel: '测试设计', protocolLabel: '综合协议 v1', publishTarget: '新测试设计运行', runtimeToolIds: ['test_case_synthesis.submit_result'] },
 }
 const agentConfigurationGroups: Array<{ label: string; agentKeys: AgentConfigurationAgentKey[] }> = [
-  { label: '需求分析', agentKeys: ['requirementPointExtraction', 'requirementReview', 'reviewQa'] },
+  { label: '需求分析', agentKeys: ['requirementAnalysis', 'reviewQa'] },
   { label: '技术方案分析', agentKeys: ['technicalSolutionExtraction', 'technicalSolutionReview'] },
   { label: '测试设计', agentKeys: ['testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'] },
 ]
@@ -874,6 +875,7 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
       const configuration = await loadAgentConfiguration()
       if (requestId !== agentConfigRequestRef.current) return configuration
       const agentDrafts = {
+        requirementAnalysis: configuration.agents.requirementAnalysis.draft,
         requirementPointExtraction: configuration.agents.requirementPointExtraction.draft,
         requirementReview: configuration.agents.requirementReview.draft,
         reviewQa: configuration.agents.reviewQa.draft,
@@ -1265,7 +1267,7 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
   publishing: boolean
   onPublish: (agentKey: AgentConfigurationAgentKey) => Promise<void>
 }) {
-  const [selectedAgent, setSelectedAgent] = useState<AgentConfigurationAgentKey>('requirementPointExtraction')
+  const [selectedAgent, setSelectedAgent] = useState<AgentConfigurationAgentKey>('requirementAnalysis')
   const [tab, setTab] = useState<'model' | 'prompt' | 'tools'>('model')
   const [resourceCatalog, setResourceCatalog] = useState<AiResourceCatalog | null>(null)
   const [resourceCatalogError, setResourceCatalogError] = useState('')

@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { AgentDefinitionVersion, ReviewRunSnapshot } from '../domain/agent-types.js'
 import { toolsetContentHash } from '../application/ai-resource-hash.js'
-import type { CandidateRequirementPointExtraction } from '../domain/review-types.js'
 
-export function renderRequirementTask(snapshot: ReviewRunSnapshot, fixedExtraction?: CandidateRequirementPointExtraction) {
+export function renderRequirementAnalysisTask(snapshot: ReviewRunSnapshot) {
   const template = snapshot.agentDefinition.taskTemplate
   const rendered = template
     .replace('{{projectName}}', snapshot.projectName)
@@ -14,15 +13,16 @@ export function renderRequirementTask(snapshot: ReviewRunSnapshot, fixedExtracti
     .replace('{{indexVersionId}}', snapshot.indexVersionId)
     .replace('{{focusAreas}}', snapshot.focusAreas.join('、') || '完整性、边界、状态、异常和可测试性')
     .replace('{{excludedAreas}}', snapshot.excludedAreas.join('、') || '无')
-    .replace('{{inputMode}}', snapshot.extractionInput?.mode ?? 'agent_directory')
-    .replace('{{estimatedInputTokens}}', String(snapshot.extractionInput?.estimatedInputTokens ?? 0))
-    .replace('{{safeInputBudget}}', String(snapshot.extractionInput?.safeInputBudget ?? 0))
-    .replace('{{fixedExtraction}}', fixedExtraction ? JSON.stringify(fixedExtraction) : '缺少固定需求点提取结果')
-  if (fixedExtraction) return rendered
-  if (snapshot.extractionInput?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: RequirementPointExtractionAgent 只支持 /workspace 文件工作区输入')
+    .replace('{{inputMode}}', snapshot.analysisInput?.mode ?? 'agent_directory')
+    .replace('{{estimatedInputTokens}}', String(snapshot.analysisInput?.estimatedInputTokens ?? 0))
+    .replace('{{safeInputBudget}}', String(snapshot.analysisInput?.safeInputBudget ?? 0))
+  if (snapshot.analysisInput?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: RequirementAnalysisAgent 只支持 /workspace 文件工作区输入')
   const workspace = snapshot.documentWorkspace
-  return `${rendered}\n\n本次运行使用 Pi Coding Agent 文件工作区协议。当前工作目录是 /${workspace?.rootLogicalPath ?? workspace?.logicalPath ?? 'workspace'}；活动分支是 /${workspace?.activeBranchLogicalPath ?? 'workspace/branches/unknown'}；本次冻结需求输入目录是 /${workspace?.logicalPath ?? snapshot.logicalPath}；Requirement Agent 目录是 /${workspace?.agentLogicalPath ?? 'workspace/agent_workspace/requirement_agent'}。输入不包含文件清单或正文。请像 Codex 一样先调用 ls，从工作区目录树开始探索；可用 find 查找文件、grep 定位文本，随后必须使用 read 按相对路径读取需要分析或引用的文件。grep 不形成正文投递证明，只有 read 实际返回的固定行范围可用于 sourceTexts。不得调用 Shell、write、edit 或越过 /workspace。`
+  return `${rendered}\n\n本次运行使用 Pi Coding Agent 文件工作区协议。当前工作目录是 /${workspace?.rootLogicalPath ?? workspace?.logicalPath ?? 'workspace'}；活动分支是 /${workspace?.activeBranchLogicalPath ?? 'workspace/branches/unknown'}；本次冻结需求输入目录是 /${workspace?.logicalPath ?? snapshot.logicalPath}；Requirement Agent 目录是 /${workspace?.agentLogicalPath ?? 'workspace/agent_workspace/requirement_agent'}。输入不包含文件清单或正文。请先调用 ls，从工作区目录树开始探索；可用 find 查找文件、grep 定位文本，随后必须使用 read 按相对路径读取需要分析或引用的文件。grep 不形成正文投递证明，只有 read 实际返回的当前需求行范围可用于 sourceTexts。Knowledge 工具返回会显式标记 current_requirement 或 knowledge_reference，必须保持事实边界。不得调用 Shell、write、edit 或越过 /workspace。`
 }
+
+/** @deprecated 旧双 Agent Runtime 使用；新需求分析只调用 renderRequirementAnalysisTask。 */
+export const renderRequirementTask = renderRequirementAnalysisTask
 
 export function createAgentDefinitionVersion(input: {
   agentKey: AgentDefinitionVersion['agentKey']

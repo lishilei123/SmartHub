@@ -9,9 +9,10 @@ import { isSkillRuntimeToolId, requiredSkillRuntimeToolIds } from './skill-runti
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 
 const SCENE = 'requirement_analysis' as const
-const AGENT_KEYS = ['requirementPointExtraction', 'requirementReview', 'reviewQa', 'technicalSolutionExtraction', 'technicalSolutionReview', 'testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'] as const
+const AGENT_KEYS = ['requirementAnalysis', 'requirementPointExtraction', 'requirementReview', 'reviewQa', 'technicalSolutionExtraction', 'technicalSolutionReview', 'testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'] as const
 const LEGACY_AGENT_KEYS = ['requirementPointExtraction', 'requirementReview'] as const
 const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch'])
+const REQUIRED_ANALYSIS_TOOL = 'requirement-analysis.submit_result'
 const REQUIRED_EXTRACTION_TOOL = 'requirement-points.submit_result'
 const REQUIRED_REVIEW_TOOL = 'review.submit_result'
 const REQUIRED_REVIEW_QA_TOOL = 'review.answer_submit'
@@ -22,6 +23,7 @@ const REQUIRED_FUNCTIONAL_TEST_DESIGN_TOOL = 'functional_test_design.submit_resu
 const REQUIRED_NON_FUNCTIONAL_TEST_DESIGN_TOOL = 'non_functional_test_design.submit_result'
 const REQUIRED_TEST_CASE_SYNTHESIS_TOOL = 'test_case_synthesis.submit_result'
 const REQUIRED_SKILLS: Record<AgentConfigurationAgentKey, readonly string[]> = {
+  requirementAnalysis: ['system.requirement-analysis'],
   requirementPointExtraction: [],
   requirementReview: [],
   reviewQa: [],
@@ -33,6 +35,7 @@ const REQUIRED_SKILLS: Record<AgentConfigurationAgentKey, readonly string[]> = {
   testCaseSynthesis: [],
 }
 const REQUIRED_MCPS: Record<AgentConfigurationAgentKey, readonly string[]> = {
+  requirementAnalysis: [],
   requirementPointExtraction: [],
   requirementReview: [],
   reviewQa: [],
@@ -66,6 +69,7 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
     return {
       scene: SCENE,
       agents: {
+        requirementAnalysis: agentState('requirementAnalysis', draft, versions),
         requirementPointExtraction: agentState('requirementPointExtraction', draft, versions),
         requirementReview: agentState('requirementReview', draft, versions),
         reviewQa: agentState('reviewQa', draft, versions),
@@ -180,6 +184,7 @@ function defaultDraft(): AgentConfigurationDraft {
   return {
     scene: SCENE,
     agents: {
+      requirementAnalysis: defaultAgentDraft('requirementAnalysis'),
       requirementPointExtraction: defaultAgentDraft('requirementPointExtraction'),
       requirementReview: defaultAgentDraft('requirementReview'),
       reviewQa: defaultAgentDraft('reviewQa'),
@@ -361,6 +366,7 @@ function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): Agent
     return {
       ...structuredClone(value),
       agents: {
+        requirementAnalysis: normalizeStoredAgentDraft((value.agents as unknown as Record<string, AgentConfigurationAgentDraft>).requirementAnalysis, 'requirementAnalysis'),
         requirementPointExtraction: normalizeStoredAgentDraft(value.agents.requirementPointExtraction, 'requirementPointExtraction'),
         requirementReview: normalizeStoredAgentDraft(value.agents.requirementReview, 'requirementReview'),
         reviewQa: normalizeStoredAgentDraft(value.agents.reviewQa, 'reviewQa'),
@@ -379,6 +385,7 @@ function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): Agent
   return {
     scene: SCENE,
     agents: {
+      requirementAnalysis: defaultAgentDraft('requirementAnalysis'),
       requirementPointExtraction: { revision, routing: structuredClone(sharedRouting), definition: normalizeLegacyDefinition(raw.agents?.requirementPointExtraction, 'requirementPointExtraction'), updatedAt },
       requirementReview: { revision, routing: structuredClone(sharedRouting), definition: normalizeLegacyDefinition(raw.agents?.requirementReview, 'requirementReview'), updatedAt },
       reviewQa: defaultAgentDraft('reviewQa'),
@@ -461,7 +468,9 @@ function defaultDefinition(agentKey: AgentConfigurationAgentKey) {
 }
 
 function configurationAgentKey(agentKey: AgentConfigurationAgentKey): AgentDefinitionVersion['agentKey'] {
-  return agentKey === 'requirementPointExtraction'
+  return agentKey === 'requirementAnalysis'
+    ? 'requirement-analysis'
+    : agentKey === 'requirementPointExtraction'
     ? 'requirement-point-extraction'
     : agentKey === 'requirementReview'
     ? 'requirement-review'
@@ -480,10 +489,10 @@ function configurationAgentKey(agentKey: AgentConfigurationAgentKey): AgentDefin
     : 'test-case-synthesis'
 }
 function configurationScene(agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion['scene'] { return ['testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'].includes(agentKey) ? 'test_design' : SCENE }
-function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : agentKey === 'requirement-review' ? 'requirementReview' : agentKey === 'review-qa' ? 'reviewQa' : agentKey === 'technical-solution-extraction' ? 'technicalSolutionExtraction' : agentKey === 'technical-solution-review' || agentKey === 'technical-solution-analysis' ? 'technicalSolutionReview' : agentKey === 'test-analysis' ? 'testAnalysis' : agentKey === 'functional-test-design' ? 'functionalTestDesign' : agentKey === 'non-functional-test-design' ? 'nonFunctionalTestDesign' : 'testCaseSynthesis' }
+function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-analysis' ? 'requirementAnalysis' : agentKey === 'requirement-point-extraction' ? 'requirementPointExtraction' : agentKey === 'requirement-review' ? 'requirementReview' : agentKey === 'review-qa' ? 'reviewQa' : agentKey === 'technical-solution-extraction' ? 'technicalSolutionExtraction' : agentKey === 'technical-solution-review' || agentKey === 'technical-solution-analysis' ? 'technicalSolutionReview' : agentKey === 'test-analysis' ? 'testAnalysis' : agentKey === 'functional-test-design' ? 'functionalTestDesign' : agentKey === 'non-functional-test-design' ? 'nonFunctionalTestDesign' : 'testCaseSynthesis' }
 function normalizeAgentKey(value: AgentConfigurationAgentKey) { if (!AGENT_KEYS.includes(value)) throw new Error('Agent 标识无效'); return value }
-function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : agentKey === 'reviewQa' ? '评审问答 Agent' : agentKey === 'technicalSolutionExtraction' ? '技术方案提取 Agent' : agentKey === 'technicalSolutionReview' ? '技术方案评审 Agent' : agentKey === 'testAnalysis' ? '测试分析 Agent' : agentKey === 'functionalTestDesign' ? '功能测试设计 Agent' : agentKey === 'nonFunctionalTestDesign' ? '非功能测试设计 Agent' : '测试用例综合 Agent' }
-function requiredTool(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementPointExtraction' ? REQUIRED_EXTRACTION_TOOL : agentKey === 'requirementReview' ? REQUIRED_REVIEW_TOOL : agentKey === 'reviewQa' ? REQUIRED_REVIEW_QA_TOOL : agentKey === 'technicalSolutionExtraction' ? REQUIRED_TECHNICAL_EXTRACTION_TOOL : agentKey === 'technicalSolutionReview' ? REQUIRED_TECHNICAL_REVIEW_TOOL : agentKey === 'testAnalysis' ? REQUIRED_TEST_ANALYSIS_TOOL : agentKey === 'functionalTestDesign' ? REQUIRED_FUNCTIONAL_TEST_DESIGN_TOOL : agentKey === 'nonFunctionalTestDesign' ? REQUIRED_NON_FUNCTIONAL_TEST_DESIGN_TOOL : REQUIRED_TEST_CASE_SYNTHESIS_TOOL }
+function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementAnalysis' ? '需求分析 Agent' : agentKey === 'requirementPointExtraction' ? '需求点提取 Agent' : agentKey === 'requirementReview' ? '需求评审 Agent' : agentKey === 'reviewQa' ? '评审问答 Agent' : agentKey === 'technicalSolutionExtraction' ? '技术方案提取 Agent' : agentKey === 'technicalSolutionReview' ? '技术方案评审 Agent' : agentKey === 'testAnalysis' ? '测试分析 Agent' : agentKey === 'functionalTestDesign' ? '功能测试设计 Agent' : agentKey === 'nonFunctionalTestDesign' ? '非功能测试设计 Agent' : '测试用例综合 Agent' }
+function requiredTool(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementAnalysis' ? REQUIRED_ANALYSIS_TOOL : agentKey === 'requirementPointExtraction' ? REQUIRED_EXTRACTION_TOOL : agentKey === 'requirementReview' ? REQUIRED_REVIEW_TOOL : agentKey === 'reviewQa' ? REQUIRED_REVIEW_QA_TOOL : agentKey === 'technicalSolutionExtraction' ? REQUIRED_TECHNICAL_EXTRACTION_TOOL : agentKey === 'technicalSolutionReview' ? REQUIRED_TECHNICAL_REVIEW_TOOL : agentKey === 'testAnalysis' ? REQUIRED_TEST_ANALYSIS_TOOL : agentKey === 'functionalTestDesign' ? REQUIRED_FUNCTIONAL_TEST_DESIGN_TOOL : agentKey === 'nonFunctionalTestDesign' ? REQUIRED_NON_FUNCTIONAL_TEST_DESIGN_TOOL : REQUIRED_TEST_CASE_SYNTHESIS_TOOL }
 function modelReference(value: AgentModelReference | null | undefined) { if (!value) return null; const sourceId = cleanText(value.sourceId, 200); const modelId = cleanText(value.modelId, 200); return sourceId && modelId ? { sourceId, modelId } : null }
 function uniqueModelReferences(values: AgentModelReference[]) { return [...new Map(values.map(item => [modelKey(item), item])).values()] }
 function modelKey(value: AgentModelReference) { return `${value.sourceId}\u0000${value.modelId}` }
@@ -537,6 +546,7 @@ function builtInToolReference(key: string): ToolResource {
     'workspace.list_directory': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
     'knowledge.search': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
     'knowledge.read_chunk': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
+    'requirement-analysis.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
     'requirement-points.submit_result': { version: '5.1.0', risk: 'internal_write', timeoutMs: 30_000 },
     'review.submit_result': { version: '4.0.0', risk: 'internal_write', timeoutMs: 30_000 },
     'review.answer_submit': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },

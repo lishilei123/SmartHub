@@ -176,7 +176,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
     const evidence = new Map(run.result.evidence.map(item => [item.clientEvidenceId, item]))
     const points = new Map(run.result.requirementPoints.map(item => [item.clientRequirementPointId, item]))
     const lines = [
-      `# ${projectVersion.name} · 需求点提取与评审报告`, '',
+      `# ${projectVersion.name} · 需求分析报告`, '',
       `- 运行 ID：${run.id}`,
       `- 项目版本 ID：${projectVersion.id}`,
       `- 固定输入文档：${run.snapshot.assets.length} 份`,
@@ -186,6 +186,8 @@ export class ReviewGovernanceService implements ToolApprovalGate {
       `- 运行状态：${run.status}`,
       `- 生成时间：${new Date().toISOString()}`, '',
       '## 评审摘要', '',
+      `- 需求概述：${safeMarkdown(run.result.summary.overview)}`,
+      ...run.result.summary.businessGoals.map(item => `- 业务目标：${safeMarkdown(item)}`),
       `- 总体结论：${run.result.summary.overallAssessment}`,
       `- 综合评分：${run.result.summary.score}`,
       ...run.result.summary.risks.map(item => `- 风险：${safeMarkdown(item)}`), '',
@@ -197,6 +199,8 @@ export class ReviewGovernanceService implements ToolApprovalGate {
         const evidenceItems = finding.requirementPointRefs.flatMap(reference => points.get(reference)?.evidenceRefs ?? []).map(reference => evidence.get(reference)).filter(Boolean)
         return [`### ${index + 1}. ${safeMarkdown(finding.title)}`, '', `- ID：${finding.clientFindingId}`, `- 类型：${finding.type}`, `- 严重度：${finding.severity}`, `- 处置状态：${current.state}`, `- 处置版本：${current.version}`, `- 关联需求点：${finding.requirementPointRefs.join('、')}`, `- 问题：${safeMarkdown(finding.description)}`, `- 影响：${safeMarkdown(finding.impact)}`, `- 建议确认：${safeMarkdown(finding.recommendation)}`, ...evidenceItems.map(item => `- Evidence：${item!.sourceRef.assetVersionId} / ${safeMarkdown(item!.locator.heading)} — ${safeMarkdown(item!.quote)}`), '']
       }),
+      '## Test Focus', '',
+      ...(run.result.testFocus.length ? run.result.testFocus.flatMap(item => [`### ${safeMarkdown(item.id)} · ${safeMarkdown(item.title)}`, '', safeMarkdown(item.description), '', `- 关联需求点：${item.requirementPointRefs.join('、') || '整体关注项'}`, '']) : ['本次没有单独的测试关注项。', '']),
       '## 降级与执行摘要', '',
       `- 覆盖限制：${run.result.coverage.limitations.length ? run.result.coverage.limitations.map(safeMarkdown).join('；') : '无'}`,
       ...(run.degradations?.length ? run.degradations.map(item => `- ${item.agentKey} 模型降级：${item.fromSourceId}/${item.fromModelId} → ${item.toSourceId}/${item.toModelId}；原因：${safeMarkdown(item.reason)}`) : ['- 模型降级：无']),

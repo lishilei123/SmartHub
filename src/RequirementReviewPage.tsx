@@ -126,7 +126,7 @@ function eventTime(value: string) { return new Date(value).toLocaleTimeString('z
 function formatTraceValue(value: unknown) { return value === undefined ? '' : JSON.stringify(value, null, 2) }
 
 type DisplayExecutionAttempt = ReviewRunExecutionAttempt & { legacy?: boolean }
-type AgentStageKey = 'requirement-point-extraction' | 'requirement-review'
+type AgentStageKey = 'requirement-analysis'
 type DisplayStageAttempt = DisplayExecutionAttempt & {
   stageAttempt: number
   stageMaxAttempts: number
@@ -135,19 +135,18 @@ type DisplayStageAttempt = DisplayExecutionAttempt & {
 
 function inferAgentKeyFromError(error?: string): AgentStageKey | undefined {
   if (!error) return undefined
-  if (/需求评审|requirement-review/iu.test(error)) return 'requirement-review'
-  if (/需求点提取|requirement-point-extraction/iu.test(error)) return 'requirement-point-extraction'
+  if (/需求分析|requirement-analysis|Agent/iu.test(error)) return 'requirement-analysis'
   return undefined
 }
 
-function executionForAgent(attempt: DisplayExecutionAttempt, agentKey: AgentStageKey) {
-  return agentKey === 'requirement-point-extraction' ? attempt.executions.requirementPointExtraction : attempt.executions.requirementReview
+function executionForAgent(attempt: DisplayExecutionAttempt, _agentKey: AgentStageKey) {
+  return attempt.executions.requirementAnalysis
 }
 
 function activeAgentKeyForAttempt(attempt: DisplayExecutionAttempt): AgentStageKey | undefined {
-  return attempt.activeAgentKey
-    ?? inferAgentKeyFromError(attempt.error)
-    ?? (attempt.executions.requirementReview ? 'requirement-review' : attempt.executions.requirementPointExtraction ? 'requirement-point-extraction' : undefined)
+  return attempt.activeAgentKey === 'requirement-analysis'
+    ? 'requirement-analysis'
+    : inferAgentKeyFromError(attempt.error) ?? (attempt.executions.requirementAnalysis ? 'requirement-analysis' : undefined)
 }
 
 function stageAttemptsForAgent(attempts: DisplayExecutionAttempt[], agentKey: AgentStageKey): DisplayStageAttempt[] {
@@ -182,9 +181,7 @@ function executionAttemptsForRun(run: RunRecord): DisplayExecutionAttempt[] {
   const maxAttempts = Math.max(run.queue?.maxAttempts ?? 0, ...retryEvents.map(item => item.maxAttempts), attemptCount)
   const projected = run.response?.executions ?? run.executions
   const projectedExecution = run.response?.execution ?? run.execution
-  const finalExecutions = projected ?? (projectedExecution?.agentKey === 'requirement-point-extraction'
-    ? { requirementPointExtraction: projectedExecution }
-    : projectedExecution?.agentKey === 'requirement-review' ? { requirementReview: projectedExecution } : {})
+  const finalExecutions = projected ?? (projectedExecution?.agentKey === 'requirement-analysis' ? { requirementAnalysis: projectedExecution } : {})
   return Array.from({ length: attemptCount }, (_, index) => {
     const attempt = index + 1
     const retry = retryEvents.find(item => item.attempt === attempt)
@@ -192,7 +189,7 @@ function executionAttemptsForRun(run: RunRecord): DisplayExecutionAttempt[] {
     return {
       attempt, maxAttempts, legacy: true,
       activeAgentKey: inferAgentKeyFromError(retry?.error ?? (isLast ? run.error : undefined))
-        ?? (isLast && finalExecutions.requirementReview ? 'requirement-review' : isLast && finalExecutions.requirementPointExtraction ? 'requirement-point-extraction' : undefined),
+        ?? (isLast && finalExecutions.requirementAnalysis ? 'requirement-analysis' : undefined),
       status: retry ? 'failed' : isLast ? run.status : 'failed',
       startedAt: attempt === 1 ? run.startedAt : retryEvents.find(item => item.attempt === attempt - 1)?.nextAttemptAt ?? run.startedAt,
       ...(retry?.occurredAt || (isLast && run.finishedAt) ? { finishedAt: retry?.occurredAt ?? run.finishedAt } : {}),
@@ -206,19 +203,12 @@ function executionAttemptsForRun(run: RunRecord): DisplayExecutionAttempt[] {
 function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord; loading: boolean; tab: 'conversation' | 'events'; onTab: (tab: 'conversation' | 'events') => void; onClose: () => void }) {
   const executionAttempts = useMemo(() => executionAttemptsForRun(run), [run])
   const projectedExecutions = run.response?.executions ?? run.executions
-  const initialAgentKey: AgentStageKey = run.step === 'extracting_requirement_points' ? 'requirement-point-extraction' : run.step === 'reviewing_requirements' || executionAttempts.some(item => item.executions.requirementReview) || projectedExecutions?.requirementReview ? 'requirement-review' : 'requirement-point-extraction'
-  const [agentKey, setAgentKey] = useState<AgentStageKey>(initialAgentKey)
-  const [attemptNumbers, setAttemptNumbers] = useState<Partial<Record<AgentStageKey, number>>>({})
-  useEffect(() => { setAgentKey(initialAgentKey); setAttemptNumbers({}) }, [run.id])
-  const extractionAttempts = useMemo(() => stageAttemptsForAgent(executionAttempts, 'requirement-point-extraction'), [executionAttempts])
-  const reviewAttempts = useMemo(() => stageAttemptsForAgent(executionAttempts, 'requirement-review'), [executionAttempts])
-  const stageAttempts = agentKey === 'requirement-point-extraction' ? extractionAttempts : reviewAttempts
-  const selectedAttempt = stageAttempts.find(item => item.attempt === attemptNumbers[agentKey]) ?? stageAttempts.at(-1)
-  const selectedExtractionAttempt = extractionAttempts.find(item => item.attempt === attemptNumbers['requirement-point-extraction']) ?? extractionAttempts.at(-1)
-  const selectedReviewAttempt = reviewAttempts.find(item => item.attempt === attemptNumbers['requirement-review']) ?? reviewAttempts.at(-1)
-  const selectedExtractionExecution = selectedExtractionAttempt ? executionForAgent(selectedExtractionAttempt, 'requirement-point-extraction') : projectedExecutions?.requirementPointExtraction
-  const selectedReviewExecution = selectedReviewAttempt ? executionForAgent(selectedReviewAttempt, 'requirement-review') : projectedExecutions?.requirementReview
-  const projectedExecution = agentKey === 'requirement-point-extraction' ? projectedExecutions?.requirementPointExtraction : projectedExecutions?.requirementReview
+  const agentKey: AgentStageKey = 'requirement-analysis'
+  const [attemptNumber, setAttemptNumber] = useState<number>()
+  useEffect(() => { setAttemptNumber(undefined) }, [run.id])
+  const stageAttempts = useMemo(() => stageAttemptsForAgent(executionAttempts, agentKey), [executionAttempts])
+  const selectedAttempt = stageAttempts.find(item => item.attempt === attemptNumber) ?? stageAttempts.at(-1)
+  const projectedExecution = projectedExecutions?.requirementAnalysis
   const currentExecution = run.execution?.agentKey === agentKey ? run.execution : undefined
   const execution: AgentExecutionRecord | undefined = selectedAttempt ? executionForAgent(selectedAttempt, agentKey) : projectedExecution ?? currentExecution ?? (!projectedExecutions ? run.response?.execution ?? run.execution : undefined)
   const events = execution?.events ?? []
@@ -230,7 +220,7 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
     const attemptAgentKey = event.agentKey ?? (sourceAttempt ? activeAgentKeyForAttempt(sourceAttempt) : undefined) ?? inferAgentKeyFromError(event.error)
     return attemptAgentKey === agentKey
   })
-  const agentName = agentKey === 'requirement-point-extraction' ? '需求点提取' : '需求评审'
+  const agentName = '需求分析'
   const stageDegradations = run.degradations?.filter(item => item.agentKey === agentKey) ?? []
   const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
   const completedToolIds = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
@@ -267,8 +257,8 @@ function RunRecordModal({ run, loading, tab, onTab, onClose }: { run: RunRecord;
   }
 
   return <ReviewModal title="Agent 运行记录" className="rr-run-record-modal" onClose={onClose}><div className="rr-run-record">
-    {(executionAttempts.length > 0 || projectedExecutions || run.execution?.agentKey === 'requirement-point-extraction' || run.execution?.agentKey === 'requirement-review') && <div className="rr-run-record-tabs"><button className={agentKey === 'requirement-point-extraction' ? 'active' : ''} onClick={() => setAgentKey('requirement-point-extraction')}><FileText />需求点提取 <span>{selectedExtractionExecution?.events.length ?? (run.execution?.agentKey === 'requirement-point-extraction' ? run.execution.events.length : 0)}</span></button><button className={agentKey === 'requirement-review' ? 'active' : ''} onClick={() => setAgentKey('requirement-review')}><Bot />需求评审 <span>{selectedReviewExecution?.events.length ?? (run.execution?.agentKey === 'requirement-review' ? run.execution.events.length : 0)}</span></button></div>}
-    {stageAttempts.length > 1 && <div className="rr-run-attempt-switch" role="tablist" aria-label={`${agentName}重试对话记录`}>{stageAttempts.map(item => <button type="button" role="tab" aria-selected={item.attempt === selectedAttempt?.attempt} className={`${item.attempt === selectedAttempt?.attempt ? 'active' : ''} ${item.stageStatus}`} onClick={() => setAttemptNumbers(current => ({ ...current, [agentKey]: item.attempt }))} key={item.attempt}><i />第 {item.stageAttempt} / {item.stageMaxAttempts} 次<small>{runLabel(item.stageStatus)}</small></button>)}</div>}
+    {(executionAttempts.length > 0 || projectedExecution || run.execution?.agentKey === 'requirement-analysis') && <div className="rr-run-record-tabs"><button className="active"><Bot />RequirementAnalysisAgent <span>{execution?.events.length ?? 0}</span></button></div>}
+    {stageAttempts.length > 1 && <div className="rr-run-attempt-switch" role="tablist" aria-label={`${agentName}重试对话记录`}>{stageAttempts.map(item => <button type="button" role="tab" aria-selected={item.attempt === selectedAttempt?.attempt} className={`${item.attempt === selectedAttempt?.attempt ? 'active' : ''} ${item.stageStatus}`} onClick={() => setAttemptNumber(item.attempt)} key={item.attempt}><i />第 {item.stageAttempt} / {item.stageMaxAttempts} 次<small>{runLabel(item.stageStatus)}</small></button>)}</div>}
     <div className="rr-run-record-summary"><div><ReviewBadge tone={runTone(displayedStatus)}>{selectedAttempt ? `第 ${selectedAttempt.stageAttempt} / ${selectedAttempt.stageMaxAttempts} 次 · ${runLabel(displayedStatus)}` : runLabel(run.status, isRetryingRun(run))}</ReviewBadge><b>{run.id}</b><span>{selectedAttempt?.modelLabel ?? run.modelLabel}</span></div><dl><div><dt>开始</dt><dd>{formatTime(selectedAttempt?.startedAt ?? run.startedAt)}</dd></div><div><dt>Turn</dt><dd>{execution?.turns ?? 0}</dd></div><div><dt>工具调用</dt><dd>{execution?.toolCalls ?? 0}{execution?.toolErrors ? `（异常 ${execution.toolErrors}）` : ''}</dd></div><div><dt>Runtime</dt><dd>{execution?.framework ? `${execution.framework.name} ${execution.framework.version}` : displayedStatus === 'running' ? '运行中' : '未完成 / 旧记录'}</dd></div></dl></div>
     {displayedError && <div className="rr-run-record-error"><AlertTriangle /><span><b>终止原因</b>{runErrorMessage(displayedError)}</span></div>}
     {stageRetryEvents.length > 0 && <div className="rr-run-record-error"><RefreshCw /><span><b>{agentName}重试记录</b>{stageRetryEvents.map((event, index) => { const stageAttempt = stageAttempts.find(item => item.attempt === event.attempt); return <small key={`${event.occurredAt}-${index}`}>{event.status === 'scheduled' ? `第 ${stageAttempt?.stageAttempt ?? index + 1} / ${stageAttempts.length} 次失败，已安排于 ${formatTime(event.nextAttemptAt ?? event.occurredAt)} 重试` : `第 ${stageAttempt?.stageAttempt ?? index + 1} / ${stageAttempts.length} 次失败，已达到最大重试次数`}：{runErrorMessage(event.error)}</small> })}</span></div>}
@@ -345,20 +335,17 @@ function piToolSummary(event: AgentExecutionEvent, start?: AgentExecutionEvent) 
   if (toolId === 'find') return `查找文件 ${String(traceRecord(start?.toolArguments).pattern ?? '')}`
   if (toolId === 'grep') return `搜索正文 ${String(traceRecord(start?.toolArguments).pattern ?? '')}`
   if (toolId === 'read') return `读取文件 ${String(record.path ?? traceRecord(start?.toolArguments).path ?? '')}${record.startLine ? ` · 行 ${String(record.startLine)}-${String(record.endLine)}` : ''}`
-  if (toolId === 'requirement_points_submit_result') return record.accepted === true ? '需求点候选已通过服务端校验' : '需求点候选需要修正'
-  if (toolId === 'review_submit_result') return record.accepted === true ? '需求评审候选已通过服务端校验' : '需求评审候选需要修正'
+  if (toolId === 'requirement_analysis_submit_result') return record.accepted === true ? '统一需求分析结果已通过服务端校验' : '需求分析结果需要修正'
   return event.isError ? `${toolId} 调用失败` : `${toolId} 调用完成`
 }
 
 function PiAgentConversation({ run }: { run?: RunRecord }) {
-  if (!run) return <div className="rr-chat-empty"><Bot /><h3>Pi Agent 需求评审</h3><p>启动后，这里会持续展示 Agent 消息、读取的工作区文件、工具调用和结果校验。</p></div>
+  if (!run) return <div className="rr-chat-empty"><Bot /><h3>Pi Agent 需求分析</h3><p>启动后，这里会持续展示同一个 Agent Session 的消息、工作区与 Knowledge 读取、工具调用和结果校验。</p></div>
   const saved = run.response?.executions ?? run.executions ?? {}
   const current = run.execution
-  const extraction = current?.agentKey === 'requirement-point-extraction' ? current : saved.requirementPointExtraction
-  const review = current?.agentKey === 'requirement-review' ? current : saved.requirementReview
+  const analysis = current?.agentKey === 'requirement-analysis' ? current : saved.requirementAnalysis
   const stages = [
-    { key: 'extraction', label: '需求点提取 Agent', execution: extraction },
-    { key: 'review', label: '需求评审 Agent', execution: review },
+    { key: 'analysis', label: 'RequirementAnalysisAgent · 单一 Session', execution: analysis },
   ].filter((stage): stage is { key: string; label: string; execution: AgentExecutionRecord } => Boolean(stage.execution))
   return <div className="rr-pi-thread">
     <article className="rr-pi-task"><span><Bot /></span><div><b>Pi Agent 运行任务</b><p>工作目录：/{run.snapshot?.documentWorkspace?.rootLogicalPath ?? run.snapshot?.documentWorkspace?.logicalPath ?? run.logicalPath}；活动分支：/{run.snapshot?.documentWorkspace?.activeBranchLogicalPath ?? '未设置'}；需求输入：/{run.snapshot?.documentWorkspace?.logicalPath ?? run.logicalPath}。</p><small>{run.id}</small></div></article>
@@ -434,7 +421,7 @@ export function RequirementReviewPage({
   const [runsLoadingMore, setRunsLoadingMore] = useState(false)
   const [contentByVersion, setContentByVersion] = useState<Record<string, string>>({})
   const [selectedRunId, setSelectedRunId] = useState('')
-  const [retryingMode, setRetryingMode] = useState<'full' | 'review_only' | null>(null)
+  const [retrying, setRetrying] = useState(false)
   const [agentConfiguration, setAgentConfiguration] = useState<AgentConfigurationState | null>(null)
   const [selectedFindingId, setSelectedFindingId] = useState('')
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('')
@@ -605,9 +592,9 @@ export function RequirementReviewPage({
   }, [selectedRunId, selectedRun?.status])
   const waitingForRetry = selectedRun?.status === 'running' && isRetryingRun(selectedRun)
   const result = selectedRun?.response?.result
-  const extractionResult = result ?? selectedRun?.extractionResult
-  const evidenceById = useMemo(() => new Map((extractionResult?.evidence ?? []).map(evidence => [evidence.clientEvidenceId, evidence])), [extractionResult])
-  const requirementPointsById = useMemo(() => new Map((extractionResult?.requirementPoints ?? []).map(point => [point.clientRequirementPointId, point])), [extractionResult])
+  const baselineResult = result
+  const evidenceById = useMemo(() => new Map((baselineResult?.evidence ?? []).map(evidence => [evidence.clientEvidenceId, evidence])), [baselineResult])
+  const requirementPointsById = useMemo(() => new Map((baselineResult?.requirementPoints ?? []).map(point => [point.clientRequirementPointId, point])), [baselineResult])
   const findingEvidence = (finding: ReviewFinding) => evidenceForFinding(finding, requirementPointsById, evidenceById)
   const documentContent = contentByVersion[selectedDocument?.assetVersionId ?? ''] ?? selectedDocument?.content ?? ''
   const documentVersionId = selectedDocument?.assetVersionId ?? ''
@@ -857,9 +844,8 @@ export function RequirementReviewPage({
 
   const startAnalysis = async () => {
     const fixedDocuments = requirementDocuments.filter(document => document.assetVersionId)
-    const extractionConfiguration = agentConfiguration?.agents.requirementPointExtraction.activeVersion
-    const reviewConfiguration = agentConfiguration?.agents.requirementReview.activeVersion
-    if (!fixedDocuments.length || !extractionConfiguration || !reviewConfiguration || requestController.current) return
+    const analysisConfiguration = agentConfiguration?.agents.requirementAnalysis.activeVersion
+    if (!fixedDocuments.length || !analysisConfiguration || requestController.current) return
     const controller = new AbortController()
     requestController.current = controller
     const temporaryId = `pending-${Date.now()}`
@@ -880,14 +866,13 @@ export function RequirementReviewPage({
       status: 'running',
       step: 'agent_executing',
       progress: 10,
-      hasFrozenExtraction: false,
-      modelLabel: `需求点提取 V${extractionConfiguration.version} · ${extractionConfiguration.routing.primaryModel?.modelId ?? '已发布模型'}；需求评审 V${reviewConfiguration.version} · ${reviewConfiguration.routing.primaryModel?.modelId ?? '已发布模型'}`,
+      modelLabel: `需求分析 V${analysisConfiguration.version} · ${analysisConfiguration.routing.primaryModel?.modelId ?? '已发布模型'}`,
       startedAt,
     }
     setRuns(current => [pendingRun, ...current])
     setSelectedRunId(temporaryId)
     setView('overview')
-    addAudit(`启动 Pi Agent 目录需求评审：/${workspaceDirectoryPath} · ${fixedDocuments.length} 份候选文档`)
+    addAudit(`启动 RequirementAnalysisAgent：/${workspaceDirectoryPath} · ${fixedDocuments.length} 份候选文档`)
     try {
       const started = await startRequirementAnalysis(projectVersion!.id, {
         documentDirectoryPath: workspaceDirectoryPath,
@@ -898,12 +883,12 @@ export function RequirementReviewPage({
       const persistedRun = { ...started, id: startedId }
       setRuns(current => current.map(run => run.id === temporaryId ? persistedRun : run))
       setSelectedRunId(startedId)
-      addAudit(`Pi Agent 目录需求评审已进入后台运行：${startedId}`)
-      notify(`已固定 /${workspaceDirectoryPath} 下 ${fixedDocuments.length} 份候选文档，Pi Agent 将自主选读并评审。`)
+      addAudit(`RequirementAnalysisAgent 已进入后台运行：${startedId}`)
+      notify(`已固定 /${workspaceDirectoryPath} 下 ${fixedDocuments.length} 份候选文档，单 Agent 将在同一会话内完成分析与自检。`)
     } catch (error) {
       const message = controller.signal.aborted ? '评审启动响应已中断；若任务已创建，重新进入页面后仍可恢复查看' : error instanceof Error ? error.message : '需求评审启动失败'
       setRuns(current => current.map(run => run.id === temporaryId ? { ...run, status: 'failed', step: 'failed', error: message } : run))
-      addAudit('启动多文档需求点提取与评审失败')
+      addAudit('启动单 Agent 需求分析失败')
       notify(message, controller.signal.aborted ? 'warning' : 'error')
     } finally {
       requestController.current = null
@@ -915,27 +900,27 @@ export function RequirementReviewPage({
     try {
       const cancelled = await cancelRequirementReviewRun(selectedRun.id)
       setRuns(current => current.map(run => run.id === cancelled.id ? { ...cancelled, content: run.content } : run))
-      addAudit(`用户取消需求点提取与评审：${selectedRun.id}`)
+      addAudit(`用户取消需求分析：${selectedRun.id}`)
       notify('已取消本次需求评审。', 'warning')
     } catch (error) {
       notify(error instanceof Error ? error.message : '需求评审取消失败', 'error')
     }
   }
 
-  const retryAnalysis = async (mode: 'full' | 'review_only') => {
-    if (!selectedRun || selectedRun.status === 'running' || selectedRun.status === 'succeeded' || selectedRun.id.startsWith('pending-') || retryingMode) return
-    setRetryingMode(mode)
+  const retryAnalysis = async () => {
+    if (!selectedRun || selectedRun.status === 'running' || selectedRun.status === 'succeeded' || selectedRun.id.startsWith('pending-') || retrying) return
+    setRetrying(true)
     try {
-      const started = await retryRequirementReviewRun(selectedRun.id, mode)
+      const started = await retryRequirementReviewRun(selectedRun.id)
       setRuns(current => [started, ...current.filter(run => run.id !== started.id)])
       setSelectedRunId(started.id)
       setView('overview')
-      addAudit(mode === 'review_only' ? `复用冻结需求点重新需求评审：${selectedRun.id} → ${started.id}` : `全部重跑需求点提取与评审：${selectedRun.id} → ${started.id}`)
-      notify(mode === 'review_only' ? '已复用冻结需求点和 Evidence，只重新执行需求评审。' : '已创建新的完整运行，正在重新提取需求点并评审。')
+      addAudit(`重新执行完整需求分析：${selectedRun.id} → ${started.id}`)
+      notify('已创建新的完整运行，单 Agent 将重新执行分析与自检。')
     } catch (error) {
       notify(error instanceof Error ? error.message : '需求评审重跑失败', 'error')
     } finally {
-      setRetryingMode(null)
+      setRetrying(false)
     }
   }
 
@@ -1158,7 +1143,7 @@ export function RequirementReviewPage({
   })
 
   const stats = {
-    requirements: extractionResult?.requirementPoints?.length ?? 0,
+    requirements: baselineResult?.requirementPoints?.length ?? 0,
     findings: result?.findings.length ?? 0,
     high: result?.findings.filter(finding => finding.severity === 'blocker' || finding.severity === 'high').length ?? 0,
     pending: result?.findings.filter(finding => !findingEvidence(finding).length).length ?? 0,
@@ -1176,11 +1161,9 @@ export function RequirementReviewPage({
   const selectedQaTraceExecution = qaTraceSelection?.messageId === 'pending'
     ? executionFromEvents(pendingQaEvents[qaTraceSelection.runId] ?? [])
     : selectedQaTraceMessage?.execution
-  const agentConfigurationsReady = Boolean(agentConfiguration?.agents.requirementPointExtraction.activeVersion && agentConfiguration?.agents.requirementReview.activeVersion)
-  const reviewAgentReady = Boolean(agentConfiguration?.agents.requirementReview.activeVersion)
+  const analysisAgentReady = Boolean(agentConfiguration?.agents.requirementAnalysis.activeVersion)
   const reviewQaReady = Boolean(agentConfiguration?.agents.reviewQa.activeVersion)
-  const canRun = Boolean(projectVersion && !readOnly && workspaceDirectoryPath && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && agentConfigurationsReady && apiState === 'ready' && !requestController.current && !retryingMode)
-  const canRetryReview = Boolean(selectedRun && !readOnly && (selectedRun.status === 'failed' || selectedRun.status === 'cancelled') && selectedRun.hasFrozenExtraction && reviewAgentReady && apiState === 'ready' && !retryingMode)
+  const canRun = Boolean(projectVersion && !readOnly && workspaceDirectoryPath && requirementDocuments.length && requirementDocuments.every(document => document.assetVersionId) && analysisAgentReady && apiState === 'ready' && !requestController.current && !retrying)
 
   const bindDocument = async (document: KnowledgeDocument) => {
     if (!projectVersion || readOnly || !document.assetVersionId || bindingActionId) return
@@ -1213,7 +1196,7 @@ export function RequirementReviewPage({
     <header className="rr-header">
       <div className="rr-title-block">
         <div className="rr-title-icon"><Sparkles /></div>
-        <div><h1>Pi Agent 需求评审 · {projectVersion.name}</h1><p>{requirementDocuments.length ? `Agent 在知识库目录中自主选读文档，提取需求点并逐条对齐固定证据` : '当前工作目录没有已进入活动索引的 ready 文档'}</p></div>
+        <div><h1>Pi Agent 需求分析 · {projectVersion.name}</h1><p>{requirementDocuments.length ? 'RequirementAnalysisAgent 在一个会话内完成需求基线、评审、自检与测试关注点输出' : '当前工作目录没有已进入活动索引的 ready 文档'}</p></div>
       </div>
       <div className="rr-run-summary">
         <ReviewBadge tone={runTone(selectedRun?.status, isRetryingRun(selectedRun))}>{runLabel(selectedRun?.status, isRetryingRun(selectedRun))}</ReviewBadge>
@@ -1221,12 +1204,12 @@ export function RequirementReviewPage({
         <span><small>{selectedRun ? '已读 / 候选' : '目录候选文档'}</small><b>{selectedRun ? `${agentReadDocumentCount} / ${selectedRun.assetVersionIds?.length ?? 0}` : `${requirementDocuments.length} 份`}</b></span>
       </div>
       <div className="rr-header-actions">
-        <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {run.retryMode === 'review_only' ? '仅评审 · ' : run.retryMode === 'full' ? '全部重跑 · ' : ''}{runLabel(run.status, isRetryingRun(run))}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button></label>
+        <label className="rr-history"><Clock3 /><span>运行历史</span><select value={selectedRun?.id ?? ''} onChange={event => selectRun(event.target.value)} disabled={runsState === 'loading'}><option value="">{runsState === 'loading' ? '正在加载历史' : '尚无运行'}</option>{reviewRuns.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {run.retryMode === 'full' ? '完整重跑 · ' : ''}{runLabel(run.status, isRetryingRun(run))}</option>)}</select>{runsCursor && <button className="text-btn" onClick={() => void loadMoreRuns()} disabled={runsLoadingMore}>{runsLoadingMore ? '加载中…' : '更多历史'}</button>}<button className="rr-record-button" type="button" onClick={() => void openRunRecord()} disabled={!selectedRun || selectedRun.id.startsWith('pending-')}><Activity />运行记录</button></label>
         <button className="btn ghost" onClick={() => setSnapshotOpen(value => !value)} disabled={!selectedRun}><ShieldCheck />固定快照</button>
         <button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />导出报告</button>
-        {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!agentConfigurationsReady ? '请先分别发布需求点提取 Agent 和需求评审 Agent' : undefined}><Play />{selectedRun ? '重新提取并评审' : '提取需求点并评审'}</button>}
+        {selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消运行</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun} title={!analysisAgentReady ? '请先发布需求分析 Agent' : undefined}><Play />{selectedRun ? '重新分析' : '开始需求分析'}</button>}
       </div>
-      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>输入文档</dt><dd>{(selectedRun.documents ?? selectedRun.snapshot?.assets ?? []).map(document => `${document.displayName} · ${document.assetVersionId}`).join('\n') || selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>Agent 配置</dt><dd>{selectedRun.snapshot?.agentConfigurationRefs ? `需求点提取 V${selectedRun.snapshot.agentConfigurationRefs.requirementPointExtraction.version} · ${selectedRun.snapshot.agentConfigurationRefs.requirementPointExtraction.id}\n需求评审 V${selectedRun.snapshot.agentConfigurationRefs.requirementReview.version} · ${selectedRun.snapshot.agentConfigurationRefs.requirementReview.id}` : selectedRun.snapshot?.agentConfigurationRef ? `历史统一配置 V${selectedRun.snapshot.agentConfigurationRef.version} · ${selectedRun.snapshot.agentConfigurationRef.id}` : '历史运行未记录发布配置'}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.version}\n${selectedRun.snapshot.agentDefinitions.requirementReview.agentKey} ${selectedRun.snapshot.agentDefinitions.requirementReview.version}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : '双 Agent 流程'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.promptRef.version} / ${selectedRun.snapshot.agentDefinitions.requirementReview.promptRef.version}` : selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot?.agentDefinitions ? `${selectedRun.snapshot.agentDefinitions.requirementPointExtraction.toolsetVersion} / ${selectedRun.snapshot.agentDefinitions.requirementReview.toolsetVersion}` : selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
+      {snapshotOpen && selectedRun && <div className="rr-snapshot-popover"><header><b>固定输入快照</b><button onClick={() => setSnapshotOpen(false)} aria-label="关闭快照"><XCircle /></button></header><dl><div><dt>项目版本</dt><dd>{selectedRun.snapshot?.projectVersionName ?? projectVersion.name}</dd></div><div><dt>运行</dt><dd>{selectedRun.id}</dd></div><div><dt>输入文档</dt><dd>{(selectedRun.documents ?? selectedRun.snapshot?.assets ?? []).map(document => `${document.displayName} · ${document.assetVersionId}`).join('\n') || selectedRun.assetVersionId}</dd></div><div><dt>模型</dt><dd>{selectedRun.modelLabel}</dd></div><div><dt>Agent 配置</dt><dd>{selectedRun.snapshot?.agentConfigurationRef ? `需求分析 V${selectedRun.snapshot.agentConfigurationRef.version} · ${selectedRun.snapshot.agentConfigurationRef.id}` : '未记录发布配置'}</dd></div><div><dt>索引版本</dt><dd>{selectedRun.snapshot?.indexVersionId ?? '运行创建后固定'}</dd></div><div><dt>Agent</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.agentKey} ${selectedRun.snapshot.agentDefinition.version}` : 'RequirementAnalysisAgent'}</dd></div><div><dt>Prompt</dt><dd>{selectedRun.snapshot?.agentDefinition.promptRef.version ?? '内置版本'}</dd></div><div><dt>Toolset / Skill / MCP</dt><dd>{selectedRun.snapshot ? `${selectedRun.snapshot.agentDefinition.toolsetVersion} / ${selectedRun.snapshot.agentDefinition.skillBindings.length} / ${selectedRun.snapshot.agentDefinition.mcpBindings.length}` : '内置工具集'}</dd></div></dl></div>}
     </header>
 
     <div className="rr-workspace">
@@ -1244,21 +1227,21 @@ export function RequirementReviewPage({
           <div className="rr-tabs" role="tablist" aria-label="需求评审视图">{viewTabs.map(tab => <button key={tab.key} className={view === tab.key ? 'active' : ''} role="tab" aria-selected={view === tab.key} onClick={() => selectView(tab.key)}><tab.icon />{tab.label}</button>)}</div>
         </div>
 
-        {selectedRun?.status === 'running' && (waitingForRetry ? <div className="rr-warning-status"><Clock3 /><div><b>等待 Worker 自动重试</b><span>{selectedRun.queue ? `第 ${selectedRun.queue.attempts} / ${selectedRun.queue.maxAttempts} 次尝试已失败，预计在 ${formatTime(selectedRun.queue.availableAt)} 再次执行。` : '本次执行遇到可恢复错误，正在等待 Worker 重新领取。'} </span>{(selectedRun.queue?.error ?? selectedRun.error) && <small>{runErrorMessage(selectedRun.queue?.error ?? selectedRun.error)}</small>}</div><ReviewBadge tone="orange">可取消</ReviewBadge></div> : <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>{selectedRun.step === 'reviewing_requirements' ? 'RequirementReviewAgent 正在评审固定需求点' : 'RequirementPointExtractionAgent 正在提取需求点'}</b><span>两个 Agent 使用独立会话；页面每秒同步服务端状态，刷新或关闭浏览器不会取消本次运行。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>)}
-        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>{selectedRun.hasFrozenExtraction ? '需求评审失败，需求点提取结果已保留' : '需求点提取或运行启动失败'}</b><span>{runErrorMessage(selectedRun.error)}</span>{selectedRun.hasFrozenExtraction && !reviewAgentReady && <small>请先发布需求评审 Agent，再单独重跑评审。</small>}{!selectedRun.hasFrozenExtraction && !agentConfigurationsReady && <small>请先分别发布两个 Agent 配置。</small>}</div><div className="rr-retry-actions">{selectedRun.hasFrozenExtraction && <button className="btn primary" onClick={() => void retryAnalysis('review_only')} disabled={!canRetryReview}><RefreshCw />{retryingMode === 'review_only' ? '启动中…' : '重新需求评审'}</button>}<button className="btn ghost" onClick={() => void retryAnalysis('full')} disabled={!canRun}><Play />{retryingMode === 'full' ? '启动中…' : '全部重跑'}</button></div></div>}
-        {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>评审已取消</b><span>{selectedRun.error}</span>{selectedRun.hasFrozenExtraction && !reviewAgentReady && <small>请先发布需求评审 Agent，再单独重跑评审。</small>}</div><div className="rr-retry-actions">{selectedRun.hasFrozenExtraction && <button className="btn primary" onClick={() => void retryAnalysis('review_only')} disabled={!canRetryReview}><RefreshCw />重新需求评审</button>}<button className="btn ghost" onClick={() => void retryAnalysis('full')} disabled={!canRun}><Play />全部重跑</button></div></div>}
+        {selectedRun?.status === 'running' && (waitingForRetry ? <div className="rr-warning-status"><Clock3 /><div><b>等待 Worker 自动重试</b><span>{selectedRun.queue ? `第 ${selectedRun.queue.attempts} / ${selectedRun.queue.maxAttempts} 次尝试已失败，预计在 ${formatTime(selectedRun.queue.availableAt)} 再次执行。` : '本次执行遇到可恢复错误，正在等待 Worker 重新领取。'} </span>{(selectedRun.queue?.error ?? selectedRun.error) && <small>{runErrorMessage(selectedRun.queue?.error ?? selectedRun.error)}</small>}</div><ReviewBadge tone="orange">可取消</ReviewBadge></div> : <div className="rr-live-status"><LoaderCircle className="rotating" /><div><b>RequirementAnalysisAgent 正在分析并自检</b><span>需求基线、Finding 与测试关注点在同一 Pi 会话中生成；页面每秒同步服务端状态，刷新或关闭浏览器不会取消本次运行。</span><i /></div><ReviewBadge tone="purple">可取消</ReviewBadge></div>)}
+        {selectedRun?.status === 'failed' && <div className="rr-error-status"><XCircle /><div><b>本次需求分析失败</b><span>{runErrorMessage(selectedRun.error)}</span>{!analysisAgentReady && <small>请先发布需求分析 Agent。</small>}</div><div className="rr-retry-actions"><button className="btn ghost" onClick={() => void retryAnalysis()} disabled={!canRun}><RefreshCw />{retrying ? '启动中…' : '完整重跑'}</button></div></div>}
+        {selectedRun?.status === 'cancelled' && <div className="rr-warning-status"><AlertTriangle /><div><b>需求分析已取消</b><span>{selectedRun.error}</span>{!analysisAgentReady && <small>请先发布需求分析 Agent。</small>}</div><div className="rr-retry-actions"><button className="btn ghost" onClick={() => void retryAnalysis()} disabled={!canRun}><RefreshCw />{retrying ? '启动中…' : '完整重跑'}</button></div></div>}
 
         <div className="rr-view-content">
           {view === 'overview' && <OverviewView result={result} stats={stats} visibleFindings={visibleFindings} selectedFindingId={selectedFindingId} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} traceabilityFilter={traceabilityFilter} setTraceabilityFilter={setTraceabilityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} findingEvidence={findingEvidence} onSelectFinding={setSelectedFindingId} onLocate={locateFinding} onQuote={quoteFinding} onState={updateFindingState} onStart={startAnalysis} canRun={canRun} />}
           {view === 'diff' && <DiffView versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
-          {view === 'tree' && <RequirementPointsView requirementPoints={extractionResult?.requirementPoints ?? []} evidence={extractionResult?.evidence ?? []} onLocateEvidence={locateEvidence} />}
-          {view === 'evidence' && <EvidenceView evidence={extractionResult?.evidence ?? []} findings={result?.findings ?? []} requirementPoints={extractionResult?.requirementPoints ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
+          {view === 'tree' && <RequirementPointsView requirementPoints={baselineResult?.requirementPoints ?? []} evidence={baselineResult?.evidence ?? []} onLocateEvidence={locateEvidence} />}
+          {view === 'evidence' && <EvidenceView evidence={baselineResult?.evidence ?? []} findings={result?.findings ?? []} requirementPoints={baselineResult?.requirementPoints ?? []} selectedEvidenceId={selectedEvidenceId} onLocate={locateEvidence} />}
         </div>
       </main>
 
       <aside className="rr-chat">
         <div className="rr-panel-head"><span><MessageSquareText /><b>Pi Agent 对话</b></span><button onClick={() => setChatCollapsed(value => !value)} aria-label={chatCollapsed ? '展开 Pi Agent 对话' : '收起 Pi Agent 对话'}>{chatCollapsed ? <PanelRightOpen /> : <PanelRightClose />}</button></div>
-        {!chatCollapsed && <><div className="rr-chat-context"><Bot /><span><b>{selectedRun?.status === 'running' ? 'Pi Agent 正在执行' : selectedRun?.status === 'succeeded' && reviewQaReady ? '流程完成，可继续追问' : selectedRun?.status === 'succeeded' ? '流程完成，问答 Agent 尚未发布' : '等待启动 Pi Agent'}</b><small>{selectedRun ? `${agentReadDocumentCount} 份已读文档 · ${selectedRun.response?.result.evidence.length ?? selectedRun.extractionResult?.evidence.length ?? 0} 条固定证据` : '文件读取和工具调用会实时记录'}</small></span><ReviewBadge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' && reviewQaReady ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' && reviewQaReady ? '可对话' : '待运行'}</ReviewBadge></div>
+        {!chatCollapsed && <><div className="rr-chat-context"><Bot /><span><b>{selectedRun?.status === 'running' ? 'Pi Agent 正在执行' : selectedRun?.status === 'succeeded' && reviewQaReady ? '流程完成，可继续追问' : selectedRun?.status === 'succeeded' ? '流程完成，问答 Agent 尚未发布' : '等待启动 Pi Agent'}</b><small>{selectedRun ? `${agentReadDocumentCount} 份已读文档 · ${selectedRun.response?.result.evidence.length ?? 0} 条固定证据` : '文件读取和工具调用会实时记录'}</small></span><ReviewBadge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' && reviewQaReady ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' && reviewQaReady ? '可对话' : '待运行'}</ReviewBadge></div>
           <div className="rr-chat-scroll"><PiAgentConversation run={selectedRun} />{selectedRun?.status === 'succeeded' && <div className="rr-pi-followup-divider"><span>评审完成后的追问</span></div>}{currentMessages.map((message, index) => <div className={`rr-message ${message.role}`} key={message.id}>{message.quote && <blockquote><Quote />{message.quote.findingId ? `Finding ${message.quote.findingId}` : `${message.quote.heading}${message.quote.startLine ? ` · L${message.quote.startLine}` : ''}`}<span>{message.quote.text}</span></blockquote>}<b>{message.role === 'user' ? '你' : message.role === 'assistant' ? message.modelLabel ?? 'AI 评审助手' : '系统状态'}</b><p>{message.text}</p>{message.citations?.length ? <div className="rr-message-citations">{message.citations.map(citation => <button key={citation} onClick={() => { const evidence = evidenceById.get(citation); if (evidence) locateEvidence(evidence) }}><ShieldCheck />{citation}</button>)}</div> : null}{message.limitations?.length ? <small className="rr-message-limitations">限制：{message.limitations.join('；')}</small> : null}{message.execution && <button className="rr-message-trace-button" onClick={() => setQaTraceSelection({ runId: selectedRun!.id, messageId: message.id, question: [...currentMessages.slice(0, index)].reverse().find(item => item.role === 'user')?.text ?? '评审问答' })}><Activity />查看执行详情<span>{message.execution.turns} Turn · {message.execution.toolCalls} 次工具调用</span></button>}</div>)}{selectedRun?.status === 'succeeded' && !currentMessages.length && <div className="rr-chat-empty compact"><MessageSquareText /><h3>基于本次评审继续追问</h3><p>回答绑定固定 ReviewRun、Agent 已读文档和已校验证据，不会切换到 latest。</p>{result?.findings.slice(0, 3).map(finding => <button key={finding.clientFindingId} onClick={() => quoteFinding(finding)}><Quote />引用：{finding.title}</button>)}</div>}{chatSendingRunId === selectedRun?.id && <div className="rr-message assistant rr-message-running"><b>AI 评审助手</b><p><LoaderCircle className="rotating" /> 正在基于固定评审上下文生成答案…</p><button className="rr-message-trace-button" onClick={() => setQaTraceSelection({ runId: selectedRun.id, messageId: 'pending', question: currentMessages.at(-1)?.text ?? '评审问答' })}><Activity />查看实时执行详情<span>{executionFromEvents(pendingQaEvents[selectedRun.id] ?? []).turns} Turn · {executionFromEvents(pendingQaEvents[selectedRun.id] ?? []).toolCalls} 次工具调用</span></button></div>}</div>
           {sourceQuote && <div className="rr-quote-preview"><Quote /><span><b>{sourceQuote.findingId ? `Finding ${sourceQuote.findingId}` : sourceQuote.heading}</b><small>{sourceQuote.text}</small></span><button onClick={() => setSourceQuote(null)} aria-label="移除引用"><XCircle /></button></div>}
           <div className="rr-chat-input"><textarea value={chatDraft} onChange={event => setChatDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat() } }} disabled={selectedRun?.status !== 'succeeded' || !reviewQaReady || Boolean(chatSendingRunId)} placeholder={selectedRun?.status === 'succeeded' ? reviewQaReady ? '基于固定评审运行提问…' : '请先发布评审问答 Agent' : '完成一次真实评审后可引用提问'} /><div><span><ShieldCheck />固定 ReviewRun · 独立问答 Agent</span><button onClick={() => void sendChat()} disabled={!chatDraft.trim() || selectedRun?.status !== 'succeeded' || !reviewQaReady || Boolean(chatSendingRunId)} aria-label="发送评审问题">{chatSendingRunId ? <LoaderCircle className="rotating" /> : <Send />}</button></div></div></>}
@@ -1277,10 +1260,11 @@ function OverviewView({ result, stats, visibleFindings, selectedFindingId, selec
   findingTypeFilter: 'all' | ReviewFindingType; setFindingTypeFilter: (value: 'all' | ReviewFindingType) => void; severityFilter: 'all' | ReviewSeverity; setSeverityFilter: (value: 'all' | ReviewSeverity) => void; traceabilityFilter: 'all' | 'traceable' | 'untraceable'; setTraceabilityFilter: (value: 'all' | 'traceable' | 'untraceable') => void; findingStateFilter: 'all' | FindingState; setFindingStateFilter: (value: 'all' | FindingState) => void;
   findingEvidence: (finding: ReviewFinding) => ReviewEvidence[]; onSelectFinding: (id: string) => void; onLocate: (finding: ReviewFinding) => void; onQuote: (finding: ReviewFinding) => void; onState: (finding: ReviewFinding, state: FindingState) => void; onStart: () => void; canRun: boolean
 }) {
-  if (!result) return <div className="rr-empty"><Sparkles /><b>{selectedRun?.status === 'running' ? 'Pi Agent 正在自主选读文档并评审' : selectedRun?.status === 'failed' ? '本次分析失败，可重新运行' : selectedRun?.status === 'cancelled' ? '本次分析已取消，可重新运行' : '尚未提取需求点'}</b><p>运行会固定左侧知识库目录中的 ready 文档版本；Pi Agent 根据目录清单自主搜索和读取相关 Chunk，所有文件读取与工具调用会同步到右侧对话。</p>{selectedRun?.status !== 'running' && <button className="btn primary" onClick={onStart} disabled={!canRun}><Play />{selectedRun ? '重新提取并评审' : '启动 Pi Agent 评审'}</button>}</div>
+  if (!result) return <div className="rr-empty"><Sparkles /><b>{selectedRun?.status === 'running' ? 'RequirementAnalysisAgent 正在自主选读文档并分析' : selectedRun?.status === 'failed' ? '本次分析失败，可重新运行' : selectedRun?.status === 'cancelled' ? '本次分析已取消，可重新运行' : '尚未生成需求分析结果'}</b><p>运行会固定左侧知识库目录中的 ready 文档版本；同一个 Pi Session 自主读取原文、按需查询 Knowledge，并统一提交 Baseline、Finding、Test Focus 与分析文档。</p>{selectedRun?.status !== 'running' && <button className="btn primary" onClick={onStart} disabled={!canRun}><Play />{selectedRun ? '重新分析' : '启动需求分析'}</button>}</div>
   return <div className="rr-overview">
-    <div className="rr-assessment"><div><span>AI 评审摘要</span><h2>{result.summary.overallAssessment === 'blocked' ? '存在阻断问题' : result.summary.overallAssessment === 'needs_revision' ? '建议修改后确认' : result.summary.overallAssessment === 'pass_with_notes' ? '附带关注项通过' : '评审通过'}</h2><p>{result.summary.risks[0] ?? result.summary.strengths[0] ?? '本次评审已完成结构化校验。'}</p></div><div className="rr-score"><strong>{result.summary.score}</strong><span>综合评分</span></div></div>
+    <div className="rr-assessment"><div><span>统一需求分析摘要</span><h2>{result.summary.overallAssessment === 'blocked' ? '存在阻断问题' : result.summary.overallAssessment === 'needs_revision' ? '建议修改后确认' : result.summary.overallAssessment === 'pass_with_notes' ? '附带关注项通过' : '评审通过'}</h2><p>{result.summary.overview || result.summary.risks[0] || result.summary.strengths[0] || '本次分析已完成结构化校验。'}</p></div><div className="rr-score"><strong>{result.summary.score}</strong><span>综合评分</span></div></div>
     <div className="rr-stat-grid"><article><GitBranch /><span>需求点</span><strong>{stats.requirements}</strong><small>原子化提取并对齐证据</small></article><article><AlertTriangle /><span>Finding</span><strong>{stats.findings}</strong><small>基于关联需求点分析</small></article><article className="danger"><ShieldCheck /><span>阻断/高风险</span><strong>{stats.high}</strong><small>优先人工确认</small></article><article className="warning"><CircleHelp /><span>待确认</span><strong>{stats.pending}</strong><small>关联需求点缺少证据</small></article><article className="success"><CheckCircle2 /><span>可追溯</span><strong>{stats.evidence}</strong><small>经需求点定位固定原文</small></article></div>
+    <section className="rr-unified-result"><article><header><CircleHelp /><b>Test Focus</b><ReviewBadge tone="blue">{result.testFocus.length}</ReviewBadge></header>{result.testFocus.length ? <ul>{result.testFocus.map(item => <li key={item.id}><b>{item.id} · {item.title}</b><span>{item.description}</span><small>{item.requirementPointRefs.join('、') || '整体关注项'}</small></li>)}</ul> : <p>本次没有单独的测试关注项。</p>}</article><details><summary><FileText /><b>Requirement Analysis Document</b><span>查看固定 Markdown Artifact</span></summary><div className="rr-markdown"><MarkdownDocument source={result.artifacts.find(item => item.fileName === 'requirement-analysis.md')?.content ?? result.analysisDocument ?? ''} format="markdown" /></div></details></section>
     <div className="rr-finding-toolbar"><span><ListFilter />Finding 筛选</span><select value={findingTypeFilter} onChange={event => setFindingTypeFilter(event.target.value as 'all' | ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={severityFilter} onChange={event => setSeverityFilter(event.target.value as 'all' | ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select value={traceabilityFilter} onChange={event => setTraceabilityFilter(event.target.value as typeof traceabilityFilter)}><option value="all">全部可追溯性</option><option value="traceable">可经需求点追溯</option><option value="untraceable">关联需求点无证据</option></select><select value={findingStateFilter} onChange={event => setFindingStateFilter(event.target.value as 'all' | FindingState)}><option value="all">全部处置</option>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>{visibleFindings.length} / {result.findings.length}</small></div>
     <div className="rr-findings">{visibleFindings.map(finding => {
       const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open' : 'open'

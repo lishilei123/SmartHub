@@ -125,10 +125,68 @@ export interface CandidateRequirementReviewV3 {
   }>
 }
 
+export interface CandidateRequirementAnalysisV1 {
+  summary?: {
+    overview?: string
+    businessGoals?: string[]
+    overallAssessment?: OverallAssessment
+    score?: number
+    strengths?: string[]
+    risks?: string[]
+  }
+  requirementPoints: Array<{
+    id: string
+    title?: string
+    description: string
+    sourceTexts: string[]
+  }>
+  findings: Array<{
+    title?: string
+    type?: ReviewFindingType
+    severity?: ReviewSeverity
+    confidence?: number
+    requirementPointRefs: string[]
+    analysis: string
+    impact?: string
+    suggestion?: string
+  }>
+  testFocus: Array<{
+    title: string
+    description: string
+    requirementPointRefs: string[]
+  }>
+  analysisDocument?: string
+}
+
+export interface RequirementTestFocus {
+  id: string
+  title: string
+  description: string
+  requirementPointRefs: string[]
+}
+
+export interface RequirementAnalysisArtifact {
+  fileName: 'requirement-baseline.md' | 'requirement-review.md' | 'requirement-analysis.md'
+  mediaType: 'text/markdown'
+  content: string
+  contentSha256: string
+}
+
+export interface RequirementAnalysisResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
+  summary: CandidateRequirementReview['summary'] & {
+    overview: string
+    businessGoals: string[]
+  }
+  testFocus: RequirementTestFocus[]
+  analysisDocument?: string
+  artifacts: RequirementAnalysisArtifact[]
+}
+
+/** @deprecated 新需求分析运行只使用 RequirementAnalysisResult。 */
 export interface CandidateReviewResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
 }
 
-export type AgentCandidateResult = CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementPointExtractionV4 | CandidateRequirementPointExtractionV5 | CandidateRequirementReview | CandidateRequirementReviewV3 | import('./technical-solution-types.js').TechnicalSolutionExtractionResult | import('./technical-solution-types.js').TechnicalSolutionFormalResult
+export type AgentCandidateResult = CandidateRequirementAnalysisV1 | RequirementAnalysisResult | CandidateRequirementPointExtraction | CandidateRequirementPointExtractionV3 | CandidateRequirementPointExtractionV4 | CandidateRequirementPointExtractionV5 | CandidateRequirementReview | CandidateRequirementReviewV3 | import('./technical-solution-types.js').TechnicalSolutionExtractionResult | import('./technical-solution-types.js').TechnicalSolutionFormalResult
 
 export interface ValidationIssue { path: string; message: string }
 export interface ValidationReport { valid: boolean; issues: ValidationIssue[] }

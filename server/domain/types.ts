@@ -1,5 +1,4 @@
 import type { AgentExecutionEvent, InputDeliveryManifest, ReviewRunSnapshot } from './agent-types.js'
-import type { CandidateRequirementPointExtraction, CandidateReviewResult } from './review-types.js'
 
 export type AssetType = string
 export type SourceType = 'upload'
@@ -127,7 +126,7 @@ export type AiResource = McpServerResource | SkillResource | ToolResource
 
 export type AgentConfigurationScene = 'requirement_analysis' | 'technical_solution_analysis' | 'test_design'
 export type AgentConfigurationStatus = 'active' | 'superseded'
-export type AgentConfigurationAgentKey = 'requirementPointExtraction' | 'requirementReview' | 'reviewQa' | 'technicalSolutionExtraction' | 'technicalSolutionReview' | 'testAnalysis' | 'functionalTestDesign' | 'nonFunctionalTestDesign' | 'testCaseSynthesis'
+export type AgentConfigurationAgentKey = 'requirementAnalysis' | 'requirementPointExtraction' | 'requirementReview' | 'reviewQa' | 'technicalSolutionExtraction' | 'technicalSolutionReview' | 'testAnalysis' | 'functionalTestDesign' | 'nonFunctionalTestDesign' | 'testCaseSynthesis'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
   primaryModel: AgentModelReference | null
@@ -156,7 +155,10 @@ export interface AgentConfigurationAgentDraft {
 export interface AgentConfigurationDraft {
   scene: AgentConfigurationScene
   agents: {
+    requirementAnalysis: AgentConfigurationAgentDraft
+    /** @deprecated 不再用于新运行。 */
     requirementPointExtraction: AgentConfigurationAgentDraft
+    /** @deprecated 不再用于新运行。 */
     requirementReview: AgentConfigurationAgentDraft
     reviewQa: AgentConfigurationAgentDraft
     technicalSolutionExtraction: AgentConfigurationAgentDraft
@@ -248,7 +250,7 @@ export interface ReviewRunQueueState {
 export interface ReviewRunRetryEvent {
   attempt: number
   maxAttempts: number
-  agentKey?: 'requirement-point-extraction' | 'requirement-review'
+  agentKey?: 'requirement-analysis'
   status: 'scheduled' | 'exhausted'
   error: string
   occurredAt: string
@@ -326,13 +328,12 @@ export interface AgentExecutionRecord {
   events: AgentExecutionEvent[]
 }
 export interface ReviewRunStageExecutions {
-  requirementPointExtraction?: AgentExecutionRecord
-  requirementReview?: AgentExecutionRecord
+  requirementAnalysis?: AgentExecutionRecord
 }
 export interface ReviewRunExecutionAttempt {
   attempt: number
   maxAttempts: number
-  activeAgentKey?: 'requirement-point-extraction' | 'requirement-review'
+  activeAgentKey?: 'requirement-analysis'
   status: 'running' | 'succeeded' | 'failed' | 'cancelled'
   startedAt: string
   finishedAt?: string
@@ -344,8 +345,7 @@ export interface ReviewRun {
   id: string
   reviewId?: string
   retryOfRunId?: string
-  retryMode?: 'full' | 'review_only'
-  reusedExtractionFromRunId?: string
+  retryMode?: 'full'
   projectVersionId: string
   assetId: string
   assetVersionId: string
@@ -362,9 +362,8 @@ export interface ReviewRun {
   startedAt: string
   finishedAt?: string
   snapshot: ReviewRunSnapshot
-  extractionResult?: CandidateRequirementPointExtraction
   inputDeliveryManifest?: InputDeliveryManifest
-  result?: CandidateReviewResult
+  result?: import('./review-types.js').RequirementAnalysisResult
   execution?: AgentExecutionRecord
   executions?: ReviewRunStageExecutions
   executionAttempts?: ReviewRunExecutionAttempt[]
@@ -372,7 +371,7 @@ export interface ReviewRun {
   retryEvents?: ReviewRunRetryEvent[]
   modelRouteAttempts?: Array<{
     id: string
-    agentKey: 'requirement-point-extraction' | 'requirement-review'
+    agentKey: 'requirement-analysis'
     sourceId: string
     modelId: string
     modelLabel: string
@@ -382,7 +381,7 @@ export interface ReviewRun {
     error?: string
   }>
   degradations?: Array<{
-    agentKey: 'requirement-point-extraction' | 'requirement-review'
+    agentKey: 'requirement-analysis'
     fromSourceId: string
     fromModelId: string
     toSourceId: string

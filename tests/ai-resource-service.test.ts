@@ -18,6 +18,7 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'knowledge.read_chunk',
     'knowledge.search',
     'non_functional_test_design.submit_result',
+    'requirement-analysis.submit_result',
     'requirement-points.submit_result',
     'review.answer_submit',
     'review.submit_result',
@@ -32,18 +33,20 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'workspace.list_directory',
     'workspace.read_file',
   ])
-  assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip', 'system.structured-summary', 'example.echo-skill'])
+  assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip', 'system.structured-summary', 'system.requirement-analysis', 'example.echo-skill'])
   assert.equal(initial.skills[0].runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
   assert.deepEqual(initial.skills[0].toolIds, [])
   assert.equal(initial.skills[1].entrypoint, 'server/skills/structured-summary/SKILL.md')
-  assert.equal(initial.skills[2].managedBy, 'filesystem')
-  assert.deepEqual(initial.skills[2].toolIds, ['example.echo'])
+  assert.equal(initial.skills[2].entrypoint, 'server/skills/requirement-analysis/SKILL.md')
+  assert.equal(initial.skills[3].managedBy, 'filesystem')
+  assert.deepEqual(initial.skills[3].toolIds, ['example.echo'])
   assert.ok(initial.tools.filter(tool => tool.builtIn).every(tool => tool.status === 'ready' && tool.enabled))
   assert.ok(initial.skills.filter(skill => skill.builtIn).every(skill => skill.status === 'ready' && skill.enabled))
   assert.equal(initial.tools.find(tool => tool.key === 'example.echo')?.managedBy, 'filesystem')
   assert.deepEqual(Object.fromEntries(initial.tools.map(tool => [tool.key, tool.sourcePath])), {
     'knowledge.search': 'server/tools/knowledge-search.ts',
     'knowledge.read_chunk': 'server/tools/knowledge-read-chunk.ts',
+    'requirement-analysis.submit_result': 'server/tools/requirement-analysis-submit-result.ts',
     'requirement-points.submit_result': 'server/tools/requirement-points-submit-result.ts',
     'review.answer_submit': 'server/tools/review-answer-submit.ts',
     'review.submit_result': 'server/tools/review-submit-result.ts',
@@ -62,7 +65,7 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'example.echo': 'ai/tools/example-echo.ts',
   })
   store.transaction = async () => { throw new Error('内置资源已同步时不应再次启动写事务') }
-  assert.equal((await service.list()).tools.length, 18)
+  assert.equal((await service.list()).tools.length, 19)
   store.transaction = JsonStore.prototype.transaction.bind(store)
   const searchTool = initial.tools.find(tool => tool.key === 'knowledge.search')!
   const builtInSource = await service.source(searchTool.id)
@@ -96,15 +99,15 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
 
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
-  assert.equal(catalog.skills.length, 4)
-  assert.equal(catalog.tools.length, 19)
+  assert.equal(catalog.skills.length, 5)
+  assert.equal(catalog.tools.length, 20)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)
   await assert.rejects(() => service.delete('mcp', mcp.id), /工具引用/)
   await service.delete('skill', skill.id)
   await service.delete('tool', tool.id)
   await service.delete('mcp', mcp.id)
-  assert.equal((await service.list()).tools.length, 18)
+  assert.equal((await service.list()).tools.length, 19)
 })
 
 test('ai/skills 与 ai/tools 支持单文件、单描述、目录、批量和 package 自动识别并按内容 Hash 重载', async () => {

@@ -146,6 +146,88 @@
         "additionalProperties": false
       }
     },
+    "requirement-analysis.submit_result": {
+      "version": "1.0.0",
+      "piName": "requirement_analysis_submit_result",
+      "label": "提交统一需求分析结果",
+      "catalogName": "提交需求分析",
+      "description": "提交 requirement-analysis/v1。一次提交同时包含需求基线、整体与跨需求 Finding、Test Focus、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
+      "catalogDescription": "提交单 Agent 需求分析结果，由服务端统一校验和生成 Artifact。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-analysis-submit-result.ts",
+      "handlerKey": "requirement-analysis.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "object",
+            "properties": {
+              "overview": { "type": "string", "maxLength": 12000 },
+              "businessGoals": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+              "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "score": { "type": "number" },
+              "strengths": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
+              "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+            },
+            "additionalProperties": false
+          },
+          "requirementPoints": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string", "minLength": 6, "maxLength": 32, "description": "本次提交内唯一的临时需求点 ID，格式 RP-001；Finding 和 Test Focus 使用它建立引用，正式 ID 由服务端生成。" },
+                "title": { "type": "string", "maxLength": 1000 },
+                "description": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "sourceTexts": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000 } }
+              },
+              "required": ["id", "description", "sourceTexts"],
+              "additionalProperties": false
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string", "maxLength": 300 },
+                "type": { "type": "string", "maxLength": 100 },
+                "severity": { "type": "string", "maxLength": 100 },
+                "confidence": { "type": "number" },
+                "requirementPointRefs": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 6, "maxLength": 32 }, "description": "单需求或跨需求问题填写一个或多个临时 RP ID；整体问题填写空数组。" },
+                "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "impact": { "type": "string", "maxLength": 4000 },
+                "suggestion": { "type": "string", "maxLength": 4000 }
+              },
+              "required": ["requirementPointRefs", "analysis"],
+              "additionalProperties": false
+            }
+          },
+          "testFocus": {
+            "type": "array",
+            "maxItems": 300,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "requirementPointRefs": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 6, "maxLength": 32 } }
+              },
+              "required": ["title", "description", "requirementPointRefs"],
+              "additionalProperties": false
+            }
+          },
+          "analysisDocument": { "type": "string", "maxLength": 200000 }
+        },
+        "required": ["summary", "requirementPoints", "findings", "testFocus"],
+        "additionalProperties": false
+      }
+    },
     "requirement-points.submit_result": {
       "version": "5.1.0",
       "piName": "requirement_points_submit_result",

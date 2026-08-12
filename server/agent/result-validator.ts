@@ -1,8 +1,10 @@
 import type { InputDeliveryManifest, ReviewRunSnapshot } from '../domain/agent-types.js'
-import type { CandidateEvidence, CandidateRequirementPoint, CandidateRequirementPointExtraction, CandidateRequirementPointExtractionV3, CandidateRequirementPointExtractionV4, CandidateRequirementPointExtractionV5, CandidateRequirementReview, CandidateRequirementReviewV3, CandidateReviewResult, ReviewFindingType, ReviewSeverity, ValidationIssue, ValidationReport } from '../domain/review-types.js'
+import type { CandidateEvidence, CandidateRequirementAnalysisV1, CandidateRequirementPoint, CandidateRequirementPointExtraction, CandidateRequirementPointExtractionV3, CandidateRequirementPointExtractionV4, CandidateRequirementPointExtractionV5, CandidateRequirementReview, CandidateRequirementReviewV3, CandidateReviewResult, RequirementAnalysisResult, ReviewFindingType, ReviewSeverity, ValidationIssue, ValidationReport } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { resolveEvidenceQuote, resolveEvidenceSourceText, searchEvidenceCandidates } from './evidence-locator.js'
 import { posix } from 'node:path'
+import { createHash } from 'node:crypto'
+import { renderRequirementAnalysisArtifacts } from './requirement-analysis-artifacts.js'
 
 const assessments = new Set(['pass', 'pass_with_notes', 'needs_revision', 'blocked'])
 const findingTypes = new Set(['missing_requirement', 'ambiguity', 'conflict', 'boundary_gap', 'state_gap', 'exception_gap', 'security_risk', 'testability_gap', 'dependency_risk', 'other'])
@@ -225,7 +227,7 @@ export class RequirementPointExtractionValidator {
     const state = await this.store.snapshot()
     const index = state.indexes.find(item => item.id === snapshot.indexVersionId && item.knowledgeBaseId === snapshot.knowledgeBaseId)
     const allowedVersions = new Set(snapshot.assets.map(asset => asset.assetVersionId))
-    const deliveredChunks = snapshot.extractionInput.mode === 'agent_directory'
+    const deliveredChunks = snapshot.analysisInput.mode === 'agent_directory'
       ? new Set(input.coverage.assets.flatMap(asset => asset.deliveredChunkIds))
       : undefined
     const allowedChunks = new Map((index?.indexedChunks ?? []).filter(chunk => allowedVersions.has(chunk.assetVersionId) && (!deliveredChunks || deliveredChunks.has(chunk.id))).map(chunk => [chunk.id, chunk]))
@@ -258,7 +260,7 @@ export class RequirementPointExtractionValidator {
 }
 
 function validateManifest(manifest: InputDeliveryManifest, snapshot: ReviewRunSnapshot, issues: ValidationIssue[]) {
-  const expected = snapshot.extractionInput
+  const expected = snapshot.analysisInput
   if (!manifest || !expected) { issues.push(issue('inputDeliveryManifest', '缺少服务端输入投递证明')); return }
   if (manifest.policyVersion !== expected.policyVersion || manifest.mode !== expected.mode || manifest.packageSha256 !== expected.packageSha256) issues.push(issue('inputDeliveryManifest', '投递策略、模式或输入包哈希与运行快照不一致'))
   if (!manifest.finalMergeCompleted) issues.push(issue('inputDeliveryManifest.finalMergeCompleted', '输入处理或分段归并尚未完成'))
@@ -271,7 +273,8 @@ function validateManifest(manifest: InputDeliveryManifest, snapshot: ReviewRunSn
     if (!entry || entry.ordinal !== batch.ordinal || entry.tokenCount !== batch.tokenCount || entry.contentSha256 !== batch.contentSha256 || !sameStrings(entry.assetVersionIds, batch.assetVersionIds) || !sameStrings(entry.chunkIds, batch.chunkIds)) issues.push(issue(`inputDeliveryManifest.entries.${batch.batchId}`, '输入批次投递证明与快照不一致'))
   })
   if (expected.mode === 'agent_directory') {
-    const plannedChunks = new Map(snapshot.extractionCoveragePlan.flatMap(asset => asset.chunks.map(chunk => [chunk.chunkId, asset.assetVersionId] as const)))
+    const coveragePlan = snapshot.analysisCoveragePlan
+    const plannedChunks = new Map(coveragePlan.flatMap(asset => asset.chunks.map(chunk => [chunk.chunkId, asset.assetVersionId] as const)))
     const reads = manifest.toolReads ?? []
     if (!reads.some(read => read.toolId === 'workspace.read_file' && read.startLine !== undefined && read.endLine !== undefined)) issues.push(issue('inputDeliveryManifest.toolReads', 'Pi Agent 必须使用 read 从固定 /workspace 读取至少一个文件范围'))
     const toolCallIds = new Set<string>()
@@ -298,26 +301,31 @@ function validateManifest(manifest: InputDeliveryManifest, snapshot: ReviewRunSn
 }
 
 function buildCoverage(snapshot: ReviewRunSnapshot, manifest: InputDeliveryManifest) {
-  const delivered = new Set(snapshot.extractionInput.mode === 'agent_directory'
+  const input = snapshot.analysisInput
+  const plan = snapshot.analysisCoveragePlan
+  if (!input || !plan) throw new Error('REQUIREMENT_ANALYSIS_SNAPSHOT_INVALID: 缺少输入或覆盖计划')
+  const delivered = new Set(input.mode === 'agent_directory'
     ? [...directoryDeliveredChunkIds(snapshot, manifest)]
     : manifest.entries.flatMap(entry => entry.chunkIds))
   return {
-    assets: snapshot.extractionCoveragePlan.map(asset => ({
+    assets: plan.map(asset => ({
       assetVersionId: asset.assetVersionId,
       deliveredChunkIds: asset.chunks.filter(chunk => !chunk.excludedReason && delivered.has(chunk.chunkId)).map(chunk => chunk.chunkId),
-      excludedChunks: asset.chunks.filter(chunk => chunk.excludedReason || (snapshot.extractionInput.mode === 'agent_directory' && !delivered.has(chunk.chunkId))).map(chunk => ({ chunkId: chunk.chunkId, reason: chunk.excludedReason ?? DIRECTORY_NOT_READ_REASON })),
+      excludedChunks: asset.chunks.filter(chunk => chunk.excludedReason || (input.mode === 'agent_directory' && !delivered.has(chunk.chunkId))).map(chunk => ({ chunkId: chunk.chunkId, reason: chunk.excludedReason ?? DIRECTORY_NOT_READ_REASON })),
     })),
     limitations: [] as string[],
   }
 }
 
 function validateCoverage(input: CandidateRequirementPointExtraction, snapshot: ReviewRunSnapshot, issues: ValidationIssue[], manifest?: InputDeliveryManifest) {
+  const analysisInput = snapshot.analysisInput
+  const coveragePlan = snapshot.analysisCoveragePlan
   const coverageByAsset = new Map(input.coverage.assets.map(asset => [asset.assetVersionId, asset]))
-  const directoryDelivered = snapshot.extractionInput.mode === 'agent_directory' && manifest
+  const directoryDelivered = analysisInput?.mode === 'agent_directory' && manifest
     ? directoryDeliveredChunkIds(snapshot, manifest)
     : undefined
-  if (coverageByAsset.size !== input.coverage.assets.length || coverageByAsset.size !== snapshot.extractionCoveragePlan.length) issues.push(issue('coverage.assets', '覆盖记录必须与全部固定输入资产一一对应'))
-  snapshot.extractionCoveragePlan.forEach((planned, position) => {
+  if (coverageByAsset.size !== input.coverage.assets.length || coverageByAsset.size !== coveragePlan.length) issues.push(issue('coverage.assets', '覆盖记录必须与全部固定输入资产一一对应'))
+  coveragePlan.forEach((planned, position) => {
     const actual = coverageByAsset.get(planned.assetVersionId)
     if (!actual) { issues.push(issue(`coverage.assets[${position}]`, '缺少固定输入资产覆盖记录')); return }
     if (!Array.isArray(actual.deliveredChunkIds) || !Array.isArray(actual.excludedChunks)) { issues.push(issue(`coverage.assets[${position}]`, '覆盖字段结构不合法')); return }
@@ -327,7 +335,7 @@ function validateCoverage(input: CandidateRequirementPointExtraction, snapshot: 
     planned.chunks.forEach(chunk => {
       if (chunk.excludedReason) {
         if (excluded.get(chunk.chunkId) !== chunk.excludedReason || delivered.has(chunk.chunkId)) issues.push(issue(`coverage.assets[${position}]`, `排除 Chunk ${chunk.chunkId} 与服务端计划不一致`))
-      } else if (snapshot.extractionInput.mode === 'agent_directory') {
+      } else if (analysisInput?.mode === 'agent_directory') {
         const shouldBeDelivered = directoryDelivered ? directoryDelivered.has(chunk.chunkId) : delivered.has(chunk.chunkId)
         if (shouldBeDelivered && (!delivered.has(chunk.chunkId) || excluded.has(chunk.chunkId))) issues.push(issue(`coverage.assets[${position}]`, `Agent 已读 Chunk 的覆盖记录不一致：${chunk.chunkId}`))
         if (!shouldBeDelivered && (delivered.has(chunk.chunkId) || excluded.get(chunk.chunkId) !== DIRECTORY_NOT_READ_REASON)) issues.push(issue(`coverage.assets[${position}]`, `Agent 未读 Chunk 的排除记录不一致：${chunk.chunkId}`))
@@ -338,7 +346,7 @@ function validateCoverage(input: CandidateRequirementPointExtraction, snapshot: 
 }
 
 function fixedEvidenceChunks<T extends { id: string; assetVersionId: string }>(chunks: T[], snapshot: ReviewRunSnapshot, manifest: InputDeliveryManifest) {
-  if (snapshot.extractionInput.mode !== 'agent_directory') return chunks
+  if (snapshot.analysisInput.mode !== 'agent_directory') return chunks
   const delivered = directoryDeliveredChunkIds(snapshot, manifest)
   return chunks.filter(chunk => delivered.has(chunk.id))
 }
@@ -356,7 +364,8 @@ function workspaceDeliveredChunkIds(snapshot: ReviewRunSnapshot, manifest: Input
     rangesByVersion.set(read.assetVersionIds[0], ranges)
   }
   const delivered = new Set<string>()
-  snapshot.extractionCoveragePlan.forEach(asset => {
+  const coveragePlan = snapshot.analysisCoveragePlan
+  coveragePlan.forEach(asset => {
     const ranges = mergeLineRanges(rangesByVersion.get(asset.assetVersionId) ?? [])
     asset.chunks.forEach(chunk => {
       if (!chunk.excludedReason && ranges.some(range => range.start <= chunk.startLine && range.end >= chunk.endLine)) delivered.add(chunk.chunkId)
@@ -409,6 +418,169 @@ function validateRequirementPoints(points: CandidateRequirementPointExtraction['
     const group = points[positions[0]].mergeGroupId
     if (!group || positions.some(position => points[position].mergeGroupId !== group || !points[position].mergeRationale?.trim())) issues.push(issue(`requirementPoints[${positions.join(',')}].mergeGroupId`, '重复需求点必须显式归并并说明理由'))
   })
+}
+
+export class RequirementAnalysisValidator {
+  private readonly pointValidator: RequirementPointExtractionValidator
+
+  constructor(store: StateStore) {
+    this.pointValidator = new RequirementPointExtractionValidator(store)
+  }
+
+  async normalize(input: CandidateRequirementAnalysisV1, snapshot: ReviewRunSnapshot, manifest: InputDeliveryManifest): Promise<{ report: ValidationReport; result?: RequirementAnalysisResult }> {
+    const issues: ValidationIssue[] = []
+    if (!input || typeof input !== 'object') return { report: invalid('$', '结果必须是对象') }
+    const raw = input as unknown as Record<string, unknown>
+    const allowedRoot = new Set(['summary', 'requirementPoints', 'findings', 'testFocus', 'analysisDocument'])
+    for (const key of Object.keys(raw)) if (!allowedRoot.has(key)) issues.push(issue(key, '不属于 requirement-analysis/v1 提交协议'))
+    if (!Array.isArray(input.requirementPoints)) issues.push(issue('requirementPoints', '必须是数组'))
+    if (!Array.isArray(input.findings)) issues.push(issue('findings', '必须是数组'))
+    if (!Array.isArray(input.testFocus)) issues.push(issue('testFocus', '必须是数组'))
+    if (issues.length) return { report: { valid: false, issues } }
+
+    const temporaryIds = new Set<string>()
+    const descriptions = new Set<string>()
+    input.requirementPoints.forEach((point, position) => {
+      const path = `requirementPoints[${position}]`
+      if (!point || typeof point !== 'object') { issues.push(issue(path, '需求点必须是对象')); return }
+      const rawPoint = point as unknown as Record<string, unknown>
+      for (const key of Object.keys(rawPoint)) if (!['id', 'title', 'description', 'sourceTexts'].includes(key)) issues.push(issue(`${path}.${key}`, '模型只提交 id、title、description 和 sourceTexts'))
+      const id = typeof point.id === 'string' ? point.id.trim() : ''
+      if (!/^RP-\d{3,}$/u.test(id)) issues.push(issue(`${path}.id`, '必须使用 RP- 加至少三位数字的本次提交临时 ID'))
+      else if (temporaryIds.has(id)) issues.push(issue(`${path}.id`, '需求点 ID 重复'))
+      temporaryIds.add(id)
+      const description = typeof point.description === 'string' ? point.description.trim().toLocaleLowerCase().replace(/\s+/gu, ' ') : ''
+      if (description && descriptions.has(description)) issues.push(issue(`${path}.description`, '存在完全重复的需求点描述，请在同一 Agent Session 内完成去重'))
+      if (description) descriptions.add(description)
+    })
+    if (issues.length) return { report: { valid: false, issues } }
+
+    const normalizedPoints = await this.pointValidator.normalizeV5({
+      requirementPoints: input.requirementPoints.map(point => ({ title: point.title, description: point.description, sourceTexts: point.sourceTexts })),
+    }, snapshot, manifest)
+    if (!normalizedPoints.report.valid || !normalizedPoints.result) return { report: normalizedPoints.report }
+    if (normalizedPoints.result.requirementPoints.length !== input.requirementPoints.length) return { report: invalid('requirementPoints', '需求点规范化数量变化，请移除重复项后重新提交') }
+    const referenceMap = new Map(input.requirementPoints.map((point, index) => [point.id.trim(), normalizedPoints.result!.requirementPoints[index].clientRequirementPointId]))
+
+    const findings: CandidateRequirementReview['findings'] = []
+    const findingKeys = new Set<string>()
+    input.findings.forEach((finding, position) => {
+      const path = `findings[${position}]`
+      if (!finding || typeof finding !== 'object') { issues.push(issue(path, 'Finding 必须是对象')); return }
+      const rawFinding = finding as unknown as Record<string, unknown>
+      for (const key of Object.keys(rawFinding)) if (!['title', 'type', 'severity', 'confidence', 'requirementPointRefs', 'analysis', 'impact', 'suggestion'].includes(key)) issues.push(issue(`${path}.${key}`, '不属于最小 Finding 协议'))
+      if (!Array.isArray(finding.requirementPointRefs) || finding.requirementPointRefs.some(reference => typeof reference !== 'string')) { issues.push(issue(`${path}.requirementPointRefs`, '必须是字符串数组；整体性问题使用空数组')); return }
+      const refs = [...new Set(finding.requirementPointRefs.map(reference => reference.trim()).filter(Boolean))]
+      const invalidRefs = refs.filter(reference => !referenceMap.has(reference))
+      if (invalidRefs.length) issues.push(issue(`${path}.requirementPointRefs`, `引用了不存在的需求点：${invalidRefs.join('、')}`))
+      const analysis = typeof finding.analysis === 'string' ? finding.analysis.trim() : ''
+      if (!analysis) issues.push(issue(`${path}.analysis`, '分析内容不能为空'))
+      if (!analysis || invalidRefs.length) return
+      const formalRefs = refs.map(reference => referenceMap.get(reference)!)
+      const key = `${formalRefs.slice().sort().join(',')}:${analysis.toLocaleLowerCase().replace(/\s+/gu, ' ')}`
+      if (findingKeys.has(key)) return
+      findingKeys.add(key)
+      const impact = typeof finding.impact === 'string' ? finding.impact.trim() : ''
+      const suggestion = typeof finding.suggestion === 'string' ? finding.suggestion.trim() : ''
+      findings.push({
+        clientFindingId: `F-${String(findings.length + 1).padStart(3, '0')}`,
+        type: findingTypes.has(String(finding.type)) ? finding.type! : inferFindingType(analysis),
+        severity: severities.has(String(finding.severity)) ? finding.severity! : inferFindingSeverity(analysis),
+        confidence: Number.isFinite(finding.confidence) ? Math.min(1, Math.max(0, Number(finding.confidence))) : 0.75,
+        title: typeof finding.title === 'string' && finding.title.trim() ? finding.title.trim().slice(0, 300) : generatedFindingTitle(analysis),
+        description: analysis,
+        impact: impact || '可能影响相关需求的实现、测试或验收一致性。',
+        recommendation: suggestion || '请补充或确认相关业务规则和判定标准。',
+        requirementPointRefs: formalRefs,
+      })
+    })
+
+    const testFocus: RequirementAnalysisResult['testFocus'] = []
+    const testFocusKeys = new Set<string>()
+    input.testFocus.forEach((item, position) => {
+      const path = `testFocus[${position}]`
+      if (!item || typeof item !== 'object') { issues.push(issue(path, 'Test Focus 必须是对象')); return }
+      const rawItem = item as unknown as Record<string, unknown>
+      for (const key of Object.keys(rawItem)) if (!['title', 'description', 'requirementPointRefs'].includes(key)) issues.push(issue(`${path}.${key}`, '不属于 Test Focus 协议'))
+      const title = typeof item.title === 'string' ? item.title.trim() : ''
+      const description = typeof item.description === 'string' ? item.description.trim() : ''
+      if (!title) issues.push(issue(`${path}.title`, '标题不能为空'))
+      if (!description) issues.push(issue(`${path}.description`, '说明不能为空'))
+      if (!Array.isArray(item.requirementPointRefs) || item.requirementPointRefs.some(reference => typeof reference !== 'string')) { issues.push(issue(`${path}.requirementPointRefs`, '必须是字符串数组')); return }
+      const refs = [...new Set(item.requirementPointRefs.map(reference => reference.trim()).filter(Boolean))]
+      const invalidRefs = refs.filter(reference => !referenceMap.has(reference))
+      if (invalidRefs.length) issues.push(issue(`${path}.requirementPointRefs`, `引用了不存在的需求点：${invalidRefs.join('、')}`))
+      if (!title || !description || invalidRefs.length) return
+      const formalRefs = refs.map(reference => referenceMap.get(reference)!)
+      const key = `${formalRefs.slice().sort().join(',')}:${title.toLocaleLowerCase()}:${description.toLocaleLowerCase().replace(/\s+/gu, ' ')}`
+      if (testFocusKeys.has(key)) return
+      testFocusKeys.add(key)
+      testFocus.push({ id: `TF-${String(testFocus.length + 1).padStart(3, '0')}`, title: title.slice(0, 300), description, requirementPointRefs: formalRefs })
+    })
+    if (issues.length) return { report: { valid: false, issues } }
+
+    const modelSummary = input.summary
+    const overallAssessment = assessments.has(String(modelSummary?.overallAssessment)) ? modelSummary!.overallAssessment! : findings.length ? 'needs_revision' : 'pass'
+    if (!findings.length && (overallAssessment === 'needs_revision' || overallAssessment === 'blocked')) return { report: invalid('findings', `总体结论为 ${overallAssessment} 时必须提交至少一条 Finding；整体性问题使用空 requirementPointRefs`) }
+    const fallbackScore = findings.length ? Math.max(40, 100 - findings.length * 8) : 100
+    const core = {
+      ...normalizedPoints.result,
+      summary: {
+        overview: typeof modelSummary?.overview === 'string' && modelSummary.overview.trim() ? modelSummary.overview.trim() : `本次分析形成 ${normalizedPoints.result.requirementPoints.length} 个需求点、${findings.length} 个 Finding 和 ${testFocus.length} 个 Test Focus。`,
+        businessGoals: cleanStrings(modelSummary?.businessGoals),
+        overallAssessment,
+        score: Number.isFinite(modelSummary?.score) ? Math.min(100, Math.max(0, Number(modelSummary?.score))) : fallbackScore,
+        strengths: cleanStrings(modelSummary?.strengths),
+        risks: cleanStrings(modelSummary?.risks),
+      },
+      findings,
+      testFocus,
+      ...(typeof input.analysisDocument === 'string' && input.analysisDocument.trim() ? { analysisDocument: input.analysisDocument.trim() } : {}),
+    } satisfies Omit<RequirementAnalysisResult, 'artifacts'>
+    const result: RequirementAnalysisResult = { ...core, artifacts: renderRequirementAnalysisArtifacts(core) }
+    const report = await this.validate(result, snapshot, manifest)
+    return { report, ...(report.valid ? { result } : {}) }
+  }
+
+  async validate(input: RequirementAnalysisResult, snapshot: ReviewRunSnapshot, manifest?: InputDeliveryManifest): Promise<ValidationReport> {
+    const issues: ValidationIssue[] = []
+    if (!input || typeof input !== 'object') return invalid('$', '结果必须是对象')
+    const pointReport = await this.pointValidator.validate({ requirementPoints: input.requirementPoints, evidence: input.evidence, coverage: input.coverage }, snapshot, manifest)
+    issues.push(...pointReport.issues)
+    if (!assessments.has(input.summary?.overallAssessment)) issues.push(issue('summary.overallAssessment', '总体结论不合法'))
+    if (!Number.isFinite(input.summary?.score) || input.summary.score < 0 || input.summary.score > 100) issues.push(issue('summary.score', '评分必须为 0～100'))
+    if (typeof input.summary?.overview !== 'string' || !isStrings(input.summary?.businessGoals) || !isStrings(input.summary?.strengths) || !isStrings(input.summary?.risks)) issues.push(issue('summary', '摘要字段结构不合法'))
+    const pointIds = new Set(input.requirementPoints.map(point => point.clientRequirementPointId))
+    const findingIds = new Set<string>()
+    const maxFindings = snapshot.agentDefinition.limits.maxFindings
+    if (!Array.isArray(input.findings) || input.findings.length > maxFindings) issues.push(issue('findings', 'Finding 结构或数量不合法'))
+    else input.findings.forEach((finding, position) => {
+      const path = `findings[${position}]`
+      if (!finding.clientFindingId || findingIds.has(finding.clientFindingId)) issues.push(issue(`${path}.clientFindingId`, 'Finding ID 为空或重复'))
+      findingIds.add(finding.clientFindingId)
+      if (!findingTypes.has(finding.type) || !severities.has(finding.severity)) issues.push(issue(path, 'Finding 类型或严重度不合法'))
+      if (!Number.isFinite(finding.confidence) || finding.confidence < 0 || finding.confidence > 1) issues.push(issue(`${path}.confidence`, '置信度必须为 0～1'))
+      for (const key of ['title', 'description', 'impact', 'recommendation'] as const) if (!finding[key]?.trim()) issues.push(issue(`${path}.${key}`, '字段不能为空'))
+      if (!isStrings(finding.requirementPointRefs) || finding.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用必须全部指向当前结果内的需求点；整体性问题可以为空'))
+    })
+    if (!Array.isArray(input.testFocus)) issues.push(issue('testFocus', '必须是数组'))
+    else {
+      const ids = new Set<string>()
+      input.testFocus.forEach((item, position) => {
+        const path = `testFocus[${position}]`
+        if (!item.id || ids.has(item.id)) issues.push(issue(`${path}.id`, 'Test Focus ID 为空或重复'))
+        ids.add(item.id)
+        if (!item.title?.trim() || !item.description?.trim()) issues.push(issue(path, 'Test Focus 标题和说明不能为空'))
+        if (!isStrings(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用了不存在的需求点'))
+      })
+    }
+    const expectedArtifactNames = new Set(['requirement-baseline.md', 'requirement-review.md', 'requirement-analysis.md'])
+    if (!Array.isArray(input.artifacts) || input.artifacts.length !== expectedArtifactNames.size) issues.push(issue('artifacts', '必须包含三个 Markdown Artifact'))
+    else input.artifacts.forEach((artifact, position) => {
+      if (!expectedArtifactNames.delete(artifact.fileName) || artifact.mediaType !== 'text/markdown' || !artifact.content || createHash('sha256').update(artifact.content).digest('hex') !== artifact.contentSha256) issues.push(issue(`artifacts[${position}]`, 'Artifact 名称、内容或 Hash 不合法'))
+    })
+    return { valid: issues.length === 0, issues }
+  }
 }
 
 export class RequirementReviewValidator {
@@ -495,7 +667,7 @@ export class RequirementReviewValidator {
     if (issues.length) return { valid: false, issues }
     const requirementPointIds = new Set(extraction.requirementPoints.map(point => point.clientRequirementPointId))
     const findingIds = new Set<string>()
-    const maxFindings = snapshot.agentDefinitions?.requirementReview.limits.maxFindings ?? snapshot.agentDefinition.limits.maxFindings
+    const maxFindings = snapshot.agentDefinition.limits.maxFindings
     if (input.findings.length > maxFindings) issues.push(issue('findings', 'Finding 数量超过执行限制'))
     input.findings.forEach((finding, position) => {
       const path = `findings[${position}]`
@@ -567,3 +739,4 @@ function sameStrings(left: string[], right: string[]) { return left.length === r
 function invalid(path: string, message: string): ValidationReport { return { valid: false, issues: [issue(path, message)] } }
 function issue(path: string, message: string): ValidationIssue { return { path, message } }
 function isStrings(value: unknown): value is string[] { return Array.isArray(value) && value.every(item => typeof item === 'string') }
+function cleanStrings(value: unknown) { return isStrings(value) ? [...new Set(value.map(item => item.trim()).filter(Boolean))] : [] }

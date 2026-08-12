@@ -42,6 +42,8 @@ export type ReviewFinding = {
 
 export type RequirementAnalysisResult = {
   summary: {
+    overview: string
+    businessGoals: string[]
     overallAssessment: OverallAssessment
     score: number
     strengths: string[]
@@ -49,6 +51,7 @@ export type RequirementAnalysisResult = {
   }
   requirementPoints: RequirementPoint[]
   findings: ReviewFinding[]
+  testFocus: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
   evidence: ReviewEvidence[]
   coverage: {
     assets: Array<{
@@ -58,9 +61,9 @@ export type RequirementAnalysisResult = {
     }>
     limitations: string[]
   }
+  analysisDocument?: string
+  artifacts: Array<{ fileName: 'requirement-baseline.md' | 'requirement-review.md' | 'requirement-analysis.md'; mediaType: 'text/markdown'; content: string; contentSha256: string }>
 }
-
-export type RequirementPointExtractionResult = Pick<RequirementAnalysisResult, 'requirementPoints' | 'evidence' | 'coverage'>
 
 export type AgentExecutionEvent = {
   sequence: number
@@ -82,7 +85,7 @@ export type AgentExecutionEvent = {
 }
 
 export type AgentExecutionRecord = {
-  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis'
+  agentKey?: 'review-qa' | 'requirement-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number
@@ -102,14 +105,13 @@ export type AgentDefinitionSnapshot = {
 }
 
 export type AgentExecutions = {
-  requirementPointExtraction?: AgentExecutionRecord
-  requirementReview?: AgentExecutionRecord
+  requirementAnalysis?: AgentExecutionRecord
 }
 
 export type ReviewRunExecutionAttempt = {
   attempt: number
   maxAttempts: number
-  activeAgentKey?: 'requirement-point-extraction' | 'requirement-review'
+  activeAgentKey?: 'requirement-analysis'
   status: 'running' | 'succeeded' | 'failed' | 'cancelled'
   startedAt: string
   finishedAt?: string
@@ -144,18 +146,10 @@ export type RequirementAnalysisResponse = {
     assets: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }[]
     documentWorkspace?: { mode: 'agent_directory'; logicalPath: string; rootLogicalPath?: string; activeBranchLogicalPath?: string; branchLogicalPaths?: string[]; agentLogicalPath?: string; layoutVersion?: 'workspace/v1'; candidateAssetVersionIds: string[] }
     modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
-    agentModelRefs?: {
-      requirementPointExtraction: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
-      requirementReview: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
-    }
     agentConfigurationRef?: { id: string; version: number; contentSha256: string }
-    agentConfigurationRefs?: {
-      requirementPointExtraction: { id: string; version: number; contentSha256: string }
-      requirementReview: { id: string; version: number; contentSha256: string }
-    }
     focusAreas: string[]
     excludedAreas: string[]
-    extractionInput: {
+    analysisInput: {
       policyVersion: string
       mode: 'full_context' | 'segmented_context' | 'agent_directory'
       estimatedInputTokens: number
@@ -165,10 +159,6 @@ export type RequirementAnalysisResponse = {
     }
     createdAt: string
     agentDefinition: AgentDefinitionSnapshot
-    agentDefinitions?: {
-      requirementPointExtraction: AgentDefinitionSnapshot
-      requirementReview: AgentDefinitionSnapshot
-    }
   }
   result: RequirementAnalysisResult
   execution?: AgentExecutionRecord
@@ -180,9 +170,7 @@ export type RequirementReviewRun = {
   id: string
   reviewId: string
   retryOfRunId?: string
-  retryMode?: 'full' | 'review_only'
-  reusedExtractionFromRunId?: string
-  hasFrozenExtraction: boolean
+  retryMode?: 'full'
   projectVersionId: string
   assetId: string
   assetVersionId: string
@@ -203,19 +191,18 @@ export type RequirementReviewRun = {
     availableAt: string
     error?: string
   }
-  retryEvents?: Array<{ attempt: number; maxAttempts: number; agentKey?: 'requirement-point-extraction' | 'requirement-review'; status: 'scheduled' | 'exhausted'; error: string; occurredAt: string; nextAttemptAt?: string }>
+  retryEvents?: Array<{ attempt: number; maxAttempts: number; agentKey?: 'requirement-analysis'; status: 'scheduled' | 'exhausted'; error: string; occurredAt: string; nextAttemptAt?: string }>
   createdAt: string
   startedAt: string
   finishedAt?: string
   error?: string
-  modelRouteAttempts?: Array<{ id: string; agentKey: 'requirement-point-extraction' | 'requirement-review'; sourceId: string; modelId: string; modelLabel: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; startedAt: string; finishedAt?: string; error?: string }>
-  degradations?: Array<{ agentKey: 'requirement-point-extraction' | 'requirement-review'; fromSourceId: string; fromModelId: string; toSourceId: string; toModelId: string; reason: string; occurredAt: string }>
+  modelRouteAttempts?: Array<{ id: string; agentKey: 'requirement-analysis'; sourceId: string; modelId: string; modelLabel: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; startedAt: string; finishedAt?: string; error?: string }>
+  degradations?: Array<{ agentKey: 'requirement-analysis'; fromSourceId: string; fromModelId: string; toSourceId: string; toModelId: string; reason: string; occurredAt: string }>
   snapshot?: RequirementAnalysisResponse['snapshot']
   execution?: AgentExecutionRecord
   executions?: AgentExecutions
   executionAttempts?: ReviewRunExecutionAttempt[]
   inputDeliveryManifest?: InputDeliveryManifest
-  extractionResult?: RequirementPointExtractionResult
   response?: RequirementAnalysisResponse
 }
 
@@ -309,11 +296,11 @@ export async function cancelRequirementReviewRun(runId: string) {
   return body as RequirementReviewRun
 }
 
-export async function retryRequirementReviewRun(runId: string, mode: 'full' | 'review_only') {
+export async function retryRequirementReviewRun(runId: string) {
   const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/retry`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ mode: 'full' }),
   })
   const body = await response.json() as RequirementReviewRun | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审重跑失败')

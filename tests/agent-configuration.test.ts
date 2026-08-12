@@ -37,7 +37,27 @@ async function fixture() {
   return { store, service: new AgentConfigurationService(store) }
 }
 
-test('九个 Agent 分别持久化草稿并发布独立不可变版本', async () => {
+test('统一需求分析 Agent 独立发布 Workspace、Knowledge、Skill 与提交协议快照', async () => {
+  const { service } = await fixture()
+  const initial = (await service.get()).agents.requirementAnalysis
+  assert.deepEqual(initial.requiredToolIds, ['requirement-analysis.submit_result'])
+  assert.deepEqual(initial.requiredSkillKeys, ['system.requirement-analysis'])
+  assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
+  assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
+  const saved = await service.save({
+    agentKey: 'requirementAnalysis',
+    revision: initial.draft.revision,
+    routing: { ...initial.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 12_288 },
+    definition: initial.draft.definition,
+  })
+  const published = await service.publish({ agentKey: 'requirementAnalysis', revision: saved.revision, publishedBy: '需求分析管理员' })
+  assert.equal(published.agentDefinition.agentKey, 'requirement-analysis')
+  assert.equal(published.agentDefinition.resultSchemaVersion, 'requirement-analysis/v1')
+  assert.equal(published.agentDefinition.skillBindings[0].skillKey, 'system.requirement-analysis')
+  assert.equal((await service.resolveActive('requirement-analysis'))?.id, published.id)
+})
+
+test('各场景 Agent 分别持久化草稿并发布独立不可变版本', async () => {
   const { store, service } = await fixture()
   const initial = await service.get()
   const extractionInitial = initial.agents.requirementPointExtraction.draft
