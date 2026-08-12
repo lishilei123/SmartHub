@@ -1,1 +1,1 @@
-export { RequirementAnalysisPage as RequirementReviewPage } from './RequirementAnalysisPage'
+export { RequirementAnalysisPageV2 as RequirementReviewPage } from './RequirementAnalysisPageV2'
