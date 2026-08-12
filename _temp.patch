@@ -1,7 +1,0 @@
-*** Begin Patch
-*** Update File: src/RequirementReviewPage.tsx
-@@
- type RunRecord = RequirementReviewRun & { content?: string }
-+
-+const resolveRunId = (run: { id?: string; runId?: string } | null | undefined) => run?.id ?? run?.runId ?? ''
-*** End Patch

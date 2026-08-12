@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import * as api from '../api'
-import type { CreateTestDesignInput, TestCaseSetVersion, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionHandoff, TestPointNode, TestPointTree, TestPointTreeOperation, TestSuiteVersion } from '../types'
+import type { CreateTestDesignInput, TestCaseContent, TestCaseSetVersion, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionHandoff, TestPointNode, TestPointTree, TestPointTreeOperation, TestSuiteVersion } from '../types'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 
@@ -112,6 +112,31 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 
+  const createCase = useCallback(async (content: TestCaseContent) => {
+    if (!projectVersionId || !design || !run) return
+    await guarded('case-create', () => api.createCase(projectVersionId, design.id, run.id, content), '测试用例已创建为草稿。')
+    await refreshRun()
+  }, [design, guarded, projectVersionId, refreshRun, run])
+
+  const editCase = useCallback(async (caseId: string, content: TestCaseContent, reason: string) => {
+    if (!projectVersionId || !design || !run) return
+    const current = await guarded('case-load', () => api.loadCase(projectVersionId, design.id, run.id, caseId))
+    await guarded('case-edit', () => api.patchCase(projectVersionId, design.id, run.id, caseId, current.etag, content, reason), '测试用例已生成新 Revision。')
+    await refreshRun()
+  }, [design, guarded, projectVersionId, refreshRun, run])
+
+  const removeCase = useCallback(async (caseId: string) => {
+    if (!projectVersionId || !design || !run) return
+    await guarded('case-delete', () => api.deleteCase(projectVersionId, design.id, run.id, caseId), '测试用例已删除，Coverage Audit 已失效。')
+    await refreshRun()
+  }, [design, guarded, projectVersionId, refreshRun, run])
+
+  const reviewCase = useCallback(async (caseId: string, decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw', targetRevision: number, comment?: string) => {
+    if (!projectVersionId || !design || !run) return
+    await guarded(`case-${decision}`, () => api.reviewCase(projectVersionId, design.id, run.id, caseId, decision, targetRevision, comment), '用例审核状态已更新。')
+    await refreshRun()
+  }, [design, guarded, projectVersionId, refreshRun, run])
+
   const reAudit = useCallback(async () => {
     if (!projectVersionId || !design || !run) return
     await guarded('audit', () => api.reAudit(projectVersionId, design.id, run.id), '服务端 Coverage Audit 已重新执行。')
@@ -137,5 +162,5 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     setHandoffs(current => [created, ...current]); return created
   }, [guarded])
 
-  return { inputs, designs, design, run, tree, handoffs, suites, busy, error, loadCollection, openDesign, closeDesign, create, startRun, refreshRun, updateTree, approve, redesign, resynthesize, reviewCases, reAudit, resolveIssue, publish, handoff }
+  return { inputs, designs, design, run, tree, handoffs, suites, busy, error, loadCollection, openDesign, closeDesign, create, startRun, refreshRun, updateTree, approve, redesign, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, publish, handoff }
 }

@@ -39,7 +39,19 @@ export async function patchTree(projectVersionId: string, designId: string, runI
 }
 
 export const approveTree = (projectVersionId: string, designId: string, runId: string, etag: string) => request(`${runScope(projectVersionId, designId, runId)}/test-point-tree/approve`, { method: 'POST', headers: { 'if-match': etag } })
-export const reviewCase = (projectVersionId: string, designId: string, runId: string, caseId: string, decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw', targetRevision: number) => request<TestDesignCase>(`${runScope(projectVersionId, designId, runId)}/test-cases/${encodeURIComponent(caseId)}/review-actions`, { method: 'POST', body: JSON.stringify({ decision, targetRevision }) })
+const caseScope = (projectVersionId: string, designId: string, runId: string, caseId: string) => `${runScope(projectVersionId, designId, runId)}/test-cases/${encodeURIComponent(caseId)}`
+
+export const createCase = (projectVersionId: string, designId: string, runId: string, content: TestDesignCase['revisions'][number]['content']) => request<TestDesignCase>(`${runScope(projectVersionId, designId, runId)}/test-cases`, { method: 'POST', body: JSON.stringify({ content }) })
+export async function loadCase(projectVersionId: string, designId: string, runId: string, caseId: string) {
+  const { value, response } = await requestWithResponse<TestDesignCase>(caseScope(projectVersionId, designId, runId, caseId))
+  return { testCase: value, etag: response.headers.get('etag') ?? '' }
+}
+export async function patchCase(projectVersionId: string, designId: string, runId: string, caseId: string, etag: string, content: TestDesignCase['revisions'][number]['content'], reason: string) {
+  const { value, response } = await requestWithResponse<TestDesignCase>(caseScope(projectVersionId, designId, runId, caseId), { method: 'PATCH', headers: { 'if-match': etag }, body: JSON.stringify({ content, reason }) })
+  return { testCase: value, etag: response.headers.get('etag') ?? '' }
+}
+export const deleteCase = (projectVersionId: string, designId: string, runId: string, caseId: string) => request<{ caseId: string; tombstonedAt: string }>(caseScope(projectVersionId, designId, runId, caseId), { method: 'DELETE' })
+export const reviewCase = (projectVersionId: string, designId: string, runId: string, caseId: string, decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw', targetRevision: number, comment?: string) => request<TestDesignCase>(`${caseScope(projectVersionId, designId, runId, caseId)}/review-actions`, { method: 'POST', body: JSON.stringify({ decision, targetRevision, comment }) })
 export const batchReviewCases = (projectVersionId: string, designId: string, runId: string, targets: Array<{ caseId: string; targetRevision: number }>, decision: 'submit' | 'approve') => request<TestDesignCase[]>(`${runScope(projectVersionId, designId, runId)}/test-cases/batch-review-actions`, { method: 'POST', body: JSON.stringify({ targets, decision }) })
 export const reAudit = (projectVersionId: string, designId: string, runId: string) => request<TestDesignCoverageAudit>(`${runScope(projectVersionId, designId, runId)}/actions/re-audit`, { method: 'POST' })
 export const actOnFinding = (projectVersionId: string, designId: string, runId: string, findingId: string, expectedVersion: number) => request(`${runScope(projectVersionId, designId, runId)}/findings/${encodeURIComponent(findingId)}/actions`, { method: 'POST', body: JSON.stringify({ expectedVersion, decision: 'resolve' }) })

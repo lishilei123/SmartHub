@@ -4,12 +4,15 @@
 
 测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`requirements.json` Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。测试点阶段人工批准后，服务端创建正式 `TestPointTreeVersion` 和 Asset/AssetVersion；测试用例阶段由同一个 Agent 生成 UI/API 用例和数据需求，确定性 Coverage Auditor 审计后只把 `resolution=agent_repair` 的质量问题送回最多两轮修复，业务决策缺失直接等待人工处理。人工发布后创建不可变 `TestCaseSetVersion`、正式 Workspace 资产、套件/冒烟/影响回归与 Execution Handoff。
 
-## 阶段文档
+## 模块状态
 
-- [一期需求文档](需求文档/第一期-项目知识库构建与配置需求文档.md)
-- [一期技术方案（含架构设计）](技术文档/第一期-项目知识库构建与配置技术文档.md)
-- [第二期需求文档](需求文档/第二期-需求评审与大模型配置需求文档.md)
-- [第二期技术方案](技术文档/第二期-需求评审与大模型配置技术文档.md)
+| 模块 | 当前状态 | 边界 |
+| --- | --- | --- |
+| 知识库、需求分析、测试设计 | 已实现 | 已接入真实 API、持久化数据、Agent Workflow 和服务端治理。 |
+| 测试执行 | 占位 | 测试设计已能创建 `Execution Handoff`；执行计划、执行器、实时状态、日志和重试尚未实现。 |
+| 报告与诊断 | 占位 | 需求分析报告和测试用例集可独立导出；跨运行质量汇总、趋势、失败诊断和发布建议尚未实现。 |
+
+左侧“测试执行”和“报告与诊断”保留为产品规划入口，页面会明确显示“功能占位 · 尚未实现”，不会展示示例数据或触发真实执行。
 
 ## 已实现
 

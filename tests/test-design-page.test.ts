@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
@@ -40,6 +40,32 @@ test('测试点审核是唯一人工门禁并保留树操作与 AI 重新设计'
   assert.match(review, /批准 TestPointTreeVersion/u)
   assert.match(review, /AI 重新设计/u)
   for (const operation of ["op: 'add'", "op: 'rename'", "op: 'delete'", "op: 'split'", "op: 'merge'"]) assert.match(`${review}\n${tree}`, new RegExp(operation, 'u'))
+  assert.match(review, /op: 'update'/u)
+  assert.match(review, /Revision 修改说明/u)
+  assert.match(review, /执行入口/u)
+  assert.doesNotMatch(`${review}\n${tree}`, /window\.(?:prompt|confirm)/u)
+})
+
+test('测试用例支持新增、结构化编辑、单条审核与 Revision 记录', () => {
+  const panel = read('../src/test-design/TestCasePanel.tsx')
+  const hook = read('../src/test-design/hooks/useTestDesign.ts')
+  for (const label of ['新增用例', '编辑并新建 Revision', '要求修改', 'Revision 与审核记录', '确认删除']) assert.match(panel, new RegExp(label, 'u'))
+  assert.match(panel, /执行步骤/u)
+  assert.match(panel, /关联可执行测试点/u)
+  for (const method of ['createCase', 'patchCase', 'deleteCase', 'reviewCase']) assert.match(hook, new RegExp(`api\\.${method}`, 'u'))
+})
+
+test('测试执行和报告页明确标记为占位且 README 不再引用已删除阶段文档', () => {
+  const app = read('../src/App.tsx')
+  const readme = read('../README.md')
+  assert.match(app, /功能占位 · 尚未实现/u)
+  assert.match(app, /hint: '占位'/u)
+  assert.match(app, /Execution Handoff/u)
+  assert.match(app, /跨运行质量汇总/u)
+  assert.match(readme, /\| 测试执行 \| 占位 \|/u)
+  assert.match(readme, /\| 报告与诊断 \| 占位 \|/u)
+  assert.doesNotMatch(readme, /第一期-项目知识库|第二期-需求评审/u)
+  assert.equal(existsSync(new URL('../_temp.patch', import.meta.url)), false)
 })
 
 test('Coverage 面板区分 Agent Repair 与 Human Decision，发布面板显示正式资产文件', () => {

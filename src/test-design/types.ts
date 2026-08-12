@@ -142,7 +142,7 @@ export type TestDesignCase = {
   currentRevision: number
   reviewState: ReviewState
   revisions: Array<{ revision: number; content: TestCaseContent; contentSha256: string; createdAt: string }>
-  reviewActions: Array<{ id: string; decision: string; createdAt: string }>
+  reviewActions: Array<{ id: string; targetRevision?: number; fromState?: ReviewState; toState?: ReviewState; decision: string; comment?: string; actorId?: string; createdAt: string }>
   tombstonedAt?: string
 }
 

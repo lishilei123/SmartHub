@@ -56,8 +56,8 @@ const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: 
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard },
   { key: 'requirements', label: '需求评审', icon: Sparkles },
   { key: 'test-design', label: '测试设计', icon: TestTube2 },
-  { key: 'execution', label: '测试执行', icon: Play },
-  { key: 'reports', label: '报告与诊断', icon: Activity },
+  { key: 'execution', label: '测试执行', icon: Play, hint: '占位' },
+  { key: 'reports', label: '报告与诊断', icon: Activity, hint: '占位' },
 ]
 
 const pageMeta: Record<PageKey, { title: string; desc: string }> = {
@@ -65,8 +65,8 @@ const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   requirements: { title: '需求评审', desc: '让 AI 帮你发现需求缺口、边界与测试风险' },
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
   'test-design': { title: '测试设计', desc: '由 TestDesignAgent 与按阶段 Skill 完成可追溯的测试点、用例与覆盖设计' },
-  execution: { title: '测试执行', desc: '跟踪计划、套件和用例的实时执行状态' },
-  reports: { title: '报告与诊断', desc: '聚合质量趋势、失败原因与发布建议' },
+  execution: { title: '测试执行', desc: '功能占位：当前仅有测试设计侧的 Execution Handoff' },
+  reports: { title: '报告与诊断', desc: '功能占位：当前仅有独立报告与用例集导出能力' },
   settings: { title: '系统管理', desc: '配置模型、集成、权限与平台策略' },
 }
 
@@ -233,8 +233,8 @@ function App() {
         {page === 'requirements' && <Suspense fallback={<PageLoading label="正在加载需求评审工作台…" />}><RequirementReviewPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={workspaceKnowledgeTree.directories} documents={workspaceKnowledgeTree.documents} workspaceRootDirectoryId={workspaceKnowledgeTree.rootDirectoryId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'test-design' && <Suspense fallback={<PageLoading label="正在加载测试设计工作台…" />}><TestDesignPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
-        {page === 'execution' && <StaticNotice title="测试执行" text="测试执行页面仍展示示例执行数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
-        {page === 'reports' && <StaticNotice title="报告与诊断" text="报告页面仍展示示例质量数据；本次交互修复聚焦需求分析、知识库和系统设置。" />}
+        {page === 'execution' && <PlaceholderNotice title="测试执行" boundary="当前只完成测试设计侧的 Execution Handoff 契约与创建接口。" missing="执行计划编排、环境与执行器接入、实时状态、日志和失败重试尚未实现；本页不展示示例数据，也不会触发真实测试。" />}
+        {page === 'reports' && <PlaceholderNotice title="报告与诊断" boundary="需求分析报告和已发布测试用例集支持独立导出。" missing="跨运行质量汇总、趋势分析、失败诊断与发布建议尚未实现；这些导出能力不等同于报告与诊断模块。" />}
         {page === 'settings' && <SystemSettings knowledgeBaseId={knowledgeBaseId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
       </section>
     </main>
@@ -286,8 +286,8 @@ function ProjectVersionManager({ versions, selectedId, onSelect, onRefresh, onCl
   return <><Modal title="项目版本" onClose={onClose} className="version-manager-modal"><div className="version-manager"><section><h3>当前项目版本</h3><p>需求分析数据按版本隔离；锁定和归档版本只能查看。只有可编辑版本可删除；删除时会同时移除该版本的需求绑定和已结束评审运行。</p><div className="project-version-list">{versions.map(version => <article className={version.id === selectedId ? 'active' : ''} key={version.id}><button className="version-select" onClick={() => onSelect(version.id)}><GitBranch /><span><b>{version.name}</b><small>{version.description || '未填写版本说明'} · {new Date(version.createdAt).toLocaleString('zh-CN')}</small></span><Badge tone={version.status === 'open' ? 'green' : version.status === 'locked' ? 'orange' : 'gray'}>{version.status === 'open' ? '可编辑' : version.status === 'locked' ? '已锁定' : '已归档'}</Badge></button><select aria-label={`设置 ${version.name} 状态`} value={version.status} onChange={event => void changeStatus(version, event.target.value as ProjectVersionStatus)}><option value="open">可编辑</option><option value="locked">锁定</option><option value="archived">归档</option></select><button className="version-delete" disabled={version.status !== 'open'} title={version.status === 'open' ? `删除 ${version.name}` : '只有可编辑版本可以删除'} aria-label={version.status === 'open' ? `删除 ${version.name}` : `${version.name} 不可删除`} onClick={() => setDeleteTarget(version)}><Trash2 /></button></article>)}{!versions.length && <div className="version-empty"><GitBranch /><b>尚无项目版本</b><span>创建第一个版本后，才能进入需求分析。</span></div>}</div></section><section className="version-create"><h3>新建版本</h3><label>版本名称<input value={name} onChange={event => setName(event.target.value)} placeholder="例如：V1.0 / 2026-Q3" /></label><label>版本说明<textarea value={description} onChange={event => setDescription(event.target.value)} placeholder="本版本目标或范围（可选）" /></label><label>来源版本<select value={sourceId} onChange={event => setSourceId(event.target.value)}><option value="">空白版本</option>{versions.map(version => <option value={version.id} key={version.id}>{version.name}</option>)}</select></label>{sourceId && <label className="version-inherit"><input type="checkbox" checked={inherit} onChange={event => setInherit(event.target.checked)} />继承来源版本的需求绑定（不继承评审运行和对话）</label>}<button className="btn primary full" disabled={!name.trim() || saving} onClick={() => void create()}><Plus />{saving ? '创建中…' : '创建并进入版本'}</button></section></div></Modal>{deleteTarget && <Modal title="删除项目版本" onClose={() => { if (!deleting) setDeleteTarget(null) }}><div className="modal-form version-delete-confirm"><div className="danger-confirm"><AlertTriangle /><span><b>确定删除“{deleteTarget.name}”吗？</b><small>该版本的需求绑定、已结束的评审结果和双 Agent 运行记录将一并删除，操作不可恢复。知识库原始文件不会被删除；如有运行中的评审，请先取消。</small></span></div><div className="modal-actions"><button className="btn ghost" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button><button className="btn danger" disabled={deleting} onClick={() => void remove()}><Trash2 />{deleting ? '删除中…' : '确认删除'}</button></div></div></Modal>}</>
 }
 
-function StaticNotice({ title, text }: { title: string; text: string }) {
-  return <section className="card static-notice"><h2>{title}</h2><p>{text}</p></section>
+function PlaceholderNotice({ title, boundary, missing }: { title: string; boundary: string; missing: string }) {
+  return <section className="card static-notice placeholder-notice"><Badge tone="orange"><AlertTriangle size={12} />功能占位 · 尚未实现</Badge><h2>{title}</h2><p>该导航项用于明确产品规划边界，当前不是可用业务页面。</p><div><span><CheckCircle2 /><b>已具备的相邻能力</b><small>{boundary}</small></span><span><Clock3 /><b>尚未实现</b><small>{missing}</small></span></div></section>
 }
 
 function PageLoading({ label }: { label: string }) {
