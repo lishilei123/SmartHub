@@ -1,0 +1,46 @@
+.requirement-review-v2-shell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+}
+
+.requirement-review-v2-shell .rav2-page {
+  flex: 1;
+  min-height: 0;
+}
+
+.requirement-workspace-upload-actions {
+  position: relative;
+  order: -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 7px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid #eceef2;
+}
+
+.rav2-workspace > footer .requirement-workspace-upload-actions button {
+  justify-content: center;
+  min-width: 0;
+  padding: 8px 5px;
+  font-weight: 600;
+}
+
+.requirement-workspace-upload-actions small {
+  color: #98a1ad;
+  font-size: 8px;
+  text-align: center;
+}
+
+.rav2-workspace > footer .requirement-workspace-upload-actions button.primary {
+  background: #5965e9;
+  color: #fff;
+}
+
+.rav2-workspace > footer .requirement-workspace-upload-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}

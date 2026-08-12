@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Archive, Eye, LoaderCircle, Trash2, Upload, XCircle } from 'lucide-react'
+import { Eye, LoaderCircle, Trash2, Upload, XCircle } from 'lucide-react'
 import { RequirementAnalysisPageV2 } from './RequirementAnalysisPageV2'
 import { deleteKnowledgeAsset, loadAssetVersion, uploadKnowledgeArchive, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
@@ -8,6 +8,7 @@ import type { KnowledgeDocument } from './prototype-data'
 import type { ProjectVersion } from './project-version-api'
 import { requirementWorkspaceDirectory } from './version-document-path'
 import './requirement-input-toolbar.css'
+import './requirement-review-layout.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 
@@ -48,10 +49,9 @@ export function RequirementReviewPage(props: Props) {
   const { projectVersion, documents, knowledgeBaseId, apiState, refreshKnowledge, notify, addAudit } = props
   const shellRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const archiveInputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [preview, setPreview] = useState<PreviewState | null>(null)
-  const [workspaceHeader, setWorkspaceHeader] = useState<HTMLElement | null>(null)
+  const [workspaceFooter, setWorkspaceFooter] = useState<HTMLElement | null>(null)
   const [selectedDocumentId, setSelectedDocumentId] = useState('')
 
   const workspaceDirectoryPath = projectVersion ? requirementWorkspaceDirectory(projectVersion.name) : ''
@@ -74,36 +74,26 @@ export function RequirementReviewPage(props: Props) {
     setBusy(true)
     try {
       const taskIds: string[] = []
+      let importedDocuments = 0
       for (const file of files) {
+        if (/\.zip$/iu.test(file.name)) {
+          const uploaded = await uploadKnowledgeArchive(knowledgeBaseId, file, workspaceDirectoryPath, 'requirement')
+          taskIds.push(...uploaded.taskIds)
+          importedDocuments += uploaded.documents
+          continue
+        }
         const name = safeFileName(file)
         const logicalPath = `${workspaceDirectoryPath}/${name}`
         const uploaded = await uploadKnowledgeFile(knowledgeBaseId, file, logicalPath, 'requirement')
         if (uploaded.task?.id) taskIds.push(uploaded.task.id)
+        importedDocuments += 1
       }
       await ensureTasksCompleted(taskIds)
       await refreshKnowledge()
-      addAudit(`上传需求文档：${files.map(file => file.name).join('、')} → /${workspaceDirectoryPath}`)
-      notify(`已上传 ${files.length} 份需求文档。`)
+      addAudit(`上传需求输入：${files.map(file => file.name).join('、')} → /${workspaceDirectoryPath}`)
+      notify(`已导入 ${importedDocuments} 份需求文档。`)
     } catch (error) {
       notify(error instanceof Error ? error.message : '需求文档上传失败', 'error')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const uploadArchive = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0]
-    event.currentTarget.value = ''
-    if (!file || !projectVersion || !canManage) return
-    setBusy(true)
-    try {
-      const uploaded = await uploadKnowledgeArchive(knowledgeBaseId, file, workspaceDirectoryPath, 'requirement')
-      await ensureTasksCompleted(uploaded.taskIds)
-      await refreshKnowledge()
-      addAudit(`上传需求压缩包：${file.name} → /${workspaceDirectoryPath}`)
-      notify(`压缩包已导入：${uploaded.documents} 份需求文档。`)
-    } catch (error) {
-      notify(error instanceof Error ? error.message : '需求 ZIP 上传失败', 'error')
     } finally {
       setBusy(false)
     }
@@ -146,9 +136,9 @@ export function RequirementReviewPage(props: Props) {
   useEffect(() => {
     const root = shellRef.current
     if (!root) return
-    const header = root.querySelector<HTMLElement>('.rav2-workspace > header')
     const list = root.querySelector<HTMLElement>('.rav2-docs')
-    setWorkspaceHeader(header)
+    const footer = root.querySelector<HTMLElement>('.rav2-workspace > footer')
+    setWorkspaceFooter(footer)
     if (!list) return
 
     const handleDocumentClick = (event: Event) => {
@@ -169,16 +159,12 @@ export function RequirementReviewPage(props: Props) {
   return <div className="requirement-review-v2-shell" ref={shellRef}>
     <RequirementAnalysisPageV2 {...props} />
 
-    {workspaceHeader && createPortal(<div className="requirement-workspace-inline-actions">
-      <button title="上传需求文档" aria-label="上传需求文档" disabled={!canManage} onClick={() => fileInputRef.current?.click()}><Upload /></button>
-      <button title="上传 ZIP" aria-label="上传 ZIP" disabled={!canManage} onClick={() => archiveInputRef.current?.click()}><Archive /></button>
-      <button title="预览当前文档" aria-label="预览当前文档" disabled={!selectedDocument} onClick={() => selectedDocument && void openPreview(selectedDocument)}><Eye /></button>
-      <button className="danger" title="删除当前文档" aria-label="删除当前文档" disabled={!canManage || !selectedDocument} onClick={() => selectedDocument && void removeDocument(selectedDocument)}><Trash2 /></button>
-      {busy && <LoaderCircle className="rotating requirement-workspace-busy" />}
-    </div>, workspaceHeader)}
+    {workspaceFooter && createPortal(<div className="requirement-workspace-upload-actions">
+      <button className="primary" disabled={!canManage} onClick={() => fileInputRef.current?.click()}><Upload />{busy ? '处理中…' : '上传需求文档'}</button>
+      <small>支持 MD / TXT / ZIP</small>
+    </div>, workspaceFooter)}
 
-    <input ref={fileInputRef} type="file" hidden multiple accept=".md,.txt,text/markdown,text/plain" onChange={uploadFiles} />
-    <input ref={archiveInputRef} type="file" hidden accept=".zip,application/zip" onChange={uploadArchive} />
+    <input ref={fileInputRef} type="file" hidden multiple accept=".md,.txt,.zip,text/markdown,text/plain,application/zip" onChange={uploadFiles} />
 
     {preview && <div className="requirement-input-backdrop preview" onMouseDown={event => { if (event.currentTarget === event.target) setPreview(null) }}>
       <section className="requirement-input-preview">
