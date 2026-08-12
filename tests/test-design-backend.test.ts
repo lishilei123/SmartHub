@@ -122,6 +122,11 @@ test('正式用例库 Proposal、Revision、不可变版本、套件与 Full Han
   const v2 = await updateService.publishLibraryVersion('pv-1', update.designId, update.runId, { name: '正式用例库 V2', expectedAuditId: update.audit.id, expectedCaseSetSha256: update.audit.caseSetSha256, expectedProposalSha256: updateDecided.caseChangeProposalSha256 }, principal)
   assert.equal(v2.members[0].caseId, stableCaseId, 'update 保持正式 Case ID')
   assert.equal(v2.members[0].revision, 2, 'update 创建新 Revision')
+  const updatedCase = await updateService.getLibraryCase('project-1', stableCaseId)
+  const updatedTraceability = updatedCase.revisions.find(item => item.revision === 2)!.traceability!
+  assert.equal(updatedTraceability.sourceRequirementReleaseId, 'release-1')
+  assert.deepEqual(updatedTraceability.requirementRefs.map(item => item.requirementId), ['REQ-1'])
+  assert.deepEqual(updatedTraceability.testPointRefs.map(item => item.testPointTreeVersionId), [update.run.testPointTree!.currentApprovedVersionId])
 
   const reuseService = new TestDesignService(store, new FakeRuntime({ proposalOperation: 'reuse' }), projector)
   const reuse = await preparePublishableRun(reuseService, 'reuse-library')
@@ -135,7 +140,8 @@ test('正式用例库 Proposal、Revision、不可变版本、套件与 Full Han
   assert.equal((await reuseService.getLibraryVersion('project-1', v3.id)).members.length, 1, '已发布用例库版本返回不可变快照')
 
   const detail = await reuseService.getLibraryCase('project-1', stableCaseId)
-  const suiteValues = (suiteKey: string, suiteType: 'smoke' | 'regression' | 'custom') => ({ suiteKey, suiteType, name: `${suiteType} 套件`, members: [{ testCaseLibraryVersionId: v3.id, caseId: stableCaseId, executionMethod: 'ui' as const, reason: '稳定执行基线' }] })
+  const suiteValues = (suiteKey: string, suiteType: 'smoke' | 'regression' | 'custom') => ({ suiteKey, suiteType, name: `${suiteType} 套件`, testCaseLibraryVersionId: v3.id, members: [{ caseId: stableCaseId, executionMethod: 'ui' as const, reason: '稳定执行基线' }] })
+  await assert.rejects(reuseService.createSuiteDraft('project-1', { ...suiteValues('mixed-library', 'smoke'), members: [{ testCaseLibraryVersionId: v1.id, caseId: stableCaseId, executionMethod: 'ui', reason: '非法混用' }] }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_SUITE_LIBRARY_VERSION_MISMATCH')
   const publishedSuites = []
   for (const suiteType of ['smoke', 'regression', 'custom'] as const) {
     const draft = await reuseService.createSuiteDraft('project-1', suiteValues(`${suiteType}-baseline`, suiteType), principal)
@@ -149,6 +155,7 @@ test('正式用例库 Proposal、Revision、不可变版本、套件与 Full Han
   const full = await reuseService.createLibraryHandoff('pv-1', v3.id, { mode: 'full', expectedLibrarySha256: v3.contentSha256 }, principal)
   assert.deepEqual(full.members.map(item => [item.caseId, item.revision]), v3.members.map(item => [item.caseId, item.revision]), 'Full Handoff 包含指定版本全部 active 用例')
   assert.ok(full.members.every(item => item.dimension === 'functional' && item.executionSpec && item.contentSha256))
+  assert.deepEqual(full.members[0].traceability, updatedTraceability, 'Handoff 冻结正式 Revision 的追溯信息')
 
   const deprecated = await reuseService.deprecateLibraryCase('project-1', stableCaseId, detail.etag, '需求范围移除', principal)
   assert.equal(deprecated.status, 'deprecated')
@@ -180,6 +187,76 @@ test('四类测试维度生成对应 executionSpec，缺少受控配置时形成
   assert.ok(run.confirmationItems.some(item => /性能阈值/u.test(item.title)))
   assert.ok(run.confirmationItems.some(item => /稳定性运行时长/u.test(item.title)))
   assert.ok(run.confirmationItems.some(item => /兼容性环境矩阵/u.test(item.title)))
+})
+
+test('正式用例库发布拒绝已变化的基线、过期 Revision 和已废弃来源', async () => {
+  const projector: TestCaseAssetProjector = { ingest: async () => ({ version: { id: `asset-${Math.random()}` }, task: null }) }
+  const { store, service: initialService } = await fixture(new FakeRuntime(), projector)
+  const initial = await preparePublishableRun(initialService, 'conflict-initial')
+  for (const proposal of initial.run.caseChangeProposals) await initialService.decideCaseChangeProposal('pv-1', initial.designId, initial.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const initialDecided = await initialService.getRun('pv-1', initial.designId, initial.runId)
+  const v1 = await initialService.publishLibraryVersion('pv-1', initial.designId, initial.runId, { name: '冲突基线 V1', expectedAuditId: initial.audit.id, expectedCaseSetSha256: initial.audit.caseSetSha256, expectedProposalSha256: initialDecided.caseChangeProposalSha256 }, principal)
+
+  const serviceA = new TestDesignService(store, new FakeRuntime({ proposalOperation: 'update' }), projector)
+  const serviceB = new TestDesignService(store, new FakeRuntime({ proposalOperation: 'update' }), projector)
+  const runA = await preparePublishableRun(serviceA, 'conflict-a')
+  const runB = await preparePublishableRun(serviceB, 'conflict-b')
+  for (const proposal of runA.run.caseChangeProposals) await serviceA.decideCaseChangeProposal('pv-1', runA.designId, runA.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  for (const proposal of runB.run.caseChangeProposals) await serviceB.decideCaseChangeProposal('pv-1', runB.designId, runB.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const decidedA = await serviceA.getRun('pv-1', runA.designId, runA.runId)
+  const decidedB = await serviceB.getRun('pv-1', runB.designId, runB.runId)
+  await serviceA.publishLibraryVersion('pv-1', runA.designId, runA.runId, { name: '冲突基线 V2', expectedAuditId: runA.audit.id, expectedCaseSetSha256: runA.audit.caseSetSha256, expectedProposalSha256: decidedA.caseChangeProposalSha256 }, principal)
+  await assert.rejects(serviceB.publishLibraryVersion('pv-1', runB.designId, runB.runId, { name: '禁止覆盖 V2', expectedAuditId: runB.audit.id, expectedCaseSetSha256: runB.audit.caseSetSha256, expectedProposalSha256: decidedB.caseChangeProposalSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_LIBRARY_BASE_CHANGED' && /正式用例库在本任务运行期间已经变化/u.test(error.message))
+
+  const { store: revisionStore, service: revisionInitial } = await fixture(new FakeRuntime(), projector)
+  const revisionSeed = await preparePublishableRun(revisionInitial, 'revision-initial')
+  for (const proposal of revisionSeed.run.caseChangeProposals) await revisionInitial.decideCaseChangeProposal('pv-1', revisionSeed.designId, revisionSeed.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const revisionSeedDecided = await revisionInitial.getRun('pv-1', revisionSeed.designId, revisionSeed.runId)
+  const revisionV1 = await revisionInitial.publishLibraryVersion('pv-1', revisionSeed.designId, revisionSeed.runId, { name: 'Revision 基线', expectedAuditId: revisionSeed.audit.id, expectedCaseSetSha256: revisionSeed.audit.caseSetSha256, expectedProposalSha256: revisionSeedDecided.caseChangeProposalSha256 }, principal)
+  const revisionService = new TestDesignService(revisionStore, new FakeRuntime({ proposalOperation: 'update' }), projector)
+  const staleRevisionRun = await preparePublishableRun(revisionService, 'revision-stale')
+  for (const proposal of staleRevisionRun.run.caseChangeProposals) await revisionService.decideCaseChangeProposal('pv-1', staleRevisionRun.designId, staleRevisionRun.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const source = await revisionService.getLibraryCase('project-1', revisionV1.members[0].caseId)
+  await revisionService.editLibraryCase('project-1', source.id, source.etag, { ...source.content, objective: '并发人工修订后的目标' }, '并发人工修订', principal)
+  const staleRevisionDecided = await revisionService.getRun('pv-1', staleRevisionRun.designId, staleRevisionRun.runId)
+  await assert.rejects(revisionService.publishLibraryVersion('pv-1', staleRevisionRun.designId, staleRevisionRun.runId, { name: '禁止旧 Proposal 覆盖', expectedAuditId: staleRevisionRun.audit.id, expectedCaseSetSha256: staleRevisionRun.audit.caseSetSha256, expectedProposalSha256: staleRevisionDecided.caseChangeProposalSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'LIBRARY_TEST_CASE_REVISION_CONFLICT')
+
+  const staleSourceService = new TestDesignService(revisionStore, new FakeRuntime({ proposalOperation: 'reuse' }), projector)
+  const staleSourceRun = await preparePublishableRun(staleSourceService, 'source-stale')
+  for (const proposal of staleSourceRun.run.caseChangeProposals) await staleSourceService.decideCaseChangeProposal('pv-1', staleSourceRun.designId, staleSourceRun.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const editedSource = await staleSourceService.getLibraryCase('project-1', revisionV1.members[0].caseId)
+  await staleSourceService.deprecateLibraryCase('project-1', editedSource.id, editedSource.etag, '并发废弃', principal)
+  const staleSourceDecided = await staleSourceService.getRun('pv-1', staleSourceRun.designId, staleSourceRun.runId)
+  await assert.rejects(staleSourceService.publishLibraryVersion('pv-1', staleSourceRun.designId, staleSourceRun.runId, { name: '禁止复用废弃来源', expectedAuditId: staleSourceRun.audit.id, expectedCaseSetSha256: staleSourceRun.audit.caseSetSha256, expectedProposalSha256: staleSourceDecided.caseChangeProposalSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'CASE_CHANGE_PROPOSAL_SOURCE_STALE')
+
+  assert.equal(v1.version, 1)
+})
+
+test('旧 TestCaseSetVersion 迁移为 v2 正式用例库且重复调用幂等', async () => {
+  const { service } = await fixture(new FakeRuntime(), { ingest: async () => ({ version: { id: `legacy-asset-${Math.random()}` }, task: null }) })
+  const prepared = await preparePublishableRun(service, 'legacy-migration')
+  const legacy = await service.publishCaseSet('pv-1', prepared.designId, prepared.runId, { name: '历史用例集', expectedAuditId: prepared.audit.id, expectedCaseSetSha256: prepared.audit.caseSetSha256 }, principal)
+  const preview = await service.previewLegacyCaseMigration('project-1', legacy.id)
+  assert.equal(preview.status, 'ready')
+  const first = await service.migrateLegacyCaseSet('project-1', { legacyTestCaseSetVersionId: legacy.id, expectedPreviewSha256: preview.previewSha256 }, principal)
+  const second = await service.migrateLegacyCaseSet('project-1', { legacyTestCaseSetVersionId: legacy.id, expectedPreviewSha256: preview.previewSha256 }, principal)
+  assert.equal(second.version.id, first.version.id)
+  assert.equal(second.record.id, first.record.id)
+  assert.equal(first.version.legacyTestCaseSetVersionId, legacy.id)
+  assert.equal((await service.listLibraryVersions('project-1')).length, 1)
+  const migratedCase = await service.getLibraryCase('project-1', first.version.members[0].caseId)
+  assert.equal(migratedCase.content.schemaVersion, 'test-case/v2')
+  assert.equal(migratedCase.content.executionSpec?.kind, 'functional')
+  assert.equal(migratedCase.revisions.length, 1)
+})
+
+test('正式用例 API 拒绝非法 executionSpec，非功能用例不依赖 executionMethods', async () => {
+  const { service } = await fixture(new FakeRuntime())
+  const { ref: _ref, ...performance } = dimensionCaseCandidate('test-case-design/v1', ['point-1', 'point-2', 'point-3', 'point-4']).cases[1]
+  const saved = await service.createLibraryCase('project-1', performance, '人工新增性能用例', principal)
+  assert.equal(saved.content.executionMethods.length, 0)
+  assert.equal(saved.content.executionSpec?.kind, 'performance')
+  await assert.rejects(service.createLibraryCase('project-1', { ...performance, executionSpec: { ...performance.executionSpec, kind: 'stability' } }, '非法维度', principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_EXECUTION_SPEC_INVALID')
 })
 
 class FakeRuntime implements TestDesignAgentRuntime {

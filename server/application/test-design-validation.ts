@@ -44,6 +44,9 @@ export function validateTestCaseContent(value: unknown, validPointIds?: Set<stri
   const dependencies = uniqueIds(input.dependencies ?? [], 'dependencies')
   const preconditions = texts(input.preconditions, 'preconditions', 100, 2_000)
   const dataRequirementIds = uniqueIds(input.dataRequirementIds ?? [], 'dataRequirementIds')
+  const executionSpec = validateExecutionSpec(input.executionSpec, testDimension, methods, preconditions, dataRequirementIds)
+  const synchronizedSpec = executionSpec.kind === 'functional' ? { ...executionSpec, preconditions, testDataRequirements: dataRequirementIds } : executionSpec
+  const synchronizedMethods = synchronizedSpec.kind === 'functional' ? methods.map(method => method.method === synchronizedSpec.method ? { ...method, steps: synchronizedSpec.steps, verificationChecks: synchronizedSpec.verificationChecks, executionReadiness: synchronizedSpec.executionReadiness, automationHint: synchronizedSpec.automationHint } : method) : methods
   return {
     schemaVersion: input.schemaVersion,
     title: requiredText(input.title, 'title', 500),
@@ -55,8 +58,8 @@ export function validateTestCaseContent(value: unknown, validPointIds?: Set<stri
     dataRequirementIds,
     cleanup: texts(input.cleanup, 'cleanup', 100, 2_000),
     dependencies,
-    executionMethods: methods,
-    executionSpec: validateExecutionSpec(input.executionSpec, testDimension, methods, preconditions, dataRequirementIds),
+    executionMethods: synchronizedMethods,
+    executionSpec: synchronizedSpec,
     sharedVerificationChecks: checks(input.sharedVerificationChecks, 'sharedVerificationChecks'),
     tags: texts(input.tags, 'tags', 100, 100),
     domain: requiredText(input.domain, 'domain', 200),

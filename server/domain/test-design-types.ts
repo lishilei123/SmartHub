@@ -130,6 +130,8 @@ export interface RetrievalSnapshot {
 export interface HistoricalCaseSnapshot {
   schemaVersion: 'historical-case-snapshot/v1'
   items: FrozenContentRef[]
+  baseTestCaseLibraryVersionId?: string
+  baseTestCaseLibraryVersionSha256?: string
   createdAt: string
   snapshotSha256: string
 }
@@ -341,9 +343,16 @@ export interface LibraryTestCaseRevision {
   semanticSha256: string
   sourceRunId?: string
   sourceProposalId?: string
+  traceability?: TestCaseTraceability
   changeReason: string
   createdBy: string
   createdAt: string
+}
+
+export interface TestCaseTraceability {
+  sourceRequirementReleaseId: string
+  requirementRefs: Array<{ requirementReleaseId: string; requirementId: string }>
+  testPointRefs: Array<{ testPointTreeVersionId: string; testPointId: string }>
 }
 
 export interface LibraryTestCase {
@@ -521,12 +530,24 @@ export interface WorkspaceArtifactProjection {
 }
 
 export interface TestSuiteVersionMember { testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; caseId: string; revision: number; executionMethods: Array<'ui' | 'api'>; executionMethod?: TestExecutionMethod; ordinal: number; reason: string }
-export interface TestSuiteVersion { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom' | 'functional_domain'; version: number; name: string; members: TestSuiteVersionMember[]; contentSha256: string; publishedBy: string; publishedAt: string; status?: 'active' | 'deprecated'; deprecatedBy?: string; deprecatedAt?: string }
-export interface TestSuiteDraft { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; members: TestSuiteVersionMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string }
+export interface TestSuiteVersion { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom' | 'functional_domain'; version: number; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteVersionMember[]; contentSha256: string; publishedBy: string; publishedAt: string; status?: 'active' | 'deprecated'; deprecatedBy?: string; deprecatedAt?: string }
+export interface TestSuiteDraft { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteVersionMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string }
 export interface SmokeCandidateRelation { testCaseSetVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'pending' | 'accepted' | 'rejected'; actorId?: string; reviewedAt?: string }
 export interface ImpactedRegressionReference { testCaseSetVersionId?: string; suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; actorId: string; createdAt: string }
-export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression' | TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dedupKey: string; dimension?: TestDimension; executionSpec?: TestCaseExecutionSpec; selectionReason?: string; contentSha256?: string }
+export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression' | TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dedupKey: string; dimension?: TestDimension; executionSpec?: TestCaseExecutionSpec; traceability?: TestCaseTraceability; selectionReason?: string; contentSha256?: string }
 export interface TestExecutionHandoff { id: string; projectId: string; projectVersionId: string; testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; suiteVersionId?: string; strategy?: 'standard' | 'fast' | 'full'; mode?: TestExecutionMode; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; members: TestExecutionHandoffMember[]; contentSha256: string; createdBy: string; createdAt: string }
+
+export interface LegacyTestCaseMigrationRecord {
+  id: string
+  projectId: string
+  legacyTestCaseSetVersionId: string
+  previewSha256: string
+  status: 'migrated'
+  mappings: Array<{ legacyCaseId: string; legacyRevision: number; libraryCaseId: string; libraryRevision: number; resolution: 'created' | 'reused_identical' | 'created_after_confirmation' }>
+  testCaseLibraryVersionId: string
+  migratedBy: string
+  migratedAt: string
+}
 
 export interface TestDesignDispositionAction { id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }
 export interface DesignFinding { id: string; title: string; description: string; severity: 'blocker' | 'high' | 'medium' | 'low'; basisRefs: string[]; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
@@ -546,6 +567,8 @@ export interface TestDesignWorkflowRun {
   formalWorkspaceFiles: TestDesignWorkspaceFile[]
   retrievalSnapshot: RetrievalSnapshot
   historicalSnapshot: HistoricalCaseSnapshot
+  baseTestCaseLibraryVersionId?: string
+  baseTestCaseLibraryVersionSha256?: string
   nodeRuns: WorkflowNodeRun[]
   artifacts: WorkflowArtifact[]
   gateDecisions: WorkflowGateDecision[]
@@ -578,4 +601,5 @@ export interface TestDesignState {
   suiteDrafts: TestSuiteDraft[]
   suiteVersions: TestSuiteVersion[]
   executionHandoffs: TestExecutionHandoff[]
+  legacyMigrations: LegacyTestCaseMigrationRecord[]
 }

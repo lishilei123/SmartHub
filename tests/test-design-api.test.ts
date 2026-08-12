@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { Readable } from 'node:stream'
 import test from 'node:test'
 import { approveTree, createRun, loadInputs, patchCase, redesignTestPoints, reviewCase } from '../src/test-design/api.ts'
+import { TestDesignError } from '../server/application/test-design-validation.ts'
 import { routeTestDesign } from '../server/http/test-design-routes.ts'
 
 test('测试设计创建表单读取当前绑定 Requirement Release 和单 Agent 就绪状态', async () => {
@@ -75,3 +77,65 @@ test('测试设计 HTTP 响应允许浏览器跨端口读取', async () => {
   const handled = await routeTestDesign({ headers: {} }, response as never, { method: 'GET', url: new URL('http://127.0.0.1/api/project-versions/pv-1/test-designs'), principal: { subjectId: 'tester', displayName: '测试人员' }, controls: { authorize: async () => undefined, canAccess: async () => true }, service: { listDesigns: async () => [] } as never, store: {} as never, configurations: {} as never })
   assert.equal(handled, true); assert.equal(headers.get('access-control-allow-origin'), '*'); assert.match(headers.get('access-control-allow-headers') ?? '', /idempotency-key/u); assert.match(headers.get('access-control-expose-headers') ?? '', /etag/u); assert.match(server, /access-control-allow-headers': 'content-type, authorization, idempotency-key, if-match'/u); assert.equal(body, '{"items":[]}')
 })
+
+test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP 路由覆盖完整写入契约', async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = []
+  const service = new Proxy({}, { get: (_target, property) => async (...args: unknown[]) => {
+    const method = String(property); calls.push({ method, args })
+    if (method === 'listLibraryCases' || method === 'listLibraryVersions' || method === 'listCaseChangeProposals') return []
+    if (method === 'getLibraryCase' || method === 'editLibraryCase') return { id: 'case-1', etag: '"library-case:case-1:r2:new"' }
+    if (method === 'createLibraryCase' || method === 'copyLibraryCase' || method === 'deprecateLibraryCase') return { id: 'case-1' }
+    if (method === 'decideCaseChangeProposal') return { id: 'proposal-1', decision: 'accepted' }
+    if (method === 'publishLibraryVersion') return { id: 'library-v1' }
+    if (method === 'createSuiteDraft' || method === 'updateSuiteDraft') return { id: 'draft-1', etag: '"suite-draft:draft-1:new"' }
+    if (method === 'publishSuiteDraft') return { id: 'suite-v1' }
+    if (method === 'createLibraryHandoff') return { id: `handoff-${String((args[2] as { mode: string }).mode)}` }
+    throw new Error(`未处理测试服务方法 ${method}`)
+  } })
+
+  assert.equal((await routeCall('GET', '/api/projects/project-1/test-case-library', undefined, {}, service)).status, 200)
+  assert.equal((await routeCall('GET', '/api/projects/project-1/test-case-library-versions', undefined, {}, service)).status, 200)
+  assert.equal((await routeCall('POST', '/api/projects/project-1/test-case-library', { content: { title: '新增' }, changeReason: '新增正式用例' }, {}, service)).status, 201)
+  const edited = await routeCall('PATCH', '/api/projects/project-1/test-case-library/case-1', { content: { title: '修改' }, changeReason: '修改 Revision' }, { 'if-match': '"library-case:case-1:r1:old"' }, service)
+  assert.equal(edited.status, 200); assert.equal(edited.headers.get('etag'), '"library-case:case-1:r2:new"')
+  assert.equal((await routeCall('POST', '/api/projects/project-1/test-case-library/case-1/copy', { changeReason: '复制' }, {}, service)).status, 201)
+  assert.equal((await routeCall('DELETE', '/api/projects/project-1/test-case-library/case-1', { changeReason: '废弃' }, { 'if-match': '"library-case:case-1:r2:new"' }, service)).status, 200)
+  assert.equal((await routeCall('GET', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/case-change-proposals', undefined, {}, service)).status, 200)
+  assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/case-change-proposals/proposal-1/decisions', { expectedVersion: 0, decision: 'accepted' }, {}, service)).status, 201)
+  assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/test-case-library-versions', { name: 'V1', expectedAuditId: 'audit-1', expectedCaseSetSha256: 'a', expectedProposalSha256: 'b' }, {}, service)).status, 201)
+  assert.equal((await routeCall('POST', '/api/projects/project-1/test-suite-drafts', { suiteKey: 'smoke', suiteType: 'smoke', name: 'Smoke', testCaseLibraryVersionId: 'library-v1', members: [] }, {}, service)).status, 201)
+  assert.equal((await routeCall('PUT', '/api/projects/project-1/test-suite-drafts/draft-1', { suiteKey: 'smoke', suiteType: 'smoke', name: 'Smoke 2', testCaseLibraryVersionId: 'library-v1', members: [] }, { 'if-match': '"suite-draft:draft-1:old"' }, service)).status, 200)
+  assert.equal((await routeCall('POST', '/api/projects/project-1/test-suite-drafts/draft-1/publish', undefined, { 'if-match': '"suite-draft:draft-1:new"' }, service)).status, 201)
+  for (const mode of ['smoke', 'regression', 'full', 'custom']) assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-case-library-versions/library-v1/execution-handoffs', { mode, expectedLibrarySha256: 'c', ...(mode === 'full' ? {} : { suiteVersionId: `suite-${mode}` }) }, {}, service)).status, 201)
+
+  assert.equal((calls.find(item => item.method === 'editLibraryCase')!.args[2]), '"library-case:case-1:r1:old"')
+  assert.deepEqual(calls.filter(item => item.method === 'createLibraryHandoff').map(item => (item.args[2] as { mode: string }).mode), ['smoke', 'regression', 'full', 'custom'])
+})
+
+test('正式资产 HTTP 路由透传单版本、基线和 executionSpec 服务端拒绝', async () => {
+  const mixError = new TestDesignError('TEST_SUITE_LIBRARY_VERSION_MISMATCH', '套件所有成员必须属于同一用例库版本', 422)
+  await assert.rejects(routeCall('POST', '/api/projects/project-1/test-suite-drafts', { suiteKey: 'mixed', suiteType: 'smoke', name: '混用', testCaseLibraryVersionId: 'library-v2', members: [{ testCaseLibraryVersionId: 'library-v1', caseId: 'case-1', executionMethod: 'ui', reason: '非法混用' }] }, {}, { createSuiteDraft: async () => { throw mixError } }), (error: unknown) => error === mixError)
+
+  const baselineError = new TestDesignError('TEST_CASE_LIBRARY_BASE_CHANGED', '正式用例库在本任务运行期间已经变化，请重新分析或基于最新版本重新创建任务。', 409)
+  await assert.rejects(routeCall('POST', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/test-case-library-versions', { name: '过期发布' }, {}, { publishLibraryVersion: async () => { throw baselineError } }), (error: unknown) => error === baselineError)
+
+  const schemaError = new TestDesignError('TEST_CASE_EXECUTION_SPEC_INVALID', 'performance 用例必须提供 performance executionSpec', 422)
+  await assert.rejects(routeCall('POST', '/api/projects/project-1/test-case-library', { content: { dimension: 'performance', executionSpec: { kind: 'functional' } }, changeReason: '非法配置' }, {}, { createLibraryCase: async () => { throw schemaError } }), (error: unknown) => error === schemaError)
+})
+
+test('正式资产 HTTP 路由拒绝未认证和无权限调用', async () => {
+  const service = { listLibraryCases: async () => [] }
+  await assert.rejects(routeCall('GET', '/api/projects/project-1/test-case-library', undefined, {}, service, { subjectId: '', displayName: '' }, 'unauthenticated'), /UNAUTHENTICATED/u)
+  await assert.rejects(routeCall('GET', '/api/projects/project-1/test-case-library', undefined, {}, service, { subjectId: 'reader', displayName: '只读用户' }, 'forbidden'), /FORBIDDEN/u)
+})
+
+async function routeCall(method: string, path: string, body: unknown, headers: Record<string, string>, service: object, principal = { subjectId: 'tester', displayName: '测试人员' }, access: 'allowed' | 'unauthenticated' | 'forbidden' = 'allowed') {
+  const request = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')]), { headers })
+  const responseHeaders = new Map<string, string>(); let responseBody = ''
+  const response = { statusCode: 0, setHeader(name: string, value: string) { responseHeaders.set(name.toLowerCase(), value) }, end(value = '') { responseBody = String(value) } }
+  const controls = { canAccess: async () => access === 'allowed', authorize: async () => { if (access === 'unauthenticated') throw new Error('UNAUTHENTICATED'); if (access === 'forbidden') throw new Error('FORBIDDEN') } }
+  const store = { snapshot: async () => ({ projectVersions: [{ id: 'pv-1', projectId: 'project-1' }] }) }
+  const handled = await routeTestDesign(request as never, response as never, { method, url: new URL(`http://127.0.0.1${path}`), principal, controls: controls as never, service: service as never, store: store as never, configurations: {} as never })
+  assert.equal(handled, true)
+  return { status: response.statusCode, headers: responseHeaders, body: responseBody ? JSON.parse(responseBody) as unknown : undefined }
+}

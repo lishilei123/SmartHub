@@ -141,6 +141,12 @@ export type TestCaseContent = {
   domain: string
 }
 
+export type TestCaseTraceability = {
+  sourceRequirementReleaseId: string
+  requirementRefs: Array<{ requirementReleaseId: string; requirementId: string }>
+  testPointRefs: Array<{ testPointTreeVersionId: string; testPointId: string }>
+}
+
 export type TestDesignCase = {
   id: string
   candidateRef?: string
@@ -169,13 +175,13 @@ export type CaseChangeOperation = 'reuse' | 'update' | 'create' | 'deprecate' | 
 export type CaseChangeDecision = 'pending' | 'accepted' | 'accepted_edited' | 'rejected' | 'keep_original' | 'reference' | 'deprecated'
 export type CaseChangeProposal = { id: string; runId: string; operation: CaseChangeOperation; sourceCaseId?: string; sourceRevision?: number; candidateCaseId?: string; candidateContent?: TestCaseContent; diff: Array<{ path: string; before?: unknown; after?: unknown }>; requirementRefs: string[]; testPointIds: string[]; reason: string; confidence: number; decision: CaseChangeDecision; createdAt: string; decidedBy?: string; decidedAt?: string; decisions: Array<{ id: string; expectedVersion: number; decision: Exclude<CaseChangeDecision, 'pending'>; comment?: string; decidedBy: string; decidedAt: string }>; appliedCaseId?: string; appliedRevision?: number }
 
-export type LibraryTestCaseRevision = { revision: number; content: TestCaseContent; contentSha256: string; semanticSha256: string; sourceRunId?: string; sourceProposalId?: string; changeReason: string; createdBy: string; createdAt: string }
+export type LibraryTestCaseRevision = { revision: number; content: TestCaseContent; contentSha256: string; semanticSha256: string; sourceRunId?: string; sourceProposalId?: string; traceability?: TestCaseTraceability; changeReason: string; createdBy: string; createdAt: string }
 export type LibraryTestCase = { id: string; projectId: string; currentRevision: number; status: 'active' | 'deprecated'; content: TestCaseContent; contentSha256: string; semanticSha256: string; createdAt: string; updatedAt: string; etag: string; revisions?: LibraryTestCaseRevision[] }
 export type TestCaseLibraryVersion = { id: string; projectId: string; version: number; name: string; sourceRunId?: string; members: Array<{ caseId: string; revision: number; ordinal: number; contentSha256: string }>; contentSha256: string; publishedBy: string; publishedAt: string; projection: WorkspaceProjection; publicationSummary?: { proposalStatistics: Record<CaseChangeOperation, number>; dimensionStatistics: Partial<Record<TestDimension, number>>; coverageAudit: { id: string; statistics: TestDesignCoverageAudit['statistics']; blockerCount: number } } }
 export type TestSuiteMember = { testCaseLibraryVersionId?: string; caseId: string; revision: number; executionMethods: ExecutionMethod[]; executionMethod?: TestExecutionMethod; ordinal: number; reason: string }
-export type TestSuiteDraft = { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; members: TestSuiteMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string; etag?: string }
-export type LibraryTestSuiteVersion = { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom' | 'functional_domain'; version: number; name: string; members: TestSuiteMember[]; contentSha256: string; publishedBy: string; publishedAt: string; status?: 'active' | 'deprecated'; deprecatedBy?: string; deprecatedAt?: string }
-export type LibraryExecutionHandoff = { id: string; projectId: string; projectVersionId: string; testCaseLibraryVersionId: string; suiteVersionId?: string; mode: TestExecutionMode; members: Array<{ stage: TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dimension: TestDimension; executionSpec: TestCaseExecutionSpec; selectionReason: string; contentSha256: string }>; contentSha256: string; createdBy: string; createdAt: string }
+export type TestSuiteDraft = { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string; etag?: string }
+export type LibraryTestSuiteVersion = { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom' | 'functional_domain'; version: number; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteMember[]; contentSha256: string; publishedBy: string; publishedAt: string; status?: 'active' | 'deprecated'; deprecatedBy?: string; deprecatedAt?: string }
+export type LibraryExecutionHandoff = { id: string; projectId: string; projectVersionId: string; testCaseLibraryVersionId: string; suiteVersionId?: string; mode: TestExecutionMode; members: Array<{ stage: TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dimension: TestDimension; executionSpec: TestCaseExecutionSpec; traceability?: TestCaseTraceability; selectionReason: string; contentSha256: string }>; contentSha256: string; createdBy: string; createdAt: string }
 
 export type TestDesignWorkflowRun = TestDesignRunSummary & {
   basisSnapshot: { schemaVersion: string; projectVersionId: string; requirementReleaseId: string; verificationRunId: string; requirementsJsonSha256: string; items: unknown[]; snapshotSha256: string; createdAt: string }
@@ -191,6 +197,8 @@ export type TestDesignWorkflowRun = TestDesignRunSummary & {
   confirmationItems: Array<{ id: string; title: string; question: string; impactStage: string; blocker: boolean; state: string; actions: Array<{ id: string }> }>
   caseChangeProposals: CaseChangeProposal[]
   caseChangeProposalSha256: string
+  baseTestCaseLibraryVersionId?: string
+  baseTestCaseLibraryVersionSha256?: string
   automaticRepair?: { status: string; attempt: number; maxAttempts: number; blockerCodes: string[] }
   /** Legacy run payload shape retained only for the unmounted historical component. */
   caseSetVersions?: TestCaseSetVersion[]

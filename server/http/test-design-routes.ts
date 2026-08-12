@@ -152,6 +152,10 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (libraryVersion && method === 'GET' && libraryVersion[2] !== 'diff') { await authorizeProjectPermission(libraryVersion[1], 'test-design:read', principal, controls, store); return send(response, 200, await service.getLibraryVersion(libraryVersion[1], libraryVersion[2])) }
   const libraryVersionDiff = /^\/api\/projects\/([^/]+)\/test-case-library-versions\/diff$/.exec(url.pathname)
   if (libraryVersionDiff && method === 'GET') { await authorizeProjectPermission(libraryVersionDiff[1], 'test-design:read', principal, controls, store); return send(response, 200, { changes: await service.compareLibraryVersions(libraryVersionDiff[1], String(url.searchParams.get('from')), String(url.searchParams.get('to'))) }) }
+  const legacyMigrationPreview = /^\/api\/projects\/([^/]+)\/test-case-library-migrations\/([^/]+)\/preview$/.exec(url.pathname)
+  if (legacyMigrationPreview && method === 'GET') { await authorizeProjectPermission(legacyMigrationPreview[1], 'test-design:read', principal, controls, store); return send(response, 200, await service.previewLegacyCaseMigration(legacyMigrationPreview[1], legacyMigrationPreview[2])) }
+  const legacyMigration = /^\/api\/projects\/([^/]+)\/test-case-library-migrations$/.exec(url.pathname)
+  if (legacyMigration && method === 'POST') { await authorizeProjectPermission(legacyMigration[1], 'test-design:publish', principal, controls, store); return send(response, 201, await service.migrateLegacyCaseSet(legacyMigration[1], await json(request) as never, principal)) }
   const suiteDrafts = /^\/api\/projects\/([^/]+)\/test-suite-drafts$/.exec(url.pathname)
   if (suiteDrafts && method === 'GET') { await authorizeProjectPermission(suiteDrafts[1], 'test-design:read', principal, controls, store); return send(response, 200, { items: await service.listSuiteDrafts(suiteDrafts[1]) }) }
   if (suiteDrafts && method === 'POST') { await authorizeProjectPermission(suiteDrafts[1], 'test-design:edit', principal, controls, store); return send(response, 201, await service.createSuiteDraft(suiteDrafts[1], await json(request), principal)) }

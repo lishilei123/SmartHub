@@ -203,7 +203,25 @@ export function normalizeTestDesignState(state: DatabaseState) {
   aggregate.suiteDrafts ??= []
   aggregate.suiteVersions ??= []
   aggregate.executionHandoffs ??= []
+  aggregate.legacyMigrations ??= []
   for (const run of aggregate.runs ?? []) run.caseChangeProposals ??= []
+  for (const draft of aggregate.suiteDrafts) normalizeSuiteLibraryBinding(draft)
+  for (const version of aggregate.suiteVersions) normalizeSuiteLibraryBinding(version)
+}
+
+function normalizeSuiteLibraryBinding(suite: { testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: Array<{ testCaseLibraryVersionId?: string }> }) {
+  const memberVersionIds = [...new Set(suite.members.map(member => member.testCaseLibraryVersionId).filter((value): value is string => Boolean(value)))]
+  if (suite.testCaseLibraryVersionId && memberVersionIds.every(id => id === suite.testCaseLibraryVersionId)) {
+    suite.compatibilityStatus = 'compatible'
+    suite.incompatibilityReason = undefined
+  } else if (!suite.testCaseLibraryVersionId && memberVersionIds.length === 1 && suite.members.every(member => member.testCaseLibraryVersionId === memberVersionIds[0])) {
+    suite.testCaseLibraryVersionId = memberVersionIds[0]
+    suite.compatibilityStatus = 'compatible'
+    suite.incompatibilityReason = undefined
+  } else {
+    suite.compatibilityStatus = 'migration_required'
+    suite.incompatibilityReason = '历史套件未固定唯一正式用例库版本，需要人工迁移。'
+  }
 }
 
 function removeRetiredAgentData(state: DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[]; technicalSolutionReviews?: unknown[]; technicalSolutionRuns?: unknown[]; technicalSolutionFindingActions?: unknown[] }) {

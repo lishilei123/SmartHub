@@ -910,6 +910,90 @@ const migrations: Migration[] = [{
     ALTER TABLE smarthub.test_execution_handoffs ADD COLUMN IF NOT EXISTS suite_version_id text REFERENCES smarthub.test_suite_versions(id) ON DELETE RESTRICT;
     ALTER TABLE smarthub.test_execution_handoffs ADD COLUMN IF NOT EXISTS execution_mode text;
   `,
+}, {
+  version: 25,
+  name: 'test-case-library-traceability-baseline-and-legacy-migration',
+  sql: `
+    ALTER TABLE smarthub.library_test_case_revisions ADD COLUMN IF NOT EXISTS traceability jsonb;
+    ALTER TABLE smarthub.workflow_runs ADD COLUMN IF NOT EXISTS base_test_case_library_version_id text REFERENCES smarthub.test_case_library_versions(id) ON DELETE RESTRICT;
+    ALTER TABLE smarthub.workflow_runs ADD COLUMN IF NOT EXISTS base_test_case_library_version_sha256 char(64);
+
+    ALTER TABLE smarthub.test_case_library_versions ADD COLUMN IF NOT EXISTS legacy_test_case_set_version_id text REFERENCES smarthub.test_case_set_versions(id) ON DELETE RESTRICT;
+    CREATE UNIQUE INDEX IF NOT EXISTS test_case_library_versions_legacy_source_uq
+      ON smarthub.test_case_library_versions (legacy_test_case_set_version_id)
+      WHERE legacy_test_case_set_version_id IS NOT NULL;
+
+    ALTER TABLE smarthub.test_suite_drafts ADD COLUMN IF NOT EXISTS test_case_library_version_id text REFERENCES smarthub.test_case_library_versions(id) ON DELETE RESTRICT;
+    ALTER TABLE smarthub.test_suite_drafts ADD COLUMN IF NOT EXISTS compatibility_status text;
+    ALTER TABLE smarthub.test_suite_versions ADD COLUMN IF NOT EXISTS test_case_library_version_id text REFERENCES smarthub.test_case_library_versions(id) ON DELETE RESTRICT;
+    ALTER TABLE smarthub.test_suite_versions ADD COLUMN IF NOT EXISTS compatibility_status text;
+    CREATE INDEX IF NOT EXISTS test_suite_drafts_library_version_idx ON smarthub.test_suite_drafts (project_id, test_case_library_version_id, status);
+    CREATE INDEX IF NOT EXISTS test_suite_versions_library_version_idx ON smarthub.test_suite_versions (project_id, test_case_library_version_id, published_at DESC);
+
+    CREATE TABLE IF NOT EXISTS smarthub.library_test_case_revision_requirement_refs (
+      case_id text NOT NULL,
+      case_revision integer NOT NULL,
+      requirement_release_id text NOT NULL,
+      requirement_id text NOT NULL,
+      PRIMARY KEY (case_id, case_revision, requirement_release_id, requirement_id),
+      FOREIGN KEY (case_id, case_revision) REFERENCES smarthub.library_test_case_revisions(case_id, revision) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS library_case_requirement_refs_release_idx
+      ON smarthub.library_test_case_revision_requirement_refs (requirement_release_id, requirement_id);
+    CREATE TABLE IF NOT EXISTS smarthub.library_test_case_revision_test_point_refs (
+      case_id text NOT NULL,
+      case_revision integer NOT NULL,
+      test_point_tree_version_id text NOT NULL,
+      test_point_id text NOT NULL,
+      PRIMARY KEY (case_id, case_revision, test_point_tree_version_id, test_point_id),
+      FOREIGN KEY (case_id, case_revision) REFERENCES smarthub.library_test_case_revisions(case_id, revision) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS library_case_test_point_refs_version_idx
+      ON smarthub.library_test_case_revision_test_point_refs (test_point_tree_version_id, test_point_id);
+
+    CREATE TABLE IF NOT EXISTS smarthub.legacy_test_case_migrations (
+      id text PRIMARY KEY,
+      project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE RESTRICT,
+      legacy_test_case_set_version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE RESTRICT,
+      test_case_library_version_id text NOT NULL REFERENCES smarthub.test_case_library_versions(id) ON DELETE RESTRICT,
+      preview_sha256 char(64) NOT NULL,
+      migrated_by text NOT NULL,
+      migrated_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (project_id, legacy_test_case_set_version_id)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.legacy_test_case_id_mappings (
+      migration_id text NOT NULL REFERENCES smarthub.legacy_test_case_migrations(id) ON DELETE RESTRICT,
+      project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE RESTRICT,
+      legacy_test_case_set_version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE RESTRICT,
+      legacy_case_id text NOT NULL,
+      legacy_revision integer NOT NULL,
+      library_case_id text NOT NULL,
+      library_revision integer NOT NULL,
+      resolution text NOT NULL,
+      data jsonb NOT NULL,
+      PRIMARY KEY (migration_id, legacy_case_id, legacy_revision),
+      UNIQUE (project_id, legacy_test_case_set_version_id, legacy_case_id, legacy_revision),
+      FOREIGN KEY (library_case_id, library_revision) REFERENCES smarthub.library_test_case_revisions(case_id, revision) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS legacy_test_case_id_mappings_case_idx ON smarthub.legacy_test_case_id_mappings (project_id, legacy_case_id);
+
+    ALTER TABLE smarthub.test_execution_handoff_members ADD COLUMN IF NOT EXISTS dimension text;
+    ALTER TABLE smarthub.test_execution_handoff_members ADD COLUMN IF NOT EXISTS execution_spec jsonb;
+    ALTER TABLE smarthub.test_execution_handoff_members ADD COLUMN IF NOT EXISTS traceability jsonb;
+    ALTER TABLE smarthub.test_execution_handoff_members ADD COLUMN IF NOT EXISTS content_sha256 char(64);
+
+    DO $$ BEGIN
+      ALTER TABLE smarthub.test_case_library_version_members
+        ADD CONSTRAINT test_case_library_members_revision_fk
+        FOREIGN KEY (case_id, case_revision) REFERENCES smarthub.library_test_case_revisions(case_id, revision) ON DELETE RESTRICT NOT VALID;
+    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    DO $$ BEGIN
+      ALTER TABLE smarthub.test_suite_draft_members
+        ADD CONSTRAINT test_suite_draft_members_revision_fk
+        FOREIGN KEY (case_id, case_revision) REFERENCES smarthub.library_test_case_revisions(case_id, revision) ON DELETE RESTRICT NOT VALID;
+    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {
