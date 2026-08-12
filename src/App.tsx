@@ -37,15 +37,12 @@ const agentConfigurationGroups: Array<{ label: string; agentKeys: AgentConfigura
 ]
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 
-const pageStorageKey = 'smarthub-current-page'
 const projectVersionStorageKey = 'smarthub-project-version-id'
 const pageKeys: PageKey[] = ['dashboard', 'requirements', 'documents', 'test-design', 'execution', 'reports', 'settings']
 const restorePage = (): PageKey => {
   if (typeof window === 'undefined') return 'dashboard'
   const routed = new URL(window.location.href).searchParams.get('page')
-  if (pageKeys.includes(routed as PageKey)) return routed as PageKey
-  const saved = window.localStorage.getItem(pageStorageKey)
-  return pageKeys.includes(saved as PageKey) ? saved as PageKey : 'dashboard'
+  return pageKeys.includes(routed as PageKey) ? routed as PageKey : 'dashboard'
 }
 const restoreProjectVersion = () => {
   if (typeof window === 'undefined') return ''
@@ -124,7 +121,6 @@ function App() {
   }, [])
 
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current) }, [])
-  useEffect(() => { window.localStorage.setItem(pageStorageKey, page) }, [page])
   const updateRoute = useCallback((next: { page?: PageKey; projectVersionId?: string; resetReviewContext?: boolean }, mode: 'push' | 'replace' = 'push') => {
     const url = new URL(window.location.href)
     if (next.page) url.searchParams.set('page', next.page)
@@ -204,8 +200,7 @@ function App() {
   useEffect(() => {
     if (selectedProjectVersionId) window.localStorage.setItem(projectVersionStorageKey, selectedProjectVersionId)
     else window.localStorage.removeItem(projectVersionStorageKey)
-    updateRoute({ page, projectVersionId: selectedProjectVersionId }, 'replace')
-  }, [page, selectedProjectVersionId, updateRoute])
+  }, [selectedProjectVersionId])
   const meta = pageMeta[page]
 
   return <div className={`app-shell ${sidebarCollapsed ? 'shell-collapsed' : ''}`}>
