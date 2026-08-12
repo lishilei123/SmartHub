@@ -195,7 +195,7 @@ export function RequirementAnalysisPageV2(props: Props) {
   useEffect(() => {
     const versions = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
     const requested = requestedRepairDiff.current
-    if (requested?.assetId === selectedDocument?.id) {
+    if (requested && requested.assetId === selectedDocument?.id) {
       requestedRepairDiff.current = null
       setDiffVersionIds(requested.versionIds)
       setDiffContents({})
