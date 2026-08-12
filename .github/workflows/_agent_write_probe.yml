@@ -1,8 +1,23 @@
 name: Agent Write Probe
 on:
-  workflow_dispatch:
+  push:
+    branches: [agent/requirement-analysis-ui]
+permissions:
+  contents: write
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - run: echo probe
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/requirement-analysis-ui
+      - name: Verify write-back
+        shell: bash
+        run: |
+          git config user.name "SmartHub Agent"
+          git config user.email "actions@users.noreply.github.com"
+          echo ok > _agent_probe_ok.txt
+          rm -f .github/workflows/_agent_write_probe.yml
+          git add -A
+          git commit -m "chore: verify agent write-back"
+          git push origin HEAD:agent/requirement-analysis-ui
