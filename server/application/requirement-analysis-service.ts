@@ -228,8 +228,8 @@ export class RequirementAnalysisService {
     }
   }
 
-  async finalizeRepairAndStartVerification(runId: string, draftId: string) {
-    let state = await this.store.snapshot()
+  async finalizeRepairApplication(runId: string, draftId: string) {
+    const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
     requireSucceededRun(run)
     requireOpenProjectVersion(state, run.projectVersionId)
@@ -241,10 +241,12 @@ export class RequirementAnalysisService {
       const activeIndex = required(state.indexes.find(item => item.id === state.knowledgeBases.find(kb => kb.id === run.snapshot.knowledgeBaseId)?.activeIndexVersionId && item.status === 'active'), '知识库活动索引不存在')
       const unindexed = draft.application.items.filter(item => !activeIndex.assetVersionIds.includes(item.targetAssetVersionId))
       if (unindexed.length) throw new Error(`REPAIR_ASSET_VERSION_NOT_INDEXED: ${unindexed.map(item => item.targetAssetVersionId).join('、')}`)
-      await this.store.transaction(current => {
+      return this.store.transaction(current => {
         const source = required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在')
         requireOpenProjectVersion(current, source.projectVersionId)
         const stored = repairDraft(source, draft.id)
+        if (['applied', 'verification_running', 'verified'].includes(stored.status)) return structuredClone(stored)
+        if (stored.status !== 'applying') throw new Error('REPAIR_APPLICATION_STATE_CHANGED')
         for (const item of stored.application!.items) {
           const version = required(current.versions.find(candidate => candidate.id === item.targetAssetVersionId && candidate.status === 'ready'), '修复后的需求版本未就绪')
           if (version.contentHash !== item.contentSha256) throw new Error('修复后的需求版本 Hash 漂移')
@@ -257,9 +259,19 @@ export class RequirementAnalysisService {
         markFindingsNeedsFollowUp(current, source, stored)
         stored.status = 'applied'
         stored.application!.appliedAt = new Date().toISOString()
+        return structuredClone(stored)
       })
-      state = await this.store.snapshot()
     }
+    return structuredClone(draft)
+  }
+
+  async finalizeRepairAndStartVerification(runId: string, draftId: string) {
+    const state = await this.store.snapshot()
+    const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
+    requireSucceededRun(run)
+    requireOpenProjectVersion(state, run.projectVersionId)
+    const draft = repairDraft(run, draftId)
+    if (!['applied', 'verification_running'].includes(draft.status) || !draft.application?.items.length) throw new Error('修复应用尚未完成人工复验前置门禁')
     const existingVerification = state.reviewRuns.find(item => item.workflow?.verificationOf?.sourceRunId === run.id && item.workflow.verificationOf.repairDraftId === draft.id)
     if (existingVerification) {
       await this.store.transaction(current => {

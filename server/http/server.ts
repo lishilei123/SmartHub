@@ -152,6 +152,8 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'POST' && repairApproval) { await requireRun(repairApproval[1], 'review:handle'); const body = await json(request); return send(response, 200, await requirementAnalysisService.approveRepairDraft(repairApproval[1], repairApproval[2], { comment: body.comment === undefined ? undefined : String(body.comment), principal })) }
   const repairApply = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/apply$/.exec(url.pathname)
   if (method === 'POST' && repairApply) { await requireRun(repairApply[1], 'review:handle'); return send(response, 202, await requirementAnalysisService.applyRepairDraft(repairApply[1], repairApply[2])) }
+  const repairFinalize = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/finalize$/.exec(url.pathname)
+  if (method === 'POST' && repairFinalize) { await requireRun(repairFinalize[1], 'review:handle'); return send(response, 200, await requirementAnalysisService.finalizeRepairApplication(repairFinalize[1], repairFinalize[2])) }
   const repairVerify = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/verify$/.exec(url.pathname)
   if (method === 'POST' && repairVerify) { await requireRun(repairVerify[1], 'review:create'); return send(response, 202, await requirementAnalysisService.finalizeRepairAndStartVerification(repairVerify[1], repairVerify[2])) }
   const releaseCandidate = /^\/api\/requirement-review-runs\/([^/]+)\/release-candidate$/.exec(url.pathname)

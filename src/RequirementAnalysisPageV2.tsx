@@ -13,6 +13,7 @@ import {
   generateRequirementRepairDraft,
   approveRequirementRepairDraft,
   applyRequirementRepairDraft,
+  finalizeRequirementRepairDraft,
   downloadRequirementReviewReport,
   loadFindingActions,
   loadRequirementReviewRun,
@@ -38,6 +39,7 @@ import { requirementWorkspaceDirectory } from './version-document-path'
 import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
 import type { ProjectVersion } from './project-version-api'
 import './requirement-analysis-v2.css'
+import './requirement-analysis-review-flow.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 type ViewKey = 'overview' | 'baseline' | 'findings' | 'artifacts' | 'diff'
@@ -66,7 +68,7 @@ const findingTypeLabels: Record<ReviewFindingType, string> = {
   dependency_risk: '依赖风险', other: '其他问题',
 }
 const severityLabels: Record<ReviewSeverity, string> = { blocker: '阻断', high: '高', medium: '中', low: '低' }
-const findingStateLabels: Record<FindingState, string> = { open: '待处理', confirmed: '已确认', dismissed: '已驳回', resolved: '已解决', needs_follow_up: '待复验' }
+const findingStateLabels: Record<FindingState, string> = { open: '待人工审核', confirmed: '已采纳', dismissed: '不采纳', resolved: '已解决', needs_follow_up: '暂缓 / 待复验' }
 const viewTabs: Array<{ key: ViewKey; label: string; icon: typeof Sparkles }> = [
   { key: 'overview', label: '分析概览', icon: Sparkles },
   { key: 'baseline', label: '需求基线', icon: GitBranch },
@@ -105,6 +107,15 @@ function fixedAssets(run: RunRecord) {
   return run.snapshot?.assets ?? run.documents ?? []
 }
 
+function repairDraftForFinding(drafts: RequirementRepairDraft[], findingId: string) {
+  return [...drafts].reverse().find(draft => draft.candidate?.patches.some(patch => patch.findingRefs.includes(findingId)))
+}
+
+function assetVersionLabel(versionId: string, documents: KnowledgeDocument[]) {
+  const version = documents.flatMap(document => document.versions ?? []).find(candidate => candidate.id === versionId)
+  return version ? `V${version.number}` : versionId
+}
+
 export function RequirementAnalysisPageV2(props: Props) {
   const { projectVersion, documents, apiState, refreshKnowledge, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenRequirementDocument, onDeleteRequirementDocument, canDeleteRequirementDocument = false } = props
   const [view, setView] = useState<ViewKey>('overview')
@@ -125,10 +136,12 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [fixFinding, setFixFinding] = useState<ReviewFinding | null>(null)
   const [fixDraft, setFixDraft] = useState<RequirementRepairDraft | null>(null)
   const [fixBusy, setFixBusy] = useState(false)
+  const [verificationBusyDraftId, setVerificationBusyDraftId] = useState('')
   const [releaseBusy, setReleaseBusy] = useState(false)
   const [diffVersionIds, setDiffVersionIds] = useState<[string, string]>(['', ''])
   const [diffContents, setDiffContents] = useState<Record<string, string>>({})
   const [diffLoading, setDiffLoading] = useState(false)
+  const requestedRepairDiff = useRef<{ assetId: string; versionIds: [string, string] } | null>(null)
 
   const workspaceDirectoryPath = projectVersion ? requirementWorkspaceDirectory(projectVersion.name) : ''
   const requirementDocuments = useMemo(() => documents.filter(document => {
@@ -181,6 +194,13 @@ export function RequirementAnalysisPageV2(props: Props) {
   }, [selectedRun?.id, selectedRun?.status])
   useEffect(() => {
     const versions = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
+    const requested = requestedRepairDiff.current
+    if (requested?.assetId === selectedDocument?.id) {
+      requestedRepairDiff.current = null
+      setDiffVersionIds(requested.versionIds)
+      setDiffContents({})
+      return
+    }
     const right = selectedDocument?.assetVersionId ?? versions.at(-1)?.id ?? ''
     const rightIndex = versions.findIndex(item => item.id === right)
     const left = versions[Math.max(0, rightIndex - 1)]?.id ?? versions.at(-2)?.id ?? ''
@@ -246,24 +266,65 @@ export function RequirementAnalysisPageV2(props: Props) {
     catch (error) { notify(error instanceof Error ? error.message : 'AI 修复草稿生成失败', 'error') } finally { setFixBusy(false) }
   }
 
-  const applyFindingFix = async () => {
+  const applyRepair = async (draft: RequirementRepairDraft, finding: ReviewFinding) => {
+    if (!selectedRun) return
+    const applying = await applyRequirementRepairDraft(selectedRun.id, draft.id)
+    setFixDraft(applying)
+    const taskIds = applying.application?.items.flatMap(item => item.taskId ? [item.taskId] : []) ?? []
+    if (taskIds.length) {
+      const completed = await waitForTaskResults(taskIds)
+      if (completed.failed.length || completed.cancelled.length || completed.pending.length) throw new Error('修复后的需求文档入库未完成')
+    }
+    const applied = await finalizeRequirementRepairDraft(selectedRun.id, draft.id)
+    await refreshKnowledge()
+    const [detail, actions] = await Promise.all([loadRequirementReviewRun(selectedRun.id), loadFindingActions(selectedRun.id)])
+    setRuns(current => current.map(item => item.id === detail.id ? { ...item, ...detail } : item))
+    setFindingStates(current => ({ ...current, ...Object.fromEntries(actions.findings.map(item => [`${selectedRun.id}:${item.findingId}`, item.state])) }))
+    setFindingVersions(current => ({ ...current, ...Object.fromEntries(actions.findings.map(item => [`${selectedRun.id}:${item.findingId}`, item.version])) }))
+    addAudit(`采纳并应用 AI 修复方案 ${draft.id}：${finding.clientFindingId} → ${applied.application?.items.map(item => item.targetAssetVersionId).join('、')}`)
+    setFixFinding(null)
+    setFixDraft(null)
+    setView('findings')
+    notify('修复方案已应用并生成新 AssetVersion；当前停留在待复验状态。')
+  }
+
+  const approveRepair = async () => {
     if (!fixFinding || !fixDraft || !selectedRun || !projectVersion || projectVersion.status !== 'open') return
     setFixBusy(true)
     try {
-      await approveRequirementRepairDraft(selectedRun.id, fixDraft.id, `已在 Diff 草稿中人工确认 ${fixFinding.clientFindingId} 的修改范围。`)
-      const applying = await applyRequirementRepairDraft(selectedRun.id, fixDraft.id)
-      const taskIds = applying.application?.items.flatMap(item => item.taskId ? [item.taskId] : []) ?? []
-      if (taskIds.length) {
-        const completed = await waitForTaskResults(taskIds)
-        if (completed.failed.length || completed.cancelled.length || completed.pending.length) throw new Error('修复后的需求文档入库未完成')
-      }
-      const verification = await verifyRequirementRepairDraft(selectedRun.id, fixDraft.id)
-      await refreshKnowledge()
-      setRuns(current => [verification.verificationRun, ...current.filter(item => item.id !== verification.verificationRun.id)])
+      const approved = fixDraft.status === 'generated'
+        ? await approveRequirementRepairDraft(selectedRun.id, fixDraft.id, `已人工采纳 ${fixFinding.clientFindingId} 的 AI 修复 Diff。`)
+        : fixDraft
+      setFixDraft(approved)
+      await applyRepair(approved, fixFinding)
+    } catch (error) { notify(error instanceof Error ? error.message : 'AI 修复方案应用失败', 'error') } finally { setFixBusy(false) }
+  }
+
+  const startVerification = async (draft: RequirementRepairDraft) => {
+    if (!selectedRun || !projectVersion || projectVersion.status !== 'open' || draft.status !== 'applied') return
+    setVerificationBusyDraftId(draft.id)
+    try {
+      const verification = await verifyRequirementRepairDraft(selectedRun.id, draft.id)
+      setRuns(current => [verification.verificationRun, ...current.map(item => item.id === selectedRun.id && item.workflow ? { ...item, workflow: { ...item.workflow, repairDrafts: item.workflow.repairDrafts?.map(candidate => candidate.id === draft.id ? verification.repairDraft : candidate) } } : item).filter(item => item.id !== verification.verificationRun.id)])
       setSelectedRunId(verification.verificationRun.id)
-      addAudit(`受控修复 ${fixFinding.clientFindingId}：${fixDraft.id} → 复验 ${verification.verificationRun.id}`)
-      setFixFinding(null); setFixDraft(null); setView('overview'); notify('修复已生成新 AssetVersion，服务端已固定输入并启动完整复验。')
-    } catch (error) { notify(error instanceof Error ? error.message : 'AI 修复应用失败', 'error') } finally { setFixBusy(false) }
+      setView('overview')
+      addAudit(`人工启动 AI 复验：${draft.id} → ${verification.verificationRun.id}`)
+      notify('AI 复验已启动，将对新 AssetVersion 执行完整需求分析。')
+    } catch (error) { notify(error instanceof Error ? error.message : 'AI 复验启动失败', 'error') } finally { setVerificationBusyDraftId('') }
+  }
+
+  const openRepairDiff = (draft: RequirementRepairDraft) => {
+    const item = draft.application?.items[0]
+    if (!item) return
+    const versionIds: [string, string] = [item.sourceAssetVersionId, item.targetAssetVersionId]
+    if (selectedDocument?.id === item.assetId) {
+      setDiffVersionIds(versionIds)
+      setDiffContents({})
+    } else {
+      requestedRepairDiff.current = { assetId: item.assetId, versionIds }
+      setSelectedDocumentId(item.assetId)
+    }
+    setView('diff')
   }
 
   const visibleFindings = (result?.findings ?? []).filter(finding => {
@@ -303,7 +364,7 @@ export function RequirementAnalysisPageV2(props: Props) {
 
   return <section className="card rav2-page">
     <header className="rav2-header">
-      <div className="rav2-title"><span><Sparkles /></span><div><h1>Pi Agent 需求分析 · {projectVersion.name}</h1><p>分析审核 → 人工确认 → 受控修复 → 新 AssetVersion → 完整复验 → 人工发布。</p></div></div>
+      <div className="rav2-title"><span><Sparkles /></span><div><h1>Pi Agent 需求分析 · {projectVersion.name}</h1><p>AI 分析 → 人工采纳问题 → AI 修复建议 → 人工采纳修复 → 新版本 → 人工启动复验 → AI 复验 → 人工发布。</p></div></div>
       <div className="rav2-run-info"><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{runLabel(selectedRun)}</Badge><span><small>Run</small><b>{selectedRun?.id?.replace('review_run_', '').slice(0, 10) ?? '-'}</b></span><span><small>已读 / 候选</small><b>{readVersions.size} / {selectedRun?.assetVersionIds?.length ?? requirementDocuments.length}</b></span></div>
       <div className="rav2-actions"><select value={selectedRunId} onChange={event => setSelectedRunId(event.target.value)} disabled={loadingRuns}><option value="">{loadingRuns ? '加载中…' : '运行历史'}</option>{runs.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run)}</option>)}</select><button className="btn ghost" onClick={() => void refreshRuns()}><RefreshCw />刷新</button><button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />分析报告</button>{selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消</button> : selectedRun && ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="btn primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />完整重跑</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : selectedRun ? '重新分析' : '开始分析'}</button>}</div>
     </header>
@@ -312,14 +373,14 @@ export function RequirementAnalysisPageV2(props: Props) {
       <main className="rav2-main"><nav className="rav2-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'findings' && result ? <i>{result.findings.length}</i> : null}</button>)}</nav>{selectedRun?.status === 'running' && <div className="rav2-running"><LoaderCircle className="rotating" /><span><b>RequirementAnalysisAgent 正在分析并自检</b><small>同一 Session 读取 Workspace、查询 Knowledge、生成 Baseline / Finding / Test Focus。</small></span></div>}<div className="rav2-content">
         {view === 'overview' && <Overview result={result} blockerCount={blockerCount} highCount={highCount} pendingCount={pendingCount} onFindings={() => setView('findings')} onArtifacts={() => setView('artifacts')} />}
         {view === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}
-        {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} canAiFix={projectVersion.status === 'open'} />}
+        {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} documents={requirementDocuments} repairDrafts={selectedRun?.workflow?.repairDrafts ?? []} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}
         {view === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} busy={releaseBusy} onGenerate={() => void generateRelease()} onPublish={() => void publishRelease()} />}
         {view === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
       </div></main>
       <aside className="rav2-agent"><header><span><Bot /><b>Pi Agent</b></span><Badge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' ? '已完成' : '待运行'}</Badge></header><AgentConversation run={selectedRun} /></aside>
     </div>
     {sourceEvidence && <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setSourceEvidence(null) }}><section className="rav2-source-modal"><header><span><ShieldCheck /><b>固定原文证据</b></span><button onClick={() => setSourceEvidence(null)}><XCircle /></button></header><div className="rav2-evidence"><b>{sourceEvidence.clientEvidenceId} · {sourceEvidence.locator.heading}</b><p>“{sourceEvidence.quote}”</p></div><div className="rav2-source-body">{sourceLoading ? <LoaderCircle className="rotating" /> : <MarkdownDocument source={sourceContent} format="markdown" />}</div></section></div>}
-    {fixFinding && <FixModal finding={fixFinding} draft={fixDraft} busy={fixBusy} assets={fixedAssets(selectedRun!)} onClose={() => { if (!fixBusy) { setFixFinding(null); setFixDraft(null) } }} onRegenerate={() => void draftFindingFix(fixFinding)} onApply={() => void applyFindingFix()} />}
+    {fixFinding && <FixModal finding={fixFinding} draft={fixDraft} busy={fixBusy} assets={fixedAssets(selectedRun!)} onClose={() => { if (!fixBusy) { setFixFinding(null); setFixDraft(null) } }} onRegenerate={() => void draftFindingFix(fixFinding)} onApprove={() => void approveRepair()} />}
   </section>
 }
 
@@ -334,9 +395,64 @@ function Baseline({ result, onEvidence }: { result?: RequirementAnalysisResponse
   return <div className="rav2-baseline"><header><div><GitBranch /><span><h2>Requirement Baseline</h2><p>自然语言需求为主，Evidence 可下钻到固定原文。</p></span></div><Badge tone="green">{result.requirementPoints.length}</Badge></header>{result.requirementPoints.map(point => { const linked = point.evidenceRefs.map(id => evidence.get(id)).filter((item): item is ReviewEvidence => Boolean(item)); return <article key={point.clientRequirementPointId}><header><span className="rav2-rp">{point.clientRequirementPointId}</span><div><h3>{point.title}</h3><p>{point.description}</p></div><Badge tone={linked.length ? 'green':'orange'}>{linked.length} Evidence</Badge></header><footer>{linked.map(item => <button key={item.clientEvidenceId} onClick={() => onEvidence(item)}><Quote />{item.clientEvidenceId} · {item.locator.heading}</button>)}</footer></article>})}</div>
 }
 
-function Findings(props: { result?: RequirementAnalysisResponse['result']; selectedRun?: RunRecord; findingStates: Record<string, FindingState>; findingTypeFilter: 'all'|ReviewFindingType; setFindingTypeFilter:(v:'all'|ReviewFindingType)=>void; severityFilter:'all'|ReviewSeverity; setSeverityFilter:(v:'all'|ReviewSeverity)=>void; findingStateFilter:'all'|FindingState; setFindingStateFilter:(v:'all'|FindingState)=>void; visibleFindings:ReviewFinding[]; onEvidence:(e:ReviewEvidence)=>void; onState:(f:ReviewFinding,s:FindingState)=>void; onAiFix:(f:ReviewFinding)=>void; canAiFix:boolean }) {
-  const { result, selectedRun, findingStates, visibleFindings } = props; if (!result) return <div className="rav2-empty"><AlertTriangle /><h2>暂无需求问题</h2></div>
-  return <div className="rav2-findings"><header><div><AlertTriangle /><span><h2>需求问题</h2><p>Finding 必须先人工确认；Pi Agent 只生成 Patch 草稿，批准后由服务端应用并自动启动完整复验。</p></span></div><Badge tone="orange">{visibleFindings.length} / {result.findings.length}</Badge></header><div className="rav2-filters"><select value={props.findingTypeFilter} onChange={e=>props.setFindingTypeFilter(e.target.value as 'all'|ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select><select value={props.severityFilter} onChange={e=>props.setSeverityFilter(e.target.value as 'all'|ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select><select value={props.findingStateFilter} onChange={e=>props.setFindingStateFilter(e.target.value as 'all'|FindingState)}><option value="all">全部状态</option>{Object.entries(findingStateLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></div>{visibleFindings.map(finding => { const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open':'open'; const evidence=evidenceForFinding(finding,result); return <article className="rav2-finding" key={finding.clientFindingId}><header><div><Badge tone={severityTone(finding.severity)}>{severityLabels[finding.severity]}</Badge><span><small>{findingTypeLabels[finding.type]} · {finding.clientFindingId}</small><h3>{finding.title}</h3></span></div><Badge tone={state==='resolved'?'green':state==='dismissed'?'gray':state==='needs_follow_up'?'blue':'orange'}>{findingStateLabels[state]}</Badge></header><div className="rav2-refs">{finding.requirementPointRefs.length?finding.requirementPointRefs.map(ref=><span key={ref}>{ref}</span>):<span className="global">🌐 整体需求问题</span>}</div><p>{finding.description}</p><dl><div><dt>影响</dt><dd>{finding.impact}</dd></div><div><dt>建议</dt><dd>{finding.recommendation}</dd></div></dl><footer><span>{evidence.length} 条证据 · 置信度 {Math.round(finding.confidence*100)}%</span><div>{evidence.slice(0,1).map(item=><button key={item.clientEvidenceId} onClick={()=>props.onEvidence(item)}><BookOpen />原文</button>)}{!['resolved','dismissed'].includes(state)&&<button className="ai" onClick={()=>props.onAiFix(finding)} disabled={!props.canAiFix||state!=='confirmed'} title={state==='confirmed'?'进入 repair Stage':'先确认 Finding'}><Sparkles />受控修复</button>}<select value={state} onChange={e=>props.onState(finding,e.target.value as FindingState)}>{Object.entries(findingStateLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></div></footer></article>})}</div>
+function Findings(props: {
+  result?: RequirementAnalysisResponse['result']
+  selectedRun?: RunRecord
+  findingStates: Record<string, FindingState>
+  findingTypeFilter: 'all' | ReviewFindingType
+  setFindingTypeFilter: (value: 'all' | ReviewFindingType) => void
+  severityFilter: 'all' | ReviewSeverity
+  setSeverityFilter: (value: 'all' | ReviewSeverity) => void
+  findingStateFilter: 'all' | FindingState
+  setFindingStateFilter: (value: 'all' | FindingState) => void
+  visibleFindings: ReviewFinding[]
+  documents: KnowledgeDocument[]
+  repairDrafts: RequirementRepairDraft[]
+  verificationBusyDraftId: string
+  onEvidence: (evidence: ReviewEvidence) => void
+  onState: (finding: ReviewFinding, state: FindingState) => void
+  onAiFix: (finding: ReviewFinding) => void
+  onStartVerification: (draft: RequirementRepairDraft) => void
+  onViewRepairDiff: (draft: RequirementRepairDraft) => void
+  canAiFix: boolean
+}) {
+  const { result, selectedRun, findingStates, visibleFindings } = props
+  if (!result) return <div className="rav2-empty"><AlertTriangle /><h2>暂无需求问题</h2></div>
+  return <div className="rav2-findings">
+    <header><div><AlertTriangle /><span><h2>需求问题</h2><p>先由人工采纳或处置问题；AI 只生成可审核的修复 Diff，应用新版本后由人工另行启动复验。</p></span></div><Badge tone="orange">{visibleFindings.length} / {result.findings.length}</Badge></header>
+    <div className="rav2-filters">
+      <select value={props.findingTypeFilter} onChange={event => props.setFindingTypeFilter(event.target.value as 'all' | ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
+      <select value={props.severityFilter} onChange={event => props.setSeverityFilter(event.target.value as 'all' | ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
+      <select value={props.findingStateFilter} onChange={event => props.setFindingStateFilter(event.target.value as 'all' | FindingState)}><option value="all">全部状态</option>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
+    </div>
+    {visibleFindings.map(finding => {
+      const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open' : 'open'
+      const evidence = evidenceForFinding(finding, result)
+      const repair = repairDraftForFinding(props.repairDrafts, finding.clientFindingId)
+      const pendingVerification = repair?.status === 'applied'
+      const verificationRunning = repair?.status === 'verification_running'
+      const deferred = state === 'needs_follow_up' && !pendingVerification && !verificationRunning
+      const stateLabel = pendingVerification ? '待复验' : verificationRunning ? 'AI 复验中' : deferred ? '已暂缓' : findingStateLabels[state]
+      const stateTone = state === 'resolved' ? 'green' : state === 'dismissed' ? 'gray' : state === 'needs_follow_up' ? 'blue' : state === 'confirmed' ? 'green' : 'orange'
+      return <article className="rav2-finding" key={finding.clientFindingId}>
+        <header><div><Badge tone={severityTone(finding.severity)}>{severityLabels[finding.severity]}</Badge><span><small>{findingTypeLabels[finding.type]} · {finding.clientFindingId}</small><h3>{finding.title}</h3></span></div><Badge tone={stateTone}>{stateLabel}</Badge></header>
+        <div className="rav2-refs">{finding.requirementPointRefs.length ? finding.requirementPointRefs.map(reference => <span key={reference}>{reference}</span>) : <span className="global">🌐 整体需求问题</span>}</div>
+        <p>{finding.description}</p>
+        <dl><div><dt>影响</dt><dd>{finding.impact}</dd></div><div><dt>AI 建议</dt><dd>{finding.recommendation}</dd></div></dl>
+        {pendingVerification && repair?.application && <section className="rav2-repair-applied">
+          <header><div><CheckCircle2 /><span><b>修复方案已应用</b><small>{repair.id}</small></span></div><Badge tone="blue">待复验</Badge></header>
+          <div>{repair.application.items.map(item => <article key={item.targetAssetVersionId}><span><small>原版本</small><b>{assetVersionLabel(item.sourceAssetVersionId, props.documents)}</b></span><em>→</em><span><small>新版本</small><b>{assetVersionLabel(item.targetAssetVersionId, props.documents)}</b></span><p>{item.logicalPath}</p></article>)}</div>
+          <footer><button className="btn ghost" onClick={() => props.onViewRepairDiff(repair)}><FileDiff />查看版本差异</button><button className="btn primary" onClick={() => props.onStartVerification(repair)} disabled={props.verificationBusyDraftId === repair.id}>{props.verificationBusyDraftId === repair.id ? <LoaderCircle className="rotating" /> : <Play />}开始 AI 复验</button></footer>
+        </section>}
+        <footer><span>{evidence.length} 条证据 · 置信度 {Math.round(finding.confidence * 100)}%</span><div>
+          {evidence.slice(0, 1).map(item => <button key={item.clientEvidenceId} onClick={() => props.onEvidence(item)}><BookOpen />查看原文</button>)}
+          {state === 'open' && <><button className="accept" onClick={() => props.onState(finding, 'confirmed')} disabled={!props.canAiFix}><CheckCircle2 />采纳问题</button><button className="reject" onClick={() => props.onState(finding, 'dismissed')} disabled={!props.canAiFix}><XCircle />不采纳</button><button className="defer" onClick={() => props.onState(finding, 'needs_follow_up')} disabled={!props.canAiFix}><Clock3 />暂缓</button></>}
+          {state === 'confirmed' && <button className="ai" onClick={() => props.onAiFix(finding)} disabled={!props.canAiFix}><Sparkles />生成 AI 修复方案</button>}
+          {(state === 'dismissed' || deferred) && <button onClick={() => props.onState(finding, 'open')} disabled={!props.canAiFix}><RefreshCw />重新处理</button>}
+        </div></footer>
+      </article>
+    })}
+  </div>
 }
 
 function Artifacts({ result, release, runId, busy, onGenerate, onPublish }: { result?: RequirementAnalysisResponse['result']; release?: RequirementReleasePackage; runId?: string; busy:boolean; onGenerate:()=>void; onPublish:()=>void }) {
@@ -351,8 +467,16 @@ function Diff({ versions,value,onChange,loading,removed,added }:{ versions:NonNu
   return <div className="rav2-diff"><header><div><span>基准版本</span><select value={value[0]} onChange={e=>onChange([e.target.value,value[1]])}>{versions.map(v=><option value={v.id} key={v.id}>V{v.number}</option>)}</select></div><div><span>目标版本</span><select value={value[1]} onChange={e=>onChange([value[0],e.target.value])}>{versions.map(v=><option value={v.id} key={v.id}>V{v.number}</option>)}</select></div></header>{loading?<div className="rav2-empty"><LoaderCircle className="rotating" /></div>:<div className="rav2-diff-grid"><section><h3>删除 <span>{removed.length}</span></h3>{removed.map((line,i)=><p className="removed" key={`${i}-${line}`}>− {line}</p>)}</section><section><h3>新增 <span>{added.length}</span></h3>{added.map((line,i)=><p className="added" key={`${i}-${line}`}>+ {line}</p>)}</section></div>}</div>
 }
 
-function FixModal({ finding,draft,busy,assets,onClose,onRegenerate,onApply }:{ finding:ReviewFinding; draft:RequirementRepairDraft|null; busy:boolean; assets:Array<{assetVersionId:string;logicalPath:string;displayName:string}>; onClose:()=>void; onRegenerate:()=>void; onApply:()=>void }) {
-  const assetByVersion=new Map(assets.map(a=>[a.assetVersionId,a])); return <div className="rav2-backdrop" onMouseDown={e=>{if(e.currentTarget===e.target)onClose()}}><section className="rav2-fix-modal"><header><div><Sparkles /><span><b>受控修复 · {finding.clientFindingId}</b><small>{finding.title}</small></span></div><button onClick={onClose} disabled={busy}><XCircle /></button></header>{busy&&!draft?<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>Pi Agent 正在 repair Stage 生成 Patch</h2></div>:draft?<><div className="rav2-fix-summary"><Wrench /><span><b>修复说明</b><p>{draft.candidate.summary}</p><small>{draft.id} · {draft.status}</small></span></div><div className="rav2-patches">{draft.candidate.patches.map((patch,index)=><article key={`${patch.assetVersionId}-${index}`}><header><b>Patch {index+1} · {assetByVersion.get(patch.assetVersionId)?.displayName??patch.assetVersionId}</b><small>{assetByVersion.get(patch.assetVersionId)?.logicalPath}</small></header><p>{patch.reason}</p><div className="rav2-patch-diff"><section><h4>修改前</h4><pre>{patch.before}</pre></section><section><h4>修改后</h4><pre>{patch.after}</pre></section></div><small>Finding：{patch.findingRefs.join('、')}</small></article>)}</div><footer><button className="btn ghost" onClick={onRegenerate} disabled={busy}><RefreshCw />重新生成</button><button className="btn primary" onClick={onApply} disabled={busy}>{busy?<LoaderCircle className="rotating" />:<CheckCircle2 />}批准、应用并启动复验</button></footer></>:<div className="rav2-empty"><AlertTriangle /><h2>未生成有效修复草稿</h2><button className="btn primary" onClick={onRegenerate}>重新生成</button></div>}</section></div>
+function FixModal({ finding, draft, busy, assets, onClose, onRegenerate, onApprove }: { finding: ReviewFinding; draft: RequirementRepairDraft | null; busy: boolean; assets: Array<{ assetVersionId: string; logicalPath: string; displayName: string }>; onClose: () => void; onRegenerate: () => void; onApprove: () => void }) {
+  const assetByVersion = new Map(assets.map(asset => [asset.assetVersionId, asset]))
+  return <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) onClose() }}><section className="rav2-fix-modal">
+    <header><div><Sparkles /><span><b>AI 修复建议 · {finding.clientFindingId}</b><small>{finding.title}</small></span></div><button onClick={onClose} disabled={busy} aria-label="关闭 AI 修复建议"><XCircle /></button></header>
+    {busy && !draft ? <div className="rav2-empty"><LoaderCircle className="rotating" /><h2>Pi Agent 正在生成可审核的修复 Diff</h2></div> : draft ? <>
+      <div className="rav2-fix-summary"><Wrench /><span><b>修复说明</b><p>{draft.candidate.summary}</p><small>{draft.id} · 等待人工审核修复方案</small></span></div>
+      <div className="rav2-patches">{draft.candidate.patches.map((patch, index) => <article key={`${patch.assetVersionId}-${index}`}><header><b>建议 {index + 1} · {assetByVersion.get(patch.assetVersionId)?.displayName ?? patch.assetVersionId}</b><small>{assetByVersion.get(patch.assetVersionId)?.logicalPath}</small></header><p>{patch.reason}</p><div className="rav2-patch-diff"><section><h4>原文</h4><pre>{patch.before}</pre></section><section><h4>建议修改</h4><pre>{patch.after}</pre></section></div><small>关联问题：{patch.findingRefs.join('、')}</small></article>)}</div>
+      <footer><button className="btn ghost" onClick={onClose} disabled={busy}><XCircle />放弃修复</button><button className="btn ghost" onClick={onRegenerate} disabled={busy}><RefreshCw />重新生成</button><button className="btn primary" onClick={onApprove} disabled={busy}>{busy ? <LoaderCircle className="rotating" /> : <CheckCircle2 />}{busy ? '正在生成新版本…' : '采纳并生成新版本'}</button></footer>
+    </> : <div className="rav2-empty"><AlertTriangle /><h2>未生成有效修复建议</h2><button className="btn primary" onClick={onRegenerate}>重新生成</button></div>}
+  </section></div>
 }
 
 function AgentConversation({ run }: { run?: RunRecord }) {

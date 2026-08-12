@@ -159,6 +159,44 @@ test('服务恢复中断运行并将重试语义限定为完整单 Agent 重跑'
   await assert.rejects(() => service.retry(recovered.id, 'review_only' as never), /只支持全部重跑/u)
 })
 
+test('修复应用完成后停在待复验状态且不会自动创建复验运行', async () => {
+  const { store } = await successfulRun()
+  const repairedContent = '# 取消订单\n\n用户可以取消待支付订单，并统一记录关闭原因。'
+  const repairedHash = createHash('sha256').update(repairedContent).digest('hex')
+  let sourceRunId = ''
+  let findingId = ''
+  await store.transaction(state => {
+    const run = state.reviewRuns[0]
+    sourceRunId = run.id
+    findingId = run.result!.findings[0].clientFindingId
+    state.findingActions.push({
+      id: 'finding-action-confirm', projectVersionId: run.projectVersionId, runId: run.id, findingId,
+      action: 'confirm', fromState: 'open', toState: 'confirmed', actorId: 'reviewer', actorDisplayName: '评审人', version: 1, createdAt: '2026-08-12T00:02:00.000Z',
+    })
+    state.versions.push({ id: 'version-repaired', assetId: 'asset-1', number: 2, content: repairedContent, contentHash: repairedHash, status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:03:00.000Z', readyAt: '2026-08-12T00:03:01.000Z', chunks: [] })
+    state.assets.find(asset => asset.id === 'asset-1')!.activeVersionId = 'version-repaired'
+    state.indexes.find(index => index.id === 'index-1')!.assetVersionIds.push('version-repaired')
+    run.workflow = { currentStage: 'repair', repairDrafts: [{
+      id: 'repair-draft-1', sourceRunId: run.id, status: 'applying',
+      candidate: { schemaVersion: 'requirement-repair/v1', summary: '统一关闭原因', patches: [{ assetVersionId: 'version-1', before: '用户可以取消待支付订单。', after: '用户可以取消待支付订单，并统一记录关闭原因。', reason: '消除状态口径歧义', findingRefs: [findingId] }] },
+      generationExecution: { agentKey: 'requirement-analysis', workflowStage: 'repair', turns: 1, toolCalls: 1, events: [] },
+      createdAt: '2026-08-12T00:02:30.000Z', createdBy: 'reviewer', approvedAt: '2026-08-12T00:02:45.000Z', approvedBy: 'reviewer',
+      application: { items: [{ assetId: 'asset-1', sourceAssetVersionId: 'version-1', targetAssetVersionId: 'version-repaired', logicalPath: `${requirementDirectory}/cancel.md`, contentSha256: repairedHash }], startedAt: '2026-08-12T00:03:00.000Z' },
+    }] }
+  })
+  const service = new RequirementAnalysisService(store, { execute: async () => { throw new Error('完成应用时不应执行 Agent') } })
+  await assert.rejects(() => service.finalizeRepairAndStartVerification(sourceRunId, 'repair-draft-1'), /前置门禁/u)
+  const applied = await service.finalizeRepairApplication(sourceRunId, 'repair-draft-1')
+  const state = await store.snapshot()
+
+  assert.equal(applied.status, 'applied')
+  assert.ok(applied.application?.appliedAt)
+  assert.equal(state.projectVersionRequirementBindings.find(binding => binding.assetId === 'asset-1')?.assetVersionId, 'version-repaired')
+  assert.equal(state.findingActions.filter(action => action.findingId === findingId).at(-1)?.toState, 'needs_follow_up')
+  assert.equal(state.reviewRuns.length, 1)
+  assert.equal(state.reviewRuns.some(run => run.workflow?.verificationOf), false)
+})
+
 async function successfulRun() {
   const store = await seededStore()
   const resources = new AiResourceService(store, undefined, { reloadIntervalMs: 0 })

@@ -28,6 +28,24 @@ test('需求分析页面由单 Agent 分阶段执行并只在发布门禁后展�
   assert.doesNotMatch(source, /retryAnalysis\('review_only'\)|两个 Agent 使用独立会话/u)
 })
 
+test('Finding 采纳与修复复验由两道人审明确分隔', () => {
+  const source = readFileSync(new URL('../src/RequirementAnalysisPageV2.tsx', import.meta.url), 'utf8')
+  const applyFlow = source.match(/const applyRepair = async[\s\S]*?\n  \}\n\n  const approveRepair/u)?.[0] ?? ''
+  const verificationFlow = source.match(/const startVerification = async[\s\S]*?\n  \}\n\n  const openRepairDiff/u)?.[0] ?? ''
+
+  assert.match(source, /采纳问题/u)
+  assert.match(source, /不采纳/u)
+  assert.match(source, /暂缓/u)
+  assert.match(source, /生成 AI 修复方案/u)
+  assert.match(source, /采纳并生成新版本/u)
+  assert.match(source, /修复方案已应用/u)
+  assert.match(source, /开始 AI 复验/u)
+  assert.match(applyFlow, /finalizeRequirementRepairDraft/u)
+  assert.doesNotMatch(applyFlow, /verifyRequirementRepairDraft/u)
+  assert.match(verificationFlow, /verifyRequirementRepairDraft/u)
+  assert.doesNotMatch(source, /批准、应用并启动复验|自动启动完整复验/u)
+})
+
 test('Workspace 统一上传入口位于固定底栏且顶部不再渲染重复操作按钮', () => {
   const pageSource = readFileSync(new URL('../src/RequirementReviewPage.tsx', import.meta.url), 'utf8')
   const layoutSource = readFileSync(new URL('../src/requirement-review-layout.css', import.meta.url), 'utf8')

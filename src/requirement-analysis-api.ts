@@ -351,6 +351,13 @@ export async function applyRequirementRepairDraft(runId: string, draftId: string
   return body as RequirementRepairDraft
 }
 
+export async function finalizeRequirementRepairDraft(runId: string, draftId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/finalize`, { method: 'POST' })
+  const body = await response.json() as RequirementRepairDraft | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复新版本确认失败')
+  return body as RequirementRepairDraft
+}
+
 export async function verifyRequirementRepairDraft(runId: string, draftId: string) {
   const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/verify`, { method: 'POST' })
   const body = await response.json() as { repairDraft: RequirementRepairDraft; verificationRun: RequirementReviewRun } | { error?: string }

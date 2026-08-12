@@ -1,0 +1,148 @@
+.rav2-finding > footer > div {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.rav2-finding footer button.accept {
+  border-color: #b8e1d2;
+  background: #effaf5;
+  color: #23775e;
+  font-weight: 700;
+}
+
+.rav2-finding footer button.reject {
+  border-color: #f0c8cd;
+  background: #fff5f6;
+  color: #a04451;
+  font-weight: 700;
+}
+
+.rav2-finding footer button.defer {
+  border-color: #d9dee5;
+  background: #f7f8fa;
+  color: #687486;
+  font-weight: 700;
+}
+
+.rav2-repair-applied {
+  margin: 10px 12px;
+  overflow: hidden;
+  border: 1px solid #cfd8ff;
+  border-radius: 9px;
+  background: #f8f9ff;
+}
+
+.rav2-repair-applied > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 11px;
+  border-bottom: 1px solid #e1e5fa;
+}
+
+.rav2-repair-applied > header > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.rav2-repair-applied > header svg {
+  width: 16px;
+  color: #278067;
+}
+
+.rav2-repair-applied > header b,
+.rav2-repair-applied > header small {
+  display: block;
+}
+
+.rav2-repair-applied > header b {
+  color: #3f4b5c;
+  font-size: 10px;
+}
+
+.rav2-repair-applied > header small {
+  margin-top: 2px;
+}
+
+.rav2-repair-applied > div {
+  padding: 9px 11px;
+}
+
+.rav2-repair-applied > div > article {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+}
+
+.rav2-repair-applied > div > article + article {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid #e6e9f5;
+}
+
+.rav2-repair-applied article span small,
+.rav2-repair-applied article span b {
+  display: block;
+}
+
+.rav2-repair-applied article span b {
+  margin-top: 2px;
+  color: #3d4960;
+  font: 9px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.rav2-repair-applied article em {
+  color: #7a84c9;
+  font-style: normal;
+}
+
+.rav2-repair-applied article p {
+  margin: 0;
+  padding: 0;
+  color: #80899a;
+  overflow-wrap: anywhere;
+}
+
+.rav2-repair-applied > footer {
+  justify-content: flex-end;
+  padding: 9px 11px;
+  background: #fff;
+}
+
+.rav2-repair-applied > footer .btn {
+  height: 30px;
+  font-size: 8px;
+}
+
+.rav2-repair-applied > footer .btn svg {
+  width: 12px;
+}
+
+@media (max-width: 700px) {
+  .rav2-finding > footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .rav2-finding > footer > div {
+    justify-content: flex-start;
+  }
+
+  .rav2-repair-applied > div > article {
+    grid-template-columns: auto auto auto;
+  }
+
+  .rav2-repair-applied > div > article p {
+    grid-column: 1 / -1;
+  }
+
+  .rav2-repair-applied > footer {
+    align-items: stretch;
+  }
+
+  .rav2-repair-applied > footer .btn {
+    justify-content: center;
+  }
+}
