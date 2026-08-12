@@ -6,7 +6,9 @@ const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf
 
 test('测试设计页面拆分为固定流程面板且不展示多 Agent DAG', () => {
   const page = read('../src/test-design/TestDesignPage.tsx')
-  for (const panel of ['TestDesignCreatePanel', 'TestDesignRunPanel', 'TestPointReviewPanel', 'TestCasePanel', 'CoverageAuditPanel', 'ExecutionHandoffPanel']) assert.match(page, new RegExp(panel, 'u'))
+  for (const panel of ['TestDesignCreatePanel', 'TestDesignRunPanel', 'TestPointReviewPanel', 'TestCasePanel', 'CaseChangeProposalPanel', 'CoverageAuditPanel', 'TestDesignPublicationPanel', 'TestCaseLibraryPanel', 'TestSuiteLibraryPanel']) assert.match(page, new RegExp(panel, 'u'))
+  for (const entry of ['设计任务', '测试用例库', '测试套件', '发布记录']) assert.match(page, new RegExp(entry, 'u'))
+  assert.doesNotMatch(page, /ExecutionHandoffPanel/u)
   assert.doesNotMatch(page, /TestAnalysisAgent|FunctionalTestDesignAgent|NonFunctionalTestDesignAgent|TestCaseSynthesisAgent|scope_gate|tree_merge/u)
   assert.match(read('../src/App.tsx'), /\.\/test-design\/TestDesignPage/u)
 })
@@ -70,13 +72,13 @@ test('测试执行和报告页明确标记为占位且 README 不再引用已删
 
 test('Coverage 面板区分 Agent Repair 与 Human Decision，发布面板显示正式资产文件', () => {
   const audit = read('../src/test-design/CoverageAuditPanel.tsx')
-  const publish = read('../src/test-design/ExecutionHandoffPanel.tsx')
+  const publish = read('../src/test-design/TestDesignPublicationPanel.tsx')
   assert.match(audit, /resolution=agent_repair/u)
   assert.match(audit, /最多/u)
   assert.match(audit, /等待人工决策/u)
-  assert.match(publish, /Audit PASS/u)
-  assert.match(publish, /正式 Workspace 资产投影/u)
-  assert.match(publish, /AssetVersion/u)
+  assert.match(publish, /Coverage Audit/u)
+  assert.match(publish, /Workspace 投影/u)
+  assert.match(publish, /contentSha256/u)
   assert.match(publish, /Execution Handoff/u)
 })
 

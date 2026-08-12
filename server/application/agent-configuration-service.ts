@@ -440,8 +440,8 @@ function builtInToolReference(key: string): ToolResource {
     'requirement-repair.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
     'requirement-release.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
     'test_design_points.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'test_design_cases.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'test_design_repair.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
+    'test_design_cases.submit_result': { version: '1.1.0', risk: 'internal_write', timeoutMs: 30_000 },
+    'test_design_repair.submit_result': { version: '1.1.0', risk: 'internal_write', timeoutMs: 30_000 },
     'skill.execute_script': { version: '1.0.0', risk: 'code_execution', timeoutMs: 120_000 },
     'skill.http_request': { version: '1.0.0', risk: 'network_read', timeoutMs: 60_000 },
   }

@@ -3,6 +3,8 @@ import type { AgentExecutionRecord } from './types.js'
 import type { AgentRoutingConfiguration } from './types.js'
 
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
+export type TestExecutionMethod = 'ui' | 'api' | 'performance_tool' | 'long_running' | 'environment_matrix'
+export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
 export type WorkflowStatus = 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled'
 export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled' | 'stale'
 export type TestCaseReviewState = 'draft' | 'in_review' | 'approved' | 'rejected' | 'needs_revision'
@@ -15,6 +17,12 @@ export interface HistoricalCaseSelection {
   caseIds?: string[]
   assetVersionId?: string
 }
+
+export type HistoricalLibrarySelection =
+  | { mode: 'latest_library' }
+  | { mode: 'library_version'; testCaseLibraryVersionId: string }
+  | { mode: 'suite_version'; suiteVersionId: string }
+  | { mode: 'none' }
 
 export type KnowledgeAugmentation =
   | { mode: 'disabled' }
@@ -31,6 +39,7 @@ export interface CreateTestDesignCommon {
   userCoverageObjectives?: string[]
   knowledgeAugmentation: KnowledgeAugmentation
   historicalCaseSelections?: HistoricalCaseSelection[]
+  historicalLibrarySelection?: HistoricalLibrarySelection
 }
 
 export type CreateTestDesignInput = CreateTestDesignCommon
@@ -49,7 +58,7 @@ export interface TestDesign {
 
 export interface FrozenContentRef {
   id: string
-  kind: 'requirement_release' | 'knowledge_asset' | 'historical_case_set' | 'historical_case_asset'
+  kind: 'requirement_release' | 'knowledge_asset' | 'historical_case_set' | 'historical_case_asset' | 'test_case_library' | 'historical_test_suite'
   sourceId: string
   contentSha256: string
   content: unknown
@@ -69,7 +78,7 @@ export interface TestDesignBasisSnapshot {
 
 export interface TestDesignWorkspaceFile {
   logicalPath: string
-  sourceType: 'asset_version' | 'requirement_release' | 'test_point_tree_version' | 'test_case_set_version' | 'run_candidate'
+  sourceType: 'asset_version' | 'requirement_release' | 'test_point_tree_version' | 'test_case_set_version' | 'test_case_library_version' | 'run_candidate'
   sourceId: string
   contentSha256: string
   content: string
@@ -243,8 +252,61 @@ export type ExecutionMethodSpec =
   | { method: 'ui'; uiSpec: UiExecutionSpec; steps: TestStep[]; verificationChecks: VerificationCheck[]; executionReadiness: ExecutionReadiness; automationHint: string }
   | { method: 'api'; apiSpec: ApiExecutionSpec; steps: TestStep[]; verificationChecks: VerificationCheck[]; executionReadiness: ExecutionReadiness; automationHint: string }
 
+export interface FunctionalExecutionSpec {
+  kind: 'functional'
+  method: 'ui' | 'api'
+  steps: TestStep[]
+  verificationChecks: VerificationCheck[]
+  preconditions: string[]
+  testDataRequirements: string[]
+  executionReadiness: ExecutionReadiness
+  automationHint: string
+}
+
+export interface PerformanceExecutionSpec {
+  kind: 'performance'
+  method: 'performance_tool'
+  target: string
+  scenario: string
+  virtualUsers: number | null
+  duration: string | null
+  rampUp: string | null
+  thresholds: Array<{ metric: string; target: string; sourceRef: string }>
+  dataStrategy: string
+  environmentRequirements: string[]
+  executionReadiness: ExecutionReadiness
+}
+
+export interface StabilityExecutionSpec {
+  kind: 'stability'
+  method: 'long_running'
+  workload: string
+  duration: string | null
+  interval: string | null
+  observations: string[]
+  recoveryPolicy: string | null
+  checkpointPolicy: string | null
+  environmentRequirements: string[]
+  executionReadiness: ExecutionReadiness
+}
+
+export interface CompatibilityExecutionSpec {
+  kind: 'compatibility'
+  method: 'environment_matrix'
+  baseMethod: 'ui' | 'api'
+  baseCaseRefs: string[]
+  browserMatrix: string[]
+  operatingSystemMatrix: string[]
+  viewportMatrix: string[]
+  versionMatrix: string[]
+  expectedConsistency: string
+  executionReadiness: ExecutionReadiness
+}
+
+export type TestCaseExecutionSpec = FunctionalExecutionSpec | PerformanceExecutionSpec | StabilityExecutionSpec | CompatibilityExecutionSpec
+
 export interface TestCaseContent {
-  schemaVersion: 'test-case/v1'
+  schemaVersion: 'test-case/v1' | 'test-case/v2'
   title: string
   objective: string
   dimension: TestDimension
@@ -255,6 +317,7 @@ export interface TestCaseContent {
   cleanup: string[]
   dependencies: string[]
   executionMethods: ExecutionMethodSpec[]
+  executionSpec?: TestCaseExecutionSpec
   sharedVerificationChecks: VerificationCheck[]
   tags: string[]
   domain: string
@@ -269,6 +332,63 @@ export interface TestCaseRevision {
   editorId: string
   reason: string
   createdAt: string
+}
+
+export interface LibraryTestCaseRevision {
+  revision: number
+  content: TestCaseContent
+  contentSha256: string
+  semanticSha256: string
+  sourceRunId?: string
+  sourceProposalId?: string
+  changeReason: string
+  createdBy: string
+  createdAt: string
+}
+
+export interface LibraryTestCase {
+  id: string
+  projectId: string
+  currentRevision: number
+  status: 'active' | 'deprecated'
+  createdAt: string
+  updatedAt: string
+  revisions: LibraryTestCaseRevision[]
+}
+
+export type CaseChangeOperation = 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'
+export type CaseChangeDecision = 'pending' | 'accepted' | 'accepted_edited' | 'rejected' | 'keep_original' | 'reference' | 'deprecated'
+
+export interface CaseChangeProposalDecisionRecord {
+  id: string
+  expectedVersion: number
+  decision: Exclude<CaseChangeDecision, 'pending'>
+  comment?: string
+  editedContentSha256?: string
+  decidedBy: string
+  decidedAt: string
+}
+
+export interface CaseChangeProposal {
+  id: string
+  runId: string
+  operation: CaseChangeOperation
+  sourceCaseId?: string
+  sourceRevision?: number
+  candidateCaseId?: string
+  candidateContent?: TestCaseContent
+  diff: Array<{ path: string; before?: unknown; after?: unknown }>
+  requirementRefs: string[]
+  testPointIds: string[]
+  reason: string
+  confidence: number
+  decision: CaseChangeDecision
+  createdAt: string
+  decidedBy?: string
+  decidedAt?: string
+  decisions: CaseChangeProposalDecisionRecord[]
+  appliedCaseId?: string
+  appliedRevision?: number
 }
 
 export interface TestCaseReviewAction {
@@ -374,18 +494,39 @@ export interface TestCaseSetVersion {
   projection: WorkspaceArtifactProjection
 }
 
+export interface TestCaseLibraryVersionMember { caseId: string; revision: number; ordinal: number; contentSha256: string }
+export interface TestCaseLibraryVersion {
+  id: string
+  projectId: string
+  version: number
+  name: string
+  sourceRunId?: string
+  legacyTestCaseSetVersionId?: string
+  members: TestCaseLibraryVersionMember[]
+  contentSha256: string
+  publishedBy: string
+  publishedAt: string
+  projection: WorkspaceArtifactProjection
+  publicationSummary?: {
+    proposalStatistics: Record<CaseChangeOperation, number>
+    dimensionStatistics: Partial<Record<TestDimension, number>>
+    coverageAudit: { id: string; statistics: CoverageAudit['statistics']; blockerCount: number }
+  }
+}
+
 export interface WorkspaceArtifactProjection {
   status: 'pending' | 'succeeded' | 'failed'
   files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>
   error?: string
 }
 
-export interface TestSuiteVersionMember { testCaseSetVersionId: string; caseId: string; revision: number; executionMethods: Array<'ui' | 'api'>; ordinal: number; reason: string }
-export interface TestSuiteVersion { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'functional_domain'; version: number; name: string; members: TestSuiteVersionMember[]; contentSha256: string; publishedBy: string; publishedAt: string }
+export interface TestSuiteVersionMember { testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; caseId: string; revision: number; executionMethods: Array<'ui' | 'api'>; executionMethod?: TestExecutionMethod; ordinal: number; reason: string }
+export interface TestSuiteVersion { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom' | 'functional_domain'; version: number; name: string; members: TestSuiteVersionMember[]; contentSha256: string; publishedBy: string; publishedAt: string; status?: 'active' | 'deprecated'; deprecatedBy?: string; deprecatedAt?: string }
+export interface TestSuiteDraft { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; members: TestSuiteVersionMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string }
 export interface SmokeCandidateRelation { testCaseSetVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'pending' | 'accepted' | 'rejected'; actorId?: string; reviewedAt?: string }
 export interface ImpactedRegressionReference { testCaseSetVersionId?: string; suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; actorId: string; createdAt: string }
-export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression'; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: 'ui' | 'api'; reason: string; dedupKey: string }
-export interface TestExecutionHandoff { id: string; projectId: string; projectVersionId: string; testCaseSetVersionId: string; strategy: 'standard' | 'fast' | 'full'; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; members: TestExecutionHandoffMember[]; contentSha256: string; createdBy: string; createdAt: string }
+export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression' | TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dedupKey: string; dimension?: TestDimension; executionSpec?: TestCaseExecutionSpec; selectionReason?: string; contentSha256?: string }
+export interface TestExecutionHandoff { id: string; projectId: string; projectVersionId: string; testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; suiteVersionId?: string; strategy?: 'standard' | 'fast' | 'full'; mode?: TestExecutionMode; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; members: TestExecutionHandoffMember[]; contentSha256: string; createdBy: string; createdAt: string }
 
 export interface TestDesignDispositionAction { id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }
 export interface DesignFinding { id: string; title: string; description: string; severity: 'blocker' | 'high' | 'medium' | 'low'; basisRefs: string[]; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
@@ -410,6 +551,7 @@ export interface TestDesignWorkflowRun {
   gateDecisions: WorkflowGateDecision[]
   testPointTree?: TestPointTree
   testCases: TestCase[]
+  caseChangeProposals: CaseChangeProposal[]
   dataSetVersions: TestDataRequirementSetVersion[]
   coverageAudits: CoverageAudit[]
   smokeCandidates: SmokeCandidateRelation[]
@@ -431,6 +573,9 @@ export interface TestDesignState {
   designs: TestDesign[]
   runs: TestDesignWorkflowRun[]
   caseSetVersions: TestCaseSetVersion[]
+  libraryCases: LibraryTestCase[]
+  libraryVersions: TestCaseLibraryVersion[]
+  suiteDrafts: TestSuiteDraft[]
   suiteVersions: TestSuiteVersion[]
   executionHandoffs: TestExecutionHandoff[]
 }

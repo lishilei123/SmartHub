@@ -95,6 +95,12 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (confirmations && method === 'GET') { await authorize(confirmations[1], 'test-design:read'); return send(response, 200, { items: await service.confirmationItems(confirmations[1], confirmations[2], confirmations[3]) }) }
   const confirmationAction = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/confirmation-items\/([^/]+)\/actions$/.exec(url.pathname)
   if (confirmationAction && method === 'POST') { await authorize(confirmationAction[1], 'test-design:review'); return send(response, 201, await service.actOnConfirmation(confirmationAction[1], confirmationAction[2], confirmationAction[3], confirmationAction[4], await json(request) as never, principal)) }
+  const proposals = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/case-change-proposals$/.exec(url.pathname)
+  if (proposals && method === 'GET') { await authorize(proposals[1], 'test-design:read'); return send(response, 200, { items: await service.listCaseChangeProposals(proposals[1], proposals[2], proposals[3], url.searchParams.get('operation') ?? undefined) }) }
+  const proposalDecision = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/case-change-proposals\/([^/]+)\/decisions$/.exec(url.pathname)
+  if (proposalDecision && method === 'POST') { await authorize(proposalDecision[1], 'test-design:review'); return send(response, 201, await service.decideCaseChangeProposal(proposalDecision[1], proposalDecision[2], proposalDecision[3], proposalDecision[4], await json(request) as never, principal)) }
+  const publishLibrary = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-case-library-versions$/.exec(url.pathname)
+  if (publishLibrary && method === 'POST') { await authorize(publishLibrary[1], 'test-design:publish'); return send(response, 201, await service.publishLibraryVersion(publishLibrary[1], publishLibrary[2], publishLibrary[3], await json(request) as never, principal)) }
   const publish = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-case-set-versions$/.exec(url.pathname)
   if (publish && method === 'POST') { await authorize(publish[1], 'test-design:publish'); return send(response, 201, await service.publishCaseSet(publish[1], publish[2], publish[3], await json(request) as never, principal)) }
 
@@ -117,12 +123,47 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   const handoff = /^\/api\/test-execution-handoffs\/([^/]+)$/.exec(url.pathname)
   if (handoff && method === 'GET') { const value = await service.getHandoff(handoff[1]); await authorize(value.projectVersionId, 'test-design:read'); return send(response, 200, value) }
 
+  const libraryHandoffs = /^\/api\/project-versions\/([^/]+)\/test-case-library-versions\/([^/]+)\/execution-handoffs$/.exec(url.pathname)
+  if (libraryHandoffs && method === 'POST') { await authorize(libraryHandoffs[1], 'test-design:publish'); return send(response, 201, await service.createLibraryHandoff(libraryHandoffs[1], libraryHandoffs[2], await json(request) as never, principal)) }
+  if (libraryHandoffs && method === 'GET') { await authorize(libraryHandoffs[1], 'test-design:read'); return send(response, 200, { items: await service.listLibraryHandoffs(libraryHandoffs[1], libraryHandoffs[2]) }) }
+  const projectLibraryHandoffs = /^\/api\/project-versions\/([^/]+)\/test-case-library-handoffs$/.exec(url.pathname)
+  if (projectLibraryHandoffs && method === 'GET') { await authorize(projectLibraryHandoffs[1], 'test-design:read'); return send(response, 200, { items: await service.listLibraryHandoffs(projectLibraryHandoffs[1]) }) }
+
   const catalog = /^\/api\/projects\/([^/]+)\/test-case-catalog$/.exec(url.pathname)
   if (catalog && method === 'GET') { await authorizeProject(catalog[1], principal, controls, store); return send(response, 200, await service.projectCatalog(catalog[1], { domain: url.searchParams.get('domain') ?? undefined, executionMethod: url.searchParams.get('executionMethod') ?? undefined, suiteVersionId: url.searchParams.get('suiteVersionId') ?? undefined })) }
   const suites = /^\/api\/projects\/([^/]+)\/test-suite-versions$/.exec(url.pathname)
   if (suites && method === 'GET') { await authorizeProject(suites[1], principal, controls, store); return send(response, 200, { items: await service.listSuites(suites[1], url.searchParams.get('suiteType') ?? undefined) }) }
   const suite = /^\/api\/projects\/([^/]+)\/test-suite-versions\/([^/]+)$/.exec(url.pathname)
-  if (suite && method === 'GET') { await authorizeProject(suite[1], principal, controls, store); return send(response, 200, await service.getSuite(suite[1], suite[2])) }
+  if (suite && method === 'GET' && suite[2] !== 'diff') { await authorizeProject(suite[1], principal, controls, store); return send(response, 200, await service.getSuite(suite[1], suite[2])) }
+  const libraryCases = /^\/api\/projects\/([^/]+)\/test-case-library$/.exec(url.pathname)
+  if (libraryCases && method === 'GET') { await authorizeProjectPermission(libraryCases[1], 'test-design:read', principal, controls, store); return send(response, 200, { items: await service.listLibraryCases(libraryCases[1], { domain: url.searchParams.get('domain') ?? undefined, dimension: url.searchParams.get('dimension') ?? undefined, executionMethod: url.searchParams.get('executionMethod') ?? undefined, priority: url.searchParams.get('priority') ?? undefined, status: url.searchParams.get('status') ?? undefined, tag: url.searchParams.get('tag') ?? undefined }) }) }
+  if (libraryCases && method === 'POST') { await authorizeProjectPermission(libraryCases[1], 'test-design:edit', principal, controls, store); const body = await json(request); return send(response, 201, await service.createLibraryCase(libraryCases[1], body.content, body.changeReason, principal)) }
+  const libraryCase = /^\/api\/projects\/([^/]+)\/test-case-library\/([^/]+)$/.exec(url.pathname)
+  if (libraryCase && method === 'GET') { await authorizeProjectPermission(libraryCase[1], 'test-design:read', principal, controls, store); const value = await service.getLibraryCase(libraryCase[1], libraryCase[2]); response.setHeader('ETag', value.etag); return send(response, 200, value) }
+  if (libraryCase && method === 'PATCH') { await authorizeProjectPermission(libraryCase[1], 'test-design:edit', principal, controls, store); const body = await json(request); const value = await service.editLibraryCase(libraryCase[1], libraryCase[2], request.headers['if-match'], body.content, body.changeReason, principal); response.setHeader('ETag', value.etag); return send(response, 200, value) }
+  if (libraryCase && method === 'DELETE') { await authorizeProjectPermission(libraryCase[1], 'test-design:edit', principal, controls, store); const body = await json(request); return send(response, 200, await service.deprecateLibraryCase(libraryCase[1], libraryCase[2], request.headers['if-match'], body.changeReason, principal)) }
+  const copyLibraryCase = /^\/api\/projects\/([^/]+)\/test-case-library\/([^/]+)\/copy$/.exec(url.pathname)
+  if (copyLibraryCase && method === 'POST') { await authorizeProjectPermission(copyLibraryCase[1], 'test-design:edit', principal, controls, store); return send(response, 201, await service.copyLibraryCase(copyLibraryCase[1], copyLibraryCase[2], await json(request) as never, principal)) }
+  const libraryCaseDiff = /^\/api\/projects\/([^/]+)\/test-case-library\/([^/]+)\/diff$/.exec(url.pathname)
+  if (libraryCaseDiff && method === 'GET') { await authorizeProjectPermission(libraryCaseDiff[1], 'test-design:read', principal, controls, store); return send(response, 200, { changes: await service.libraryCaseDiff(libraryCaseDiff[1], libraryCaseDiff[2], Number(url.searchParams.get('from')), Number(url.searchParams.get('to'))) }) }
+  const libraryVersions = /^\/api\/projects\/([^/]+)\/test-case-library-versions$/.exec(url.pathname)
+  if (libraryVersions && method === 'GET') { await authorizeProjectPermission(libraryVersions[1], 'test-design:read', principal, controls, store); return send(response, 200, { items: await service.listLibraryVersions(libraryVersions[1]) }) }
+  const libraryVersion = /^\/api\/projects\/([^/]+)\/test-case-library-versions\/([^/]+)$/.exec(url.pathname)
+  if (libraryVersion && method === 'GET' && libraryVersion[2] !== 'diff') { await authorizeProjectPermission(libraryVersion[1], 'test-design:read', principal, controls, store); return send(response, 200, await service.getLibraryVersion(libraryVersion[1], libraryVersion[2])) }
+  const libraryVersionDiff = /^\/api\/projects\/([^/]+)\/test-case-library-versions\/diff$/.exec(url.pathname)
+  if (libraryVersionDiff && method === 'GET') { await authorizeProjectPermission(libraryVersionDiff[1], 'test-design:read', principal, controls, store); return send(response, 200, { changes: await service.compareLibraryVersions(libraryVersionDiff[1], String(url.searchParams.get('from')), String(url.searchParams.get('to'))) }) }
+  const suiteDrafts = /^\/api\/projects\/([^/]+)\/test-suite-drafts$/.exec(url.pathname)
+  if (suiteDrafts && method === 'GET') { await authorizeProjectPermission(suiteDrafts[1], 'test-design:read', principal, controls, store); return send(response, 200, { items: await service.listSuiteDrafts(suiteDrafts[1]) }) }
+  if (suiteDrafts && method === 'POST') { await authorizeProjectPermission(suiteDrafts[1], 'test-design:edit', principal, controls, store); return send(response, 201, await service.createSuiteDraft(suiteDrafts[1], await json(request), principal)) }
+  const suiteDraft = /^\/api\/projects\/([^/]+)\/test-suite-drafts\/([^/]+)$/.exec(url.pathname)
+  if (suiteDraft && method === 'GET') { await authorizeProjectPermission(suiteDraft[1], 'test-design:read', principal, controls, store); const value = await service.getSuiteDraft(suiteDraft[1], suiteDraft[2]); response.setHeader('ETag', value.etag); return send(response, 200, value) }
+  if (suiteDraft && method === 'PUT') { await authorizeProjectPermission(suiteDraft[1], 'test-design:edit', principal, controls, store); const value = await service.updateSuiteDraft(suiteDraft[1], suiteDraft[2], request.headers['if-match'], await json(request), principal); response.setHeader('ETag', value.etag); return send(response, 200, value) }
+  const publishSuite = /^\/api\/projects\/([^/]+)\/test-suite-drafts\/([^/]+)\/publish$/.exec(url.pathname)
+  if (publishSuite && method === 'POST') { await authorizeProjectPermission(publishSuite[1], 'test-design:publish', principal, controls, store); return send(response, 201, await service.publishSuiteDraft(publishSuite[1], publishSuite[2], request.headers['if-match'], principal)) }
+  const suiteDiff = /^\/api\/projects\/([^/]+)\/test-suite-versions\/diff$/.exec(url.pathname)
+  if (suiteDiff && method === 'GET') { await authorizeProjectPermission(suiteDiff[1], 'test-design:read', principal, controls, store); return send(response, 200, { changes: await service.compareSuiteVersions(suiteDiff[1], String(url.searchParams.get('from')), String(url.searchParams.get('to'))) }) }
+  const deprecateSuite = /^\/api\/projects\/([^/]+)\/test-suite-versions\/([^/]+)\/deprecate$/.exec(url.pathname)
+  if (deprecateSuite && method === 'POST') { await authorizeProjectPermission(deprecateSuite[1], 'test-design:publish', principal, controls, store); return send(response, 200, await service.deprecateSuiteVersion(deprecateSuite[1], deprecateSuite[2], principal)) }
   return false
 }
 
@@ -131,6 +172,7 @@ async function authorizeProject(projectId: string, principal: Principal, control
   for (const version of versions) if (await controls.canAccess(principal, version.id, 'test-design:read')) return
   await controls.authorize(principal, versions[0]?.id ?? `project:${projectId}`, 'test-design:read')
 }
+async function authorizeProjectPermission(projectId: string, permission: ProjectVersionPermission, principal: Principal, controls: AccessControl, store: StateStore) { const versions = (await store.snapshot()).projectVersions.filter(item => item.projectId === projectId); for (const version of versions) if (await controls.canAccess(principal, version.id, permission)) return; await controls.authorize(principal, versions[0]?.id ?? `project:${projectId}`, permission) }
 
 function header(request: IncomingMessage, name: string) { const value = request.headers[name]; return Array.isArray(value) ? value[0] ?? '' : value ?? '' }
 async function json(request: IncomingMessage) { const chunks: Buffer[] = []; let size = 0; for await (const chunk of request) { const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += buffer.length; if (size > 10 * 1024 * 1024) throw new Error('REQUEST_TOO_LARGE'); chunks.push(buffer) } const text = Buffer.concat(chunks).toString('utf8'); return text ? JSON.parse(text) as Record<string, any> : {} }

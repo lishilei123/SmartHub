@@ -30,8 +30,8 @@ test('需求分析页面由单 Agent 分阶段执行并只在发布门禁后展�
 
 test('Finding 采纳与修复复验由两道人审明确分隔', () => {
   const source = readFileSync(new URL('../src/RequirementAnalysisPageV2.tsx', import.meta.url), 'utf8')
-  const applyFlow = source.match(/const applyRepair = async[\s\S]*?\n  \}\n\n  const approveRepair/u)?.[0] ?? ''
-  const verificationFlow = source.match(/const startVerification = async[\s\S]*?\n  \}\n\n  const openRepairDiff/u)?.[0] ?? ''
+  const applyFlow = source.match(/const applyRepair = async[\s\S]*?\r?\n  \}\r?\n\r?\n  const approveRepair/u)?.[0] ?? ''
+  const verificationFlow = source.match(/const startVerification = async[\s\S]*?\r?\n  \}\r?\n\r?\n  const openRepairDiff/u)?.[0] ?? ''
 
   assert.match(source, /采纳问题/u)
   assert.match(source, /不采纳/u)

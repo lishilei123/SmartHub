@@ -852,7 +852,7 @@
       }
     },
     "test_design_cases.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "test_design_cases_submit_result",
       "label": "提交测试用例候选",
       "catalogName": "提交测试用例候选",
@@ -884,7 +884,7 @@
                   "description": "本次提交内唯一临时引用，不是正式 TestCase ID。"
                 },
                 "schemaVersion": {
-                  "const": "test-case/v1"
+                  "const": "test-case/v2"
                 },
                 "title": {
                   "type": "string",
@@ -963,7 +963,7 @@
                 },
                 "executionMethods": {
                   "type": "array",
-                  "minItems": 1,
+                  "minItems": 0,
                   "maxItems": 2,
                   "items": {
                     "type": "object",
@@ -1110,6 +1110,12 @@
                     "additionalProperties": false
                   }
                 },
+                "executionSpec": {
+                  "type": "object",
+                  "description": "按 dimension 提交可辨识执行配置。functional/security 使用 kind=functional 与 ui/api；performance 使用 performance_tool 且阈值必须包含 sourceRef；stability 使用 long_running；compatibility 使用 environment_matrix。缺失阈值、时长或矩阵时使用 null/空数组和 needs_confirmation，不得编造。",
+                  "properties": {},
+                  "additionalProperties": true
+                },
                 "sharedVerificationChecks": {
                   "type": "array",
                   "maxItems": 200,
@@ -1160,9 +1166,10 @@
                 "preconditions",
                 "dataRequirementIds",
                 "cleanup",
-                "dependencies",
-                "executionMethods",
-                "sharedVerificationChecks",
+                 "dependencies",
+                 "executionMethods",
+                 "executionSpec",
+                 "sharedVerificationChecks",
                 "tags",
                 "domain"
               ],
@@ -1393,6 +1400,26 @@
               ],
               "additionalProperties": false
             }
+          },
+          "proposals": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "完整用例库变更建议。复用不复制，修改不换 Case ID，新增才创建 Case ID，删除只废弃。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "operation": { "enum": ["reuse", "update", "create", "deprecate", "reference"] },
+                "sourceCaseId": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "sourceRevision": { "type": "integer", "minimum": 1 },
+                "candidateRef": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "requirementRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "testPointIds": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+              },
+              "required": ["operation", "requirementRefs", "testPointIds", "reason", "confidence"],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -1400,13 +1427,14 @@
           "cases",
           "dataRequirements",
           "findings",
-          "confirmationItems"
+          "confirmationItems",
+          "proposals"
         ],
         "additionalProperties": false
       }
     },
     "test_design_repair.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "test_design_repair_submit_result",
       "label": "提交测试设计修复候选",
       "catalogName": "提交测试设计修复候选",
@@ -1438,7 +1466,7 @@
                   "description": "本次提交内唯一临时引用，不是正式 TestCase ID。"
                 },
                 "schemaVersion": {
-                  "const": "test-case/v1"
+                  "const": "test-case/v2"
                 },
                 "title": {
                   "type": "string",
@@ -1517,7 +1545,7 @@
                 },
                 "executionMethods": {
                   "type": "array",
-                  "minItems": 1,
+                  "minItems": 0,
                   "maxItems": 2,
                   "items": {
                     "type": "object",
@@ -1664,6 +1692,12 @@
                     "additionalProperties": false
                   }
                 },
+                "executionSpec": {
+                  "type": "object",
+                  "description": "保持或修复按 dimension 区分的 executionSpec；不得编造阈值、时长、兼容矩阵、接口、定位器或环境。",
+                  "properties": {},
+                  "additionalProperties": true
+                },
                 "sharedVerificationChecks": {
                   "type": "array",
                   "maxItems": 200,
@@ -1716,6 +1750,7 @@
                 "cleanup",
                 "dependencies",
                 "executionMethods",
+                "executionSpec",
                 "sharedVerificationChecks",
                 "tags",
                 "domain"
@@ -1947,6 +1982,26 @@
               ],
               "additionalProperties": false
             }
+          },
+          "proposals": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "保留完整用例库变更建议，修复无关问题时不得改变 operation 或历史来源。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "operation": { "enum": ["reuse", "update", "create", "deprecate", "reference"] },
+                "sourceCaseId": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "sourceRevision": { "type": "integer", "minimum": 1 },
+                "candidateRef": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "requirementRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "testPointIds": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+              },
+              "required": ["operation", "requirementRefs", "testPointIds", "reason", "confidence"],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -1954,7 +2009,8 @@
           "cases",
           "dataRequirements",
           "findings",
-          "confirmationItems"
+          "confirmationItems",
+          "proposals"
         ],
         "additionalProperties": false
       }

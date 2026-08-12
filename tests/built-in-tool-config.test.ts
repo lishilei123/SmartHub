@@ -48,13 +48,14 @@ test('测试点提交工具向模型声明完整临时引用和节点字段', ()
   assert.ok('parentRef' in schema.properties.nodes.items.properties)
 })
 
-test('测试用例与修复提交工具声明闭合的 test-case/v1 层级', () => {
+test('测试用例与修复提交工具声明闭合的 test-case/v2、executionSpec 与 Proposal 层级', () => {
   for (const toolId of ['test_design_cases.submit_result', 'test_design_repair.submit_result']) {
   const schema = defaultBuiltInToolConfigResolver.toDescriptor(toolId).parameters as unknown as {
     additionalProperties: boolean
     properties: {
-      cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
+      cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, { minItems?: number }> } }
       dataRequirements: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { description?: string }> } }
+      proposals: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
     }
   }
   const caseSchema = schema.properties.cases.items
@@ -64,6 +65,11 @@ test('测试用例与修复提交工具声明闭合的 test-case/v1 层级', () 
   assert.equal(caseSchema.additionalProperties, false)
   assert.ok(caseSchema.required.includes('preconditions'))
   assert.ok(caseSchema.required.includes('executionMethods'))
+  assert.ok(caseSchema.required.includes('executionSpec'))
+  assert.equal(caseSchema.properties.executionMethods.minItems, 0)
+  assert.equal(schema.properties.proposals.items.additionalProperties, false)
+  assert.ok(schema.properties.proposals.items.required.includes('operation'))
+  assert.ok(schema.properties.proposals.items.required.includes('confidence'))
   assert.ok(!('preConditions' in caseSchema.properties))
   assert.ok(!('steps' in caseSchema.properties))
   assert.equal(dataSchema.additionalProperties, false)

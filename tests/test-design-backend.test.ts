@@ -97,22 +97,116 @@ test('Coverage Audit 仅将 agent_repair 问题送回同一 Agent，自动修复
   assert.equal(completed.coverageAudits.at(-1)?.blockers.some(item => item.resolution === 'agent_repair'), true)
 })
 
+test('正式用例库 Proposal、Revision、不可变版本、套件与 Full Handoff 形成完整闭环', async () => {
+  const projected: string[] = []
+  const projector: TestCaseAssetProjector = { ingest: async input => { projected.push(input.logicalPath); return { version: { id: `library-asset-${projected.length}` }, task: null } } }
+  const initialRuntime = new FakeRuntime()
+  const { store, service: initialService } = await fixture(initialRuntime, projector)
+  const initial = await preparePublishableRun(initialService, 'initial-library')
+
+  await assert.rejects(
+    initialService.publishLibraryVersion('pv-1', initial.designId, initial.runId, { name: '不应发布', expectedAuditId: initial.audit.id, expectedCaseSetSha256: initial.audit.caseSetSha256, expectedProposalSha256: initial.run.caseChangeProposalSha256 }, principal),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'CASE_CHANGE_PROPOSAL_DECISION_REQUIRED',
+  )
+  for (const proposal of initial.run.caseChangeProposals) await initialService.decideCaseChangeProposal('pv-1', initial.designId, initial.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const initialDecided = await initialService.getRun('pv-1', initial.designId, initial.runId)
+  const v1 = await initialService.publishLibraryVersion('pv-1', initial.designId, initial.runId, { name: '正式用例库 V1', expectedAuditId: initial.audit.id, expectedCaseSetSha256: initial.audit.caseSetSha256, expectedProposalSha256: initialDecided.caseChangeProposalSha256 }, principal)
+  assert.equal(v1.members.length, 1, 'create 只创建一个新正式 Case ID')
+  const stableCaseId = v1.members[0].caseId
+  assert.match(stableCaseId, /^library_test_case_/u)
+
+  const updateService = new TestDesignService(store, new FakeRuntime({ proposalOperation: 'update' }), projector)
+  const update = await preparePublishableRun(updateService, 'update-library')
+  for (const proposal of update.run.caseChangeProposals) await updateService.decideCaseChangeProposal('pv-1', update.designId, update.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const updateDecided = await updateService.getRun('pv-1', update.designId, update.runId)
+  const v2 = await updateService.publishLibraryVersion('pv-1', update.designId, update.runId, { name: '正式用例库 V2', expectedAuditId: update.audit.id, expectedCaseSetSha256: update.audit.caseSetSha256, expectedProposalSha256: updateDecided.caseChangeProposalSha256 }, principal)
+  assert.equal(v2.members[0].caseId, stableCaseId, 'update 保持正式 Case ID')
+  assert.equal(v2.members[0].revision, 2, 'update 创建新 Revision')
+
+  const reuseService = new TestDesignService(store, new FakeRuntime({ proposalOperation: 'reuse' }), projector)
+  const reuse = await preparePublishableRun(reuseService, 'reuse-library')
+  for (const proposal of reuse.run.caseChangeProposals) await reuseService.decideCaseChangeProposal('pv-1', reuse.designId, reuse.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const reuseDecided = await reuseService.getRun('pv-1', reuse.designId, reuse.runId)
+  const v3 = await reuseService.publishLibraryVersion('pv-1', reuse.designId, reuse.runId, { name: '正式用例库 V3', expectedAuditId: reuse.audit.id, expectedCaseSetSha256: reuse.audit.caseSetSha256, expectedProposalSha256: reuseDecided.caseChangeProposalSha256 }, principal)
+  assert.deepEqual(v3.members.map(item => [item.caseId, item.revision]), [[stableCaseId, 2]], 'reuse 不复制正式用例或 Revision')
+  assert.equal((await reuseService.listLibraryCases('project-1')).length, 1)
+
+  const detachedVersion = await reuseService.getLibraryVersion('project-1', v3.id); detachedVersion.members.length = 0
+  assert.equal((await reuseService.getLibraryVersion('project-1', v3.id)).members.length, 1, '已发布用例库版本返回不可变快照')
+
+  const detail = await reuseService.getLibraryCase('project-1', stableCaseId)
+  const suiteValues = (suiteKey: string, suiteType: 'smoke' | 'regression' | 'custom') => ({ suiteKey, suiteType, name: `${suiteType} 套件`, members: [{ testCaseLibraryVersionId: v3.id, caseId: stableCaseId, executionMethod: 'ui' as const, reason: '稳定执行基线' }] })
+  const publishedSuites = []
+  for (const suiteType of ['smoke', 'regression', 'custom'] as const) {
+    const draft = await reuseService.createSuiteDraft('project-1', suiteValues(`${suiteType}-baseline`, suiteType), principal)
+    const suite = await reuseService.publishSuiteDraft('project-1', draft.id, draft.etag, principal); publishedSuites.push(suite)
+    await assert.rejects(reuseService.updateSuiteDraft('project-1', draft.id, (await reuseService.getSuiteDraft('project-1', draft.id)).etag, suiteValues(`${suiteType}-changed`, suiteType), principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_SUITE_DRAFT_IMMUTABLE')
+    const detachedSuite = await reuseService.getSuite('project-1', suite.id); detachedSuite.members.length = 0
+    assert.equal((await reuseService.getSuite('project-1', suite.id)).members.length, 1, `${suiteType} 套件版本不可变`)
+  }
+  assert.equal(publishedSuites.length, 3)
+
+  const full = await reuseService.createLibraryHandoff('pv-1', v3.id, { mode: 'full', expectedLibrarySha256: v3.contentSha256 }, principal)
+  assert.deepEqual(full.members.map(item => [item.caseId, item.revision]), v3.members.map(item => [item.caseId, item.revision]), 'Full Handoff 包含指定版本全部 active 用例')
+  assert.ok(full.members.every(item => item.dimension === 'functional' && item.executionSpec && item.contentSha256))
+
+  const deprecated = await reuseService.deprecateLibraryCase('project-1', stableCaseId, detail.etag, '需求范围移除', principal)
+  assert.equal(deprecated.status, 'deprecated')
+  assert.equal(deprecated.currentRevision, 3)
+  assert.equal(deprecated.revisions.length, 3, '废弃后仍保留全部历史 Revision')
+})
+
+test('Coverage Audit 未通过时禁止发布正式用例库版本', async () => {
+  const { service } = await fixture(new FakeRuntime(), { ingest: async () => ({ version: { id: 'asset' }, task: null }) })
+  const design = await service.createDesign('pv-1', createInput(), principal)
+  const created = await service.createRun('pv-1', design.id, 'blocked-publication', principal)
+  await waitFor(service, design.id, created.id, run => run.stage === 'test_point_review')
+  const tree = await service.getTree('pv-1', design.id, created.id); await service.approveTree('pv-1', design.id, created.id, tree.etag, principal)
+  const run = await waitFor(service, design.id, created.id, value => value.status === 'succeeded' && value.testCases.length > 0)
+  const audit = run.coverageAudits.at(-1)!
+  assert.ok(audit.blockers.length > 0)
+  await assert.rejects(service.publishLibraryVersion('pv-1', design.id, run.id, { name: '禁止发布', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256, expectedProposalSha256: run.caseChangeProposalSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_LIBRARY_PUBLICATION_BLOCKED')
+})
+
+test('四类测试维度生成对应 executionSpec，缺少受控配置时形成 Confirmation Item', async () => {
+  const { service } = await fixture(new FakeRuntime({ dimensionMatrix: true }), { ingest: async () => ({ version: { id: 'asset' }, task: null }) })
+  const design = await service.createDesign('pv-1', { ...createInput(), focusDimensions: ['functional', 'performance', 'stability', 'compatibility'] }, principal)
+  const created = await service.createRun('pv-1', design.id, 'dimension-matrix', principal)
+  await waitFor(service, design.id, created.id, run => run.stage === 'test_point_review')
+  const tree = await service.getTree('pv-1', design.id, created.id); await service.approveTree('pv-1', design.id, created.id, tree.etag, principal)
+  const run = await waitFor(service, design.id, created.id, value => value.status === 'failed' || (value.status === 'succeeded' && value.testCases.length === 4))
+  assert.notEqual(run.status, 'failed', run.error)
+  assert.deepEqual(run.testCases.map(item => item.revisions.at(-1)!.content.executionSpec?.kind).sort(), ['compatibility', 'functional', 'performance', 'stability'])
+  assert.ok(run.confirmationItems.some(item => /性能阈值/u.test(item.title)))
+  assert.ok(run.confirmationItems.some(item => /稳定性运行时长/u.test(item.title)))
+  assert.ok(run.confirmationItems.some(item => /兼容性环境矩阵/u.test(item.title)))
+})
+
 class FakeRuntime implements TestDesignAgentRuntime {
   stages: string[] = []
-  constructor(private readonly behavior: { uncoveredPoint?: boolean; keepUncoveredDuringRepair?: boolean } = {}) {}
+  constructor(private readonly behavior: { uncoveredPoint?: boolean; keepUncoveredDuringRepair?: boolean; proposalOperation?: 'reuse' | 'update'; dimensionMatrix?: boolean } = {}) {}
   readiness = async () => ({ ready: true, agents: [{ agentKey: 'test-design', ready: true }] })
   freezeConfiguration = async () => ({ configurationId: 'agent-config-1', configurationVersion: 1, configurationSha256: 'c'.repeat(64), agentDefinition: {} as never, routing: {} as never, primaryModel: { sourceId: 'source-1', modelId: 'model-1', modelName: '测试模型' }, createdAt: '2026-08-12T00:00:00.000Z', snapshotSha256: 'd'.repeat(64) })
   execute = async (input: { stage: 'test_point_design' | 'test_case_design' | 'test_design_repair'; run: TestDesignWorkflowRun }) => {
     this.stages.push(input.stage)
     if (input.stage === 'test_point_design') {
       const refs = input.run.basisSnapshot.items.map(item => item.id)
-      const nodes = refs.map((basisRef, index) => ({ ref: `point-${index + 1}`, title: `需求 ${index + 1} 测试点`, objective: `验证需求 ${index + 1}`, dimension: 'functional', priority: 'P0', applicability: 'applicable', designTechniques: ['主流程'], entryMethods: ['ui'], oracle: '结果符合需求', dataConditions: [], risks: [], assumptions: [], basisRefs: [basisRef], historicalRefs: [] }))
+      const dimensions = this.behavior.dimensionMatrix ? ['functional', 'performance', 'stability', 'compatibility'] : refs.map(() => 'functional')
+      const nodes = dimensions.map((dimension, index) => ({ ref: `point-${index + 1}`, title: `${dimension} 测试点`, objective: `验证 ${dimension}`, dimension, priority: 'P0', applicability: 'applicable', designTechniques: ['主流程'], entryMethods: ['ui'], oracle: '结果符合需求', dataConditions: [], risks: [], assumptions: [], basisRefs: [refs[index % refs.length]], historicalRefs: [] }))
       if (this.behavior.uncoveredPoint) nodes.push({ ...nodes[0], ref: 'point-extra', title: '额外风险测试点' })
       return { schemaVersion: 'test-point-design/v1', content: { schemaVersion: 'test-point-design/v1', nodes, findings: [], confirmationItems: [] } }
     }
     const pointIds = approvedPointIds(input.run)
     const covered = this.behavior.keepUncoveredDuringRepair ? pointIds.slice(0, 1) : pointIds
-    return { schemaVersion: input.stage === 'test_design_repair' ? 'test-design-repair/v1' : 'test-case-design/v1', content: caseCandidate(input.stage === 'test_design_repair' ? 'test-design-repair/v1' : 'test-case-design/v1', covered) }
+    const schemaVersion = input.stage === 'test_design_repair' ? 'test-design-repair/v1' : 'test-case-design/v1'
+    if (this.behavior.dimensionMatrix) return { schemaVersion, content: dimensionCaseCandidate(schemaVersion, covered) }
+    const content = caseCandidate(schemaVersion, covered)
+    if (this.behavior.proposalOperation && input.stage === 'test_case_design') {
+      const source = input.run.historicalSnapshot.items[0]; const locator = source.locator as { caseId: string; revision: number }
+      content.proposals = [{ operation: this.behavior.proposalOperation, sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: 'case-1', requirementRefs: input.run.basisSnapshot.items.map(item => item.id), testPointIds: covered, reason: this.behavior.proposalOperation === 'reuse' ? '需求语义未变化，直接复用' : '需求变化影响步骤，保留 Case ID 创建新 Revision', confidence: 0.96 }]
+      if (this.behavior.proposalOperation === 'update') content.cases[0].objective = '按新需求更新后的验证目标'
+    }
+    return { schemaVersion, content }
   }
 }
 
@@ -144,6 +238,8 @@ function releasePackage(releaseId: string, reviewId: string, requirementIds: str
 
 function createInput() { return { name: '认证测试设计', objective: '验证正式需求', includedScopes: [{ kind: 'module', value: '认证' }], excludedScopes: [], focusDimensions: ['functional'], executionMethods: ['ui'], userCoverageObjectives: [], knowledgeAugmentation: { mode: 'disabled' }, historicalCaseSelections: [] } }
 function caseCandidate(schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1', pointIds: string[]) { return { schemaVersion, cases: pointIds.map((pointId, index) => ({ ref: `case-${index + 1}`, schemaVersion: 'test-case/v1', title: `用例 ${index + 1}`, objective: `验证 ${pointId}`, dimension: 'functional', testPointIds: [pointId], priority: 'P0', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/login' }, steps: [{ key: 'step-1', action: '执行操作', expected: '结果符合需求' }], verificationChecks: [{ key: 'check-1', description: '页面结果正确' }], executionReadiness: 'ready', automationHint: '使用 UI 自动化' }], sharedVerificationChecks: [], tags: ['smoke'], domain: '认证' })), dataRequirements: [], findings: [], confirmationItems: [] } }
+function dimensionCaseCandidate(schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1', pointIds: string[]) { const dimensions = ['functional', 'performance', 'stability', 'compatibility'] as const; return { schemaVersion, cases: pointIds.map((pointId, index) => { const dimension = dimensions[index]; const executionSpec = dimension === 'functional' ? { kind: 'functional', method: 'ui', steps: [{ key: 'step-1', action: '执行功能操作', expected: '功能结果正确' }], verificationChecks: [{ key: 'check-1', description: '功能断言' }], preconditions: [], testDataRequirements: [], executionReadiness: 'ready', automationHint: 'UI 自动化' } : dimension === 'performance' ? { kind: 'performance', method: 'performance_tool', target: '订单接口', scenario: '并发下单', virtualUsers: null, duration: null, rampUp: null, thresholds: [], dataStrategy: '隔离测试数据', environmentRequirements: [], executionReadiness: 'needs_confirmation' } : dimension === 'stability' ? { kind: 'stability', method: 'long_running', workload: '持续下单', duration: null, interval: null, observations: ['错误率'], recoveryPolicy: null, checkpointPolicy: null, environmentRequirements: [], executionReadiness: 'needs_confirmation' } : { kind: 'compatibility', method: 'environment_matrix', baseMethod: 'ui', baseCaseRefs: [], browserMatrix: [], operatingSystemMatrix: [], viewportMatrix: [], versionMatrix: [], expectedConsistency: '行为一致', executionReadiness: 'needs_confirmation' }; return { ref: `case-${index + 1}`, schemaVersion: 'test-case/v2', title: `${dimension} 用例`, objective: `验证 ${dimension}`, dimension, testPointIds: [pointId], priority: 'P0', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: dimension === 'functional' ? [{ method: 'ui', uiSpec: { entry: '/login' }, steps: [{ key: 'step-1', action: '执行功能操作', expected: '功能结果正确' }], verificationChecks: [{ key: 'check-1', description: '功能断言' }], executionReadiness: 'ready', automationHint: 'UI 自动化' }] : [], executionSpec, sharedVerificationChecks: [], tags: [], domain: '多维测试' } }), dataRequirements: [], findings: [], confirmationItems: [], proposals: [] } }
+async function preparePublishableRun(service: TestDesignService, key: string) { const design = await service.createDesign('pv-1', { ...createInput(), name: key }, principal); const created = await service.createRun('pv-1', design.id, key, principal); await waitFor(service, design.id, created.id, run => run.stage === 'test_point_review'); const tree = await service.getTree('pv-1', design.id, created.id); await service.approveTree('pv-1', design.id, created.id, tree.etag, principal); const designed = await waitFor(service, design.id, created.id, run => run.status === 'succeeded' && run.testCases.length > 0); const targets = designed.testCases.map(item => ({ caseId: item.id, targetRevision: item.currentRevision })); await service.batchReview('pv-1', design.id, created.id, { targets, decision: 'submit' }, principal); await service.batchReview('pv-1', design.id, created.id, { targets, decision: 'approve' }, principal); const audit = await service.reAudit('pv-1', design.id, created.id); const run = await service.getRun('pv-1', design.id, created.id); return { designId: design.id, runId: created.id, audit, run } }
 function approvedPointIds(run: TestDesignWorkflowRun) { const tree = run.testPointTree!; const version = tree.versions.find(item => item.id === tree.currentApprovedVersionId)!; const revision = tree.revisions.find(item => item.revision === version.revision)!; const parents = new Set(revision.nodes.flatMap(item => item.parentId ? [item.parentId] : [])); return revision.nodes.filter(item => !item.deleted && item.applicability !== 'not_applicable' && !parents.has(item.nodeId)).map(item => item.nodeId) }
 async function waitFor(service: TestDesignService, designId: string, runId: string, predicate: (run: TestDesignWorkflowRun) => boolean) { for (let attempt = 0; attempt < 200; attempt += 1) { const value = await service.getRun('pv-1', designId, runId) as TestDesignWorkflowRun; if (predicate(value)) return value; await new Promise(resolve => setTimeout(resolve, 5)) } throw new Error('等待测试设计状态超时') }
 function sha256(value: string) { return createHash('sha256').update(value).digest('hex') }

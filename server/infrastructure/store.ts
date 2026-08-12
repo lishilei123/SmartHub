@@ -147,6 +147,7 @@ export class JsonStore implements StateStore {
       this.state = loaded
       this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []
       const retiredDataRemoved = removeRetiredAgentData(loaded)
+      normalizeTestDesignState(this.state)
       normalizeReviewSeverities(this.state)
       if (retiredDataRemoved) await this.transaction(() => undefined)
     }
@@ -191,6 +192,18 @@ export class JsonStore implements StateStore {
     if (failure) throw failure
     return result
   }
+}
+
+export function normalizeTestDesignState(state: DatabaseState) {
+  const aggregate = state.testDesignState
+  if (!aggregate) return
+  aggregate.caseSetVersions ??= []
+  aggregate.libraryCases ??= []
+  aggregate.libraryVersions ??= []
+  aggregate.suiteDrafts ??= []
+  aggregate.suiteVersions ??= []
+  aggregate.executionHandoffs ??= []
+  for (const run of aggregate.runs ?? []) run.caseChangeProposals ??= []
 }
 
 function removeRetiredAgentData(state: DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[]; technicalSolutionReviews?: unknown[]; technicalSolutionRuns?: unknown[]; technicalSolutionFindingActions?: unknown[] }) {

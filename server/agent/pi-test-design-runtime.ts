@@ -126,11 +126,11 @@ export function buildTestDesignAgentTask(run: TestDesignWorkflowRun, design: Tes
     projectVersionId: run.projectVersionId,
     requirementRelease: { releaseId: run.basisSnapshot.requirementReleaseId, verificationRunId: run.basisSnapshot.verificationRunId, requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256 },
     workspace: { root: '/workspace', activeBranch: `/${workspace.activeBranchLogicalPath}`, agentDirectory: `/${workspace.agentLogicalPath}`, snapshotSha256: workspace.snapshotSha256 },
-    design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [] },
+    design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
     stageContract: { allowedSkills: binding.skills, submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
     ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test_design/test-point-tree.json` } } : {}),
     ...(repairAudit ? { repair: { attempt: run.automaticRepair?.attempt, maxAttempts: run.automaticRepair?.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/design_agent/current-test-cases.json' } } : {}),
-    instructions: ['Workflow 已固定 Stage，不能自行切换。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
+    instructions: ['Workflow 已固定 Stage，不能自行切换。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', '如存在 /workspace/agent_workspace/design_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须分离；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
   })
 }
 
@@ -159,6 +159,7 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
       return { ref: refById.get(testCase.id), content: { ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] } }
     }),
     dataRequirements: (dataSet?.requirements ?? []).map((item, index) => ({ ...item, ref: `data-${index + 1}`, caseRefs: item.caseIds.map(id => refById.get(id) ?? id), id: undefined, caseIds: undefined })),
+    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: refById.get(item.candidateCaseId) } : {}), requirementRefs: item.requirementRefs, testPointIds: item.testPointIds, reason: item.reason, confidence: item.confidence })),
   }
 }
 
@@ -191,6 +192,7 @@ async function validateStageCandidate(stage: TestDesignStage, candidate: Record<
     : stage === 'test_case_design'
     ? [`${branchRelative}/requirements/requirements.json`, `${branchRelative}/test_design/test-point-tree.json`]
     : ['agent_workspace/design_agent/current-test-cases.json', `${branchRelative}/test_design/test-point-tree.json`]
+  if (run.historicalSnapshot.items.length && stage !== 'test_design_repair') requiredPaths.push('agent_workspace/design_agent/historical-test-cases.json')
   const missingReads = requiredPaths.filter(path => !readPaths.has(path))
   if (missingReads.length) return { valid: false, issues: missingReads.map(path => ({ path: '/workspaceReads', message: `提交前必须用 read 读取 /workspace/${path}` })) }
   try {

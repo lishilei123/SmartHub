@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, TestCaseContent, TestDataRequirement, TestDimension, TestPointNodeContent, TestPointNodeRevision } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalLibrarySelection, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension, TestPointNodeContent, TestPointNodeRevision } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 
 export class TestDesignError extends Error {
@@ -10,7 +10,7 @@ export class TestDesignError extends Error {
 
 export function validateCreateTestDesignInput(value: unknown): CreateTestDesignInput {
   const input = object(value, 'TEST_DESIGN_INPUT_INVALID', '创建参数必须是对象')
-  rejectUnknown(input, ['name', 'objective', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation', 'historicalCaseSelections'], 'TEST_DESIGN_INPUT_INVALID')
+  rejectUnknown(input, ['name', 'objective', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation', 'historicalCaseSelections', 'historicalLibrarySelection'], 'TEST_DESIGN_INPUT_INVALID')
   return {
     name: requiredText(input.name, 'name', 200),
     objective: requiredText(input.objective, 'objective', 4_000),
@@ -21,6 +21,7 @@ export function validateCreateTestDesignInput(value: unknown): CreateTestDesignI
     userCoverageObjectives: optionalTexts(input.userCoverageObjectives, 'userCoverageObjectives', 100, 2_000),
     knowledgeAugmentation: validateAugmentation(input.knowledgeAugmentation ?? { mode: 'disabled' }),
     historicalCaseSelections: validateHistoricalSelections(input.historicalCaseSelections),
+    historicalLibrarySelection: validateHistoricalLibrarySelection(input.historicalLibrarySelection),
   }
 }
 
@@ -32,25 +33,30 @@ function optionalExecutionMethods(value: unknown): Array<'ui' | 'api'> {
 
 export function validateTestCaseContent(value: unknown, validPointIds?: Set<string>): TestCaseContent {
   const input = object(value, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '用例必须是对象')
-  rejectUnknown(input, ['schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'sharedVerificationChecks', 'tags', 'domain'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID')
-  if (input.schemaVersion !== 'test-case/v1') fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'schemaVersion 必须为 test-case/v1', 422)
+  rejectUnknown(input, ['schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'executionSpec', 'sharedVerificationChecks', 'tags', 'domain'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID')
+  if (input.schemaVersion !== 'test-case/v1' && input.schemaVersion !== 'test-case/v2') fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'schemaVersion 必须为 test-case/v1 或 test-case/v2', 422)
   const testPointIds = uniqueIds(input.testPointIds, 'testPointIds')
   if (!testPointIds.length) fail('TEST_CASE_BASIS_REFERENCE_INVALID', '用例至少引用一个批准测试点', 422)
   if (validPointIds && testPointIds.some(pointId => !validPointIds.has(pointId))) fail('TEST_CASE_BASIS_REFERENCE_INVALID', '用例引用了批准树之外的测试点', 422)
-  const methods = executionMethods(input.executionMethods)
+  const testDimension = dimension(input.dimension)
+  const nonFunctionalSpec = input.executionSpec !== undefined && ['performance', 'stability', 'compatibility'].includes(testDimension)
+  const methods = executionMethods(input.executionMethods, nonFunctionalSpec)
   const dependencies = uniqueIds(input.dependencies ?? [], 'dependencies')
+  const preconditions = texts(input.preconditions, 'preconditions', 100, 2_000)
+  const dataRequirementIds = uniqueIds(input.dataRequirementIds ?? [], 'dataRequirementIds')
   return {
-    schemaVersion: 'test-case/v1',
+    schemaVersion: input.schemaVersion,
     title: requiredText(input.title, 'title', 500),
     objective: requiredText(input.objective, 'objective', 4_000),
-    dimension: dimension(input.dimension),
+    dimension: testDimension,
     testPointIds,
     priority: priority(input.priority),
-    preconditions: texts(input.preconditions, 'preconditions', 100, 2_000),
-    dataRequirementIds: uniqueIds(input.dataRequirementIds ?? [], 'dataRequirementIds'),
+    preconditions,
+    dataRequirementIds,
     cleanup: texts(input.cleanup, 'cleanup', 100, 2_000),
     dependencies,
     executionMethods: methods,
+    executionSpec: validateExecutionSpec(input.executionSpec, testDimension, methods, preconditions, dataRequirementIds),
     sharedVerificationChecks: checks(input.sharedVerificationChecks, 'sharedVerificationChecks'),
     tags: texts(input.tags, 'tags', 100, 100),
     domain: requiredText(input.domain, 'domain', 200),
@@ -105,6 +111,7 @@ export interface TestCaseDesignCandidate extends Record<string, unknown> {
   dataRequirements: TestDataRequirementCandidate[]
   findings: Record<string, unknown>[]
   confirmationItems: Record<string, unknown>[]
+  proposals: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; testPointIds: string[]; reason: string; confidence: number }>
 }
 
 export function validateTestPointDesignCandidate(value: unknown): TestPointDesignCandidate {
@@ -116,7 +123,7 @@ export function validateTestPointDesignCandidate(value: unknown): TestPointDesig
   return { schemaVersion: 'test-point-design/v1', nodes, findings, confirmationItems }
 }
 
-const synthesisCaseFields = ['ref', 'schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'sharedVerificationChecks', 'tags', 'domain']
+const synthesisCaseFields = ['ref', 'schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'executionSpec', 'sharedVerificationChecks', 'tags', 'domain']
 const legacySynthesisFieldGuidance: Record<string, string> = {
   preConditions: '改为 preconditions',
   steps: '移入 executionMethods[].steps，并使用 action/expected',
@@ -128,7 +135,7 @@ const legacySynthesisFieldGuidance: Record<string, string> = {
 
 export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: Set<string>, repair = false): TestCaseDesignCandidate {
   const input = synthesisObject(value, '/', '提交结果必须是对象')
-  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dataRequirements', 'findings', 'confirmationItems'], '/')
+  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dataRequirements', 'findings', 'confirmationItems', 'proposals'], '/')
   const schemaVersion = repair ? 'test-design-repair/v1' : 'test-case-design/v1'
   if (input.schemaVersion !== schemaVersion) synthesisFail('/schemaVersion', `schemaVersion 必须为 ${schemaVersion}`)
   if (!Array.isArray(input.cases) || !input.cases.length || input.cases.length > 1_000) synthesisFail('/cases', 'cases 必须包含 1 到 1000 条用例')
@@ -193,7 +200,33 @@ export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: 
     }
   })
   const { findings, confirmationItems } = validateDesignIssues(input)
-  return { schemaVersion, cases, dataRequirements, findings, confirmationItems }
+  const proposals = validateProposalCandidates(input.proposals, caseRefs)
+  if (proposals.length) {
+    const proposedCaseRefs = new Set(proposals.flatMap(item => item.candidateRef ? [item.candidateRef] : []))
+    const missing = [...caseRefs].filter(ref => !proposedCaseRefs.has(ref))
+    if (missing.length) synthesisFail('/proposals', `每条候选用例都必须由 Proposal 覆盖，缺少：${missing.join('、')}`)
+  }
+  return { schemaVersion, cases, dataRequirements, findings, confirmationItems, proposals }
+}
+
+function validateProposalCandidates(value: unknown, caseRefs: Set<string>): TestCaseDesignCandidate['proposals'] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 1_000) synthesisFail('/proposals', 'proposals 必须是最多 1000 项的数组')
+  return value.map((candidate, index) => {
+    const path = `/proposals/${index}`
+    const input = synthesisObject(candidate, path, 'Proposal 必须是对象')
+    synthesisRejectUnknown(input, ['operation', 'sourceCaseId', 'sourceRevision', 'candidateRef', 'requirementRefs', 'testPointIds', 'reason', 'confidence'], path)
+    const operation = synthesisEnum(input.operation, `${path}/operation`, ['reuse', 'update', 'create', 'deprecate', 'reference'] as const)
+    const sourceCaseId = input.sourceCaseId === undefined ? undefined : synthesisText(input.sourceCaseId, `${path}/sourceCaseId`, 500)
+    const sourceRevision = input.sourceRevision === undefined ? undefined : synthesisPositiveInteger(input.sourceRevision, `${path}/sourceRevision`)
+    const candidateRef = input.candidateRef === undefined ? undefined : synthesisText(input.candidateRef, `${path}/candidateRef`, 200)
+    if ((operation === 'reuse' || operation === 'update' || operation === 'deprecate' || operation === 'reference') && (!sourceCaseId || !sourceRevision)) synthesisFail(path, `${operation} 必须指定 sourceCaseId 和 sourceRevision`)
+    if ((operation === 'reuse' || operation === 'update' || operation === 'create') && (!candidateRef || !caseRefs.has(candidateRef))) synthesisFail(`${path}/candidateRef`, `${operation} 必须引用本次 cases 中的有效 ref`)
+    if ((operation === 'deprecate' || operation === 'reference') && candidateRef && !caseRefs.has(candidateRef)) synthesisFail(`${path}/candidateRef`, 'candidateRef 不属于本次 cases')
+    const confidence = Number(input.confidence)
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) synthesisFail(`${path}/confidence`, 'confidence 必须是 0 到 1 的数值')
+    return { operation, ...(sourceCaseId ? { sourceCaseId } : {}), ...(sourceRevision ? { sourceRevision } : {}), ...(candidateRef ? { candidateRef } : {}), requirementRefs: synthesisIds(input.requirementRefs, `${path}/requirementRefs`), testPointIds: synthesisIds(input.testPointIds, `${path}/testPointIds`), reason: synthesisText(input.reason, `${path}/reason`, 4_000), confidence }
+  })
 }
 
 function validateCandidateNodes(raw: unknown): DesignCandidateNode[] {
@@ -307,8 +340,26 @@ function validateHistoricalSelections(value: unknown) {
   })
 }
 
-function executionMethods(value: unknown): ExecutionMethodSpec[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 2) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'executionMethods 必须包含一到两种方式', 422)
+function validateHistoricalLibrarySelection(value: unknown): HistoricalLibrarySelection {
+  if (value === undefined) return { mode: 'latest_library' }
+  const input = object(value, 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', 'historicalLibrarySelection 必须是对象')
+  if (input.mode === 'latest_library' || input.mode === 'none') {
+    rejectUnknown(input, ['mode'], 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID')
+    return { mode: input.mode }
+  }
+  if (input.mode === 'library_version') {
+    rejectUnknown(input, ['mode', 'testCaseLibraryVersionId'], 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID')
+    return { mode: 'library_version', testCaseLibraryVersionId: id(input.testCaseLibraryVersionId, 'testCaseLibraryVersionId') }
+  }
+  if (input.mode === 'suite_version') {
+    rejectUnknown(input, ['mode', 'suiteVersionId'], 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID')
+    return { mode: 'suite_version', suiteVersionId: id(input.suiteVersionId, 'suiteVersionId') }
+  }
+  fail('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', 'historicalLibrarySelection.mode 无效', 422)
+}
+
+function executionMethods(value: unknown, allowEmpty = false): ExecutionMethodSpec[] {
+  if (!Array.isArray(value) || value.length > 2 || (!allowEmpty && value.length < 1)) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', allowEmpty ? 'executionMethods 必须是最多两种 UI/API 兼容入口' : 'executionMethods 必须包含一到两种方式', 422)
   const seen = new Set<string>()
   return value.map((candidate, index) => {
     const input = object(candidate, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', `executionMethods[${index}] 必须是对象`)
@@ -328,6 +379,48 @@ function executionMethods(value: unknown): ExecutionMethodSpec[] {
     return { method: 'api' as const, apiSpec: { method: requiredText(spec.method, 'apiSpec.method', 20).toUpperCase(), path: requiredText(spec.path, 'apiSpec.path', 2_000), ...(spec.requestSchemaRef === undefined ? {} : { requestSchemaRef: text(spec.requestSchemaRef, 'requestSchemaRef', 500) }), ...(spec.responseSchemaRef === undefined ? {} : { responseSchemaRef: text(spec.responseSchemaRef, 'responseSchemaRef', 500) }) }, ...common }
   })
 }
+
+function validateExecutionSpec(value: unknown, testDimension: TestDimension, methods: ExecutionMethodSpec[], preconditions: string[], dataRequirementIds: string[]): TestCaseExecutionSpec {
+  if (value === undefined) {
+    const primary = methods[0]
+    if (testDimension === 'functional' || testDimension === 'security') return { kind: 'functional', method: primary.method, steps: primary.steps, verificationChecks: primary.verificationChecks, preconditions, testDataRequirements: dataRequirementIds, executionReadiness: primary.executionReadiness, automationHint: primary.automationHint }
+    if (testDimension === 'performance') return { kind: 'performance', method: 'performance_tool', target: '待需求或人工确认', scenario: '待需求或人工确认', virtualUsers: null, duration: null, rampUp: null, thresholds: [], dataStrategy: '待确认', environmentRequirements: [], executionReadiness: 'needs_confirmation' }
+    if (testDimension === 'stability') return { kind: 'stability', method: 'long_running', workload: '待需求或人工确认', duration: null, interval: null, observations: [], recoveryPolicy: null, checkpointPolicy: null, environmentRequirements: [], executionReadiness: 'needs_confirmation' }
+    return { kind: 'compatibility', method: 'environment_matrix', baseMethod: primary.method, baseCaseRefs: [], browserMatrix: [], operatingSystemMatrix: [], viewportMatrix: [], versionMatrix: [], expectedConsistency: '待需求、项目配置或人工确认', executionReadiness: 'needs_confirmation' }
+  }
+  const input = object(value, 'TEST_CASE_EXECUTION_SPEC_INVALID', 'executionSpec 必须是对象')
+  if (testDimension === 'functional' || testDimension === 'security') {
+    rejectUnknown(input, ['kind', 'method', 'steps', 'verificationChecks', 'preconditions', 'testDataRequirements', 'executionReadiness', 'automationHint'], 'TEST_CASE_EXECUTION_SPEC_INVALID')
+    if (input.kind !== 'functional' || (input.method !== 'ui' && input.method !== 'api')) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能执行配置 kind/method 无效', 422)
+    if (!methods.some(method => method.method === input.method)) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能执行配置 method 必须存在于 executionMethods', 422)
+    return { kind: 'functional', method: input.method, steps: steps(input.steps, 0), verificationChecks: checks(input.verificationChecks, 'executionSpec.verificationChecks'), preconditions: texts(input.preconditions, 'executionSpec.preconditions', 100, 2_000), testDataRequirements: texts(input.testDataRequirements, 'executionSpec.testDataRequirements', 100, 2_000), executionReadiness: readiness(input.executionReadiness), automationHint: text(input.automationHint, 'executionSpec.automationHint', 2_000) }
+  }
+  if (testDimension === 'performance') {
+    rejectUnknown(input, ['kind', 'method', 'target', 'scenario', 'virtualUsers', 'duration', 'rampUp', 'thresholds', 'dataStrategy', 'environmentRequirements', 'executionReadiness'], 'TEST_CASE_EXECUTION_SPEC_INVALID')
+    if (input.kind !== 'performance' || input.method !== 'performance_tool') fail('TEST_CASE_EXECUTION_SPEC_INVALID', '性能执行配置 kind/method 无效', 422)
+    if (!Array.isArray(input.thresholds) || input.thresholds.length > 100) fail('TEST_CASE_EXECUTION_SPEC_INVALID', 'thresholds 必须是最多 100 项的数组', 422)
+    const thresholds = input.thresholds.map((candidate, index) => { const threshold = object(candidate, 'TEST_CASE_EXECUTION_SPEC_INVALID', `thresholds[${index}] 必须是对象`); rejectUnknown(threshold, ['metric', 'target', 'sourceRef'], 'TEST_CASE_EXECUTION_SPEC_INVALID'); return { metric: requiredText(threshold.metric, `thresholds[${index}].metric`, 200), target: requiredText(threshold.target, `thresholds[${index}].target`, 500), sourceRef: requiredText(threshold.sourceRef, `thresholds[${index}].sourceRef`, 500) } })
+    const requestedReadiness = readiness(input.executionReadiness)
+    return { kind: 'performance', method: 'performance_tool', target: requiredText(input.target, 'executionSpec.target', 2_000), scenario: requiredText(input.scenario, 'executionSpec.scenario', 4_000), virtualUsers: nullablePositiveInteger(input.virtualUsers, 'executionSpec.virtualUsers'), duration: nullableText(input.duration, 'executionSpec.duration', 200), rampUp: nullableText(input.rampUp, 'executionSpec.rampUp', 200), thresholds, dataStrategy: requiredText(input.dataStrategy, 'executionSpec.dataStrategy', 2_000), environmentRequirements: texts(input.environmentRequirements, 'executionSpec.environmentRequirements', 100, 2_000), executionReadiness: thresholds.length ? requestedReadiness : 'needs_confirmation' }
+  }
+  if (testDimension === 'stability') {
+    rejectUnknown(input, ['kind', 'method', 'workload', 'duration', 'interval', 'observations', 'recoveryPolicy', 'checkpointPolicy', 'environmentRequirements', 'executionReadiness'], 'TEST_CASE_EXECUTION_SPEC_INVALID')
+    if (input.kind !== 'stability' || input.method !== 'long_running') fail('TEST_CASE_EXECUTION_SPEC_INVALID', '稳定性执行配置 kind/method 无效', 422)
+    const duration = nullableText(input.duration, 'executionSpec.duration', 200)
+    return { kind: 'stability', method: 'long_running', workload: requiredText(input.workload, 'executionSpec.workload', 4_000), duration, interval: nullableText(input.interval, 'executionSpec.interval', 200), observations: texts(input.observations, 'executionSpec.observations', 100, 2_000), recoveryPolicy: nullableText(input.recoveryPolicy, 'executionSpec.recoveryPolicy', 2_000), checkpointPolicy: nullableText(input.checkpointPolicy, 'executionSpec.checkpointPolicy', 2_000), environmentRequirements: texts(input.environmentRequirements, 'executionSpec.environmentRequirements', 100, 2_000), executionReadiness: duration ? readiness(input.executionReadiness) : 'needs_confirmation' }
+  }
+  rejectUnknown(input, ['kind', 'method', 'baseMethod', 'baseCaseRefs', 'browserMatrix', 'operatingSystemMatrix', 'viewportMatrix', 'versionMatrix', 'expectedConsistency', 'executionReadiness'], 'TEST_CASE_EXECUTION_SPEC_INVALID')
+  if (input.kind !== 'compatibility' || input.method !== 'environment_matrix' || (input.baseMethod !== 'ui' && input.baseMethod !== 'api')) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '兼容性执行配置 kind/method/baseMethod 无效', 422)
+  const browserMatrix = texts(input.browserMatrix, 'executionSpec.browserMatrix', 100, 500)
+  const operatingSystemMatrix = texts(input.operatingSystemMatrix, 'executionSpec.operatingSystemMatrix', 100, 500)
+  const viewportMatrix = texts(input.viewportMatrix, 'executionSpec.viewportMatrix', 100, 500)
+  const versionMatrix = texts(input.versionMatrix, 'executionSpec.versionMatrix', 100, 500)
+  const hasMatrix = browserMatrix.length + operatingSystemMatrix.length + viewportMatrix.length + versionMatrix.length > 0
+  return { kind: 'compatibility', method: 'environment_matrix', baseMethod: input.baseMethod, baseCaseRefs: uniqueIds(input.baseCaseRefs, 'executionSpec.baseCaseRefs'), browserMatrix, operatingSystemMatrix, viewportMatrix, versionMatrix, expectedConsistency: requiredText(input.expectedConsistency, 'executionSpec.expectedConsistency', 4_000), executionReadiness: hasMatrix ? readiness(input.executionReadiness) : 'needs_confirmation' }
+}
+
+function nullableText(value: unknown, field: string, max: number) { return value == null || value === '' ? null : text(value, field, max).trim() || null }
+function nullablePositiveInteger(value: unknown, field: string) { if (value == null) return null; if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 1_000_000) fail('TEST_CASE_EXECUTION_SPEC_INVALID', `${field} 必须为正整数或 null`, 422); return Number(value) }
 
 function steps(value: unknown, methodIndex: number) {
   if (!Array.isArray(value) || !value.length || value.length > 200) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', `executionMethods[${methodIndex}].steps 不能为空`, 422)

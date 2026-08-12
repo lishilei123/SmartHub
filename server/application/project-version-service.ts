@@ -68,7 +68,7 @@ export class ProjectVersionService {
       state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
       state.reviewRuns = state.reviewRuns.filter(item => item.projectVersionId !== version.id)
       if (testDesignState) {
-        testDesignState.executionHandoffs = testDesignState.executionHandoffs.filter(item => !caseSetVersionIds.has(item.testCaseSetVersionId))
+        testDesignState.executionHandoffs = testDesignState.executionHandoffs.filter(item => item.projectVersionId !== version.id && (!item.testCaseSetVersionId || !caseSetVersionIds.has(item.testCaseSetVersionId)))
         testDesignState.caseSetVersions = testDesignState.caseSetVersions.filter(item => item.projectVersionId !== version.id)
         testDesignState.runs = testDesignState.runs.filter(item => !testDesignRunIds.has(item.id))
         testDesignState.designs = testDesignState.designs.filter(item => !testDesignIds.has(item.id))

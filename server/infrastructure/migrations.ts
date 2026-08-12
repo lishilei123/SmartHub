@@ -809,6 +809,107 @@ const migrations: Migration[] = [{
     DROP TABLE IF EXISTS smarthub.technical_solution_review_runs;
     DROP TABLE IF EXISTS smarthub.technical_solution_reviews;
   `,
+}, {
+  version: 24,
+  name: 'project-test-case-library-and-handoffs',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.library_test_cases (
+      id text PRIMARY KEY,
+      project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE CASCADE,
+      current_revision integer NOT NULL,
+      status text NOT NULL CHECK (status IN ('active','deprecated')),
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS library_test_cases_project_idx ON smarthub.library_test_cases (project_id, status, updated_at DESC, id);
+    CREATE TABLE IF NOT EXISTS smarthub.library_test_case_revisions (
+      case_id text NOT NULL REFERENCES smarthub.library_test_cases(id) ON DELETE RESTRICT,
+      revision integer NOT NULL,
+      content_sha256 char(64) NOT NULL,
+      semantic_sha256 char(64) NOT NULL,
+      source_run_id text,
+      source_proposal_id text,
+      created_by text NOT NULL,
+      created_at timestamptz NOT NULL,
+      content jsonb NOT NULL,
+      data jsonb NOT NULL,
+      PRIMARY KEY (case_id, revision)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.case_change_proposals (
+      id text PRIMARY KEY,
+      workflow_run_id text NOT NULL,
+      operation text NOT NULL CHECK (operation IN ('reuse','update','create','deprecate','reference')),
+      source_case_id text,
+      source_revision integer,
+      decision text NOT NULL,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS case_change_proposals_run_idx ON smarthub.case_change_proposals (workflow_run_id, operation, decision, id);
+    CREATE TABLE IF NOT EXISTS smarthub.case_change_proposal_decisions (
+      id text PRIMARY KEY,
+      proposal_id text NOT NULL REFERENCES smarthub.case_change_proposals(id) ON DELETE RESTRICT,
+      expected_version integer NOT NULL,
+      decision text NOT NULL,
+      decided_by text NOT NULL,
+      decided_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (proposal_id, expected_version)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_library_versions (
+      id text PRIMARY KEY,
+      project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE CASCADE,
+      version integer NOT NULL,
+      name text NOT NULL,
+      source_run_id text,
+      content_sha256 char(64) NOT NULL,
+      published_by text NOT NULL,
+      published_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (project_id, version),
+      UNIQUE (project_id, content_sha256)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_case_library_version_members (
+      version_id text NOT NULL REFERENCES smarthub.test_case_library_versions(id) ON DELETE RESTRICT,
+      case_id text NOT NULL REFERENCES smarthub.library_test_cases(id) ON DELETE RESTRICT,
+      case_revision integer NOT NULL,
+      ordinal integer NOT NULL,
+      content_sha256 char(64) NOT NULL,
+      PRIMARY KEY (version_id, case_id),
+      UNIQUE (version_id, ordinal)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_suite_drafts (
+      id text PRIMARY KEY,
+      project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE CASCADE,
+      suite_key text NOT NULL,
+      suite_type text NOT NULL CHECK (suite_type IN ('smoke','regression','custom')),
+      status text NOT NULL CHECK (status IN ('draft','published')),
+      content_sha256 char(64) NOT NULL,
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (project_id, suite_key, id)
+    );
+    CREATE TABLE IF NOT EXISTS smarthub.test_suite_draft_members (
+      draft_id text NOT NULL REFERENCES smarthub.test_suite_drafts(id) ON DELETE CASCADE,
+      case_id text NOT NULL REFERENCES smarthub.library_test_cases(id) ON DELETE RESTRICT,
+      case_revision integer NOT NULL,
+      ordinal integer NOT NULL,
+      execution_method text NOT NULL,
+      data jsonb NOT NULL,
+      PRIMARY KEY (draft_id, case_id),
+      UNIQUE (draft_id, ordinal)
+    );
+    ALTER TABLE smarthub.test_suite_version_members ALTER COLUMN test_case_set_version_id DROP NOT NULL;
+    ALTER TABLE smarthub.test_suite_version_members ALTER COLUMN execution_methods DROP NOT NULL;
+    ALTER TABLE smarthub.test_suite_version_members ADD COLUMN IF NOT EXISTS test_case_library_version_id text REFERENCES smarthub.test_case_library_versions(id) ON DELETE RESTRICT;
+    ALTER TABLE smarthub.test_suite_version_members ADD COLUMN IF NOT EXISTS execution_method text;
+    ALTER TABLE smarthub.test_execution_handoffs ALTER COLUMN test_case_set_version_id DROP NOT NULL;
+    ALTER TABLE smarthub.test_execution_handoffs ADD COLUMN IF NOT EXISTS test_case_library_version_id text REFERENCES smarthub.test_case_library_versions(id) ON DELETE RESTRICT;
+    ALTER TABLE smarthub.test_execution_handoffs ADD COLUMN IF NOT EXISTS suite_version_id text REFERENCES smarthub.test_suite_versions(id) ON DELETE RESTRICT;
+    ALTER TABLE smarthub.test_execution_handoffs ADD COLUMN IF NOT EXISTS execution_mode text;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {
