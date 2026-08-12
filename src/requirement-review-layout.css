@@ -11,6 +11,10 @@
   min-height: 0;
 }
 
+.rav2-workspace > header > span > svg {
+  color: #5965e9;
+}
+
 .rav2-document-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 30px;
