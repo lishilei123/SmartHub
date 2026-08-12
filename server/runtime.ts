@@ -4,13 +4,11 @@ import { KnowledgeService } from './application/knowledge-service.js'
 import { ModelService } from './application/model-service.js'
 import { RequirementAnalysisService } from './application/requirement-analysis-service.js'
 import { PiAgentRuntimeAdapter } from './agent/pi-agent-runtime.js'
-import { PiReviewQaRuntimeAdapter } from './agent/pi-review-qa-runtime.js'
 import { LocalModelRuntime } from './infrastructure/local-model-runtime.js'
 import { PostgresStore } from './infrastructure/postgres-store.js'
 import { RawDocumentStore } from './infrastructure/raw-document-store.js'
 import { JsonStore, type StateStore } from './infrastructure/store.js'
 import { ProjectVersionService } from './application/project-version-service.js'
-import { ReviewQaService } from './application/review-qa-service.js'
 import { AgentConfigurationService } from './application/agent-configuration-service.js'
 import { AiResourceService } from './application/ai-resource-service.js'
 import { SkillPackageStore } from './infrastructure/skill-package-store.js'
@@ -43,12 +41,10 @@ export const aiResourceService = new AiResourceService(stateStore, skillPackageS
 export const agentConfigurationService = new AgentConfigurationService(stateStore)
 export const reviewGovernanceService = new ReviewGovernanceService(stateStore)
 export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore, {}, skillPackageStore, reviewGovernanceService)
-export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService)
+export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService, service)
 export const technicalSolutionReviewService = new TechnicalSolutionReviewService(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignRuntime = new PiTestDesignRuntimeAdapter(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignService = new TestDesignService(stateStore, testDesignRuntime, service)
-export const reviewQaRuntime = new PiReviewQaRuntimeAdapter({}, stateStore, skillPackageStore)
-export const reviewQaService = new ReviewQaService(stateStore, reviewQaRuntime, agentConfigurationService)
 export const projectVersionService = new ProjectVersionService(stateStore)
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore

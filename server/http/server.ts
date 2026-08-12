@@ -4,9 +4,8 @@ import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
-import type { ReviewQuestionQuote } from '../domain/review-qa-types.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, technicalSolutionReviewService, testDesignService, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, technicalSolutionReviewService, testDesignService, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
@@ -15,7 +14,7 @@ import { TestDesignError } from '../application/test-design-validation.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, reviewQaService, service, stateStore, technicalSolutionReviewService, testDesignService }
+export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, technicalSolutionReviewService, testDesignService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -143,6 +142,28 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   }
   const requirementReviewRun = /^\/api\/requirement-review-runs\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && requirementReviewRun) { await requireRun(requirementReviewRun[1], 'review:read'); return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1])) }
+  const repairDrafts = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts$/.exec(url.pathname)
+  if (method === 'POST' && repairDrafts) {
+    await requireRun(repairDrafts[1], 'review:handle')
+    const body = await json(request)
+    return send(response, 201, await requirementAnalysisService.generateRepairDraft(repairDrafts[1], { findingIds: stringList(body.findingIds) ?? [], principal }))
+  }
+  const repairApproval = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/approve$/.exec(url.pathname)
+  if (method === 'POST' && repairApproval) { await requireRun(repairApproval[1], 'review:handle'); const body = await json(request); return send(response, 200, await requirementAnalysisService.approveRepairDraft(repairApproval[1], repairApproval[2], { comment: body.comment === undefined ? undefined : String(body.comment), principal })) }
+  const repairApply = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/apply$/.exec(url.pathname)
+  if (method === 'POST' && repairApply) { await requireRun(repairApply[1], 'review:handle'); return send(response, 202, await requirementAnalysisService.applyRepairDraft(repairApply[1], repairApply[2])) }
+  const repairVerify = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/verify$/.exec(url.pathname)
+  if (method === 'POST' && repairVerify) { await requireRun(repairVerify[1], 'review:create'); return send(response, 202, await requirementAnalysisService.finalizeRepairAndStartVerification(repairVerify[1], repairVerify[2])) }
+  const releaseCandidate = /^\/api\/requirement-review-runs\/([^/]+)\/release-candidate$/.exec(url.pathname)
+  if (method === 'POST' && releaseCandidate) { await requireRun(releaseCandidate[1], 'review:create'); return send(response, 201, await requirementAnalysisService.createReleaseCandidate(releaseCandidate[1], { principal })) }
+  const releasePublish = /^\/api\/requirement-review-runs\/([^/]+)\/release\/publish$/.exec(url.pathname)
+  if (method === 'POST' && releasePublish) { await requireRun(releasePublish[1], 'project-version:manage'); return send(response, 200, await requirementAnalysisService.publishRelease(releasePublish[1], { principal })) }
+  const releaseArtifact = /^\/api\/requirement-review-runs\/([^/]+)\/release\/artifacts\/([^/]+)$/.exec(url.pathname)
+  if (method === 'GET' && releaseArtifact) {
+    await requireRun(releaseArtifact[1], 'review:read')
+    const artifact = await requirementAnalysisService.releaseArtifact(releaseArtifact[1], decodeURIComponent(releaseArtifact[2]))
+    return sendText(response, 200, artifact.content, artifact.mediaType === 'application/json' ? 'application/json; charset=utf-8' : `${artifact.mediaType}; charset=utf-8`, artifact.fileName.split('/').at(-1))
+  }
   const findingActions = /^\/api\/requirement-review-runs\/([^/]+)\/finding-actions$/.exec(url.pathname)
   if (method === 'GET' && findingActions) { await requireRun(findingActions[1], 'review:read'); return send(response, 200, await reviewGovernanceService.listFindingActions(findingActions[1])) }
   const findingAction = /^\/api\/requirement-review-runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
@@ -176,29 +197,6 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     const mode = String(body.mode ?? '')
     if (mode !== 'full') throw new Error('单 Agent 需求分析只支持 full 全部重跑')
     return send(response, 202, await requirementAnalysisService.retry(requirementReviewRunRetry[1], 'full'))
-  }
-  const requirementReviewQuestions = /^\/api\/requirement-review-runs\/([^/]+)\/questions$/.exec(url.pathname)
-  if (method === 'GET' && requirementReviewQuestions) { await requireRun(requirementReviewQuestions[1], 'review:read'); return send(response, 200, await reviewQaService.list(requirementReviewQuestions[1])) }
-  if (method === 'POST' && requirementReviewQuestions) {
-    await requireRun(requirementReviewQuestions[1], 'review:read')
-    const body = await json(request)
-    const controller = new AbortController()
-    request.once('aborted', () => controller.abort(new Error('REVIEW_QA_CANCELLED')))
-    response.once('close', () => { if (!response.writableEnded) controller.abort(new Error('REVIEW_QA_CANCELLED')) })
-    const question = { question: String(body.question ?? ''), quote: body.quote && typeof body.quote === 'object' ? body.quote as ReviewQuestionQuote : undefined, principal }
-    if (url.searchParams.get('stream') === 'true') {
-      response.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff', 'access-control-allow-origin': '*' })
-      try {
-        const result = await reviewQaService.ask(requirementReviewQuestions[1], question, controller.signal, event => writeNdjson(response, { type: 'event', event }))
-        writeNdjson(response, { type: 'result', result })
-      } catch (error) {
-        writeNdjson(response, { type: 'error', error: error instanceof Error ? error.message : '未知错误' })
-      } finally {
-        response.end()
-      }
-      return
-    }
-    return send(response, 200, await reviewQaService.ask(requirementReviewQuestions[1], question, controller.signal))
   }
   const modelSource = /^\/api\/model-sources\/([^/]+)$/.exec(url.pathname)
   if (method === 'PATCH' && modelSource) return send(response, 200, await modelService.updateSource(modelSource[1], await json(request)))

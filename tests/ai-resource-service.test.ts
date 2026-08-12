@@ -19,9 +19,9 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'knowledge.search',
     'non_functional_test_design.submit_result',
     'requirement-analysis.submit_result',
-    'requirement-points.submit_result',
-    'review.answer_submit',
-    'review.submit_result',
+    'requirement-release.submit_result',
+    'requirement-repair.submit_result',
+    'skill.activate',
     'technical_solution.evidence.preview',
     'technical_solution.input.read',
     'technical_solution_points.submit_result',
@@ -33,13 +33,29 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'workspace.list_directory',
     'workspace.read_file',
   ])
-  assert.deepEqual(initial.skills.map(skill => skill.key), ['system.query-local-ip', 'system.structured-summary', 'system.requirement-analysis', 'example.echo-skill'])
-  assert.equal(initial.skills[0].runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
-  assert.deepEqual(initial.skills[0].toolIds, [])
-  assert.equal(initial.skills[1].entrypoint, 'server/skills/structured-summary/SKILL.md')
-  assert.equal(initial.skills[2].entrypoint, 'server/skills/requirement-analysis/SKILL.md')
-  assert.equal(initial.skills[3].managedBy, 'filesystem')
-  assert.deepEqual(initial.skills[3].toolIds, ['example.echo'])
+  assert.deepEqual(initial.skills.map(skill => skill.key).sort(), [
+    'example.echo-skill',
+    'requirement.baseline',
+    'requirement.release',
+    'requirement.repair',
+    'requirement.review',
+    'requirement.verification',
+    'system.query-local-ip',
+    'system.requirement-analysis',
+    'system.structured-summary',
+  ])
+  assert.equal(initial.skills.find(skill => skill.key === 'system.query-local-ip')?.runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
+  assert.deepEqual(initial.skills.find(skill => skill.key === 'system.query-local-ip')?.toolIds, [])
+  assert.equal(initial.skills.find(skill => skill.key === 'system.structured-summary')?.entrypoint, 'server/skills/structured-summary/SKILL.md')
+  assert.equal(initial.skills.find(skill => skill.key === 'system.requirement-analysis')?.entrypoint, 'server/skills/requirement-analysis/SKILL.md')
+  for (const key of ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release']) {
+    const skill = initial.skills.find(candidate => candidate.key === key)
+    assert.equal(skill?.builtIn, true)
+    assert.equal(skill?.managedBy, 'builtin')
+    assert.equal(skill?.entrypoint, `server/skills/${key.replace('.', '-')}/SKILL.md`)
+  }
+  assert.equal(initial.skills.find(skill => skill.key === 'example.echo-skill')?.managedBy, 'filesystem')
+  assert.deepEqual(initial.skills.find(skill => skill.key === 'example.echo-skill')?.toolIds, ['example.echo'])
   assert.ok(initial.tools.filter(tool => tool.builtIn).every(tool => tool.status === 'ready' && tool.enabled))
   assert.ok(initial.skills.filter(skill => skill.builtIn).every(skill => skill.status === 'ready' && skill.enabled))
   assert.equal(initial.tools.find(tool => tool.key === 'example.echo')?.managedBy, 'filesystem')
@@ -47,9 +63,9 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'knowledge.search': 'server/tools/knowledge-search.ts',
     'knowledge.read_chunk': 'server/tools/knowledge-read-chunk.ts',
     'requirement-analysis.submit_result': 'server/tools/requirement-analysis-submit-result.ts',
-    'requirement-points.submit_result': 'server/tools/requirement-points-submit-result.ts',
-    'review.answer_submit': 'server/tools/review-answer-submit.ts',
-    'review.submit_result': 'server/tools/review-submit-result.ts',
+    'requirement-release.submit_result': 'server/tools/requirement-workflow-submit.ts',
+    'requirement-repair.submit_result': 'server/tools/requirement-workflow-submit.ts',
+    'skill.activate': 'server/tools/skill-activate.ts',
     'technical_solution.input.read': 'server/tools/technical-solution-tools.ts',
     'technical_solution.evidence.preview': 'server/tools/technical-solution-tools.ts',
     'technical_solution_points.submit_result': 'server/tools/technical-solution-tools.ts',
@@ -99,7 +115,7 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
 
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
-  assert.equal(catalog.skills.length, 5)
+  assert.equal(catalog.skills.length, 10)
   assert.equal(catalog.tools.length, 20)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)
@@ -172,6 +188,42 @@ test('AI 资源目录清理已退役的批量校验证据工具', async () => {
   })
   const catalog = await new AiResourceService(store).list()
   assert.ok(!catalog.tools.some(tool => tool.key === 'evidence.validate_batch'))
+})
+
+test('AI 资源目录将历史 filesystem 阶段 Skill 提升为内置资源', async () => {
+  const store = new JsonStore(null)
+  await store.load()
+  await store.transaction(state => {
+    state.aiResources.push({
+      id: 'filesystem_skill_requirement_baseline',
+      kind: 'skill',
+      key: 'requirement.baseline',
+      name: '旧需求基线',
+      description: '历史外置资源',
+      version: '1.0.0',
+      enabled: false,
+      status: 'ready',
+      builtIn: false,
+      managedBy: 'filesystem',
+      entrypoint: 'ai/skills/requirement-baseline/SKILL.md',
+      toolIds: [],
+      tags: ['旧资源'],
+      contentSha256: 'a'.repeat(64),
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    })
+  })
+
+  const catalog = await new AiResourceService(store, undefined, { reloadIntervalMs: 0 }).list()
+  const matches = catalog.skills.filter(skill => skill.key === 'requirement.baseline')
+  assert.equal(matches.length, 1)
+  assert.equal(matches[0].id, 'builtin_skill_requirement_baseline')
+  assert.equal(matches[0].builtIn, true)
+  assert.equal(matches[0].managedBy, 'builtin')
+  assert.equal(matches[0].enabled, true)
+  assert.equal(matches[0].entrypoint, 'server/skills/requirement-baseline/SKILL.md')
+  assert.equal(matches[0].contentSha256, undefined)
+  assert.equal(matches[0].createdAt, '2026-01-01T00:00:00.000Z')
 })
 
 test('AI 资源目录自动恢复历史上被停用的内置 Tool 和 Skill', async () => {

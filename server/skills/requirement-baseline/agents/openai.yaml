@@ -1,0 +1,4 @@
+interface:
+  display_name: "需求基线"
+  short_description: "建立完整、原子且可追溯到固定原文证据的需求基线"
+  default_prompt: "使用需求基线 Skill 阅读固定需求并提交可追溯的需求点与 Evidence 草稿。"

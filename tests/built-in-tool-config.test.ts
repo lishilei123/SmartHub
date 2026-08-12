@@ -14,6 +14,7 @@ test('checked-in built-in Tool config includes the unified requirement-analysis 
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.list_directory').piName, 'ls')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('skill.http_request').piName, 'skill_http_request')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('skill.activate').piName, 'skill_activate')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_case_synthesis.submit_result').piName, 'test_case_synthesis_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
 })

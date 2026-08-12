@@ -38,7 +38,7 @@ export function buildRequirementDirectoryInputPlan(input: {
       agentWorkspacePath: input.agentWorkspacePath,
       fileCount: input.assets.length,
       workspaceSnapshotSha256,
-      instructions: '像 Codex 一样从当前工作目录开始，使用 ls 查看目录、find 按文件名查找、grep 搜索文本位置，再用 read 按相对路径读取文件。不要假设文件内容，也不要越过工作目录。grep 只用于定位；需要分析或引用的正文必须通过 read 实际读取。',
+      instructions: '当前工作目录开始，使用 ls 查看目录、find 按文件名查找、grep 搜索文本位置，再用 read 按相对路径读取文件。不要假设文件内容，也不要越过工作目录。grep 只用于定位；需要分析或引用的正文必须通过 read 实际读取。',
     }),
     '<<<SMARTHUB_PI_DOCUMENT_WORKSPACE_END>>>',
   ].join('\n')

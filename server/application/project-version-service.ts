@@ -68,8 +68,6 @@ export class ProjectVersionService {
       const deletedRunIds = new Set(reviewRuns.map(item => item.id))
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
       state.findingActions = state.findingActions.filter(item => !deletedRunIds.has(item.runId))
-      state.reviewQaTurns = state.reviewQaTurns.filter(item => !deletedRunIds.has(item.runId))
-      state.reviewQaSessions = state.reviewQaSessions.filter(item => !deletedRunIds.has(item.runId))
       state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
       state.technicalSolutionFindingActions = state.technicalSolutionFindingActions.filter(item => item.projectVersionId !== version.id)
       state.technicalSolutionRuns = state.technicalSolutionRuns.filter(item => item.projectVersionId !== version.id)

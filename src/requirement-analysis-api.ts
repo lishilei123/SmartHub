@@ -85,12 +85,51 @@ export type AgentExecutionEvent = {
 }
 
 export type AgentExecutionRecord = {
-  agentKey?: 'review-qa' | 'requirement-analysis'
+  agentKey?: 'requirement-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number
   framework?: { name: string; version: string }
+  workflowStage?: 'analysis' | 'repair' | 'verification' | 'release'
   events: AgentExecutionEvent[]
+}
+
+export type RequirementRepairDraft = {
+  id: string
+  sourceRunId: string
+  status: 'generated' | 'approved' | 'applying' | 'applied' | 'verification_running' | 'verified' | 'failed'
+  candidate: {
+    schemaVersion: 'requirement-repair/v1'
+    summary: string
+    patches: Array<{ assetVersionId: string; before: string; after: string; reason: string; findingRefs: string[] }>
+  }
+  generationExecution: AgentExecutionRecord
+  createdAt: string
+  createdBy: string
+  approvedAt?: string
+  approvedBy?: string
+  approvalComment?: string
+  application?: { items: Array<{ assetId: string; sourceAssetVersionId: string; targetAssetVersionId: string; taskId?: string; logicalPath: string; contentSha256: string }>; startedAt: string; appliedAt?: string; verificationRunId?: string }
+  error?: string
+}
+
+export type RequirementReleasePackage = {
+  id: string
+  schemaVersion: 'requirement-release-package/v1'
+  status: 'candidate' | 'published'
+  projectVersionId: string
+  verificationRunId: string
+  sourceRunId?: string
+  repairDraftId?: string
+  sourceAssetVersionIds: string[]
+  candidate: { schemaVersion: 'requirement-release-candidate/v1'; sourceAssetVersionIds: string[]; refinedRequirementsMarkdown: string }
+  generationExecution: AgentExecutionRecord
+  artifacts: Array<{ fileName: string; mediaType: 'text/markdown' | 'application/json' | 'text/plain'; content: string; contentSha256: string }>
+  contentSha256: string
+  createdAt: string
+  createdBy: string
+  publishedAt?: string
+  publishedBy?: string
 }
 
 export type AgentDefinitionSnapshot = {
@@ -203,27 +242,18 @@ export type RequirementReviewRun = {
   executions?: AgentExecutions
   executionAttempts?: ReviewRunExecutionAttempt[]
   inputDeliveryManifest?: InputDeliveryManifest
+  workflow?: {
+    currentStage: 'analysis' | 'repair' | 'verification' | 'release'
+    repairDrafts?: RequirementRepairDraft[]
+    verificationOf?: { sourceRunId: string; repairDraftId: string }
+    release?: RequirementReleasePackage
+  }
   response?: RequirementAnalysisResponse
 }
 
 export type RequirementReviewRunPage = {
   items: RequirementReviewRun[]
   nextCursor?: string
-}
-
-export type ReviewQuestionQuote = { text: string; assetVersionId: string; heading: string; startLine?: number; endLine?: number; findingId?: string }
-export type ReviewQuestionResponse = {
-  id: string
-  runId: string
-  question: string
-  answer: string
-  citations: string[]
-  limitations: string[]
-  quote?: ReviewQuestionQuote
-  modelLabel: string
-  execution: AgentExecutionRecord
-  agentConfigurationRef?: { id: string; version: number; contentSha256: string }
-  createdAt: string
 }
 
 export type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
@@ -235,27 +265,6 @@ export type FindingActionsResponse = {
   actions: Array<{ id: string; findingId: string; action: FindingActionType; fromState: FindingState; toState: FindingState; comment?: string; actorDisplayName: string; version: number; createdAt: string }>
 }
 
-export type ReviewQuestionHistory = {
-  runId: string
-  projectVersionId: string
-  session: { id: string; createdAt: string; createdBy: string } | null
-  turns: Array<{
-    id: string
-    question: string
-    quote?: ReviewQuestionQuote
-    answer?: string
-    citations: string[]
-    limitations: string[]
-    status: 'succeeded' | 'failed' | 'cancelled'
-    modelRef?: { sourceId: string; modelId: string; label: string }
-    agentConfigurationRef?: { id: string; version: number; contentSha256: string }
-    execution?: AgentExecutionRecord
-    error?: string
-    createdBy: string
-    createdAt: string
-    finishedAt: string
-  }>
-}
 export type ToolApproval = { id: string; runId: string; toolId: string; toolVersion: string; risk: 'write_reversible' | 'write_high_risk'; parameterSummary: string; parameterHash: string; status: 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'; requestedAt: string; expiresAt: string; decidedAt?: string; decidedByDisplayName?: string; decisionComment?: string; consumedAt?: string }
 
 export async function startRequirementAnalysis(projectVersionId: string, input: { documentDirectoryPath: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
@@ -307,43 +316,6 @@ export async function retryRequirementReviewRun(runId: string) {
   return body as RequirementReviewRun
 }
 
-export async function askRequirementReviewQuestion(runId: string, input: { question: string; quote?: ReviewQuestionQuote }, signal?: AbortSignal, onEvent?: (event: AgentExecutionEvent) => void) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/questions${onEvent ? '?stream=true' : ''}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
-    signal,
-  })
-  if (!onEvent) {
-    const body = await response.json() as ReviewQuestionResponse | { error?: string }
-    if (!response.ok) throw new Error('error' in body && body.error ? body.error : '评审问答失败')
-    return body as ReviewQuestionResponse
-  }
-  if (!response.ok || !response.body) throw new Error('评审问答流式连接失败')
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let result: ReviewQuestionResponse | undefined
-  const consume = (line: string) => {
-    if (!line.trim()) return
-    const item = JSON.parse(line) as { type: 'event'; event: AgentExecutionEvent } | { type: 'result'; result: ReviewQuestionResponse } | { type: 'error'; error: string }
-    if (item.type === 'event') onEvent(item.event)
-    else if (item.type === 'result') result = item.result
-    else throw new Error(item.error || '评审问答失败')
-  }
-  while (true) {
-    const { done, value } = await reader.read()
-    buffer += decoder.decode(value, { stream: !done })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) consume(line)
-    if (done) break
-  }
-  consume(buffer)
-  if (!result) throw new Error('评审问答未返回最终答案')
-  return result
-}
-
 export async function loadFindingActions(runId: string) {
   const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/finding-actions`)
   const body = await response.json() as FindingActionsResponse | { error?: string }
@@ -358,11 +330,50 @@ export async function createFindingAction(runId: string, findingId: string, inpu
   return body as FindingActionsResponse['actions'][number]
 }
 
-export async function loadReviewQuestionHistory(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/questions`)
-  const body = await response.json() as ReviewQuestionHistory | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '评审问答历史读取失败')
-  return body as ReviewQuestionHistory
+export async function generateRequirementRepairDraft(runId: string, findingIds: string[]) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ findingIds }) })
+  const body = await response.json() as RequirementRepairDraft | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复草稿生成失败')
+  return body as RequirementRepairDraft
+}
+
+export async function approveRequirementRepairDraft(runId: string, draftId: string, comment?: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/approve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comment }) })
+  const body = await response.json() as RequirementRepairDraft | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复草稿审批失败')
+  return body as RequirementRepairDraft
+}
+
+export async function applyRequirementRepairDraft(runId: string, draftId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/apply`, { method: 'POST' })
+  const body = await response.json() as RequirementRepairDraft | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复应用失败')
+  return body as RequirementRepairDraft
+}
+
+export async function verifyRequirementRepairDraft(runId: string, draftId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/verify`, { method: 'POST' })
+  const body = await response.json() as { repairDraft: RequirementRepairDraft; verificationRun: RequirementReviewRun } | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复复验启动失败')
+  return body as { repairDraft: RequirementRepairDraft; verificationRun: RequirementReviewRun }
+}
+
+export async function createRequirementReleaseCandidate(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/release-candidate`, { method: 'POST' })
+  const body = await response.json() as RequirementReleasePackage | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求发布候选生成失败')
+  return body as RequirementReleasePackage
+}
+
+export async function publishRequirementRelease(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/release/publish`, { method: 'POST' })
+  const body = await response.json() as RequirementReleasePackage | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求发布失败')
+  return body as RequirementReleasePackage
+}
+
+export function requirementReleaseArtifactUrl(runId: string, fileName: string) {
+  return `${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/release/artifacts/${encodeURIComponent(fileName)}`
 }
 
 export async function downloadRequirementReviewReport(projectVersionId: string, runId: string) {

@@ -21,9 +21,6 @@ export function renderRequirementAnalysisTask(snapshot: ReviewRunSnapshot) {
   return `${rendered}\n\n本次运行使用 Pi Coding Agent 文件工作区协议。当前工作目录是 /${workspace?.rootLogicalPath ?? workspace?.logicalPath ?? 'workspace'}；活动分支是 /${workspace?.activeBranchLogicalPath ?? 'workspace/branches/unknown'}；本次冻结需求输入目录是 /${workspace?.logicalPath ?? snapshot.logicalPath}；Requirement Agent 目录是 /${workspace?.agentLogicalPath ?? 'workspace/agent_workspace/requirement_agent'}。输入不包含文件清单或正文。请先调用 ls，从工作区目录树开始探索；可用 find 查找文件、grep 定位文本，随后必须使用 read 按相对路径读取需要分析或引用的文件。grep 不形成正文投递证明，只有 read 实际返回的当前需求行范围可用于 sourceTexts。Knowledge 工具返回会显式标记 current_requirement 或 knowledge_reference，必须保持事实边界。不得调用 Shell、write、edit 或越过 /workspace。`
 }
 
-/** @deprecated 旧双 Agent Runtime 使用；新需求分析只调用 renderRequirementAnalysisTask。 */
-export const renderRequirementTask = renderRequirementAnalysisTask
-
 export function createAgentDefinitionVersion(input: {
   agentKey: AgentDefinitionVersion['agentKey']
   agentType: AgentDefinitionVersion['agentType']

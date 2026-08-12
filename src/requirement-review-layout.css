@@ -11,6 +11,71 @@
   min-height: 0;
 }
 
+.rav2-document-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.rav2-document-row:hover {
+  background: #f5f6fa;
+}
+
+.rav2-document-row.active {
+  background: #f0f1ff;
+}
+
+.rav2-docs .rav2-document-open {
+  min-width: 0;
+  width: 100%;
+  padding: 9px 4px 9px 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  display: flex;
+  gap: 8px;
+}
+
+.rav2-document-open > span {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: #abb2bd;
+  display: grid;
+  place-items: center;
+}
+
+.rav2-document-open > span.read {
+  color: #24a276;
+}
+
+.rav2-document-open > div {
+  min-width: 0;
+}
+
+.rav2-docs .rav2-document-delete {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #a3abb6;
+  display: grid;
+  place-items: center;
+}
+
+.rav2-docs .rav2-document-delete:hover:not(:disabled) {
+  background: #fff0f2;
+  color: #ca4158;
+}
+
+.rav2-docs .rav2-document-delete:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 .requirement-workspace-upload-actions {
   position: relative;
   order: -1;
@@ -43,4 +108,375 @@
 .rav2-workspace > footer .requirement-workspace-upload-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.48;
+}
+
+.requirement-upload-progress {
+  margin-top: 3px;
+  padding: 8px;
+  border: 1px solid #dfe3f8;
+  border-radius: 6px;
+  background: #f7f8ff;
+}
+
+.requirement-upload-progress > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #5965e9;
+  font-size: 8px;
+}
+
+.requirement-upload-progress b {
+  font-size: 9px;
+}
+
+.requirement-upload-progress progress {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin: 6px 0;
+  border: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  accent-color: #5965e9;
+}
+
+.requirement-upload-progress progress::-webkit-progress-bar {
+  background: #e4e7f4;
+}
+
+.requirement-upload-progress progress::-webkit-progress-value {
+  background: #5965e9;
+}
+
+.requirement-workspace-upload-actions .requirement-upload-progress small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #778296;
+  text-align: left;
+}
+
+.requirement-upload-progress.completed {
+  border-color: #caead8;
+  background: #f3fbf6;
+}
+
+.requirement-upload-progress.completed > div {
+  color: #218653;
+}
+
+.requirement-upload-progress.completed progress {
+  accent-color: #2da365;
+}
+
+.requirement-upload-progress.completed progress::-webkit-progress-value {
+  background: #2da365;
+}
+
+.requirement-upload-progress.failed {
+  border-color: #f2cccc;
+  background: #fff6f6;
+}
+
+.requirement-upload-progress.failed > div {
+  color: #c64040;
+}
+
+.requirement-upload-progress.failed progress {
+  accent-color: #d94a4a;
+}
+
+.requirement-upload-progress.failed progress::-webkit-progress-value {
+  background: #d94a4a;
+}
+
+.rav2-conversation {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #f7f8fa;
+}
+
+.rav2-conversation-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  scroll-behavior: smooth;
+}
+
+.rav2-agent-task {
+  padding: 10px;
+  border: 1px solid #dfe2fa;
+  border-radius: 9px;
+  background: #f0f1ff;
+  display: flex;
+  gap: 8px;
+}
+
+.rav2-agent-task > span {
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  border-radius: 7px;
+  background: #fff;
+  color: #5965e9;
+  display: grid;
+  place-items: center;
+}
+
+.rav2-agent-task svg {
+  width: 14px;
+}
+
+.rav2-agent-task > div {
+  min-width: 0;
+}
+
+.rav2-agent-task b,
+.rav2-agent-task p,
+.rav2-agent-task small {
+  display: block;
+}
+
+.rav2-agent-task b {
+  color: #3f4b5c;
+  font-size: 9px;
+}
+
+.rav2-agent-task p {
+  margin: 4px 0;
+  color: #697587;
+  font-size: 8px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.rav2-agent-task small {
+  color: #929baa;
+  font: 7px ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rav2-agent-metrics {
+  margin: 6px 0 8px;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.rav2-agent-metrics span {
+  padding: 3px 6px;
+  border-radius: 10px;
+  background: #eceef2;
+  color: #687486;
+  font-size: 7px;
+}
+
+.rav2-agent-metrics span.failed {
+  background: #fff0f2;
+  color: #ca4158;
+}
+
+.rav2-run-message,
+.rav2-run-tool,
+.rav2-run-control {
+  margin-top: 7px;
+  border: 1px solid #e3e6eb;
+  border-radius: 9px;
+  background: #fff;
+  color: #536071;
+  font-size: 8px;
+}
+
+.rav2-run-message,
+.rav2-run-tool {
+  padding: 9px;
+}
+
+.rav2-run-message > header,
+.rav2-run-tool > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.rav2-run-message > header > span,
+.rav2-run-tool > header > span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #465264;
+  font-weight: 700;
+}
+
+.rav2-run-message svg,
+.rav2-run-tool svg {
+  width: 12px;
+  flex: 0 0 12px;
+}
+
+.rav2-run-message header small,
+.rav2-run-tool > small {
+  color: #969eaa;
+  font-size: 7px;
+}
+
+.rav2-run-message p {
+  margin: 7px 0 0;
+  color: #5b6778;
+  font-size: 8px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rav2-run-message.user {
+  border-color: #dfe2fa;
+  background: #f6f7ff;
+}
+
+.rav2-run-message details,
+.rav2-run-tool details {
+  margin-top: 7px;
+  border: 1px solid #eceef2;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.rav2-run-message summary,
+.rav2-run-tool summary {
+  padding: 6px 7px;
+  color: #667283;
+  cursor: pointer;
+  line-height: 1.45;
+}
+
+.rav2-run-message pre,
+.rav2-run-tool pre {
+  max-height: 300px;
+  margin: 0;
+  padding: 8px;
+  border-top: 1px solid #eceef2;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #4f5b6c;
+  font: 7px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.rav2-run-message > footer,
+.rav2-run-tool > footer {
+  margin-top: 7px;
+  color: #929ba8;
+  font-size: 7px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.rav2-run-tool.failed {
+  border-color: #f0cbd1;
+  background: #fff8f8;
+}
+
+.rav2-run-tool-requests {
+  margin-top: 7px;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.rav2-run-tool-requests span {
+  min-height: 22px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: #eef0ff;
+  color: #5965e9;
+  font-size: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rav2-run-control {
+  padding: 7px 8px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: #fafbfc;
+}
+
+.rav2-run-control > svg {
+  width: 12px;
+  color: #7b85de;
+}
+
+.rav2-run-control span {
+  min-width: 0;
+}
+
+.rav2-run-control b,
+.rav2-run-control small {
+  display: block;
+}
+
+.rav2-run-control b {
+  color: #657183;
+  font-size: 8px;
+}
+
+.rav2-run-control small {
+  margin-top: 2px;
+  color: #9aa2ae;
+  font-size: 7px;
+}
+
+.rav2-run-control.failed {
+  border-color: #f0cbd1;
+  background: #fff6f7;
+}
+
+.rav2-agent-waiting {
+  margin-top: 8px;
+  padding: 14px 9px;
+  border: 1px dashed #dfe3ea;
+  border-radius: 8px;
+  color: #8b95a4;
+  text-align: center;
+}
+
+.rav2-agent-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.rav2-agent-waiting svg {
+  width: 16px;
+  color: #7c87e4;
+}
+
+.rav2-agent-waiting b,
+.rav2-agent-waiting small {
+  display: block;
+}
+
+.rav2-agent-waiting b {
+  color: #596576;
+  font-size: 8px;
+}
+
+.rav2-agent-waiting small {
+  margin: 3px 0 0;
+  font-size: 7px;
+  line-height: 1.5;
 }

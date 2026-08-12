@@ -36,8 +36,8 @@
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
 - “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。随应用发布的内置 Tool 和 Skill 始终启用，管理页不允许关闭，服务端也会拒绝停用请求并自动修复历史停用状态；是否授权给具体 Agent 仍由 Agent 配置及必需能力约束决定。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。随应用发布的内置 Skill 位于 `server/skills`，当前包含 `system.query-local-ip` 和 `system.structured-summary` 示例；项目外置 Skill/Tool 分别位于 `ai/skills`、`ai/tools`，服务启动和目录读取时扫描，并默认每 1 秒自动重扫。外置 Skill 通过同目录 `skill.json` 登记；外置 Tool 可使用无 JSON 的单文件静态清单、`*.tool.json`、目录 `tool.json`、批量 `tools.json` 或 `package.json` 的 SmartHub 声明。管理页标记为“外置”，只允许启停，编辑或删除应修改文件。Skill ZIP、内置 Skill 或外置 Skill 都会按发布配置 Hash 读取 `SKILL.md` 并注入 Agent；可执行 Skill 还可在入口同目录提供 `skill-runtime.json`，显式声明 PowerShell 脚本及 GET/HEAD 网络 Origin。脚本和网络权限归属 Skill，不出现在可独立管理的 Tool 目录；选择 Skill 发布时服务端自动派生内部调用协议，并实施相对路径、参数、精确 Origin、无重定向、超时、取消、受限环境和 256 KB 结果上限。自定义 Tool 仍支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
-- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：通过中文下拉框分别配置需求点提取 Agent、需求评审 Agent、评审问答 Agent、技术方案提取 Agent 与技术方案评审 Agent；每个 Agent 独立持久化默认/回退模型、温度、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。页面不提供版本记录入口，历史不可变快照仅由服务端保留用于运行追溯。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前除资源和参数校验外，模型必须通过版本化 `model-probe/v2` 长上下文、结构化提交和工具调用质量门禁。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
-- 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；五个 Agent 分别通过各自的结果提交工具提交协议结果，最终结果仍由应用服务复验；
+- “系统管理 → Agent 配置”已接入真实草稿、发布和不可变版本闭环：需求分析只配置统一的 `RequirementAnalysisAgent`，技术方案分析与测试设计仍按各自职责配置专用 Agent；每个 Agent 独立持久化默认/回退模型、输出上限、请求超时、重试次数、系统提示词、Tool/MCP/Skill 选择和运行限制，并拥有独立 revision 与当前生效版本。Agent 配置列出模型管理中可独立配置的 Tool、MCP、Skill；启用的非必需资源可自由添加或移除，协议必需项固定保留，停用项不能新增。选择 Skill 即授权其固定运行权限清单，脚本和网络内部协议由服务端自动固化，无需重复勾选 Tool。发布时固定包含执行配置 Hash 的 Toolset、MCP 版本与策略 Hash、Skill 版本与内容配置 Hash；发布前除资源和参数校验外，模型必须通过版本化 `model-probe/v2` 长上下文、结构化提交和工具调用质量门禁。运行时发现目录配置与发布快照漂移会拒绝加载对应扩展能力并记录安全事件；
+- 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；各 Agent 通过自身结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
 - 需求分析上传支持 Markdown、TXT 和 ZIP；知识库页面以“知识库”为根节点，直接展示与 Pi Agent 相同的 `/workspace` 文件树，并补齐各项目版本、`shared` 和 `agent_workspace` 的标准空目录；当前版本需求固定上传到 `workspace/branches/{项目版本名}/input/requirements/`。ZIP 保留包内子目录和图片相对路径；启动评审时服务端固定需求输入范围，并把活动索引中整个 `/workspace` 的 ready 文档版本物化为本次运行的只读文件快照，让 Pi Agent 可自主查看当前分支、其他分支和 `shared` 资料；正式 ReviewRun、工作区快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON；
 - AC-001～AC-009 自动化验收场景。
@@ -56,9 +56,9 @@
 
 生产 API 注入 SmartHub 内置模型运行池。知识库配置先选择来源，再选择该来源中的生效模型；本地模式下上传解析、索引重建和向量/混合检索均路由到所选模型，发现模型未运行时会自动拉取并启动，同时不会停止池内其他模型。单元测试通过运行时接口注入轻量测试模型，不下载大模型。
 
-## 当前已实现的第二期双 Agent 需求分析流程
+## 当前已实现的统一需求分析 Agent 流程
 
-> 需求评审已完成破坏性重构，只接受 `/workspace` 文件工作区，不再接受正文直传、分段正文或 `knowledge_search / knowledge_read_chunk` 目录协议。`RequirementPointExtractionAgent` 基于 Pi Agent Core 运行，直接复用 Pi Coding Agent 的只读 `ls / find / grep / read` 能力，像 Codex 一样自主探索文件，再按 `requirement-point-extraction/v5` 提交“可选 `title` + `description` + `sourceTexts`”。
+> 需求分析只保留统一的 `RequirementAnalysisAgent`，并且只接受 `/workspace` 文件工作区。Agent 基于 Pi Agent Core 运行，使用只读 `ls / find / grep / read` 与受控 Knowledge 工具自主探索固定资料，在同一 Session 内完成需求基线、审核、自检和结构化提交；旧 `RequirementPointExtractionAgent`、`RequirementReviewAgent` 及其独立提交工具、草稿和配置快照均已删除。
 
 统一逻辑目录如下：
 
@@ -81,17 +81,15 @@
 - 运行开始时，服务端将固定 `AssetVersion.content` 物化到 run-scoped 临时目录，预建完整工作区层级，并在结束、失败或取消后清理。Agent 只能传相对路径；绝对路径、盘符、UNC、`..` 和越界 Glob 均被拒绝；不开放 Shell、write、edit 或任意文件系统权限；
 - 首轮 Prompt 只投递工作区根、活动分支、需求输入目录、文件数量和快照 Hash，不投递文件名、Chunk 清单或正文。Agent 使用 `ls` 看目录、`find` 找文件、`grep` 定位文本，再用 `read` 的 `offset / limit` 分段读取大文件；
 - 只有 `read` 实际返回的固定文件行范围会写入 `InputDeliveryManifest.toolReads` 并形成 Evidence 候选。`grep` 和 `find` 只用于定位；资产版本、内部 Chunk、Evidence、需求点 ID、`evidenceRefs`、coverage 和 locator 全部由服务端生成和校验；
-- 已发布需求点提取 Agent 必须包含 `workspace.read_file`、`workspace.grep_files`、`workspace.find_files`、`workspace.list_directory` 与 `requirement-points.submit_result`，且不能包含已退役的知识检索读取工具；旧配置会以 `PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED` 被拒绝，必须重新发布；
-- Agent 定义、Prompt、Toolset、Skill、MCP、模型路由、执行限制和内容 Hash 仍独立版本化并写入运行快照；`RequirementReviewAgent` 只引用冻结需求点并通过 `review.submit_result` 提交评审；
-- 工具继续经过白名单、超时、调用次数和重复调用门禁；最后 3 次工具调用独立保留给结果提交。模型不维护服务器 ID 或 Evidence 结构；`requirement-points.submit_result` 只接受需求语义及原文线索；
-- `review.submit_result` 使用 `requirement-review/v3`：模型提交总体摘要和逐条 `analyses`，每条分析只通过一个 `requirementPointRef` 对应冻结需求点，并给出标题、类型、严重度、置信度、分析、影响和建议。服务端校验引用、去重并生成 Finding ID；展示字段偶发缺失或枚举不规范时使用确定性兜底，不反复退回，只有需求点引用不存在或分析内容为空才拒绝；
-- ReviewRun 分别持久化两个 Agent 的公开模型消息、工具参数/返回和语义事件时间线；需求评审右侧“Pi Agent 对话”按秒刷新并在同一线程展示任务、阶段、读取文件路径、函数调用、公开结果和错误，流程成功后在同一面板继续评审问答。每个 Worker attempt 独立冻结当前 Agent、状态、错误和阶段执行快照；两个 Pi session id 包含各自 Agent key，不复用消息上下文。API 凭据、签名、图片二进制和模型隐藏思维不写入记录；单模型按发布配置有限重试，耗尽后仅对允许降级、能力和上下文满足的候选模型切换，并保存每次实际尝试和降级原因；
-- 调用评审接口时先创建 `running` ReviewRun 和持久化 ReviewJob 后立即返回；独立 Worker 通过 lease、heartbeat、run token 和 fencing 执行，只有当前租约持有者可以冻结阶段结果或发布正式结果。Worker 失租约后任务可重新领取，超过次数或取消后进入明确终态，晚到结果不能覆盖。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、FindingAction、问答、审批和运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除。
-- 提取结果通过独立校验后立即作为冻结阶段检查点持久化。若随后需求评审失败或取消，页面同时提供“重新需求评审”和“全部重跑”：前者创建新 ReviewRun，复用并重新校验原需求点、Evidence、coverage 与读取证明，只使用当前已发布的需求评审 Agent 执行评审；后者沿用来源运行的文档目录、按当前活动索引重新固定候选文档并从需求点提取开始完整运行。提取阶段失败时没有可复用检查点，只允许全部重跑；任何重跑都不覆盖原运行。
+- 已发布 `RequirementAnalysisAgent` 必须包含 Workspace 只读工具、Knowledge 查询工具、`skill.activate` 和当前 Workflow Stage 的服务端提交工具；基线、审核、修复、复验和发布方法由固定 Skill Catalog 按需激活，Skill 不能切换 Stage 或扩大 Tool 白名单；
+- Agent 定义、Prompt、Toolset、Skill、MCP、模型路由、执行限制和内容 Hash 独立版本化并写入运行快照。模型只提交语义候选，正式 RP、Evidence、Finding、coverage、Artifact 与发布门禁由服务端生成和校验；
+- ReviewRun 持久化统一 Agent 的公开模型消息、工具参数/返回和语义事件时间线；需求分析右侧“Pi Agent”面板按秒刷新任务、Stage、读取文件路径、函数调用、公开结果和错误，不提供独立评审问答入口；
+- 调用分析接口时先创建 `running` ReviewRun 和持久化 ReviewJob 后立即返回；独立 Worker 通过 lease、heartbeat、run token 和 fencing 执行，只有当前租约持有者可以冻结阶段结果或发布正式结果。Worker 失租约后任务可重新领取，超过次数或取消后进入明确终态，晚到结果不能覆盖。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、FindingAction、审批和运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除；
+- 失败或取消后的重跑只支持 `full`，会沿用来源运行的需求目录并按当前活动索引重新固定候选文档；任何重跑都创建新的 ReviewRun，不覆盖原运行。
 
 当前自动化测试已覆盖首轮上下文不泄露文件清单与正文、完整目录树、当前分支与 `shared/knowledge` 自主读取、路径穿越拒绝、实际 `read` 行范围形成 `toolReads`、未读范围不可用于 Evidence、需求覆盖、需求点规范化和评审引用。
 
-运行前需要先创建一个状态为 `open` 的项目版本，把至少一份需求文档上传到当前版本的 `input/requirements` 并等待 ready/活动索引，再到“系统管理 → 模型管理”让生成式模型通过 `model-probe/v2`，随后重新发布需求点提取 Agent 与需求评审 Agent。启动 API 固定统一工作区快照并立即创建 ReviewRun/ReviewJob，Worker 先运行提取 Agent，再用独立会话运行评审 Agent：
+运行前需要先创建一个状态为 `open` 的项目版本，把至少一份需求文档上传到当前版本的 `input/requirements` 并等待 ready/活动索引，再到“系统管理 → 模型管理”让生成式模型通过 `model-probe/v2`，随后发布统一需求分析 Agent。启动 API 固定统一工作区快照并立即创建 ReviewRun/ReviewJob，Worker 在单个受治理 Session 中执行当前 Workflow Stage：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -148,7 +146,7 @@ Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文�
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
-进入“系统管理 → Agent 配置”后，使用顶部中文下拉框选择“需求点提取 Agent”“需求评审 Agent”“评审问答 Agent”“技术方案提取 Agent”或“技术方案评审 Agent”。页面只提供模型与路由、提示词、Tool/MCP/Skill 三类配置；Tool/MCP/Skill 页面在资源清单底部集中维护最大轮次、最大工具调用、总截止时间和推理强度。资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布新版本”会先保存当前 Agent 草稿，再只发布该 Agent 的下一不可变版本。五个 Agent 的版本号和生效状态互不影响；发布会校验资源依赖及模型的 `model-probe/v2` 质量门禁。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；`write-reversible`/`write-high-risk` 会按参数 SHA-256 建立 Approval，运行记录窗口可批准或拒绝，高风险写操作必须逐次批准；参数变化、拒绝、过期、取消都会阻止执行。
+进入“系统管理 → Agent 配置”后，需求分析场景只提供“需求分析 Agent（RequirementAnalysisAgent）”；技术方案分析和测试设计场景继续提供各自的专用 Agent。页面只提供模型与路由、提示词、Tool/MCP/Skill 三类配置；Tool/MCP/Skill 页面在资源清单底部集中维护最大轮次、最大工具调用、总截止时间和推理强度。资源页一次展示模型管理中的三类完整目录和已选数量，必需项不可取消，其余启用项可按 Agent 自由勾选。点击“发布”会先保存当前 Agent 草稿，再发布该 Agent 的下一不可变版本；发布会校验资源依赖及模型的 `model-probe/v2` 质量门禁。运行时只加载与发布 Toolset、Skill Hash 和 MCP Policy Hash 一致的能力；`write-reversible`/`write-high-risk` 会按参数 SHA-256 建立 Approval，运行记录窗口可批准或拒绝，高风险写操作必须逐次批准；参数变化、拒绝、过期、取消都会阻止执行。
 
 ## 生产构建与运行
 
@@ -218,7 +216,6 @@ npm run build
 - `GET /api/project-versions/:id/requirement-review-runs`
 - `GET /api/requirement-review-runs/:id`
 - `POST /api/requirement-review-runs/:id/cancel`
-- `GET|POST /api/requirement-review-runs/:id/questions`
 - `GET /api/requirement-review-runs/:id/finding-actions`
 - `POST /api/requirement-review-runs/:id/findings/:findingId/actions`
 - `GET /api/requirement-review-runs/:id/approvals`
@@ -253,4 +250,4 @@ npm run build
 
 需求评审采用独立 Worker 后台运行：启动接口创建 `ReviewRun + ReviewJob` 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page + projectVersionId + reviewId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `reviewId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
 
-评审问答只接受成功完成的 ReviewRun，并要求已发布独立的评审问答 Agent。右侧“Pi Agent 对话”在流程轨迹下方直接续接问答，每轮固定使用该运行的目录资产版本、评审结果和 Evidence 白名单，同时固定当前生效的问答 Agent 配置版本；问题、回答、引用、实际模型、Agent/Prompt/Toolset 引用、用量和脱敏失败摘要写入 ReviewQaSession/Turn，刷新后从服务端恢复。模型必须通过 `review_answer_submit` 返回答案、Evidence ID 引用和限制项；Skill、网页、MCP 或其他 Tool 的内容可用于辅助解释，但不能扩大 Evidence 白名单。Finding 处置通过带期望版本的追加式 FindingAction 保存，原始 Finding 不改写。报告由服务端按 `projectVersionId + runId` 从正式结果、固定输入、Evidence、降级和处置投影生成 Markdown，不包含候选输出、问答全文、明文凭据或未脱敏日志。
+需求分析不再提供独立评审问答 Agent、问答 API 或问答历史表；数据库迁移会删除旧问答记录及其 Agent 配置快照。右侧“Pi Agent”仅展示统一需求分析运行轨迹。Finding 处置通过带期望版本的追加式 FindingAction 保存，原始 Finding 不改写；报告由服务端按 `projectVersionId + runId` 从正式结果、固定输入、Evidence、降级和处置投影生成 Markdown，不包含候选输出、明文凭据或未脱敏日志。

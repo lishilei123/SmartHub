@@ -103,11 +103,11 @@ test('绑定 Skill 的网络访问仅允许清单中的 Origin、只读方法且
 })
 
 test('配置已声明但当前阶段未注册的内置工具会产生预警', async () => {
-  const tool = builtInTool('review.submit_result', 'internal_write', 30_000)
+  const tool = builtInTool('technical_solution_review.submit_result', 'internal_write', 30_000)
   const registry = new ToolRegistry()
   const loaded = await new AgentCapabilityLoader(await storeWith(tool)).load(definition([tool]), registry, new AbortController().signal)
   assert.equal(registry.get(tool.key), undefined)
-  assert.ok(loaded.warnings.some(warning => /review\.submit_result.*当前 Agent 阶段未注册/u.test(warning)))
+  assert.ok(loaded.warnings.some(warning => /technical_solution_review\.submit_result.*当前 Agent 阶段未注册/u.test(warning)))
   await loaded.close()
 })
 
@@ -206,7 +206,7 @@ test('Skill ZIP 内容按发布 Hash 加载，目录漂移会被拒绝', async (
 
 function definition(tools: ToolResource[], skills: AgentDefinitionVersion['skillBindings'] = [], mcps: AgentDefinitionVersion['mcpBindings'] = []) {
   return createAgentDefinitionVersion({
-    agentKey: 'requirementReview', agentType: 'requirement_review', resultSchemaVersion: 'requirement-review/v3', version: 'test+config.1', systemPrompt: 'test', taskTemplate: 'test', promptKey: 'test',
+    agentKey: 'requirement-analysis', agentType: 'requirement_analysis', resultSchemaVersion: 'requirement-analysis/v1', version: 'test+config.1', systemPrompt: 'test', taskTemplate: 'test', promptKey: 'test',
     tools: tools.map(toolBindingToken), skills, mcps,
     limits: { maxTurns: 8, maxToolCalls: 12, deadlineMs: 30_000, toolTimeoutMs: 5_000, maxCandidateBytes: 64_000, maxFindings: 10, maxRepeatedToolCall: 3 },
   })

@@ -4,6 +4,7 @@ import { PiTestDesignRuntimeAdapter } from '../server/agent/pi-test-design-runti
 import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { JsonStore } from '../server/infrastructure/store.js'
+import { materializeRequiredAgentCapabilities } from '../src/agent-configuration-api.js'
 
 async function fixture() {
   const store = new JsonStore(null)
@@ -40,8 +41,8 @@ async function fixture() {
 test('统一需求分析 Agent 独立发布 Workspace、Knowledge、Skill 与提交协议快照', async () => {
   const { service } = await fixture()
   const initial = (await service.get()).agents.requirementAnalysis
-  assert.deepEqual(initial.requiredToolIds, ['requirement-analysis.submit_result'])
-  assert.deepEqual(initial.requiredSkillKeys, ['system.requirement-analysis'])
+  assert.deepEqual(initial.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
+  assert.deepEqual(initial.requiredSkillKeys, ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
   assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
   assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
   const saved = await service.save({
@@ -53,25 +54,55 @@ test('统一需求分析 Agent 独立发布 Workspace、Knowledge、Skill 与提
   const published = await service.publish({ agentKey: 'requirementAnalysis', revision: saved.revision, publishedBy: '需求分析管理员' })
   assert.equal(published.agentDefinition.agentKey, 'requirement-analysis')
   assert.equal(published.agentDefinition.resultSchemaVersion, 'requirement-analysis/v1')
-  assert.equal(published.agentDefinition.skillBindings[0].skillKey, 'system.requirement-analysis')
+  assert.deepEqual(published.agentDefinition.skillBindings.map(binding => binding.skillKey), initial.requiredSkillKeys)
   assert.equal((await service.resolveActive('requirement-analysis'))?.id, published.id)
 })
 
-test('各场景 Agent 分别持久化草稿并发布独立不可变版本', async () => {
+test('旧需求分析草稿加载和前端发布 payload 都会补齐新增的必需能力', async () => {
+  const { store, service } = await fixture()
+  const initialState = (await service.get()).agents.requirementAnalysis
+  const firstSaved = await service.save({
+    agentKey: 'requirementAnalysis',
+    revision: initialState.draft.revision,
+    routing: { ...initialState.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
+    definition: initialState.draft.definition,
+  })
+  const newlyRequiredTools = new Set(['skill.activate', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
+  await store.transaction(state => {
+    const stored = state.agentConfigurationDrafts.find(item => item.scene === 'requirement_analysis')!.agents.requirementAnalysis
+    stored.definition.toolIds = stored.definition.toolIds.filter(toolId => !newlyRequiredTools.has(toolId))
+    stored.definition.skillKeys = []
+  })
+
+  const reloaded = (await service.get()).agents.requirementAnalysis
+  assert.equal(reloaded.draft.revision, firstSaved.revision)
+  assert.ok(reloaded.requiredToolIds.every(toolId => reloaded.draft.definition.toolIds.includes(toolId)))
+  assert.ok(reloaded.requiredSkillKeys.every(skillKey => reloaded.draft.definition.skillKeys.includes(skillKey)))
+
+  const staleBrowserDraft = structuredClone(reloaded.draft)
+  staleBrowserDraft.definition.toolIds = staleBrowserDraft.definition.toolIds.filter(toolId => !newlyRequiredTools.has(toolId))
+  staleBrowserDraft.definition.skillKeys = []
+  const publishPayload = materializeRequiredAgentCapabilities(staleBrowserDraft, reloaded)
+  assert.ok(reloaded.requiredToolIds.every(toolId => publishPayload.definition.toolIds.includes(toolId)))
+  assert.ok(reloaded.requiredSkillKeys.every(skillKey => publishPayload.definition.skillKeys.includes(skillKey)))
+  assert.equal(staleBrowserDraft.definition.toolIds.includes('skill.activate'), false)
+
+  const migrated = await service.save({ agentKey: 'requirementAnalysis', revision: publishPayload.revision, routing: publishPayload.routing, definition: publishPayload.definition })
+  const published = await service.publish({ agentKey: 'requirementAnalysis', revision: migrated.revision })
+  assert.ok(reloaded.requiredToolIds.every(toolId => published.agentDefinition.toolIds.includes(toolId)))
+  assert.ok(reloaded.requiredSkillKeys.every(skillKey => published.agentDefinition.skillBindings.some(binding => binding.skillKey === skillKey)))
+})
+
+test('统一需求分析、技术方案与测试设计 Agent 分别发布独立不可变版本', async () => {
   const { store, service } = await fixture()
   const initial = await service.get()
-  const extractionInitial = initial.agents.requirementPointExtraction.draft
-  const reviewInitial = initial.agents.requirementReview.draft
-  const qaInitial = initial.agents.reviewQa.draft
   const technicalExtractionInitial = initial.agents.technicalSolutionExtraction.draft
   const technicalReviewInitial = initial.agents.technicalSolutionReview.draft
-  assert.equal(extractionInitial.revision, 0)
-  assert.equal(reviewInitial.revision, 0)
-  assert.equal(qaInitial.revision, 0)
+  assert.equal('requirementPointExtraction' in initial.agents, false)
+  assert.equal('requirementReview' in initial.agents, false)
   assert.equal(technicalExtractionInitial.revision, 0)
   assert.equal(technicalReviewInitial.revision, 0)
-  assert.equal('temperature' in extractionInitial.routing, false)
-  assert.deepEqual(initial.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
+  assert.equal('temperature' in technicalExtractionInitial.routing, false)
   assert.deepEqual(initial.agents.technicalSolutionExtraction.requiredToolIds, ['technical_solution_points.submit_result'])
   assert.deepEqual(initial.agents.technicalSolutionReview.requiredToolIds, ['technical_solution_review.submit_result'])
   assert.deepEqual(initial.agents.testAnalysis.requiredToolIds, ['test_analysis.submit_result'])
@@ -83,41 +114,6 @@ test('各场景 Agent 分别持久化草稿并发布独立不可变版本', asyn
   const testAnalysisPublished = await service.publish({ agentKey: 'testAnalysis', revision: testAnalysisSaved.revision, publishedBy: '测试设计管理员' })
   assert.equal(testAnalysisPublished.scene, 'test_design')
   assert.equal(testAnalysisPublished.agentDefinition.modelScene, 'test_design')
-
-  const extractionSaved = await service.save({
-    agentKey: 'requirementPointExtraction',
-    revision: extractionInitial.revision,
-    routing: { ...extractionInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 4_096 },
-    definition: extractionInitial.definition,
-  })
-  const extractionPublished = await service.publish({ agentKey: 'requirementPointExtraction', revision: extractionSaved.revision, publishedBy: '提取管理员' })
-  assert.equal(extractionPublished.agentKey, 'requirementPointExtraction')
-  assert.equal(extractionPublished.version, 1)
-  assert.equal(await service.resolveActive('requirement-review'), null)
-
-  const reviewSaved = await service.save({
-    agentKey: 'requirementReview',
-    revision: reviewInitial.revision,
-    routing: { ...reviewInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 8_192 },
-    definition: { ...reviewInitial.definition, systemPrompt: `${reviewInitial.definition.systemPrompt}\n只报告有固定证据支撑的问题。` },
-  })
-  const reviewPublished = await service.publish({ agentKey: 'requirementReview', revision: reviewSaved.revision, publishedBy: '评审管理员' })
-  assert.equal(reviewPublished.agentKey, 'requirementReview')
-  assert.equal(reviewPublished.version, 1)
-  assert.match(reviewPublished.agentDefinition.systemPrompt, /固定证据支撑/)
-  assert.equal((await service.resolve('requirement-review')).contentSha256, reviewPublished.agentDefinition.contentSha256)
-
-  const qaSaved = await service.save({
-    agentKey: 'reviewQa',
-    revision: qaInitial.revision,
-    routing: { ...qaInitial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 4_096 },
-    definition: { ...qaInitial.definition, systemPrompt: `${qaInitial.definition.systemPrompt}\n回答时明确列出限制。` },
-  })
-  const qaPublished = await service.publish({ agentKey: 'reviewQa', revision: qaSaved.revision, publishedBy: '问答管理员' })
-  assert.equal(qaPublished.agentKey, 'reviewQa')
-  assert.equal(qaPublished.agentDefinition.agentKey, 'review-qa')
-  assert.deepEqual(qaPublished.agentDefinition.toolIds, ['review.answer_submit'])
-  assert.equal((await service.resolveActive('review-qa'))?.id, qaPublished.id)
 
   const technicalExtractionSaved = await service.save({
     agentKey: 'technicalSolutionExtraction', revision: technicalExtractionInitial.revision,
@@ -134,17 +130,17 @@ test('各场景 Agent 分别持久化草稿并发布独立不可变版本', asyn
   assert.equal((await service.resolveActive('technical-solution-review'))?.id, technicalReviewPublished.id)
 
   const secondReviewDraft = await service.save({
-    agentKey: 'requirementReview',
-    revision: reviewSaved.revision,
-    routing: reviewSaved.routing,
-    definition: { ...reviewSaved.definition, systemPrompt: `${reviewSaved.definition.systemPrompt}\n第二版。` },
+    agentKey: 'technicalSolutionReview',
+    revision: technicalReviewSaved.revision,
+    routing: technicalReviewSaved.routing,
+    definition: { ...technicalReviewSaved.definition, systemPrompt: `${technicalReviewSaved.definition.systemPrompt}\n第二版。` },
   })
-  const secondReview = await service.publish({ agentKey: 'requirementReview', revision: secondReviewDraft.revision })
+  const secondReview = await service.publish({ agentKey: 'technicalSolutionReview', revision: secondReviewDraft.revision })
   const state = store.read()
   assert.equal(secondReview.version, 2)
-  assert.equal(state.agentConfigurationVersions.find(item => item.id === extractionPublished.id)?.status, 'active')
-  assert.equal(state.agentConfigurationVersions.find(item => item.id === reviewPublished.id)?.status, 'superseded')
-  assert.doesNotMatch((await service.getVersion(reviewPublished.id)).agentDefinition.systemPrompt, /第二版/)
+  assert.equal(state.agentConfigurationVersions.find(item => item.id === technicalExtractionPublished.id)?.status, 'active')
+  assert.equal(state.agentConfigurationVersions.find(item => item.id === technicalReviewPublished.id)?.status, 'superseded')
+  assert.doesNotMatch((await service.getVersion(technicalReviewPublished.id)).agentDefinition.systemPrompt, /第二版/)
 })
 
 test('Agent 配置读取使用窄查询而不加载完整状态快照', async () => {
@@ -156,32 +152,33 @@ test('Agent 配置读取使用窄查询而不加载完整状态快照', async ()
   const configuration = await service.get()
 
   assert.equal(configuration.scene, 'requirement_analysis')
-  assert.equal(configuration.agents.requirementPointExtraction.draft.revision, 0)
-  assert.equal(configuration.agents.requirementReview.draft.revision, 0)
-  assert.equal(configuration.agents.reviewQa.draft.revision, 0)
+  assert.equal(configuration.agents.requirementAnalysis.draft.revision, 0)
+  assert.equal('requirementPointExtraction' in configuration.agents, false)
+  assert.equal('requirementReview' in configuration.agents, false)
+  assert.equal('reviewQa' in configuration.agents, false)
   assert.equal(configuration.agents.technicalSolutionExtraction.draft.revision, 0)
   assert.equal(configuration.agents.technicalSolutionReview.draft.revision, 0)
 })
 
 test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用模型', async () => {
   const { store, service } = await fixture()
-  const initial = (await service.get()).agents.requirementReview.draft
+  const initial = (await service.get()).agents.requirementAnalysis.draft
   await assert.rejects(() => service.save({
-    agentKey: 'requirementReview',
+    agentKey: 'requirementAnalysis',
     revision: 0,
     routing: initial.routing,
     definition: { ...initial.definition, toolIds: [] },
   }), /必须保留结果提交工具/)
 
   const saved = await service.save({
-    agentKey: 'requirementReview',
+    agentKey: 'requirementAnalysis',
     revision: 0,
     routing: { ...initial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
     definition: initial.definition,
   })
-  await assert.rejects(() => service.save({ agentKey: 'requirementReview', revision: 0, routing: saved.routing, definition: saved.definition }), /已被其他操作更新/)
+  await assert.rejects(() => service.save({ agentKey: 'requirementAnalysis', revision: 0, routing: saved.routing, definition: saved.definition }), /已被其他操作更新/)
   await store.transaction(state => { state.modelSources[0].models[0].health = 'degraded' })
-  await assert.rejects(() => service.publish({ agentKey: 'requirementReview', revision: saved.revision }), /尚未通过健康探测/)
+  await assert.rejects(() => service.publish({ agentKey: 'requirementAnalysis', revision: saved.revision }), /尚未通过健康探测/)
 })
 
 test('测试设计 Agent 保留必需提交工具时允许绑定额外工具', async () => {
@@ -205,14 +202,14 @@ test('测试设计 Agent 保留必需提交工具时允许绑定额外工具', a
 
 test('Agent 最大输出 Token 独立于模型目录中的历史输出值', async () => {
   const { service } = await fixture()
-  const initial = (await service.get()).agents.requirementReview.draft
+  const initial = (await service.get()).agents.requirementAnalysis.draft
   const saved = await service.save({
-    agentKey: 'requirementReview',
+    agentKey: 'requirementAnalysis',
     revision: initial.revision,
     routing: { ...initial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 32_768 },
     definition: initial.definition,
   })
-  const published = await service.publish({ agentKey: 'requirementReview', revision: saved.revision })
+  const published = await service.publish({ agentKey: 'requirementAnalysis', revision: saved.revision })
 
   assert.equal(published.routing.maxOutputTokens, 32_768)
   assert.equal('temperature' in published.routing, false)
@@ -240,38 +237,38 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
       status: 'draft',
       builtIn: false,
       entrypoint: 'ai/skills/quality-review/SKILL.md',
-      toolIds: ['review.submit_result', 'quality.lookup'],
+      toolIds: ['technical_solution_review.submit_result', 'quality.lookup'],
       tags: ['质量', '评审'],
       createdAt: '2026-07-27T00:00:00.000Z',
       updatedAt: '2026-07-27T00:00:00.000Z',
     })
   })
-  const initial = (await service.get()).agents.requirementReview
-  assert.deepEqual(initial.requiredToolIds, ['review.submit_result'])
+  const initial = (await service.get()).agents.technicalSolutionReview
+  assert.deepEqual(initial.requiredToolIds, ['technical_solution_review.submit_result'])
   assert.deepEqual(initial.requiredSkillKeys, [])
   assert.deepEqual(initial.requiredMcpServerKeys, [])
   assert.deepEqual(initial.draft.definition.skillKeys, [])
   assert.deepEqual(initial.draft.definition.mcpServerKeys, [])
 
   await assert.rejects(() => service.save({
-    agentKey: 'requirementReview', revision: initial.draft.revision, routing: initial.draft.routing,
+    agentKey: 'technicalSolutionReview', revision: initial.draft.revision, routing: initial.draft.routing,
     definition: { ...initial.draft.definition, skillKeys: ['quality.review'] },
   }), /依赖未选择工具/u)
   await assert.rejects(() => service.save({
-    agentKey: 'requirementReview', revision: initial.draft.revision, routing: initial.draft.routing,
+    agentKey: 'technicalSolutionReview', revision: initial.draft.revision, routing: initial.draft.routing,
     definition: { ...initial.draft.definition, toolIds: [...initial.draft.definition.toolIds, 'quality.lookup'] },
   }), /必须同时选择其 MCP 服务/u)
 
   const saved = await service.save({
-    agentKey: 'requirementReview',
+    agentKey: 'technicalSolutionReview',
     revision: initial.draft.revision,
     routing: { ...initial.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
     definition: { ...initial.draft.definition, skillKeys: ['quality.review'], mcpServerKeys: ['quality.mcp'], toolIds: [...initial.draft.definition.toolIds, 'knowledge.search', 'quality.lookup'] },
   })
   assert.deepEqual(saved.definition.skillKeys, ['quality.review'])
   assert.deepEqual(saved.definition.mcpServerKeys, ['quality.mcp'])
-  assert.deepEqual(saved.definition.toolIds, ['review.submit_result', 'knowledge.search', 'quality.lookup'])
-  const published = await service.publish({ agentKey: 'requirementReview', revision: saved.revision })
+  assert.deepEqual(saved.definition.toolIds, ['technical_solution_review.submit_result', 'knowledge.search', 'quality.lookup'])
+  const published = await service.publish({ agentKey: 'technicalSolutionReview', revision: saved.revision })
   assert.deepEqual(published.agentDefinition.skillBindings.map(item => ({ skillKey: item.skillKey, version: item.version, enabled: item.enabled })), [
     { skillKey: 'quality.review', version: '1.2.0', enabled: true },
   ])
@@ -280,7 +277,7 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
     { serverKey: 'quality.mcp', version: '2.1.0', toolIds: ['quality.lookup'] },
   ])
   assert.match(published.agentDefinition.mcpBindings[0].policyHash, /^[a-f0-9]{64}$/u)
-  assert.deepEqual(published.agentDefinition.toolIds, ['review.submit_result', 'knowledge.search', 'quality.lookup'])
+  assert.deepEqual(published.agentDefinition.toolIds, ['technical_solution_review.submit_result', 'knowledge.search', 'quality.lookup'])
   await assert.rejects(() => new AiResourceService(store).delete('skill', 'skill-quality-review'), /仍被 Agent 草稿引用/)
   await assert.rejects(() => new AiResourceService(store).delete('mcp', 'mcp-quality-review'), /仍被工具引用/)
   await assert.rejects(() => new AiResourceService(store).delete('tool', 'tool-quality-lookup'), /仍被 Skill 引用/)
@@ -292,13 +289,13 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
   })
   assert.equal((await service.getVersion(published.id)).agentDefinition.skillBindings[0].version, '1.2.0')
   await assert.rejects(() => service.save({
-    agentKey: 'requirementReview',
+    agentKey: 'technicalSolutionReview',
     revision: saved.revision,
     routing: saved.routing,
     definition: saved.definition,
   }), /包含未启用 Skill/)
   await assert.rejects(() => service.save({
-    agentKey: 'requirementReview',
+    agentKey: 'technicalSolutionReview',
     revision: saved.revision,
     routing: saved.routing,
     definition: { ...saved.definition, skillKeys: ['missing.skill'] },

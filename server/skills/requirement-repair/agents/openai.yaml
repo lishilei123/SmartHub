@@ -1,0 +1,4 @@
+interface:
+  display_name: "需求修复"
+  short_description: "针对已确认 Finding 生成基于固定原文且可安全应用的 Patch 草稿"
+  default_prompt: "使用需求修复 Skill 针对固定原文和已确认 Finding 生成安全 Patch 草稿。"

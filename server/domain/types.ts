@@ -126,7 +126,7 @@ export type AiResource = McpServerResource | SkillResource | ToolResource
 
 export type AgentConfigurationScene = 'requirement_analysis' | 'technical_solution_analysis' | 'test_design'
 export type AgentConfigurationStatus = 'active' | 'superseded'
-export type AgentConfigurationAgentKey = 'requirementAnalysis' | 'requirementPointExtraction' | 'requirementReview' | 'reviewQa' | 'technicalSolutionExtraction' | 'technicalSolutionReview' | 'testAnalysis' | 'functionalTestDesign' | 'nonFunctionalTestDesign' | 'testCaseSynthesis'
+export type AgentConfigurationAgentKey = 'requirementAnalysis' | 'technicalSolutionExtraction' | 'technicalSolutionReview' | 'testAnalysis' | 'functionalTestDesign' | 'nonFunctionalTestDesign' | 'testCaseSynthesis'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
   primaryModel: AgentModelReference | null
@@ -156,11 +156,6 @@ export interface AgentConfigurationDraft {
   scene: AgentConfigurationScene
   agents: {
     requirementAnalysis: AgentConfigurationAgentDraft
-    /** @deprecated 不再用于新运行。 */
-    requirementPointExtraction: AgentConfigurationAgentDraft
-    /** @deprecated 不再用于新运行。 */
-    requirementReview: AgentConfigurationAgentDraft
-    reviewQa: AgentConfigurationAgentDraft
     technicalSolutionExtraction: AgentConfigurationAgentDraft
     technicalSolutionReview: AgentConfigurationAgentDraft
     testAnalysis: AgentConfigurationAgentDraft
@@ -272,34 +267,6 @@ export interface FindingAction {
   version: number
   createdAt: string
 }
-export interface ReviewQaSession {
-  id: string
-  projectVersionId: string
-  runId: string
-  createdAt: string
-  createdBy: string
-}
-export interface ReviewQaTurn {
-  id: string
-  sessionId: string
-  projectVersionId: string
-  runId: string
-  question: string
-  quote?: import('./review-qa-types.js').ReviewQuestionQuote
-  answer?: string
-  citations: string[]
-  limitations: string[]
-  status: 'succeeded' | 'failed' | 'cancelled'
-  modelRef?: { sourceId: string; modelId: string; label: string }
-  agentConfigurationRef?: { id: string; version: number; contentSha256: string }
-  agentDefinitionRef?: { agentKey: string; version: string; contentSha256: string; promptRef: { promptKey: string; version: string; contentSha256: string }; toolsetContentSha256: string }
-  execution?: AgentExecutionRecord
-  usage?: { input: number; output: number; totalTokens: number }
-  error?: string
-  createdBy: string
-  createdAt: string
-  finishedAt: string
-}
 export interface ToolApproval {
   id: string
   projectVersionId: string
@@ -320,11 +287,12 @@ export interface ToolApproval {
   consumedAt?: string
 }
 export interface AgentExecutionRecord {
-  agentKey?: 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'requirement-analysis' | 'technical-solution-analysis' | 'technical-solution-extraction' | 'technical-solution-review'
+  agentKey?: 'requirement-analysis' | 'technical-solution-analysis' | 'technical-solution-extraction' | 'technical-solution-review'
   turns: number
   toolCalls: number
   toolErrors?: number
   framework?: { name: 'pi-agent-core'; version: string }
+  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage
   events: AgentExecutionEvent[]
 }
 export interface ReviewRunStageExecutions {
@@ -362,6 +330,7 @@ export interface ReviewRun {
   startedAt: string
   finishedAt?: string
   snapshot: ReviewRunSnapshot
+  workflow?: import('./requirement-workflow-types.js').RequirementWorkflowState
   inputDeliveryManifest?: InputDeliveryManifest
   result?: import('./review-types.js').RequirementAnalysisResult
   execution?: AgentExecutionRecord
@@ -392,7 +361,7 @@ export interface ReviewRun {
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; reviewQaSessions: ReviewQaSession[]; reviewQaTurns: ReviewQaTurn[]; toolApprovals: ToolApproval[]; technicalSolutionReviews: import('./technical-solution-types.js').TechnicalSolutionReview[]; technicalSolutionRuns: import('./technical-solution-types.js').TechnicalSolutionReviewRun[]; technicalSolutionFindingActions: import('./technical-solution-types.js').TechnicalSolutionFindingAction[]; testDesignState?: import('./test-design-types.js').TestDesignState }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; technicalSolutionReviews: import('./technical-solution-types.js').TechnicalSolutionReview[]; technicalSolutionRuns: import('./technical-solution-types.js').TechnicalSolutionReviewRun[]; technicalSolutionFindingActions: import('./technical-solution-types.js').TechnicalSolutionFindingAction[]; testDesignState?: import('./test-design-types.js').TestDesignState }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

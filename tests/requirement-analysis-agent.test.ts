@@ -28,10 +28,14 @@ test('RequirementAnalysisAgent 通过一个定义绑定 Workspace、Knowledge、
     'workspace.list_directory',
     'knowledge.search',
     'knowledge.read_chunk',
+    'skill.activate',
     'requirement-analysis.submit_result',
+    'requirement-repair.submit_result',
+    'requirement-release.submit_result',
   ])
-  assert.deepEqual(definition.skillBindings.map(binding => binding.skillKey), ['system.requirement-analysis'])
-  assert.match(definition.systemPrompt, /一次连续的 Pi Agent Session/u)
+  assert.deepEqual(definition.skillBindings.map(binding => binding.skillKey), ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
+  assert.match(definition.systemPrompt, /Workflow 已固定当前 Stage/u)
+  assert.match(definition.systemPrompt, /可以根据任务选择不激活、激活一个或激活多个 Skill/u)
   assert.match(definition.systemPrompt, /Current Requirement/u)
   assert.match(definition.systemPrompt, /Knowledge Reference/u)
   assert.match(definition.systemPrompt, /Self Review/u)
@@ -161,6 +165,7 @@ async function successfulRun() {
   await resources.initialize()
   const faux = fauxProvider()
   faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('skill_activate', { skillKey: 'requirement.baseline' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/cancel.md' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/payment.md' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('knowledge_search', { query: '取消' }), { stopReason: 'toolUse' }),

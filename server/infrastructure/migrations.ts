@@ -668,6 +668,43 @@ const migrations: Migration[] = [{
     CREATE TABLE IF NOT EXISTS smarthub.test_execution_handoffs (id text PRIMARY KEY, project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE CASCADE, test_case_set_version_id text NOT NULL REFERENCES smarthub.test_case_set_versions(id) ON DELETE RESTRICT, strategy text NOT NULL, content_sha256 char(64) NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL, content jsonb NOT NULL, data jsonb NOT NULL);
     CREATE TABLE IF NOT EXISTS smarthub.test_execution_handoff_members (handoff_id text NOT NULL REFERENCES smarthub.test_execution_handoffs(id) ON DELETE CASCADE, stage text NOT NULL, ordinal integer NOT NULL, source_version_id text NOT NULL, case_id text NOT NULL, case_revision integer NOT NULL, method text NOT NULL, dedup_key text NOT NULL, data jsonb NOT NULL, PRIMARY KEY (handoff_id, stage, ordinal), UNIQUE (handoff_id, dedup_key));
   `,
+}, {
+  version: 20,
+  name: 'remove-review-qa-agent-and-history',
+  sql: `
+    DELETE FROM smarthub.agent_configuration_versions
+    WHERE agent_key = 'reviewQa'
+       OR data->>'agentKey' = 'reviewQa'
+       OR data->'agentDefinition'->>'agentKey' = 'review-qa';
+    UPDATE smarthub.agent_configuration_drafts
+    SET data = jsonb_set(data, '{agents}', COALESCE(data->'agents', '{}'::jsonb) - 'reviewQa', true),
+        updated_at = now()
+    WHERE COALESCE(data->'agents', '{}'::jsonb) ? 'reviewQa';
+    DELETE FROM smarthub.ai_resources WHERE resource_key = 'review.answer_submit';
+    DROP TABLE IF EXISTS smarthub.review_qa_turns;
+    DROP TABLE IF EXISTS smarthub.review_qa_sessions;
+  `,
+}, {
+  version: 21,
+  name: 'remove-legacy-requirement-agents-and-history',
+  sql: `
+    DELETE FROM smarthub.agent_configuration_versions
+    WHERE agent_key IN ('requirementPointExtraction', 'requirementReview')
+       OR data->>'agentKey' IN ('requirementPointExtraction', 'requirementReview')
+       OR data->'agentDefinition'->>'agentKey' IN ('requirement-point-extraction', 'requirement-review')
+       OR COALESCE(data->'agentDefinitions', '{}'::jsonb) ?| ARRAY['requirementPointExtraction', 'requirementReview'];
+    UPDATE smarthub.agent_configuration_drafts
+    SET data = jsonb_set(
+          data,
+          '{agents}',
+          (COALESCE(data->'agents', '{}'::jsonb) - 'requirementPointExtraction') - 'requirementReview',
+          true
+        ),
+        updated_at = now()
+    WHERE COALESCE(data->'agents', '{}'::jsonb) ?| ARRAY['requirementPointExtraction', 'requirementReview'];
+    DELETE FROM smarthub.ai_resources
+    WHERE resource_key IN ('requirement-points.submit_result', 'review.submit_result');
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

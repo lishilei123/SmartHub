@@ -67,7 +67,7 @@ export type DefaultKnowledgeBase = {
   knowledgeBase: DatabaseState['knowledgeBases'][number]
 }
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], reviewQaSessions: [], reviewQaTurns: [], toolApprovals: [], technicalSolutionReviews: [], technicalSolutionRuns: [], technicalSolutionFindingActions: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [], technicalSolutionReviews: [], technicalSolutionRuns: [], technicalSolutionFindingActions: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -155,7 +155,14 @@ export class JsonStore implements StateStore {
   constructor(private readonly file: string | null) {}
   async load() {
     if (!this.file) return
-    try { this.state = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState; this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.reviewQaSessions ??= []; this.state.reviewQaTurns ??= []; this.state.toolApprovals ??= []; this.state.technicalSolutionReviews ??= []; this.state.technicalSolutionRuns ??= []; this.state.technicalSolutionFindingActions ??= []; normalizeReviewSeverities(this.state) }
+    try {
+      const loaded = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[] }
+      this.state = loaded
+      this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []; this.state.technicalSolutionReviews ??= []; this.state.technicalSolutionRuns ??= []; this.state.technicalSolutionFindingActions ??= []
+      const retiredDataRemoved = removeRetiredAgentData(loaded)
+      normalizeReviewSeverities(this.state)
+      if (retiredDataRemoved) await this.transaction(() => undefined)
+    }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   read() { return structuredClone(this.state) }
@@ -197,6 +204,29 @@ export class JsonStore implements StateStore {
     if (failure) throw failure
     return result
   }
+}
+
+function removeRetiredAgentData(state: DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[] }) {
+  let changed = false
+  if ('reviewQaSessions' in state) { delete state.reviewQaSessions; changed = true }
+  if ('reviewQaTurns' in state) { delete state.reviewQaTurns; changed = true }
+  for (const draft of state.agentConfigurationDrafts) {
+    const agents = draft.agents as unknown as Record<string, unknown>
+    for (const key of ['reviewQa', 'requirementPointExtraction', 'requirementReview']) {
+      if (key in agents) { delete agents[key]; changed = true }
+    }
+  }
+  const versions = state.agentConfigurationVersions.filter(item => {
+    const legacy = item as unknown as { agentKey?: string; agentDefinition?: { agentKey?: string }; agentDefinitions?: Record<string, unknown> }
+    return !['reviewQa', 'requirementPointExtraction', 'requirementReview'].includes(legacy.agentKey ?? '')
+      && !['review-qa', 'requirement-point-extraction', 'requirement-review'].includes(legacy.agentDefinition?.agentKey ?? '')
+      && !legacy.agentDefinitions?.requirementPointExtraction
+      && !legacy.agentDefinitions?.requirementReview
+  })
+  if (versions.length !== state.agentConfigurationVersions.length) { state.agentConfigurationVersions = versions; changed = true }
+  const resources = state.aiResources.filter(item => !['review.answer_submit', 'requirement-points.submit_result', 'review.submit_result'].includes(item.key))
+  if (resources.length !== state.aiResources.length) { state.aiResources = resources; changed = true }
+  return changed
 }
 
 export function normalizeReviewSeverities(state: DatabaseState) {

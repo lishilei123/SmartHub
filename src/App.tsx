@@ -15,7 +15,7 @@ import { MarkdownDocument } from './MarkdownDocument'
 import { getActiveDocumentSectionKey, getClosestSourceLineIndex } from './document-scroll'
 import { emptyMarkdownOutline, parseMarkdownOutline, type MarkdownOutline } from './markdown-outline'
 import { createProjectVersion, deleteProjectVersion, loadProjectVersions, updateProjectVersionStatus, type ProjectVersion, type ProjectVersionStatus } from './project-version-api'
-import { loadAgentConfiguration, publishAgentConfiguration, saveAgentConfigurationDraft, type AgentConfigurationAgentDraft, type AgentConfigurationAgentKey, type AgentConfigurationState, type AgentRoutingConfiguration } from './agent-configuration-api'
+import { loadAgentConfiguration, materializeRequiredAgentCapabilities, publishAgentConfiguration, saveAgentConfigurationDraft, type AgentConfigurationAgentDraft, type AgentConfigurationAgentKey, type AgentConfigurationState, type AgentRoutingConfiguration } from './agent-configuration-api'
 import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, updateAiResource, uploadSkillPackage, type AiResource, type AiResourceCatalog, type AiResourceKind, type McpServerResource, type SkillPackageMetadata, type SkillResource, type ToolResource, type ToolSource } from './ai-resource-api'
 import { buildWorkspaceKnowledgeTree, type WorkspaceKnowledgeDirectory } from './workspace-knowledge-tree'
 
@@ -30,9 +30,6 @@ type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
 type SearchLocation = { assetId: string; assetVersionId: string; startLine: number; endLine: number; nonce: number }
 const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: string; identifier: string; sceneLabel: string; protocolLabel: string; publishTarget: string; runtimeToolIds: string[] }> = {
   requirementAnalysis: { label: '需求分析 Agent', identifier: 'RequirementAnalysisAgent', sceneLabel: '需求分析', protocolLabel: '统一分析协议 v1', publishTarget: '新需求分析', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result'] },
-  requirementPointExtraction: { label: '需求点提取 Agent', identifier: 'RequirementPointExtractionAgent', sceneLabel: '需求分析', protocolLabel: '提取协议 v5', publishTarget: '新需求评审', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'requirement-points.submit_result'] },
-  requirementReview: { label: '需求评审 Agent', identifier: 'RequirementReviewAgent', sceneLabel: '需求分析', protocolLabel: '评审协议 v3', publishTarget: '新需求评审', runtimeToolIds: ['review.submit_result'] },
-  reviewQa: { label: '评审问答 Agent', identifier: 'ReviewQaAgent', sceneLabel: '需求分析', protocolLabel: '问答协议 v1', publishTarget: '新评审问答', runtimeToolIds: ['review.answer_submit'] },
   technicalSolutionExtraction: { label: '技术方案提取 Agent', identifier: 'TechnicalSolutionExtractionAgent', sceneLabel: '技术方案分析', protocolLabel: '提取协议 v1', publishTarget: '新技术方案评审', runtimeToolIds: ['technical_solution_points.submit_result'] },
   technicalSolutionReview: { label: '技术方案评审 Agent', identifier: 'TechnicalSolutionReviewAgent', sceneLabel: '技术方案分析', protocolLabel: '评审协议 v2', publishTarget: '新技术方案评审', runtimeToolIds: ['technical_solution_review.submit_result'] },
   testAnalysis: { label: '测试分析 Agent', identifier: 'TestAnalysisAgent', sceneLabel: '测试设计', protocolLabel: '分析协议 v1', publishTarget: '新测试设计运行', runtimeToolIds: ['test_analysis.submit_result'] },
@@ -41,7 +38,7 @@ const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: st
   testCaseSynthesis: { label: '测试用例综合 Agent', identifier: 'TestCaseSynthesisAgent', sceneLabel: '测试设计', protocolLabel: '综合协议 v1', publishTarget: '新测试设计运行', runtimeToolIds: ['test_case_synthesis.submit_result'] },
 }
 const agentConfigurationGroups: Array<{ label: string; agentKeys: AgentConfigurationAgentKey[] }> = [
-  { label: '需求分析', agentKeys: ['requirementAnalysis', 'reviewQa'] },
+  { label: '需求分析', agentKeys: ['requirementAnalysis'] },
   { label: '技术方案分析', agentKeys: ['technicalSolutionExtraction', 'technicalSolutionReview'] },
   { label: '测试设计', agentKeys: ['testAnalysis', 'functionalTestDesign', 'nonFunctionalTestDesign', 'testCaseSynthesis'] },
 ]
@@ -876,9 +873,6 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
       if (requestId !== agentConfigRequestRef.current) return configuration
       const agentDrafts = {
         requirementAnalysis: configuration.agents.requirementAnalysis.draft,
-        requirementPointExtraction: configuration.agents.requirementPointExtraction.draft,
-        requirementReview: configuration.agents.requirementReview.draft,
-        reviewQa: configuration.agents.reviewQa.draft,
         technicalSolutionExtraction: configuration.agents.technicalSolutionExtraction.draft,
         technicalSolutionReview: configuration.agents.technicalSolutionReview.draft,
         testAnalysis: configuration.agents.testAnalysis.draft,
@@ -960,7 +954,7 @@ function SystemSettings({ knowledgeBaseId, notify, addAudit }: { knowledgeBaseId
       {selected === 1 && agentDraft && agentConfiguration && <PromptAgentSettings draft={draft} notify={notify} agentDraft={agentDraft} updateAgent={value => setAgentDraft(current => typeof value === 'function' ? current ? value(current) : current : value)} configuration={agentConfiguration} configurationError={agentConfigError} modelSourcesState={modelSourcesState} modelSourcesError={modelSourcesError} onRetryConfiguration={() => void loadCurrentAgentConfiguration().catch(() => undefined)} onRetryModelSources={() => void loadModelSources().catch(() => undefined)} publishing={agentPublishing} onPublish={async agentKey => {
         setAgentPublishing(true)
         try {
-          const nextDraft = agentDraft[agentKey]
+          const nextDraft = materializeRequiredAgentCapabilities(agentDraft[agentKey], agentConfiguration.agents[agentKey])
           const persisted = await saveAgentConfigurationDraft(agentKey, nextDraft)
           setAgentDraft(current => current ? { ...current, [agentKey]: persisted } : current)
           setSavedAgentDraft(current => current ? { ...current, [agentKey]: persisted } : current)

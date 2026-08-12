@@ -1053,8 +1053,6 @@ function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {
   })
   state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(binding => !assetIds.has(binding.assetId) && !versionIds.has(binding.assetVersionId))
   state.findingActions = state.findingActions.filter(item => !deletedRunIds.has(item.runId))
-  state.reviewQaTurns = state.reviewQaTurns.filter(item => !deletedRunIds.has(item.runId))
-  state.reviewQaSessions = state.reviewQaSessions.filter(item => !deletedRunIds.has(item.runId))
   state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
   state.technicalSolutionFindingActions = state.technicalSolutionFindingActions.filter(item => !deletedTechnicalRunIds.has(item.runId))
   state.technicalSolutionRuns = state.technicalSolutionRuns.filter(run => !deletedTechnicalRunIds.has(run.id))

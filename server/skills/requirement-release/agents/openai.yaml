@@ -1,0 +1,4 @@
+interface:
+  display_name: "需求发布产物"
+  short_description: "基于复验通过的固定需求版本生成可供人工发布的最终产物候选"
+  default_prompt: "使用需求发布 Skill 基于复验通过的固定需求版本生成最终产物候选。"

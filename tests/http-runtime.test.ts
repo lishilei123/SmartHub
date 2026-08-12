@@ -79,8 +79,6 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
     assert.deepEqual(await list.json(), [{ id: 'authorization-pv-a', projectId: 'authorization-project-a', name: 'A', status: 'open', createdAt, updatedAt: createdAt }])
     const read = await fetch(`${baseUrl}/requirement-review-runs/authorization-run-b`)
     assert.equal(read.status, 403)
-    const qa = await fetch(`${baseUrl}/requirement-review-runs/authorization-run-b/questions?stream=true`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: '不应调用运行时' }) })
-    assert.equal(qa.status, 403)
   }, controlsFor('reviewer-a', [{ projectVersionId: 'authorization-pv-a', permissions: ['project-version:read', 'review:read'] }]))
 })
 
@@ -94,34 +92,30 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
     }
     assert.equal(body.scene, 'requirement_analysis')
     assert.equal(body.agents.requirementAnalysis.draft.revision, 0)
-    assert.deepEqual(body.agents.requirementAnalysis.requiredToolIds, ['requirement-analysis.submit_result'])
-    assert.deepEqual(body.agents.requirementAnalysis.requiredSkillKeys, ['system.requirement-analysis'])
-    assert.equal(body.agents.requirementPointExtraction.draft.revision, 0)
-    assert.equal(body.agents.requirementReview.draft.revision, 0)
-    assert.equal(body.agents.reviewQa.draft.revision, 0)
+    assert.deepEqual(body.agents.requirementAnalysis.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
+    assert.deepEqual(body.agents.requirementAnalysis.requiredSkillKeys, ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
+    assert.equal('requirementPointExtraction' in body.agents, false)
+    assert.equal('requirementReview' in body.agents, false)
+    assert.equal('reviewQa' in body.agents, false)
     assert.equal(body.agents.technicalSolutionExtraction.draft.revision, 0)
     assert.equal(body.agents.technicalSolutionReview.draft.revision, 0)
     assert.equal(body.agents.testAnalysis.draft.revision, 0)
     assert.equal(body.agents.functionalTestDesign.draft.revision, 0)
     assert.equal(body.agents.nonFunctionalTestDesign.draft.revision, 0)
     assert.equal(body.agents.testCaseSynthesis.draft.revision, 0)
-    assert.deepEqual(body.agents.requirementPointExtraction.requiredSkillKeys, [])
-    assert.deepEqual(body.agents.requirementReview.requiredToolIds, ['review.submit_result'])
-    assert.deepEqual(body.agents.reviewQa.requiredToolIds, ['review.answer_submit'])
     assert.deepEqual(body.agents.technicalSolutionExtraction.requiredToolIds, ['technical_solution_points.submit_result'])
     assert.deepEqual(body.agents.technicalSolutionReview.requiredToolIds, ['technical_solution_review.submit_result'])
     assert.deepEqual(body.agents.testAnalysis.requiredToolIds, ['test_analysis.submit_result'])
     assert.deepEqual(body.agents.functionalTestDesign.requiredToolIds, ['functional_test_design.submit_result'])
     assert.deepEqual(body.agents.nonFunctionalTestDesign.requiredToolIds, ['non_functional_test_design.submit_result'])
     assert.deepEqual(body.agents.testCaseSynthesis.requiredToolIds, ['test_case_synthesis.submit_result'])
-    assert.deepEqual(body.agents.requirementReview.requiredMcpServerKeys, [])
-    assert.deepEqual(body.agents.requirementReview.draft.definition.skillKeys, [])
-    assert.deepEqual(body.agents.requirementReview.draft.definition.mcpServerKeys, [])
-    assert.deepEqual(body.agents.requirementPointExtraction.versions, [])
-    assert.deepEqual(body.agents.requirementReview.versions, [])
-    assert.deepEqual(body.agents.reviewQa.versions, [])
     assert.deepEqual(body.agents.technicalSolutionExtraction.versions, [])
     assert.deepEqual(body.agents.technicalSolutionReview.versions, [])
+
+    const retiredQaEndpoint = await fetch(`${baseUrl}/requirement-review-runs/retired-review/questions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: '已删除入口' }),
+    })
+    assert.equal(retiredQaEndpoint.status, 404)
 
     const skillResponse = await fetch(`${baseUrl}/ai-resources/skill`, {
       method: 'POST',
@@ -140,17 +134,17 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
       body: JSON.stringify({ key: 'http.agent.tool', name: 'HTTP Agent Tool', version: '1.0.0', enabled: true, source: 'mcp', risk: 'network_read', timeoutMs: 30_000, mcpServerId: mcp.id }),
     })
     assert.equal(toolResponse.status, 201)
-    const draft = body.agents.requirementReview.draft
+    const draft = body.agents.technicalSolutionReview.draft
     const savedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agentKey: 'requirementReview', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: ['http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
+      body: JSON.stringify({ agentKey: 'technicalSolutionReview', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: ['http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
     })
     assert.equal(savedResponse.status, 200)
     const saved = await savedResponse.json() as { definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }
     assert.deepEqual(saved.definition.skillKeys, ['http.agent.skill'])
     assert.deepEqual(saved.definition.mcpServerKeys, ['http.agent.mcp'])
-    assert.deepEqual(saved.definition.toolIds, ['review.submit_result', 'http.agent.tool'])
+    assert.deepEqual(saved.definition.toolIds, ['technical_solution_review.submit_result', 'http.agent.tool'])
   })
 })
 

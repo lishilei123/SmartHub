@@ -5,9 +5,9 @@
       "version": "1.0.0",
       "piName": "read",
       "label": "读取工作区文件",
-      "catalogName": "Pi 工作区文件读取",
-      "description": "使用 Pi Coding Agent 的 read 语义，按工作区相对路径读取固定文件。支持 offset/limit 续读大文件；只允许当前 ReviewRun 的只读 /workspace，实际 read 范围才可形成 Evidence。",
-      "catalogDescription": "像 Codex 一样按相对路径读取 ReviewRun 固定的只读工作区文件。",
+      "catalogName": "工作区文件读取",
+      "description": "使用 read 语义，按工作区相对路径读取固定文件。支持 offset/limit 续读大文件；只允许当前 ReviewRun 的只读 /workspace，实际 read 范围才可形成 Evidence。",
+      "catalogDescription": "按相对路径读取 ReviewRun 固定的只读工作区文件。",
       "risk": "read",
       "timeoutMs": 30000,
       "idempotent": true,
@@ -30,9 +30,9 @@
       "version": "1.0.0",
       "piName": "grep",
       "label": "搜索工作区正文",
-      "catalogName": "Pi 工作区正文搜索",
-      "description": "使用 Pi Coding Agent 的 grep 语义在只读 /workspace 内搜索文本，返回相对文件路径和行号。grep 只用于定位，引用前必须通过 read 读取文件。",
-      "catalogDescription": "像 Codex 一样在固定工作区中按文本和文件模式搜索。",
+      "catalogName": "工作区正文搜索",
+      "description": "使用 grep 语义在只读 /workspace 内搜索文本，返回相对文件路径和行号。grep 只用于定位，引用前必须通过 read 读取文件。",
+      "catalogDescription": "固定工作区中按文本和文件模式搜索。",
       "risk": "read",
       "timeoutMs": 30000,
       "idempotent": true,
@@ -58,9 +58,9 @@
       "version": "1.0.0",
       "piName": "find",
       "label": "查找工作区文件",
-      "catalogName": "Pi 工作区文件查找",
-      "description": "使用 Pi Coding Agent 的 find 语义，在只读 /workspace 内按 glob 查找文件和目录。只接受不会越过工作区的相对路径与模式。",
-      "catalogDescription": "像 Codex 一样在固定工作区中按名称查找文件。",
+      "catalogName": "工作区文件查找",
+      "description": "使用 find 语义，在只读 /workspace 内按 glob 查找文件和目录。只接受不会越过工作区的相对路径与模式。",
+      "catalogDescription": "在固定工作区中按名称查找文件。",
       "risk": "read",
       "timeoutMs": 30000,
       "idempotent": true,
@@ -82,9 +82,9 @@
       "version": "1.0.0",
       "piName": "ls",
       "label": "列出工作区目录",
-      "catalogName": "Pi 工作区目录查看",
-      "description": "使用 Pi Coding Agent 的 ls 语义列出只读 /workspace 中的目录内容。只接受工作区内相对路径。",
-      "catalogDescription": "像 Codex 一样浏览固定工作区目录树。",
+      "catalogName": "工作区目录查看",
+      "description": "使用 ls 语义列出只读 /workspace 中的目录内容。只接受工作区内相对路径。",
+      "catalogDescription": "浏览固定工作区目录树。",
       "risk": "read",
       "timeoutMs": 30000,
       "idempotent": true,
@@ -143,6 +143,93 @@
           "chunkId": { "type": "string", "minLength": 1, "maxLength": 200 }
         },
         "required": ["chunkId"],
+        "additionalProperties": false
+      }
+    },
+    "requirement-repair.submit_result": {
+      "version": "1.0.0",
+      "piName": "requirement_repair_submit_result",
+      "label": "提交需求修复草稿",
+      "catalogName": "提交需求修复草稿",
+      "description": "提交 requirement-repair/v1 Patch 候选；服务端重新校验 Finding 状态、固定 AssetVersion、before 唯一性和 Patch 非重叠性。",
+      "catalogDescription": "提交当前 repair Stage 的需求 Patch 候选。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-workflow-submit.ts",
+      "handlerKey": "requirement-repair.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "requirement-repair/v1" },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 12000 },
+          "patches": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "assetVersionId": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "before": { "type": "string", "minLength": 1, "maxLength": 50000 },
+                "after": { "type": "string", "minLength": 1, "maxLength": 50000 },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "findingRefs": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
+              },
+              "required": ["assetVersionId", "before", "after", "reason", "findingRefs"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["schemaVersion", "summary", "patches"],
+        "additionalProperties": false
+      }
+    },
+    "requirement-release.submit_result": {
+      "version": "1.0.0",
+      "piName": "requirement_release_submit_result",
+      "label": "提交需求发布候选",
+      "catalogName": "提交需求发布候选",
+      "description": "提交 requirement-release-candidate/v1；服务端重新校验复验门禁并生成 Markdown 与机器可读 JSON 发布包。",
+      "catalogDescription": "提交 release Stage 的最终需求文档候选。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-workflow-submit.ts",
+      "handlerKey": "requirement-release.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "requirement-release-candidate/v1" },
+          "sourceAssetVersionIds": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+          "refinedRequirementsMarkdown": { "type": "string", "minLength": 1, "maxLength": 1000000 }
+        },
+        "required": ["schemaVersion", "sourceAssetVersionIds", "refinedRequirementsMarkdown"],
+        "additionalProperties": false
+      }
+    },
+    "skill.activate": {
+      "version": "1.0.0",
+      "piName": "skill_activate",
+      "label": "激活阶段 Skill",
+      "catalogName": "激活阶段 Skill",
+      "description": "按 Skill Key 激活当前 Workflow Stage Catalog 中的一个 Skill，并返回该发布版本的受信正文。可调用零次、一次或多次；不能切换 Stage。",
+      "catalogDescription": "按需激活当前 Workflow Stage 允许的 Skill。",
+      "risk": "read",
+      "timeoutMs": 30000,
+      "idempotent": true,
+      "repeatPolicy": "replay_success_once",
+      "sourcePath": "server/tools/skill-activate.ts",
+      "handlerKey": "skill.activate",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skillKey": { "type": "string", "minLength": 1, "maxLength": 200, "description": "必须来自当前 Stage 暴露的 Skill Catalog。" }
+        },
+        "required": ["skillKey"],
         "additionalProperties": false
       }
     },
@@ -225,115 +312,6 @@
           "analysisDocument": { "type": "string", "maxLength": 200000 }
         },
         "required": ["summary", "requirementPoints", "findings", "testFocus"],
-        "additionalProperties": false
-      }
-    },
-    "requirement-points.submit_result": {
-      "version": "5.1.0",
-      "piName": "requirement_points_submit_result",
-      "label": "提交需求标题、描述与原文线索",
-      "catalogName": "提交需求点",
-      "description": "提交 requirement-point-extraction/v5。模型正常为每条需求点生成 title，并提交 description 和 sourceTexts；title 缺失或空白时服务端根据 description 兜底，其余结构、ID、Evidence、引用、定位和覆盖清单全部由服务端生成。",
-      "catalogDescription": "提交需求点提取候选结果，由服务端生成 ID 和证据关联。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/requirement-points-submit-result.ts",
-      "handlerKey": "requirement-points.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "requirementPoints": {
-            "type": "array",
-            "maxItems": 500,
-            "items": {
-              "type": "object",
-              "properties": {
-                "title": { "type": "string", "maxLength": 1000, "description": "模型生成的简洁需求点标题；缺失或空白时由服务端根据 description 兜底。" },
-                "description": { "type": "string", "minLength": 1, "maxLength": 8000, "description": "可独立实现、测试或验收的原子需求描述。" },
-                "sourceTexts": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 4, "maxLength": 4000, "description": "支撑当前需求点的原文或高区分度原文线索。" } }
-              },
-              "required": ["description", "sourceTexts"],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": ["requirementPoints"],
-        "additionalProperties": false
-      }
-    },
-    "review.submit_result": {
-      "version": "4.0.0",
-      "piName": "review_submit_result",
-      "label": "提交需求点对应分析",
-      "catalogName": "提交评审分析",
-      "description": "提交 requirement-review/v3。每条分析只需关联一个冻结需求点；模型给出标题、类型、严重度、置信度、影响、建议和总体摘要，服务端生成 Finding ID 并完成引用结构。",
-      "catalogDescription": "提交需求点评审候选结果，由服务端校验并发布。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/review-submit-result.ts",
-      "handlerKey": "review.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "summary": {
-            "type": "object",
-            "properties": {
-              "overallAssessment": { "type": "string", "minLength": 1, "maxLength": 100, "description": "建议使用 pass、pass_with_notes、needs_revision 或 blocked。" },
-              "score": { "type": "number" },
-              "strengths": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-              "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } }
-            },
-            "additionalProperties": false
-          },
-          "analyses": {
-            "type": "array",
-            "maxItems": 100,
-            "items": {
-              "type": "object",
-              "properties": {
-                "requirementPointRef": { "type": "string", "minLength": 1, "maxLength": 100, "description": "必须是输入中存在的 RP-* 需求点 ID。" },
-                "analysis": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "title": { "type": "string", "minLength": 1, "maxLength": 300 },
-                "type": { "type": "string", "minLength": 1, "maxLength": 100 },
-                "severity": { "type": "string", "minLength": 1, "maxLength": 100 },
-                "confidence": { "type": "number" },
-                "impact": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "recommendation": { "type": "string", "minLength": 1, "maxLength": 4000 }
-              },
-              "required": ["requirementPointRef", "analysis"],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": ["analyses"],
-        "additionalProperties": false
-      }
-    },
-    "review.answer_submit": {
-      "version": "1.0.0",
-      "piName": "review_answer_submit",
-      "label": "提交评审问答答案",
-      "catalogName": "提交评审问答答案",
-      "description": "提交 review-qa/v1。答案必须基于固定 ReviewRun；citations 只能填写固定上下文允许的 E-* Evidence ID。",
-      "catalogDescription": "提交基于固定 ReviewRun 的问答答案、Evidence 引用和限制项。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/review-answer-submit.ts",
-      "handlerKey": "review.answer_submit",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "answer": { "type": "string", "minLength": 1, "maxLength": 12000 },
-          "citations": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
-          "limitations": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
-        },
-        "required": ["answer", "citations", "limitations"],
         "additionalProperties": false
       }
     },

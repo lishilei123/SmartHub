@@ -3,9 +3,6 @@ const apiBase = 'http://127.0.0.1:8787/api'
 export type AgentModelReference = { sourceId: string; modelId: string }
 export type AgentConfigurationAgentKey =
   | 'requirementAnalysis'
-  | 'requirementPointExtraction'
-  | 'requirementReview'
-  | 'reviewQa'
   | 'technicalSolutionExtraction'
   | 'technicalSolutionReview'
   | 'testAnalysis'
@@ -69,6 +66,21 @@ export type AgentConfigurationState = {
   agents: Record<AgentConfigurationAgentKey, AgentConfigurationAgentState>
 }
 
+export function materializeRequiredAgentCapabilities(
+  draft: AgentConfigurationAgentDraft,
+  requirements: Pick<AgentConfigurationAgentState, 'requiredToolIds' | 'requiredSkillKeys' | 'requiredMcpServerKeys'>,
+): AgentConfigurationAgentDraft {
+  return {
+    ...draft,
+    definition: {
+      ...draft.definition,
+      toolIds: uniqueKeys(requirements.requiredToolIds, draft.definition.toolIds),
+      skillKeys: uniqueKeys(requirements.requiredSkillKeys, draft.definition.skillKeys),
+      mcpServerKeys: uniqueKeys(requirements.requiredMcpServerKeys, draft.definition.mcpServerKeys),
+    },
+  }
+}
+
 export async function loadAgentConfiguration() {
   return request<AgentConfigurationState>('/agent-configurations/requirement-analysis')
 }
@@ -94,4 +106,8 @@ async function request<T>(path: string, init?: RequestInit) {
   const value = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error((value as { error?: string }).error ?? `请求失败（HTTP ${response.status}）`)
   return value as T
+}
+
+function uniqueKeys(required: readonly string[], selected: readonly string[]) {
+  return [...new Set([...selected, ...required].map(item => item.trim()).filter(Boolean))]
 }

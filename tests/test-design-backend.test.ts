@@ -124,7 +124,6 @@ test('用例综合候选将 fieldConstraints 标量规范化为字符串并拒�
 })
 
 test('测试设计内置 Prompt 要求矩阵化发散并在综合前完成全集核对', () => {
-  assert.equal(defaultAgentDefinitionConfigDictionary['review-qa'].version, '1.0.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['test-analysis'].version, '1.3.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['functional-test-design'].version, '1.1.0')
   assert.equal(defaultAgentDefinitionConfigDictionary['non-functional-test-design'].version, '1.2.0')

@@ -1,0 +1,4 @@
+interface:
+  display_name: "需求审核"
+  short_description: "审核冻结需求基线并形成可追溯、可行动、可闭环的 Finding"
+  default_prompt: "使用需求审核 Skill 检查冻结需求基线的完整性、一致性、边界与可测试性。"

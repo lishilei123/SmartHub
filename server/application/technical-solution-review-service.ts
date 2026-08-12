@@ -16,7 +16,7 @@ export class TechnicalSolutionReviewService {
     const state = this.store.loadTechnicalSolutionInputState ? await this.store.loadTechnicalSolutionInputState(projectVersionId) : await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND: 项目版本不存在')
     const projectBases = state.knowledgeBases.filter(item => item.projectId === projectVersion.projectId)
-    const baselines = state.reviewRuns.filter(item => item.projectVersionId === projectVersionId && item.status === 'succeeded' && item.result).sort(byNewest).map(run => ({ id: run.id, reviewId: run.reviewId ?? run.id, completedAt: run.finishedAt, requirementCount: run.result!.requirementPoints.length, documentTitle: run.documentTitle, unresolvedHighCount: unresolvedHighCount(run, state), resultSchemaVersions: { extraction: 'requirement-point-extraction/v5', review: 'requirement-review/v3' } }))
+    const baselines = state.reviewRuns.filter(item => item.projectVersionId === projectVersionId && item.status === 'succeeded' && item.result).sort(byNewest).map(run => ({ id: run.id, reviewId: run.reviewId ?? run.id, completedAt: run.finishedAt, requirementCount: run.result!.requirementPoints.length, documentTitle: run.documentTitle, unresolvedHighCount: unresolvedHighCount(run, state), resultSchemaVersions: { analysis: 'requirement-analysis/v1' } }))
     const solutionAssets = projectBases.flatMap(base => {
       const index = state.indexes.find(item => item.id === base.activeIndexVersionId && item.status === 'active')
       if (!index) return []

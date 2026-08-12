@@ -1,4 +1,4 @@
-import type { AgentCandidateResult, CandidateRequirementPointExtraction } from './review-types.js'
+import type { AgentCandidateResult } from './review-types.js'
 
 export type AgentReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type RequirementInputMode = 'full_context' | 'segmented_context' | 'agent_directory'
@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-analysis' | 'requirement-point-extraction' | 'requirement-review' | 'review-qa' | 'technical-solution-extraction' | 'technical-solution-review' | 'technical-solution-analysis' | 'test-analysis' | 'functional-test-design' | 'non-functional-test-design' | 'test-case-synthesis'
-  agentType: 'requirement_analysis' | 'requirement_point_extraction' | 'requirement_review' | 'review_qa' | 'technical_solution_extraction' | 'technical_solution_review' | 'technical_solution_analysis' | 'test_analysis' | 'functional_test_design' | 'non_functional_test_design' | 'test_case_synthesis'
+  agentKey: 'requirement-analysis' | 'technical-solution-extraction' | 'technical-solution-review' | 'technical-solution-analysis' | 'test-analysis' | 'functional-test-design' | 'non-functional-test-design' | 'test-case-synthesis'
+  agentType: 'requirement_analysis' | 'technical_solution_extraction' | 'technical_solution_review' | 'technical_solution_analysis' | 'test_analysis' | 'functional_test_design' | 'non_functional_test_design' | 'test_case_synthesis'
   version: string
   status: 'published'
   modelScene: 'requirement_analysis' | 'technical_solution_analysis' | 'test_design'
-  resultSchemaVersion: 'requirement-analysis/v1' | 'requirement-point-extraction/v1' | 'requirement-point-extraction/v2' | 'requirement-point-extraction/v3' | 'requirement-point-extraction/v4' | 'requirement-point-extraction/v5' | 'requirement-review/v2' | 'requirement-review/v3' | 'review-qa/v1' | 'technical-solution-extraction/v1' | 'technical-solution-review/v1' | 'technical-solution-review/v2' | 'test-analysis/v1' | 'functional-test-design/v1' | 'non-functional-test-design/v1' | 'test-case-synthesis/v1'
+  resultSchemaVersion: 'requirement-analysis/v1' | 'technical-solution-extraction/v1' | 'technical-solution-review/v1' | 'technical-solution-review/v2' | 'test-analysis/v1' | 'functional-test-design/v1' | 'non-functional-test-design/v1' | 'test-case-synthesis/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -167,11 +167,12 @@ export interface AgentExecutionEvent {
 export interface AgentExecutionInput {
   snapshot: ReviewRunSnapshot | import('./technical-solution-types.js').TechnicalSolutionRunSnapshot | TestDesignAgentSnapshot
   model: AgentModelConnection
-  fixedRequirementPointExtraction?: CandidateRequirementPointExtraction
   fixedTechnicalSolutionExtraction?: import('./technical-solution-types.js').TechnicalSolutionExtractionResult
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
+    workflowStage: 'analysis' | 'repair' | 'verification' | 'release'
+    allowedSkillKeys: string[]
     submitToolId: string
     schemaVersion: string
     agentLabel: string

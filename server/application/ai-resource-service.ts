@@ -22,9 +22,14 @@ const builtInSkills: SkillResource[] = [
   }),
   builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例'], undefined),
   builtInSkill('system.requirement-analysis', '需求分析方法论', '单 Agent 需求分析的整体理解、基线、跨需求评审、Test Focus 与自检方法论。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['系统', '需求分析', '评审'], undefined),
+  builtInSkill('requirement.baseline', '需求基线', '读取固定需求正文并建立完整、原子且可追溯到原文证据的需求基线草稿。', '1.0.0', 'server/skills/requirement-baseline/SKILL.md', [], ['需求分析', '基线', 'baseline'], undefined),
+  builtInSkill('requirement.review', '需求审核', '审核冻结需求基线并生成可追溯、可行动且可闭环的正式 Finding。', '1.0.0', 'server/skills/requirement-review/SKILL.md', [], ['需求分析', '审核', 'finding'], undefined),
+  builtInSkill('requirement.repair', '需求修复', '针对人工确认的 Finding 生成基于固定原文且可安全应用的 Patch 草稿。', '1.0.0', 'server/skills/requirement-repair/SKILL.md', [], ['需求分析', '修复', 'patch'], undefined),
+  builtInSkill('requirement.verification', '需求复验', '完整复查修复后的需求版本并判定原 Finding 是否真正完成闭环。', '1.0.0', 'server/skills/requirement-verification/SKILL.md', [], ['需求分析', '复验', 'verification'], undefined),
+  builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact'], undefined),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
-const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', ...SKILL_RUNTIME_TOOL_IDS])
+const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', ...SKILL_RUNTIME_TOOL_IDS])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 
@@ -168,7 +173,7 @@ export class AiResourceService {
       for (const builtIn of builtInResources) {
         const index = state.aiResources.findIndex(item => item.kind === builtIn.kind && item.key === builtIn.key)
         if (index < 0) state.aiResources.push(structuredClone(builtIn))
-        else if (state.aiResources[index].builtIn) state.aiResources[index] = { ...structuredClone(builtIn), createdAt: state.aiResources[index].createdAt, updatedAt: state.aiResources[index].updatedAt }
+        else state.aiResources[index] = { ...structuredClone(builtIn), createdAt: state.aiResources[index].createdAt, updatedAt: state.aiResources[index].updatedAt }
       }
     })
   }

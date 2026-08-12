@@ -5,7 +5,7 @@ import type { Api, Model } from '@earendil-works/pi-ai'
 import { streamSimple as streamAnthropic } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as streamOpenAi } from '@earendil-works/pi-ai/api/openai-completions'
 import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, InputDeliveryManifest, RequirementInputBatch } from '../domain/agent-types.js'
-import type { AgentCandidateResult, CandidateRequirementPointExtraction } from '../domain/review-types.js'
+import type { AgentCandidateResult } from '../domain/review-types.js'
 import type { ToolApprovalGate } from '../domain/tool-types.js'
 import type { ToolDescriptor } from '../domain/tool-types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -13,12 +13,11 @@ import type { SkillPackageStore } from '../infrastructure/skill-package-store.js
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { defaultTokenCodec } from '../application/content.js'
-import { createRequirementReviewToolRegistry, createWorkspaceAgentToolRegistry } from '../tools/requirement-tools.js'
+import { createWorkspaceAgentToolRegistry } from '../tools/requirement-tools.js'
 import { createTechnicalSolutionExtractionToolRegistry, createTechnicalSolutionReviewToolRegistry } from '../tools/technical-solution-tools.js'
 import { createTestDesignToolRegistry } from '../tools/test-design-tools.js'
 import { RequirementDocumentWorkspace } from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
-import { RequirementReviewValidator } from './result-validator.js'
 import { renderTechnicalSegmentBatchTask, renderTechnicalSegmentMergeTask, renderTechnicalSolutionReviewTask, renderTechnicalSolutionTask } from './requirement-analysis-agent.js'
 import { TechnicalSolutionExtractionValidator, TechnicalSolutionReviewValidatorV2 } from './technical-solution-result-validator.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
@@ -78,6 +77,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const piDocumentWorkspace = stage.isWorkspaceAnalysis && inputPlan?.mode === 'agent_directory'
       ? new RequirementDocumentWorkspace(this.store, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
       : undefined
+    const workspaceProfile = stage.isWorkspaceAnalysis ? required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED') : undefined
+    const skillRuntime = new AgentSkillRuntime(this.store, this.skillPackages)
+    const skillSession = workspaceProfile
+      ? await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage, workspaceProfile.allowedSkillKeys)
+      : undefined
     const deliveryManifest: InputDeliveryManifest | undefined = inputPlan ? {
       policyVersion: inputPlan.policyVersion,
       mode: inputPlan.mode,
@@ -118,7 +122,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
         deliveryManifest.toolReads ??= []
         deliveryManifest.toolReads.push(structuredClone(observation))
-      }, piDocumentWorkspace)
+      }, piDocumentWorkspace, skillSession)
       : stage.isTechnicalExtraction
       ? createTechnicalSolutionExtractionToolRegistry(this.store, async value => {
         const normalized = new TechnicalSolutionExtractionValidator().normalize(value, input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, await this.store.snapshot())
@@ -127,22 +131,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         lastSubmissionIssues = []
         return { accepted: true }
       })
-      : stage.isTechnicalReview
-      ? createTechnicalSolutionReviewToolRegistry(async value => {
+      : createTechnicalSolutionReviewToolRegistry(async value => {
         const normalized = new TechnicalSolutionReviewValidatorV2().normalize(value, input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED: TechnicalSolutionReviewAgent 缺少冻结提取结果'))
         if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
         candidate = normalized.result
         lastSubmissionIssues = []
         return { accepted: true }
       })
-      : createRequirementReviewToolRegistry(async value => {
-        const normalized = new RequirementReviewValidator().normalizeV3(value, required(stage.fixedExtraction, 'REQUIREMENT_POINT_EXTRACTION_REQUIRED'), input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot)
-        if (!normalized.report.valid || !normalized.result) { lastSubmissionIssues = normalized.report.issues; return { accepted: false, issues: normalized.report.issues } }
-        candidate = normalized.result
-        lastSubmissionIssues = []
-        return { accepted: true }
-      })
-    const skillPrompt = await new AgentSkillRuntime(this.store, this.skillPackages).render(input.snapshot.agentDefinition)
+    const skillPrompt = skillSession?.renderCatalogPrompt() ?? await skillRuntime.render(input.snapshot.agentDefinition)
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
@@ -165,7 +161,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
     for (const warning of capabilityLoad.warnings) await record({ type: 'capability_binding_unavailable', content: warning })
     if (unavailableToolIds.length) await record({ type: 'tool_bindings_unavailable', content: `以下目录绑定尚未注册到当前 Agent 运行时，因此不会暴露给模型：${unavailableToolIds.join('、')}` })
-    if (skillPrompt) await record({ type: 'skill_bindings_loaded', content: `${input.snapshot.agentDefinition.skillBindings.filter(binding => binding.enabled).length} 个 Skill 已按发布快照加载。` })
+    if (skillSession) await record({ type: 'skill_catalog_loaded', content: JSON.stringify({ workflowStage: skillSession.workflowStage, skills: skillSession.catalog().map(skill => ({ key: skill.key, version: skill.version })) }) })
+    else if (skillPrompt) await record({ type: 'skill_bindings_loaded', content: `${input.snapshot.agentDefinition.skillBindings.filter(binding => binding.enabled).length} 个 Skill 已按发布快照加载。` })
     const controller = new AbortController()
     const deadline = setTimeout(() => controller.abort(new Error('AGENT_DEADLINE_EXCEEDED')), limits.deadlineMs)
     const abort = () => controller.abort(signal.reason ?? new Error('AGENT_CANCELLED'))
@@ -247,7 +244,13 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
             resultSubmissionRequired = true
           }
         }
-        if (!isTransientAgentEvent(event)) await record(toAuditEvent(event, turns, input.model.baseUrl, input.model.apiKey))
+        if (!isTransientAgentEvent(event)) {
+          const auditEvent = toAuditEvent(event, turns, input.model.baseUrl, input.model.apiKey)
+          await record(auditEvent)
+          if (auditEvent.type === 'tool_execution_end' && auditEvent.toolId === defaultBuiltInToolConfigResolver.toDescriptor('skill.activate').piName && !auditEvent.isError) {
+            await record({ type: 'skill_activated', turn: turns, toolId: 'skill.activate', toolCallId: auditEvent.toolCallId, content: JSON.stringify({ workflowStage: workspaceProfile?.workflowStage, activatedSkillKeys: skillSession?.activatedKeys() ?? [] }) })
+          }
+        }
         if (resultSubmissionRequired) await record({ type: 'result_submission_required', turn: turns })
         if (eventSignal.aborted || controller.signal.aborted) agent?.abort()
       })
@@ -263,7 +266,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           await agent.prompt(`${renderInitialTask(input, stage)}\n\n${current.content}`)
           await agent.waitForIdle()
         } else {
-          if (!stage.isTechnicalExtraction) throw new Error('PI_WORKSPACE_INPUT_REQUIRED: RequirementPointExtractionAgent 只支持 /workspace 文件工作区输入')
+          if (!stage.isTechnicalExtraction) throw new Error('SEGMENTED_CONTEXT_UNSUPPORTED: 只有技术方案提取 Agent 支持分段正文归并')
           const drafts: string[] = []
           inDraftStage = true
           agent.state.tools = []
@@ -448,7 +451,7 @@ function runtimeAllowedToolIds(input: AgentExecutionInput) {
 }
 
 function requireWorkspaceToolset(toolIds: string[], submitToolId: string) {
-  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', submitToolId]
+  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', submitToolId]
   const missing = requiredTools.filter(toolId => !toolIds.includes(toolId))
   if (missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: Workspace Agent 工具配置不符合 /workspace + Knowledge 协议；缺少 ${missing.join(', ')}`)
 }
@@ -463,7 +466,6 @@ type StageConfiguration = {
   submitPiName: string
   schemaVersion: string
   agentLabel: string
-  fixedExtraction?: CandidateRequirementPointExtraction
 }
 
 function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
@@ -506,20 +508,10 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
     schemaVersion: 'technical-solution-review/v2',
     agentLabel: 'TechnicalSolutionReviewAgent',
   })
-  if (!input.fixedRequirementPointExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
-  return { ...stage({
-    isWorkspaceAnalysis: false,
-    isTechnicalExtraction: false,
-    isTechnicalReview: false,
-    isTestDesign: false,
-    usesInputPlan: false,
-    submitToolId: 'review.submit_result',
-    schemaVersion: 'requirement-review/v3',
-    agentLabel: 'RequirementReviewAgent',
-  }), fixedExtraction: input.fixedRequirementPointExtraction }
+  throw new Error(`AGENT_STAGE_UNSUPPORTED: ${input.snapshot.agentDefinition.agentKey}`)
 }
 
-function stage<T extends Omit<StageConfiguration, 'submitPiName' | 'fixedExtraction'>>(value: T): T & { submitPiName: string } {
+function stage<T extends Omit<StageConfiguration, 'submitPiName'>>(value: T): T & { submitPiName: string } {
   return { ...value, submitPiName: defaultBuiltInToolConfigResolver.toDescriptor(value.submitToolId).piName }
 }
 
@@ -530,19 +522,7 @@ function renderInitialTask(input: AgentExecutionInput, stage: StageConfiguration
     ? renderTechnicalSolutionTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot)
     : stage.isTechnicalReview
     ? renderTechnicalSolutionReviewTask(input.snapshot as import('../domain/technical-solution-types.js').TechnicalSolutionRunSnapshot, required(input.fixedTechnicalSolutionExtraction, 'TECHNICAL_SOLUTION_EXTRACTION_REQUIRED'))
-    : stage.isWorkspaceAnalysis
-    ? required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED').initialTask
-    : renderRequirementTaskLegacy(input, stage)
-}
-
-function renderRequirementTaskLegacy(input: AgentExecutionInput, stage: StageConfiguration) {
-  if (!stage.fixedExtraction) throw new Error('REQUIREMENT_POINT_EXTRACTION_REQUIRED: RequirementReviewAgent 缺少已固定的需求点提取结果')
-  const snapshot = input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot
-  return snapshot.agentDefinition.taskTemplate
-    .replace('{{projectName}}', snapshot.projectName)
-    .replace('{{runId}}', snapshot.runId)
-    .replace('{{indexVersionId}}', snapshot.indexVersionId)
-    .replace('{{fixedExtraction}}', JSON.stringify(stage.fixedExtraction))
+    : required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED').initialTask
 }
 
 function testDesignPointIds(task: string | undefined) {

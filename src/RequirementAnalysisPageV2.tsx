@@ -1,24 +1,33 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, BookOpen, Bot, CheckCircle2, Clock3, Download, FileDiff, FileText,
-  GitBranch, ListFilter, LoaderCircle, Play, Quote, RefreshCw, Send, ShieldCheck, Sparkles, Wrench, XCircle,
+  GitBranch, ListFilter, LoaderCircle, Play, Quote, RefreshCw, ShieldCheck, Sparkles, Trash2, Wrench, XCircle,
 } from 'lucide-react'
 import type { KnowledgeDocument } from './prototype-data'
-import { loadAssetVersion, uploadKnowledgeFile, waitForTaskResults } from './knowledge-api'
+import { loadAssetVersion, waitForTaskResults } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
 import {
-  askRequirementReviewQuestion,
   cancelRequirementReviewRun,
+  createRequirementReleaseCandidate,
   createFindingAction,
+  generateRequirementRepairDraft,
+  approveRequirementRepairDraft,
+  applyRequirementRepairDraft,
   downloadRequirementReviewReport,
   loadFindingActions,
   loadRequirementReviewRun,
   loadRequirementReviewRuns,
   retryRequirementReviewRun,
+  publishRequirementRelease,
+  requirementReleaseArtifactUrl,
   startRequirementAnalysis,
+  verifyRequirementRepairDraft,
   type AgentExecutionEvent,
+  type AgentExecutionRecord,
   type FindingActionType,
   type RequirementAnalysisResponse,
+  type RequirementRepairDraft,
+  type RequirementReleasePackage,
   type RequirementReviewRun,
   type ReviewEvidence,
   type ReviewFinding,
@@ -27,15 +36,13 @@ import {
 } from './requirement-analysis-api'
 import { requirementWorkspaceDirectory } from './version-document-path'
 import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
-import { bindRequirementVersion, type ProjectVersion } from './project-version-api'
+import type { ProjectVersion } from './project-version-api'
 import './requirement-analysis-v2.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 type ViewKey = 'overview' | 'baseline' | 'findings' | 'artifacts' | 'diff'
 type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
 type RunRecord = RequirementReviewRun & { content?: string }
-type FixPatch = { assetVersionId: string; before: string; after: string; reason: string }
-type FixDraft = { summary: string; patches: FixPatch[] }
 
 type Props = {
   projectVersion: ProjectVersion | null
@@ -46,6 +53,9 @@ type Props = {
   onManageVersions: () => void
   onOpenKnowledge: () => void
   onOpenActivity: () => void
+  onOpenRequirementDocument?: (document: KnowledgeDocument) => void
+  onDeleteRequirementDocument?: (document: KnowledgeDocument) => void
+  canDeleteRequirementDocument?: boolean
   notify: Notify
   addAudit: (entry: string) => void
 }
@@ -70,7 +80,15 @@ function formatTime(value: string) { return new Date(value).toLocaleString('zh-C
 function severityTone(value: ReviewSeverity) { return value === 'blocker' ? 'red' : value === 'high' ? 'orange' : value === 'medium' ? 'gold' : 'blue' }
 function assessmentLabel(value?: string) { return value === 'blocked' ? '存在阻断问题' : value === 'needs_revision' ? '建议修改后确认' : value === 'pass_with_notes' ? '附带关注项通过' : value === 'pass' ? '可以进入下一阶段' : '等待分析' }
 function runLabel(run?: RunRecord) { return run?.status === 'running' ? '分析中' : run?.status === 'succeeded' ? '已完成' : run?.status === 'failed' ? '失败' : run?.status === 'cancelled' ? '已取消' : '未运行' }
-
+const agentEventLabels: Record<string, string> = {
+  runtime_initialized: 'Runtime 已初始化', agent_start: 'Agent 已启动', agent_end: 'Agent 已结束', turn_start: 'Turn 开始', turn_end: 'Turn 结束',
+  message_start: '消息开始', message_end: '消息完成', tool_execution_start: '工具调用开始', tool_execution_end: '工具调用结束',
+  input_package_built: '输入包已构建', input_batch_delivered: '输入批次已投递', input_final_merge_started: '开始合并输入',
+  result_submission_required: '等待提交正式结果', result_submission_retry: '结果校验未通过，等待修正', evidence_repair_tools_enabled: '证据修复工具已启用',
+  skill_catalog_loaded: '已加载当前 Stage Skill Catalog', skill_activated: 'Agent 已按需激活 Skill',
+}
+function eventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
+function formatTraceValue(value: unknown) { if (value === undefined) return ''; try { return JSON.stringify(value, null, 2) } catch { return String(value) } }
 function evidenceForFinding(finding: ReviewFinding, result?: RequirementAnalysisResponse['result']) {
   if (!result) return [] as ReviewEvidence[]
   const points = new Map(result.requirementPoints.map(item => [item.clientRequirementPointId, item]))
@@ -87,69 +105,8 @@ function fixedAssets(run: RunRecord) {
   return run.snapshot?.assets ?? run.documents ?? []
 }
 
-function parseFixDraft(raw: string, allowedAssetVersionIds: Set<string>): FixDraft {
-  const cleaned = raw.replace(/^```(?:json)?\s*/iu, '').replace(/\s*```$/u, '').trim()
-  const start = cleaned.indexOf('{'); const end = cleaned.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('AI 修复结果不是有效 JSON')
-  const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Partial<FixDraft>
-  const summary = String(parsed.summary ?? '').trim()
-  if (!summary) throw new Error('AI 修复草稿缺少 summary')
-  if (!Array.isArray(parsed.patches) || !parsed.patches.length || parsed.patches.length > 20) throw new Error('AI 修复草稿 patches 数量不合法')
-  const patches = parsed.patches.map((item, index) => {
-    const patch = item as Partial<FixPatch>
-    const assetVersionId = String(patch.assetVersionId ?? '').trim()
-    const before = String(patch.before ?? '')
-    const after = String(patch.after ?? '')
-    const reason = String(patch.reason ?? '').trim()
-    if (!allowedAssetVersionIds.has(assetVersionId)) throw new Error(`Patch ${index + 1} 引用了非本次固定需求版本`)
-    if (!before.trim() || !after.trim() || before === after) throw new Error(`Patch ${index + 1} 缺少有效 before/after`)
-    if (!reason) throw new Error(`Patch ${index + 1} 缺少修改原因`)
-    return { assetVersionId, before, after, reason }
-  })
-  return { summary, patches }
-}
-
-function replaceExactlyOnce(content: string, before: string, after: string) {
-  const first = content.indexOf(before)
-  if (first < 0) throw new Error('修复草稿中的原文片段已无法在固定版本中定位')
-  if (content.indexOf(before, first + before.length) >= 0) throw new Error('修复草稿中的原文片段出现多次，无法安全自动应用')
-  return `${content.slice(0, first)}${after}${content.slice(first + before.length)}`
-}
-
-function refinedRequirementsMarkdown(result: RequirementAnalysisResponse['result'], runId: string, versionName: string, findingStates: Record<string, FindingState>) {
-  const unresolved = result.findings.filter(finding => {
-    const state = findingStates[`${runId}:${finding.clientFindingId}`] ?? 'open'
-    return state !== 'resolved' && state !== 'dismissed'
-  })
-  const lines = [
-    `# ${versionName} 完善需求文档`, '',
-    '> 本文档由当前固定需求版本经过 PI Agent 分析、人工确认与修复闭环形成。未确认内容明确保留为“待确认”，不会将历史知识自动写成当前需求事实。', '',
-    '## 1. 需求概述', '', result.summary.overview || '未提供需求概述。', '',
-    '## 2. 业务目标', '', ...(result.summary.businessGoals.length ? result.summary.businessGoals.map(item => `- ${item}`) : ['- 当前需求未明确独立业务目标。']), '',
-    '## 3. 完整需求', '',
-    ...result.requirementPoints.flatMap(point => [`### ${point.clientRequirementPointId} · ${point.title}`, '', point.description, '']),
-    '## 4. 关键业务规则', '',
-    ...result.requirementPoints.flatMap(point => point.businessRules.map(rule => `- ${point.clientRequirementPointId}：${rule}`)),
-    ...(result.requirementPoints.some(point => point.businessRules.length) ? [] : ['- 当前结构化结果未单独拆分业务规则，请以上述完整需求自然语言为准。']), '',
-    '## 5. 待确认与未闭环事项', '',
-    ...(unresolved.length ? unresolved.map(finding => `- [${finding.severity}/${finding.type}] ${finding.clientFindingId} · ${finding.title}：${finding.description}；建议：${finding.recommendation}`) : ['- 无未闭环 Finding。']), '',
-    '## 6. 验收与测试关注点', '',
-    ...(result.testFocus.length ? result.testFocus.map(item => `- ${item.id} · ${item.title}：${item.description}`) : ['- 当前分析未形成独立 Test Focus。']), '',
-    '## 7. 来源与追溯', '',
-    ...result.requirementPoints.map(point => `- ${point.clientRequirementPointId} → ${point.evidenceRefs.join('、') || '无固定 Evidence'}`), '',
-    `生成来源：RequirementAnalysisRun ${runId}`,
-  ]
-  return lines.join('\n')
-}
-
-function downloadText(fileName: string, content: string) {
-  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a'); link.href = url; link.download = fileName; link.click(); URL.revokeObjectURL(url)
-}
-
 export function RequirementAnalysisPageV2(props: Props) {
-  const { projectVersion, documents, knowledgeBaseId, apiState, refreshKnowledge, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity } = props
+  const { projectVersion, documents, apiState, refreshKnowledge, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenRequirementDocument, onDeleteRequirementDocument, canDeleteRequirementDocument = false } = props
   const [view, setView] = useState<ViewKey>('overview')
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [selectedRunId, setSelectedRunId] = useState('')
@@ -166,9 +123,9 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [sourceContent, setSourceContent] = useState('')
   const [sourceLoading, setSourceLoading] = useState(false)
   const [fixFinding, setFixFinding] = useState<ReviewFinding | null>(null)
-  const [fixDraft, setFixDraft] = useState<FixDraft | null>(null)
+  const [fixDraft, setFixDraft] = useState<RequirementRepairDraft | null>(null)
   const [fixBusy, setFixBusy] = useState(false)
-  const [savingArtifact, setSavingArtifact] = useState(false)
+  const [releaseBusy, setReleaseBusy] = useState(false)
   const [diffVersionIds, setDiffVersionIds] = useState<[string, string]>(['', ''])
   const [diffContents, setDiffContents] = useState<Record<string, string>>({})
   const [diffLoading, setDiffLoading] = useState(false)
@@ -183,7 +140,6 @@ export function RequirementAnalysisPageV2(props: Props) {
   const readVersions = readAssetVersionIds(selectedRun)
   const selectedDocument = requirementDocuments.find(item => item.id === selectedDocumentId) ?? requirementDocuments[0]
   const analysisAgentReady = Boolean(agentConfiguration?.agents.requirementAnalysis.activeVersion)
-  const reviewQaReady = Boolean(agentConfiguration?.agents.reviewQa.activeVersion)
   const canRun = Boolean(projectVersion && projectVersion.status === 'open' && requirementDocuments.length && analysisAgentReady && apiState === 'ready' && !starting)
 
   const refreshRuns = async (selectLatest = false) => {
@@ -282,48 +238,31 @@ export function RequirementAnalysisPageV2(props: Props) {
   }
 
   const draftFindingFix = async (finding: ReviewFinding) => {
-    if (!selectedRun || selectedRun.status !== 'succeeded' || !reviewQaReady) { notify('请先完成需求分析并发布评审问答 Agent。', 'warning'); return }
-    const assets = fixedAssets(selectedRun); const allowed = new Set(assets.map(item => item.assetVersionId))
-    const assetHint = assets.slice(0, 12).map(item => `${item.assetVersionId}|${item.logicalPath}`).join('\n').slice(0, 700)
-    const question = [
-      `为 Finding ${finding.clientFindingId} 生成需求文档修复草稿。只输出 JSON，不要 Markdown。`,
-      `Finding：${finding.title}；问题：${finding.description}；建议：${finding.recommendation}`,
-      '规则：before 必须逐字复制固定当前需求中的一个连续片段；after 是替换后的完整片段；不得把历史 Knowledge 直接当当前事实；不确定的业务决策用“待确认”明确表达；多个 patch 不得重叠。',
-      `可修改固定需求资产：\n${assetHint}`,
-      'JSON Schema：{"summary":"修复说明","patches":[{"assetVersionId":"...","before":"固定原文","after":"修改后原文","reason":"原因"}]}',
-    ].join('\n').slice(0, 1_950)
+    if (!selectedRun || selectedRun.status !== 'succeeded') { notify('请先完成需求分析。', 'warning'); return }
+    const state = findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open'
+    if (state !== 'confirmed') { notify('先将 Finding 人工确认，再进入受控修复 Stage。', 'warning'); return }
     setFixFinding(finding); setFixDraft(null); setFixBusy(true)
-    try { const answer = await askRequirementReviewQuestion(selectedRun.id, { question }); setFixDraft(parseFixDraft(answer.answer, allowed)) }
+    try { setFixDraft(await generateRequirementRepairDraft(selectedRun.id, [finding.clientFindingId])) }
     catch (error) { notify(error instanceof Error ? error.message : 'AI 修复草稿生成失败', 'error') } finally { setFixBusy(false) }
   }
 
   const applyFindingFix = async () => {
     if (!fixFinding || !fixDraft || !selectedRun || !projectVersion || projectVersion.status !== 'open') return
-    const assets = fixedAssets(selectedRun); const assetByVersion = new Map(assets.map(item => [item.assetVersionId, item])); const grouped = new Map<string, FixPatch[]>()
-    fixDraft.patches.forEach(patch => grouped.set(patch.assetVersionId, [...(grouped.get(patch.assetVersionId) ?? []), patch]))
     setFixBusy(true)
     try {
-      const applied: Array<{ assetVersionId: string; newVersionId: string; logicalPath: string }> = []
-      for (const [assetVersionId, patches] of grouped) {
-        const asset = assetByVersion.get(assetVersionId); if (!asset) throw new Error('修复目标不属于本次固定输入')
-        const source = await loadAssetVersion(assetVersionId); let content = source.content
-        for (const patch of patches) content = replaceExactlyOnce(content, patch.before, patch.after)
-        const uploaded = await uploadKnowledgeFile(knowledgeBaseId, new File([content], asset.displayName, { type: asset.displayName.toLowerCase().endsWith('.txt') ? 'text/plain' : 'text/markdown' }), asset.logicalPath, 'requirement')
-        if (uploaded.task?.id) {
-          const completed = await waitForTaskResults([uploaded.task.id])
-          if (completed.failed.length || completed.cancelled.length || completed.pending.length) throw new Error('修复后的需求文档入库未完成')
-        }
-        await bindRequirementVersion(projectVersion.id, uploaded.version.id)
-        applied.push({ assetVersionId, newVersionId: uploaded.version.id, logicalPath: asset.logicalPath })
+      await approveRequirementRepairDraft(selectedRun.id, fixDraft.id, `已在 Diff 草稿中人工确认 ${fixFinding.clientFindingId} 的修改范围。`)
+      const applying = await applyRequirementRepairDraft(selectedRun.id, fixDraft.id)
+      const taskIds = applying.application?.items.flatMap(item => item.taskId ? [item.taskId] : []) ?? []
+      if (taskIds.length) {
+        const completed = await waitForTaskResults(taskIds)
+        if (completed.failed.length || completed.cancelled.length || completed.pending.length) throw new Error('修复后的需求文档入库未完成')
       }
+      const verification = await verifyRequirementRepairDraft(selectedRun.id, fixDraft.id)
       await refreshKnowledge()
-      const key = `${selectedRun.id}:${fixFinding.clientFindingId}`; const state = findingStates[key] ?? 'open'
-      if (state !== 'needs_follow_up') {
-        const saved = await createFindingAction(selectedRun.id, fixFinding.clientFindingId, { action: 'request_follow_up', comment: `AI 修复已应用到 ${applied.length} 份需求文档的新版本，待重新需求分析验证。`, expectedVersion: findingVersions[key] ?? 0 })
-        setFindingStates(values => ({ ...values, [key]: saved.toState })); setFindingVersions(values => ({ ...values, [key]: saved.version }))
-      }
-      addAudit(`AI 修复 ${fixFinding.clientFindingId}：${applied.map(item => `${item.logicalPath} → ${item.newVersionId}`).join('；')}`)
-      setFixFinding(null); setFixDraft(null); setView('diff'); notify('AI 修复已应用到新的需求文档版本。Finding 已进入待复验，请重新运行需求分析验证。')
+      setRuns(current => [verification.verificationRun, ...current.filter(item => item.id !== verification.verificationRun.id)])
+      setSelectedRunId(verification.verificationRun.id)
+      addAudit(`受控修复 ${fixFinding.clientFindingId}：${fixDraft.id} → 复验 ${verification.verificationRun.id}`)
+      setFixFinding(null); setFixDraft(null); setView('overview'); notify('修复已生成新 AssetVersion，服务端已固定输入并启动完整复验。')
     } catch (error) { notify(error instanceof Error ? error.message : 'AI 修复应用失败', 'error') } finally { setFixBusy(false) }
   }
 
@@ -336,18 +275,24 @@ export function RequirementAnalysisPageV2(props: Props) {
   const pendingCount = result?.findings.filter(item => {
     const state = selectedRun ? findingStates[`${selectedRun.id}:${item.clientFindingId}`] ?? 'open' : 'open'; return !['resolved', 'dismissed'].includes(state)
   }).length ?? 0
-  const pendingVerification = result?.findings.some(item => selectedRun && (findingStates[`${selectedRun.id}:${item.clientFindingId}`] ?? 'open') === 'needs_follow_up') ?? false
-  const refinedMarkdown = result && selectedRun && projectVersion ? refinedRequirementsMarkdown(result, selectedRun.id, projectVersion.name, findingStates) : ''
-  const saveRefinedArtifact = async () => {
-    if (!refinedMarkdown || !projectVersion || !selectedRun) return
-    if (pendingVerification) { notify('存在刚应用但尚未重新分析验证的修复，请先重新分析后再沉淀最终需求文档。', 'warning'); return }
-    const artifactDirectory = workspaceDirectoryPath.replace(/\/input\/requirements$/u, '/artifacts/requirements'); const logicalPath = `${artifactDirectory}/refined-requirements.md`
-    setSavingArtifact(true)
+  const release = selectedRun?.workflow?.release
+  const generateRelease = async () => {
+    if (!selectedRun || selectedRun.status !== 'succeeded') return
+    setReleaseBusy(true)
     try {
-      const uploaded = await uploadKnowledgeFile(knowledgeBaseId, new File([refinedMarkdown], 'refined-requirements.md', { type: 'text/markdown' }), logicalPath, 'requirement_analysis_artifact')
-      if (uploaded.task?.id) { const completed = await waitForTaskResults([uploaded.task.id]); if (completed.failed.length || completed.cancelled.length || completed.pending.length) throw new Error('完善需求文档 Artifact 入库未完成') }
-      await refreshKnowledge(); addAudit(`沉淀完善需求文档：${logicalPath} · ${uploaded.version.id}`); notify('完善需求文档已沉淀到当前版本 Knowledge/Workspace。')
-    } catch (error) { notify(error instanceof Error ? error.message : '完善需求文档沉淀失败', 'error') } finally { setSavingArtifact(false) }
+      const created = await createRequirementReleaseCandidate(selectedRun.id)
+      setRuns(current => current.map(item => item.id === selectedRun.id ? { ...item, workflow: { ...(item.workflow ?? { currentStage: 'release' as const }), currentStage: 'release', release: created } } : item))
+      addAudit(`生成需求发布候选：${created.id}`); notify('发布候选已生成；请核对人读与机器可读产物后正式发布。')
+    } catch (error) { notify(error instanceof Error ? error.message : '需求发布候选生成失败', 'error') } finally { setReleaseBusy(false) }
+  }
+  const publishRelease = async () => {
+    if (!selectedRun || release?.status !== 'candidate') return
+    setReleaseBusy(true)
+    try {
+      const published = await publishRequirementRelease(selectedRun.id)
+      setRuns(current => current.map(item => item.id === selectedRun.id && item.workflow ? { ...item, workflow: { ...item.workflow, release: published } } : item))
+      addAudit(`正式发布需求包：${published.id} · ${published.contentSha256}`); notify('需求发布包已正式发布且不可变；TestDesignAgent 将读取 requirements.json。')
+    } catch (error) { notify(error instanceof Error ? error.message : '需求发布失败', 'error') } finally { setReleaseBusy(false) }
   }
 
   const versionHistory = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
@@ -358,20 +303,20 @@ export function RequirementAnalysisPageV2(props: Props) {
 
   return <section className="card rav2-page">
     <header className="rav2-header">
-      <div className="rav2-title"><span><Sparkles /></span><div><h1>Pi Agent 需求分析 · {projectVersion.name}</h1><p>发现问题 → AI 修复 → Diff → 新需求版本 → 重新分析验证 → 沉淀完善需求文档。</p></div></div>
+      <div className="rav2-title"><span><Sparkles /></span><div><h1>Pi Agent 需求分析 · {projectVersion.name}</h1><p>分析审核 → 人工确认 → 受控修复 → 新 AssetVersion → 完整复验 → 人工发布。</p></div></div>
       <div className="rav2-run-info"><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{runLabel(selectedRun)}</Badge><span><small>Run</small><b>{selectedRun?.id?.replace('review_run_', '').slice(0, 10) ?? '-'}</b></span><span><small>已读 / 候选</small><b>{readVersions.size} / {selectedRun?.assetVersionIds?.length ?? requirementDocuments.length}</b></span></div>
       <div className="rav2-actions"><select value={selectedRunId} onChange={event => setSelectedRunId(event.target.value)} disabled={loadingRuns}><option value="">{loadingRuns ? '加载中…' : '运行历史'}</option>{runs.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run)}</option>)}</select><button className="btn ghost" onClick={() => void refreshRuns()}><RefreshCw />刷新</button><button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />分析报告</button>{selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消</button> : selectedRun && ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="btn primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />完整重跑</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : selectedRun ? '重新分析' : '开始分析'}</button>}</div>
     </header>
     <div className="rav2-layout">
-      <aside className="rav2-workspace"><header><span><FileText /><b>需求 Workspace</b></span><Badge tone="blue">{requirementDocuments.length}</Badge></header><div className="rav2-path">/{workspaceDirectoryPath}</div><div className="rav2-docs">{requirementDocuments.map(document => { const read = Boolean(document.assetVersionId && readVersions.has(document.assetVersionId)); return <button className={selectedDocument?.id === document.id ? 'active' : ''} key={document.id} onClick={() => setSelectedDocumentId(document.id)}><span className={read ? 'read' : ''}>{read ? <CheckCircle2 /> : <Clock3 />}</span><div><b>{document.title}</b><small>{read ? 'Agent 已读取' : selectedRun ? 'Agent 未读取' : '候选输入'} · {document.version}</small><em>{document.logicalPath}</em></div></button>})}</div><footer><button onClick={onOpenKnowledge}><BookOpen />知识库</button><button onClick={onManageVersions}><GitBranch />版本管理</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></footer></aside>
+      <aside className="rav2-workspace"><header><span><FileText /><b>需求 Workspace</b></span><Badge tone="blue">{requirementDocuments.length}</Badge></header><div className="rav2-path">/{workspaceDirectoryPath}</div><div className="rav2-docs">{requirementDocuments.map(document => { const read = Boolean(document.assetVersionId && readVersions.has(document.assetVersionId)); const active = selectedDocument?.id === document.id; return <div className={`rav2-document-row ${active ? 'active' : ''}`} key={document.id}><button className="rav2-document-open" onClick={() => { setSelectedDocumentId(document.id); onOpenRequirementDocument?.(document) }}><span className={read ? 'read' : ''}>{read ? <CheckCircle2 /> : <Clock3 />}</span><div><b>{document.title}</b><small>{read ? 'Agent 已读取' : selectedRun ? 'Agent 未读取' : '候选输入'} · {document.version}</small><em>{document.logicalPath}</em></div></button>{onDeleteRequirementDocument && <button className="rav2-document-delete" aria-label={`删除需求文档 ${document.title || document.name}`} title="删除需求文档" disabled={!canDeleteRequirementDocument} onClick={() => onDeleteRequirementDocument(document)}><Trash2 /></button>}</div>})}</div><footer><button onClick={onOpenKnowledge}><BookOpen />知识库</button><button onClick={onManageVersions}><GitBranch />版本管理</button><button onClick={onOpenActivity}><Clock3 />操作记录</button></footer></aside>
       <main className="rav2-main"><nav className="rav2-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'findings' && result ? <i>{result.findings.length}</i> : null}</button>)}</nav>{selectedRun?.status === 'running' && <div className="rav2-running"><LoaderCircle className="rotating" /><span><b>RequirementAnalysisAgent 正在分析并自检</b><small>同一 Session 读取 Workspace、查询 Knowledge、生成 Baseline / Finding / Test Focus。</small></span></div>}<div className="rav2-content">
         {view === 'overview' && <Overview result={result} blockerCount={blockerCount} highCount={highCount} pendingCount={pendingCount} onFindings={() => setView('findings')} onArtifacts={() => setView('artifacts')} />}
         {view === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}
-        {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} canAiFix={reviewQaReady && projectVersion.status === 'open'} />}
-        {view === 'artifacts' && <Artifacts result={result} refinedMarkdown={refinedMarkdown} pendingVerification={pendingVerification} saving={savingArtifact} onSave={() => void saveRefinedArtifact()} />}
+        {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} canAiFix={projectVersion.status === 'open'} />}
+        {view === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} busy={releaseBusy} onGenerate={() => void generateRelease()} onPublish={() => void publishRelease()} />}
         {view === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
       </div></main>
-      <aside className="rav2-agent"><header><span><Bot /><b>Pi Agent Trace</b></span><Badge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' ? '已完成' : '待运行'}</Badge></header><AgentTrace run={selectedRun} /></aside>
+      <aside className="rav2-agent"><header><span><Bot /><b>Pi Agent</b></span><Badge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' ? '已完成' : '待运行'}</Badge></header><AgentConversation run={selectedRun} /></aside>
     </div>
     {sourceEvidence && <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setSourceEvidence(null) }}><section className="rav2-source-modal"><header><span><ShieldCheck /><b>固定原文证据</b></span><button onClick={() => setSourceEvidence(null)}><XCircle /></button></header><div className="rav2-evidence"><b>{sourceEvidence.clientEvidenceId} · {sourceEvidence.locator.heading}</b><p>“{sourceEvidence.quote}”</p></div><div className="rav2-source-body">{sourceLoading ? <LoaderCircle className="rotating" /> : <MarkdownDocument source={sourceContent} format="markdown" />}</div></section></div>}
     {fixFinding && <FixModal finding={fixFinding} draft={fixDraft} busy={fixBusy} assets={fixedAssets(selectedRun!)} onClose={() => { if (!fixBusy) { setFixFinding(null); setFixDraft(null) } }} onRegenerate={() => void draftFindingFix(fixFinding)} onApply={() => void applyFindingFix()} />}
@@ -380,7 +325,7 @@ export function RequirementAnalysisPageV2(props: Props) {
 
 function Overview({ result, blockerCount, highCount, pendingCount, onFindings, onArtifacts }: { result?: RequirementAnalysisResponse['result']; blockerCount: number; highCount: number; pendingCount: number; onFindings: () => void; onArtifacts: () => void }) {
   if (!result) return <div className="rav2-empty"><Sparkles /><h2>等待需求分析</h2><p>完成后得到需求基线、问题、测试关注点和可持续修复的需求资产。</p></div>
-  return <div><section className="rav2-assessment"><div><Badge tone={result.summary.overallAssessment === 'blocked' ? 'red' : result.summary.overallAssessment === 'needs_revision' ? 'orange' : 'green'}>{assessmentLabel(result.summary.overallAssessment)}</Badge><h2>{result.summary.overview || '需求分析已完成'}</h2><p>{result.summary.risks[0] ?? result.summary.strengths[0] ?? '当前结果已通过服务端结构与追溯校验。'}</p></div><div className="rav2-score"><strong>{result.summary.score}</strong><span>辅助评分</span></div></section><div className="rav2-kpis"><article><GitBranch /><span>需求基线</span><strong>{result.requirementPoints.length}</strong></article><article><AlertTriangle /><span>需求问题</span><strong>{result.findings.length}</strong><small>{blockerCount} 阻断 · {highCount} 高风险</small></article><article><ListFilter /><span>未闭环</span><strong>{pendingCount}</strong></article><article><ShieldCheck /><span>Test Focus</span><strong>{result.testFocus.length}</strong></article></div><section className="rav2-top"><header><div><AlertTriangle /><b>优先处理的问题</b></div><button onClick={onFindings}>查看全部</button></header>{[...result.findings].sort((a,b) => ['blocker','high','medium','low'].indexOf(a.severity)-['blocker','high','medium','low'].indexOf(b.severity)).slice(0,5).map(f => <article key={f.clientFindingId}><Badge tone={severityTone(f.severity)}>{severityLabels[f.severity]}</Badge><span><b>{f.title}</b><small>{f.requirementPointRefs.join('、') || '整体需求问题'}</small></span></article>)}</section><section className="rav2-top"><header><div><FileText /><b>最终产物</b></div><button onClick={onArtifacts}>查看完善需求文档</button></header><p>完成 Finding 修复并重新分析验证后，将完善需求文档沉淀到当前版本 Workspace，作为后续测试设计的首要输入。</p></section></div>
+  return <div><section className="rav2-assessment"><div><Badge tone={result.summary.overallAssessment === 'blocked' ? 'red' : result.summary.overallAssessment === 'needs_revision' ? 'orange' : 'green'}>{assessmentLabel(result.summary.overallAssessment)}</Badge><h2>{result.summary.overview || '需求分析已完成'}</h2><p>{result.summary.risks[0] ?? result.summary.strengths[0] ?? '当前结果已通过服务端结构与追溯校验。'}</p></div><div className="rav2-score"><strong>{result.summary.score}</strong><span>辅助评分</span></div></section><div className="rav2-kpis"><article><GitBranch /><span>需求基线</span><strong>{result.requirementPoints.length}</strong></article><article><AlertTriangle /><span>需求问题</span><strong>{result.findings.length}</strong><small>{blockerCount} 阻断 · {highCount} 高风险</small></article><article><ListFilter /><span>未闭环</span><strong>{pendingCount}</strong></article><article><ShieldCheck /><span>Test Focus</span><strong>{result.testFocus.length}</strong></article></div><section className="rav2-top"><header><div><AlertTriangle /><b>优先处理的问题</b></div><button onClick={onFindings}>查看全部</button></header>{[...result.findings].sort((a,b) => ['blocker','high','medium','low'].indexOf(a.severity)-['blocker','high','medium','low'].indexOf(b.severity)).slice(0,5).map(f => <article key={f.clientFindingId}><Badge tone={severityTone(f.severity)}>{severityLabels[f.severity]}</Badge><span><b>{f.title}</b><small>{f.requirementPointRefs.join('、') || '整体需求问题'}</small></span></article>)}</section><section className="rav2-top"><header><div><FileText /><b>发布工作流</b></div><button onClick={onArtifacts}>查看发布门禁与产物</button></header><p>当前只是分析期候选。修复与复验闭环后，由服务端生成 requirements.json 等机器可读产物，再经人工正式发布供 TestDesignAgent 使用。</p></section></div>
 }
 
 function Baseline({ result, onEvidence }: { result?: RequirementAnalysisResponse['result']; onEvidence: (evidence: ReviewEvidence) => void }) {
@@ -391,13 +336,14 @@ function Baseline({ result, onEvidence }: { result?: RequirementAnalysisResponse
 
 function Findings(props: { result?: RequirementAnalysisResponse['result']; selectedRun?: RunRecord; findingStates: Record<string, FindingState>; findingTypeFilter: 'all'|ReviewFindingType; setFindingTypeFilter:(v:'all'|ReviewFindingType)=>void; severityFilter:'all'|ReviewSeverity; setSeverityFilter:(v:'all'|ReviewSeverity)=>void; findingStateFilter:'all'|FindingState; setFindingStateFilter:(v:'all'|FindingState)=>void; visibleFindings:ReviewFinding[]; onEvidence:(e:ReviewEvidence)=>void; onState:(f:ReviewFinding,s:FindingState)=>void; onAiFix:(f:ReviewFinding)=>void; canAiFix:boolean }) {
   const { result, selectedRun, findingStates, visibleFindings } = props; if (!result) return <div className="rav2-empty"><AlertTriangle /><h2>暂无需求问题</h2></div>
-  return <div className="rav2-findings"><header><div><AlertTriangle /><span><h2>需求问题</h2><p>AI 修复只生成 Patch 草稿；应用前必须在 Diff 中人工确认。</p></span></div><Badge tone="orange">{visibleFindings.length} / {result.findings.length}</Badge></header><div className="rav2-filters"><select value={props.findingTypeFilter} onChange={e=>props.setFindingTypeFilter(e.target.value as 'all'|ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select><select value={props.severityFilter} onChange={e=>props.setSeverityFilter(e.target.value as 'all'|ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select><select value={props.findingStateFilter} onChange={e=>props.setFindingStateFilter(e.target.value as 'all'|FindingState)}><option value="all">全部状态</option>{Object.entries(findingStateLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></div>{visibleFindings.map(finding => { const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open':'open'; const evidence=evidenceForFinding(finding,result); return <article className="rav2-finding" key={finding.clientFindingId}><header><div><Badge tone={severityTone(finding.severity)}>{severityLabels[finding.severity]}</Badge><span><small>{findingTypeLabels[finding.type]} · {finding.clientFindingId}</small><h3>{finding.title}</h3></span></div><Badge tone={state==='resolved'?'green':state==='dismissed'?'gray':state==='needs_follow_up'?'blue':'orange'}>{findingStateLabels[state]}</Badge></header><div className="rav2-refs">{finding.requirementPointRefs.length?finding.requirementPointRefs.map(ref=><span key={ref}>{ref}</span>):<span className="global">🌐 整体需求问题</span>}</div><p>{finding.description}</p><dl><div><dt>影响</dt><dd>{finding.impact}</dd></div><div><dt>建议</dt><dd>{finding.recommendation}</dd></div></dl><footer><span>{evidence.length} 条证据 · 置信度 {Math.round(finding.confidence*100)}%</span><div>{evidence.slice(0,1).map(item=><button key={item.clientEvidenceId} onClick={()=>props.onEvidence(item)}><BookOpen />原文</button>)}{!['resolved','dismissed'].includes(state)&&<button className="ai" onClick={()=>props.onAiFix(finding)} disabled={!props.canAiFix}><Sparkles />AI 修复</button>}<select value={state} onChange={e=>props.onState(finding,e.target.value as FindingState)}>{Object.entries(findingStateLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></div></footer></article>})}</div>
+  return <div className="rav2-findings"><header><div><AlertTriangle /><span><h2>需求问题</h2><p>Finding 必须先人工确认；Pi Agent 只生成 Patch 草稿，批准后由服务端应用并自动启动完整复验。</p></span></div><Badge tone="orange">{visibleFindings.length} / {result.findings.length}</Badge></header><div className="rav2-filters"><select value={props.findingTypeFilter} onChange={e=>props.setFindingTypeFilter(e.target.value as 'all'|ReviewFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select><select value={props.severityFilter} onChange={e=>props.setSeverityFilter(e.target.value as 'all'|ReviewSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select><select value={props.findingStateFilter} onChange={e=>props.setFindingStateFilter(e.target.value as 'all'|FindingState)}><option value="all">全部状态</option>{Object.entries(findingStateLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></div>{visibleFindings.map(finding => { const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open':'open'; const evidence=evidenceForFinding(finding,result); return <article className="rav2-finding" key={finding.clientFindingId}><header><div><Badge tone={severityTone(finding.severity)}>{severityLabels[finding.severity]}</Badge><span><small>{findingTypeLabels[finding.type]} · {finding.clientFindingId}</small><h3>{finding.title}</h3></span></div><Badge tone={state==='resolved'?'green':state==='dismissed'?'gray':state==='needs_follow_up'?'blue':'orange'}>{findingStateLabels[state]}</Badge></header><div className="rav2-refs">{finding.requirementPointRefs.length?finding.requirementPointRefs.map(ref=><span key={ref}>{ref}</span>):<span className="global">🌐 整体需求问题</span>}</div><p>{finding.description}</p><dl><div><dt>影响</dt><dd>{finding.impact}</dd></div><div><dt>建议</dt><dd>{finding.recommendation}</dd></div></dl><footer><span>{evidence.length} 条证据 · 置信度 {Math.round(finding.confidence*100)}%</span><div>{evidence.slice(0,1).map(item=><button key={item.clientEvidenceId} onClick={()=>props.onEvidence(item)}><BookOpen />原文</button>)}{!['resolved','dismissed'].includes(state)&&<button className="ai" onClick={()=>props.onAiFix(finding)} disabled={!props.canAiFix||state!=='confirmed'} title={state==='confirmed'?'进入 repair Stage':'先确认 Finding'}><Sparkles />受控修复</button>}<select value={state} onChange={e=>props.onState(finding,e.target.value as FindingState)}>{Object.entries(findingStateLabels).map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></div></footer></article>})}</div>
 }
 
-function Artifacts({ result, refinedMarkdown, pendingVerification, saving, onSave }: { result?: RequirementAnalysisResponse['result']; refinedMarkdown:string; pendingVerification:boolean; saving:boolean; onSave:()=>void }) {
-  if (!result) return <div className="rav2-empty"><FileText /><h2>暂无最终产物</h2></div>
-  const analysis = result.artifacts.find(item=>item.fileName==='requirement-analysis.md'); const baseline=result.artifacts.find(item=>item.fileName==='requirement-baseline.md'); const review=result.artifacts.find(item=>item.fileName==='requirement-review.md')
-  return <div className="rav2-artifacts"><header><div><FileText /><span><h2>完善需求文档</h2><p>最终首要产物。刚应用 AI 修复时必须先重新分析验证，再沉淀。</p></span></div><div><button className="btn ghost" onClick={()=>downloadText('refined-requirements.md',refinedMarkdown)}><Download />下载</button><button className="btn primary" onClick={onSave} disabled={saving||pendingVerification}>{saving?'沉淀中…':pendingVerification?'待复验':'沉淀到 Workspace'}</button></div></header>{pendingVerification&&<div className="rav2-warning"><AlertTriangle />存在 AI 修复后的待复验 Finding，当前完善需求文档不是最终版本。请先重新运行需求分析。</div>}<div className="rav2-markdown"><MarkdownDocument source={refinedMarkdown} format="markdown" /></div><details><summary>其他需求分析产物</summary><div className="rav2-artifact-list"><article><b>Requirement Baseline</b><small>{baseline?.fileName} · {baseline?.contentSha256}</small></article><article><b>Requirement Review</b><small>{review?.fileName} · {review?.contentSha256}</small></article><article><b>Requirement Analysis Report</b><small>{analysis?.fileName} · {analysis?.contentSha256}</small></article></div></details></div>
+function Artifacts({ result, release, runId, busy, onGenerate, onPublish }: { result?: RequirementAnalysisResponse['result']; release?: RequirementReleasePackage; runId?: string; busy:boolean; onGenerate:()=>void; onPublish:()=>void }) {
+  if (!result) return <div className="rav2-empty"><FileText /><h2>暂无需求分析候选</h2></div>
+  const machineNames = new Set(['requirements.json', 'findings.json', 'test-focus.json', 'traceability.json', 'manifest.json'])
+  const refined = release?.artifacts.find(item => item.fileName === 'refined-requirements.md')?.content
+  return <div className="rav2-artifacts"><header><div><FileText /><span><h2>{release?.status === 'published' ? '正式需求发布包' : release ? '待发布需求包' : '尚未生成最终产物'}</h2><p>分析期候选不等于最终产物；通过版本、Finding、复验门禁后才可生成并人工发布。</p></span></div><div>{!release?<button className="btn primary" onClick={onGenerate} disabled={busy}>{busy?'生成中…':'生成发布候选'}</button>:release.status==='candidate'?<button className="btn primary" onClick={onPublish} disabled={busy}>{busy?'发布中…':'人工确认并发布'}</button>:<Badge tone="green">已发布</Badge>}</div></header>{!release&&<div className="rav2-warning"><AlertTriangle />当前只有分析期 Baseline / Review / Report 候选。系统不会在审核、修复、复验和人工发布之前把它们标记为最终产物。</div>}{refined&&<div className="rav2-markdown"><MarkdownDocument source={refined} format="markdown" /></div>}{release&&<><div className="rav2-artifact-list">{release.artifacts.map(artifact=><article key={artifact.fileName}><b>{artifact.fileName}</b><small>{artifact.mediaType} · {artifact.contentSha256}</small>{release.status==='published'&&runId?<a className="btn ghost" href={requirementReleaseArtifactUrl(runId,artifact.fileName)} download={artifact.fileName.split('/').at(-1)}><Download />下载</a>:null}</article>)}</div><details><summary>机器可读下游契约</summary><div className="rav2-artifact-list">{release.artifacts.filter(item=>machineNames.has(item.fileName)).map(item=><article key={item.fileName}><b>{item.fileName}</b><small>{item.fileName==='requirements.json'?'TestDesignAgent 主需求输入':'服务端生成并按 Schema 校验'} · {item.contentSha256}</small></article>)}</div></details></>}<details><summary>分析期候选（非最终产物）</summary><div className="rav2-artifact-list">{result.artifacts.map(item=><article key={item.fileName}><b>{item.fileName}</b><small>{item.contentSha256}</small></article>)}</div></details></div>
 }
 
 function Diff({ versions,value,onChange,loading,removed,added }:{ versions:NonNullable<KnowledgeDocument['versions']>; value:[string,string]; onChange:(v:[string,string])=>void; loading:boolean; removed:string[]; added:string[] }) {
@@ -405,9 +351,40 @@ function Diff({ versions,value,onChange,loading,removed,added }:{ versions:NonNu
   return <div className="rav2-diff"><header><div><span>基准版本</span><select value={value[0]} onChange={e=>onChange([e.target.value,value[1]])}>{versions.map(v=><option value={v.id} key={v.id}>V{v.number}</option>)}</select></div><div><span>目标版本</span><select value={value[1]} onChange={e=>onChange([value[0],e.target.value])}>{versions.map(v=><option value={v.id} key={v.id}>V{v.number}</option>)}</select></div></header>{loading?<div className="rav2-empty"><LoaderCircle className="rotating" /></div>:<div className="rav2-diff-grid"><section><h3>删除 <span>{removed.length}</span></h3>{removed.map((line,i)=><p className="removed" key={`${i}-${line}`}>− {line}</p>)}</section><section><h3>新增 <span>{added.length}</span></h3>{added.map((line,i)=><p className="added" key={`${i}-${line}`}>+ {line}</p>)}</section></div>}</div>
 }
 
-function FixModal({ finding,draft,busy,assets,onClose,onRegenerate,onApply }:{ finding:ReviewFinding; draft:FixDraft|null; busy:boolean; assets:Array<{assetVersionId:string;logicalPath:string;displayName:string}>; onClose:()=>void; onRegenerate:()=>void; onApply:()=>void }) {
-  const assetByVersion=new Map(assets.map(a=>[a.assetVersionId,a])); return <div className="rav2-backdrop" onMouseDown={e=>{if(e.currentTarget===e.target)onClose()}}><section className="rav2-fix-modal"><header><div><Sparkles /><span><b>AI 修复 · {finding.clientFindingId}</b><small>{finding.title}</small></span></div><button onClick={onClose} disabled={busy}><XCircle /></button></header>{busy&&!draft?<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>AI 正在生成修复 Patch</h2></div>:draft?<><div className="rav2-fix-summary"><Wrench /><span><b>修复说明</b><p>{draft.summary}</p></span></div><div className="rav2-patches">{draft.patches.map((patch,index)=><article key={`${patch.assetVersionId}-${index}`}><header><b>Patch {index+1} · {assetByVersion.get(patch.assetVersionId)?.displayName??patch.assetVersionId}</b><small>{assetByVersion.get(patch.assetVersionId)?.logicalPath}</small></header><p>{patch.reason}</p><div className="rav2-patch-diff"><section><h4>修改前</h4><pre>{patch.before}</pre></section><section><h4>修改后</h4><pre>{patch.after}</pre></section></div></article>)}</div><footer><button className="btn ghost" onClick={onRegenerate} disabled={busy}><RefreshCw />重新生成</button><button className="btn primary" onClick={onApply} disabled={busy}>{busy?<LoaderCircle className="rotating" />:<CheckCircle2 />}应用修改并生成新版本</button></footer></>:<div className="rav2-empty"><AlertTriangle /><h2>未生成有效修复草稿</h2><button className="btn primary" onClick={onRegenerate}>重新生成</button></div>}</section></div>
+function FixModal({ finding,draft,busy,assets,onClose,onRegenerate,onApply }:{ finding:ReviewFinding; draft:RequirementRepairDraft|null; busy:boolean; assets:Array<{assetVersionId:string;logicalPath:string;displayName:string}>; onClose:()=>void; onRegenerate:()=>void; onApply:()=>void }) {
+  const assetByVersion=new Map(assets.map(a=>[a.assetVersionId,a])); return <div className="rav2-backdrop" onMouseDown={e=>{if(e.currentTarget===e.target)onClose()}}><section className="rav2-fix-modal"><header><div><Sparkles /><span><b>受控修复 · {finding.clientFindingId}</b><small>{finding.title}</small></span></div><button onClick={onClose} disabled={busy}><XCircle /></button></header>{busy&&!draft?<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>Pi Agent 正在 repair Stage 生成 Patch</h2></div>:draft?<><div className="rav2-fix-summary"><Wrench /><span><b>修复说明</b><p>{draft.candidate.summary}</p><small>{draft.id} · {draft.status}</small></span></div><div className="rav2-patches">{draft.candidate.patches.map((patch,index)=><article key={`${patch.assetVersionId}-${index}`}><header><b>Patch {index+1} · {assetByVersion.get(patch.assetVersionId)?.displayName??patch.assetVersionId}</b><small>{assetByVersion.get(patch.assetVersionId)?.logicalPath}</small></header><p>{patch.reason}</p><div className="rav2-patch-diff"><section><h4>修改前</h4><pre>{patch.before}</pre></section><section><h4>修改后</h4><pre>{patch.after}</pre></section></div><small>Finding：{patch.findingRefs.join('、')}</small></article>)}</div><footer><button className="btn ghost" onClick={onRegenerate} disabled={busy}><RefreshCw />重新生成</button><button className="btn primary" onClick={onApply} disabled={busy}>{busy?<LoaderCircle className="rotating" />:<CheckCircle2 />}批准、应用并启动复验</button></footer></>:<div className="rav2-empty"><AlertTriangle /><h2>未生成有效修复草稿</h2><button className="btn primary" onClick={onRegenerate}>重新生成</button></div>}</section></div>
 }
 
-function AgentTrace({ run }:{run?:RunRecord}) { if(!run)return <div className="rav2-agent-empty"><Bot /><b>等待启动 Pi Agent</b></div>; const execution=run.response?.executions?.requirementAnalysis??run.executions?.requirementAnalysis??(run.execution?.agentKey==='requirement-analysis'?run.execution:undefined); const events=execution?.events??[]; const visible=events.filter(e=>['message_end','tool_execution_start','tool_execution_end','result_submission_required','result_submission_retry'].includes(e.type)); return <div className="rav2-trace"><div className="rav2-agent-summary"><Activity /><span><b>RequirementAnalysisAgent</b><small>{execution?.turns??0} Turn · {execution?.toolCalls??0} 工具调用</small></span></div>{visible.slice(-60).map(e=><TraceEvent event={e} key={e.sequence}/>)}</div> }
-function TraceEvent({event}:{event:AgentExecutionEvent}) { if(event.type==='message_end')return <article className="rav2-trace-message"><b>{event.role==='user'?'任务输入':event.model??'Agent'}</b>{event.content&&<p>{event.content.length>360?`${event.content.slice(0,360)}…`:event.content}</p>}</article>; if(event.type==='tool_execution_start'||event.type==='tool_execution_end'){const label=event.toolId?.includes('read')?'读取文件':event.toolId?.includes('knowledge')?'查询 Knowledge':event.toolId?.includes('submit')?'提交结果':event.toolId??'工具调用';return <article className="rav2-trace-tool"><Activity /><span><b>{label}</b><small>{event.toolId} · Turn {event.turn??0}</small></span><Badge tone={event.type==='tool_execution_start'?'orange':event.isError?'red':'green'}>{event.type==='tool_execution_start'?'执行中':event.isError?'失败':'完成'}</Badge></article>} return <article className="rav2-trace-control"><Sparkles />{event.type}</article> }
+function AgentConversation({ run }: { run?: RunRecord }) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const executions = [run?.response?.executions?.requirementAnalysis, run?.executions?.requirementAnalysis, run?.execution?.agentKey === 'requirement-analysis' ? run.execution : undefined].filter((item): item is AgentExecutionRecord => Boolean(item))
+  const execution = executions.sort((left, right) => left.events.length - right.events.length).at(-1)
+  const events = execution?.events ?? []
+  const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
+  const completedCalls = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
+  const visibleEvents = events.filter(event => event.type !== 'tool_execution_start' || !completedCalls.has(event.toolCallId))
+  useEffect(() => { const root = scrollRef.current; if (root) root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' }) }, [events.length])
+
+  return <div className="rav2-conversation">
+    <div className="rav2-conversation-scroll" ref={scrollRef}>
+      {!run ? <div className="rav2-agent-empty"><Bot /><b>等待启动 Pi Agent</b><p>运行后，这里会像智能体会话一样展示消息、工具和状态。</p></div> : <>
+        <article className="rav2-agent-task"><span><Bot /></span><div><b>RequirementAnalysisAgent</b><p>需求输入：{run.snapshot?.documentWorkspace?.logicalPath ?? run.logicalPath ?? '固定需求工作区'}</p><small>{run.id}</small></div></article>
+        <div className="rav2-agent-metrics"><span>{execution?.turns ?? 0} Turn</span><span>{execution?.toolCalls ?? 0} 次工具</span><span>{events.length} 条事件</span>{execution?.toolErrors ? <span className="failed">{execution.toolErrors} 次异常</span> : null}</div>
+        {visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={event.sequence} />)}
+        {!events.length && <div className="rav2-agent-waiting"><LoaderCircle className={run.status === 'running' ? 'rotating' : ''} /><span><b>{run.status === 'running' ? '等待首个 Agent 事件' : '没有可展示的运行记录'}</b><small>{run.status === 'running' ? '消息和工具调用写入服务端后会自动同步。' : '旧运行可能只保留了结果摘要。'}</small></span></div>}
+      </>}
+    </div>
+  </div>
+}
+
+function AgentRunEvent({ event, start }: { event: AgentExecutionEvent; start?: AgentExecutionEvent }) {
+  if (event.type === 'message_end') {
+    const content = event.content?.trim() ?? ''
+    return <article className={`rav2-run-message ${event.role ?? 'assistant'}`}><header><span>{event.role === 'user' ? <FileText /> : <Bot />}{event.role === 'user' ? '任务输入' : event.model ?? 'Agent'}</span><small>#{event.sequence} · Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}</small></header>{content && (content.length > 700 ? <details><summary>{content.slice(0, 180)}…</summary><pre>{content}</pre></details> : <p>{content}</p>)}{event.toolCalls?.length ? <div className="rav2-run-tool-requests">{event.toolCalls.map(call => <span key={call.id}><Wrench />请求 {call.name}</span>)}</div> : null}{event.usage && <footer>Token：输入 {event.usage.input} · 输出 {event.usage.output} · 缓存读取 {event.usage.cacheRead} · 总计 {event.usage.totalTokens} · {event.stopReason ?? '未知停止原因'}</footer>}</article>
+  }
+  if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+    const tool = event.toolId ?? start?.toolId ?? '未知工具'; const completed = event.type === 'tool_execution_end'
+    return <article className={`rav2-run-tool ${event.isError ? 'failed' : ''}`}><header><span><Wrench /><b>{tool}</b></span><Badge tone={!completed ? 'orange' : event.isError ? 'red' : 'green'}>{!completed ? '执行中' : event.isError ? '失败' : '完成'}</Badge></header><small>#{start?.sequence ? `${start.sequence} → ` : ''}{event.sequence} · Turn {event.turn ?? start?.turn ?? 0} · {eventTime(event.occurredAt)}</small><details><summary>调用参数</summary><pre>{formatTraceValue(start?.toolArguments ?? event.toolArguments) || '该记录未保存参数'}</pre></details>{completed && <details><summary>工具返回</summary><pre>{formatTraceValue(event.toolResult) || '该记录未保存返回内容'}</pre></details>}<footer>{event.toolCallId ?? '无 Tool Call ID'}</footer></article>
+  }
+  return <article className={`rav2-run-control ${event.isError ? 'failed' : ''}`}><Sparkles /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}{event.stopReason ? ` · ${event.stopReason}` : ''}</small></span></article>
+}

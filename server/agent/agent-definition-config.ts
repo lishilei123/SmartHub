@@ -25,9 +25,7 @@ export interface AgentDefinitionConfigFile {
 export type AgentDefinitionConfigDictionary = Record<string, AgentDefinitionConfig>
 
 const expectedKeys: readonly AgentDefinitionConfigKey[] = [
-  'requirement-point-extraction',
-  'requirement-review',
-  'review-qa',
+  'requirement-analysis',
   'technical-solution-extraction',
   'technical-solution-review',
 ]
@@ -105,7 +103,3 @@ function requiredString(value: unknown, agentKey: string, field: string, maxLeng
 
 export const defaultAgentDefinitionConfig = validateAgentDefinitionConfig(rawConfig)
 export const defaultAgentDefinitionConfigDictionary = defaultAgentDefinitionConfig.agents
-
-export const REQUIREMENT_POINT_EXTRACTION_AGENT_VERSION = defaultAgentDefinitionConfigDictionary['requirement-point-extraction'].version
-export const REQUIREMENT_REVIEW_AGENT_VERSION = defaultAgentDefinitionConfigDictionary['requirement-review'].version
-export const REVIEW_QA_AGENT_VERSION = defaultAgentDefinitionConfigDictionary['review-qa'].version

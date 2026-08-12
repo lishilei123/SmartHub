@@ -1,0 +1,4 @@
+interface:
+  display_name: "需求复验"
+  short_description: "完整复查修复后的需求版本并判定原 Finding 是否真正闭环"
+  default_prompt: "使用需求复验 Skill 完整复查修复后的需求版本并提交复验结论。"
