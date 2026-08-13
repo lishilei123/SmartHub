@@ -82,6 +82,23 @@ test('Coverage 面板区分 Agent Repair 与 Human Decision，发布面板显示
   assert.match(publish, /Execution Handoff/u)
 })
 
+test('历史用例库版本、套件批量选择与 Handoff 全部使用冻结 Revision', () => {
+  const suite = read('../src/test-design/TestSuiteLibraryPanel.tsx')
+  const library = read('../src/test-design/TestCaseLibraryPanel.tsx')
+  const publish = read('../src/test-design/TestDesignPublicationPanel.tsx')
+  const api = read('../src/test-design/api.ts')
+  assert.match(suite, /member\.frozenContent\.title/u)
+  assert.match(suite, /member\.frozenContent\.executionSpec/u)
+  assert.match(suite, /该用例已有较新 Revision，当前套件仍使用冻结的 Revision/u)
+  assert.match(library, /executionMethod\(member\.frozenContent\)/u)
+  assert.doesNotMatch(library, /executionMethod\(testCase\.content\).*批量加入/u)
+  assert.match(publish, /冻结内容 Hash/u)
+  assert.match(publish, /needs_confirmation 成员默认被服务端阻断/u)
+  assert.match(publish, /人工覆盖原因（必填）/u)
+  assert.match(publish, /overrideInputs\.some\(item => !item\.reason\)/u)
+  assert.match(api, /executionReadinessOverrides/u)
+})
+
 test('测试设计页面在窄视口收敛布局并允许长 Hash 与路径完整显示', () => {
   const styles = read('../src/test-design/test-design.css')
   assert.match(styles, /@media \(max-width:760px\)/u)

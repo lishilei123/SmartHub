@@ -994,6 +994,42 @@ const migrations: Migration[] = [{
         FOREIGN KEY (case_id, case_revision) REFERENCES smarthub.library_test_case_revisions(case_id, revision) ON DELETE RESTRICT NOT VALID;
     EXCEPTION WHEN duplicate_object THEN NULL; END $$;
   `,
+}, {
+  version: 26,
+  name: 'freeze-library-member-execution-readiness-and-handoff-overrides',
+  sql: `
+    ALTER TABLE smarthub.test_case_library_version_members ADD COLUMN IF NOT EXISTS frozen_content jsonb;
+    ALTER TABLE smarthub.test_case_library_version_members ADD COLUMN IF NOT EXISTS traceability jsonb;
+    ALTER TABLE smarthub.test_case_library_version_members ADD COLUMN IF NOT EXISTS execution_readiness text;
+    ALTER TABLE smarthub.test_execution_handoff_members ADD COLUMN IF NOT EXISTS readiness_override jsonb;
+
+    UPDATE smarthub.test_case_library_version_members member
+      SET frozen_content = COALESCE(member.frozen_content, revision.content),
+          traceability = COALESCE(member.traceability, revision.traceability),
+          execution_readiness = COALESCE(member.execution_readiness, revision.content #>> '{executionSpec,executionReadiness}')
+      FROM smarthub.library_test_case_revisions revision
+      WHERE revision.case_id = member.case_id AND revision.revision = member.case_revision;
+
+    DO $$ BEGIN
+      ALTER TABLE smarthub.test_case_library_version_members
+        ADD CONSTRAINT test_case_library_member_execution_readiness_ck
+        CHECK (execution_readiness IS NULL OR execution_readiness IN ('ready','needs_confirmation','blocked'));
+    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    DO $$ BEGIN
+      ALTER TABLE smarthub.test_execution_handoff_members
+        ADD CONSTRAINT test_execution_handoff_readiness_override_ck
+        CHECK (readiness_override IS NULL OR (
+          jsonb_typeof(readiness_override) = 'object'
+          AND readiness_override ?& ARRAY['reason','actorId','createdAt']
+          AND jsonb_typeof(readiness_override->'reason') = 'string'
+          AND jsonb_typeof(readiness_override->'actorId') = 'string'
+          AND jsonb_typeof(readiness_override->'createdAt') = 'string'
+          AND length(trim(readiness_override->>'reason')) > 0
+          AND length(trim(readiness_override->>'actorId')) > 0
+          AND length(trim(readiness_override->>'createdAt')) > 0
+        ));
+    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

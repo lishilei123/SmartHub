@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Verify PowerShell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable.PSVersion.ToString()
+      - name: Install dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+      - name: Run tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm test
+      - name: Build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm run build
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    needs: test-and-build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: smarthub
+          POSTGRES_PASSWORD: smarthub_test
+          POSTGRES_DB: smarthub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U smarthub -d smarthub_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://smarthub:smarthub_test@127.0.0.1:5432/smarthub_test
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Verify PowerShell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable.PSVersion.ToString()
+      - name: Install dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+      - name: Run PostgreSQL integration tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm run test:postgres

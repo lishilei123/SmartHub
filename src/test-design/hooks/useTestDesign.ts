@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import * as api from '../api'
-import type { CaseChangeDecision, CreateTestDesignInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionMethod, TestPointNode, TestPointTree, TestPointTreeOperation, TestSuiteDraft } from '../types'
+import type { CaseChangeDecision, CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionMethod, TestPointNode, TestPointTree, TestPointTreeOperation, TestSuiteDraft } from '../types'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 
@@ -167,14 +167,14 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     await Promise.all([refreshRun(), loadCollection()]); return version
   }, [design, guarded, projectVersionId, refreshRun, run])
 
-  const handoff = useCallback(async (version: TestCaseLibraryVersion, mode: 'smoke' | 'regression' | 'full' | 'custom', suiteVersionId?: string, impactedCaseIds?: string[]) => {
+  const handoff = useCallback(async (version: TestCaseLibraryVersion, mode: 'smoke' | 'regression' | 'full' | 'custom', suiteVersionId?: string, impactedCaseIds?: string[], executionReadinessOverrides?: ExecutionReadinessOverrideInput[]) => {
     if (!projectVersionId) return
-    const created = await guarded('handoff', () => api.createLibraryHandoff(projectVersionId, version.id, { mode, expectedLibrarySha256: version.contentSha256, suiteVersionId, impactedCaseIds }), 'Execution Handoff 已创建并冻结执行输入。')
+    const created = await guarded('handoff', () => api.createLibraryHandoff(projectVersionId, version.id, { mode, expectedLibrarySha256: version.contentSha256, suiteVersionId, impactedCaseIds, executionReadinessOverrides }), 'Execution Handoff 已创建并冻结执行输入。')
     setHandoffs(current => [created, ...current]); return created
   }, [guarded, projectVersionId])
 
   const createLibraryCase = useCallback(async (content: TestCaseContent, reason: string) => { if (!inputs) return; await guarded('library-create', () => api.createLibraryCase(inputs.projectVersion.projectId, content, reason), '正式用例已创建。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const editLibraryCase = useCallback(async (testCase: LibraryTestCase, content: TestCaseContent, reason: string) => { if (!inputs) return; await guarded('library-edit', () => api.editLibraryCase(inputs.projectVersion.projectId, testCase.id, testCase.etag, content, reason), '正式用例已生成新 Revision。'); await loadCollection() }, [guarded, inputs, loadCollection])
+  const editLibraryCase = useCallback(async (testCase: LibraryTestCase, content: TestCaseContent, reason: string, traceability?: TestCaseTraceability) => { if (!inputs) return; await guarded('library-edit', () => api.editLibraryCase(inputs.projectVersion.projectId, testCase.id, testCase.etag, content, reason, traceability), '正式用例已生成新 Revision。'); await loadCollection() }, [guarded, inputs, loadCollection])
   const copyLibraryCase = useCallback(async (testCase: LibraryTestCase) => { if (!inputs) return; await guarded('library-copy', () => api.copyLibraryCase(inputs.projectVersion.projectId, testCase.id, `复制自 ${testCase.id}`), '正式用例副本已创建。'); await loadCollection() }, [guarded, inputs, loadCollection])
   const deprecateLibraryCase = useCallback(async (testCase: LibraryTestCase, reason: string) => { if (!inputs) return; await guarded('library-deprecate', () => api.deprecateLibraryCase(inputs.projectVersion.projectId, testCase.id, testCase.etag, reason), '正式用例已废弃，历史 Revision 保留。'); await loadCollection() }, [guarded, inputs, loadCollection])
   const saveSuiteDraft = useCallback(async (draft: TestSuiteDraft | undefined, value: { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange?: boolean; members: Array<{ caseId: string; executionMethod: TestExecutionMethod; reason: string }> }) => { if (!inputs) return; if (draft) { const loaded = await api.loadSuiteDraft(inputs.projectVersion.projectId, draft.id); await guarded('suite-save', () => api.updateSuiteDraft(inputs.projectVersion.projectId, draft.id, loaded.response.headers.get('etag') ?? draft.etag ?? '', value), '测试套件草稿已保存。') } else await guarded('suite-create', () => api.createSuiteDraft(inputs.projectVersion.projectId, value), '测试套件草稿已创建。'); await loadCollection() }, [guarded, inputs, loadCollection])

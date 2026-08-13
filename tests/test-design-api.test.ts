@@ -87,6 +87,7 @@ test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP �
     if (method === 'createLibraryCase' || method === 'copyLibraryCase' || method === 'deprecateLibraryCase') return { id: 'case-1' }
     if (method === 'decideCaseChangeProposal') return { id: 'proposal-1', decision: 'accepted' }
     if (method === 'publishLibraryVersion') return { id: 'library-v1' }
+    if (method === 'getLibraryVersion') return { id: 'library-v1', members: [{ caseId: 'case-1', revision: 1, ordinal: 0, contentSha256: 'a'.repeat(64), frozenContent: { title: '冻结标题', executionSpec: { method: 'ui' } }, executionReadiness: 'needs_confirmation' }] }
     if (method === 'createSuiteDraft' || method === 'updateSuiteDraft') return { id: 'draft-1', etag: '"suite-draft:draft-1:new"' }
     if (method === 'publishSuiteDraft') return { id: 'suite-v1' }
     if (method === 'createLibraryHandoff') return { id: `handoff-${String((args[2] as { mode: string }).mode)}` }
@@ -96,7 +97,8 @@ test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP �
   assert.equal((await routeCall('GET', '/api/projects/project-1/test-case-library', undefined, {}, service)).status, 200)
   assert.equal((await routeCall('GET', '/api/projects/project-1/test-case-library-versions', undefined, {}, service)).status, 200)
   assert.equal((await routeCall('POST', '/api/projects/project-1/test-case-library', { content: { title: '新增' }, changeReason: '新增正式用例' }, {}, service)).status, 201)
-  const edited = await routeCall('PATCH', '/api/projects/project-1/test-case-library/case-1', { content: { title: '修改' }, changeReason: '修改 Revision' }, { 'if-match': '"library-case:case-1:r1:old"' }, service)
+  const traceability = { sourceRequirementReleaseId: 'release-1', requirementRefs: [{ requirementReleaseId: 'release-1', requirementId: 'REQ-1' }], testPointRefs: [{ testPointTreeVersionId: 'tree-v1', testPointId: 'point-1' }] }
+  const edited = await routeCall('PATCH', '/api/projects/project-1/test-case-library/case-1', { content: { title: '修改' }, changeReason: '修改 Revision', traceability }, { 'if-match': '"library-case:case-1:r1:old"' }, service)
   assert.equal(edited.status, 200); assert.equal(edited.headers.get('etag'), '"library-case:case-1:r2:new"')
   assert.equal((await routeCall('POST', '/api/projects/project-1/test-case-library/case-1/copy', { changeReason: '复制' }, {}, service)).status, 201)
   assert.equal((await routeCall('DELETE', '/api/projects/project-1/test-case-library/case-1', { changeReason: '废弃' }, { 'if-match': '"library-case:case-1:r2:new"' }, service)).status, 200)
@@ -106,10 +108,14 @@ test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP �
   assert.equal((await routeCall('POST', '/api/projects/project-1/test-suite-drafts', { suiteKey: 'smoke', suiteType: 'smoke', name: 'Smoke', testCaseLibraryVersionId: 'library-v1', members: [] }, {}, service)).status, 201)
   assert.equal((await routeCall('PUT', '/api/projects/project-1/test-suite-drafts/draft-1', { suiteKey: 'smoke', suiteType: 'smoke', name: 'Smoke 2', testCaseLibraryVersionId: 'library-v1', members: [] }, { 'if-match': '"suite-draft:draft-1:old"' }, service)).status, 200)
   assert.equal((await routeCall('POST', '/api/projects/project-1/test-suite-drafts/draft-1/publish', undefined, { 'if-match': '"suite-draft:draft-1:new"' }, service)).status, 201)
-  for (const mode of ['smoke', 'regression', 'full', 'custom']) assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-case-library-versions/library-v1/execution-handoffs', { mode, expectedLibrarySha256: 'c', ...(mode === 'full' ? {} : { suiteVersionId: `suite-${mode}` }) }, {}, service)).status, 201)
+  const versionDetail = await routeCall('GET', '/api/projects/project-1/test-case-library-versions/library-v1', undefined, {}, service)
+  assert.equal(((versionDetail.body as { members: Array<{ frozenContent: { title: string } }> }).members[0].frozenContent.title), '冻结标题')
+  for (const mode of ['smoke', 'regression', 'full', 'custom']) assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-case-library-versions/library-v1/execution-handoffs', { mode, expectedLibrarySha256: 'c', ...(mode === 'full' ? { executionReadinessOverrides: [{ caseId: 'case-1', revision: 1, reason: '人工确认执行' }] } : { suiteVersionId: `suite-${mode}` }) }, {}, service)).status, 201)
 
   assert.equal((calls.find(item => item.method === 'editLibraryCase')!.args[2]), '"library-case:case-1:r1:old"')
+  assert.deepEqual(calls.find(item => item.method === 'editLibraryCase')!.args[6], traceability)
   assert.deepEqual(calls.filter(item => item.method === 'createLibraryHandoff').map(item => (item.args[2] as { mode: string }).mode), ['smoke', 'regression', 'full', 'custom'])
+  assert.deepEqual((calls.filter(item => item.method === 'createLibraryHandoff')[2].args[2] as { executionReadinessOverrides: unknown }).executionReadinessOverrides, [{ caseId: 'case-1', revision: 1, reason: '人工确认执行' }])
 })
 
 test('正式资产 HTTP 路由透传单版本、基线和 executionSpec 服务端拒绝', async () => {
@@ -121,12 +127,23 @@ test('正式资产 HTTP 路由透传单版本、基线和 executionSpec 服务�
 
   const schemaError = new TestDesignError('TEST_CASE_EXECUTION_SPEC_INVALID', 'performance 用例必须提供 performance executionSpec', 422)
   await assert.rejects(routeCall('POST', '/api/projects/project-1/test-case-library', { content: { dimension: 'performance', executionSpec: { kind: 'functional' } }, changeReason: '非法配置' }, {}, { createLibraryCase: async () => { throw schemaError } }), (error: unknown) => error === schemaError)
+
+  for (const [code, status] of [['TEST_EXECUTION_CASE_NOT_READY', 422], ['TEST_EXECUTION_CASE_BLOCKED', 422], ['TEST_EXECUTION_READINESS_OVERRIDE_REQUIRED', 422], ['TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH', 409], ['LIBRARY_TEST_CASE_TRACEABILITY_REQUIRED', 422], ['LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 422]] as const) {
+    const expected = new TestDesignError(code, '服务端拒绝', status)
+    const action = code === 'TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH'
+      ? routeCall('GET', '/api/projects/project-1/test-case-library-versions/library-v1', undefined, {}, { getLibraryVersion: async () => { throw expected } })
+      : code.startsWith('LIBRARY_')
+        ? routeCall('PATCH', '/api/projects/project-1/test-case-library/case-1', { content: {}, changeReason: '非法追溯' }, { 'if-match': '"etag"' }, { editLibraryCase: async () => { throw expected } })
+        : routeCall('POST', '/api/project-versions/pv-1/test-case-library-versions/library-v1/execution-handoffs', { mode: 'full', expectedLibrarySha256: 'a' }, {}, { createLibraryHandoff: async () => { throw expected } })
+    await assert.rejects(action, (error: unknown) => error === expected && expected.status === status)
+  }
 })
 
 test('正式资产 HTTP 路由拒绝未认证和无权限调用', async () => {
   const service = { listLibraryCases: async () => [] }
   await assert.rejects(routeCall('GET', '/api/projects/project-1/test-case-library', undefined, {}, service, { subjectId: '', displayName: '' }, 'unauthenticated'), /UNAUTHENTICATED/u)
   await assert.rejects(routeCall('GET', '/api/projects/project-1/test-case-library', undefined, {}, service, { subjectId: 'reader', displayName: '只读用户' }, 'forbidden'), /FORBIDDEN/u)
+  await assert.rejects(routeCall('GET', '/api/projects/another-project/test-case-library-versions/library-v1', undefined, {}, { getLibraryVersion: async () => ({}) }, { subjectId: 'reader', displayName: '只读用户' }, 'forbidden'), /FORBIDDEN/u)
 })
 
 async function routeCall(method: string, path: string, body: unknown, headers: Record<string, string>, service: object, principal = { subjectId: 'tester', displayName: '测试人员' }, access: 'allowed' | 'unauthenticated' | 'forbidden' = 'allowed') {

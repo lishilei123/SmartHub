@@ -5,7 +5,7 @@ import { defaultAgentDefinitionConfigDictionary } from '../server/agent/agent-de
 import { TEST_DESIGN_STAGE_BINDINGS } from '../server/agent/pi-test-design-runtime.js'
 import { TestDesignService, type TestCaseAssetProjector, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
 import { TestDesignError, validateCreateTestDesignInput, validateTestCaseDesignCandidate, validateTestPointDesignCandidate } from '../server/application/test-design-validation.js'
-import type { TestDesignWorkflowRun } from '../server/domain/test-design-types.js'
+import type { TestCaseContent, TestDesignWorkflowRun } from '../server/domain/test-design-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
 const principal = { subjectId: 'tester', displayName: '测试负责人' }
@@ -217,7 +217,7 @@ test('正式用例库发布拒绝已变化的基线、过期 Revision 和已废�
   const staleRevisionRun = await preparePublishableRun(revisionService, 'revision-stale')
   for (const proposal of staleRevisionRun.run.caseChangeProposals) await revisionService.decideCaseChangeProposal('pv-1', staleRevisionRun.designId, staleRevisionRun.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
   const source = await revisionService.getLibraryCase('project-1', revisionV1.members[0].caseId)
-  await revisionService.editLibraryCase('project-1', source.id, source.etag, { ...source.content, objective: '并发人工修订后的目标' }, '并发人工修订', principal)
+  await revisionService.editLibraryCase('project-1', source.id, source.etag, { ...source.content, priority: source.content.priority === 'P0' ? 'P1' : 'P0' }, '并发人工修订', principal)
   const staleRevisionDecided = await revisionService.getRun('pv-1', staleRevisionRun.designId, staleRevisionRun.runId)
   await assert.rejects(revisionService.publishLibraryVersion('pv-1', staleRevisionRun.designId, staleRevisionRun.runId, { name: '禁止旧 Proposal 覆盖', expectedAuditId: staleRevisionRun.audit.id, expectedCaseSetSha256: staleRevisionRun.audit.caseSetSha256, expectedProposalSha256: staleRevisionDecided.caseChangeProposalSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'LIBRARY_TEST_CASE_REVISION_CONFLICT')
 
@@ -257,6 +257,98 @@ test('正式用例 API 拒绝非法 executionSpec，非功能用例不依赖 exe
   assert.equal(saved.content.executionMethods.length, 0)
   assert.equal(saved.content.executionSpec?.kind, 'performance')
   await assert.rejects(service.createLibraryCase('project-1', { ...performance, executionSpec: { ...performance.executionSpec, kind: 'stability' } }, '非法维度', principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_EXECUTION_SPEC_INVALID')
+})
+
+test('needs_confirmation 默认和 Full 均被 Handoff 门禁阻断，人工覆盖后冻结决定', async () => {
+  const { ref: _ref, ...candidate } = caseCandidate('test-case-design/v1', ['point-ready']).cases[0]
+  const content = { ...candidate, executionMethods: candidate.executionMethods.map(method => ({ ...method, executionReadiness: 'needs_confirmation' as const })) }
+  const { store, service } = await fixture(new FakeRuntime())
+  const { version, testCase } = await seedManualLibraryVersion(store, service, content, 'needs-confirmation')
+  await assert.rejects(service.createLibraryHandoff('pv-1', version.id, { mode: 'full', expectedLibrarySha256: version.contentSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_EXECUTION_READINESS_OVERRIDE_REQUIRED' && error.status === 422)
+  const handoff = await service.createLibraryHandoff('pv-1', version.id, { mode: 'full', expectedLibrarySha256: version.contentSha256, executionReadinessOverrides: [{ caseId: testCase.id, revision: 1, reason: '历史用例已由测试负责人核对入口与步骤，本轮允许执行' }] }, principal)
+  assert.deepEqual(handoff.members[0].readinessOverride, { reason: '历史用例已由测试负责人核对入口与步骤，本轮允许执行', actorId: principal.subjectId, createdAt: handoff.members[0].readinessOverride?.createdAt })
+  assert.match(handoff.members[0].readinessOverride!.createdAt, /^\d{4}-\d{2}-\d{2}T/u)
+})
+
+test('blocked 用例即使提交人工覆盖也不能进入 Handoff', async () => {
+  const { ref: _ref, ...candidate } = caseCandidate('test-case-design/v1', ['point-blocked']).cases[0]
+  const content = { ...candidate, executionMethods: candidate.executionMethods.map(method => ({ ...method, executionReadiness: 'blocked' as const })) }
+  const { store, service } = await fixture(new FakeRuntime())
+  const { version, testCase } = await seedManualLibraryVersion(store, service, content, 'blocked')
+  await assert.rejects(service.createLibraryHandoff('pv-1', version.id, { mode: 'full', expectedLibrarySha256: version.contentSha256, executionReadinessOverrides: [{ caseId: testCase.id, revision: 1, reason: '尝试普通覆盖' }] }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_EXECUTION_CASE_BLOCKED' && error.status === 422)
+})
+
+test('正式 Revision 修改追溯字段必须提交匹配追溯，普通字段修改继承原追溯', async () => {
+  const { ref: _ref, ...content } = caseCandidate('test-case-design/v1', ['point-trace']).cases[0]
+  const { store, service } = await fixture(new FakeRuntime())
+  const created = await service.createLibraryCase('project-1', content, '创建正式追溯用例', principal)
+  const traceability = { sourceRequirementReleaseId: 'release-1', requirementRefs: [{ requirementReleaseId: 'release-1', requirementId: 'REQ-1' }], testPointRefs: [{ testPointTreeVersionId: 'tree-version-1', testPointId: 'point-trace' }] }
+  await store.transaction(state => { const testCase = state.testDesignState!.libraryCases.find(item => item.id === created.id)!; testCase.revisions[0].traceability = structuredClone(traceability) })
+  const current = await service.getLibraryCase('project-1', created.id)
+  const changed = { ...current.content, testPointIds: ['point-new'] }
+  await assert.rejects(service.editLibraryCase('project-1', current.id, current.etag, changed, '修改测试点', principal), (error: unknown) => error instanceof TestDesignError && error.code === 'LIBRARY_TEST_CASE_TRACEABILITY_REQUIRED')
+  await assert.rejects(service.editLibraryCase('project-1', current.id, current.etag, changed, '提交错误追溯', principal, traceability), (error: unknown) => error instanceof TestDesignError && error.code === 'LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH')
+  const ordinary = await service.editLibraryCase('project-1', current.id, current.etag, { ...current.content, priority: 'P1' }, '只调整优先级', principal)
+  assert.deepEqual(ordinary.revisions.at(-1)!.traceability, traceability)
+
+  const historical = await service.createLibraryCase('project-1', { ...content, testPointIds: ['historical-point'] }, '历史无追溯用例', principal)
+  const historicalEdited = await service.editLibraryCase('project-1', historical.id, historical.etag, { ...historical.content, tags: ['historical', 'maintained'] }, '普通字段维护', principal)
+  assert.equal(historicalEdited.revisions.at(-1)!.traceability, undefined)
+})
+
+test('用例库历史版本始终返回冻结内容并在 Hash 不一致时拒绝读取', async () => {
+  const { ref: _ref, ...content } = caseCandidate('test-case-design/v1', ['point-frozen']).cases[0]
+  const { store, service } = await fixture(new FakeRuntime())
+  const { version, testCase } = await seedManualLibraryVersion(store, service, content, 'frozen-history')
+  const current = await service.getLibraryCase('project-1', testCase.id)
+  await service.editLibraryCase('project-1', current.id, current.etag, { ...current.content, title: '当前 Revision 新标题' }, '只更新当前标题', principal)
+  const historical = await service.getLibraryVersion('project-1', version.id)
+  assert.equal(historical.members[0].frozenContent?.title, content.title)
+  assert.equal((await service.getLibraryCase('project-1', testCase.id)).content.title, '当前 Revision 新标题')
+  await store.transaction(state => { state.testDesignState!.libraryVersions.find(item => item.id === version.id)!.members[0].frozenContent = { ...content, title: '被篡改的冻结标题' } })
+  await assert.rejects(service.getLibraryVersion('project-1', version.id), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH' && error.status === 409)
+})
+
+test('旧用例迁移预览逐条识别四类执行配置缺口且确认导入不虚构配置', async () => {
+  const { store, service } = await fixture(new FakeRuntime(), { ingest: async input => ({ version: { id: `legacy-incomplete-${sha256(input.logicalPath).slice(0, 8)}` }, task: null }) })
+  const legacyId = 'legacy-incomplete-configurations'
+  await store.transaction(state => {
+    const aggregate = state.testDesignState ??= { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [] }
+    const cases = ['functional', 'performance', 'stability', 'compatibility'].map((dimension, index) => ({ caseId: `legacy-${dimension}`, revision: 1, content: { title: `历史 ${dimension}`, dimension } }))
+    aggregate.caseSetVersions.push({ id: legacyId, projectId: 'project-1', projectVersionId: 'pv-1', testDesignId: 'legacy-design', runId: 'legacy-run', version: 1, schemaVersion: 'test-case-set/v1', name: '不完整历史用例', treeVersionId: 'legacy-tree', dataSetVersionId: 'legacy-data', coverageAuditId: 'legacy-audit', members: [], canonicalContent: { schemaVersion: 'test-case-set/v1', cases }, contentSha256: '9'.repeat(64), publishedBy: 'legacy-owner', publishedAt: '2026-08-12T00:00:00.000Z', projection: { status: 'succeeded', files: [] } })
+  })
+  const preview = await service.previewLegacyCaseMigration('project-1', legacyId)
+  assert.equal(preview.status, 'needs_confirmation')
+  assert.deepEqual(preview.items.map(item => item.executionConfigurationStatus), ['needs_confirmation', 'needs_confirmation', 'needs_confirmation', 'needs_confirmation'])
+  assert.match(preview.items.find(item => item.legacyCaseId === 'legacy-functional')!.executionConfigurationIssues.join(' '), /执行步骤|UI 入口/u)
+  assert.match(preview.items.find(item => item.legacyCaseId === 'legacy-performance')!.executionConfigurationIssues.join(' '), /阈值来源/u)
+  assert.match(preview.items.find(item => item.legacyCaseId === 'legacy-stability')!.executionConfigurationIssues.join(' '), /运行时长/u)
+  assert.match(preview.items.find(item => item.legacyCaseId === 'legacy-compatibility')!.executionConfigurationIssues.join(' '), /环境矩阵/u)
+  await assert.rejects(service.migrateLegacyCaseSet('project-1', { legacyTestCaseSetVersionId: legacyId, expectedPreviewSha256: preview.previewSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'LEGACY_TEST_CASE_MIGRATION_CONFIRMATION_REQUIRED')
+  const migrated = await service.migrateLegacyCaseSet('project-1', { legacyTestCaseSetVersionId: legacyId, expectedPreviewSha256: preview.previewSha256, confirmUncertain: true }, principal)
+  assert.ok(migrated.version.members.every(member => member.executionReadiness === 'needs_confirmation'))
+  const performance = migrated.version.members.find(member => member.frozenContent?.dimension === 'performance')!.frozenContent!.executionSpec
+  const stability = migrated.version.members.find(member => member.frozenContent?.dimension === 'stability')!.frozenContent!.executionSpec
+  const compatibility = migrated.version.members.find(member => member.frozenContent?.dimension === 'compatibility')!.frozenContent!.executionSpec
+  assert.deepEqual(performance?.kind === 'performance' ? performance.thresholds : null, [])
+  assert.equal(stability?.kind === 'stability' ? stability.duration : 'unexpected', null)
+  assert.deepEqual(compatibility?.kind === 'compatibility' ? [compatibility.browserMatrix, compatibility.operatingSystemMatrix, compatibility.viewportMatrix, compatibility.versionMatrix] : null, [[], [], [], []])
+})
+
+test('无对应 Proposal 的基线成员被并发废弃时阻止发布且不静默删除', async () => {
+  const projector: TestCaseAssetProjector = { ingest: async () => ({ version: { id: `asset-${Math.random()}` }, task: null }) }
+  const { store, service } = await fixture(new FakeRuntime(), projector)
+  const initial = await preparePublishableRun(service, 'base-member-seed')
+  for (const proposal of initial.run.caseChangeProposals) await service.decideCaseChangeProposal('pv-1', initial.designId, initial.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const initialDecided = await service.getRun('pv-1', initial.designId, initial.runId)
+  const v1 = await service.publishLibraryVersion('pv-1', initial.designId, initial.runId, { name: '基线 V1', expectedAuditId: initial.audit.id, expectedCaseSetSha256: initial.audit.caseSetSha256, expectedProposalSha256: initialDecided.caseChangeProposalSha256 }, principal)
+  const concurrent = new TestDesignService(store, new FakeRuntime(), projector)
+  const next = await preparePublishableRun(concurrent, 'base-member-no-source-proposal')
+  for (const proposal of next.run.caseChangeProposals) await concurrent.decideCaseChangeProposal('pv-1', next.designId, next.runId, proposal.id, { expectedVersion: 0, decision: 'accepted' }, principal)
+  const baseCase = await concurrent.getLibraryCase('project-1', v1.members[0].caseId)
+  await concurrent.deprecateLibraryCase('project-1', baseCase.id, baseCase.etag, '并发废弃基线成员', principal)
+  const decided = await concurrent.getRun('pv-1', next.designId, next.runId)
+  await assert.rejects(concurrent.publishLibraryVersion('pv-1', next.designId, next.runId, { name: '禁止静默删除', expectedAuditId: next.audit.id, expectedCaseSetSha256: next.audit.caseSetSha256, expectedProposalSha256: decided.caseChangeProposalSha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_LIBRARY_BASE_MEMBER_DEPRECATED')
 })
 
 class FakeRuntime implements TestDesignAgentRuntime {
@@ -317,6 +409,16 @@ function createInput() { return { name: '认证测试设计', objective: '验证
 function caseCandidate(schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1', pointIds: string[]) { return { schemaVersion, cases: pointIds.map((pointId, index) => ({ ref: `case-${index + 1}`, schemaVersion: 'test-case/v1', title: `用例 ${index + 1}`, objective: `验证 ${pointId}`, dimension: 'functional', testPointIds: [pointId], priority: 'P0', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/login' }, steps: [{ key: 'step-1', action: '执行操作', expected: '结果符合需求' }], verificationChecks: [{ key: 'check-1', description: '页面结果正确' }], executionReadiness: 'ready', automationHint: '使用 UI 自动化' }], sharedVerificationChecks: [], tags: ['smoke'], domain: '认证' })), dataRequirements: [], findings: [], confirmationItems: [] } }
 function dimensionCaseCandidate(schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1', pointIds: string[]) { const dimensions = ['functional', 'performance', 'stability', 'compatibility'] as const; return { schemaVersion, cases: pointIds.map((pointId, index) => { const dimension = dimensions[index]; const executionSpec = dimension === 'functional' ? { kind: 'functional', method: 'ui', steps: [{ key: 'step-1', action: '执行功能操作', expected: '功能结果正确' }], verificationChecks: [{ key: 'check-1', description: '功能断言' }], preconditions: [], testDataRequirements: [], executionReadiness: 'ready', automationHint: 'UI 自动化' } : dimension === 'performance' ? { kind: 'performance', method: 'performance_tool', target: '订单接口', scenario: '并发下单', virtualUsers: null, duration: null, rampUp: null, thresholds: [], dataStrategy: '隔离测试数据', environmentRequirements: [], executionReadiness: 'needs_confirmation' } : dimension === 'stability' ? { kind: 'stability', method: 'long_running', workload: '持续下单', duration: null, interval: null, observations: ['错误率'], recoveryPolicy: null, checkpointPolicy: null, environmentRequirements: [], executionReadiness: 'needs_confirmation' } : { kind: 'compatibility', method: 'environment_matrix', baseMethod: 'ui', baseCaseRefs: [], browserMatrix: [], operatingSystemMatrix: [], viewportMatrix: [], versionMatrix: [], expectedConsistency: '行为一致', executionReadiness: 'needs_confirmation' }; return { ref: `case-${index + 1}`, schemaVersion: 'test-case/v2', title: `${dimension} 用例`, objective: `验证 ${dimension}`, dimension, testPointIds: [pointId], priority: 'P0', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: dimension === 'functional' ? [{ method: 'ui', uiSpec: { entry: '/login' }, steps: [{ key: 'step-1', action: '执行功能操作', expected: '功能结果正确' }], verificationChecks: [{ key: 'check-1', description: '功能断言' }], executionReadiness: 'ready', automationHint: 'UI 自动化' }] : [], executionSpec, sharedVerificationChecks: [], tags: [], domain: '多维测试' } }), dataRequirements: [], findings: [], confirmationItems: [], proposals: [] } }
 async function preparePublishableRun(service: TestDesignService, key: string) { const design = await service.createDesign('pv-1', { ...createInput(), name: key }, principal); const created = await service.createRun('pv-1', design.id, key, principal); await waitFor(service, design.id, created.id, run => run.stage === 'test_point_review'); const tree = await service.getTree('pv-1', design.id, created.id); await service.approveTree('pv-1', design.id, created.id, tree.etag, principal); const designed = await waitFor(service, design.id, created.id, run => run.status === 'succeeded' && run.testCases.length > 0); const targets = designed.testCases.map(item => ({ caseId: item.id, targetRevision: item.currentRevision })); await service.batchReview('pv-1', design.id, created.id, { targets, decision: 'submit' }, principal); await service.batchReview('pv-1', design.id, created.id, { targets, decision: 'approve' }, principal); const audit = await service.reAudit('pv-1', design.id, created.id); const run = await service.getRun('pv-1', design.id, created.id); return { designId: design.id, runId: created.id, audit, run } }
+async function seedManualLibraryVersion(store: JsonStore, service: TestDesignService, content: TestCaseContent, suffix: string) {
+  const testCase = await service.createLibraryCase('project-1', content, `创建 ${suffix} 用例`, principal)
+  const revision = testCase.revisions![0]
+  const versionId = `library-version-${suffix}`
+  await store.transaction(state => {
+    const aggregate = state.testDesignState!
+    aggregate.libraryVersions.push({ id: versionId, projectId: 'project-1', version: aggregate.libraryVersions.length + 1, name: suffix, members: [{ caseId: testCase.id, revision: revision.revision, ordinal: 0, contentSha256: revision.contentSha256, frozenContent: structuredClone(revision.content), executionReadiness: revision.content.executionSpec!.executionReadiness }], contentSha256: sha256(versionId), publishedBy: principal.subjectId, publishedAt: '2026-08-12T00:00:00.000Z', projection: { status: 'succeeded', files: [] } })
+  })
+  return { testCase, version: await service.getLibraryVersion('project-1', versionId) }
+}
 function approvedPointIds(run: TestDesignWorkflowRun) { const tree = run.testPointTree!; const version = tree.versions.find(item => item.id === tree.currentApprovedVersionId)!; const revision = tree.revisions.find(item => item.revision === version.revision)!; const parents = new Set(revision.nodes.flatMap(item => item.parentId ? [item.parentId] : [])); return revision.nodes.filter(item => !item.deleted && item.applicability !== 'not_applicable' && !parents.has(item.nodeId)).map(item => item.nodeId) }
 async function waitFor(service: TestDesignService, designId: string, runId: string, predicate: (run: TestDesignWorkflowRun) => boolean) { for (let attempt = 0; attempt < 200; attempt += 1) { const value = await service.getRun('pv-1', designId, runId) as TestDesignWorkflowRun; if (predicate(value)) return value; await new Promise(resolve => setTimeout(resolve, 5)) } throw new Error('等待测试设计状态超时') }
 function sha256(value: string) { return createHash('sha256').update(value).digest('hex') }

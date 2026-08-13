@@ -503,7 +503,19 @@ export interface TestCaseSetVersion {
   projection: WorkspaceArtifactProjection
 }
 
-export interface TestCaseLibraryVersionMember { caseId: string; revision: number; ordinal: number; contentSha256: string }
+export interface TestCaseLibraryVersionMember {
+  caseId: string
+  revision: number
+  ordinal: number
+  contentSha256: string
+  frozenContent?: TestCaseContent
+  traceability?: TestCaseTraceability
+  executionReadiness?: ExecutionReadiness
+}
+export interface TestCaseLibraryVersionMemberDetail extends TestCaseLibraryVersionMember {
+  frozenContent: TestCaseContent
+  executionReadiness: ExecutionReadiness
+}
 export interface TestCaseLibraryVersion {
   id: string
   projectId: string
@@ -522,6 +534,7 @@ export interface TestCaseLibraryVersion {
     coverageAudit: { id: string; statistics: CoverageAudit['statistics']; blockerCount: number }
   }
 }
+export interface TestCaseLibraryVersionDetail extends Omit<TestCaseLibraryVersion, 'members'> { members: TestCaseLibraryVersionMemberDetail[] }
 
 export interface WorkspaceArtifactProjection {
   status: 'pending' | 'succeeded' | 'failed'
@@ -534,7 +547,7 @@ export interface TestSuiteVersion { id: string; projectId: string; suiteKey: str
 export interface TestSuiteDraft { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteVersionMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string }
 export interface SmokeCandidateRelation { testCaseSetVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'pending' | 'accepted' | 'rejected'; actorId?: string; reviewedAt?: string }
 export interface ImpactedRegressionReference { testCaseSetVersionId?: string; suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; actorId: string; createdAt: string }
-export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression' | TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dedupKey: string; dimension?: TestDimension; executionSpec?: TestCaseExecutionSpec; traceability?: TestCaseTraceability; selectionReason?: string; contentSha256?: string }
+export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression' | TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dedupKey: string; dimension?: TestDimension; executionSpec?: TestCaseExecutionSpec; traceability?: TestCaseTraceability; selectionReason?: string; contentSha256?: string; readinessOverride?: { reason: string; actorId: string; createdAt: string } }
 export interface TestExecutionHandoff { id: string; projectId: string; projectVersionId: string; testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; suiteVersionId?: string; strategy?: 'standard' | 'fast' | 'full'; mode?: TestExecutionMode; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; members: TestExecutionHandoffMember[]; contentSha256: string; createdBy: string; createdAt: string }
 
 export interface LegacyTestCaseMigrationRecord {
