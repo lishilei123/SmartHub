@@ -1,5 +1,6 @@
 import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import rawConfig from './agents-config.json' with { type: 'json' }
+import { AGENT_DEFINITION_KEYS } from './agent-catalog.js'
 
 export type AgentDefinitionConfigKey = AgentDefinitionVersion['agentKey']
 
@@ -24,10 +25,7 @@ export interface AgentDefinitionConfigFile {
 
 export type AgentDefinitionConfigDictionary = Record<string, AgentDefinitionConfig>
 
-const expectedKeys: readonly AgentDefinitionConfigKey[] = [
-  'requirement-analysis',
-  'test-design',
-]
+const expectedKeys: readonly AgentDefinitionConfigKey[] = AGENT_DEFINITION_KEYS
 
 export function validateAgentDefinitionConfig(value: unknown): AgentDefinitionConfigFile {
   if (!value || typeof value !== 'object') throw new Error('AGENT_CONFIG_INVALID: 配置文件必须是对象')

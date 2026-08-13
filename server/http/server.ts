@@ -2,19 +2,22 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
+import type { AgentConfigurationScene, AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
 import { routeTestDesign } from './test-design-routes.js'
 import { TestDesignError } from '../application/test-design-validation.js'
+import { TestExecutionServiceError } from '../application/test-execution-service.js'
+import { TestExecutionValidationError } from '../application/test-execution-validation.js'
+import { routeTestExecution } from './test-execution-routes.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService }
+export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionService, testExecutionStore }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -22,11 +25,26 @@ export async function start(port = Number(process.env.PORT ?? 8787), controls: A
   const server = createServer(async (request, response) => {
     try { await route(request, response, controls) }
     catch (error) {
-      const status = error instanceof UnauthenticatedError ? 401 : error instanceof ForbiddenError ? 403 : error instanceof TestDesignError ? error.status : 400
-      send(response, status, error instanceof TestDesignError ? { code: error.code, message: error.message.replace(/^[A-Z][A-Z0-9_]+:\s*/u, ''), details: error.details } : { error: error instanceof Error ? error.message : '未知错误' })
+      const status = error instanceof UnauthenticatedError
+        ? 401
+        : error instanceof ForbiddenError
+          ? 403
+          : error instanceof TestDesignError
+            ? error.status
+            : error instanceof TestExecutionServiceError
+              ? error.status
+              : error instanceof TestExecutionValidationError
+                ? 422
+                : 400
+      const structured = error instanceof TestDesignError
+        || error instanceof TestExecutionServiceError
+        || error instanceof TestExecutionValidationError
+      send(response, status, structured
+        ? { code: error.code, message: error.message.replace(/^[A-Z][A-Z0-9_]+:\s*/u, ''), details: error.details }
+        : { error: error instanceof Error ? error.message : '未知错误' })
     }
   })
-  server.once('close', () => { void aiResourceService.close().then(() => stateStore.close?.()) })
+  installAwaitedShutdown(server)
   return new Promise<typeof server>((resolvePromise, reject) => {
     const onError = (error: Error) => reject(error)
     server.once('error', onError)
@@ -49,7 +67,32 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'OPTIONS') return send(response, 204, null)
   if (method === 'GET' && url.pathname === '/api/health') return send(response, 200, { status: 'ok' })
   const principal = await controls.authenticate(request).catch(() => { throw new UnauthenticatedError() })
-  if (await routeTestDesign(request, response, { method, url, principal, controls, service: testDesignService, store: stateStore, configurations: agentConfigurationService })) return
+  const agentConfiguration = /^\/api\/agent-configurations\/(requirement-analysis|test-design|test-execution)(?:\/(draft|publish))?$/.exec(url.pathname)
+  if (agentConfiguration) {
+    const scene = agentConfigurationScene(agentConfiguration[1])
+    if (method === 'GET' && !agentConfiguration[2]) return send(response, 200, await agentConfigurationService.get(scene))
+    if (method === 'PUT' && agentConfiguration[2] === 'draft') return send(response, 200, await agentConfigurationService.save(scene, await json(request) as unknown as AgentConfigurationInput))
+    if (method === 'POST' && agentConfiguration[2] === 'publish') {
+      const body = await json(request)
+      return send(response, 201, await agentConfigurationService.publish(scene, { agentKey: String(body.agentKey) as AgentConfigurationInput['agentKey'], revision: Number(body.revision), publishedBy: principal.displayName }))
+    }
+  }
+  if (await routeTestExecution(request, response, {
+    method,
+    url,
+    principal,
+    controls,
+    service: testExecutionService,
+    artifactStore: executionArtifactStore,
+    resolveProjectVersion: loadProjectVersion,
+    readiness: async () => testExecutionService
+      ? testExecutionService.readiness()
+      : unavailableTestExecutionReadiness(),
+    environments: () => executionEnvironmentCatalog.listSnapshots(),
+    handoffs: async projectVersionId =>
+      testDesignService.listLibraryHandoffs(projectVersionId),
+  })) return
+  if (await routeTestDesign(request, response, { method, url, principal, controls, service: testDesignService, store: stateStore })) return
   const requireProjectVersion = async (projectVersionId: string, permission: ProjectVersionPermission) => {
     await controls.authorize(principal, projectVersionId, permission)
   }
@@ -80,12 +123,6 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'DELETE' && aiResource) return send(response, 200, await aiResourceService.delete(aiResource[1] as AiResourceKind, aiResource[2]))
   const toolSource = /^\/api\/ai-resources\/tool\/([^/]+)\/source$/.exec(url.pathname)
   if (method === 'GET' && toolSource) return send(response, 200, await aiResourceService.source(toolSource[1]))
-  if (method === 'GET' && url.pathname === '/api/agent-configurations/requirement-analysis') return send(response, 200, await agentConfigurationService.get())
-  if (method === 'PUT' && url.pathname === '/api/agent-configurations/requirement-analysis/draft') return send(response, 200, await agentConfigurationService.save(await json(request) as unknown as AgentConfigurationInput))
-  if (method === 'POST' && url.pathname === '/api/agent-configurations/requirement-analysis/publish') {
-    const body = await json(request)
-    return send(response, 201, await agentConfigurationService.publish({ agentKey: String(body.agentKey) as AgentConfigurationInput['agentKey'], revision: Number(body.revision), publishedBy: body.publishedBy ? String(body.publishedBy) : undefined }))
-  }
   const agentConfigurationVersion = /^\/api\/agent-configuration-versions\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && agentConfigurationVersion) return send(response, 200, await agentConfigurationService.getVersion(agentConfigurationVersion[1]))
   const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
@@ -235,6 +272,66 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   send(response, 404, { error: '接口不存在' })
 }
 
+function installAwaitedShutdown(server: ReturnType<typeof createServer>) {
+  const closeServer = server.close.bind(server)
+  let cleanup: Promise<void> | undefined
+  const closeResources = () => {
+    cleanup ??= Promise.allSettled([
+      () => aiResourceService.close(),
+      () => testExecutionStore?.close(),
+      () => stateStore.close?.(),
+    ].map(close => Promise.resolve().then(close))).then(results => {
+      const errors = results
+        .filter((result): result is PromiseRejectedResult =>
+          result.status === 'rejected')
+        .map(result => result.reason)
+      if (errors.length) {
+        throw new AggregateError(errors, 'SERVER_RESOURCE_CLEANUP_FAILED')
+      }
+    })
+    return cleanup
+  }
+  server.close = ((callback?: (error?: Error) => void) => {
+    closeServer(error => {
+      if (error) {
+        callback?.(error)
+        return
+      }
+      void closeResources().then(
+        () => callback?.(),
+        cause => {
+          const failure = cause instanceof Error
+            ? cause
+            : new Error('SERVER_RESOURCE_CLEANUP_FAILED')
+          if (callback) callback(failure)
+          else console.error(failure)
+        },
+      )
+    })
+    return server
+  }) as typeof server.close
+}
+
+async function unavailableTestExecutionReadiness() {
+  const [artifactStore, environment, agents, runner] = await Promise.all([
+    executionArtifactStore.readiness(),
+    executionEnvironmentCatalog.readiness(),
+    testExecutionAgentRuntime.readiness(),
+    playwrightRunner.readiness(),
+  ])
+  return {
+    ready: false,
+    store: {
+      ready: false,
+      reason: 'TEST_EXECUTION_POSTGRES_UNAVAILABLE',
+    },
+    artifactStore,
+    environment,
+    agents,
+    runner,
+  }
+}
+
 async function sendWeb(response: ServerResponse, pathname: string) {
   const relative = decodeURIComponent(pathname).replace(/^\/+|\\/gu, '/')
   const requested = resolve(webRoot, ...relative.split('/').filter(Boolean))
@@ -252,6 +349,13 @@ async function sendWeb(response: ServerResponse, pathname: string) {
 
 function webContentType(path: string) {
   return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon' } as Record<string, string>)[extname(path).toLocaleLowerCase()] ?? 'application/octet-stream'
+}
+
+async function loadProjectVersion(projectVersionId: string) {
+  return stateStore.getProjectVersion
+    ? stateStore.getProjectVersion(projectVersionId)
+    : (await stateStore.snapshot()).projectVersions.find(item =>
+        item.id === projectVersionId) ?? null
 }
 
 async function loadRun(runId: string) {
@@ -309,6 +413,11 @@ async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) 
     chunks.push(buffer)
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {}
+}
+function agentConfigurationScene(path: string): AgentConfigurationScene {
+  if (path === 'requirement-analysis') return 'requirement_analysis'
+  if (path === 'test-design') return 'test_design'
+  return 'test_execution'
 }
 function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type, authorization, idempotency-key, if-match', 'access-control-expose-headers': 'etag, content-disposition' }); response.end(body == null ? '' : JSON.stringify(body)) }
 function sendText(response: ServerResponse, status: number, body: string, type: string, filename?: string) { response.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...(filename ? { 'content-disposition': `attachment; filename="${filename.replaceAll('"', '')}"` } : {}), 'access-control-allow-origin': '*' }); response.end(body) }

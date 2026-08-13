@@ -2,25 +2,19 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createAgentDefinitionVersion } from '../agent/requirement-analysis-agent.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/agent-types.js'
-import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
+import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { mcpPolicyHash, skillConfigurationHash, toolBindingToken } from './ai-resource-hash.js'
 import { isSkillRuntimeToolId, requiredSkillRuntimeToolIds } from './skill-runtime-policy.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
+import {
+  AGENT_CONFIGURATION_KEYS,
+  AGENT_CONFIGURATION_SCENES,
+  agentCatalogEntry,
+  agentCatalogEntryByDefinition,
+} from '../agent/agent-catalog.js'
 
-const SCENE = 'requirement_analysis' as const
-const AGENT_KEYS = ['requirementAnalysis', 'testDesign'] as const
 const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result'])
-const REQUIRED_ANALYSIS_TOOL = 'requirement-analysis.submit_result'
-const REQUIRED_TEST_DESIGN_TOOLS = ['test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'] as const
-const REQUIRED_SKILLS: Record<AgentConfigurationAgentKey, readonly string[]> = {
-  requirementAnalysis: ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'],
-  testDesign: ['test-design-baseline', 'test-point-design', 'test-case-design', 'test-design-repair'],
-}
-const REQUIRED_MCPS: Record<AgentConfigurationAgentKey, readonly string[]> = {
-  requirementAnalysis: [],
-  testDesign: [],
-}
 
 export type AgentConfigurationInput = {
   agentKey: AgentConfigurationAgentKey
@@ -32,42 +26,32 @@ export type AgentConfigurationInput = {
 export class AgentConfigurationService implements AgentDefinitionResolver {
   constructor(private readonly store: StateStore) {}
 
-  async get() {
-    const configuration = this.store.getAgentConfigurationState
-      ? await Promise.all([this.store.getAgentConfigurationState(SCENE), this.store.getAgentConfigurationState('test_design')]).then(([primary, testDesign]) => ({ draft: primary.draft, versions: [...primary.versions, ...testDesign.versions] }))
-      : await this.store.snapshot().then(state => ({
-        draft: state.agentConfigurationDrafts.find(item => item.scene === SCENE) ?? null,
-        versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE || item.scene === 'test_design'),
-      }))
-    const draft = normalizeStoredDraft(configuration.draft ?? undefined)
+  async get(scene: AgentConfigurationScene) {
+    const configuration = await loadStoredConfiguration(this.store, scene)
+    const draft = normalizeStoredDraft(configuration.draft ?? undefined, scene)
     const versions = expandStoredVersions(configuration.versions)
-    return {
-      scene: SCENE,
-      agents: {
-        requirementAnalysis: agentState('requirementAnalysis', draft, versions),
-        testDesign: agentState('testDesign', draft, versions),
-      },
-    }
+    const keys = configurationKeysForScene(scene)
+    const agents = Object.fromEntries(
+      keys.map(agentKey => [agentKey, agentState(agentKey, draft, versions)]),
+    ) as Partial<Record<AgentConfigurationAgentKey, ReturnType<typeof agentState>>>
+    return { scene, agents }
   }
 
   async getVersion(id: string) {
-    const configuration = this.store.getAgentConfigurationState
-      ? await Promise.all([this.store.getAgentConfigurationState(SCENE), this.store.getAgentConfigurationState('test_design')]).then(([primary, testDesign]) => ({ draft: primary.draft, versions: [...primary.versions, ...testDesign.versions] }))
-      : await this.store.snapshot().then(state => ({ draft: null, versions: state.agentConfigurationVersions.filter(item => item.scene === SCENE || item.scene === 'test_design') }))
-    const versions = expandStoredVersions(configuration.versions)
+    const versions = expandStoredVersions((await loadAllStoredVersions(this.store)))
     return structuredClone(required(versions.find(item => item.id === id), 'Agent 配置版本不存在'))
   }
 
   async resolveVersion(id: string) { return this.getVersion(id) }
 
-  async save(input: AgentConfigurationInput) {
-    const agentKey = normalizeAgentKey(input.agentKey)
+  async save(scene: AgentConfigurationScene, input: AgentConfigurationInput) {
+    const agentKey = requireSceneAgent(scene, input.agentKey)
     return await this.transaction(state => {
       migrateState(state)
       const normalized = normalizeAgentDraft(agentKey, input, state)
-      const index = state.agentConfigurationDrafts.findIndex(item => item.scene === SCENE)
-      const draft = index < 0 ? defaultDraft() : state.agentConfigurationDrafts[index]
-      const current = draft.agents[agentKey]
+      const index = state.agentConfigurationDrafts.findIndex(item => item.scene === scene)
+      const draft = index < 0 ? defaultDraft(scene) : normalizeStoredDraft(state.agentConfigurationDrafts[index], scene)
+      const current = required(draft.agents[agentKey], `${agentLabel(agentKey)}草稿不存在`)
       if (input.revision !== current.revision) throw new Error(`${agentLabel(agentKey)}草稿已被其他操作更新，请刷新后重试`)
       const value: AgentConfigurationAgentDraft = { ...normalized, revision: current.revision + 1, updatedAt: new Date().toISOString() }
       const next: AgentConfigurationDraft = { ...draft, agents: { ...draft.agents, [agentKey]: value } }
@@ -77,15 +61,14 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
     })
   }
 
-  async publish(input: { agentKey: AgentConfigurationAgentKey; revision: number; publishedBy?: string }) {
-    const agentKey = normalizeAgentKey(input.agentKey)
+  async publish(scene: AgentConfigurationScene, input: { agentKey: AgentConfigurationAgentKey; revision: number; publishedBy?: string }) {
+    const agentKey = requireSceneAgent(scene, input.agentKey)
     return await this.transaction(state => {
       migrateState(state)
-      const draft = required(state.agentConfigurationDrafts.find(item => item.scene === SCENE), `请先保存${agentLabel(agentKey)}草稿`)
-      const agentDraft = draft.agents[agentKey]
+      const draft = required(state.agentConfigurationDrafts.find(item => item.scene === scene), `请先保存${agentLabel(agentKey)}草稿`)
+      const agentDraft = required(draft.agents[agentKey], `请先保存${agentLabel(agentKey)}草稿`)
       if (agentDraft.revision !== input.revision) throw new Error(`${agentLabel(agentKey)}草稿已更新，请刷新后再发布`)
       validatePublishable(agentKey, agentDraft, state)
-      const scene = configurationScene(agentKey)
       const version = Math.max(0, ...state.agentConfigurationVersions.filter(item => item.scene === scene && item.agentKey === agentKey).map(item => item.version)) + 1
       const agentDefinition = publishedDefinition(agentKey, agentDraft.definition, version, state)
       state.agentConfigurationVersions.forEach(item => { if (item.scene === scene && item.agentKey === agentKey && item.status === 'active') item.status = 'superseded' })
@@ -135,25 +118,56 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
   }
 }
 
+async function loadStoredConfiguration(store: StateStore, scene: AgentConfigurationScene) {
+  if (store.getAgentConfigurationState) {
+    const configuration = await store.getAgentConfigurationState(scene)
+    if (configuration.draft || scene === 'requirement_analysis') return configuration
+    const legacy = await store.getAgentConfigurationState('requirement_analysis')
+    return {
+      draft: legacy.draft,
+      versions: configuration.versions,
+    }
+  }
+  const state = await store.snapshot()
+  return {
+    draft: state.agentConfigurationDrafts.find(item => item.scene === scene)
+      ?? state.agentConfigurationDrafts.find(item => item.scene === 'requirement_analysis')
+      ?? null,
+    versions: state.agentConfigurationVersions.filter(item => item.scene === scene),
+  }
+}
+
+async function loadAllStoredVersions(store: StateStore) {
+  if (store.getAgentConfigurationState) {
+    const configurations = await Promise.all(
+      AGENT_CONFIGURATION_SCENES.map(scene => store.getAgentConfigurationState!(scene)),
+    )
+    return configurations.flatMap(configuration => configuration.versions)
+  }
+  const state = await store.snapshot()
+  const scenes = new Set(AGENT_CONFIGURATION_SCENES)
+  return state.agentConfigurationVersions.filter(item => scenes.has(item.scene))
+}
+
 function agentState(agentKey: AgentConfigurationAgentKey, draft: AgentConfigurationDraft, versions: AgentConfigurationVersion[]) {
   const agentVersions = versions.filter(item => item.agentKey === agentKey).sort((left, right) => right.version - left.version)
+  const catalog = agentCatalogEntry(agentKey)
   return {
-    draft: structuredClone(draft.agents[agentKey]),
-    requiredToolIds: requiredTools(agentKey),
-    requiredSkillKeys: [...REQUIRED_SKILLS[agentKey]],
-    requiredMcpServerKeys: [...REQUIRED_MCPS[agentKey]],
+    draft: structuredClone(required(draft.agents[agentKey], `${catalog.label}草稿不存在`)),
+    requiredToolIds: [...catalog.requiredToolIds],
+    requiredSkillKeys: [...catalog.requiredSkillKeys],
+    requiredMcpServerKeys: [...catalog.requiredMcpServerKeys],
     activeVersion: structuredClone(agentVersions.find(item => item.status === 'active') ?? null),
     versions: agentVersions.map(versionSummary),
   }
 }
 
-function defaultDraft(): AgentConfigurationDraft {
+function defaultDraft(scene: AgentConfigurationScene): AgentConfigurationDraft {
   return {
-    scene: SCENE,
-    agents: {
-      requirementAnalysis: defaultAgentDraft('requirementAnalysis'),
-      testDesign: defaultAgentDraft('testDesign'),
-    },
+    scene,
+    agents: Object.fromEntries(
+      configurationKeysForScene(scene).map(agentKey => [agentKey, defaultAgentDraft(agentKey)]),
+    ),
   }
 }
 
@@ -184,10 +198,11 @@ function definitionDraft(value: AgentDefinitionVersion): AgentDefinitionDraft {
 }
 
 function normalizeAgentDraft(agentKey: AgentConfigurationAgentKey, input: AgentConfigurationInput, state: DatabaseState): Omit<AgentConfigurationAgentDraft, 'revision' | 'updatedAt'> {
-  if (!Number.isInteger(input.revision) || input.revision < 0) throw new Error(`${agentLabel(agentKey)}草稿 revision 无效`)
+  const catalog = agentCatalogEntry(agentKey)
+  if (!Number.isInteger(input.revision) || input.revision < 0) throw new Error(`${catalog.label}草稿 revision 无效`)
   return {
     routing: normalizeRouting(input.routing),
-    definition: normalizeAgent(input.definition, agentLabel(agentKey), requiredTools(agentKey), REQUIRED_SKILLS[agentKey], REQUIRED_MCPS[agentKey], state),
+    definition: normalizeAgent(input.definition, catalog.label, catalog.requiredToolIds, catalog.requiredSkillKeys, catalog.requiredMcpServerKeys, state, catalog.exactCapabilities),
   }
 }
 
@@ -211,15 +226,14 @@ function normalizeRouting(value: AgentRoutingConfiguration): AgentRoutingConfigu
   }
 }
 
-function normalizeAgent(value: AgentDefinitionDraft | undefined, label: string, requiredToolIds: readonly string[], requiredSkillKeys: readonly string[], requiredMcpServerKeys: readonly string[], state: DatabaseState): AgentDefinitionDraft {
+function normalizeAgent(value: AgentDefinitionDraft | undefined, label: string, requiredToolIds: readonly string[], requiredSkillKeys: readonly string[], requiredMcpServerKeys: readonly string[], state: DatabaseState, exactCapabilities = false): AgentDefinitionDraft {
   if (!value) throw new Error(`${label}配置不能为空`)
   const systemPrompt = cleanRequired(value.systemPrompt, `${label}系统 Prompt`, 100_000)
   const taskTemplate = cleanRequired(value.taskTemplate, `${label}任务模板`, 50_000)
   const toolIds = normalizeToolIds(value.toolIds, label, state)
-  const missingRequiredTools = requiredToolIds.filter(toolId => !toolIds.includes(toolId))
-  if (missingRequiredTools.length) throw new Error(`${label}必须保留结果提交工具和受控工具 ${missingRequiredTools.join('、')}`)
   const skillKeys = normalizeSkillKeys(value.skillKeys, requiredSkillKeys, label, state)
   const mcpServerKeys = normalizeMcpServerKeys(value.mcpServerKeys, requiredMcpServerKeys, label, state)
+  validateCatalogCapabilities(label, toolIds, skillKeys, mcpServerKeys, requiredToolIds, requiredSkillKeys, requiredMcpServerKeys, exactCapabilities)
   validateCapabilityDependencies(toolIds, skillKeys, mcpServerKeys, label, state)
   const limits = value.limits
   if (!limits || typeof limits !== 'object') throw new Error(`${label}运行限制不能为空`)
@@ -244,6 +258,17 @@ function normalizeAgent(value: AgentDefinitionDraft | undefined, label: string, 
   }
 }
 
+function validateCatalogCapabilities(label: string, toolIds: string[], skillKeys: string[], mcpServerKeys: string[], requiredToolIds: readonly string[], requiredSkillKeys: readonly string[], requiredMcpServerKeys: readonly string[], exact: boolean) {
+  const missingTools = requiredToolIds.filter(toolId => !toolIds.includes(toolId))
+  if (missingTools.length) throw new Error(`${label}必须保留结果提交工具和受控工具 ${missingTools.join('、')}`)
+  const unexpectedTools = exact ? toolIds.filter(toolId => !requiredToolIds.includes(toolId)) : []
+  const unexpectedSkills = exact ? skillKeys.filter(skillKey => !requiredSkillKeys.includes(skillKey)) : []
+  const unexpectedMcps = exact ? mcpServerKeys.filter(serverKey => !requiredMcpServerKeys.includes(serverKey)) : []
+  if (unexpectedTools.length) throw new Error(`${label}不允许额外工具：${unexpectedTools.join('、')}`)
+  if (unexpectedSkills.length) throw new Error(`${label}不允许额外 Skill：${unexpectedSkills.join('、')}`)
+  if (unexpectedMcps.length) throw new Error(`${label}不允许 MCP：${unexpectedMcps.join('、')}`)
+}
+
 function validateCapabilityDependencies(toolIds: string[], skillKeys: string[], mcpServerKeys: string[], label: string, state: DatabaseState) {
   const selectedTools = new Set(toolIds)
   for (const skill of resolveSkills(skillKeys, state)) {
@@ -263,10 +288,12 @@ function validateCapabilityDependencies(toolIds: string[], skillKeys: string[], 
 }
 
 function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentConfigurationAgentDraft, state: DatabaseState) {
-  normalizeToolIds(draft.definition.toolIds, agentLabel(agentKey), state)
-  normalizeSkillKeys(draft.definition.skillKeys, REQUIRED_SKILLS[agentKey], agentLabel(agentKey), state)
-  normalizeMcpServerKeys(draft.definition.mcpServerKeys, REQUIRED_MCPS[agentKey], agentLabel(agentKey), state)
-  const primary = required(draft.routing.primaryModel, `发布${agentLabel(agentKey)}前必须选择默认模型`)
+  const catalog = agentCatalogEntry(agentKey)
+  const toolIds = normalizeToolIds(draft.definition.toolIds, catalog.label, state)
+  const skillKeys = normalizeSkillKeys(draft.definition.skillKeys, catalog.requiredSkillKeys, catalog.label, state)
+  const mcpServerKeys = normalizeMcpServerKeys(draft.definition.mcpServerKeys, catalog.requiredMcpServerKeys, catalog.label, state)
+  validateCatalogCapabilities(catalog.label, toolIds, skillKeys, mcpServerKeys, catalog.requiredToolIds, catalog.requiredSkillKeys, catalog.requiredMcpServerKeys, catalog.exactCapabilities)
+  const primary = required(draft.routing.primaryModel, `发布${catalog.label}前必须选择默认模型`)
   const references = [primary, ...(draft.routing.fallbackEnabled ? draft.routing.fallbackModels : [])]
   references.forEach((reference, index) => {
     const source = required(state.modelSources.find(item => item.id === reference.sourceId), `${agentLabel(agentKey)}${index ? '回退' : '默认'}模型来源不存在`)
@@ -317,22 +344,28 @@ function versionSummary(value: AgentConfigurationVersion) {
   return { id: value.id, agentKey: value.agentKey, version: value.version, status: value.status, createdAt: value.createdAt, publishedBy: value.publishedBy, contentSha256: value.contentSha256, primaryModel: value.routing.primaryModel }
 }
 
-function normalizeStoredDraft(value: AgentConfigurationDraft | undefined): AgentConfigurationDraft {
-  if (!value) return defaultDraft()
+function normalizeStoredDraft(value: AgentConfigurationDraft | undefined, scene: AgentConfigurationScene): AgentConfigurationDraft {
+  if (!value) return defaultDraft(scene)
   const raw = value as unknown as { agents?: Record<string, AgentConfigurationAgentDraft | undefined> }
   const agents = raw.agents ?? {}
   return {
-    scene: SCENE,
-    agents: {
-      requirementAnalysis: normalizeStoredAgentDraft(agents.requirementAnalysis, 'requirementAnalysis'),
-      testDesign: normalizeStoredAgentDraft(agents.testDesign, 'testDesign'),
-    },
+    scene,
+    agents: Object.fromEntries(
+      configurationKeysForScene(scene).map(agentKey => [
+        agentKey,
+        normalizeStoredAgentDraft(agents[agentKey], agentKey),
+      ]),
+    ),
   }
 }
 
 function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft | undefined, agentKey: AgentConfigurationAgentKey): AgentConfigurationAgentDraft {
+  const catalog = agentCatalogEntry(agentKey)
   const fallback = defaultAgentDraft(agentKey)
   const definition = value?.definition ?? fallback.definition
+  const skillKeys = stringKeys(definition.skillKeys)
+  const mcpServerKeys = stringKeys(definition.mcpServerKeys)
+  const toolIds = activeToolKeys(definition.toolIds)
   return {
     ...fallback,
     ...structuredClone(value),
@@ -340,9 +373,9 @@ function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft | undefin
     definition: {
       ...fallback.definition,
       ...structuredClone(definition),
-      skillKeys: requiredKeys(stringKeys(definition.skillKeys), REQUIRED_SKILLS[agentKey]),
-      mcpServerKeys: requiredKeys(stringKeys(definition.mcpServerKeys), REQUIRED_MCPS[agentKey]),
-      toolIds: requiredKeys(activeToolKeys(definition.toolIds), requiredTools(agentKey)),
+      skillKeys: catalog.exactCapabilities ? [...catalog.requiredSkillKeys] : requiredKeys(skillKeys, catalog.requiredSkillKeys),
+      mcpServerKeys: catalog.exactCapabilities ? [...catalog.requiredMcpServerKeys] : requiredKeys(mcpServerKeys, catalog.requiredMcpServerKeys),
+      toolIds: catalog.exactCapabilities ? [...catalog.requiredToolIds] : requiredKeys(toolIds, catalog.requiredToolIds),
     },
   }
 }
@@ -350,8 +383,11 @@ function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft | undefin
 function expandStoredVersions(values: AgentConfigurationVersion[]): AgentConfigurationVersion[] {
   return values.flatMap(value => {
     const raw = value as unknown as { agentKey?: string; agentDefinition?: AgentDefinitionVersion }
-    if (!raw.agentKey || !raw.agentDefinition || !AGENT_KEYS.includes(raw.agentKey as typeof AGENT_KEYS[number])) return []
-    return [normalizeStoredVersion(value, raw.agentKey as AgentConfigurationAgentKey)]
+    if (!raw.agentKey || !raw.agentDefinition || !AGENT_CONFIGURATION_KEYS.includes(raw.agentKey as AgentConfigurationAgentKey)) return []
+    const agentKey = raw.agentKey as AgentConfigurationAgentKey
+    const catalog = agentCatalogEntry(agentKey)
+    if (value.scene !== catalog.scene || raw.agentDefinition.agentKey !== catalog.definitionKey) return []
+    return [normalizeStoredVersion(value, agentKey)]
   })
 }
 
@@ -360,13 +396,22 @@ function normalizeStoredVersion(value: AgentConfigurationVersion, agentKey: Agen
 }
 
 function migrateState(state: DatabaseState) {
-  const draftIndex = state.agentConfigurationDrafts.findIndex(item => item.scene === SCENE)
-  if (draftIndex >= 0) state.agentConfigurationDrafts[draftIndex] = normalizeStoredDraft(state.agentConfigurationDrafts[draftIndex])
-  const current = state.agentConfigurationVersions.filter(item => item.scene === SCENE)
-  const retained = expandStoredVersions(current)
-  if (retained.length !== current.length) {
-    state.agentConfigurationVersions = [...state.agentConfigurationVersions.filter(item => item.scene !== SCENE), ...retained]
-  }
+  const legacyAgents = Object.assign(
+    {},
+    ...state.agentConfigurationDrafts.map(draft => draft.agents),
+  ) as Partial<Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft>>
+  state.agentConfigurationDrafts = AGENT_CONFIGURATION_SCENES.map(scene => normalizeStoredDraft({
+    scene,
+    agents: Object.fromEntries(
+      configurationKeysForScene(scene).map(agentKey => [agentKey, legacyAgents[agentKey]]),
+    ),
+  }, scene))
+  const scenes = new Set(AGENT_CONFIGURATION_SCENES)
+  const retained = expandStoredVersions(state.agentConfigurationVersions.filter(item => scenes.has(item.scene)))
+  state.agentConfigurationVersions = [
+    ...state.agentConfigurationVersions.filter(item => !scenes.has(item.scene)),
+    ...retained,
+  ]
 }
 
 function defaultDefinition(agentKey: AgentConfigurationAgentKey) {
@@ -374,14 +419,18 @@ function defaultDefinition(agentKey: AgentConfigurationAgentKey) {
 }
 
 function configurationAgentKey(agentKey: AgentConfigurationAgentKey): AgentDefinitionVersion['agentKey'] {
-  return agentKey === 'requirementAnalysis' ? 'requirement-analysis' : 'test-design'
+  return agentCatalogEntry(agentKey).definitionKey
 }
-function configurationScene(agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion['scene'] { return agentKey === 'testDesign' ? 'test_design' : SCENE }
-function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentKey === 'requirement-analysis' ? 'requirementAnalysis' : 'testDesign' }
-function normalizeAgentKey(value: AgentConfigurationAgentKey) { if (!AGENT_KEYS.includes(value)) throw new Error('Agent 标识无效'); return value }
-function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementAnalysis' ? '需求分析 Agent' : '测试设计 Agent' }
-function requiredTool(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementAnalysis' ? REQUIRED_ANALYSIS_TOOL : REQUIRED_TEST_DESIGN_TOOLS[0] }
-function requiredTools(agentKey: AgentConfigurationAgentKey) { return agentKey === 'requirementAnalysis' ? ['skill.activate', requiredTool(agentKey), 'requirement-repair.submit_result', 'requirement-release.submit_result'] : ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', ...REQUIRED_TEST_DESIGN_TOOLS] }
+function configurationKeysForScene(scene: AgentConfigurationScene) { return AGENT_CONFIGURATION_KEYS.filter(agentKey => agentCatalogEntry(agentKey).scene === scene) }
+function configurationScene(agentKey: AgentConfigurationAgentKey): AgentConfigurationVersion['scene'] { return agentCatalogEntry(agentKey).scene }
+function configurationKey(agentKey: AgentDefinitionVersion['agentKey']): AgentConfigurationAgentKey { return agentCatalogEntryByDefinition(agentKey).configurationKey }
+function normalizeAgentKey(value: AgentConfigurationAgentKey) { if (!AGENT_CONFIGURATION_KEYS.includes(value)) throw new Error('Agent 标识无效'); return value }
+function requireSceneAgent(scene: AgentConfigurationScene, value: AgentConfigurationAgentKey) {
+  const agentKey = normalizeAgentKey(value)
+  if (configurationScene(agentKey) !== scene) throw new Error('Agent 不属于当前配置场景')
+  return agentKey
+}
+function agentLabel(agentKey: AgentConfigurationAgentKey) { return agentCatalogEntry(agentKey).label }
 function modelReference(value: AgentModelReference | null | undefined) { if (!value) return null; const sourceId = cleanText(value.sourceId, 200); const modelId = cleanText(value.modelId, 200); return sourceId && modelId ? { sourceId, modelId } : null }
 function uniqueModelReferences(values: AgentModelReference[]) { return [...new Map(values.map(item => [modelKey(item), item])).values()] }
 function modelKey(value: AgentModelReference) { return `${value.sourceId}\u0000${value.modelId}` }
@@ -428,25 +477,8 @@ function resolveTools(toolIds: string[], state: DatabaseState): Array<ToolResour
   return toolIds.map(key => tools.find(tool => tool.key === key && tool.enabled) ?? builtInToolReference(key))
 }
 function builtInToolReference(key: string): ToolResource {
-  const definitions: Record<string, { version: string; risk: ToolResource['risk']; timeoutMs: number }> = {
-    'workspace.read_file': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'workspace.grep_files': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'workspace.find_files': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'workspace.list_directory': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'knowledge.search': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'knowledge.read_chunk': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'skill.activate': { version: '1.0.0', risk: 'read', timeoutMs: 30_000 },
-    'requirement-analysis.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'requirement-repair.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'requirement-release.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'test_design_points.submit_result': { version: '1.0.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'test_design_cases.submit_result': { version: '1.1.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'test_design_repair.submit_result': { version: '1.1.0', risk: 'internal_write', timeoutMs: 30_000 },
-    'skill.execute_script': { version: '1.0.0', risk: 'code_execution', timeoutMs: 120_000 },
-    'skill.http_request': { version: '1.0.0', risk: 'network_read', timeoutMs: 60_000 },
-  }
-  const definition = required(definitions[key], `工具 ${key} 不存在或未启用`)
-  return { id: `builtin_tool_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'tool', key, name: key, description: '', version: definition.version, enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk: definition.risk, timeoutMs: definition.timeoutMs, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
+  if (!defaultBuiltInToolConfigResolver.has(key)) throw new Error(`工具 ${key} 不存在或未启用`)
+  return defaultBuiltInToolConfigResolver.toToolResource(key)
 }
 function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ? value : []).map(item => String(item).trim()).filter(Boolean))] }
 function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key) && !isSkillRuntimeToolId(key)) }

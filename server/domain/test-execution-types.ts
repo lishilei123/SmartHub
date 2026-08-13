@@ -44,6 +44,7 @@ export type FailureDiagnosisCategory =
 export type ExecutionAttemptKind =
   | 'initial'
   | 'same_script_retry'
+  | 'infrastructure_retry'
   | 'post_repair'
   | 'manual_retry'
 
@@ -72,6 +73,13 @@ export interface FrozenExecutionAgentSnapshot {
     sourceId: string
     modelId: string
     providerType: 'openai' | 'anthropic' | 'openai_compatible'
+    modelName: string
+    baseUrlSha256: string
+    contextWindow: number
+    maxOutputTokens: number
+    supportsReasoning: boolean
+    requestTimeoutMs: number
+    retryCount: number
   }
   snapshotSha256: string
 }
@@ -243,6 +251,7 @@ export interface ScriptRevision {
   scriptArtifactId: string
   revision: number
   parentRevisionId?: string
+  cacheSourceRevisionId?: string
   source: ScriptGenerationSource
   repairReason?: string
   generatedBy: FrozenExecutionAgentSnapshot
@@ -341,6 +350,11 @@ export interface ExecutionJob {
   heartbeatAt?: string
   cancelRequestedAt?: string
   error?: string
+  request?: {
+    kind: 'manual_retry'
+    idempotencyKey: string
+    requestedBy: string
+  }
   createdAt: string
   updatedAt: string
 }

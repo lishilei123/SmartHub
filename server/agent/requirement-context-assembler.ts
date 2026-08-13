@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
 import { defaultTokenCodec } from '../application/content.js'
-import type { AgentDefinitionVersion, RequirementInputPlan } from '../domain/agent-types.js'
+import type {
+  AgentDefinitionVersion,
+  RequirementInputPlan,
+  TestExecutionAgentSnapshot,
+} from '../domain/agent-types.js'
 import type { TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
 import type { Asset, AssetVersion } from '../domain/types.js'
 
@@ -97,6 +101,51 @@ export function buildTestDesignDirectoryInputPlan(input: {
       ordinal: 0,
       tokenCount: estimatedInputTokens,
       assetVersionIds: input.workspace.files.flatMap(file => file.assetVersionId ? [file.assetVersionId] : []),
+      chunkIds: [],
+      content,
+    }],
+  }
+}
+
+export function buildTestExecutionDirectoryInputPlan(input: {
+  snapshot: TestExecutionAgentSnapshot
+  definition: AgentDefinitionVersion
+  contextWindow: number
+  maxOutputTokens: number
+}): RequirementInputPlan {
+  const safeInputBudget = safeBudget(input)
+  const workspace = input.snapshot.documentWorkspace
+  const content = [
+    '<<<SMARTHUB_PI_TEST_EXECUTION_WORKSPACE_BEGIN>>>',
+    JSON.stringify({
+      mode: 'agent_directory',
+      cwd: '/',
+      rootLogicalPath: workspace.rootLogicalPath,
+      activeBranchPath: workspace.activeBranchLogicalPath,
+      agentWorkspacePath: workspace.agentLogicalPath,
+      fileCount: input.snapshot.workspaceFiles.length,
+      workspaceSnapshotSha256: sha256(JSON.stringify(input.snapshot.workspaceFiles.map(file => ({
+        logicalPath: file.logicalPath,
+        contentSha256: file.contentSha256,
+      })))),
+      taskSha256: input.snapshot.taskSha256,
+      instructions: '只使用 ls/find/grep/read 读取服务端冻结的当前执行工作区。不得调用 Shell、write、edit、网络、数据库、其他 Agent 或 Runner。',
+    }),
+    '<<<SMARTHUB_PI_TEST_EXECUTION_WORKSPACE_END>>>',
+  ].join('\n')
+  const estimatedInputTokens = defaultTokenCodec.count(content)
+  if (estimatedInputTokens > safeInputBudget) throw new Error(`INPUT_CONTEXT_BUDGET_EXCEEDED: 测试执行工作区清单需要 ${estimatedInputTokens} Token，超过安全输入预算 ${safeInputBudget}`)
+  return {
+    policyVersion: 'test-execution-workspace/v1',
+    mode: 'agent_directory',
+    estimatedInputTokens,
+    safeInputBudget,
+    packageSha256: sha256(content),
+    batches: [{
+      batchId: 'test_execution_workspace_manifest',
+      ordinal: 0,
+      tokenCount: estimatedInputTokens,
+      assetVersionIds: [],
       chunkIds: [],
       content,
     }],

@@ -1,5 +1,9 @@
 import type { TSchema } from 'typebox'
-import type { ReviewRunSnapshot } from './agent-types.js'
+import type {
+  ReviewRunSnapshot,
+  TestDesignAgentSnapshot,
+  TestExecutionAgentSnapshot,
+} from './agent-types.js'
 
 export type ToolRisk = 'read' | 'network_read' | 'code_execution' | 'internal_write' | 'write_reversible' | 'write_high_risk'
 export type ToolRepeatPolicy = 'replay_success_once'
@@ -18,7 +22,10 @@ export interface ToolDescriptor {
 }
 
 export interface ToolExecutionContext {
-  snapshot: ReviewRunSnapshot | import('./agent-types.js').TestDesignAgentSnapshot
+  snapshot:
+    | ReviewRunSnapshot
+    | TestDesignAgentSnapshot
+    | TestExecutionAgentSnapshot
   allowedToolIds: ReadonlySet<string>
 }
 

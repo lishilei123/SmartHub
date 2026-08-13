@@ -17,14 +17,23 @@ test('创建协议删除旧依据模式并保留范围、维度与执行入口',
   assert.throws(() => validateCreateTestDesignInput({ name: '旧协议', objective: '必须删除旧协议', basisMode: 'review_baseline', sourceReviewRunId: 'review-1', knowledgeAugmentation: { mode: 'disabled' } }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_INPUT_INVALID')
 })
 
-test('Stage、Skill 与 Submit Tool 映射固定且配置只包含 TestDesignAgent', () => {
+test('TestDesign Stage 映射固定且五 Agent 定义各自独立', () => {
   assert.deepEqual(TEST_DESIGN_STAGE_BINDINGS, {
     test_point_design: { skills: ['test-design-baseline', 'test-point-design'], submitToolId: 'test_design_points.submit_result', schemaVersion: 'test-point-design/v1' },
     test_case_design: { skills: ['test-case-design'], submitToolId: 'test_design_cases.submit_result', schemaVersion: 'test-case-design/v1' },
     test_design_repair: { skills: ['test-design-repair'], submitToolId: 'test_design_repair.submit_result', schemaVersion: 'test-design-repair/v1' },
   })
-  assert.deepEqual(Object.keys(defaultAgentDefinitionConfigDictionary).filter(key => key.includes('test')), ['test-design'])
+  assert.deepEqual(Object.keys(defaultAgentDefinitionConfigDictionary), [
+    'requirement-analysis',
+    'test-design',
+    'test-script',
+    'failure-analysis',
+    'script-repair',
+  ])
   assert.equal(defaultAgentDefinitionConfigDictionary['test-design'].agentType, 'test_design')
+  assert.equal(defaultAgentDefinitionConfigDictionary['test-script'].agentType, 'test_script')
+  assert.equal(defaultAgentDefinitionConfigDictionary['failure-analysis'].agentType, 'failure_analysis')
+  assert.equal(defaultAgentDefinitionConfigDictionary['script-repair'].agentType, 'script_repair')
   assert.match(defaultAgentDefinitionConfigDictionary['test-design'].systemPrompt, /TestDesignAgent/u)
 })
 

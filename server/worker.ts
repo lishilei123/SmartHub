@@ -1,6 +1,20 @@
 import { hostname } from 'node:os'
-import { requirementAnalysisService, service, stateStore, testDesignService, usingPostgres } from './runtime.js'
+import {
+  requirementAnalysisService,
+  service,
+  stateStore,
+  testDesignService,
+  testExecutionService,
+  testExecutionStore,
+  usingPostgres,
+} from './runtime.js'
 import type { TaskLease } from './infrastructure/store.js'
+import type {
+  ExecutionJobLease,
+  TestExecutionStore,
+} from './infrastructure/test-execution-store.js'
+import type { ExecutionJob } from './domain/test-execution-types.js'
+import type { TestExecutionService } from './application/test-execution-service.js'
 
 const workerId = process.env.SMARTHUB_WORKER_ID ?? `${hostname()}-${process.pid}`
 const leaseMs = positiveIntegerEnv('SMARTHUB_TASK_LEASE_MS', 60_000)
@@ -11,12 +25,152 @@ const activeControllers = new Set<AbortController>()
 let nextQueueIndex = 0
 
 async function processOne() {
-  const queues = [processTestDesignOne, processReviewOne, processKnowledgeOne]
+  const queues = [
+    processTestExecutionOne,
+    processTestDesignOne,
+    processReviewOne,
+    processKnowledgeOne,
+  ]
   const start = nextQueueIndex++ % queues.length
   for (let offset = 0; offset < queues.length; offset += 1) {
     if (await queues[(start + offset) % queues.length]()) return true
   }
   return false
+}
+
+async function processTestExecutionOne() {
+  const executionStore = testExecutionStore
+  const executionService = testExecutionService
+  if (!executionStore || !executionService) return false
+  let job
+  try {
+    job = await executionStore.claimJob(workerId, leaseMs)
+  } catch (error) {
+    console.error(
+      '测试执行任务领取失败：',
+      error instanceof Error ? error.message : error,
+    )
+    return false
+  }
+  if (!job) return false
+  if (!job.runToken || job.fencingToken < 1) {
+    throw new Error('TEST_EXECUTION_JOB_LEASE_INVALID')
+  }
+  await processClaimedTestExecutionJob({
+    job,
+    store: executionStore,
+    service: executionService,
+    workerId,
+    leaseMs,
+    activeControllers,
+  })
+  return true
+}
+
+export async function processClaimedTestExecutionJob(input: {
+  job: ExecutionJob
+  store: TestExecutionStore
+  service: Pick<TestExecutionService, 'processPreparedTask'>
+  workerId: string
+  leaseMs: number
+  activeControllers?: Set<AbortController>
+  scheduleHeartbeat?: (
+    heartbeat: () => Promise<void>,
+    intervalMs: number,
+  ) => { clear(): void }
+}) {
+  if (!input.job.runToken || input.job.fencingToken < 1) {
+    throw new Error('TEST_EXECUTION_JOB_LEASE_INVALID')
+  }
+  const lease: ExecutionJobLease = {
+    workerId: input.workerId,
+    runToken: input.job.runToken,
+    fencingToken: input.job.fencingToken,
+  }
+  const controller = new AbortController()
+  input.activeControllers?.add(controller)
+  const heartbeat = async () => {
+    try {
+      const renewed = await input.store.heartbeatJob(
+        input.job.id,
+        lease,
+        input.leaseMs,
+      )
+      if (!renewed) {
+        controller.abort(
+          new Error('测试执行 Worker 租约已失效或运行已取消'),
+        )
+      }
+    } catch (error) {
+      const cause = error instanceof Error
+        ? error
+        : new Error(String(error))
+      console.error(`测试执行任务 ${input.job.id} 心跳失败：`, cause.message)
+      controller.abort(cause)
+    }
+  }
+  const intervalMs = Math.max(1_000, Math.floor(input.leaseMs / 3))
+  const scheduled = input.scheduleHeartbeat
+    ? input.scheduleHeartbeat(heartbeat, intervalMs)
+    : defaultHeartbeatScheduler(heartbeat, intervalMs)
+  try {
+    await input.service.processPreparedTask(
+      input.job,
+      lease,
+      controller.signal,
+    )
+    const task = await input.store.getTask(input.job.taskId)
+    if (!task) throw new Error('TEST_EXECUTION_TASK_NOT_FOUND')
+    const jobStatus = task.status === 'passed'
+      ? 'succeeded'
+      : task.status === 'cancelled'
+        ? 'cancelled'
+        : 'failed'
+    const finished = await input.store.finishJob(
+      input.job.id,
+      lease,
+      jobStatus,
+      task.error,
+    )
+    if (!finished) {
+      throw new Error('TEST_EXECUTION_JOB_FINALIZATION_REJECTED')
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (controller.signal.aborted) {
+      await input.store.finishJob(
+        input.job.id,
+        lease,
+        'cancelled',
+        message,
+      )
+    } else {
+      const delay = Math.min(
+        60_000,
+        1_000 * 2 ** Math.max(0, input.job.attempts - 1),
+      )
+      const released = await input.store.releaseJob(
+        input.job.id,
+        lease,
+        delay,
+        message,
+      )
+      if (!released) {
+        console.error(`测试执行任务 ${input.job.id} 无法释放或收口：${message}`)
+      }
+    }
+  } finally {
+    scheduled.clear()
+    input.activeControllers?.delete(controller)
+  }
+}
+
+function defaultHeartbeatScheduler(
+  heartbeat: () => Promise<void>,
+  intervalMs: number,
+) {
+  const timer = setInterval(() => { void heartbeat() }, intervalMs)
+  return { clear: () => clearInterval(timer) }
 }
 
 async function processKnowledgeOne() {
@@ -126,7 +280,14 @@ async function retryFailedTask(claimed: { id: string; attempts: number; maxAttem
 }
 
 async function run() {
-  if (!usingPostgres || !stateStore.claimTask || !stateStore.claimReviewJob || !stateStore.claimTestDesignJob) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
+  if (
+    !usingPostgres
+    || !stateStore.claimTask
+    || !stateStore.claimReviewJob
+    || !stateStore.claimTestDesignJob
+    || !testExecutionStore
+    || !testExecutionService
+  ) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
   await service.initialize()
   console.log(`SmartHub Worker ${workerId} 已启动，并发度 ${concurrency}`)
   try {
@@ -144,7 +305,10 @@ async function run() {
       }
     }
   } finally {
-    await stateStore.close?.()
+    await Promise.all([
+      stateStore.close?.(),
+      testExecutionStore.close(),
+    ])
   }
 }
 

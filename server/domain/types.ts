@@ -124,9 +124,14 @@ export interface ToolResource extends AiResourceBase {
 
 export type AiResource = McpServerResource | SkillResource | ToolResource
 
-export type AgentConfigurationScene = 'requirement_analysis' | 'test_design'
+export type AgentConfigurationScene = 'requirement_analysis' | 'test_design' | 'test_execution'
 export type AgentConfigurationStatus = 'active' | 'superseded'
-export type AgentConfigurationAgentKey = 'requirementAnalysis' | 'testDesign'
+export type AgentConfigurationAgentKey =
+  | 'requirementAnalysis'
+  | 'testDesign'
+  | 'testScript'
+  | 'failureAnalysis'
+  | 'scriptRepair'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
   primaryModel: AgentModelReference | null
@@ -154,10 +159,7 @@ export interface AgentConfigurationAgentDraft {
 }
 export interface AgentConfigurationDraft {
   scene: AgentConfigurationScene
-  agents: {
-    requirementAnalysis: AgentConfigurationAgentDraft
-    testDesign: AgentConfigurationAgentDraft
-  }
+  agents: Partial<Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft>>
 }
 export interface AgentConfigurationVersion {
   id: string
@@ -297,12 +299,12 @@ export interface ToolApproval {
   consumedAt?: string
 }
 export interface AgentExecutionRecord {
-  agentKey?: 'requirement-analysis' | 'test-design'
+  agentKey?: 'requirement-analysis' | 'test-design' | 'test-script' | 'failure-analysis' | 'script-repair'
   turns: number
   toolCalls: number
   toolErrors?: number
   framework?: { name: 'pi-agent-core'; version: string }
-  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_point_design' | 'test_case_design' | 'test_design_repair'
+  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
   events: AgentExecutionEvent[]
 }
 export interface ReviewRunStageExecutions {

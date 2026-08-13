@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-analysis' | 'test-design'
-  agentType: 'requirement_analysis' | 'test_design'
+  agentKey: 'requirement-analysis' | 'test-design' | 'test-script' | 'failure-analysis' | 'script-repair'
+  agentType: 'requirement_analysis' | 'test_design' | 'test_script' | 'failure_analysis' | 'script_repair'
   version: string
   status: 'published'
-  modelScene: 'requirement_analysis' | 'test_design'
-  resultSchemaVersion: 'requirement-analysis/v1' | 'test-design/v1'
+  modelScene: 'requirement_analysis' | 'test_design' | 'test_execution'
+  resultSchemaVersion: 'requirement-analysis/v1' | 'test-design/v1' | 'test-script-generation/v1' | 'failure-analysis/v1' | 'script-repair/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -165,13 +165,14 @@ export interface AgentExecutionEvent {
 }
 
 export interface AgentExecutionInput {
-  snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot
+  snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot | TestExecutionAgentSnapshot
   model: AgentModelConnection
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
-    workflowStage: 'analysis' | 'repair' | 'verification' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair'
+    workflowStage: 'analysis' | 'repair' | 'verification' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
     allowedSkillKeys: string[]
+    allowedToolIds: string[]
     submitToolId: string
     schemaVersion: string
     agentLabel: string
@@ -189,6 +190,35 @@ export interface AgentExecutionOutput {
   toolErrors: number
   framework: { name: 'pi-agent-core'; version: string }
   inputDeliveryManifest?: InputDeliveryManifest
+}
+
+export interface TestExecutionAgentWorkspaceFile {
+  logicalPath: string
+  contentSha256: string
+  content: string
+  assetId?: string
+  assetVersionId?: string
+  displayName: string
+}
+
+export interface TestExecutionAgentWorkspaceProjection {
+  runId: string
+  projectId: string
+  projectName: string
+  projectVersionId: string
+  projectVersionName: string
+  knowledgeBaseId: string
+  indexVersionId: string
+  assets: []
+  documentWorkspace: NonNullable<ReviewRunSnapshot['documentWorkspace']>
+  workspaceFiles: TestExecutionAgentWorkspaceFile[]
+}
+
+export interface TestExecutionAgentSnapshot
+  extends TestExecutionAgentWorkspaceProjection {
+  agentDefinition: AgentDefinitionVersion
+  taskSha256: string
+  createdAt: string
 }
 
 export interface TestDesignAgentSnapshot {

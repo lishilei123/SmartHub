@@ -17,6 +17,7 @@ export interface StoredExecutionArtifact extends ExecutionArtifactObject {
 }
 
 export interface ExecutionArtifactStore {
+  readiness(): Promise<{ ready: boolean; reason?: string }>
   put(input: {
     body: AsyncIterable<Uint8Array>
     mimeType: string
@@ -32,6 +33,43 @@ export class LocalExecutionArtifactStore implements ExecutionArtifactStore {
 
   constructor(root: string) {
     this.root = resolve(root)
+  }
+
+  async readiness() {
+    let handle: Awaited<ReturnType<typeof open>> | undefined
+    let probe = ''
+    try {
+      await mkdir(this.root, { recursive: true })
+      const root = await realpath(this.root)
+      const metadata = await lstat(root)
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error('EXECUTION_ARTIFACT_ROOT_INVALID')
+      }
+      const stagingDirectory = resolve(root, '.staging')
+      assertInside(root, stagingDirectory)
+      await mkdir(stagingDirectory, { recursive: true })
+      const stagingMetadata = await lstat(stagingDirectory)
+      if (!stagingMetadata.isDirectory() || stagingMetadata.isSymbolicLink()) {
+        throw new Error('EXECUTION_ARTIFACT_STAGING_INVALID')
+      }
+      probe = resolve(stagingDirectory, `${randomUUID()}.readiness`)
+      assertInside(stagingDirectory, probe)
+      handle = await open(probe, 'wx', 0o600)
+      await handle.write(Buffer.from('smarthub-execution-artifact-readiness', 'utf8'))
+      await handle.sync()
+      await handle.close()
+      handle = undefined
+      await rm(probe, { force: true })
+      return { ready: true }
+    } catch {
+      return {
+        ready: false,
+        reason: 'TEST_EXECUTION_ARTIFACT_STORE_UNAVAILABLE',
+      }
+    } finally {
+      await handle?.close().catch(() => undefined)
+      if (probe) await rm(probe, { force: true }).catch(() => undefined)
+    }
   }
 
   async put(input: {
@@ -75,7 +113,14 @@ export class LocalExecutionArtifactStore implements ExecutionArtifactStore {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
         const existing = await lstat(target)
-        if (!existing.isFile() || existing.isSymbolicLink() || existing.size !== size) throw new Error('EXECUTION_ARTIFACT_IMMUTABILITY_CONFLICT')
+        if (
+          !existing.isFile()
+          || existing.isSymbolicLink()
+          || existing.size !== size
+          || await fileSha256(target) !== sha256
+        ) {
+          throw new Error('EXECUTION_ARTIFACT_IMMUTABILITY_CONFLICT')
+        }
       }
       await unlink(temporary)
       return { storagePath, sha256, size, mimeType }
@@ -87,13 +132,23 @@ export class LocalExecutionArtifactStore implements ExecutionArtifactStore {
 
   async open(storagePath: string) {
     const target = await this.resolveExistingFile(storagePath)
+    const expectedSha256 = storagePath.split('/').at(-1)!
+    if (await fileSha256(target) !== expectedSha256) {
+      throw new Error('EXECUTION_ARTIFACT_IMMUTABILITY_CONFLICT')
+    }
     return createReadStream(target)
   }
 
   async stat(storagePath: string): Promise<ExecutionArtifactObject> {
     const target = await this.resolveExistingFile(storagePath)
-    const value = await stat(target)
-    const sha256 = storagePath.split('/').at(-1)!
+    const [value, sha256] = await Promise.all([
+      stat(target),
+      fileSha256(target),
+    ])
+    const expectedSha256 = storagePath.split('/').at(-1)!
+    if (sha256 !== expectedSha256) {
+      throw new Error('EXECUTION_ARTIFACT_IMMUTABILITY_CONFLICT')
+    }
     return { storagePath, sha256, size: value.size }
   }
 
@@ -119,6 +174,12 @@ export class LocalExecutionArtifactStore implements ExecutionArtifactStore {
 
 export function executionArtifactBody(value: string | Uint8Array) {
   return Readable.from([typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value)])
+}
+
+async function fileSha256(path: string) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(path)) hash.update(chunk)
+  return hash.digest('hex')
 }
 
 function objectPath(sha256: string) {

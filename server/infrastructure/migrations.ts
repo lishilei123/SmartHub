@@ -1034,6 +1034,51 @@ const migrations: Migration[] = [{
   version: 27,
   name: 'test-execution-runs-tasks-and-worker-queue',
   sql: `
+    INSERT INTO smarthub.agent_configuration_drafts (scene, revision, updated_at, data)
+    SELECT
+      'test_design',
+      revision,
+      updated_at,
+      jsonb_build_object(
+        'scene', 'test_design',
+        'agents', jsonb_build_object('testDesign', data->'agents'->'testDesign')
+      )
+    FROM smarthub.agent_configuration_drafts
+    WHERE scene = 'requirement_analysis'
+      AND COALESCE(data->'agents', '{}'::jsonb) ? 'testDesign'
+    ON CONFLICT (scene) DO NOTHING;
+
+    INSERT INTO smarthub.agent_configuration_drafts (scene, revision, updated_at, data)
+    SELECT
+      'test_execution',
+      revision,
+      updated_at,
+      jsonb_build_object(
+        'scene', 'test_execution',
+        'agents', jsonb_build_object(
+          'testScript', data->'agents'->'testScript',
+          'failureAnalysis', data->'agents'->'failureAnalysis',
+          'scriptRepair', data->'agents'->'scriptRepair'
+        )
+      )
+    FROM smarthub.agent_configuration_drafts
+    WHERE scene = 'requirement_analysis'
+      AND COALESCE(data->'agents', '{}'::jsonb) ?| ARRAY['testScript','failureAnalysis','scriptRepair']
+    ON CONFLICT (scene) DO NOTHING;
+
+    UPDATE smarthub.agent_configuration_drafts
+    SET data = jsonb_build_object(
+          'scene', 'requirement_analysis',
+          'agents', jsonb_build_object(
+            'requirementAnalysis', data->'agents'->'requirementAnalysis'
+          )
+        ),
+        updated_at = now()
+    WHERE scene = 'requirement_analysis'
+      AND COALESCE(data->'agents', '{}'::jsonb) ?| ARRAY['testDesign','testScript','failureAnalysis','scriptRepair'];
+
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
     CREATE TABLE IF NOT EXISTS smarthub.test_execution_runs (
       id text PRIMARY KEY,
       project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE RESTRICT,
@@ -1050,6 +1095,8 @@ const migrations: Migration[] = [{
       environment_signature char(64) NOT NULL,
       snapshot_sha256 char(64) NOT NULL,
       aggregate_sha256 char(64) NOT NULL,
+      create_request_sha256 char(64) NOT NULL,
+      create_request_canonical text NOT NULL,
       status text NOT NULL CHECK (status IN ('queued','running','succeeded','failed','partial','cancelled')),
       state_version integer NOT NULL DEFAULT 0 CHECK (state_version >= 0),
       idempotency_key text NOT NULL,
@@ -1061,6 +1108,7 @@ const migrations: Migration[] = [{
       cancel_requested_at timestamptz,
       error text,
       snapshot jsonb NOT NULL,
+      snapshot_canonical text NOT NULL,
       UNIQUE (project_version_id, idempotency_key),
       UNIQUE (id, test_case_library_version_id, test_case_library_version_sha256),
       CHECK ((suite_version_id IS NULL) = (suite_version_sha256 IS NULL)),
@@ -1167,7 +1215,33 @@ const migrations: Migration[] = [{
           OR NEW.snapshot->>'idempotencyKey' IS DISTINCT FROM NEW.idempotency_key
           OR (NEW.snapshot->>'taskCount')::integer IS DISTINCT FROM NEW.task_count
           OR NEW.snapshot->>'createdBy' IS DISTINCT FROM NEW.created_by
-          OR (NEW.snapshot->>'createdAt')::timestamptz IS DISTINCT FROM NEW.created_at THEN
+          OR (NEW.snapshot->>'createdAt')::timestamptz IS DISTINCT FROM NEW.created_at
+          OR NEW.snapshot_canonical::jsonb IS DISTINCT FROM jsonb_build_object(
+            'schemaVersion','test-execution-run-snapshot/v1',
+            'projectId',NEW.snapshot->'projectId',
+            'projectVersionId',NEW.snapshot->'projectVersionId',
+            'handoff',NEW.snapshot->'handoff',
+            'environment',NEW.snapshot->'environment',
+            'runner',NEW.snapshot->'runner',
+            'agents',NEW.snapshot->'agents',
+            'taskCount',NEW.snapshot->'taskCount',
+            'createdBy',NEW.snapshot->'createdBy'
+          )
+          OR encode(digest(
+            convert_to(NEW.snapshot_canonical, 'UTF8'),
+            'sha256'
+          ), 'hex') IS DISTINCT FROM NEW.snapshot_sha256
+          OR NEW.create_request_canonical::jsonb IS DISTINCT FROM jsonb_build_object(
+            'schemaVersion','test-execution-create-request/v1',
+            'projectVersionId',NEW.project_version_id,
+            'handoffId',NEW.handoff_id,
+            'environmentId',NEW.environment_id,
+            'createdBy',NEW.created_by
+          )
+          OR encode(digest(
+            convert_to(NEW.create_request_canonical, 'UTF8'),
+            'sha256'
+          ), 'hex') IS DISTINCT FROM NEW.create_request_sha256 THEN
           RAISE EXCEPTION 'TEST_EXECUTION_RUN_SNAPSHOT_MISMATCH';
         END IF;
         IF NOT EXISTS (
@@ -1211,22 +1285,32 @@ const migrations: Migration[] = [{
         NEW.test_case_library_version_id,NEW.test_case_library_version_sha256,
         NEW.suite_version_id,NEW.suite_version_sha256,NEW.execution_mode,
         NEW.member_snapshot_sha256,NEW.environment_id,NEW.environment_signature,
-        NEW.snapshot_sha256,NEW.aggregate_sha256,NEW.idempotency_key,NEW.task_count,
-        NEW.created_by,NEW.created_at,NEW.snapshot
+        NEW.snapshot_sha256,NEW.aggregate_sha256,NEW.create_request_sha256,
+        NEW.create_request_canonical,NEW.idempotency_key,NEW.task_count,NEW.created_by,NEW.created_at,
+        NEW.snapshot,NEW.snapshot_canonical
       ) IS DISTINCT FROM ROW(
         OLD.project_id,OLD.project_version_id,OLD.handoff_id,OLD.handoff_sha256,
         OLD.test_case_library_version_id,OLD.test_case_library_version_sha256,
         OLD.suite_version_id,OLD.suite_version_sha256,OLD.execution_mode,
         OLD.member_snapshot_sha256,OLD.environment_id,OLD.environment_signature,
-        OLD.snapshot_sha256,OLD.aggregate_sha256,OLD.idempotency_key,OLD.task_count,
-        OLD.created_by,OLD.created_at,OLD.snapshot
+        OLD.snapshot_sha256,OLD.aggregate_sha256,OLD.create_request_sha256,
+        OLD.create_request_canonical,OLD.idempotency_key,OLD.task_count,OLD.created_by,OLD.created_at,
+        OLD.snapshot,OLD.snapshot_canonical
       ) THEN
         RAISE EXCEPTION 'TEST_EXECUTION_RUN_SNAPSHOT_IMMUTABLE';
       END IF;
       IF NEW.state_version <> OLD.state_version + 1 THEN
         RAISE EXCEPTION 'TEST_EXECUTION_RUN_STATE_VERSION_INVALID';
       END IF;
-      IF OLD.status IN ('succeeded','failed','partial','cancelled') THEN
+      IF OLD.status IN ('succeeded','cancelled')
+        OR (OLD.status IN ('failed','partial') AND NOT (
+          NEW.status='running'
+          AND OLD.cancel_requested_at IS NULL
+          AND NEW.cancel_requested_at IS NULL
+          AND NEW.finished_at IS NULL
+          AND NEW.error IS NULL
+          AND NEW.started_at IS NOT DISTINCT FROM OLD.started_at
+        )) THEN
         RAISE EXCEPTION 'TEST_EXECUTION_RUN_TERMINAL_IMMUTABLE';
       END IF;
       IF NEW.status = OLD.status THEN
@@ -1239,6 +1323,7 @@ const migrations: Migration[] = [{
       ELSIF NOT (
         (OLD.status='queued' AND NEW.status='running')
         OR (OLD.status='running' AND NEW.status IN ('succeeded','failed','partial','cancelled'))
+        OR (OLD.status IN ('failed','partial') AND NEW.status='running')
       ) THEN
         RAISE EXCEPTION 'TEST_EXECUTION_RUN_TRANSITION_INVALID';
       END IF;
@@ -1330,7 +1415,7 @@ const migrations: Migration[] = [{
         WHEN 'pending' THEN NEW.status IN ('script_generating','ready','unsupported','blocked','cancelled')
         WHEN 'script_generating' THEN NEW.status IN ('ready','blocked','waiting_manual','cancelled')
         WHEN 'ready' THEN NEW.status IN ('running','blocked','waiting_manual','cancelled')
-        WHEN 'running' THEN NEW.status IN ('passed','retrying','diagnosing','blocked','waiting_manual','cancelled')
+        WHEN 'running' THEN NEW.status IN ('ready','passed','retrying','diagnosing','blocked','waiting_manual','cancelled')
         WHEN 'retrying' THEN NEW.status IN ('running','blocked','cancelled')
         WHEN 'diagnosing' THEN NEW.status IN ('repairing','failed','blocked','waiting_manual','cancelled')
         WHEN 'repairing' THEN NEW.status IN ('ready','blocked','waiting_manual','cancelled')
@@ -1340,6 +1425,14 @@ const migrations: Migration[] = [{
         ELSE false
       END;
       IF NOT allowed THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_INVALID'; END IF;
+      IF OLD.status='running' AND NEW.status='ready' AND NOT EXISTS (
+        SELECT 1 FROM smarthub.test_execution_attempts
+        WHERE task_id=NEW.id
+          AND ordinal=NEW.runner_attempt_count
+          AND status='infrastructure_error'
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_INFRASTRUCTURE_RETRY_REQUIRED';
+      END IF;
       IF NEW.runner_attempt_count < OLD.runner_attempt_count
         OR NEW.runner_attempt_count > OLD.runner_attempt_count + 1
         OR NEW.same_script_retry_count < OLD.same_script_retry_count
@@ -1517,35 +1610,6 @@ const migrations: Migration[] = [{
   version: 28,
   name: 'test-execution-append-only-history-and-artifacts',
   sql: `
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
-    CREATE OR REPLACE FUNCTION smarthub.canonical_jsonb(value jsonb)
-    RETURNS text LANGUAGE plpgsql IMMUTABLE STRICT AS $$
-    DECLARE kind text;
-    DECLARE result text;
-    BEGIN
-      kind := jsonb_typeof(value);
-      IF kind IN ('null','boolean','number','string') THEN
-        RETURN value::text;
-      ELSIF kind='array' THEN
-        SELECT '[' || COALESCE(string_agg(
-          smarthub.canonical_jsonb(item.value),
-          ',' ORDER BY item.ordinality
-        ), '') || ']'
-        INTO result
-        FROM jsonb_array_elements(value) WITH ORDINALITY AS item(value, ordinality);
-        RETURN result;
-      ELSIF kind='object' THEN
-        SELECT '{' || COALESCE(string_agg(
-          to_jsonb(item.key)::text || ':' || smarthub.canonical_jsonb(item.value),
-          ',' ORDER BY item.key COLLATE "C"
-        ), '') || '}'
-        INTO result
-        FROM jsonb_each(value) AS item(key, value);
-        RETURN result;
-      END IF;
-      RAISE EXCEPTION 'TEST_EXECUTION_CANONICAL_JSON_INVALID';
-    END $$;
-
     CREATE TABLE IF NOT EXISTS smarthub.test_execution_artifacts (
       id text PRIMARY KEY,
       run_id text NOT NULL REFERENCES smarthub.test_execution_runs(id) ON DELETE RESTRICT,
@@ -1590,14 +1654,17 @@ const migrations: Migration[] = [{
       script_artifact_id text NOT NULL REFERENCES smarthub.test_execution_script_artifacts(id) ON DELETE RESTRICT,
       revision integer NOT NULL CHECK (revision > 0),
       parent_revision_id text,
+      cache_source_revision_id text,
       generation_source text NOT NULL CHECK (generation_source IN ('agent','cache','repair')),
       repair_reason text,
       generated_by jsonb NOT NULL,
       package_manifest jsonb NOT NULL,
+      package_canonical text NOT NULL,
       package_sha256 char(64) NOT NULL,
       source_artifact_id text NOT NULL,
       content_sha256 char(64) NOT NULL,
       protected_assertion_sha256 char(64) NOT NULL,
+      protected_assertions_canonical text NOT NULL,
       created_at timestamptz NOT NULL,
       UNIQUE (task_id, revision),
       UNIQUE (task_id, content_sha256),
@@ -1605,8 +1672,10 @@ const migrations: Migration[] = [{
       UNIQUE (id, run_id, task_id, package_sha256),
       FOREIGN KEY (task_id, run_id) REFERENCES smarthub.test_execution_tasks(id, run_id) ON DELETE RESTRICT,
       FOREIGN KEY (parent_revision_id, run_id, task_id) REFERENCES smarthub.test_execution_script_revisions(id, run_id, task_id) ON DELETE RESTRICT,
+      FOREIGN KEY (cache_source_revision_id) REFERENCES smarthub.test_execution_script_revisions(id) ON DELETE RESTRICT,
       FOREIGN KEY (source_artifact_id, run_id, task_id, content_sha256) REFERENCES smarthub.test_execution_artifacts(id, run_id, task_id, sha256) ON DELETE RESTRICT,
-      CHECK ((generation_source = 'repair') = (repair_reason IS NOT NULL))
+      CHECK ((generation_source = 'repair') = (repair_reason IS NOT NULL)),
+      CHECK ((generation_source = 'cache') = (cache_source_revision_id IS NOT NULL))
     );
     ALTER TABLE smarthub.test_execution_tasks
       ADD CONSTRAINT test_execution_tasks_current_script_revision_fk
@@ -1615,6 +1684,8 @@ const migrations: Migration[] = [{
     CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_script_revision_insert()
     RETURNS trigger LANGUAGE plpgsql AS $$
     DECLARE previous_revision integer;
+    DECLARE parent_protected_assertion_sha256 char(64);
+    DECLARE parent_assertions jsonb;
     BEGIN
       IF NOT EXISTS (
         SELECT 1
@@ -1654,14 +1725,16 @@ const migrations: Migration[] = [{
           AND NEW.package_manifest #>> '{files,0,contentSha256}'=NEW.content_sha256
           AND (NEW.package_manifest #>> '{files,0,size}')::bigint=source.byte_size
           AND NEW.package_manifest->>'packageSha256'=NEW.package_sha256
+          AND NEW.package_canonical::jsonb=NEW.package_manifest-'packageSha256'
           AND encode(digest(
-            smarthub.canonical_jsonb(NEW.package_manifest-'packageSha256'),
+            convert_to(NEW.package_canonical, 'UTF8'),
             'sha256'
           ), 'hex')=NEW.package_sha256
           AND NEW.package_manifest->>'protectedAssertionSha256'=NEW.protected_assertion_sha256
           AND jsonb_typeof(NEW.package_manifest->'assertions')='array'
+          AND NEW.protected_assertions_canonical::jsonb=NEW.package_manifest->'assertions'
           AND encode(digest(
-            smarthub.canonical_jsonb(NEW.package_manifest->'assertions'),
+            convert_to(NEW.protected_assertions_canonical, 'UTF8'),
             'sha256'
           ), 'hex')=NEW.protected_assertion_sha256
           AND source.artifact_type='script'
@@ -1669,15 +1742,35 @@ const migrations: Migration[] = [{
       ) THEN
         RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_SOURCE_MISMATCH';
       END IF;
+      IF NEW.generation_source='cache' THEN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM smarthub.test_execution_script_revisions source_revision
+          WHERE source_revision.id=NEW.cache_source_revision_id
+            AND source_revision.script_artifact_id=NEW.script_artifact_id
+            AND source_revision.generation_source<>'cache'
+            AND source_revision.content_sha256=NEW.content_sha256
+            AND source_revision.protected_assertion_sha256=NEW.protected_assertion_sha256
+        ) THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_INVALID';
+        END IF;
+      ELSIF NEW.cache_source_revision_id IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_FORBIDDEN';
+      END IF;
       IF NEW.generation_source='repair' THEN
         IF NEW.parent_revision_id IS NULL OR NEW.revision <= 1 THEN
           RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID';
         END IF;
-        SELECT revision INTO previous_revision
+        SELECT revision,protected_assertion_sha256,package_manifest->'assertions'
+          INTO previous_revision,parent_protected_assertion_sha256,parent_assertions
         FROM smarthub.test_execution_script_revisions
         WHERE id=NEW.parent_revision_id AND run_id=NEW.run_id AND task_id=NEW.task_id;
         IF previous_revision IS DISTINCT FROM NEW.revision-1 THEN
           RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID';
+        END IF;
+        IF NEW.protected_assertion_sha256 IS DISTINCT FROM parent_protected_assertion_sha256
+          OR NEW.package_manifest->'assertions' IS DISTINCT FROM parent_assertions THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_ASSERTIONS_CHANGED';
         END IF;
       ELSIF NEW.parent_revision_id IS NOT NULL OR NEW.revision <> 1 THEN
         RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID';
@@ -1694,7 +1787,7 @@ const migrations: Migration[] = [{
       task_id text NOT NULL REFERENCES smarthub.test_execution_tasks(id) ON DELETE RESTRICT,
       ordinal integer NOT NULL CHECK (ordinal > 0),
       invocation_key text NOT NULL UNIQUE,
-      attempt_kind text NOT NULL CHECK (attempt_kind IN ('initial','same_script_retry','post_repair','manual_retry')),
+      attempt_kind text NOT NULL CHECK (attempt_kind IN ('initial','same_script_retry','infrastructure_retry','post_repair','manual_retry')),
       script_revision_id text NOT NULL,
       package_sha256 char(64) NOT NULL,
       status text NOT NULL CHECK (status IN ('running','passed','failed','cancelled','infrastructure_error')),
@@ -1721,6 +1814,11 @@ const migrations: Migration[] = [{
     DECLARE task_attempt_count integer;
     DECLARE revision_source text;
     DECLARE revision_attempt_count integer;
+    DECLARE revision_same_retry_count integer;
+    DECLARE previous_attempt_status text;
+    DECLARE previous_attempt_kind text;
+    DECLARE previous_script_revision_id text;
+    DECLARE previous_package_sha256 char(64);
     BEGIN
       IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'TEST_EXECUTION_HISTORY_IMMUTABLE';
@@ -1746,9 +1844,19 @@ const migrations: Migration[] = [{
         SELECT generation_source INTO revision_source
         FROM smarthub.test_execution_script_revisions
         WHERE id=NEW.script_revision_id AND task_id=NEW.task_id;
-        SELECT count(*) INTO revision_attempt_count
+        SELECT count(*),
+               count(*) FILTER (
+                 WHERE attempt_kind='same_script_retry'
+                   AND status IN ('passed','failed')
+               )
+          INTO revision_attempt_count,revision_same_retry_count
         FROM smarthub.test_execution_attempts
         WHERE task_id=NEW.task_id AND script_revision_id=NEW.script_revision_id;
+        SELECT status,attempt_kind,script_revision_id,package_sha256
+          INTO previous_attempt_status,previous_attempt_kind,
+               previous_script_revision_id,previous_package_sha256
+        FROM smarthub.test_execution_attempts
+        WHERE task_id=NEW.task_id AND ordinal=task_attempt_count;
         IF NEW.status <> 'running' OR NEW.finished_at IS NOT NULL
           OR NEW.duration_ms IS NOT NULL OR NEW.exit_code IS NOT NULL
           OR NEW.summary IS NOT NULL OR NEW.error IS NOT NULL
@@ -1758,10 +1866,31 @@ const migrations: Migration[] = [{
           OR (task_status='retrying' AND NEW.attempt_kind <> 'same_script_retry')
           OR (task_status<>'retrying' AND NEW.attempt_kind='same_script_retry')
           OR (NEW.attempt_kind='initial' AND (task_attempt_count<>0 OR revision_attempt_count<>0 OR revision_source='repair'))
-          OR (NEW.attempt_kind='same_script_retry' AND revision_attempt_count=0)
+          OR (
+            NEW.attempt_kind='same_script_retry'
+            AND (
+              revision_same_retry_count<>0
+              OR previous_attempt_status NOT IN ('failed','infrastructure_error')
+              OR (
+                previous_attempt_status='infrastructure_error'
+                AND previous_attempt_kind<>'same_script_retry'
+              )
+              OR previous_script_revision_id IS DISTINCT FROM NEW.script_revision_id
+              OR previous_package_sha256 IS DISTINCT FROM NEW.package_sha256
+            )
+          )
+          OR (
+            NEW.attempt_kind='infrastructure_retry'
+            AND (
+              task_status<>'ready'
+              OR previous_attempt_status<>'infrastructure_error'
+              OR previous_script_revision_id IS DISTINCT FROM NEW.script_revision_id
+              OR previous_package_sha256 IS DISTINCT FROM NEW.package_sha256
+            )
+          )
           OR (NEW.attempt_kind='post_repair' AND (revision_source<>'repair' OR revision_attempt_count<>0))
           OR (NEW.attempt_kind='manual_retry' AND (task_attempt_count=0 OR revision_attempt_count=0))
-          OR (NEW.attempt_kind NOT IN ('initial','post_repair','manual_retry','same_script_retry')) THEN
+          OR (NEW.attempt_kind NOT IN ('initial','post_repair','manual_retry','same_script_retry','infrastructure_retry')) THEN
           RAISE EXCEPTION 'TEST_EXECUTION_ATTEMPT_INITIAL_STATE_INVALID';
         END IF;
         RETURN NEW;
@@ -1918,6 +2047,36 @@ const migrations: Migration[] = [{
       FOREIGN KEY (attempt_id, run_id, task_id, script_revision_id) REFERENCES smarthub.test_execution_attempts(id, run_id, task_id, script_revision_id) ON DELETE RESTRICT
     );
     CREATE INDEX IF NOT EXISTS test_execution_diagnosis_attempts_attempt_idx ON smarthub.test_execution_diagnosis_attempts (attempt_id, diagnosis_id);
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_diagnosis_attempt_terminal()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_attempt_id text;
+    BEGIN
+      target_attempt_id := CASE
+        WHEN TG_TABLE_NAME='test_execution_attempts'
+          THEN CASE WHEN TG_OP='DELETE' THEN OLD.id ELSE NEW.id END
+        ELSE CASE WHEN TG_OP='DELETE' THEN OLD.attempt_id ELSE NEW.attempt_id END
+      END;
+      IF EXISTS (
+        SELECT 1
+        FROM smarthub.test_execution_diagnosis_attempts diagnosis_attempt
+        JOIN smarthub.test_execution_attempts attempt
+          ON attempt.id=diagnosis_attempt.attempt_id
+        WHERE diagnosis_attempt.attempt_id=target_attempt_id
+          AND attempt.status='running'
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_DIAGNOSIS_ATTEMPT_NOT_TERMINAL';
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE CONSTRAINT TRIGGER test_execution_diagnosis_attempts_terminal_ck
+      AFTER INSERT OR UPDATE ON smarthub.test_execution_diagnosis_attempts
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+      EXECUTE FUNCTION smarthub.validate_test_execution_diagnosis_attempt_terminal();
+    CREATE CONSTRAINT TRIGGER test_execution_attempts_diagnosis_terminal_ck
+      AFTER INSERT OR UPDATE ON smarthub.test_execution_attempts
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+      EXECUTE FUNCTION smarthub.validate_test_execution_diagnosis_attempt_terminal();
 
     CREATE TABLE IF NOT EXISTS smarthub.test_execution_diagnosis_evidence (
       diagnosis_id text NOT NULL,

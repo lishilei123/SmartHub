@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import { canonicalSha256 } from '../application/canonical-json.js'
+import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import {
   aggregateExecutionRunStatus,
   assertRunTransition,
   assertTaskTransition,
+  executionCreateRequestCanonical,
+  executionCreateRequestSha256,
   freezeExecutionTaskInput,
   scriptCacheKey,
   unsupportedExecutionMethodReason,
@@ -83,12 +85,24 @@ export interface TestExecutionTransaction {
   recomputeRun(runId: string): Promise<ExecutionRun>
 }
 
+export interface ExecutionTaskDetailSnapshot {
+  run: ExecutionRun
+  task: ExecutionTask
+  attempts: ExecutionAttempt[]
+  diagnoses: FailureDiagnosis[]
+  scriptRevisions: ScriptRevision[]
+  artifacts: ExecutionArtifact[]
+}
+
 export interface TestExecutionStore {
+  readiness(): Promise<{ ready: boolean; reason?: string }>
   createAggregate(input: CreateExecutionAggregateInput): Promise<ExecutionRun>
   getRun(runId: string): Promise<ExecutionRun | null>
   getRunByIdempotencyKey(projectVersionId: string, idempotencyKey: string): Promise<ExecutionRun | null>
+  listRuns(projectVersionId: string, limit: number): Promise<ExecutionRun[]>
   listTasks(runId: string): Promise<ExecutionTask[]>
   getTask(taskId: string): Promise<ExecutionTask | null>
+  getTaskDetail(taskId: string): Promise<ExecutionTaskDetailSnapshot | null>
   listAttempts(taskId: string): Promise<ExecutionAttempt[]>
   listDiagnoses(taskId: string): Promise<FailureDiagnosis[]>
   getScriptArtifactByCacheKey(cacheKey: string): Promise<ScriptArtifact | null>
@@ -102,6 +116,13 @@ export interface TestExecutionStore {
   releaseJob(jobId: string, lease: ExecutionJobLease, retryDelayMs: number, error: string): Promise<boolean>
   finishJob(jobId: string, lease: ExecutionJobLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
   cancelRun(runId: string, expectedStateVersion: number, requestedAt: string): Promise<ExecutionRun>
+  retryTask(input: {
+    runId: string
+    taskId: string
+    expectedRunStateVersion: number
+    expectedTaskStateVersion: number
+    job: ExecutionJob
+  }): Promise<ExecutionTask>
   transactionWithLease<T>(jobId: string, lease: ExecutionJobLease, operation: (transaction: TestExecutionTransaction) => Promise<T>, options?: { allowCancellation?: boolean }): Promise<T | null>
   close(): Promise<void>
 }
@@ -117,22 +138,40 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     await this.pool.end()
   }
 
+  async readiness() {
+    try {
+      await this.pool.query('SELECT 1 FROM smarthub.test_execution_runs LIMIT 0')
+      return { ready: true }
+    } catch {
+      return {
+        ready: false,
+        reason: 'TEST_EXECUTION_POSTGRES_UNAVAILABLE',
+      }
+    }
+  }
+
   async createAggregate(input: CreateExecutionAggregateInput): Promise<ExecutionRun> {
     validateAggregate(input)
     const aggregateSha256 = executionAggregateSha256(input)
+    const createRequestSha256 = executionCreateRequestSha256(input.run)
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
       const existing = await getAggregateByIdempotencyKey(client, input.run.projectVersionId, input.run.idempotencyKey)
       if (existing) {
-        if (existing.aggregateSha256 !== aggregateSha256) {
+        if (existing.createRequestSha256 !== createRequestSha256) {
           throw new Error('TEST_EXECUTION_IDEMPOTENCY_CONFLICT')
         }
         await client.query('COMMIT')
         return existing.run
       }
       await validatePersistedExecutionSources(client, input)
-      await insertRun(client, input.run, aggregateSha256)
+      await insertRun(
+        client,
+        input.run,
+        aggregateSha256,
+        createRequestSha256,
+      )
       for (const task of input.tasks) await insertTask(client, task)
       for (const job of input.jobs) await insertJob(client, job)
       const created = input.jobs.length
@@ -144,8 +183,13 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     } catch (error) {
       await client.query('ROLLBACK')
       if ((error as { code?: string }).code === '23505') {
-        const existing = await getAggregateByIdempotencyKey(this.pool, input.run.projectVersionId, input.run.idempotencyKey)
-        if (existing?.aggregateSha256 === aggregateSha256) return existing.run
+        const existing = await getAggregateByIdempotencyKey(client, input.run.projectVersionId, input.run.idempotencyKey)
+        if (existing?.createRequestSha256 === createRequestSha256) {
+          return existing.run
+        }
+        if (existing) {
+          throw new Error('TEST_EXECUTION_IDEMPOTENCY_CONFLICT')
+        }
       }
       throw error
     } finally {
@@ -161,6 +205,27 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     return getRunByIdempotencyKey(this.pool, projectVersionId, idempotencyKey)
   }
 
+  async listRuns(projectVersionId: string, limit: number) {
+    const boundedLimit = Math.min(200, Math.max(1, limit))
+    const result = await this.pool.query<{
+      snapshot: ExecutionRun
+      status: ExecutionRunStatus
+      state_version: number
+      started_at: Date | string | null
+      finished_at: Date | string | null
+      cancel_requested_at: Date | string | null
+      error: string | null
+    }>(`
+      SELECT snapshot,status,state_version,started_at,finished_at,
+             cancel_requested_at,error
+      FROM smarthub.test_execution_runs
+      WHERE project_version_id=$1
+      ORDER BY created_at DESC,id DESC
+      LIMIT $2
+    `, [projectVersionId, boundedLimit])
+    return result.rows.map(runFromRow)
+  }
+
   async listTasks(runId: string) {
     const result = await this.pool.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
       SELECT frozen_input,status,state_version,runner_attempt_count,same_script_retry_count,repair_count,current_script_revision_id,unsupported_reason,error,created_at,updated_at,finished_at
@@ -170,11 +235,46 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
   }
 
   async getTask(taskId: string) {
-    const result = await this.pool.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
-      SELECT frozen_input,status,state_version,runner_attempt_count,same_script_retry_count,repair_count,current_script_revision_id,unsupported_reason,error,created_at,updated_at,finished_at
-      FROM smarthub.test_execution_tasks WHERE id=$1
-    `, [taskId])
-    return result.rows[0] ? taskFromRow(result.rows[0]) : null
+    return getTaskWithQueryable(this.pool, taskId)
+  }
+
+  async getTaskDetail(taskId: string): Promise<ExecutionTaskDetailSnapshot | null> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const task = await getTaskWithQueryable(client, taskId)
+      if (!task) {
+        await client.query('COMMIT')
+        return null
+      }
+      const run = await getRun(client, task.runId)
+      if (!run) throw new Error('TEST_EXECUTION_RUN_NOT_FOUND')
+      const [attempts, diagnoses, revisions, artifacts] = await Promise.all([
+        client.query<AttemptRow>('SELECT * FROM smarthub.test_execution_attempts WHERE task_id=$1 ORDER BY ordinal', [task.id]),
+        client.query<DiagnosisRow>(`${diagnosisSelectSql}
+          WHERE diagnosis.task_id=$1 ORDER BY diagnosis.created_at,diagnosis.id
+        `, [task.id]),
+        client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE task_id=$1 ORDER BY revision,id', [task.id]),
+        client.query<ArtifactRow>(`
+          SELECT * FROM smarthub.test_execution_artifacts
+          WHERE task_id=$1 ORDER BY created_at,id
+        `, [task.id]),
+      ])
+      await client.query('COMMIT')
+      return {
+        run,
+        task,
+        attempts: attempts.rows.map(attemptFromRow),
+        diagnoses: diagnoses.rows.map(diagnosisFromRow),
+        scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
+        artifacts: artifacts.rows.map(artifactFromRow),
+      }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async listAttempts(taskId: string) {
@@ -202,7 +302,8 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
   async getCacheSourceRevision(scriptArtifactId: string) {
     const result = await this.pool.query<ScriptRevisionRow>(`
       SELECT * FROM smarthub.test_execution_script_revisions
-      WHERE script_artifact_id=$1 ORDER BY created_at,id LIMIT 1
+      WHERE script_artifact_id=$1 AND generation_source<>'cache'
+      ORDER BY created_at,id LIMIT 1
     `, [scriptArtifactId])
     return result.rows[0] ? scriptRevisionFromRow(result.rows[0]) : null
   }
@@ -297,11 +398,6 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       SET lease_expires_at=clock_timestamp()+($5::text||' milliseconds')::interval,heartbeat_at=clock_timestamp(),updated_at=clock_timestamp()
       WHERE id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND fencing_token=$4
         AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NULL
-        AND EXISTS (
-          SELECT 1 FROM smarthub.test_execution_tasks task
-          WHERE task.id=test_execution_jobs.task_id
-            AND task.status NOT IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled')
-        )
     `, [jobId, lease.workerId, lease.runToken, lease.fencingToken, Math.max(1_000, leaseMs)])
     return result.rowCount === 1
   }
@@ -550,6 +646,134 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     }
   }
 
+  async retryTask(input: {
+    runId: string
+    taskId: string
+    expectedRunStateVersion: number
+    expectedTaskStateVersion: number
+    job: ExecutionJob
+  }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const currentRun = await getRunForUpdate(client, input.runId)
+      if (!currentRun) throw new Error('TEST_EXECUTION_RUN_NOT_FOUND')
+      const currentTaskResult = await client.query<{
+        frozen_input: ExecutionTask['input']
+        status: ExecutionTaskStatus
+        state_version: number
+        runner_attempt_count: number
+        same_script_retry_count: number
+        repair_count: number
+        current_script_revision_id: string | null
+        unsupported_reason: string | null
+        error: string | null
+        created_at: Date | string
+        updated_at: Date | string
+        finished_at: Date | string | null
+      }>(`
+        SELECT frozen_input,status,state_version,runner_attempt_count,
+               same_script_retry_count,repair_count,current_script_revision_id,
+               unsupported_reason,error,created_at,updated_at,finished_at
+        FROM smarthub.test_execution_tasks
+        WHERE id=$1 AND run_id=$2
+        FOR UPDATE
+      `, [input.taskId, input.runId])
+      const currentTask = currentTaskResult.rows[0]
+        ? taskFromRow(currentTaskResult.rows[0])
+        : null
+      if (!currentTask) throw new Error('TEST_EXECUTION_TASK_NOT_FOUND')
+
+      const existingJob = await client.query<JobRow & { data: ExecutionJob }>(`
+        SELECT *,data
+        FROM smarthub.test_execution_jobs
+        WHERE id=$1
+      `, [input.job.id])
+      if (existingJob.rows[0]) {
+        const existing = jobFromRow(existingJob.rows[0])
+        if (
+          existing.runId !== input.runId
+          || existing.taskId !== input.taskId
+          || canonicalSha256(existing.request) !== canonicalSha256(input.job.request)
+        ) {
+          throw new Error('TEST_EXECUTION_IDEMPOTENCY_CONFLICT')
+        }
+        await client.query('COMMIT')
+        return currentTask
+      }
+
+      if (currentRun.stateVersion !== input.expectedRunStateVersion) {
+        throw new Error('TEST_EXECUTION_RUN_STATE_VERSION_CONFLICT')
+      }
+      if (currentTask.stateVersion !== input.expectedTaskStateVersion) {
+        throw new Error('TEST_EXECUTION_TASK_STATE_VERSION_CONFLICT')
+      }
+      if (!['failed', 'partial'].includes(currentRun.status)) {
+        throw new Error('TEST_EXECUTION_RUN_NOT_RETRYABLE')
+      }
+      if (!['failed', 'blocked', 'waiting_manual'].includes(currentTask.status)) {
+        throw new Error('TEST_EXECUTION_TASK_NOT_RETRYABLE')
+      }
+      if (!currentTask.currentScriptRevisionId) {
+        throw new Error('TEST_EXECUTION_CURRENT_SCRIPT_REVISION_REQUIRED')
+      }
+      if (input.job.runId !== input.runId || input.job.taskId !== input.taskId) {
+        throw new Error('TEST_EXECUTION_JOB_TASK_MISMATCH')
+      }
+      if (
+        input.job.status !== 'queued'
+        || input.job.attempts !== 0
+        || input.job.fencingToken !== 0
+        || input.job.maxAttempts < 1
+        || !input.job.request
+        || input.job.request.kind !== 'manual_retry'
+      ) {
+        throw new Error('TEST_EXECUTION_MANUAL_RETRY_JOB_INVALID')
+      }
+
+      assertTaskTransition(currentTask.status, 'ready')
+      assertRunTransition(currentRun.status, 'running')
+      const updated = await transitionTask(client, {
+        taskId: currentTask.id,
+        expectedStatus: currentTask.status,
+        expectedStateVersion: currentTask.stateVersion,
+        status: 'ready',
+      })
+      await client.query(`
+        UPDATE smarthub.test_execution_runs
+        SET status='running',state_version=state_version+1,
+            finished_at=NULL,error=NULL
+        WHERE id=$1 AND status=$2 AND state_version=$3
+      `, [input.runId, currentRun.status, currentRun.stateVersion])
+      await insertJob(client, input.job)
+      await notifyExecutionTask(client)
+      await client.query('COMMIT')
+      return updated
+    } catch (error) {
+      await client.query('ROLLBACK')
+      if ((error as { code?: string }).code === '23505') {
+        const existingJob = await client.query<JobRow & { data: ExecutionJob }>(`
+          SELECT *,data FROM smarthub.test_execution_jobs WHERE id=$1
+        `, [input.job.id])
+        if (existingJob.rows[0]) {
+          const existing = jobFromRow(existingJob.rows[0])
+          if (
+            existing.runId === input.runId
+            && existing.taskId === input.taskId
+            && canonicalSha256(existing.request) === canonicalSha256(input.job.request)
+          ) {
+            const replay = await getTaskWithQueryable(client, input.taskId)
+            if (replay) return replay
+          }
+          throw new Error('TEST_EXECUTION_IDEMPOTENCY_CONFLICT')
+        }
+      }
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async transactionWithLease<T>(jobId: string, lease: ExecutionJobLease, operation: (transaction: TestExecutionTransaction) => Promise<T>, options: { allowCancellation?: boolean } = {}): Promise<T | null> {
     const client = await this.pool.connect()
     try {
@@ -713,10 +937,10 @@ async function reconcileExpiredExhaustedJob(client: PoolClient): Promise<string 
   }
 
   if (!terminal && !cancelled && !exhausted && runningAttempt.rows[0]) {
-    assertTaskTransition(task.status, 'retrying')
+    assertTaskTransition(task.status, 'ready')
     const updated = await client.query(`
       UPDATE smarthub.test_execution_tasks
-      SET status='retrying',state_version=state_version+1,updated_at=clock_timestamp(),finished_at=NULL,error=$2
+      SET status='ready',state_version=state_version+1,updated_at=clock_timestamp(),finished_at=NULL,error=$2
       WHERE id=$1 AND state_version=$3
     `, [job.task_id, attemptError, Number(task.state_version)])
     if (updated.rowCount !== 1) throw new Error('TEST_EXECUTION_TASK_STATE_CONFLICT')
@@ -839,6 +1063,29 @@ async function getRun(queryable: Pool | PoolClient, runId: string) {
   return result.rows[0] ? runFromRow(result.rows[0]) : null
 }
 
+async function getTaskWithQueryable(queryable: Pool | PoolClient, taskId: string) {
+  const result = await queryable.query<{
+    frozen_input: ExecutionTask['input']
+    status: ExecutionTaskStatus
+    state_version: number
+    runner_attempt_count: number
+    same_script_retry_count: number
+    repair_count: number
+    current_script_revision_id: string | null
+    unsupported_reason: string | null
+    error: string | null
+    created_at: Date | string
+    updated_at: Date | string
+    finished_at: Date | string | null
+  }>(`
+    SELECT frozen_input,status,state_version,runner_attempt_count,
+           same_script_retry_count,repair_count,current_script_revision_id,
+           unsupported_reason,error,created_at,updated_at,finished_at
+    FROM smarthub.test_execution_tasks WHERE id=$1
+  `, [taskId])
+  return result.rows[0] ? taskFromRow(result.rows[0]) : null
+}
+
 async function getRunForUpdate(client: PoolClient, runId: string) {
   const result = await client.query<{ snapshot: ExecutionRun; status: ExecutionRunStatus; state_version: number; started_at: Date | string | null; finished_at: Date | string | null; cancel_requested_at: Date | string | null; error: string | null }>('SELECT snapshot,status,state_version,started_at,finished_at,cancel_requested_at,error FROM smarthub.test_execution_runs WHERE id=$1 FOR UPDATE', [runId])
   return result.rows[0] ? runFromRow(result.rows[0]) : null
@@ -853,6 +1100,7 @@ async function getAggregateByIdempotencyKey(queryable: Pool | PoolClient, projec
   const result = await queryable.query<{
     snapshot: ExecutionRun
     aggregate_sha256: string
+    create_request_sha256: string
     status: ExecutionRunStatus
     state_version: number
     started_at: Date | string | null
@@ -860,12 +1108,16 @@ async function getAggregateByIdempotencyKey(queryable: Pool | PoolClient, projec
     cancel_requested_at: Date | string | null
     error: string | null
   }>(`
-    SELECT snapshot,aggregate_sha256,status,state_version,started_at,finished_at,cancel_requested_at,error
+    SELECT snapshot,aggregate_sha256,create_request_sha256,status,state_version,started_at,finished_at,cancel_requested_at,error
     FROM smarthub.test_execution_runs
     WHERE project_version_id=$1 AND idempotency_key=$2
   `, [projectVersionId, idempotencyKey])
   return result.rows[0]
-    ? { run: runFromRow(result.rows[0]), aggregateSha256: result.rows[0].aggregate_sha256 }
+    ? {
+        run: runFromRow(result.rows[0]),
+        aggregateSha256: result.rows[0].aggregate_sha256,
+        createRequestSha256: result.rows[0].create_request_sha256,
+      }
     : null
 }
 
@@ -1197,14 +1449,23 @@ function caseRevisionKey(caseId: string, revision: number) {
   return `${caseId}\u0000${revision}`
 }
 
-async function insertRun(client: PoolClient, run: ExecutionRun, aggregateSha256: string) {
+async function insertRun(
+  client: PoolClient,
+  run: ExecutionRun,
+  aggregateSha256: string,
+  createRequestSha256: string,
+) {
+  const snapshotBase = executionRunSnapshotBase(run)
+  const snapshotCanonical = canonicalJson(snapshotBase)
+  const createRequestCanonical =
+    executionCreateRequestCanonical(run)
   await client.query(`
     INSERT INTO smarthub.test_execution_runs (
       id,project_id,project_version_id,handoff_id,handoff_sha256,test_case_library_version_id,test_case_library_version_sha256,
-      suite_version_id,suite_version_sha256,execution_mode,member_snapshot_sha256,environment_id,environment_signature,snapshot_sha256,aggregate_sha256,
-      status,state_version,idempotency_key,task_count,created_by,created_at,started_at,finished_at,cancel_requested_at,error,snapshot
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb)
-  `, [run.id, run.projectId, run.projectVersionId, run.handoff.handoffId, run.handoff.handoffSha256, run.handoff.testCaseLibraryVersionId, run.handoff.testCaseLibraryVersionSha256, run.handoff.suiteVersionId ?? null, run.handoff.suiteVersionSha256 ?? null, run.handoff.mode, run.handoff.memberSnapshotSha256, run.environment.environmentId, run.environment.signature, executionRunSnapshotSha256(run), aggregateSha256, run.status, run.stateVersion, run.idempotencyKey, run.taskCount, run.createdBy, run.createdAt, run.startedAt ?? null, run.finishedAt ?? null, run.cancelRequestedAt ?? null, run.error ?? null, JSON.stringify(run)])
+      suite_version_id,suite_version_sha256,execution_mode,member_snapshot_sha256,environment_id,environment_signature,snapshot_sha256,aggregate_sha256,create_request_sha256,create_request_canonical,
+      status,state_version,idempotency_key,task_count,created_by,created_at,started_at,finished_at,cancel_requested_at,error,snapshot,snapshot_canonical
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28::jsonb,$29)
+  `, [run.id, run.projectId, run.projectVersionId, run.handoff.handoffId, run.handoff.handoffSha256, run.handoff.testCaseLibraryVersionId, run.handoff.testCaseLibraryVersionSha256, run.handoff.suiteVersionId ?? null, run.handoff.suiteVersionSha256 ?? null, run.handoff.mode, run.handoff.memberSnapshotSha256, run.environment.environmentId, run.environment.signature, canonicalSha256(snapshotBase), aggregateSha256, createRequestSha256, createRequestCanonical, run.status, run.stateVersion, run.idempotencyKey, run.taskCount, run.createdBy, run.createdAt, run.startedAt ?? null, run.finishedAt ?? null, run.cancelRequestedAt ?? null, run.error ?? null, JSON.stringify(run), snapshotCanonical])
 }
 
 async function insertTask(client: PoolClient, task: ExecutionTask) {
@@ -1265,12 +1526,13 @@ async function insertScriptArtifact(client: PoolClient, artifact: ScriptArtifact
 
 async function insertScriptRevision(client: PoolClient, revision: ScriptRevision) {
   await validateScriptRevisionSources(client, revision)
+  const { packageSha256, ...packageBase } = revision.package
   const inserted = await client.query<ScriptRevisionRow>(`
-    INSERT INTO smarthub.test_execution_script_revisions (id,run_id,task_id,script_artifact_id,revision,parent_revision_id,generation_source,repair_reason,generated_by,package_manifest,package_sha256,source_artifact_id,content_sha256,protected_assertion_sha256,created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15)
+    INSERT INTO smarthub.test_execution_script_revisions (id,run_id,task_id,script_artifact_id,revision,parent_revision_id,cache_source_revision_id,generation_source,repair_reason,generated_by,package_manifest,package_canonical,package_sha256,source_artifact_id,content_sha256,protected_assertion_sha256,protected_assertions_canonical,created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,$15,$16,$17,$18)
     ON CONFLICT DO NOTHING
     RETURNING *
-  `, [revision.id, revision.runId, revision.taskId, revision.scriptArtifactId, revision.revision, revision.parentRevisionId ?? null, revision.source, revision.repairReason ?? null, JSON.stringify(revision.generatedBy), JSON.stringify(revision.package), revision.package.packageSha256, revision.sourceArtifactId, revision.contentSha256, revision.protectedAssertionSha256, revision.createdAt])
+  `, [revision.id, revision.runId, revision.taskId, revision.scriptArtifactId, revision.revision, revision.parentRevisionId ?? null, revision.cacheSourceRevisionId ?? null, revision.source, revision.repairReason ?? null, JSON.stringify(revision.generatedBy), JSON.stringify(revision.package), canonicalJson(packageBase), packageSha256, revision.sourceArtifactId, revision.contentSha256, revision.protectedAssertionSha256, canonicalJson(revision.package.assertions), revision.createdAt])
   if (inserted.rows[0]) return
   const conflicts = await client.query<ScriptRevisionRow>(`
     SELECT * FROM smarthub.test_execution_script_revisions
@@ -1346,17 +1608,59 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
     throw new Error('TEST_EXECUTION_SCRIPT_REVISION_SOURCE_ARTIFACT_INVALID')
   }
 
+  if (revision.source === 'cache') {
+    if (!revision.cacheSourceRevisionId) {
+      throw new Error('TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_REQUIRED')
+    }
+    const sourceRevision = await client.query<{
+      script_artifact_id: string
+      generation_source: ScriptRevision['source']
+      content_sha256: string
+      protected_assertion_sha256: string
+    }>(`
+      SELECT script_artifact_id,generation_source,content_sha256,
+             protected_assertion_sha256
+      FROM smarthub.test_execution_script_revisions
+      WHERE id=$1 FOR SHARE
+    `, [revision.cacheSourceRevisionId])
+    const sourceRevisionRow = sourceRevision.rows[0]
+    if (
+      !sourceRevisionRow
+      || sourceRevisionRow.generation_source === 'cache'
+      || sourceRevisionRow.script_artifact_id !== revision.scriptArtifactId
+      || sourceRevisionRow.content_sha256 !== revision.contentSha256
+      || sourceRevisionRow.protected_assertion_sha256
+        !== revision.protectedAssertionSha256
+    ) {
+      throw new Error('TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_INVALID')
+    }
+  } else if (revision.cacheSourceRevisionId) {
+    throw new Error('TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_FORBIDDEN')
+  }
+
   if (revision.source === 'repair') {
     if (!revision.parentRevisionId || revision.revision <= 1) {
       throw new Error('TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID')
     }
-    const parent = await client.query<{ revision: number }>(`
-      SELECT revision FROM smarthub.test_execution_script_revisions
+    const parent = await client.query<{
+      revision: number
+      protected_assertion_sha256: string
+      assertions: ScriptRevision['package']['assertions']
+    }>(`
+      SELECT revision,protected_assertion_sha256,
+             package_manifest->'assertions' AS assertions
+      FROM smarthub.test_execution_script_revisions
       WHERE id=$1 AND run_id=$2 AND task_id=$3
       FOR SHARE
     `, [revision.parentRevisionId, revision.runId, revision.taskId])
     if (Number(parent.rows[0]?.revision) !== revision.revision - 1) {
       throw new Error('TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID')
+    }
+    if (
+      parent.rows[0].protected_assertion_sha256 !== revision.protectedAssertionSha256
+      || canonicalSha256(parent.rows[0].assertions) !== canonicalSha256(revision.package.assertions)
+    ) {
+      throw new Error('TEST_EXECUTION_SCRIPT_REVISION_ASSERTIONS_CHANGED')
     }
   } else if (revision.parentRevisionId || revision.revision !== 1) {
     throw new Error('TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID')
@@ -1364,7 +1668,16 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
 }
 
 async function insertAttempt(client: PoolClient, attempt: ExecutionAttempt) {
-  if (attempt.status !== 'running' || attempt.finishedAt) throw new Error('TEST_EXECUTION_ATTEMPT_MUST_START_RUNNING')
+  if (
+    attempt.status !== 'running'
+    || attempt.finishedAt !== undefined
+    || attempt.durationMs !== undefined
+    || attempt.exitCode !== undefined
+    || attempt.summary !== undefined
+    || attempt.error !== undefined
+  ) {
+    throw new Error('TEST_EXECUTION_ATTEMPT_MUST_START_RUNNING')
+  }
   const inserted = await client.query<AttemptRow>(`
     INSERT INTO smarthub.test_execution_attempts (id,run_id,task_id,ordinal,invocation_key,attempt_kind,script_revision_id,package_sha256,status,started_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9)
@@ -1420,7 +1733,8 @@ async function insertDiagnosis(client: PoolClient, diagnosis: FailureDiagnosis) 
   }
   const attempts = await client.query<{ id: string }>(`
     SELECT id FROM smarthub.test_execution_attempts
-    WHERE run_id=$1 AND task_id=$2 AND script_revision_id=$3 AND id=ANY($4::text[])
+    WHERE run_id=$1 AND task_id=$2 AND script_revision_id=$3
+      AND id=ANY($4::text[]) AND status<>'running'
     ORDER BY id
     FOR SHARE
   `, [diagnosis.runId, diagnosis.taskId, diagnosis.scriptRevisionId, diagnosis.attemptIds])
@@ -1532,8 +1846,8 @@ function validateAggregate(input: CreateExecutionAggregateInput) {
   }
 }
 
-function executionRunSnapshotSha256(run: ExecutionRun) {
-  return canonicalSha256({
+function executionRunSnapshotBase(run: ExecutionRun) {
+  return {
     schemaVersion: 'test-execution-run-snapshot/v1',
     projectId: run.projectId,
     projectVersionId: run.projectVersionId,
@@ -1543,7 +1857,7 @@ function executionRunSnapshotSha256(run: ExecutionRun) {
     agents: run.agents,
     taskCount: run.taskCount,
     createdBy: run.createdBy,
-  })
+  }
 }
 
 function executionAggregateSha256(input: CreateExecutionAggregateInput) {
@@ -1616,10 +1930,10 @@ function scriptArtifactFromRow(row: ScriptArtifactRow): ScriptArtifact {
 }
 
 type ScriptRevisionRow = {
-  id: string; run_id: string; task_id: string; script_artifact_id: string; revision: number; parent_revision_id: string | null; generation_source: ScriptRevision['source']; repair_reason: string | null; generated_by: ScriptRevision['generatedBy']; package_manifest: ScriptRevision['package']; package_sha256: string; source_artifact_id: string; content_sha256: string; protected_assertion_sha256: string; created_at: Date | string
+  id: string; run_id: string; task_id: string; script_artifact_id: string; revision: number; parent_revision_id: string | null; cache_source_revision_id: string | null; generation_source: ScriptRevision['source']; repair_reason: string | null; generated_by: ScriptRevision['generatedBy']; package_manifest: ScriptRevision['package']; package_sha256: string; source_artifact_id: string; content_sha256: string; protected_assertion_sha256: string; created_at: Date | string
 }
 function scriptRevisionFromRow(row: ScriptRevisionRow): ScriptRevision {
-  return { id: row.id, runId: row.run_id, taskId: row.task_id, scriptArtifactId: row.script_artifact_id, revision: Number(row.revision), ...(row.parent_revision_id ? { parentRevisionId: row.parent_revision_id } : {}), source: row.generation_source, ...(row.repair_reason ? { repairReason: row.repair_reason } : {}), generatedBy: structuredClone(row.generated_by), package: structuredClone(row.package_manifest), sourceArtifactId: row.source_artifact_id, contentSha256: row.content_sha256, protectedAssertionSha256: row.protected_assertion_sha256, createdAt: iso(row.created_at) }
+  return { id: row.id, runId: row.run_id, taskId: row.task_id, scriptArtifactId: row.script_artifact_id, revision: Number(row.revision), ...(row.parent_revision_id ? { parentRevisionId: row.parent_revision_id } : {}), ...(row.cache_source_revision_id ? { cacheSourceRevisionId: row.cache_source_revision_id } : {}), source: row.generation_source, ...(row.repair_reason ? { repairReason: row.repair_reason } : {}), generatedBy: structuredClone(row.generated_by), package: structuredClone(row.package_manifest), sourceArtifactId: row.source_artifact_id, contentSha256: row.content_sha256, protectedAssertionSha256: row.protected_assertion_sha256, createdAt: iso(row.created_at) }
 }
 
 type ArtifactRow = {
@@ -1717,10 +2031,11 @@ function diagnosisFromRow(row: DiagnosisRow): FailureDiagnosis {
 }
 
 type JobRow = {
-  id: string; run_id: string; task_id: string; status: ExecutionJob['status']; attempt_count: number; max_attempts: number; available_at: Date | string; lease_owner: string | null; run_token: string | null; fencing_token: number | string; lease_expires_at: Date | string | null; heartbeat_at: Date | string | null; cancel_requested_at: Date | string | null; error: string | null; created_at: Date | string; updated_at: Date | string
+  id: string; run_id: string; task_id: string; status: ExecutionJob['status']; attempt_count: number; max_attempts: number; available_at: Date | string; lease_owner: string | null; run_token: string | null; fencing_token: number | string; lease_expires_at: Date | string | null; heartbeat_at: Date | string | null; cancel_requested_at: Date | string | null; error: string | null; created_at: Date | string; updated_at: Date | string; data?: ExecutionJob
 }
 function jobFromRow(row: JobRow): ExecutionJob {
-  return { id: row.id, runId: row.run_id, taskId: row.task_id, status: row.status, attempts: Number(row.attempt_count), maxAttempts: Number(row.max_attempts), availableAt: iso(row.available_at), fencingToken: Number(row.fencing_token), ...(row.lease_owner ? { leaseOwner: row.lease_owner } : {}), ...(row.run_token ? { runToken: row.run_token } : {}), ...(row.lease_expires_at ? { leaseExpiresAt: iso(row.lease_expires_at) } : {}), ...(row.heartbeat_at ? { heartbeatAt: iso(row.heartbeat_at) } : {}), ...(row.cancel_requested_at ? { cancelRequestedAt: iso(row.cancel_requested_at) } : {}), ...(row.error ? { error: row.error } : {}), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
+  const request = row.data?.request
+  return { id: row.id, runId: row.run_id, taskId: row.task_id, status: row.status, attempts: Number(row.attempt_count), maxAttempts: Number(row.max_attempts), availableAt: iso(row.available_at), fencingToken: Number(row.fencing_token), ...(row.lease_owner ? { leaseOwner: row.lease_owner } : {}), ...(row.run_token ? { runToken: row.run_token } : {}), ...(row.lease_expires_at ? { leaseExpiresAt: iso(row.lease_expires_at) } : {}), ...(row.heartbeat_at ? { heartbeatAt: iso(row.heartbeat_at) } : {}), ...(row.cancel_requested_at ? { cancelRequestedAt: iso(row.cancel_requested_at) } : {}), ...(row.error ? { error: row.error } : {}), ...(request ? { request: structuredClone(request) } : {}), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }
 }
 
 function iso(value: Date | string) {

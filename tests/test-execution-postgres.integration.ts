@@ -2,8 +2,13 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import { Pool } from 'pg'
-import { canonicalSha256 } from '../server/application/canonical-json.js'
-import { freezeExecutionTaskInput, scriptCacheKey } from '../server/application/test-execution-validation.js'
+import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
+import {
+  executionCreateRequestCanonical,
+  executionCreateRequestSha256,
+  freezeExecutionTaskInput,
+  scriptCacheKey,
+} from '../server/application/test-execution-validation.js'
 import type {
   ExecutionArtifact,
   ExecutionAttempt,
@@ -121,7 +126,18 @@ const agentSnapshot = (agentKey: FrozenExecutionAgentSnapshot['agentKey']): Froz
   configurationVersion: 1,
   configurationSha256: 'a'.repeat(64),
   definitionSha256: 'b'.repeat(64),
-  model: { sourceId: 'source-1', modelId: 'model-1', providerType: 'anthropic' },
+  model: {
+    sourceId: 'source-1',
+    modelId: 'model-1',
+    providerType: 'anthropic',
+    modelName: 'model-1',
+    baseUrlSha256: 'd'.repeat(64),
+    contextWindow: 200_000,
+    maxOutputTokens: 8_192,
+    supportsReasoning: true,
+    requestTimeoutMs: 30_000,
+    retryCount: 2,
+  },
   snapshotSha256: 'c'.repeat(64),
 })
 const run: ExecutionRun = {
@@ -193,25 +209,54 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   const replay = await firstStore.createAggregate({ run, tasks: [task], jobs: [job] })
   assert.equal(created.id, ids.run)
   assert.equal(replay.id, ids.run)
+  assert.deepEqual(await firstStore.readiness(), { ready: true })
   assert.equal((await firstStore.listTasks(ids.run)).length, 1)
+  const detail = required(
+    await firstStore.getTaskDetail(ids.task),
+    '应返回同一 repeatable-read 快照中的 Task detail',
+  )
+  assert.equal(detail.run.id, ids.run)
+  assert.equal(detail.task.id, ids.task)
+  assert.deepEqual(detail.attempts, [])
+  assert.deepEqual(detail.diagnoses, [])
+  assert.deepEqual(detail.scriptRevisions, [])
+  assert.deepEqual(detail.artifacts, [])
+  const replayWithFreshServerFacts = await firstStore.createAggregate({
+    run: {
+      ...run,
+      id: `${ids.run}-regenerated`,
+      createdAt: new Date(Date.now() + 50).toISOString(),
+      environment: {
+        ...run.environment,
+        signature: '9'.repeat(64),
+      },
+    },
+    tasks: [{
+      ...task,
+      id: `${ids.task}-regenerated`,
+      runId: `${ids.run}-regenerated`,
+    }],
+    jobs: [{
+      ...job,
+      id: `${ids.job}-regenerated`,
+      runId: `${ids.run}-regenerated`,
+      taskId: `${ids.task}-regenerated`,
+      maxAttempts: 4,
+    }],
+  })
+  assert.equal(replayWithFreshServerFacts.id, ids.run)
   await assert.rejects(
     firstStore.createAggregate({
-      run: { ...run, environment: { ...run.environment, signature: '9'.repeat(64) } },
+      run: {
+        ...run,
+        environment: {
+          ...run.environment,
+          environmentId: `${run.environment.environmentId}-other`,
+        },
+      },
       tasks: [task],
       jobs: [job],
     }),
-    /IDEMPOTENCY_CONFLICT/u,
-  )
-  await assert.rejects(
-    firstStore.createAggregate({
-      run,
-      tasks: [{ ...task, id: `${ids.task}-regenerated` }],
-      jobs: [{ ...job, id: `${ids.job}-regenerated`, taskId: `${ids.task}-regenerated` }],
-    }),
-    /IDEMPOTENCY_CONFLICT/u,
-  )
-  await assert.rejects(
-    firstStore.createAggregate({ run, tasks: [task], jobs: [{ ...job, maxAttempts: 4 }] }),
     /IDEMPOTENCY_CONFLICT/u,
   )
 
@@ -284,6 +329,44 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.equal(exhaustedStatus.rows[0]?.status, 'failed')
 })
 
+test('PostgreSQL 并发同请求只创建一个聚合并返回唯一键赢家', async () => {
+  const first = executionAggregateVariant('concurrent-idempotency-a', 2)
+  const second = executionAggregateVariant('concurrent-idempotency-b', 3)
+  second.run.idempotencyKey = first.run.idempotencyKey
+
+  const [firstResult, secondResult] = await Promise.all([
+    firstStore.createAggregate(first),
+    secondStore.createAggregate(second),
+  ])
+
+  assert.equal(firstResult.id, secondResult.id)
+  assert.ok(
+    firstResult.id === first.run.id
+      || firstResult.id === second.run.id,
+  )
+  assert.equal(
+    (await firstStore.listTasks(firstResult.id)).length,
+    1,
+  )
+})
+
+test('PostgreSQL 对 canonical text 的原始 UTF-8 字节求 Hash', async () => {
+  const canonical = canonicalJson({ threshold: 1e-7 })
+  const result = await database.query<{
+    equivalent: boolean
+    sha256: string
+  }>(`
+    SELECT $1::text::jsonb =
+             '{"threshold":0.0000001}'::jsonb AS equivalent,
+           encode(digest(convert_to($1::text, 'UTF8'), 'sha256'), 'hex') AS sha256
+  `, [canonical])
+  assert.equal(result.rows[0]?.equivalent, true)
+  assert.equal(
+    result.rows[0]?.sha256,
+    canonicalSha256({ threshold: 1e-7 }),
+  )
+})
+
 test('PostgreSQL 使用实时 lease 截止时间回滚过期事务', async () => {
   const aggregate = executionAggregateVariant('lease-clock', 2)
   await firstStore.createAggregate(aggregate)
@@ -310,6 +393,55 @@ test('PostgreSQL 使用实时 lease 截止时间回滚过期事务', async () =>
 
 test('PostgreSQL 拒绝终态 run 与任务聚合矛盾', async () => {
   const aggregate = executionAggregateVariant('run-task-status', 2)
+  const forgedRun: ExecutionRun = {
+    ...aggregate.run,
+    id: `${aggregate.run.id}-forged`,
+    idempotencyKey: `${aggregate.run.idempotencyKey}-forged`,
+    runner: {
+      ...aggregate.run.runner,
+      imageDigest: `sha256:${'9'.repeat(64)}`,
+    },
+  }
+  await assert.rejects(
+    database.query(`
+      INSERT INTO smarthub.test_execution_runs (
+        id,project_id,project_version_id,handoff_id,handoff_sha256,
+        test_case_library_version_id,test_case_library_version_sha256,
+        suite_version_id,suite_version_sha256,execution_mode,
+        member_snapshot_sha256,environment_id,environment_signature,
+        snapshot_sha256,aggregate_sha256,create_request_sha256,create_request_canonical,status,state_version,
+        idempotency_key,task_count,created_by,created_at,started_at,
+        finished_at,cancel_requested_at,error,snapshot,snapshot_canonical
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,NULL,NULL,$8,$9,$10,$11,
+        $12,$13,$14,$15,'queued',0,$16,$17,$18,$19,NULL,NULL,NULL,NULL,
+        $20::jsonb,$21
+      )
+    `, [
+      forgedRun.id,
+      forgedRun.projectId,
+      forgedRun.projectVersionId,
+      forgedRun.handoff.handoffId,
+      forgedRun.handoff.handoffSha256,
+      forgedRun.handoff.testCaseLibraryVersionId,
+      forgedRun.handoff.testCaseLibraryVersionSha256,
+      forgedRun.handoff.mode,
+      forgedRun.handoff.memberSnapshotSha256,
+      forgedRun.environment.environmentId,
+      forgedRun.environment.signature,
+      '0'.repeat(64),
+      '1'.repeat(64),
+      executionCreateRequestSha256(forgedRun),
+      executionCreateRequestCanonical(forgedRun),
+      forgedRun.idempotencyKey,
+      forgedRun.taskCount,
+      forgedRun.createdBy,
+      forgedRun.createdAt,
+      JSON.stringify(forgedRun),
+      canonicalJson({ invalid: true }),
+    ]),
+    /TEST_EXECUTION_RUN_SNAPSHOT_MISMATCH/u,
+  )
   await firstStore.createAggregate(aggregate)
   const constraintClient = await database.connect()
   try {
@@ -363,7 +495,7 @@ test('PostgreSQL 拒绝使用同一 fencing token 复活过期 lease', async () 
   assert.equal(await secondStore.releaseJob(reclaimed.id, lease(reclaimed), 0, 'lease resurrection test complete'), true)
 })
 
-test('PostgreSQL 普通 reclaim 先终结遗留 attempt 再允许同脚本重试', async () => {
+test('PostgreSQL 普通 reclaim 终结遗留 attempt 后使用独立基础设施重试', async () => {
   const aggregate = executionAggregateVariant('reclaim-running-attempt', 3)
   await firstStore.createAggregate(aggregate)
   const claimed = required(await firstStore.claimJob('execution-worker-reclaim-attempt', 1_000), 'reclaim attempt 任务应被领取')
@@ -375,15 +507,16 @@ test('PostgreSQL 普通 reclaim 先终结遗留 attempt 再允许同脚本重试
   assert.equal(reclaimed.attempts, 2)
   assert.notEqual(reclaimed.runToken, claimed.runToken)
   assert.equal((await firstStore.listAttempts(aggregate.tasks[0].id))[0].status, 'infrastructure_error')
-  const retrying = required(await firstStore.getTask(aggregate.tasks[0].id), '任务应存在')
-  assert.equal(retrying.status, 'retrying')
+  const ready = required(await firstStore.getTask(aggregate.tasks[0].id), '任务应存在')
+  assert.equal(ready.status, 'ready')
+  assert.equal(ready.sameScriptRetryCount, 0)
 
   const retryAttempt: ExecutionAttempt = {
     ...interrupted,
     id: `${prefix}-reclaim-running-attempt-retry`,
     ordinal: 2,
     invocationKey: `${prefix}-reclaim-running-attempt-retry-invocation`,
-    kind: 'same_script_retry',
+    kind: 'infrastructure_retry',
     status: 'running',
     startedAt: new Date().toISOString(),
   }
@@ -391,11 +524,10 @@ test('PostgreSQL 普通 reclaim 先终结遗留 attempt 再允许同脚本重试
     await transaction.appendAttempt(retryAttempt)
     await transaction.transitionTask({
       taskId: aggregate.tasks[0].id,
-      expectedStatus: 'retrying',
-      expectedStateVersion: retrying.stateVersion,
+      expectedStatus: 'ready',
+      expectedStateVersion: ready.stateVersion,
       status: 'running',
       incrementRunnerAttempt: true,
-      incrementSameScriptRetry: true,
     })
   })
   const attempts = await firstStore.listAttempts(aggregate.tasks[0].id)
@@ -429,6 +561,79 @@ test('PostgreSQL 在提交时拒绝 attempt 与 task 的非原子状态', async 
     'attempt 原子性任务应被领取',
   )
   const attempt = await appendRunningAttempt(claimed, aggregate, 'attempt-task-atomicity')
+  const runningDiagnosis: FailureDiagnosis = {
+    id: `${prefix}-running-attempt-diagnosis`,
+    runId: aggregate.run.id,
+    taskId: aggregate.tasks[0].id,
+    scriptRevisionId: attempt.scriptRevisionId,
+    attemptIds: [attempt.id],
+    category: 'unknown',
+    confidence: 0.5,
+    summary: '不得诊断仍在运行的 attempt',
+    evidence: [{ attemptId: attempt.id, observation: '执行尚未完成' }],
+    repairable: false,
+    recommendedAction: '等待执行完成',
+    source: 'deterministic',
+    createdAt: new Date().toISOString(),
+  }
+  await assert.rejects(
+    firstStore.transactionWithLease(claimed.id, lease(claimed), transaction =>
+      transaction.appendDiagnosis(runningDiagnosis),
+    ),
+    /TEST_EXECUTION_DIAGNOSIS_ATTEMPT_SCOPE_MISMATCH/u,
+  )
+  const diagnosisConstraintClient = await database.connect()
+  try {
+    await diagnosisConstraintClient.query('BEGIN')
+    await diagnosisConstraintClient.query(`
+      INSERT INTO smarthub.test_execution_diagnoses (
+        id,run_id,task_id,script_revision_id,attempt_count,evidence_count,
+        category,confidence,summary,repairable,recommended_action,
+        source,agent_snapshot,created_at
+      ) VALUES ($1,$2,$3,$4,1,1,'unknown',0.5,$5,false,$6,'deterministic',NULL,$7)
+    `, [
+      runningDiagnosis.id,
+      runningDiagnosis.runId,
+      runningDiagnosis.taskId,
+      runningDiagnosis.scriptRevisionId,
+      runningDiagnosis.summary,
+      runningDiagnosis.recommendedAction,
+      runningDiagnosis.createdAt,
+    ])
+    await diagnosisConstraintClient.query(`
+      INSERT INTO smarthub.test_execution_diagnosis_attempts (
+        diagnosis_id,run_id,task_id,script_revision_id,attempt_id,ordinal
+      ) VALUES ($1,$2,$3,$4,$5,0)
+    `, [
+      runningDiagnosis.id,
+      runningDiagnosis.runId,
+      runningDiagnosis.taskId,
+      runningDiagnosis.scriptRevisionId,
+      attempt.id,
+    ])
+    await diagnosisConstraintClient.query(`
+      INSERT INTO smarthub.test_execution_diagnosis_evidence (
+        diagnosis_id,run_id,task_id,script_revision_id,ordinal,
+        attempt_id,artifact_id,observation
+      ) VALUES ($1,$2,$3,$4,0,$5,NULL,$6)
+    `, [
+      runningDiagnosis.id,
+      runningDiagnosis.runId,
+      runningDiagnosis.taskId,
+      runningDiagnosis.scriptRevisionId,
+      attempt.id,
+      runningDiagnosis.evidence[0].observation,
+    ])
+    await assert.rejects(
+      diagnosisConstraintClient.query(
+        'SET CONSTRAINTS smarthub.test_execution_diagnosis_attempts_terminal_ck IMMEDIATE',
+      ),
+      /TEST_EXECUTION_DIAGNOSIS_ATTEMPT_NOT_TERMINAL/u,
+    )
+  } finally {
+    await diagnosisConstraintClient.query('ROLLBACK')
+    diagnosisConstraintClient.release()
+  }
   const constraintClient = await database.connect()
   try {
     await constraintClient.query('BEGIN')
@@ -744,6 +949,15 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     })),
     /TEST_EXECUTION_ATTEMPT_INITIAL_STATE_INVALID/u,
   )
+  await assert.rejects(
+    secondStore.transactionWithLease(claimed.id, activeLease, transaction =>
+      transaction.appendAttempt({
+        ...attempt,
+        summary: 'running attempt 不得携带终结字段',
+      }),
+    ),
+    /TEST_EXECUTION_ATTEMPT_MUST_START_RUNNING/u,
+  )
   await secondStore.transactionWithLease(claimed.id, activeLease, async transaction => {
     await transaction.appendAttempt(attempt)
     await transaction.appendAttempt({
@@ -791,6 +1005,23 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     ...alternateManifestBase,
     packageSha256: canonicalSha256(alternateManifestBase),
   }
+  const changedAssertions = [{
+    verificationCheckKey: 'ready',
+    verificationCheckSha256: 'a'.repeat(64),
+    anchor: 'ready',
+    matcher: 'toBeVisible',
+    modifiers: [],
+    expectedSemanticsSha256: 'b'.repeat(64),
+  }]
+  const { packageSha256: _assertionPackageSha256, ...changedAssertionManifestBase } = {
+    ...alternateManifest,
+    assertions: changedAssertions,
+    protectedAssertionSha256: canonicalSha256(changedAssertions),
+  }
+  const changedAssertionManifest: ExecutionPackageManifest = {
+    ...changedAssertionManifestBase,
+    packageSha256: canonicalSha256(changedAssertionManifestBase),
+  }
   const alternateRevision: ScriptRevision = {
     ...revision,
     id: `${prefix}-alternate-script-revision`,
@@ -802,6 +1033,12 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     package: alternateManifest,
     sourceArtifactId: alternateSourceArtifact.id,
     contentSha256: alternateSourceArtifact.sha256,
+  }
+  const changedAssertionRevision: ScriptRevision = {
+    ...alternateRevision,
+    id: `${prefix}-changed-assertion-revision`,
+    package: changedAssertionManifest,
+    protectedAssertionSha256: changedAssertionManifest.protectedAssertionSha256,
   }
   const postRepairAttempt: ExecutionAttempt = {
     ...attempt,
@@ -820,6 +1057,67 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     invocationKey: `${prefix}-manual-retry-invocation`,
     kind: 'manual_retry',
     startedAt: new Date(Date.now() + 275).toISOString(),
+  }
+  await assert.rejects(
+    secondStore.transactionWithLease(claimed.id, activeLease, async transaction => {
+      await transaction.appendArtifact(alternateSourceArtifact)
+      await transaction.appendScriptRevision(changedAssertionRevision)
+    }),
+    /TEST_EXECUTION_SCRIPT_REVISION_ASSERTIONS_CHANGED/u,
+  )
+  const assertionConstraintClient = await database.connect()
+  try {
+    await assertionConstraintClient.query('BEGIN')
+    await assertionConstraintClient.query(`
+      INSERT INTO smarthub.test_execution_artifacts (
+        id,run_id,task_id,attempt_id,artifact_type,storage_path,
+        sha256,byte_size,mime_type,created_at
+      ) VALUES ($1,$2,$3,NULL,$4,$5,$6,$7,$8,$9)
+    `, [
+      alternateSourceArtifact.id,
+      alternateSourceArtifact.runId,
+      alternateSourceArtifact.taskId,
+      alternateSourceArtifact.type,
+      alternateSourceArtifact.storagePath,
+      alternateSourceArtifact.sha256,
+      alternateSourceArtifact.size,
+      alternateSourceArtifact.mimeType,
+      alternateSourceArtifact.createdAt,
+    ])
+    await assert.rejects(
+      assertionConstraintClient.query(`
+        INSERT INTO smarthub.test_execution_script_revisions (
+          id,run_id,task_id,script_artifact_id,revision,parent_revision_id,
+          generation_source,repair_reason,generated_by,package_manifest,
+          package_canonical,package_sha256,source_artifact_id,content_sha256,
+          protected_assertion_sha256,protected_assertions_canonical,created_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15,$16,$17
+        )
+      `, [
+        changedAssertionRevision.id,
+        changedAssertionRevision.runId,
+        changedAssertionRevision.taskId,
+        changedAssertionRevision.scriptArtifactId,
+        changedAssertionRevision.revision,
+        changedAssertionRevision.parentRevisionId,
+        changedAssertionRevision.source,
+        changedAssertionRevision.repairReason,
+        JSON.stringify(changedAssertionRevision.generatedBy),
+        JSON.stringify(changedAssertionRevision.package),
+        canonicalJson(changedAssertionManifestBase),
+        changedAssertionRevision.package.packageSha256,
+        changedAssertionRevision.sourceArtifactId,
+        changedAssertionRevision.contentSha256,
+        changedAssertionRevision.protectedAssertionSha256,
+        canonicalJson(changedAssertionRevision.package.assertions),
+        changedAssertionRevision.createdAt,
+      ]),
+      /TEST_EXECUTION_SCRIPT_REVISION_ASSERTIONS_CHANGED/u,
+    )
+  } finally {
+    await assertionConstraintClient.query('ROLLBACK')
+    assertionConstraintClient.release()
   }
   const diagnosis: FailureDiagnosis = {
     id: `${prefix}-diagnosis`,
@@ -977,11 +1275,11 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
         INSERT INTO smarthub.test_execution_script_revisions (
           id,run_id,task_id,script_artifact_id,revision,parent_revision_id,
           generation_source,repair_reason,generated_by,package_manifest,
-          package_sha256,source_artifact_id,content_sha256,
-          protected_assertion_sha256,created_at
+          package_canonical,package_sha256,source_artifact_id,content_sha256,
+          protected_assertion_sha256,protected_assertions_canonical,created_at
         ) VALUES (
           $1,$2,$3,$4,3,$5,'repair',$6,$7::jsonb,$8::jsonb,
-          $9,$10,$11,$12,$13
+          $9,$10,$11,$12,$13,$14,$15
         )
       `, [
         `${prefix}-forged-script-revision`,
@@ -992,10 +1290,12 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
         '验证数据库拒绝伪造 package hash',
         JSON.stringify(run.agents.scriptRepair),
         JSON.stringify(forgedManifest),
+        canonicalJson(forgedManifestBase),
         forgedPackageSha256,
         forgedSourceArtifact.id,
         forgedSourceArtifact.sha256,
         forgedManifest.protectedAssertionSha256,
+        canonicalJson(forgedManifest.assertions),
         forgedSourceArtifact.createdAt,
       ]),
       /TEST_EXECUTION_SCRIPT_REVISION_SOURCE_MISMATCH/u,

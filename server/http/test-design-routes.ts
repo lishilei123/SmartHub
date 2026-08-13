@@ -3,23 +3,11 @@ import type { Principal, ProjectVersionPermission } from '../domain/access-contr
 import type { TestDesignService } from '../application/test-design-service.js'
 import type { AccessControl } from './access-control.js'
 import type { StateStore } from '../infrastructure/store.js'
-import type { AgentConfigurationInput, AgentConfigurationService } from '../application/agent-configuration-service.js'
 
-export async function routeTestDesign(request: IncomingMessage, response: ServerResponse, context: { method: string; url: URL; principal: Principal; controls: AccessControl; service: TestDesignService; store: StateStore; configurations: AgentConfigurationService }) {
-  const { method, url, principal, controls, service, store, configurations } = context
+export async function routeTestDesign(request: IncomingMessage, response: ServerResponse, context: { method: string; url: URL; principal: Principal; controls: AccessControl; service: TestDesignService; store: StateStore }) {
+  const { method, url, principal, controls, service, store } = context
   if (!url.pathname.includes('test-design') && !url.pathname.includes('test-case') && !url.pathname.includes('test-suite') && !url.pathname.includes('test-execution')) return false
   const authorize = (projectVersionId: string, permission: ProjectVersionPermission) => controls.authorize(principal, projectVersionId, permission)
-
-  if (url.pathname === '/api/agent-configurations/test-design' && method === 'GET') {
-    const agents = (await configurations.get()).agents
-    return send(response, 200, { scene: 'test_design', agents: { testDesign: agents.testDesign } })
-  }
-  if (url.pathname === '/api/agent-configurations/test-design/draft' && method === 'PUT') {
-    const body = await json(request); return send(response, 200, await configurations.save(body as unknown as AgentConfigurationInput))
-  }
-  if (url.pathname === '/api/agent-configurations/test-design/publish' && method === 'POST') {
-    const body = await json(request); return send(response, 201, await configurations.publish({ agentKey: body.agentKey, revision: Number(body.revision), publishedBy: principal.displayName }))
-  }
 
   const allInputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs$/.exec(url.pathname)
   if (allInputs && method === 'GET') { await authorize(allInputs[1], 'test-design:read'); return send(response, 200, await service.inputCandidates(allInputs[1])) }

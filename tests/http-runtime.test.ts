@@ -45,6 +45,23 @@ async function createKnowledgeBase(baseUrl: string) {
   return value.knowledgeBase.id
 }
 
+type HttpAgentConfiguration = {
+  scene: string
+  agents: Record<string, {
+    draft: { revision: number; routing: Record<string, unknown>; definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }
+    requiredToolIds: string[]
+    requiredSkillKeys: string[]
+    requiredMcpServerKeys: string[]
+    versions: unknown[]
+  }>
+}
+
+async function loadAgentConfiguration(baseUrl: string, scenePath: 'requirement-analysis' | 'test-design' | 'test-execution') {
+  const response = await fetch(`${baseUrl}/agent-configurations/${scenePath}`)
+  assert.equal(response.status, 200)
+  return await response.json() as HttpAgentConfiguration
+}
+
 test('项目版本授权拒绝未认证和越权评审读取', async () => {
   const unauthenticated = new StaticAccessControl(
     { async authenticate() { throw new UnauthenticatedError() } },
@@ -82,26 +99,25 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
   }, controlsFor('reviewer-a', [{ projectVersionId: 'authorization-pv-a', permissions: ['project-version:read', 'review:read'] }]))
 })
 
-  test('Agent 配置接口返回需求分析及各场景 Agent 的可编辑草稿', async () => {
+test('Agent 配置接口按场景返回精确 Agent 集合并隔离保存', async () => {
   await withServer(async baseUrl => {
-    const response = await fetch(`${baseUrl}/agent-configurations/requirement-analysis`)
-    assert.equal(response.status, 200)
-    const body = await response.json() as {
-      scene: string
-      agents: Record<string, { draft: { revision: number; routing: unknown; definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }; requiredToolIds: string[]; requiredSkillKeys: string[]; requiredMcpServerKeys: string[]; versions: unknown[] }>
-    }
-    assert.equal(body.scene, 'requirement_analysis')
-    assert.equal(body.agents.requirementAnalysis.draft.revision, 0)
-    assert.deepEqual(body.agents.requirementAnalysis.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
-    assert.deepEqual(body.agents.requirementAnalysis.requiredSkillKeys, ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
-    assert.equal('requirementPointExtraction' in body.agents, false)
-    assert.equal('requirementReview' in body.agents, false)
-    assert.equal('reviewQa' in body.agents, false)
-    assert.equal(body.agents.testDesign.draft.revision, 0)
-    assert.deepEqual(body.agents.testDesign.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
-    assert.deepEqual(body.agents.testDesign.requiredSkillKeys, ['test-design-baseline', 'test-point-design', 'test-case-design', 'test-design-repair'])
-    assert.equal('technicalSolutionExtraction' in body.agents, false)
-    assert.equal('technicalSolutionReview' in body.agents, false)
+    const requirementAnalysis = await loadAgentConfiguration(baseUrl, 'requirement-analysis')
+    assert.equal(requirementAnalysis.scene, 'requirement_analysis')
+    assert.deepEqual(Object.keys(requirementAnalysis.agents), ['requirementAnalysis'])
+    assert.equal(requirementAnalysis.agents.requirementAnalysis.draft.revision, 0)
+    assert.deepEqual(requirementAnalysis.agents.requirementAnalysis.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
+    assert.deepEqual(requirementAnalysis.agents.requirementAnalysis.requiredSkillKeys, ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
+
+    const testDesign = await loadAgentConfiguration(baseUrl, 'test-design')
+    assert.equal(testDesign.scene, 'test_design')
+    assert.deepEqual(Object.keys(testDesign.agents), ['testDesign'])
+    assert.equal(testDesign.agents.testDesign.draft.revision, 0)
+    assert.deepEqual(testDesign.agents.testDesign.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
+    assert.deepEqual(testDesign.agents.testDesign.requiredSkillKeys, ['test-design-baseline', 'test-point-design', 'test-case-design', 'test-design-repair'])
+
+    const testExecution = await loadAgentConfiguration(baseUrl, 'test-execution')
+    assert.equal(testExecution.scene, 'test_execution')
+    assert.deepEqual(Object.keys(testExecution.agents), ['testScript', 'failureAnalysis', 'scriptRepair'])
 
     const retiredQaEndpoint = await fetch(`${baseUrl}/requirement-review-runs/retired-review/questions`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: '已删除入口' }),
@@ -125,8 +141,16 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
       body: JSON.stringify({ key: 'http.agent.tool', name: 'HTTP Agent Tool', version: '1.0.0', enabled: true, source: 'mcp', risk: 'network_read', timeoutMs: 30_000, mcpServerId: mcp.id }),
     })
     assert.equal(toolResponse.status, 201)
-    const draft = body.agents.testDesign.draft
-    const savedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
+    const draft = testDesign.agents.testDesign.draft
+    const crossSceneSave = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentKey: 'testDesign', revision: draft.revision, routing: draft.routing, definition: draft.definition }),
+    })
+    assert.equal(crossSceneSave.status, 400)
+    assert.match((await crossSceneSave.json() as { error: string }).error, /不属于当前配置场景/u)
+
+    const savedResponse = await fetch(`${baseUrl}/agent-configurations/test-design/draft`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ agentKey: 'testDesign', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: [...draft.definition.skillKeys, 'http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
@@ -138,6 +162,62 @@ test('项目版本授权拒绝未认证和越权评审读取', async () => {
     assert.ok(saved.definition.toolIds.includes('test_design_points.submit_result'))
     assert.ok(saved.definition.toolIds.includes('http.agent.tool'))
   })
+})
+
+test('Agent 配置发布人使用认证主体而不是请求 body', async () => {
+  const principalName = '认证配置管理员'
+  const controls = new StaticAccessControl(
+    { async authenticate() { return { subjectId: 'agent-publisher', displayName: principalName } } },
+    new StaticProjectVersionAuthorizer([]),
+  )
+  await withServer(async baseUrl => {
+    const source = {
+      id: 'http-agent-publish-source',
+      name: 'HTTP Agent 发布来源',
+      providerType: 'openai_compatible',
+      baseUrl: 'https://models.example/v1',
+      apiKey: 'secret',
+      enabled: true,
+      health: 'healthy',
+      priority: 1,
+      models: [{
+        id: 'http-agent-publish-model',
+        name: 'agent-model',
+        displayName: 'Agent Model',
+        contextWindow: 65_536,
+        maxOutputTokens: 16_384,
+        capabilities: ['structured_output', 'tool_calling', 'reasoning'],
+        enabled: true,
+        health: 'healthy',
+        qualityGate: { version: 'model-probe/v2', checkedAt: '2026-08-13T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } },
+      }],
+    }
+    const now = '2026-08-13T00:00:00.000Z'
+    await stateStore.transaction(state => {
+      state.modelSources = state.modelSources.filter(item => item.id !== source.id)
+      state.modelSources.push({ ...source, createdAt: now, updatedAt: now } as never)
+    })
+
+    const configuration = await loadAgentConfiguration(baseUrl, 'requirement-analysis')
+    const draft = configuration.agents.requirementAnalysis.draft
+    const savedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentKey: 'requirementAnalysis', revision: draft.revision, routing: { ...draft.routing, primaryModel: { sourceId: source.id, modelId: source.models[0].id } }, definition: draft.definition }),
+    })
+    assert.equal(savedResponse.status, 200)
+    const saved = await savedResponse.json() as { revision: number }
+
+    const publishedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/publish`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentKey: 'requirementAnalysis', revision: saved.revision, publishedBy: '伪造发布人' }),
+    })
+    const published = await publishedResponse.json() as { publishedBy?: string; error?: string }
+    assert.equal(publishedResponse.status, 201, published.error)
+    assert.equal(published.publishedBy, principalName)
+    assert.notEqual(published.publishedBy, '伪造发布人')
+  }, controls)
 })
 
 test('本地模型运行状态接口返回隔离的缓存目录', async () => {

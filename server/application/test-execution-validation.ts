@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto'
 import { parse } from '@babel/parser'
 import type { Node } from '@babel/types'
-import { canonicalSha256 } from './canonical-json.js'
+import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import type {
   ExecutionAssertionContract,
   ExecutionPackage,
   ExecutionPackageCandidate,
   ExecutionPackageFile,
+  ExecutionRun,
   ExecutionRunStatus,
   ExecutionTaskStatus,
   FailureDiagnosis,
@@ -37,8 +38,8 @@ export const EXECUTION_RUN_TRANSITIONS: Readonly<Record<ExecutionRunStatus, read
   queued: ['running', 'cancelled'],
   running: ['succeeded', 'failed', 'partial', 'cancelled'],
   succeeded: [],
-  failed: [],
-  partial: [],
+  failed: ['running'],
+  partial: ['running'],
   cancelled: [],
 }
 
@@ -46,7 +47,7 @@ export const EXECUTION_TASK_TRANSITIONS: Readonly<Record<ExecutionTaskStatus, re
   pending: ['script_generating', 'ready', 'unsupported', 'blocked', 'cancelled'],
   script_generating: ['ready', 'blocked', 'waiting_manual', 'cancelled'],
   ready: ['running', 'blocked', 'waiting_manual', 'cancelled'],
-  running: ['passed', 'retrying', 'diagnosing', 'blocked', 'waiting_manual', 'cancelled'],
+  running: ['ready', 'passed', 'retrying', 'diagnosing', 'blocked', 'waiting_manual', 'cancelled'],
   retrying: ['running', 'blocked', 'cancelled'],
   diagnosing: ['repairing', 'failed', 'blocked', 'waiting_manual', 'cancelled'],
   repairing: ['ready', 'blocked', 'waiting_manual', 'cancelled'],
@@ -150,6 +151,31 @@ export function unsupportedExecutionMethodReason(method: string) {
   return UNSUPPORTED_EXECUTION_METHODS.get(method)
 }
 
+type ExecutionCreateRequestSource = Pick<
+  ExecutionRun,
+  'projectVersionId' | 'handoff' | 'environment' | 'createdBy'
+>
+
+export function executionCreateRequestCanonical(
+  run: ExecutionCreateRequestSource,
+) {
+  return canonicalJson({
+    schemaVersion: 'test-execution-create-request/v1',
+    projectVersionId: run.projectVersionId,
+    handoffId: run.handoff.handoffId,
+    environmentId: run.environment.environmentId,
+    createdBy: run.createdBy,
+  })
+}
+
+export function executionCreateRequestSha256(
+  run: ExecutionCreateRequestSource,
+) {
+  return createHash('sha256')
+    .update(executionCreateRequestCanonical(run), 'utf8')
+    .digest('hex')
+}
+
 export function freezeExecutionTaskInput(input: {
   handoffMember: TestExecutionHandoffMember
   libraryMember: TestCaseLibraryVersionMemberDetail
@@ -244,13 +270,26 @@ export function buildExecutionPackage(input: {
   task: FrozenExecutionTaskInput & { taskId: string }
   environmentSignature: string
   baselineAssertions?: readonly ExecutionAssertionContract[]
+  parentScriptRevisionId?: string
 }): ExecutionPackage {
-  const expectedSchemaVersion = input.baselineAssertions ? 'script-repair/v1' : 'test-script-generation/v1'
+  const repairing = input.baselineAssertions !== undefined
+  const expectedSchemaVersion = repairing ? 'script-repair/v1' : 'test-script-generation/v1'
   if (input.candidate.schemaVersion !== expectedSchemaVersion) {
     throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_SCHEMA_INVALID', '脚本候选 schemaVersion 无效')
   }
   if (input.candidate.taskId !== input.task.taskId) {
     throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_TASK_MISMATCH', '脚本候选引用了错误任务')
+  }
+  if (
+    repairing
+      ? !input.parentScriptRevisionId
+        || input.candidate.parentScriptRevisionId !== input.parentScriptRevisionId
+      : input.candidate.parentScriptRevisionId !== undefined
+  ) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_PACKAGE_PARENT_REVISION_MISMATCH',
+      '脚本候选引用了错误的 parent ScriptRevision',
+    )
   }
   if (!['ui', 'api'].includes(input.task.method)) {
     throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_UNSUPPORTED', '不支持的方法不能创建执行包')
@@ -287,11 +326,81 @@ export function buildExecutionPackage(input: {
   }
 }
 
+export function assertExecutionPackageIntegrity(input: {
+  package: ExecutionPackage
+  task: FrozenExecutionTaskInput & { taskId: string }
+  environmentSignature: string
+  expectedPackageSha256: string
+}) {
+  const rebuilt = buildExecutionPackage({
+    candidate: {
+      schemaVersion: 'test-script-generation/v1',
+      taskId: input.task.taskId,
+      files: input.package.files,
+      summary: 'Runner boundary validation',
+    },
+    task: input.task,
+    environmentSignature: input.environmentSignature,
+  })
+  if (
+    canonicalSha256(rebuilt) !== canonicalSha256(input.package)
+    || rebuilt.manifest.packageSha256 !== input.expectedPackageSha256
+  ) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_PACKAGE_INTEGRITY_INVALID',
+      '执行包内容、Manifest 或固定输入不一致',
+    )
+  }
+  return rebuilt
+}
+
 export function validateFailureDiagnosisCandidate(
   value: unknown,
   context: { taskId: string; scriptRevisionId: string; attemptIds: readonly string[]; artifactIds: readonly string[] },
 ): Pick<FailureDiagnosis, 'category' | 'confidence' | 'summary' | 'evidence' | 'repairable' | 'recommendedAction'> {
   const candidate = record(value, '诊断候选必须是对象')
+  if (candidate.schemaVersion !== 'failure-analysis/v1') {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_DIAGNOSIS_SCHEMA_INVALID',
+      '诊断候选 schemaVersion 无效',
+    )
+  }
+  if (text(candidate.taskId, 'taskId') !== context.taskId) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_DIAGNOSIS_TASK_MISMATCH',
+      '诊断候选引用了错误任务',
+    )
+  }
+  if (
+    text(candidate.scriptRevisionId, 'scriptRevisionId')
+      !== context.scriptRevisionId
+  ) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_DIAGNOSIS_REVISION_MISMATCH',
+      '诊断候选引用了错误 ScriptRevision',
+    )
+  }
+  if (!Array.isArray(candidate.attemptIds)) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_DIAGNOSIS_ATTEMPTS_INVALID',
+      '诊断候选必须引用当前固定的 Attempt 集',
+    )
+  }
+  const candidateAttemptIds = candidate.attemptIds.map(
+    (attemptId, index) => text(attemptId, `attemptIds[${index}]`),
+  )
+  if (
+    candidateAttemptIds.length !== context.attemptIds.length
+    || new Set(candidateAttemptIds).size !== candidateAttemptIds.length
+    || candidateAttemptIds.some(
+      attemptId => !context.attemptIds.includes(attemptId),
+    )
+  ) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_DIAGNOSIS_ATTEMPTS_MISMATCH',
+      '诊断候选引用了错误的 Attempt 集',
+    )
+  }
   const category = text(candidate.category, 'category') as FailureDiagnosisCategory
   if (!diagnosisCategories.has(category)) throw new TestExecutionValidationError('TEST_EXECUTION_DIAGNOSIS_CATEGORY_INVALID', '诊断分类无效')
   const confidence = Number(candidate.confidence)

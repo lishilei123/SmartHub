@@ -3,9 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { AgentConfigurationService } from '../server/application/agent-configuration-service.js'
+import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
-test('源码配置只保留 RequirementAnalysisAgent 与 TestDesignAgent', async () => {
+test('源码配置只保留五个正式 Agent 并移除旧拆分 Agent', async () => {
   const agents = JSON.parse(await readFile(new URL('../server/agent/agents-config.json', import.meta.url), 'utf8')) as { agents: Record<string, unknown> }
   const tools = JSON.parse(await readFile(new URL('../server/tools/built-in-tools-config.json', import.meta.url), 'utf8')) as { tools: Record<string, unknown> }
   const runtime = await readFile(new URL('../server/agent/pi-agent-runtime.ts', import.meta.url), 'utf8')
@@ -15,7 +17,13 @@ test('源码配置只保留 RequirementAnalysisAgent 与 TestDesignAgent', async
   assert.equal('technical-solution-extraction' in agents.agents, false)
   assert.equal('technical-solution-review' in agents.agents, false)
   assert.equal('test-design' in agents.agents, true)
+  assert.equal('test-script' in agents.agents, true)
+  assert.equal('failure-analysis' in agents.agents, true)
+  assert.equal('script-repair' in agents.agents, true)
   assert.equal('requirement-analysis.submit_result' in tools.tools, true)
+  assert.equal('test_script.submit_result' in tools.tools, true)
+  assert.equal('failure_analysis.submit_result' in tools.tools, true)
+  assert.equal('script_repair.submit_result' in tools.tools, true)
   assert.equal('requirement-points.submit_result' in tools.tools, false)
   assert.equal('review.submit_result' in tools.tools, false)
   assert.equal('technical_solution_points.submit_result' in tools.tools, false)
@@ -71,6 +79,50 @@ test('JSON Store 加载时物理删除已退役 Agent、配置快照和工具资
   }
 })
 
+test('旧 JSON 聚合草稿在首次场景写入时拆分为三个独立 scene', async () => {
+  const store = new JsonStore(null)
+  await store.load()
+  await new AiResourceService(store).list()
+  const service = new AgentConfigurationService(store)
+  const requirement = await service.get('requirement_analysis')
+  const design = await service.get('test_design')
+  const execution = await service.get('test_execution')
+  await store.transaction(state => {
+    state.agentConfigurationDrafts = [{
+      scene: 'requirement_analysis',
+      agents: {
+        requirementAnalysis: requirement.agents.requirementAnalysis!.draft,
+        testDesign: design.agents.testDesign!.draft,
+        testScript: execution.agents.testScript!.draft,
+        failureAnalysis: execution.agents.failureAnalysis!.draft,
+        scriptRepair: execution.agents.scriptRepair!.draft,
+      },
+    }]
+  })
+
+  const testScript = execution.agents.testScript!.draft
+  await service.save('test_execution', {
+    agentKey: 'testScript',
+    revision: testScript.revision,
+    routing: testScript.routing,
+    definition: testScript.definition,
+  })
+
+  const drafts = store.read().agentConfigurationDrafts
+  assert.deepEqual(drafts.map(draft => draft.scene), [
+    'requirement_analysis',
+    'test_design',
+    'test_execution',
+  ])
+  assert.deepEqual(Object.keys(drafts[0].agents), ['requirementAnalysis'])
+  assert.deepEqual(Object.keys(drafts[1].agents), ['testDesign'])
+  assert.deepEqual(Object.keys(drafts[2].agents), [
+    'testScript',
+    'failureAnalysis',
+    'scriptRepair',
+  ])
+})
+
 test('PostgreSQL 迁移删除已退役 Agent 的历史配置与工具资源', async () => {
   const source = await readFile(new URL('../server/infrastructure/migrations.ts', import.meta.url), 'utf8')
   assert.match(source, /name: 'remove-review-qa-agent-and-history'/u)
@@ -82,4 +134,14 @@ test('PostgreSQL 迁移删除已退役 Agent 的历史配置与工具资源', as
   assert.match(source, /DROP TABLE IF EXISTS smarthub\.technical_solution_reviews/u)
   assert.match(source, /technicalSolutionExtraction/u)
   assert.match(source, /technical_solution_review\.submit_result/u)
+})
+
+test('PostgreSQL migration 27 将五 Agent 草稿拆分到三个 scene', async () => {
+  const source = await readFile(new URL('../server/infrastructure/migrations.ts', import.meta.url), 'utf8')
+  const migration = source.slice(source.indexOf("version: 27"), source.indexOf("version: 28"))
+
+  assert.match(migration, /'test_design'.*'testDesign'/su)
+  assert.match(migration, /'test_execution'.*'testScript'.*'failureAnalysis'.*'scriptRepair'/su)
+  assert.match(migration, /UPDATE smarthub\.agent_configuration_drafts.*'requirement_analysis'.*'requirementAnalysis'/su)
+  assert.doesNotMatch(migration, /version:\s*29/u)
 })

@@ -31,6 +31,9 @@ const builtInSkills: SkillResource[] = [
   builtInSkill('test-point-design', '测试点设计', '基于冻结需求和历史映射直接设计完整且可审核的 Test Point Tree 候选。', '1.1.0', 'server/skills/test-point-design/SKILL.md', [], ['测试设计', '测试点', 'tree'], undefined),
   builtInSkill('test-case-design', '测试用例设计', '生成按维度区分的 executionSpec、测试数据和正式用例库变更 Proposal。', '1.1.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'Proposal'], undefined),
   builtInSkill('test-design-repair', '测试设计修复', '保留 Proposal 与 executionSpec，仅修复 Coverage Audit 标记为 agent_repair 的质量问题。', '1.1.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage'], undefined),
+  builtInSkill('test-script-generation', '测试脚本生成', '从冻结执行任务生成单文件 Playwright UI 或 API 脚本候选。', '1.0.0', 'server/skills/test-script-generation/SKILL.md', [], ['测试执行', 'Playwright', '脚本生成'], undefined),
+  builtInSkill('failure-analysis', '执行失败分析', '根据同脚本终态 Attempt 与不可变证据生成失败诊断候选。', '1.0.0', 'server/skills/failure-analysis/SKILL.md', [], ['测试执行', '诊断', '失败分析'], undefined),
+  builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下修复 Playwright 实现候选。', '1.0.0', 'server/skills/script-repair/SKILL.md', [], ['测试执行', 'Playwright', '脚本修复'], undefined),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
 const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', ...SKILL_RUNTIME_TOOL_IDS])

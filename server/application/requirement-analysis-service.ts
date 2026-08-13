@@ -12,6 +12,16 @@ import { renderRequirementAnalysisTask } from '../agent/requirement-analysis-age
 import type { KnowledgeService } from './knowledge-service.js'
 import { buildRequirementReleaseArtifacts } from './requirement-release-artifacts.js'
 
+const REQUIREMENT_WORKSPACE_TOOL_IDS = [
+  'workspace.read_file',
+  'workspace.grep_files',
+  'workspace.find_files',
+  'workspace.list_directory',
+  'knowledge.search',
+  'knowledge.read_chunk',
+  'skill.activate',
+] as const
+
 export interface RequirementAnalysisRequest {
   projectVersionId: string
   documentDirectoryPath: string
@@ -549,6 +559,7 @@ export class RequirementAnalysisService {
           mode: 'workspace_tools',
           workflowStage,
           allowedSkillKeys,
+          allowedToolIds: [...REQUIREMENT_WORKSPACE_TOOL_IDS, submitToolId],
           submitToolId,
           schemaVersion,
           agentLabel,
@@ -599,6 +610,7 @@ export class RequirementAnalysisService {
             allowedSkillKeys: input.run.workflow?.currentStage === 'verification'
               ? ['requirement.baseline', 'requirement.review', 'requirement.verification']
               : ['requirement.baseline', 'requirement.review'],
+            allowedToolIds: [...REQUIREMENT_WORKSPACE_TOOL_IDS, 'requirement-analysis.submit_result'],
             submitToolId: 'requirement-analysis.submit_result',
             schemaVersion: 'requirement-analysis/v1',
             agentLabel: 'RequirementAnalysisAgent',

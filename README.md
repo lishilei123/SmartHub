@@ -1,21 +1,22 @@
-# SmartHub 需求分析与测试设计闭环
+# SmartHub 需求分析、测试设计与测试执行闭环
 
-当前仓库已实现资料接入与检索、统一需求分析、需求发布和测试设计闭环。需求分析使用 `RequirementAnalysisAgent`，测试设计使用唯一的 `TestDesignAgent`；两者都采用 Pi Coding Agent 的只读 `/workspace` 模式，由 Skill 提供方法、Workflow 固定阶段、人工控制关键决策、服务端负责校验、版本、Hash 和正式资产投影。PostgreSQL 模式下 ReviewRun 与 TestDesign Run 均由独立 Job/Worker 队列执行并持久化冻结快照、运行事件、人工处置和正式结果。
+当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析使用 `RequirementAnalysisAgent`，测试设计使用唯一的 `TestDesignAgent`；测试执行由确定性的 `TestExecutionService` 编排三个独立发布的 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`，并只把服务端校验后的 `ExecutionPackage` 交给非 Agentic OCI Playwright Runner。PostgreSQL 保存正式状态，Workspace 与 Artifact Store 只保存不可变投影和产物。
 
-测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`requirements.json` Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。测试点阶段人工批准后，服务端创建正式 `TestPointTreeVersion` 和 Asset/AssetVersion；测试用例阶段由同一个 Agent 生成 UI/API 用例和数据需求，确定性 Coverage Auditor 审计后只把 `resolution=agent_repair` 的质量问题送回最多两轮修复，业务决策缺失直接等待人工处理。人工发布后创建不可变 `TestCaseSetVersion`、正式 Workspace 资产、套件/冒烟/影响回归与 Execution Handoff。
+测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`requirements.json` Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库、套件与 `TestExecutionHandoff`。执行 Run 仅接受 Handoff 与服务端环境标识，冻结业务输入、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
 
 ## 模块状态
 
 | 模块 | 当前状态 | 边界 |
 | --- | --- | --- |
 | 知识库、需求分析、测试设计 | 已实现 | 已接入真实 API、持久化数据、Agent Workflow 和服务端治理。 |
-| 测试执行 | 占位 | 测试设计已能创建 `Execution Handoff`；执行计划、执行器、实时状态、日志和重试尚未实现。 |
+| 测试执行 | 已实现 | 以不可变 `TestExecutionHandoff` 为唯一正式输入；Service 确定性编排、三个隔离 Agent、OCI-only Runner、不可变 Attempt/Revision/Diagnosis/Artifact 与真实状态前端。 |
 | 报告与诊断 | 占位 | 需求分析报告和测试用例集可独立导出；跨运行质量汇总、趋势、失败诊断和发布建议尚未实现。 |
 
-左侧“测试执行”和“报告与诊断”保留为产品规划入口，页面会明确显示“功能占位 · 尚未实现”，不会展示示例数据或触发真实执行。
+左侧“测试执行”展示 PostgreSQL 中的真实 Run/Task、就绪状态、冻结快照和不可变历史，不生成示例进度；“报告与诊断”仍为产品规划入口。
 
 ## 已实现
 
+- 测试执行：固定 `RequirementAnalysisAgent → TestDesignAgent → TestExecutionService → ExecutionPackage → OCI Playwright Runner` 边界，三个执行 Agent 分别发布与冻结，Service 独占状态、重试、诊断和修复决策；支持 UI/API 与 smoke/regression/full/custom，不支持的方法明确落为 `unsupported` 且不创建脚本或 Runner Attempt；
 - 测试设计：唯一 `TestDesignAgent`、四个内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、测试点树唯一人工门禁、服务端 Coverage Audit、最多两轮 Agent Repair、人工用例集发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
@@ -243,7 +244,7 @@ npm run build
 - `POST /api/knowledge-bases/:id/search`
 - `POST /api/knowledge-bases/:id/rebuild`
 
-当前 Agent 交付不包含技术方案生成、多 Agent 协作、Git/代码分析、测试执行，以及 PDF/Word/Excel/图片等专用解析能力。
+当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。测试执行只支持服务端固定编排的三个隔离 Agent 与 OCI Playwright UI/API 自动化。
 
 需求评审采用独立 Worker 后台运行：启动接口创建 `ReviewRun + ReviewJob` 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page + projectVersionId + reviewId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `reviewId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
 

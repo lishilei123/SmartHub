@@ -93,6 +93,7 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
           mode: 'workspace_tools',
           workflowStage: stage,
           allowedSkillKeys: [...binding.skills],
+          allowedToolIds: [...WORKSPACE_TOOL_IDS, binding.submitToolId],
           submitToolId: binding.submitToolId,
           schemaVersion: binding.schemaVersion,
           agentLabel: 'TestDesignAgent',

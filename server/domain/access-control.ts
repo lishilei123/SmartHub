@@ -16,6 +16,12 @@ export type ProjectVersionPermission =
   | 'test-design:review'
   | 'test-design:publish'
   | 'test-design:export'
+  | 'test-execution:create'
+  | 'test-execution:read'
+  | 'test-execution:cancel'
+  | 'test-execution:retry'
+  | 'test-execution:download'
+  | 'test-execution:maintain'
 
 export interface Principal {
   subjectId: string

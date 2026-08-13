@@ -2015,6 +2015,137 @@
         "additionalProperties": false
       }
     },
+    "test_script.submit_result": {
+      "version": "1.0.0",
+      "piName": "test_script_submit_result",
+      "label": "提交测试脚本候选",
+      "catalogName": "提交测试脚本候选",
+      "description": "提交 test-script-generation/v1 单入口 Playwright 源码候选；服务端校验固定任务、路径、Hash、AST、依赖和受保护断言后才可构建 ExecutionPackage。",
+      "catalogDescription": "提交只读测试执行 Stage 生成的 Playwright 源码候选。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "test_script.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "test-script-generation/v1" },
+          "taskId": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "content": { "type": "string", "minLength": 1, "maxLength": 524288 },
+                "contentSha256": { "type": "string", "minLength": 64, "maxLength": 64 }
+              },
+              "required": ["path", "content"],
+              "additionalProperties": false
+            }
+          },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 8000 }
+        },
+        "required": ["schemaVersion", "taskId", "files", "summary"],
+        "additionalProperties": false
+      }
+    },
+    "failure_analysis.submit_result": {
+      "version": "1.0.0",
+      "piName": "failure_analysis_submit_result",
+      "label": "提交执行失败诊断候选",
+      "catalogName": "提交执行失败诊断候选",
+      "description": "提交 failure-analysis/v1 候选；服务端校验任务、ScriptRevision、终态 Attempt、Artifact 证据和确定性修复策略。",
+      "catalogDescription": "提交只读失败分析 Stage 的证据化诊断候选。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "failure_analysis.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "failure-analysis/v1" },
+          "taskId": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "scriptRevisionId": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "attemptIds": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 20,
+            "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+          },
+          "category": {
+            "enum": ["product_defect", "script_defect", "selector_changed", "environment_defect", "test_data_defect", "flaky", "assertion_mismatch", "timeout", "unknown"]
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 12000 },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "attemptId": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "artifactId": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "observation": { "type": "string", "minLength": 1, "maxLength": 8000 }
+              },
+              "required": ["attemptId", "observation"],
+              "additionalProperties": false
+            }
+          },
+          "repairable": { "type": "boolean" },
+          "recommendedAction": { "type": "string", "minLength": 1, "maxLength": 8000 }
+        },
+        "required": ["schemaVersion", "taskId", "scriptRevisionId", "attemptIds", "category", "confidence", "summary", "evidence", "repairable", "recommendedAction"],
+        "additionalProperties": false
+      }
+    },
+    "script_repair.submit_result": {
+      "version": "1.0.0",
+      "piName": "script_repair_submit_result",
+      "label": "提交测试脚本修复候选",
+      "catalogName": "提交测试脚本修复候选",
+      "description": "提交 script-repair/v1 单入口源码候选；服务端校验 parent Revision、诊断、修复限额、AST 和受保护断言继承。",
+      "catalogDescription": "提交只读脚本修复 Stage 的 Playwright 源码候选。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "script_repair.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "script-repair/v1" },
+          "taskId": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "parentScriptRevisionId": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "content": { "type": "string", "minLength": 1, "maxLength": 524288 },
+                "contentSha256": { "type": "string", "minLength": 64, "maxLength": 64 }
+              },
+              "required": ["path", "content"],
+              "additionalProperties": false
+            }
+          },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 8000 }
+        },
+        "required": ["schemaVersion", "taskId", "parentScriptRevisionId", "files", "summary"],
+        "additionalProperties": false
+      }
+    },
     "skill.execute_script": {
       "version": "1.0.0",
       "piName": "skill_execute_script",

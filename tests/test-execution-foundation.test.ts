@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { canonicalSha256 } from '../server/application/canonical-json.js'
+import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
+import {
+  ConfiguredExecutionEnvironmentCatalog,
+  executionEnvironmentProfilesFromJson,
+} from '../server/application/test-execution-environment.js'
 import {
   aggregateExecutionRunStatus,
   assertRunTransition,
   assertTaskTransition,
   automaticRepairAllowed,
   buildExecutionPackage,
+  executionCreateRequestSha256,
   freezeExecutionTaskInput,
   scriptCacheKey,
   TestExecutionValidationError,
@@ -123,6 +128,61 @@ function validationCode(error: unknown, code: string) {
   return error instanceof TestExecutionValidationError && error.code === code
 }
 
+test('canonical JSON 保留 JavaScript 数值词法并拒绝 PostgreSQL 重序列化等价替代', () => {
+  const canonical = canonicalJson({ threshold: 1e-7 })
+  assert.equal(canonical, '{"threshold":1e-7}')
+  assert.notEqual(canonical, '{"threshold":0.0000001}')
+  assert.equal(
+    canonicalSha256({ threshold: 1e-7 }),
+    createHash('sha256').update(canonical, 'utf8').digest('hex'),
+  )
+})
+
+test('创建请求身份忽略服务端生成事实，但绑定项目版本、Handoff、环境与创建者', () => {
+  const base = {
+    projectVersionId: 'project-version-one',
+    handoff: {
+      handoffId: 'handoff-one',
+      handoffSha256: 'a'.repeat(64),
+      projectId: 'project-one',
+      projectVersionId: 'project-version-one',
+      testCaseLibraryVersionId: 'library-version-one',
+      testCaseLibraryVersionSha256: 'b'.repeat(64),
+      mode: 'full' as const,
+      memberSnapshotSha256: 'c'.repeat(64),
+    },
+    environment: {
+      environmentId: 'environment-one',
+      name: '环境一',
+      baseUrl: 'https://example.test',
+      targets: [{ protocol: 'https' as const, host: 'example.test', port: 443 }],
+      signature: 'd'.repeat(64),
+    },
+    createdBy: 'user-one',
+  }
+  const identity = executionCreateRequestSha256(base)
+  assert.equal(
+    executionCreateRequestSha256({
+      ...base,
+      environment: {
+        ...base.environment,
+        signature: 'f'.repeat(64),
+      },
+    }),
+    identity,
+  )
+  assert.notEqual(
+    executionCreateRequestSha256({
+      ...base,
+      environment: {
+        ...base.environment,
+        environmentId: 'environment-two',
+      },
+    }),
+    identity,
+  )
+})
+
 test('执行状态迁移由显式状态图约束，终态聚合不会把 unsupported 当作成功', () => {
   assert.doesNotThrow(() => assertRunTransition('queued', 'running'))
   assert.throws(() => assertRunTransition('queued', 'succeeded'), error => validationCode(error, 'TEST_EXECUTION_RUN_TRANSITION_INVALID'))
@@ -204,43 +264,188 @@ test('脚本修复可变更 selector，但不能更改受保护断言语义', ()
     task,
     environmentSignature: 'env',
     baselineAssertions: baseline.manifest.assertions,
+    parentScriptRevisionId: 'script-revision-1',
   }))
+  assert.throws(
+    () => buildExecutionPackage({
+      candidate: { ...candidate(selectorRepair, 'script-repair/v1'), parentScriptRevisionId: 'foreign-revision' },
+      task,
+      environmentSignature: 'env',
+      baselineAssertions: baseline.manifest.assertions,
+      parentScriptRevisionId: 'script-revision-1',
+    }),
+    error => validationCode(error, 'TEST_EXECUTION_PACKAGE_PARENT_REVISION_MISMATCH'),
+  )
   const weakened = validSource.replace("toHaveText('Ready')", "toContainText('Ready')")
   assert.throws(
-    () => buildExecutionPackage({ candidate: candidate(weakened, 'script-repair/v1'), task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions }),
+    () => buildExecutionPackage({ candidate: { ...candidate(weakened, 'script-repair/v1'), parentScriptRevisionId: 'script-revision-1' }, task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions, parentScriptRevisionId: 'script-revision-1' }),
     error => validationCode(error, 'TEST_EXECUTION_PROTECTED_ASSERTION_CHANGED'),
   )
   const changedExpected = validSource.replace("toHaveText('Ready')", "toHaveText('Anything')")
   assert.throws(
-    () => buildExecutionPackage({ candidate: candidate(changedExpected, 'script-repair/v1'), task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions }),
+    () => buildExecutionPackage({ candidate: { ...candidate(changedExpected, 'script-repair/v1'), parentScriptRevisionId: 'script-revision-1' }, task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions, parentScriptRevisionId: 'script-revision-1' }),
     error => validationCode(error, 'TEST_EXECUTION_PROTECTED_ASSERTION_CHANGED'),
   )
 })
 
 test('诊断证据只允许引用当前任务事实，自动修复策略由服务端固定', () => {
-  const diagnosis = validateFailureDiagnosisCandidate({
+  const diagnosisCandidate = {
+    schemaVersion: 'failure-analysis/v1',
+    taskId: 'task-status',
+    scriptRevisionId: 'revision-1',
+    attemptIds: ['attempt-1'],
     category: 'selector_changed',
     confidence: 0.92,
     summary: '登录按钮 selector 已变化',
     evidence: [{ attemptId: 'attempt-1', artifactId: 'artifact-log-1', observation: '两次执行均无法定位旧 selector' }],
     repairable: true,
     recommendedAction: '更新 selector',
-  }, { taskId: 'task-status', scriptRevisionId: 'revision-1', attemptIds: ['attempt-1'], artifactIds: ['artifact-log-1'] })
+  }
+  const context = { taskId: 'task-status', scriptRevisionId: 'revision-1', attemptIds: ['attempt-1'], artifactIds: ['artifact-log-1'] }
+  const diagnosis = validateFailureDiagnosisCandidate(diagnosisCandidate, context)
   assert.equal(automaticRepairAllowed(diagnosis, 0), true)
   assert.equal(automaticRepairAllowed(diagnosis, 2), false)
   assert.equal(automaticRepairAllowed({ category: 'product_defect', repairable: true }, 0), false)
   assert.equal(automaticRepairAllowed({ category: 'assertion_mismatch', repairable: true }, 0), false)
   assert.equal(automaticRepairAllowed({ category: 'unknown', repairable: true }, 0), false)
   assert.throws(
-    () => validateFailureDiagnosisCandidate({ ...diagnosis, evidence: [{ attemptId: 'foreign-attempt', observation: '外部事实' }] }, { taskId: 'task-status', scriptRevisionId: 'revision-1', attemptIds: ['attempt-1'], artifactIds: [] }),
+    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, evidence: [{ attemptId: 'foreign-attempt', observation: '外部事实' }] }, { ...context, artifactIds: [] }),
     error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_EVIDENCE_FOREIGN'),
   )
+  assert.throws(
+    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, schemaVersion: 'failure-analysis/v0' }, context),
+    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_SCHEMA_INVALID'),
+  )
+  assert.throws(
+    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, taskId: 'foreign-task' }, context),
+    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_TASK_MISMATCH'),
+  )
+  assert.throws(
+    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, attemptIds: ['foreign-attempt'] }, context),
+    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_ATTEMPTS_MISMATCH'),
+  )
+})
+
+test('执行环境快照不含 secret，且只在签名一致的 Runner 启动边界解析', async () => {
+  const sourceName = 'SMARTHUB_TEST_EXECUTION_SECRET_SOURCE'
+  const previous = process.env[sourceName]
+  delete process.env[sourceName]
+  try {
+    const catalog = new ConfiguredExecutionEnvironmentCatalog(
+      executionEnvironmentProfilesFromJson(JSON.stringify([{
+        environmentId: 'environment-test',
+        name: '隔离测试环境',
+        baseUrl: 'https://EXAMPLE.test/status',
+        targets: [{ protocol: 'https', host: 'EXAMPLE.test', port: 443 }],
+        networkName: 'smarthub-test-network',
+        secretEnvironmentVariables: {
+          SMARTHUB_SECRET_TOKEN: sourceName,
+        },
+      }])),
+    )
+    assert.deepEqual(await catalog.readiness(), {
+      ready: false,
+      reason: 'TEST_EXECUTION_ENVIRONMENT_SECRETS_UNAVAILABLE',
+    })
+    const snapshot = await catalog.resolveSnapshot('environment-test')
+    assert.deepEqual(snapshot, {
+      environmentId: 'environment-test',
+      name: '隔离测试环境',
+      baseUrl: 'https://example.test/status',
+      targets: [{ protocol: 'https', host: 'example.test', port: 443 }],
+      signature: snapshot.signature,
+    })
+    assert.equal(JSON.stringify(snapshot).includes(sourceName), false)
+    assert.deepEqual(catalog.networkPolicies(), {
+      [snapshot.signature]: 'smarthub-test-network',
+    })
+    await assert.rejects(
+      catalog.resolveForLaunch({
+        environmentId: snapshot.environmentId,
+        environmentSignature: snapshot.signature,
+      }, new AbortController().signal),
+      /TEST_EXECUTION_SECRET_UNAVAILABLE/u,
+    )
+    process.env[sourceName] = 'launch-only-secret-value'
+    assert.deepEqual(await catalog.readiness(), { ready: true })
+    assert.deepEqual(await catalog.resolveForLaunch({
+      environmentId: snapshot.environmentId,
+      environmentSignature: snapshot.signature,
+    }, new AbortController().signal), {
+      SMARTHUB_SECRET_TOKEN: 'launch-only-secret-value',
+    })
+    await assert.rejects(
+      catalog.resolveForLaunch({
+        environmentId: snapshot.environmentId,
+        environmentSignature: 'f'.repeat(64),
+      }, new AbortController().signal),
+      /TEST_EXECUTION_ENVIRONMENT_SNAPSHOT_DRIFT/u,
+    )
+  } finally {
+    if (previous === undefined) delete process.env[sourceName]
+    else process.env[sourceName] = previous
+  }
+})
+
+test('执行环境 readiness 要求至少一个服务端配置', async () => {
+  assert.deepEqual(
+    await new ConfiguredExecutionEnvironmentCatalog([]).readiness(),
+    {
+      ready: false,
+      reason: 'TEST_EXECUTION_ENVIRONMENT_NOT_CONFIGURED',
+    },
+  )
+})
+
+test('执行环境拒绝未声明 base URL、重复目标和不安全 secret 映射', () => {
+  assert.throws(() => new ConfiguredExecutionEnvironmentCatalog([{
+    environmentId: 'environment-test',
+    name: '隔离测试环境',
+    baseUrl: 'https://foreign.test/',
+    targets: [{ protocol: 'https', host: 'example.test', port: 443 }],
+    networkName: 'smarthub-test-network',
+  }]), /TEST_EXECUTION_ENVIRONMENT_BASE_URL_NOT_ALLOWED/u)
+  assert.throws(() => new ConfiguredExecutionEnvironmentCatalog([{
+    environmentId: 'environment-test',
+    name: '隔离测试环境',
+    baseUrl: 'https://example.test/',
+    targets: [
+      { protocol: 'https', host: 'example.test', port: 443 },
+      { protocol: 'https', host: 'EXAMPLE.test', port: 443 },
+    ],
+    networkName: 'smarthub-test-network',
+  }]), /TEST_EXECUTION_ENVIRONMENT_TARGET_DUPLICATE/u)
+  assert.throws(() => new ConfiguredExecutionEnvironmentCatalog([{
+    environmentId: 'environment-test',
+    name: '隔离测试环境',
+    baseUrl: 'https://example.test/',
+    targets: [{ protocol: 'https', host: 'example.test', port: 443 }],
+    networkName: 'smarthub-test-network',
+    secretEnvironmentVariables: { PATH: 'PATH' },
+  }]), /TEST_EXECUTION_SECRET_NAME_INVALID/u)
+})
+
+test('Artifact Store readiness 必须能在受控 staging 目录真实写入', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-artifact-readiness-'))
+  try {
+    await writeFile(join(root, '.staging'), 'not-a-directory')
+    assert.deepEqual(
+      await new LocalExecutionArtifactStore(root).readiness(),
+      {
+        ready: false,
+        reason: 'TEST_EXECUTION_ARTIFACT_STORE_UNAVAILABLE',
+      },
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('LocalExecutionArtifactStore 流式写入、按内容寻址并拒绝路径逃逸', async () => {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-artifacts-'))
   try {
     const store = new LocalExecutionArtifactStore(root)
+    assert.deepEqual(await store.readiness(), { ready: true })
     const stored = await store.put({ body: executionArtifactBody('real runner log'), mimeType: 'text/plain; charset=utf-8' })
     assert.equal(stored.sha256, createHash('sha256').update('real runner log').digest('hex'))
     const duplicate = await store.put({ body: executionArtifactBody('real runner log'), mimeType: 'text/plain; charset=utf-8' })
@@ -249,6 +454,22 @@ test('LocalExecutionArtifactStore 流式写入、按内容寻址并拒绝路径�
     let content = ''
     for await (const chunk of await store.open(stored.storagePath)) content += Buffer.from(chunk).toString('utf8')
     assert.equal(content, 'real runner log')
+    await writeFile(join(root, ...stored.storagePath.split('/')), 'fake runner log')
+    await assert.rejects(
+      () => store.stat(stored.storagePath),
+      /EXECUTION_ARTIFACT_IMMUTABILITY_CONFLICT/u,
+    )
+    await assert.rejects(
+      () => store.open(stored.storagePath),
+      /EXECUTION_ARTIFACT_IMMUTABILITY_CONFLICT/u,
+    )
+    await assert.rejects(
+      () => store.put({
+        body: executionArtifactBody('real runner log'),
+        mimeType: 'text/plain; charset=utf-8',
+      }),
+      /EXECUTION_ARTIFACT_IMMUTABILITY_CONFLICT/u,
+    )
     await assert.rejects(() => store.open('../secret'), /STORAGE_PATH_INVALID/u)
     await assert.rejects(() => store.put({ body: executionArtifactBody('too large'), mimeType: 'text/plain', maximumBytes: 2 }), /TOO_LARGE/u)
   } finally {

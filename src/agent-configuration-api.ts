@@ -4,6 +4,13 @@ export type AgentModelReference = { sourceId: string; modelId: string }
 export type AgentConfigurationAgentKey =
   | 'requirementAnalysis'
   | 'testDesign'
+  | 'testScript'
+  | 'failureAnalysis'
+  | 'scriptRepair'
+export type AgentConfigurationScene =
+  | 'requirement_analysis'
+  | 'test_design'
+  | 'test_execution'
 export type AgentExecutionLimits = {
   maxTurns: number
   maxToolCalls: number
@@ -44,7 +51,7 @@ export type AgentConfigurationVersionSummary = {
   primaryModel: AgentModelReference | null
 }
 export type AgentConfigurationVersion = AgentConfigurationVersionSummary & {
-  scene: 'requirement_analysis' | 'test_design'
+  scene: AgentConfigurationScene
   routing: AgentRoutingConfiguration
   agentDefinition: { version: string; promptRef: { version: string }; skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>; mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>; toolIds: string[]; limits: AgentExecutionLimits; contentSha256: string }
 }
@@ -57,8 +64,26 @@ export type AgentConfigurationAgentState = {
   versions: AgentConfigurationVersionSummary[]
 }
 export type AgentConfigurationState = {
-  scene: 'requirement_analysis'
   agents: Record<AgentConfigurationAgentKey, AgentConfigurationAgentState>
+}
+
+type AgentConfigurationSceneState = {
+  scene: AgentConfigurationScene
+  agents: Partial<Record<AgentConfigurationAgentKey, AgentConfigurationAgentState>>
+}
+
+const scenePaths: Record<AgentConfigurationScene, string> = {
+  requirement_analysis: 'requirement-analysis',
+  test_design: 'test-design',
+  test_execution: 'test-execution',
+}
+
+const agentScenes: Record<AgentConfigurationAgentKey, AgentConfigurationScene> = {
+  requirementAnalysis: 'requirement_analysis',
+  testDesign: 'test_design',
+  testScript: 'test_execution',
+  failureAnalysis: 'test_execution',
+  scriptRepair: 'test_execution',
 }
 
 export function materializeRequiredAgentCapabilities(
@@ -76,12 +101,20 @@ export function materializeRequiredAgentCapabilities(
   }
 }
 
-export async function loadAgentConfiguration() {
-  return request<AgentConfigurationState>('/agent-configurations/requirement-analysis')
+export async function loadAgentConfiguration(): Promise<AgentConfigurationState> {
+  const scenes = await Promise.all(
+    Object.values(scenePaths).map(path => request<AgentConfigurationSceneState>(`/agent-configurations/${path}`)),
+  )
+  const agents = Object.assign({}, ...scenes.map(scene => scene.agents)) as Record<AgentConfigurationAgentKey, AgentConfigurationAgentState>
+  for (const agentKey of Object.keys(agentScenes) as AgentConfigurationAgentKey[]) {
+    if (!agents[agentKey]) throw new Error(`Agent 配置缺少 ${agentKey}`)
+  }
+  return { agents }
 }
 
 export async function saveAgentConfigurationDraft(agentKey: AgentConfigurationAgentKey, draft: AgentConfigurationAgentDraft) {
-  return request<AgentConfigurationAgentDraft>('/agent-configurations/requirement-analysis/draft', {
+  const path = scenePaths[agentScenes[agentKey]]
+  return request<AgentConfigurationAgentDraft>(`/agent-configurations/${path}/draft`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ agentKey, revision: draft.revision, routing: draft.routing, definition: draft.definition }),
@@ -89,7 +122,8 @@ export async function saveAgentConfigurationDraft(agentKey: AgentConfigurationAg
 }
 
 export async function publishAgentConfiguration(agentKey: AgentConfigurationAgentKey, revision: number) {
-  return request<AgentConfigurationVersion>('/agent-configurations/requirement-analysis/publish', {
+  const path = scenePaths[agentScenes[agentKey]]
+  return request<AgentConfigurationVersion>(`/agent-configurations/${path}/publish`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ agentKey, revision }),

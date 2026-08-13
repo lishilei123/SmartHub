@@ -46,8 +46,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const stage = stageConfiguration(input)
     const inputPlan = required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划')
     if (inputPlan.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: Workspace Agent 只支持 /workspace 文件工作区输入')
-    requireWorkspaceToolset(input.snapshot.agentDefinition.toolIds, stage.submitToolId)
-    const piDocumentWorkspace = new RequirementDocumentWorkspace(this.store, input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/agent-types.js').TestDesignAgentSnapshot)
+    requireAllowedToolset(input.snapshot.agentDefinition.toolIds, stage.submitToolId, stage.allowedToolIds)
+    const piDocumentWorkspace = new RequirementDocumentWorkspace(this.store, input.snapshot)
     const workspaceProfile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
     const skillRuntime = new AgentSkillRuntime(this.store, this.skillPackages)
     const skillSession = await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage, workspaceProfile.allowedSkillKeys)
@@ -201,8 +201,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           activeToolNames = new Set(tools.map(tool => tool.name))
           await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: '原文定位未能建立 Evidence；继续使用 grep 定位并用 read 核对固定工作区文件，然后修正 sourceTexts。' })
         }
-        const repairGuidance = stage.isTestDesign
-          ? '请严格按当前 Stage 的提交工具 Schema 和错误路径修正完整候选；临时 ref 仅用于本次提交，正式 ID、Revision、Version 与 Hash 由服务端生成。'
+        const repairGuidance = stage.isGovernedCandidate
+          ? '请严格按当前 Stage 的提交工具 Schema 和错误路径修正完整候选；不得修改服务端冻结的任务、证据范围或受保护业务语义。'
           : evidenceRepairRequired
           ? '工作区文件版本、内部证据范围、需求点 ID、Evidence ID、定位和引用均由服务端负责；请只修正需求点内部的 sourceTexts，必要时用 grep 定位后通过 read 核对原文。'
           : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
@@ -273,7 +273,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       description: `${descriptor.description} 业务工具 ID：${descriptor.id}；版本：${descriptor.version}。`,
       parameters: descriptor.parameters,
       executionMode: 'sequential',
-      ...(stage.isTestDesign && descriptor.id === stage.submitToolId ? {
+      ...(stage.isGovernedCandidate && descriptor.id === stage.submitToolId ? {
         prepareArguments: (args: unknown) => {
           const value = args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {}
           return value.schemaVersion === undefined ? { ...value, schemaVersion: stage.schemaVersion } : value
@@ -287,7 +287,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           return { content: [{ type: 'text', text: JSON.stringify(data) }], details: { toolId: descriptor.id, version: descriptor.version, data }, terminate: accepted }
         }
         const executionArguments = submissionBatches.mergedArgumentsByPrimaryId.get(toolCallId) ?? args
-        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot as import('../domain/agent-types.js').ReviewRunSnapshot | import('../domain/agent-types.js').TestDesignAgentSnapshot, allowedToolIds: runtimeAllowedToolIds(input) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot, allowedToolIds: runtimeAllowedToolIds(input) } }, AbortSignal.any([signal, toolSignal ?? signal]))
         if (result.terminate && submissionBatches.mergedArgumentsByPrimaryId.has(toolCallId)) submissionBatches.acceptedPrimaryIds.add(toolCallId)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
@@ -327,32 +327,36 @@ function required<T>(value: T | undefined, message: string): T { if (value === u
 
 function runtimeAllowedToolIds(input: AgentExecutionInput) {
   const profile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
-  const stageTools = new Set(['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', profile.submitToolId])
-  return new Set(input.snapshot.agentDefinition.toolIds.filter(toolId => stageTools.has(toolId)))
+  return new Set(profile.allowedToolIds)
 }
 
-function requireWorkspaceToolset(toolIds: string[], submitToolId: string) {
-  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', submitToolId]
-  const missing = requiredTools.filter(toolId => !toolIds.includes(toolId))
-  if (missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: Workspace Agent 工具配置不符合 /workspace + Knowledge 协议；缺少 ${missing.join(', ')}`)
+function requireAllowedToolset(toolIds: string[], submitToolId: string, allowedToolIds: string[]) {
+  const allowed = new Set(allowedToolIds)
+  if (!allowed.has(submitToolId)) throw new Error(`PI_AGENT_SUBMIT_TOOL_NOT_ALLOWED: ${submitToolId}`)
+  const missing = [...allowed].filter(toolId => !toolIds.includes(toolId))
+  if (missing.length) throw new Error(`PI_AGENT_CONFIGURATION_TOOL_MISSING: ${missing.join(', ')}`)
 }
 
 type StageConfiguration = {
-  isTestDesign: boolean
+  isGovernedCandidate: boolean
   submitToolId: string
   submitPiName: string
   schemaVersion: string
   agentLabel: string
+  allowedToolIds: string[]
 }
 
 function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
   const workspaceStage = input.executionProfile
   if (workspaceStage?.mode !== 'workspace_tools') throw new Error(`AGENT_STAGE_UNSUPPORTED: ${input.snapshot.agentDefinition.agentKey}`)
   return stage({
-    isTestDesign: input.snapshot.agentDefinition.agentKey === 'test-design',
+    isGovernedCandidate:
+      input.snapshot.agentDefinition.agentKey
+        !== 'requirement-analysis',
     submitToolId: workspaceStage.submitToolId,
     schemaVersion: workspaceStage.schemaVersion,
     agentLabel: workspaceStage.agentLabel,
+    allowedToolIds: [...workspaceStage.allowedToolIds],
   })
 }
 

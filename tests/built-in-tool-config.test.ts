@@ -6,9 +6,9 @@ import { ToolRegistry } from '../server/tools/registry.js'
 
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
-test('checked-in built-in Tool config includes the unified requirement-analysis submission tool', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 15)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 13)
+test('checked-in built-in Tool config includes five-Agent submission tools', () => {
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 18)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 16)
   assert.ok(!defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).includes('skill.execute_script'))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
@@ -17,6 +17,34 @@ test('checked-in built-in Tool config includes the unified requirement-analysis 
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('skill.activate').piName, 'skill_activate')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').piName, 'test_script_submit_result')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').piName, 'failure_analysis_submit_result')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').piName, 'script_repair_submit_result')
+})
+
+test('测试执行候选工具使用闭合身份与服务端一致的大小边界', () => {
+  const script = defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').parameters as unknown as {
+    additionalProperties: boolean
+    properties: { files: { maxItems: number; items: { properties: { content: { maxLength: number } } } } }
+  }
+  const diagnosis = defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').parameters as unknown as {
+    additionalProperties: boolean
+    properties: { evidence: { maxItems: number }; category: { enum: string[] } }
+  }
+  const repair = defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').parameters as unknown as {
+    additionalProperties: boolean
+    required: string[]
+    properties: { files: { items: { properties: { content: { maxLength: number } } } } }
+  }
+  assert.equal(script.additionalProperties, false)
+  assert.equal(script.properties.files.maxItems, 1)
+  assert.equal(script.properties.files.items.properties.content.maxLength, 524_288)
+  assert.equal(diagnosis.additionalProperties, false)
+  assert.equal(diagnosis.properties.evidence.maxItems, 50)
+  assert.deepEqual(diagnosis.properties.category.enum, ['product_defect', 'script_defect', 'selector_changed', 'environment_defect', 'test_data_defect', 'flaky', 'assertion_mismatch', 'timeout', 'unknown'])
+  assert.equal(repair.additionalProperties, false)
+  assert.ok(repair.required.includes('parentScriptRevisionId'))
+  assert.equal(repair.properties.files.items.properties.content.maxLength, 524_288)
 })
 
 test('resolver copies outputs and descriptors register through the governed registry', () => {
