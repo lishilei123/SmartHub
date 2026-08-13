@@ -474,6 +474,208 @@ test('PostgreSQL 在提交时拒绝 attempt 与 task 的非原子状态', async 
   assert.equal(await firstStore.finishJob(claimed.id, lease(claimed), 'failed'), true)
 })
 
+test('PostgreSQL claim reconciliation 与 cancel 使用无环锁序', { timeout: 15_000 }, async () => {
+  const suffix = 'claim-cancel-lock-order'
+  const handoffId = `${prefix}-${suffix}-handoff`
+  const firstHandoffMember: TestExecutionHandoffMember = {
+    ...handoffMember,
+    ordinal: 0,
+    dedupKey: `${prefix}-${suffix}-first`,
+  }
+  const secondHandoffMember: TestExecutionHandoffMember = {
+    ...handoffMember,
+    ordinal: 1,
+    dedupKey: `${prefix}-${suffix}-second`,
+  }
+  const handoffMembers = [firstHandoffMember, secondHandoffMember]
+  const handoffContentSha256 = canonicalSha256({
+    projectId: ids.project,
+    projectVersionId: ids.projectVersion,
+    testCaseLibraryVersionId: ids.libraryVersion,
+    mode: 'full',
+    members: handoffMembers,
+  })
+  await database.query(`
+    INSERT INTO smarthub.test_execution_handoffs (
+      id,project_version_id,test_case_set_version_id,
+      test_case_library_version_id,suite_version_id,
+      execution_mode,strategy,content_sha256,created_by,created_at,content,data
+    ) VALUES ($1,$2,NULL,$3,NULL,'full','full',$4,$5,$6,$7::jsonb,$7::jsonb)
+  `, [
+    handoffId,
+    ids.projectVersion,
+    ids.libraryVersion,
+    handoffContentSha256,
+    'integration-test',
+    now,
+    JSON.stringify({
+      id: handoffId,
+      projectId: ids.project,
+      projectVersionId: ids.projectVersion,
+      testCaseLibraryVersionId: ids.libraryVersion,
+      mode: 'full',
+      members: handoffMembers,
+      contentSha256: handoffContentSha256,
+      createdBy: 'integration-test',
+      createdAt: now,
+    }),
+  ])
+  for (const member of handoffMembers) {
+    await database.query(`
+      INSERT INTO smarthub.test_execution_handoff_members (
+        handoff_id,stage,ordinal,source_version_id,case_id,case_revision,
+        method,dedup_key,dimension,execution_spec,traceability,
+        content_sha256,readiness_override,data
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,NULL,$11,NULL,$12::jsonb
+      )
+    `, [
+      handoffId,
+      member.stage,
+      member.ordinal,
+      member.sourceVersionId,
+      member.caseId,
+      member.revision,
+      member.method,
+      member.dedupKey,
+      member.dimension,
+      JSON.stringify(member.executionSpec),
+      member.contentSha256,
+      JSON.stringify(member),
+    ])
+  }
+
+  const firstInput = freezeExecutionTaskInput({
+    handoffMember: firstHandoffMember,
+    libraryMember,
+  })
+  const secondInput = freezeExecutionTaskInput({
+    handoffMember: secondHandoffMember,
+    libraryMember,
+  })
+  const runId = `${prefix}-${suffix}-run`
+  const lockRun: ExecutionRun = {
+    ...run,
+    id: runId,
+    handoff: {
+      ...run.handoff,
+      handoffId,
+      handoffSha256: handoffContentSha256,
+      memberSnapshotSha256: canonicalSha256([firstInput, secondInput]),
+    },
+    idempotencyKey: `${prefix}-${suffix}-idempotency`,
+    taskCount: 2,
+  }
+  const firstTask: ExecutionTask = {
+    ...task,
+    id: `${prefix}-${suffix}-a-task`,
+    runId,
+    input: firstInput,
+  }
+  const secondTask: ExecutionTask = {
+    ...task,
+    id: `${prefix}-${suffix}-b-task`,
+    runId,
+    input: secondInput,
+  }
+  const firstJob: ExecutionJob = {
+    ...job,
+    id: `${prefix}-${suffix}-a-job`,
+    runId,
+    taskId: firstTask.id,
+    maxAttempts: 3,
+  }
+  const secondJob: ExecutionJob = {
+    ...job,
+    id: `${prefix}-${suffix}-b-job`,
+    runId,
+    taskId: secondTask.id,
+    maxAttempts: 1,
+  }
+  await firstStore.createAggregate({
+    run: lockRun,
+    tasks: [firstTask, secondTask],
+    jobs: [firstJob, secondJob],
+  })
+  const firstClaim = required(
+    await firstStore.claimJob('execution-worker-lock-order-first', 60_000),
+    '锁序测试的第一个 job 应被领取',
+  )
+  assert.equal(firstClaim.id, firstJob.id)
+  await firstStore.transactionWithLease(firstClaim.id, lease(firstClaim), transaction =>
+    transaction.transitionTask({
+      taskId: firstTask.id,
+      expectedStatus: 'pending',
+      expectedStateVersion: 0,
+      status: 'script_generating',
+    }),
+  )
+  assert.equal(
+    await firstStore.releaseJob(firstClaim.id, lease(firstClaim), 0, '准备锁序测试'),
+    true,
+  )
+
+  const firstJobBlocker = await database.connect()
+  try {
+    await firstJobBlocker.query('BEGIN')
+    await firstJobBlocker.query(
+      'SELECT id FROM smarthub.test_execution_jobs WHERE id=$1 FOR UPDATE',
+      [firstJob.id],
+    )
+    const secondClaim = required(
+      await secondStore.claimJob('execution-worker-lock-order-second', 1_000),
+      '锁序测试的第二个 job 应被领取',
+    )
+    assert.equal(secondClaim.id, secondJob.id)
+    await firstJobBlocker.query('COMMIT')
+  } finally {
+    await firstJobBlocker.query('ROLLBACK').catch(() => undefined)
+    firstJobBlocker.release()
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 1_100))
+  const taskBlocker = await database.connect()
+  let taskBlockerOpen = false
+  try {
+    await taskBlocker.query('BEGIN')
+    taskBlockerOpen = true
+    await taskBlocker.query(
+      'SELECT id FROM smarthub.test_execution_tasks WHERE id=$1 FOR UPDATE',
+      [secondTask.id],
+    )
+    const claimPromise = secondStore.claimJob(
+      'execution-worker-lock-order-reconcile',
+      60_000,
+    )
+    await waitForPostgresLock('%test_execution_tasks WHERE id=$1 FOR UPDATE%')
+    const cancelPromise = firstStore.cancelRun(
+      runId,
+      1,
+      new Date().toISOString(),
+    )
+    await waitForPostgresLock('%test_execution_jobs%ORDER BY id FOR UPDATE%')
+    await taskBlocker.query('COMMIT')
+    taskBlockerOpen = false
+
+    const [claimResult, cancelled] = await Promise.all([
+      claimPromise,
+      cancelPromise,
+    ])
+    assert.equal(claimResult, null)
+    assert.equal(cancelled.status, 'partial')
+  } finally {
+    if (taskBlockerOpen) {
+      await taskBlocker.query('ROLLBACK').catch(() => undefined)
+    }
+    taskBlocker.release()
+  }
+  const finalTasks = await firstStore.listTasks(runId)
+  assert.deepEqual(
+    finalTasks.map(taskValue => taskValue.status),
+    ['cancelled', 'blocked'],
+  )
+})
+
 async function appendScriptAndAttempt(claimed: ExecutionJob) {
   const sourceArtifact: ExecutionArtifact = {
     id: `${prefix}-source-artifact`, runId: ids.run, taskId: ids.task, type: 'script', storagePath: `objects/33/${'3'.repeat(64)}`, sha256: '3'.repeat(64), size: 100, mimeType: 'text/typescript', createdAt: now,
@@ -730,7 +932,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
       }),
       /DIAGNOSIS_EVIDENCE_SCOPE_MISMATCH/u,
     )
-    await transaction.transitionTask({ taskId: ids.task, expectedStatus: 'ready', expectedStateVersion: repaired.stateVersion, status: 'waiting_manual', finishedAt: new Date(Date.now() + 300).toISOString() })
+    await transaction.transitionTask({ taskId: ids.task, expectedStatus: 'diagnosing', expectedStateVersion: manualDiagnosing.stateVersion, status: 'waiting_manual', finishedAt: new Date(Date.now() + 325).toISOString() })
     await transaction.recomputeRun(ids.run)
   })
   assert.equal((await firstStore.listDiagnoses(ids.task)).length, 1)
@@ -952,6 +1154,25 @@ async function appendRunningAttempt(
     await transaction.transitionTask({ taskId: variantTask.id, expectedStatus: 'ready', expectedStateVersion: ready.stateVersion, status: 'running', incrementRunnerAttempt: true })
   })
   return attempt
+}
+
+async function waitForPostgresLock(queryPattern: string) {
+  const deadline = Date.now() + 3_000
+  while (Date.now() < deadline) {
+    const result = await database.query<{ waiting: boolean }>(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_stat_activity
+        WHERE datname=current_database()
+          AND pid<>pg_backend_pid()
+          AND wait_event_type='Lock'
+          AND query ILIKE $1
+      ) AS waiting
+    `, [queryPattern])
+    if (result.rows[0]?.waiting) return
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error(`未观察到预期 PostgreSQL 锁等待: ${queryPattern}`)
 }
 
 async function seedParents() {
