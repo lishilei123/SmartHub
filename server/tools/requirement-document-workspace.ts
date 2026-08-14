@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { createReadOnlyTools } from '@earendil-works/pi-coding-agent'
 import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { glob as globFiles } from 'glob'
-import type { InputDeliveryManifest, ReviewRunSnapshot, TestDesignAgentSnapshot, TestExecutionAgentSnapshot } from '../domain/agent-types.js'
+import type { InputDeliveryManifest, PlanningReviewerSnapshot, ReviewRunSnapshot, TestDesignAgentSnapshot, TestExecutionAgentSnapshot } from '../domain/agent-types.js'
 import type { ToolExecutionRequest, ToolExecutionResult } from '../domain/tool-types.js'
 import type { AssetVersion } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -56,7 +56,7 @@ const toolIdByName = new Map(Object.entries(toolNameById).map(([id, name]) => [n
 export class RequirementDocumentWorkspace {
   private materialized?: Promise<MaterializedWorkspace>
 
-  constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot | TestExecutionAgentSnapshot) {}
+  constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot | TestExecutionAgentSnapshot | PlanningReviewerSnapshot) {}
 
   async execute(toolId: RequirementWorkspaceToolId, request: ToolExecutionRequest, signal: AbortSignal, onRead?: (observation: RequirementDocumentReadObservation) => void): Promise<ToolExecutionResult> {
     const workspace = await this.ensureMaterialized()

@@ -145,6 +145,20 @@ export interface AgentModelConnection {
   retryCount?: number
 }
 
+export interface AgentExecutionContext {
+  sessionId: string
+  sessionFile?: string
+  sessionRole: 'planning_parent' | 'reviewer' | 'execution_agent'
+  parentSessionKey?: string
+  contextWindow: number
+  currentTokens: number | null
+  usagePercent: number | null
+  compactionCount: number
+  lastCompactionAt?: string
+  totalMessages: number
+  autoCompactionEnabled: boolean
+}
+
 export interface AgentExecutionEvent {
   sequence: number
   type: string
@@ -161,7 +175,86 @@ export interface AgentExecutionEvent {
   stopReason?: string
   model?: string
   usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }
-  framework?: { name: 'pi-agent-core'; version: string }
+  framework?: { name: 'pi-agent-core' | 'pi-coding-agent'; version: string }
+  context?: AgentExecutionContext
+  compaction?: {
+    reason: 'manual' | 'threshold' | 'overflow'
+    aborted?: boolean
+    willRetry?: boolean
+    tokensBefore?: number
+    estimatedTokensAfter?: number
+    compactedTokens?: number
+  }
+  parentSessionId?: string
+  subAgentRunId?: string
+  reviewerType?: 'requirement' | 'test_point' | 'test_case' | 'coverage'
+}
+
+export type PlanningReviewerType = 'requirement' | 'test_point' | 'test_case' | 'coverage'
+
+export interface ReviewCandidate {
+  schemaVersion: 'planning-review-candidate/v1'
+  reviewerType: PlanningReviewerType
+  verdict: 'pass' | 'changes_required' | 'blocked'
+  summary: string
+  findings: Array<{
+    ref: string
+    severity: 'blocker' | 'high' | 'medium' | 'low'
+    category: string
+    title: string
+    detail: string
+    evidenceRefs: string[]
+    recommendation?: string
+  }>
+  suggestedActions: string[]
+}
+
+export interface PlanningReviewerWorkspaceFile {
+  logicalPath: string
+  contentSha256: string
+  content: string
+  displayName: string
+  assetId?: string
+  assetVersionId?: string
+}
+
+export interface PlanningReviewerSnapshot {
+  runId: string
+  projectId: string
+  projectName: string
+  projectVersionId: string
+  projectVersionName: string
+  knowledgeBaseId: string
+  indexVersionId: string
+  assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }>
+  documentWorkspace: NonNullable<ReviewRunSnapshot['documentWorkspace']>
+  workspaceFiles: PlanningReviewerWorkspaceFile[]
+  agentDefinition: AgentDefinitionVersion
+  taskSha256: string
+  createdAt: string
+}
+
+export interface ReviewerExecutionInput {
+  runId: string
+  reviewerType: PlanningReviewerType
+  snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot | PlanningReviewerSnapshot
+  model: AgentModelConnection
+  task: string
+  requiredReadPaths: string[]
+  onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
+}
+
+export interface ReviewerExecutionOutput {
+  runId: string
+  reviewerType: PlanningReviewerType
+  parentSessionId?: string
+  candidate: ReviewCandidate
+  events: AgentExecutionEvent[]
+  turns: number
+  toolCalls: number
+  toolErrors: number
+  framework: { name: 'pi-coding-agent'; version: string }
+  context: AgentExecutionContext
 }
 
 export interface AgentExecutionInput {
@@ -188,8 +281,108 @@ export interface AgentExecutionOutput {
   turns: number
   toolCalls: number
   toolErrors: number
-  framework: { name: 'pi-agent-core'; version: string }
+  framework: { name: 'pi-agent-core' | 'pi-coding-agent'; version: string }
+  context?: AgentExecutionContext
   inputDeliveryManifest?: InputDeliveryManifest
+}
+
+export type PlanningReviewerSourceReference =
+  | {
+      kind: 'requirement'
+      requirementRunId: string
+      assetVersions: Array<{
+        assetVersionId: string
+        contentSha256: string
+      }>
+      resultSha256: string
+    }
+  | {
+      kind: 'test_design'
+      testDesignRunId: string
+      requirementReleaseId: string
+      requirementsJsonSha256: string
+      testPointTreeId: string
+      testPointTreeRevision: number
+      testPointTreeSha256: string
+      approvedTestPointTreeVersionId?: string
+      testCases: Array<{
+        caseId: string
+        treeVersionId: string
+        revision: number
+        contentSha256: string
+      }>
+      dataSetVersionId?: string
+      dataSetContentSha256?: string
+      coverageAuditId?: string
+      coverageAuditInputSha256?: string
+    }
+
+export interface PlanningSubAgentRunRecord {
+  runId: string
+  reviewerType: PlanningReviewerType
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  sourceKind: 'requirement_run' | 'test_design_run'
+  sourceId: string
+  sourceSha256: string
+  sourceReference: PlanningReviewerSourceReference
+  parentSessionId?: string
+  reviewerSessionId?: string
+  turns: number
+  toolCalls: number
+  toolErrors: number
+  framework?: { name: 'pi-coding-agent'; version: string }
+  context?: AgentExecutionContext
+  events: AgentExecutionEvent[]
+  startedAt: string
+  finishedAt?: string
+  error?: string
+}
+
+export type PlanningWorkflowStage =
+  | 'requirement_analysis'
+  | 'requirement_repair'
+  | 'requirement_verification'
+  | 'requirement_release'
+  | 'test_point_design'
+  | 'test_point_review'
+  | 'test_case_design'
+  | 'test_design_repair'
+  | 'test_design_release'
+
+export interface PlanningStageProfile {
+  stage: PlanningWorkflowStage
+  agentKey: 'requirement-analysis' | 'test-design'
+  allowedSkillKeys: string[]
+  allowedToolIds: string[]
+  submitToolId?: string
+  resultSchemaVersion?: string
+  reviewers: PlanningReviewerType[]
+  humanGate: boolean
+}
+
+export interface PlanningAgentProfile {
+  agentKey: 'planning'
+  label: 'PlanningAgent'
+  parentSession: 'project_version'
+  subAgents: Array<{
+    reviewerType: PlanningReviewerType
+    label: string
+    session: 'independent'
+    workspace: 'read_only'
+    resultSchemaVersion: 'planning-review-candidate/v1'
+  }>
+  context: {
+    autoCompaction: true
+    proactiveThresholdPercent: number
+    checkpoints: string[]
+    summaryIsFormalBusinessFact: false
+  }
+  stageProfiles: PlanningStageProfile[]
+  configurations: Array<{
+    scene: 'requirement_analysis' | 'test_design'
+    agentKey: 'requirementAnalysis' | 'testDesign'
+    activeVersion: import('./types.js').AgentConfigurationVersion | null
+  }>
 }
 
 export interface TestExecutionAgentWorkspaceFile {

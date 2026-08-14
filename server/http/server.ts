@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfigurationScene, AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
+import type { TestDesignReviewerSourceSelection } from '../application/planning-workflow-service.js'
+import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
@@ -19,7 +20,7 @@ import { routeTestReport } from './test-report-routes.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionService, testExecutionStore, testReportService }
+export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionService, testExecutionStore, testReportService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -138,6 +139,48 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'GET' && toolSource) return send(response, 200, await aiResourceService.source(toolSource[1]))
   const agentConfigurationVersion = /^\/api\/agent-configuration-versions\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && agentConfigurationVersion) return send(response, 200, await agentConfigurationService.getVersion(agentConfigurationVersion[1]))
+  if (method === 'GET' && url.pathname === '/api/planning-agent/profile') {
+    return send(response, 200, await planningWorkflowService.profile())
+  }
+  const planningWorkflow = /^\/api\/project-versions\/([^/]+)\/planning-workflow$/.exec(url.pathname)
+  if (method === 'GET' && planningWorkflow) {
+    await requireProjectVersion(planningWorkflow[1], 'project-version:read')
+    return send(response, 200, await planningWorkflowService.workflow(planningWorkflow[1]))
+  }
+  const planningContext = /^\/api\/project-versions\/([^/]+)\/planning-context$/.exec(url.pathname)
+  if (planningContext) {
+    const projectVersion = await loadProjectVersion(planningContext[1])
+    if (!projectVersion) throw new Error('项目版本不存在')
+    const scopeKey = `planning:${projectVersion.projectId}:${projectVersion.id}`
+    if (method === 'GET') {
+      await requireProjectVersion(projectVersion.id, 'project-version:read')
+      return send(response, 200, piAgentRuntime.context(scopeKey) ?? null)
+    }
+    if (method === 'POST') {
+      await requireProjectVersion(projectVersion.id, 'project-version:manage')
+      return send(response, 202, await piAgentRuntime.compact(scopeKey))
+    }
+  }
+  const requirementReviewer = /^\/api\/requirement-analysis-runs\/([^/]+)\/planning-reviewer$/.exec(url.pathname)
+  if (method === 'POST' && requirementReviewer) {
+    await requireRun(requirementReviewer[1], 'requirement-analysis:handle')
+    return send(response, 202, await planningWorkflowService.reviewRequirement(requirementReviewer[1]))
+  }
+  const testDesignReviewer = /^\/api\/test-design-runs\/([^/]+)\/planning-reviewer$/.exec(url.pathname)
+  if (method === 'POST' && testDesignReviewer) {
+    const state = await stateStore.snapshot()
+    const run = state.testDesignState?.runs.find(item => item.id === testDesignReviewer[1])
+    if (!run) throw new Error('TEST_DESIGN_RUN_NOT_FOUND')
+    await requireProjectVersion(run.projectVersionId, 'test-design:review')
+    const body = await json(request)
+    const reviewerType = String(body.reviewerType ?? '')
+    if (!['test_point', 'test_case', 'coverage'].includes(reviewerType)) throw new Error('PLANNING_REVIEWER_TYPE_INVALID')
+    return send(response, 202, await planningWorkflowService.reviewTestDesign({
+      sourceRunId: run.id,
+      reviewerType: reviewerType as 'test_point' | 'test_case' | 'coverage',
+      sourceSelection: testDesignReviewerSourceSelection(body),
+    }))
+  }
   const projectVersionAnalysisRuns = /^\/api\/project-versions\/([^/]+)\/requirement-analysis-runs$/.exec(url.pathname)
   if (method === 'POST' && projectVersionAnalysisRuns) {
     await requireProjectVersion(projectVersionAnalysisRuns[1], 'requirement-analysis:create')
@@ -387,6 +430,40 @@ async function loadApproval(approvalId: string) {
 }
 
 function stringList(value: unknown) { return Array.isArray(value) ? value.map(String) : undefined }
+function testDesignReviewerSourceSelection(body: Record<string, unknown>): TestDesignReviewerSourceSelection {
+  const revision = Number(body.testPointTreeRevision)
+  if (!Number.isInteger(revision) || revision <= 0) {
+    throw new Error('TEST_POINT_TREE_REVISION_REQUIRED')
+  }
+  if (!Array.isArray(body.testCases)) {
+    throw new Error('TEST_CASE_SOURCE_SELECTION_REQUIRED')
+  }
+  const testCases = body.testCases.map((candidate, index) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`TEST_CASE_SOURCE_SELECTION_INVALID: ${index}`)
+    }
+    const reference = candidate as Record<string, unknown>
+    const caseRevision = Number(reference.revision)
+    const caseId = String(reference.caseId ?? '').trim()
+    const treeVersionId = String(reference.treeVersionId ?? '').trim()
+    if (!caseId || !treeVersionId || !Number.isInteger(caseRevision) || caseRevision <= 0) {
+      throw new Error(`TEST_CASE_SOURCE_SELECTION_INVALID: ${index}`)
+    }
+    return { caseId, treeVersionId, revision: caseRevision }
+  })
+  const approvedTestPointTreeVersionId = String(
+    body.approvedTestPointTreeVersionId ?? '',
+  ).trim()
+  const dataSetVersionId = String(body.dataSetVersionId ?? '').trim()
+  const coverageAuditId = String(body.coverageAuditId ?? '').trim()
+  return {
+    testPointTreeRevision: revision,
+    ...(approvedTestPointTreeVersionId ? { approvedTestPointTreeVersionId } : {}),
+    testCases,
+    ...(dataSetVersionId ? { dataSetVersionId } : {}),
+    ...(coverageAuditId ? { coverageAuditId } : {}),
+  }
+}
 function optionalPositiveInteger(value: string | null) {
   if (value == null || value === '') return undefined
   const parsed = Number(value)

@@ -6,6 +6,8 @@ import {
 import type { KnowledgeDocument } from './prototype-data'
 import { loadAssetVersion, waitForTaskResults } from './knowledge-api'
 import { MarkdownDocument } from './MarkdownDocument'
+import { PlanningContextMetrics, PlanningSubAgentRuns } from './PlanningObservability'
+import { runRequirementReviewer } from './planning-api'
 import {
   cancelRequirementAnalysisRun,
   createRequirementReleaseCandidate,
@@ -377,7 +379,7 @@ export function RequirementAnalysisPageV2(props: Props) {
         {view === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} busy={releaseBusy} onGenerate={() => void generateRelease()} onPublish={() => void publishRelease()} />}
         {view === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
       </div></main>
-      <aside className="rav2-agent"><header><span><Bot /><b>Pi Agent</b></span><Badge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' ? '已完成' : '待运行'}</Badge></header><AgentConversation run={selectedRun} /></aside>
+      <aside className="rav2-agent"><header><span><Bot /><b>Pi Agent</b></span><Badge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' ? '已完成' : '待运行'}</Badge></header><AgentConversation run={selectedRun} onReviewed={detail => setRuns(current => current.map(item => item.id === detail.id ? { ...item, ...detail } : item))} notify={notify} /></aside>
     </div>
     {sourceEvidence && <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setSourceEvidence(null) }}><section className="rav2-source-modal"><header><span><ShieldCheck /><b>固定原文证据</b></span><button onClick={() => setSourceEvidence(null)}><XCircle /></button></header><div className="rav2-evidence"><b>{sourceEvidence.clientEvidenceId} · {sourceEvidence.locator.heading}</b><p>“{sourceEvidence.quote}”</p></div><div className="rav2-source-body">{sourceLoading ? <LoaderCircle className="rotating" /> : <MarkdownDocument source={sourceContent} format="markdown" />}</div></section></div>}
     {fixFinding && <FixModal finding={fixFinding} draft={fixDraft} busy={fixBusy} assets={fixedAssets(selectedRun!)} onClose={() => { if (!fixBusy) { setFixFinding(null); setFixDraft(null) } }} onRegenerate={() => void draftFindingFix(fixFinding)} onApprove={() => void approveRepair()} />}
@@ -479,8 +481,9 @@ function FixModal({ finding, draft, busy, assets, onClose, onRegenerate, onAppro
   </section></div>
 }
 
-function AgentConversation({ run }: { run?: RunRecord }) {
+function AgentConversation({ run, onReviewed, notify }: { run?: RunRecord; onReviewed: (run: RequirementAnalysisRun) => void; notify: Notify }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [reviewing, setReviewing] = useState(false)
   const executions = [run?.response?.executions?.requirementAnalysis, run?.executions?.requirementAnalysis, run?.execution?.agentKey === 'requirement-analysis' ? run.execution : undefined].filter((item): item is AgentExecutionRecord => Boolean(item))
   const execution = executions.sort((left, right) => left.events.length - right.events.length).at(-1)
   const events = execution?.events ?? []
@@ -488,12 +491,25 @@ function AgentConversation({ run }: { run?: RunRecord }) {
   const completedCalls = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
   const visibleEvents = events.filter(event => event.type !== 'tool_execution_start' || !completedCalls.has(event.toolCallId))
   useEffect(() => { const root = scrollRef.current; if (root) root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' }) }, [events.length])
+  const review = async () => {
+    if (!run || reviewing) return
+    setReviewing(true)
+    try {
+      await runRequirementReviewer(run.id)
+      onReviewed(await loadRequirementAnalysisRun(run.id))
+      notify('RequirementReviewer 已完成；候选仅注入 Planning Parent Session。')
+    } catch (error) { notify(error instanceof Error ? error.message : 'RequirementReviewer 执行失败', 'error') }
+    finally { setReviewing(false) }
+  }
 
   return <div className="rav2-conversation">
     <div className="rav2-conversation-scroll" ref={scrollRef}>
       {!run ? <div className="rav2-agent-empty"><span className="rav2-agent-empty-icon"><Bot /></span><div><b>等待启动 Pi Agent</b><p>开始需求分析后，这里会同步展示任务输入、Agent 消息、工具调用与运行状态。</p></div><ul className="rav2-agent-empty-preview"><li><FileText />任务输入与分析进度</li><li><Wrench />工具调用与执行结果</li><li><Sparkles />关键状态与最终产物</li></ul></div> : <>
         <article className="rav2-agent-task"><span><Bot /></span><div><b>RequirementAnalysisAgent</b><p>需求输入：{run.snapshot?.documentWorkspace?.logicalPath ?? run.logicalPath ?? '固定需求工作区'}</p><small>{run.id}</small></div></article>
         <div className="rav2-agent-metrics"><span>{execution?.turns ?? 0} Turn</span><span>{execution?.toolCalls ?? 0} 次工具</span><span>{events.length} 条事件</span>{execution?.toolErrors ? <span className="failed">{execution.toolErrors} 次异常</span> : null}</div>
+        <PlanningContextMetrics context={execution?.context} />
+        <button className="planning-reviewer-button" disabled={reviewing || run.status === 'running'} onClick={() => void review()}><ShieldCheck />{reviewing ? 'RequirementReviewer 审阅中…' : '运行只读 RequirementReviewer'}</button>
+        <PlanningSubAgentRuns runs={run.planningSubAgentRuns} />
         {visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={event.sequence} />)}
         {!events.length && <div className="rav2-agent-waiting"><LoaderCircle className={run.status === 'running' ? 'rotating' : ''} /><span><b>{run.status === 'running' ? '等待首个 Agent 事件' : '没有可展示的运行记录'}</b><small>{run.status === 'running' ? '消息和工具调用写入服务端后会自动同步。' : '旧运行可能只保留了结果摘要。'}</small></span></div>}
       </>}

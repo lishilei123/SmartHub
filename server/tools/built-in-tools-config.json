@@ -2146,6 +2146,58 @@
         "additionalProperties": false
       }
     },
+    "reviewer.submit_result": {
+      "version": "1.0.0",
+      "piName": "reviewer_submit_result",
+      "label": "提交 Reviewer 候选",
+      "catalogName": "提交 Reviewer 候选",
+      "description": "提交 planning-review-candidate/v1 只读审查候选；结果只作为 PlanningAgent 补充输入，不写正式业务数据。",
+      "catalogDescription": "提交只读 Reviewer 的结构化候选结果。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "reviewer.submit_result",
+      "catalogVisible": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "const": "planning-review-candidate/v1" },
+          "reviewerType": { "enum": ["requirement", "test_point", "test_case", "coverage"] },
+          "verdict": { "enum": ["pass", "changes_required", "blocked"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 8000 },
+          "findings": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "severity": { "enum": ["blocker", "high", "medium", "low"] },
+                "category": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "title": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                "detail": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "evidenceRefs": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+                },
+                "recommendation": { "type": "string", "minLength": 1, "maxLength": 4000 }
+              },
+              "required": ["ref", "severity", "category", "title", "detail", "evidenceRefs"],
+              "additionalProperties": false
+            }
+          },
+          "suggestedActions": {
+            "type": "array",
+            "maxItems": 50,
+            "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+          }
+        },
+        "required": ["schemaVersion", "reviewerType", "verdict", "summary", "findings", "suggestedActions"],
+        "additionalProperties": false
+      }
+    },
     "skill.execute_script": {
       "version": "1.0.0",
       "piName": "skill_execute_script",

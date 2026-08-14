@@ -53,7 +53,7 @@ export type AgentConfigurationVersionSummary = {
 export type AgentConfigurationVersion = AgentConfigurationVersionSummary & {
   scene: AgentConfigurationScene
   routing: AgentRoutingConfiguration
-  agentDefinition: { version: string; promptRef: { version: string }; skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>; mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>; toolIds: string[]; limits: AgentExecutionLimits; contentSha256: string }
+  agentDefinition: { version: string; systemPrompt: string; taskTemplate: string; promptRef: { version: string }; skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>; mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>; toolIds: string[]; limits: AgentExecutionLimits; contentSha256: string }
 }
 export type AgentConfigurationAgentState = {
   draft: AgentConfigurationAgentDraft

@@ -18,13 +18,15 @@ import { createProjectVersion, deleteProjectVersion, loadProjectVersions, update
 import { loadAgentConfiguration, materializeRequiredAgentCapabilities, publishAgentConfiguration, saveAgentConfigurationDraft, type AgentConfigurationAgentDraft, type AgentConfigurationAgentKey, type AgentConfigurationState, type AgentRoutingConfiguration } from './agent-configuration-api'
 import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, updateAiResource, uploadSkillPackage, type AiResource, type AiResourceCatalog, type AiResourceKind, type McpServerResource, type SkillPackageMetadata, type SkillResource, type ToolResource, type ToolSource } from './ai-resource-api'
 import { buildWorkspaceKnowledgeTree, type WorkspaceKnowledgeDirectory } from './workspace-knowledge-tree'
+import { loadPlanningAgentProfile, type PlanningAgentProfile } from './planning-api'
+import './planning.css'
 
-const RequirementAnalysisPage = lazy(() => import('./RequirementAnalysisPage').then(module => ({ default: module.RequirementAnalysisPage })))
-const TestDesignPage = lazy(() => import('./test-design/TestDesignPage').then(module => ({ default: module.TestDesignPage })))
+const PlanningPage = lazy(() => import('./PlanningPage').then(module => ({ default: module.PlanningPage })))
 const TestExecutionPage = lazy(() => import('./test-execution/TestExecutionPage').then(module => ({ default: module.TestExecutionPage })))
 const TestReportPage = lazy(() => import('./test-report/TestReportPage').then(module => ({ default: module.TestReportPage })))
 
-type PageKey = 'dashboard' | 'requirement-analysis' | 'documents' | 'test-design' | 'execution' | 'reports' | 'settings'
+type PageKey = 'dashboard' | 'planning' | 'documents' | 'execution' | 'reports' | 'settings'
+type PlanningTab = 'requirements' | 'test-design' | 'workflow'
 type NotifyTone = 'success' | 'error' | 'warning'
 type Notify = (message: string, tone?: NotifyTone) => void
 type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
@@ -37,18 +39,18 @@ const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: st
   scriptRepair: { label: '脚本修复 Agent', identifier: 'ScriptRepairAgent', sceneLabel: '测试执行', protocolLabel: '脚本修复 v1', publishTarget: '新测试执行修复', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'skill.activate', 'script_repair.submit_result'], exactCapabilities: true },
 }
 const agentConfigurationGroups: Array<{ label: string; agentKeys: AgentConfigurationAgentKey[] }> = [
-  { label: '需求分析', agentKeys: ['requirementAnalysis'] },
-  { label: '测试设计', agentKeys: ['testDesign'] },
+  { label: 'PlanningAgent · 底层发布配置', agentKeys: ['requirementAnalysis', 'testDesign'] },
   { label: '测试执行', agentKeys: ['testScript', 'failureAnalysis', 'scriptRepair'] },
 ]
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 
 const projectVersionStorageKey = 'smarthub-project-version-id'
-const pageKeys: PageKey[] = ['dashboard', 'requirement-analysis', 'documents', 'test-design', 'execution', 'reports', 'settings']
+const pageKeys: PageKey[] = ['dashboard', 'planning', 'documents', 'execution', 'reports', 'settings']
+const routedPage = (value: string | null): PageKey => value === 'requirement-analysis' || value === 'test-design' ? 'planning' : pageKeys.includes(value as PageKey) ? value as PageKey : 'dashboard'
+const legacyPlanningTab = (value: string | null): PlanningTab | undefined => value === 'requirement-analysis' ? 'requirements' : value === 'test-design' ? 'test-design' : undefined
 const restorePage = (): PageKey => {
   if (typeof window === 'undefined') return 'dashboard'
-  const routed = new URL(window.location.href).searchParams.get('page')
-  return pageKeys.includes(routed as PageKey) ? routed as PageKey : 'dashboard'
+  return routedPage(new URL(window.location.href).searchParams.get('page'))
 }
 const restoreProjectVersion = () => {
   if (typeof window === 'undefined') return ''
@@ -57,17 +59,15 @@ const restoreProjectVersion = () => {
 
 const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: string }[] = [
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard },
-  { key: 'requirement-analysis', label: '需求分析', icon: Sparkles },
-  { key: 'test-design', label: '测试设计', icon: TestTube2 },
+  { key: 'planning', label: '测试策划', icon: Sparkles },
   { key: 'execution', label: '测试执行', icon: Play },
   { key: 'reports', label: '报告与诊断', icon: Activity },
 ]
 
 const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   dashboard: { title: '工作台', desc: '掌握项目质量状态与 AI 任务进展' },
-  'requirement-analysis': { title: '需求分析', desc: '由 RequirementAnalysisAgent 建立需求基线并发现缺口、边界与测试风险' },
+  planning: { title: '测试策划', desc: 'PlanningAgent 串联需求分析、Requirement Release、测试设计、Coverage Audit 与正式发布交接' },
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
-  'test-design': { title: '测试设计', desc: '由 TestDesignAgent 与按阶段 Skill 完成可追溯的测试点、用例与覆盖设计' },
   execution: { title: '测试执行', desc: '基于不可变 Handoff、独立执行 Agents 与 OCI Playwright Runner 的正式执行工作台' },
   reports: { title: '报告与诊断', desc: '基于 PostgreSQL 正式执行事实的确定性单 Run 报告、失败诊断与完整追溯' },
   settings: { title: '系统管理', desc: '配置模型、集成、权限与平台策略' },
@@ -127,29 +127,45 @@ function App() {
   }, [])
 
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current) }, [])
-  const updateRoute = useCallback((next: { page?: PageKey; projectVersionId?: string; resetAnalysisContext?: boolean }, mode: 'push' | 'replace' = 'push') => {
+  const updateRoute = useCallback((next: { page?: PageKey; projectVersionId?: string; planningTab?: PlanningTab; resetAnalysisContext?: boolean }, mode: 'push' | 'replace' = 'push') => {
     const url = new URL(window.location.href)
     if (next.page) url.searchParams.set('page', next.page)
     if (next.projectVersionId) url.searchParams.set('projectVersionId', next.projectVersionId)
     else if (next.projectVersionId === '') url.searchParams.delete('projectVersionId')
-    if (next.resetAnalysisContext) ['analysisId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'executionMaintenanceProposalId', 'testDesignEntry', 'libraryCaseId', 'reportRunId', 'tab', 'assetView'].forEach(key => url.searchParams.delete(key))
+    if (next.resetAnalysisContext) ['analysisId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'executionMaintenanceProposalId', 'testDesignEntry', 'libraryCaseId', 'reportRunId', 'tab', 'assetView', 'planningTab'].forEach(key => url.searchParams.delete(key))
+    if (next.planningTab) url.searchParams.set('planningTab', next.planningTab)
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', url)
   }, [])
-  const navigate = useCallback((nextPage: PageKey) => {
+  const navigate = useCallback((nextPage: PageKey, planningTab?: PlanningTab) => {
     const pageChanged = nextPage !== page
     setPage(nextPage)
-    updateRoute({ page: nextPage, ...(pageChanged ? { resetAnalysisContext: true } : {}) })
+    updateRoute({ page: nextPage, ...(pageChanged ? { resetAnalysisContext: true } : {}), ...(planningTab ? { planningTab } : {}) })
   }, [page, updateRoute])
   const selectProjectVersion = useCallback((id: string) => { setSelectedProjectVersionId(id); updateRoute({ projectVersionId: id, resetAnalysisContext: true }) }, [updateRoute])
   useEffect(() => {
     const restore = () => {
       const url = new URL(window.location.href)
-      const routedPage = url.searchParams.get('page')
-      if (pageKeys.includes(routedPage as PageKey)) setPage(routedPage as PageKey)
+      const requestedPage = url.searchParams.get('page')
+      setPage(routedPage(requestedPage))
+      const planningTab = legacyPlanningTab(requestedPage)
+      if (planningTab) {
+        url.searchParams.set('page', 'planning')
+        url.searchParams.set('planningTab', planningTab)
+        window.history.replaceState({}, '', url)
+      }
       setSelectedProjectVersionId(url.searchParams.get('projectVersionId') ?? '')
     }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
+  }, [])
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    const requestedPage = url.searchParams.get('page')
+    const planningTab = legacyPlanningTab(requestedPage)
+    if (!planningTab) return
+    url.searchParams.set('page', 'planning')
+    url.searchParams.set('planningTab', planningTab)
+    window.history.replaceState({}, '', url)
   }, [])
   const activeProjectVersion = projectVersions.find(item => item.id === selectedProjectVersionId) ?? null
   const workspaceKnowledgeTree = useMemo(() => buildWorkspaceKnowledgeTree({
@@ -227,12 +243,11 @@ function App() {
       </button>
     </aside>
     <main>
-      <section className={`content ${page === 'requirement-analysis' ? 'requirements-content' : ''} ${page === 'test-design' ? 'test-design-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
+      <section className={`content ${page === 'planning' ? 'planning-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>
         {page === 'dashboard' && <Dashboard navigate={navigate} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
-        {page === 'requirement-analysis' && <Suspense fallback={<PageLoading label="正在加载需求分析工作台…" />}><RequirementAnalysisPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
+        {page === 'planning' && <Suspense fallback={<PageLoading label="正在加载测试策划工作台…" />}><PlanningPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={workspaceKnowledgeTree.directories} documents={workspaceKnowledgeTree.documents} workspaceRootDirectoryId={workspaceKnowledgeTree.rootDirectoryId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
-        {page === 'test-design' && <Suspense fallback={<PageLoading label="正在加载测试设计工作台…" />}><TestDesignPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'execution' && <Suspense fallback={<PageLoading label="正在加载测试执行工作台…" />}><TestExecutionPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'reports' && <Suspense fallback={<PageLoading label="正在加载报告与诊断工作台…" />}><TestReportPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'settings' && <SystemSettings knowledgeBaseId={knowledgeBaseId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
@@ -244,8 +259,8 @@ function App() {
   </div>
 }
 
-function Dashboard({ navigate, projectVersion, onManageVersions }: { navigate: (page: PageKey) => void; projectVersion: ProjectVersion | null; onManageVersions: () => void }) {
-  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> {projectVersion ? `当前版本 ${projectVersion.name}` : '尚未创建项目版本'}</Badge><h2>{projectVersion ? '当前项目空间已按版本隔离' : '先创建项目版本，再开始需求分析'}</h2><p>{projectVersion ? '需求发布、测试设计运行与处置上下文都固定在当前版本。' : '平台固定服务 SmartHub 单项目，项目空间通过版本切换。'}</p><div><button className="btn primary" onClick={projectVersion ? () => navigate('test-design') : onManageVersions}>{projectVersion ? '进入测试设计' : '新建项目版本'}</button></div></section><section className="card quick-card"><Sparkles /><h3>需求分析</h3><p>由 RequirementAnalysisAgent 分析当前项目版本的 ready 需求，版本间结果互不可见。</p><button className="text-btn" onClick={() => navigate('requirement-analysis')}>打开需求分析 <ChevronRight /></button></section><section className="card quick-card"><TestTube2 /><h3>测试设计</h3><p>由 TestDesignAgent 按固定阶段生成测试点树、结构化用例并接受服务端覆盖审计。</p><button className="text-btn" onClick={() => navigate('test-design')}>打开测试设计 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>知识库由平台单项目共享，不随项目版本复制。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>模型与平台配置为全局资源，不参与版本隔离。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
+function Dashboard({ navigate, projectVersion, onManageVersions }: { navigate: (page: PageKey, planningTab?: PlanningTab) => void; projectVersion: ProjectVersion | null; onManageVersions: () => void }) {
+  return <div className="dashboard-grid"><section className="card span2 dashboard-notice"><Badge tone="violet"><Sparkles size={12} /> {projectVersion ? `当前版本 ${projectVersion.name}` : '尚未创建项目版本'}</Badge><h2>{projectVersion ? '当前项目空间已按版本隔离' : '先创建项目版本，再开始测试策划'}</h2><p>{projectVersion ? '需求发布、测试设计运行与 Parent Session 上下文都固定在当前版本。' : '平台固定服务 SmartHub 单项目，项目空间通过版本切换。'}</p><div><button className="btn primary" onClick={projectVersion ? () => navigate('planning', 'workflow') : onManageVersions}>{projectVersion ? '进入测试策划' : '新建项目版本'}</button></div></section><section className="card quick-card"><Sparkles /><h3>需求分析</h3><p>由 PlanningAgent 调用已发布 RequirementAnalysisAgent 配置分析当前项目版本。</p><button className="text-btn" onClick={() => navigate('planning', 'requirements')}>打开需求分析 <ChevronRight /></button></section><section className="card quick-card"><TestTube2 /><h3>测试设计</h3><p>由 PlanningAgent 串联已发布 TestDesignAgent 配置、人工门禁与 Coverage Audit。</p><button className="text-btn" onClick={() => navigate('planning', 'test-design')}>打开测试设计 <ChevronRight /></button></section><section className="card quick-card"><Library /><h3>知识库</h3><p>知识库由平台单项目共享，不随项目版本复制。</p><button className="text-btn" onClick={() => navigate('documents')}>打开知识库 <ChevronRight /></button></section><section className="card quick-card"><Settings /><h3>系统设置</h3><p>模型与平台配置为全局资源，不参与版本隔离。</p><button className="text-btn" onClick={() => navigate('settings')}>打开系统设置 <ChevronRight /></button></section></div>
 }
 
 function ProjectVersionManager({ versions, selectedId, onSelect, onRefresh, onClose, notify }: { versions: ProjectVersion[]; selectedId: string; onSelect: (id: string) => void; onRefresh: () => Promise<ProjectVersion[]>; onClose: () => void; notify: Notify }) {
@@ -1250,9 +1265,11 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
   onPublish: (agentKey: AgentConfigurationAgentKey) => Promise<void>
 }) {
   const [selectedAgent, setSelectedAgent] = useState<AgentConfigurationAgentKey>('requirementAnalysis')
-  const [tab, setTab] = useState<'model' | 'prompt' | 'tools'>('model')
+  const [tab, setTab] = useState<'planning' | 'model' | 'prompt' | 'tools'>('planning')
   const [resourceCatalog, setResourceCatalog] = useState<AiResourceCatalog | null>(null)
   const [resourceCatalogError, setResourceCatalogError] = useState('')
+  const [planningProfile, setPlanningProfile] = useState<PlanningAgentProfile | null>(null)
+  const [planningProfileError, setPlanningProfileError] = useState('')
   const currentDraft = agentDraft[selectedAgent]
   const currentState = configuration.agents[selectedAgent]
   const routing = currentDraft.routing
@@ -1310,15 +1327,43 @@ function PromptAgentSettings({ draft, notify, agentDraft, updateAgent, configura
     if (tab !== 'tools' || resourceCatalog || resourceCatalogError) return
     void loadResourceCatalog().catch(() => undefined)
   }, [loadResourceCatalog, resourceCatalog, resourceCatalogError, tab])
+  const loadPlanningProfile = useCallback(() => {
+    setPlanningProfileError('')
+    return loadPlanningAgentProfile().then(setPlanningProfile).catch(error => {
+      setPlanningProfileError(error instanceof Error ? error.message : 'PlanningAgent Profile 读取失败')
+      throw error
+    })
+  }, [])
+  useEffect(() => { void loadPlanningProfile().catch(() => undefined) }, [loadPlanningProfile])
   const selectAgent = (value: AgentConfigurationAgentKey) => setSelectedAgent(value)
   return <><div className="agent-settings-page">
     <section className="agent-config-header"><div className="agent-symbol"><BrainCircuit /></div><div className="agent-selector"><span>配置 Agent</span><select value={selectedAgent} onChange={event => selectAgent(event.target.value as AgentConfigurationAgentKey)} aria-label="选择要配置的 Agent">{agentConfigurationGroups.map(group => <optgroup label={group.label} key={group.label}>{group.agentKeys.map(agentKey => { const metadata = agentConfigurationMetadata[agentKey]; return <option value={agentKey} key={agentKey}>{metadata.label}（{metadata.identifier}）</option> })}</optgroup>)}</select><p>{agentMetadata.sceneLabel} / {agentIdentifier} · 草稿 revision {currentDraft.revision}</p></div><Badge tone={currentState.activeVersion ? 'green' : 'orange'}>{currentState.activeVersion ? `V${currentState.activeVersion.version} 生效中` : '尚未发布'}</Badge><button className="btn primary agent-publish-button" disabled={publishing || !routing.primaryModel || !modelSourcesReady} onClick={() => void onPublish(selectedAgent)}><Play />{publishing ? '发布中…' : `发布`}</button></section>
     {configurationError && <div className="agent-configuration-status failed"><AlertTriangle /><div><b>版本已发布，但配置刷新失败</b><span>{configurationError}</span></div><button className="btn ghost" onClick={onRetryConfiguration}><RefreshCw />重新加载</button></div>}
-    <nav className="agent-config-tabs"><button className={tab === 'model' ? 'active' : ''} onClick={() => setTab('model')}><Bot />模型与路由</button><button className={tab === 'prompt' ? 'active' : ''} onClick={() => setTab('prompt')}><FileText />提示词</button><button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}><ShieldCheck />Tool、MCP、Skill</button></nav>
+    <nav className="agent-config-tabs"><button className={tab === 'planning' ? 'active' : ''} onClick={() => setTab('planning')}><BrainCircuit />PlanningAgent</button><button className={tab === 'model' ? 'active' : ''} onClick={() => setTab('model')}><Bot />模型与路由</button><button className={tab === 'prompt' ? 'active' : ''} onClick={() => setTab('prompt')}><FileText />提示词</button><button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}><ShieldCheck />Tool、MCP、Skill</button></nav>
+    {tab === 'planning' && <PlanningAgentSettings profile={planningProfile} error={planningProfileError} modelSources={draft.generativeSources} agentDraft={agentDraft} onRetry={() => void loadPlanningProfile().catch(() => undefined)} />}
     {tab === 'model' && <div className="model-routing-grid"><section className="model-config-panel"><ModelPanelHead title={`${agentLabel}模型参数`} desc={`仅作用于${agentLabel}，不会影响其他 Agent。`}><Badge tone="purple">{agentMetadata.sceneLabel}</Badge></ModelPanelHead>{!modelSourcesReady && <div className={`agent-configuration-status ${modelSourcesState === 'failed' ? 'failed' : ''}`}><RefreshCw /><div><b>{modelSourcesState === 'failed' ? '模型来源读取失败' : '正在读取模型来源'}</b><span>{modelSourcesState === 'failed' ? modelSourcesError ?? '模型与路由暂不可编辑。' : '提示词、工具和运行限制仍可使用。'}</span></div>{modelSourcesState === 'failed' && <button className="btn ghost" onClick={onRetryModelSources}><RefreshCw />重新加载</button>}</div>}<div className="routing-form"><FormRow label="默认模型" help="智能路由关闭时固定使用该模型"><select disabled={!modelSourcesReady} value={routing.primaryModel ? modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId) : ''} onChange={event => { const [sourceId, modelId] = event.target.value.split('\u0000'); updateRouting('primaryModel', sourceId && modelId ? { sourceId, modelId } : null) }}><option value="">{modelSourcesReady ? '请选择模型' : '模型来源读取中…'}</option>{availableModels.map(model => <option value={modelValue(model.source.id, model.id)} key={modelValue(model.source.id, model.id)}>{model.displayName} · {model.source.name}</option>)}</select></FormRow><FormRow label="最大输出 Token" help="由当前 Agent 独立设置，发布后直接用于模型调用"><div className="input-unit"><input type="number" min="1024" step="1024" value={routing.maxOutputTokens} onChange={event => updateRouting('maxOutputTokens', Number(event.target.value))} /><span>tokens</span></div></FormRow><FormRow label="请求超时" help="单次模型请求的服务端超时"><div className="input-unit"><input type="number" min="10" value={routing.requestTimeoutSeconds} onChange={event => updateRouting('requestTimeoutSeconds', Number(event.target.value))} /><span>秒</span></div></FormRow><FormRow label="失败重试" help="仅对限流、超时等错误生效"><select value={routing.retryCount} onChange={event => updateRouting('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option></select></FormRow><SwitchRow title="强制结构化输出" desc="提交结果必须通过服务端 Schema 校验" checked={routing.structuredOutput} onChange={value => updateRouting('structuredOutput', value)} /></div></section><section className="model-config-panel route-policy-panel"><ModelPanelHead title="路由与降级" desc={`仅保存到${agentLabel}的独立版本快照。`} /><SwitchRow title="启用智能模型路由" desc="按能力、上下文、启用和健康状态选择模型" checked={routing.intelligentRouting} onChange={value => updateRouting('intelligentRouting', value)} /><SwitchRow title="允许模型降级" desc="默认模型不可用时按顺序尝试备用模型" checked={routing.fallbackEnabled} onChange={value => updateRouting('fallbackEnabled', value)} /><div className={`fallback-route ${routing.fallbackEnabled ? '' : 'disabled'}`}><div className="fallback-primary"><span>主</span><div><b>{defaultModel?.displayName ?? '未选择默认模型'}</b><small>{defaultModel?.source.name ?? '请先在模型管理中启用模型'}</small></div><Badge tone="green">默认</Badge></div>{routing.fallbackModels.map((reference, index) => { const model = resolveModel(reference); return model && <div className="fallback-item" key={modelValue(reference.sourceId, reference.modelId)}><span>{index + 1}</span><div><b>{model.displayName}</b><small>{model.source.name}</small></div><div><button className="icon-btn" disabled={!modelSourcesReady || index === 0} onClick={() => moveFallback(index, -1)}><ArrowUp /></button><button className="icon-btn" disabled={!modelSourcesReady || index === routing.fallbackModels.length - 1} onClick={() => moveFallback(index, 1)}><ArrowDown /></button><button className="icon-btn danger-text" disabled={!modelSourcesReady} onClick={() => updateRouting('fallbackModels', routing.fallbackModels.filter((_, position) => position !== index))}><Trash2 /></button></div></div>})}<button className="add-fallback" disabled={!modelSourcesReady || !routing.fallbackEnabled || !availableModels.some(model => (!routing.primaryModel || modelValue(model.source.id, model.id) !== modelValue(routing.primaryModel.sourceId, routing.primaryModel.modelId)) && !routing.fallbackModels.some(reference => modelValue(reference.sourceId, reference.modelId) === modelValue(model.source.id, model.id)))} onClick={addFallback}><Plus />添加回退模型</button></div><div className="route-note"><ShieldCheck /><span><b>{agentLabel}独立配置</b><small>模型来源由通用模型库管理；模型选择和路由策略随当前 Agent 版本发布。</small></span></div></section></div>}
     {tab === 'prompt' && <section className="model-config-panel agent-prompt-editor"><ModelPanelHead title={`${agentLabel}提示词`} desc={`配置${agentLabel}的系统指令与任务模板。`}><Badge tone="purple">{agentMetadata.protocolLabel}</Badge></ModelPanelHead><label><span>系统提示词</span><textarea value={definition.systemPrompt} onChange={event => updateDefinition({ systemPrompt: event.target.value })} /><small>{definition.systemPrompt.length.toLocaleString()} 字符</small></label><label><span>任务模板</span><textarea className="task-template" value={definition.taskTemplate} onChange={event => updateDefinition({ taskTemplate: event.target.value })} /><small>{definition.taskTemplate.length.toLocaleString()} 字符</small></label></section>}
     {tab === 'tools' && <section className="model-config-panel agent-tool-editor"><ModelPanelHead title={`${agentLabel} Tool、MCP、Skill 与运行限制`} desc="直接读取模型管理的资源目录；Skill 自带的脚本和网络权限随 Skill 自动固化，无需重复选择 Tool。"><Badge tone="green">服务端强校验</Badge></ModelPanelHead>{resourceCatalog === null && !resourceCatalogError && <div className="agent-capability-state"><RefreshCw className="document-loading-icon" />正在读取完整 AI 资源目录…</div>}{resourceCatalogError && <div className="agent-capability-state failed"><AlertTriangle /><span>{resourceCatalogError}</span><button className="btn ghost" onClick={() => void loadResourceCatalog().catch(() => undefined)}><RefreshCw />重试</button></div>}{resourceCatalog && <><div className="agent-capability-section"><header><div><b>Tool</b><small>仅展示可独立配置的工具；Skill 脚本和网络能力在 Skill 区域授权。</small></div><Badge tone="purple">{resourceCatalog.tools.filter(tool => definition.toolIds.includes(tool.key) || requiredToolIds.includes(tool.key)).length} / {resourceCatalog.tools.length} 已选择</Badge></header>{resourceCatalog.tools.length === 0 ? <div className="agent-capability-state"><ShieldCheck />暂无 Tool，请先到模型管理添加。</div> : <div className="agent-skill-list">{resourceCatalog.tools.map(tool => { const required = requiredToolIds.includes(tool.key); const selected = definition.toolIds.includes(tool.key) || required; const runtimeReady = stageRuntimeToolIds.has(tool.key); return <label className={!tool.enabled ? 'disabled' : ''} key={tool.id}><input type="checkbox" checked={selected} disabled={agentMetadata.exactCapabilities || required || (!tool.enabled && !selected)} onChange={() => toggleTool(tool)} /><span><b>{tool.name}</b><code>{tool.key}@{tool.version}</code><small>{tool.description || '暂无描述'}</small></span><Badge tone={required || runtimeReady ? 'green' : tool.status === 'ready' ? 'blue' : 'gray'}>{required ? '必需' : runtimeReady ? '可运行' : tool.status === 'ready' ? '可绑定' : '待接入'}</Badge></label>})}</div>}</div><div className="agent-capability-section"><header><div><b>MCP</b><small>展示 MCP 目录中的全部服务，选择结果随 Agent 版本固化。</small></div><Badge tone="purple">{resourceCatalog.mcpServers.filter(server => definition.mcpServerKeys.includes(server.key) || requiredMcpServerKeys.includes(server.key)).length} / {resourceCatalog.mcpServers.length} 已选择</Badge></header>{resourceCatalog.mcpServers.length === 0 ? <div className="agent-capability-state"><Server />暂无 MCP，请先到模型管理添加。</div> : <div className="agent-skill-list">{resourceCatalog.mcpServers.map(server => { const required = requiredMcpServerKeys.includes(server.key); const selected = definition.mcpServerKeys.includes(server.key) || required; return <label className={!server.enabled ? 'disabled' : ''} key={server.id}><input type="checkbox" checked={selected} disabled={agentMetadata.exactCapabilities || required || (!server.enabled && !selected)} onChange={() => toggleMcp(server)} /><span><b>{server.name}</b><code>{server.key}@{server.version}</code><small>{required ? '必需 MCP，不可移除' : !server.enabled ? '已停用，可取消但不能新增' : `${server.transport === 'streamable_http' ? 'Streamable HTTP' : 'SSE'} · ${server.toolIds.length} 个远程工具`}</small></span><Badge tone={required ? 'green' : server.status === 'ready' ? 'blue' : 'gray'}>{required ? '必需' : server.status === 'ready' ? '可绑定' : '待接入'}</Badge></label>})}</div>}</div><div className="agent-capability-section"><header><div><b>Skill</b><small>选择 Skill 即同时授权其运行权限清单；停用项不能新增，必需项不可移除。</small></div><Badge tone="purple">{resourceCatalog.skills.filter(skill => definition.skillKeys.includes(skill.key) || requiredSkillKeys.includes(skill.key)).length} / {resourceCatalog.skills.length} 已选择</Badge></header>{resourceCatalog.skills.length === 0 ? <div className="agent-capability-state"><Sparkles />暂无 Skill，请先到模型管理添加。</div> : <div className="agent-skill-list">{resourceCatalog.skills.map(skill => { const required = requiredSkillKeys.includes(skill.key); const selected = definition.skillKeys.includes(skill.key) || required; return <label className={!skill.enabled ? 'disabled' : ''} key={skill.id}><input type="checkbox" checked={selected} disabled={agentMetadata.exactCapabilities || required || (!skill.enabled && !selected)} onChange={() => toggleSkill(skill)} /><span><b>{skill.name}</b><code>{skill.key}@{skill.version}</code><small>{required ? '必需 Skill，不可移除' : !skill.enabled ? '已停用，可取消但不能新增' : agentSkillSummary(skill)}</small></span><Badge tone={required ? 'green' : skill.status === 'ready' ? 'blue' : 'gray'}>{required ? '必需' : skill.status === 'ready' ? '可绑定' : '待接入'}</Badge></label>})}</div>}</div></>}<div className="agent-limit-grid"><label>最大轮次<input type="number" min="4" max="100" value={definition.limits.maxTurns} onChange={event => updateLimit('maxTurns', Number(event.target.value))} /></label><label>最大工具调用<input type="number" min="1" max="200" value={definition.limits.maxToolCalls} onChange={event => updateLimit('maxToolCalls', Number(event.target.value))} /></label><label>总截止时间（秒）<input type="number" min="30" max="3600" value={definition.limits.deadlineMs / 1000} onChange={event => updateLimit('deadlineMs', Number(event.target.value) * 1000)} /></label><label>推理强度<select value={definition.limits.reasoningEffort ?? 'medium'} onChange={event => updateLimit('reasoningEffort', event.target.value)}><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">超高</option></select></label></div></section>}
   </div></>
+}
+
+function PlanningAgentSettings({ profile, error, modelSources, agentDraft, onRetry }: { profile: PlanningAgentProfile | null; error: string; modelSources: GenerativeSourceDraft[]; agentDraft: Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft>; onRetry: () => void }) {
+  if (error) return <div className="agent-configuration-status failed"><AlertTriangle /><div><b>PlanningAgent Profile 读取失败</b><span>{error}</span></div><button className="btn ghost" onClick={onRetry}><RefreshCw />重新加载</button></div>
+  if (!profile) return <AgentConfigurationLoading />
+  const modelFor = (reference: { sourceId: string; modelId: string } | null) => reference ? modelSources.flatMap(source => source.models.map(model => ({ source, model }))).find(item => item.source.id === reference.sourceId && item.model.id === reference.modelId) : undefined
+  return <section className="planning-agent-profile">
+    <header><span><BrainCircuit /><div><b>{profile.label}</b><small>上层 Parent Session 编排；不创建第三套可发布 Agent 配置。</small></div></span><Badge tone="green">projectVersion Parent Session</Badge></header>
+    <div className="planning-agent-summary"><article><small>Parent Session</small><b>{profile.parentSession}</b><span>RequirementAnalysis 与 TestDesign 共用同一 Planning Context</span></article><article><small>Auto Compaction</small><b>{profile.context.autoCompaction ? 'Enabled' : 'Disabled'} · {profile.context.proactiveThresholdPercent}%</b><span>Summary 不是正式业务事实</span></article><article><small>SubAgents</small><b>{profile.subAgents.length} 个独立 Reviewer</b><span>独立 Session · 只读 Workspace</span></article><article><small>Stages</small><b>{profile.stageProfiles.length} 个固定 Stage</b><span>Service、Validator、Release 与人工门禁保持不变</span></article></div>
+    <div className="planning-agent-configurations">{profile.configurations.map(configuration => {
+      const active = configuration.activeVersion
+      const model = modelFor(active?.routing.primaryModel ?? null)
+      const draft = agentDraft[configuration.agentKey]
+      return <article key={configuration.agentKey}><header><span><Bot /><div><b>{configuration.scene === 'requirement_analysis' ? 'RequirementAnalysisAgent' : 'TestDesignAgent'}</b><small>底层已发布配置 · {configuration.scene}</small></div></span><Badge tone={active ? 'green' : 'orange'}>{active ? `V${active.version}` : '未发布'}</Badge></header>{active ? <><div className="planning-agent-kpis"><span><small>模型</small><b>{model?.model.displayName ?? active.routing.primaryModel?.modelId ?? '未选择'}</b></span><span><small>Context Window</small><b>{model ? model.model.contextWindow.toLocaleString() : '—'}</b></span><span><small>最大 Turns</small><b>{active.agentDefinition.limits.maxTurns}</b></span><span><small>Tool Calls</small><b>{active.agentDefinition.limits.maxToolCalls}</b></span></div><details><summary>System Prompt</summary><pre>{active.agentDefinition.systemPrompt}</pre></details><dl><div><dt>Skills</dt><dd>{active.agentDefinition.skillBindings.filter(item => item.enabled).map(item => item.skillKey).join(' · ') || '—'}</dd></div><div><dt>Tools</dt><dd>{active.agentDefinition.toolIds.join(' · ') || '—'}</dd></div></dl></> : <p className="readonly-notice">请在模型与路由、提示词、Tool/MCP/Skill 页签完成底层配置并发布。</p>}<footer>草稿 revision {draft.revision} · 发布与编辑仍作用于该底层配置</footer></article>
+    })}</div>
+    <section className="planning-agent-subagents"><header><ShieldCheck /><span><b>Reviewer SubAgents</b><small>候选只注入 Parent Session，最终采纳仍由 Workflow、Service 与 Validator 决定。</small></span></header><div>{profile.subAgents.map(subAgent => <article key={subAgent.reviewerType}><Bot /><span><b>{subAgent.label}</b><small>{subAgent.session} session · {subAgent.workspace} workspace</small><code>{subAgent.resultSchemaVersion}</code></span></article>)}</div></section>
+    <section className="planning-agent-context"><header><RefreshCw /><span><b>Context / Compaction</b><small>检查点达到阈值时主动压缩，不在每个 Stage 无条件压缩。</small></span></header><div>{profile.context.checkpoints.map(checkpoint => <code key={checkpoint}>{checkpoint}</code>)}</div></section>
+    <section className="planning-agent-stages"><header><Activity /><span><b>Stage 权限</b><small>每个 Stage 固定 Allowed Skills、Allowed Tools、Submit Tool、Schema、Reviewer 与 Human Gate。</small></span></header><div>{profile.stageProfiles.map(stage => <article key={stage.stage}><header><b>{stage.stage}</b><Badge tone={stage.humanGate ? 'orange' : 'gray'}>{stage.humanGate ? 'Human Gate' : stage.agentKey}</Badge></header><dl><div><dt>Skills</dt><dd>{stage.allowedSkillKeys.join(' · ') || '—'}</dd></div><div><dt>Tools</dt><dd>{stage.allowedToolIds.join(' · ') || '—'}</dd></div><div><dt>Submit / Schema</dt><dd>{stage.submitToolId ?? '—'} · {stage.resultSchemaVersion ?? '—'}</dd></div><div><dt>Reviewer</dt><dd>{stage.reviewers.join(' · ') || '—'}</dd></div></dl></article>)}</div></section>
+  </section>
 }
 
 function ModelPanelHead({ title, desc, children }: { title: string; desc: string; children?: ReactNode }) { return <div className="model-panel-head"><div><h3>{title}</h3><p>{desc}</p></div>{children}</div> }

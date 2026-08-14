@@ -1,3 +1,6 @@
+
+import type { AgentExecutionContext, PlanningSubAgentRunRecord } from './planning-api'
+
 const apiBase = 'http://127.0.0.1:8787/api'
 
 export type AnalysisFindingType = 'missing_requirement' | 'ambiguity' | 'conflict' | 'boundary_gap' | 'state_gap' | 'exception_gap' | 'security_risk' | 'testability_gap' | 'dependency_risk' | 'other'
@@ -91,6 +94,7 @@ export type AgentExecutionRecord = {
   toolErrors?: number
   framework?: { name: string; version: string }
   workflowStage?: 'analysis' | 'repair' | 'verification' | 'release'
+  context?: AgentExecutionContext
   events: AgentExecutionEvent[]
 }
 
@@ -242,6 +246,7 @@ export type RequirementAnalysisRun = {
   executions?: AgentExecutions
   executionAttempts?: RequirementAnalysisRunExecutionAttempt[]
   inputDeliveryManifest?: InputDeliveryManifest
+  planningSubAgentRuns?: PlanningSubAgentRunRecord[]
   workflow?: {
     currentStage: 'analysis' | 'repair' | 'verification' | 'release'
     repairDrafts?: RequirementRepairDraft[]

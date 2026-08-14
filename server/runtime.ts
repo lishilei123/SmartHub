@@ -4,6 +4,8 @@ import { KnowledgeService } from './application/knowledge-service.js'
 import { ModelService } from './application/model-service.js'
 import { RequirementAnalysisService } from './application/requirement-analysis-service.js'
 import { PiAgentRuntimeAdapter } from './agent/pi-agent-runtime.js'
+import { PiSessionRuntime } from './agent/pi-session-runtime.js'
+import { ContextManager } from './agent/context-manager.js'
 import { LocalModelRuntime } from './infrastructure/local-model-runtime.js'
 import { PostgresStore } from './infrastructure/postgres-store.js'
 import { RawDocumentStore } from './infrastructure/raw-document-store.js'
@@ -16,6 +18,7 @@ import { applicationRoot, dataRoot } from './infrastructure/runtime-paths.js'
 import { ReviewGovernanceService } from './application/review-governance-service.js'
 import { createBootstrapAccessControl } from './http/access-control.js'
 import { TestDesignService } from './application/test-design-service.js'
+import { PlanningWorkflowService } from './application/planning-workflow-service.js'
 import { PiTestDesignRuntimeAdapter } from './agent/pi-test-design-runtime.js'
 import { PiTestExecutionRuntimeAdapter } from './agent/pi-test-execution-runtime.js'
 import { TestExecutionService } from './application/test-execution-service.js'
@@ -56,10 +59,39 @@ export const skillPackageStore = new SkillPackageStore(skillRoot)
 export const aiResourceService = new AiResourceService(stateStore, skillPackageStore)
 export const agentConfigurationService = new AgentConfigurationService(stateStore)
 export const reviewGovernanceService = new ReviewGovernanceService(stateStore)
-export const piAgentRuntime = new PiAgentRuntimeAdapter(stateStore, {}, skillPackageStore, reviewGovernanceService, service)
+export const piSessionRuntime = new PiSessionRuntime(resolve(dataRoot, 'pi-sessions'))
+export const contextManager = new ContextManager()
+export const piAgentRuntime = new PiAgentRuntimeAdapter(
+  stateStore,
+  {},
+  skillPackageStore,
+  reviewGovernanceService,
+  service,
+  piSessionRuntime,
+  contextManager,
+)
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService, service)
 export const testDesignRuntime = new PiTestDesignRuntimeAdapter(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignService = new TestDesignService(stateStore, testDesignRuntime, service)
+export const planningWorkflowService = new PlanningWorkflowService(
+  stateStore,
+  agentConfigurationService,
+  piAgentRuntime,
+  requirementAnalysisService,
+  testDesignService,
+)
+testDesignService.onTestPointsConfirmed(async projectVersionId => {
+  const projectVersion = stateStore.getProjectVersion
+    ? await stateStore.getProjectVersion(projectVersionId)
+    : (await stateStore.snapshot()).projectVersions.find(
+        item => item.id === projectVersionId,
+      )
+  if (!projectVersion) throw new Error('PROJECT_VERSION_NOT_FOUND')
+  planningWorkflowService.queueTestPointsConfirmed(
+    projectVersion.projectId,
+    projectVersion.id,
+  )
+})
 export const projectVersionService = new ProjectVersionService(stateStore)
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore

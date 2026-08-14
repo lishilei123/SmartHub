@@ -50,6 +50,7 @@ export const BUILT_IN_HANDLER_KEYS = [
   'test_script.submit_result',
   'failure_analysis.submit_result',
   'script_repair.submit_result',
+  'reviewer.submit_result',
   'skill.execute_script',
   'skill.http_request',
 ] as const

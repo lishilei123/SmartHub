@@ -8,7 +8,9 @@ import {
 } from '../application/ai-resource-hash.js'
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import type {
+  AgentExecutionContext,
   AgentExecutionEvent,
+  AgentExecutionOutput,
   AgentModelConnection,
   InputDeliveryManifest,
   TestExecutionAgentSnapshot,
@@ -105,7 +107,8 @@ export interface TestExecutionAgentRuntimeOutput {
     toolCalls: number
     toolErrors: number
     events: AgentExecutionEvent[]
-    framework: { name: 'pi-agent-core'; version: string }
+    framework: AgentExecutionOutput['framework']
+    context?: AgentExecutionContext
   }
 }
 
@@ -225,6 +228,7 @@ export class PiTestExecutionRuntimeAdapter {
           output.toolCalls,
           output.toolErrors,
           output.framework,
+          output.context,
         ),
       }
     } catch (error) {
@@ -511,7 +515,8 @@ function executionRecord(
   turns?: number,
   toolCalls?: number,
   toolErrors?: number,
-  framework = { name: 'pi-agent-core' as const, version: piVersion },
+  framework: AgentExecutionOutput['framework'] = { name: 'pi-agent-core', version: piVersion },
+  context?: AgentExecutionContext,
 ): TestExecutionAgentRuntimeOutput['execution'] {
   return {
     agentKey,
@@ -521,6 +526,7 @@ function executionRecord(
     toolErrors: toolErrors ?? events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
     events: structuredClone(events),
     framework,
+    ...(context ? { context: structuredClone(context) } : {}),
   }
 }
 

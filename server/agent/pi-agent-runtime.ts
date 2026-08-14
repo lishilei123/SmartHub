@@ -2,9 +2,19 @@ import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from '@earendil-works/pi-agent-core'
 import type { Api, Model } from '@earendil-works/pi-ai'
+import {
+  AgentSession,
+  DefaultResourceLoader,
+  ModelRuntime,
+  SettingsManager,
+  compact as compactPiContext,
+  type AgentSessionEvent,
+  type InlineExtension,
+  type SessionManager,
+} from '@earendil-works/pi-coding-agent'
 import { streamSimple as streamAnthropic } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as streamOpenAi } from '@earendil-works/pi-ai/api/openai-completions'
-import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, InputDeliveryManifest, RequirementInputBatch } from '../domain/agent-types.js'
+import type { AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentModelConnection, AgentRuntime, InputDeliveryManifest, RequirementInputBatch, ReviewCandidate, ReviewerExecutionInput, ReviewerExecutionOutput } from '../domain/agent-types.js'
 import type { AgentCandidateResult } from '../domain/review-types.js'
 import type { ToolApprovalGate } from '../domain/tool-types.js'
 import type { ToolDescriptor } from '../domain/tool-types.js'
@@ -17,9 +27,16 @@ import { RequirementDocumentWorkspace } from '../tools/requirement-document-work
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
 import { KnowledgeService } from '../application/knowledge-service.js'
+import { ContextManager, protectedCompactionInstructions, type PlanningCompactionCheckpoint } from './context-manager.js'
+import {
+  PiSessionRuntime,
+  type PersistedParentSessionBinding,
+  type PiSessionScope,
+} from './pi-session-runtime.js'
 
 const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
+export const piCodingAgentVersion = '0.84.1'
 const RESULT_SUBMISSION_TURN_RESERVE = 3
 const RESULT_SUBMISSION_TOOL_RESERVE = 3
 const TRANSIENT_MODEL_RETRIES = 2
@@ -38,11 +55,345 @@ type SubmissionBatchState = {
   callCountByPrimaryId: Map<string, number>
 }
 
+type PiModelInput = {
+  model: AgentModelConnection
+  snapshot: {
+    agentDefinition: Pick<
+      AgentExecutionInput['snapshot']['agentDefinition'],
+      'limits'
+    >
+  }
+}
+
+type ParentSessionBinding = {
+  scope: PiSessionScope
+  model: AgentModelConnection
+  agentDefinition: AgentExecutionInput['snapshot']['agentDefinition']
+  systemPrompt: string
+}
+
 export class PiAgentRuntimeAdapter implements AgentRuntime {
   private readonly knowledge: KnowledgeService
+  private readonly parentBindings = new Map<string, ParentSessionBinding>()
 
-  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore, private readonly approvalGate?: ToolApprovalGate, knowledge?: KnowledgeService) {
+  constructor(
+    private readonly store: StateStore,
+    private readonly bindings: PiRuntimeBindings = {},
+    private readonly skillPackages?: SkillPackageStore,
+    private readonly approvalGate?: ToolApprovalGate,
+    knowledge?: KnowledgeService,
+    private readonly sessions = PiSessionRuntime.inMemory(),
+    private readonly contexts = new ContextManager(),
+  ) {
     this.knowledge = knowledge ?? new KnowledgeService(store)
+  }
+
+  context(scopeKey: string) {
+    return this.sessions.context(scopeKey)
+  }
+
+  contextProfile() {
+    return this.contexts.profile()
+  }
+
+  queueCompactionCheckpoint(
+    scopeKey: string,
+    checkpoint: PlanningCompactionCheckpoint,
+  ) {
+    this.contexts.queueCheckpoint(scopeKey, checkpoint)
+  }
+
+  async compact(scopeKey: string) {
+    if (this.sessions.active(scopeKey)) throw new Error('PI_SESSION_BUSY')
+    const binding = this.parentBindings.get(scopeKey)
+      ?? await this.restoreParentBinding(scopeKey)
+    if (!binding) throw new Error('PI_SESSION_BINDING_NOT_AVAILABLE')
+    const lease = await this.sessions.acquireIdle(binding.scope)
+    let session: AgentSession | undefined
+    try {
+      const modelInput = {
+        snapshot: {
+          agentDefinition: binding.agentDefinition,
+        },
+        model: binding.model,
+      }
+      const model = this.bindings.model ?? createModel(modelInput)
+      const providerStreamFn = this.bindings.streamFn ?? createStreamFn(modelInput)
+      const streamFn = configuredStreamFn(
+        binding.model,
+        providerStreamFn,
+      )
+      const sessionContext = lease.manager.buildSessionContext()
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: binding.systemPrompt,
+          model,
+          tools: [],
+          thinkingLevel: binding.agentDefinition.limits.reasoningEffort ?? 'medium',
+        },
+        streamFn,
+        getApiKey: () => binding.model.apiKey,
+        sessionId: lease.manager.getSessionId(),
+        toolExecution: 'sequential',
+      })
+      agent.state.messages = sessionContext.messages
+      session = await createPiAgentSession({
+        agent,
+        manager: lease.manager,
+        model,
+        tools: [],
+        systemPrompt: binding.systemPrompt,
+        input: modelInput,
+        streamFn,
+        compactionStreamFn: streamFn,
+      })
+      await this.contexts.compact(session)
+      const context = this.contexts.describe(session, binding.scope)
+      this.sessions.rememberContext(scopeKey, context)
+      return context
+    } finally {
+      session?.dispose()
+      lease.release()
+    }
+  }
+
+  private async restoreParentBinding(scopeKey: string) {
+    const persisted = this.sessions.parentBinding(scopeKey)
+    if (!persisted) return undefined
+    const state = await this.store.snapshot()
+    const source = state.modelSources.find(
+      item => item.id === persisted.model.sourceId,
+    )
+    const model = source?.models.find(
+      item => item.id === persisted.model.modelId,
+    )
+    if (
+      !source
+      || !model
+      || source.providerType !== persisted.model.providerType
+      || model.name !== persisted.model.modelName
+      || model.contextWindow !== persisted.model.contextWindow
+      || model.capabilities.includes('reasoning') !== persisted.model.supportsReasoning
+    ) {
+      throw new Error('PI_SESSION_MODEL_BINDING_DRIFT')
+    }
+    const binding: ParentSessionBinding = {
+      scope: persisted.scope,
+      model: {
+        ...persisted.model,
+        baseUrl: source.baseUrl,
+        apiKey: source.apiKey,
+      },
+      agentDefinition: persisted.agentDefinition,
+      systemPrompt: persisted.systemPrompt,
+    }
+    this.parentBindings.set(scopeKey, binding)
+    return binding
+  }
+
+  async injectReviewCandidate(snapshot: ReviewerExecutionInput['snapshot'], output: ReviewerExecutionOutput) {
+    const scope = this.sessions.scopeFor({ snapshot })
+    const lease = await this.sessions.acquire(scope)
+    try {
+      lease.manager.appendCustomMessageEntry(
+        'planning_reviewer_candidate',
+        reviewCandidateContext(output),
+        false,
+        {
+          subAgentRunId: output.runId,
+          reviewerType: output.reviewerType,
+          reviewerSessionId: output.context.sessionId,
+          formalBusinessFact: false,
+        },
+      )
+      return {
+        parentSessionId: lease.manager.getSessionId(),
+        subAgentRunId: output.runId,
+        reviewerType: output.reviewerType,
+      }
+    } finally {
+      lease.release()
+    }
+  }
+
+  async review(input: ReviewerExecutionInput, signal: AbortSignal): Promise<ReviewerExecutionOutput> {
+    const parentScope = this.sessions.scopeFor(input)
+    const scope = this.sessions.reviewerScope(parentScope, input.reviewerType, input.runId)
+    const lease = await this.sessions.acquire(scope)
+    const manager = lease.manager
+    const workspace = new RequirementDocumentWorkspace(this.store, input.snapshot)
+    const readPaths = new Set<string>()
+    let reviewCandidate: ReviewCandidate | undefined
+    const requiredReadPaths = [...new Set(input.requiredReadPaths.map(normalizeReviewPath))]
+    const registry = createWorkspaceAgentToolRegistry(
+      this.store,
+      'reviewer.submit_result',
+      candidate => {
+        const missingReads = requiredReadPaths.filter(path => !readPaths.has(path))
+        if (missingReads.length) return { accepted: false, issues: missingReads.map(path => ({ path: '/workspaceReads', message: `提交前必须读取 /workspace/${path}` })) }
+        const normalized = validateReviewCandidate(candidate, input.reviewerType)
+        if (!normalized.valid) return { accepted: false, issues: normalized.issues }
+        reviewCandidate = normalized.candidate
+        return { accepted: true }
+      },
+      observation => { readPaths.add(normalizeReviewPath(observation.relativePath)) },
+      workspace,
+      undefined,
+      this.knowledge,
+    )
+    if (!requiredReadPaths.length) throw new Error('REVIEWER_REQUIRED_READS_EMPTY')
+    const parentToolIds = new Set(input.snapshot.agentDefinition.toolIds)
+    const allowedToolIds = new Set([
+      ...[
+        'workspace.read_file',
+        'workspace.grep_files',
+        'workspace.find_files',
+        'workspace.list_directory',
+        'knowledge.search',
+        'knowledge.read_chunk',
+      ].filter(toolId => parentToolIds.has(toolId)),
+      'reviewer.submit_result',
+    ])
+    if (!allowedToolIds.has('workspace.read_file')) throw new Error('REVIEWER_PARENT_READ_PERMISSION_REQUIRED')
+    const descriptors = registry.descriptors(allowedToolIds)
+    const runtime = new GovernedToolRuntime(
+      registry,
+      { maxToolCalls: Math.min(40, input.snapshot.agentDefinition.limits.maxToolCalls), maxRepeatedToolCall: input.snapshot.agentDefinition.limits.maxRepeatedToolCall },
+      { toolIds: new Set(['reviewer.submit_result']), calls: 3 },
+    )
+    const events: AgentExecutionEvent[] = []
+    let sequence = 0
+    let turns = 0
+    const limits = input.snapshot.agentDefinition.limits
+    const controller = new AbortController()
+    const deadline = setTimeout(
+      () => controller.abort(
+        new Error('REVIEWER_DEADLINE_EXCEEDED'),
+      ),
+      limits.deadlineMs,
+    )
+    const abort = () => controller.abort(
+      signal.reason ?? new Error('REVIEWER_CANCELLED'),
+    )
+    signal.addEventListener('abort', abort, { once: true })
+    let session: AgentSession | undefined
+    let unbind: (() => void) | undefined
+    let unsubscribe: (() => void) | undefined
+    let sessionEventQueue = Promise.resolve()
+    const record = async (event: Omit<AgentExecutionEvent, 'sequence' | 'occurredAt'>) => {
+      const value = { sequence: ++sequence, occurredAt: new Date().toISOString(), reviewerType: input.reviewerType, subAgentRunId: input.runId, ...event }
+      events.push(value)
+      await input.onEvent?.(value)
+    }
+    try {
+      const model = this.bindings.model ?? createModel(input)
+      const providerStreamFn =
+        this.bindings.streamFn ?? createStreamFn(input)
+      const streamFn: StreamFn = (
+        streamModel,
+        context,
+        options,
+      ) => providerStreamFn(
+        streamModel,
+        context,
+        {
+          ...options,
+          signal: AbortSignal.any([
+            options?.signal ?? controller.signal,
+            controller.signal,
+          ]),
+        },
+      )
+      const tools = descriptors.map(descriptor => reviewerTool(
+        descriptor,
+        runtime,
+        input.snapshot,
+        allowedToolIds,
+        controller.signal,
+      ))
+      const systemPrompt = reviewerSystemPrompt(input.reviewerType)
+      const agent = new Agent({
+        initialState: { systemPrompt, model, tools, thinkingLevel: input.snapshot.agentDefinition.limits.reasoningEffort ?? 'medium' },
+        streamFn,
+        getApiKey: () => input.model.apiKey,
+        sessionId: manager.getSessionId(),
+        toolExecution: 'sequential',
+      })
+      session = await createPiAgentSession({ agent, manager, model, tools, systemPrompt, input, streamFn, compactionStreamFn: providerStreamFn })
+      unbind = this.sessions.bindActive(scope, session)
+      unsubscribe = session.subscribe(event => {
+        const contextEvent = this.contexts.sessionEvent(event, session!, scope)
+        if (contextEvent) sessionEventQueue = sessionEventQueue.then(() => record(contextEvent))
+      })
+      agent.subscribe(async (event, eventSignal) => {
+        if (event.type === 'turn_start') {
+          turns += 1
+          if (turns > limits.maxTurns) {
+            controller.abort(
+              new Error('REVIEWER_TURN_LIMIT_EXCEEDED'),
+            )
+          }
+        }
+        if (!isTransientAgentEvent(event)) {
+          await record(toAuditEvent(
+            event,
+            turns,
+            input.model.baseUrl,
+            input.model.apiKey,
+          ))
+        }
+        if (eventSignal.aborted || controller.signal.aborted) {
+          agent.abort()
+        }
+      })
+      controller.signal.addEventListener(
+        'abort',
+        () => agent.abort(),
+        { once: true },
+      )
+      const initialContext = this.contexts.describe(session, scope)
+      await record({ type: 'session_created', context: initialContext, framework: { name: 'pi-coding-agent', version: piCodingAgentVersion }, ...(lease.parentSessionId ? { parentSessionId: lease.parentSessionId } : {}) })
+      await record(this.contexts.usageEvent(session, scope))
+      await session.prompt(`${input.task}\n\n${reviewerInstructions(input.reviewerType, input.requiredReadPaths)}`)
+      await session.waitForIdle()
+      if (controller.signal.aborted) {
+        throw controller.signal.reason instanceof Error
+          ? controller.signal.reason
+          : new Error('REVIEWER_CANCELLED')
+      }
+      if (turns > limits.maxTurns) {
+        throw new Error('REVIEWER_TURN_LIMIT_EXCEEDED')
+      }
+      const missingReads = requiredReadPaths.filter(path => !readPaths.has(path))
+      if (missingReads.length) throw new Error(`REVIEWER_REQUIRED_READ_MISSING: ${missingReads.join(', ')}`)
+      if (!reviewCandidate) throw new Error('REVIEWER_RESULT_REQUIRED')
+      await sessionEventQueue
+      const context = this.contexts.describe(session, scope)
+      this.sessions.rememberContext(scope.key, context)
+      await record(this.contexts.usageEvent(session, scope))
+      return {
+        runId: input.runId,
+        reviewerType: input.reviewerType,
+        ...(lease.parentSessionId ? { parentSessionId: lease.parentSessionId } : {}),
+        candidate: reviewCandidate,
+        events,
+        turns,
+        toolCalls: events.filter(event => event.type === 'tool_execution_start').length,
+        toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
+        framework: { name: 'pi-coding-agent', version: piCodingAgentVersion },
+        context,
+      }
+    } finally {
+      clearTimeout(deadline)
+      signal.removeEventListener('abort', abort)
+      if (session?.isStreaming) await session.abort().catch(() => undefined)
+      await sessionEventQueue.catch(() => undefined)
+      unsubscribe?.()
+      unbind?.()
+      session?.dispose()
+      lease.release()
+      await workspace.dispose()
+    }
   }
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
@@ -108,6 +459,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
 
     const model = this.bindings.model ?? createModel(input)
     const providerStreamFn = this.bindings.streamFn ?? createStreamFn(input)
+    const sessionScope = this.sessions.scopeFor(input)
     let forceResultSubmission = false
     let latestModelFailure: ModelFailure | undefined
     let resultSubmissionRequiredRecorded = false
@@ -129,6 +481,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       } as Parameters<StreamFn>[2] : configuredOptions)
     }
     let agent: Agent | undefined
+    let session: AgentSession | undefined
+    let releaseSession: (() => void) | undefined
+    let unbindActive: (() => void) | undefined
+    let unsubscribeSession: (() => void) | undefined
+    let sessionEventQueue = Promise.resolve()
     try {
       const requireResultSubmission = async (content?: string) => {
         if (forceResultSubmission && resultSubmissionRequiredRecorded) return
@@ -146,16 +503,54 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       const primaryToolNames = new Set(descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
+      const lease = await this.sessions.acquire(sessionScope)
+      releaseSession = lease.release
+      const sessionManager = lease.manager
+      const sessionContext = sessionManager.buildSessionContext()
+      const systemPrompt = [input.snapshot.agentDefinition.systemPrompt, skillPrompt].filter(Boolean).join('\n\n')
+      if (sessionScope.role === 'planning_parent') {
+        const parentBinding: ParentSessionBinding = {
+          scope: sessionScope,
+          model: structuredClone(input.model),
+          agentDefinition: structuredClone(input.snapshot.agentDefinition),
+          systemPrompt,
+        }
+        this.parentBindings.set(sessionScope.key, parentBinding)
+        const {
+          baseUrl: _baseUrl,
+          apiKey: _apiKey,
+          ...persistedModel
+        } = parentBinding.model
+        const persisted: PersistedParentSessionBinding = {
+          scope: parentBinding.scope,
+          model: persistedModel,
+          agentDefinition: parentBinding.agentDefinition,
+          systemPrompt: parentBinding.systemPrompt,
+        }
+        this.sessions.rememberParentBinding(persisted)
+      }
       agent = new Agent({
-        initialState: { systemPrompt: [input.snapshot.agentDefinition.systemPrompt, skillPrompt].filter(Boolean).join('\n\n'), model, tools: primaryTools, thinkingLevel: limits.reasoningEffort ?? 'medium' },
+        initialState: { systemPrompt, model, tools: primaryTools, thinkingLevel: limits.reasoningEffort ?? 'medium' },
         streamFn,
         getApiKey: () => input.model.apiKey,
-        sessionId: `${input.snapshot.runId}:${input.snapshot.agentDefinition.agentKey}`,
+        sessionId: sessionManager.getSessionId(),
         toolExecution: 'sequential',
-        beforeToolCall: async ({ toolCall }) => {
-          if (!byPiName.has(toolCall.name) || !activeToolNames.has(toolCall.name)) return { block: true, reason: 'TOOL_NOT_ALLOWED_IN_CURRENT_PHASE' }
-          return undefined
-        },
+      })
+      if (sessionContext.messages.length) agent.state.messages = sessionContext.messages
+      session = await createPiAgentSession({
+        agent,
+        manager: sessionManager,
+        model,
+        tools: primaryTools,
+        systemPrompt,
+        input,
+        streamFn,
+        compactionStreamFn: providerStreamFn,
+      })
+      unbindActive = this.sessions.bindActive(sessionScope, session)
+      unsubscribeSession = session.subscribe(event => {
+        const contextEvent = this.contexts.sessionEvent(event, session!, sessionScope)
+        if (contextEvent) sessionEventQueue = sessionEventQueue.then(() => record(contextEvent))
       })
       agent.subscribe(async (event, eventSignal) => {
         let resultSubmissionRequired = false
@@ -182,14 +577,29 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         if (eventSignal.aborted || controller.signal.aborted) agent?.abort()
       })
       controller.signal.addEventListener('abort', () => agent?.abort(), { once: true })
-      await record({ type: 'runtime_initialized', turn: 0, framework: { name: 'pi-agent-core', version: piVersion } })
+      const initialContext = this.contexts.describe(session, sessionScope)
+      await record({
+        type: 'session_created',
+        turn: 0,
+        framework: { name: 'pi-coding-agent', version: piCodingAgentVersion },
+        context: initialContext,
+        ...(lease.parentSessionId ? { parentSessionId: lease.parentSessionId } : {}),
+      })
+      await record(this.contexts.usageEvent(session, sessionScope))
+      await record({ type: 'runtime_initialized', turn: 0, framework: { name: 'pi-coding-agent', version: piCodingAgentVersion } })
       await record({ type: 'input_package_built', turn: 0, content: JSON.stringify({ mode: inputPlan.mode, packageSha256: inputPlan.packageSha256, batches: inputPlan.batches.length, estimatedInputTokens: inputPlan.estimatedInputTokens, safeInputBudget: inputPlan.safeInputBudget }) })
       const current = inputPlan.batches[0]
       deliveryManifest!.entries.push(manifestEntry(current, 1))
       deliveryManifest!.finalMergeCompleted = true
       await record({ type: 'input_batch_delivered', turn: turns, content: JSON.stringify({ batchId: current.batchId, ordinal: current.ordinal, contentSha256: sha256(current.content), tokenCount: current.tokenCount }) })
-      await agent.prompt(`${renderInitialTask(input)}\n\n${current.content}`)
-      await agent.waitForIdle()
+      await this.contexts.consumeCheckpoint(
+        session,
+        sessionScope.key,
+      )
+      const beforePromptCheckpoint = compactionCheckpoint(workspaceProfile.workflowStage, 'before_prompt')
+      if (beforePromptCheckpoint) await this.contexts.compactAtCheckpoint(session, beforePromptCheckpoint)
+      await session.prompt(`${renderInitialTask(input)}\n\n${current.content}`)
+      await session.waitForIdle()
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
       if (!candidate && latestModelFailure && !lastSubmissionIssues.length) throw modelProviderError(latestModelFailure)
       if (turns > limits.maxTurns) {
@@ -211,8 +621,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           : evidenceRepairRequired
           ? '工作区文件版本、内部证据范围、需求点 ID、Evidence ID、定位和引用均由服务端负责；请只修正需求点内部的 sourceTexts，必要时用 grep 定位后通过 read 核对原文。'
           : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
-        await agent.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
-        await agent.waitForIdle()
+        await session.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
+        await session.waitForIdle()
       }
       if (!candidate) {
         await record({ type: 'result_submission_retry', turn: turns })
@@ -226,8 +636,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
             await waitForRetry(retryDelayMs, controller.signal)
           }
           latestModelFailure = undefined
-          await agent.prompt(attempt === 0 ? submissionPrompt : `模型服务上一次请求临时失败。${submissionPrompt}`)
-          await agent.waitForIdle()
+          await session.prompt(attempt === 0 ? submissionPrompt : `模型服务上一次请求临时失败。${submissionPrompt}`)
+          await session.waitForIdle()
           const submissionFailure = latestModelFailure as ModelFailure | undefined
           if (!submissionFailure) break
           if (!submissionFailure.retryable || attempt === transientModelRetries) {
@@ -245,19 +655,37 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (!candidate && latestModelFailure) throw modelProviderError(latestModelFailure)
       if (!candidate) throw new Error(`MODEL_TOOL_CALL_REQUIRED: 模型未调用 ${stage.submitPiName}，实际工具调用能力不满足 ${stage.agentLabel}；请在模型管理中重新探测并选择通过工具调用检测的模型`)
       if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > limits.maxCandidateBytes) throw new Error('AGENT_RESULT_TOO_LARGE')
+      const completedCheckpoint = compactionCheckpoint(workspaceProfile.workflowStage, 'completed')
+      if (completedCheckpoint) await this.contexts.compactAtCheckpoint(session, completedCheckpoint)
+      await sessionEventQueue
+      const finalContext = this.contexts.describe(session, sessionScope)
+      this.sessions.rememberContext(sessionScope.key, finalContext)
+      await record(this.contexts.usageEvent(session, sessionScope))
       return {
         candidate,
         events,
         turns,
         toolCalls: events.filter(event => event.type === 'tool_execution_start').length,
         toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
-        framework: { name: 'pi-agent-core', version: piVersion },
+        framework: { name: 'pi-coding-agent', version: piCodingAgentVersion },
+        context: finalContext,
         ...(deliveryManifest ? { inputDeliveryManifest: deliveryManifest } : {}),
       }
     } finally {
       clearTimeout(deadline)
       signal.removeEventListener('abort', abort)
-      if (agent?.state.isStreaming) agent.abort()
+      if (session) {
+        if (session.isStreaming) await session.abort().catch(() => undefined)
+        const finalContext = this.contexts.describe(session, sessionScope)
+        this.sessions.rememberContext(sessionScope.key, finalContext)
+      } else if (agent?.state.isStreaming) {
+        agent.abort()
+      }
+      await sessionEventQueue.catch(() => undefined)
+      unsubscribeSession?.()
+      unbindActive?.()
+      session?.dispose()
+      releaseSession?.()
       await capabilityLoad.close()
       await piDocumentWorkspace?.dispose()
     }
@@ -313,6 +741,118 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       },
     }
   }
+}
+
+function reviewCandidateContext(output: ReviewerExecutionOutput) {
+  return [
+    '[Reviewer SubAgent 候选输入；不是正式业务事实]',
+    `Reviewer 类型：${output.reviewerType}`,
+    `SubAgent Run：${output.runId}`,
+    '以下候选仅用于 Parent Agent 后续推理；Workflow、Service 和 Validator 必须重新读取固定正式事实并决定是否采纳。',
+    JSON.stringify(output.candidate),
+  ].join('\n')
+}
+
+function reviewerTool(
+  descriptor: ToolDescriptor,
+  runtime: GovernedToolRuntime,
+  snapshot: ReviewerExecutionInput['snapshot'],
+  allowedToolIds: ReadonlySet<string>,
+  signal: AbortSignal,
+): AgentTool {
+  return {
+    name: descriptor.piName,
+    label: descriptor.label,
+    description: descriptor.description,
+    parameters: descriptor.parameters,
+    executionMode: 'sequential',
+    execute: async (toolCallId, args, toolSignal) => {
+      const result = await runtime.execute({
+        toolId: descriptor.id,
+        toolCallId,
+        arguments: args,
+        context: { snapshot, allowedToolIds },
+      }, AbortSignal.any([signal, toolSignal ?? signal]))
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result.data) }],
+        details: { toolId: descriptor.id, version: descriptor.version, data: result.data },
+        terminate: result.terminate,
+      }
+    },
+  }
+}
+
+function reviewerSystemPrompt(reviewerType: ReviewerExecutionInput['reviewerType']) {
+  const focus = {
+    requirement: '需求完整性、一致性、歧义、可验证性与 Test Focus',
+    test_point: '测试点覆盖、维度、适用性、Oracle 与需求追踪',
+    test_case: '测试用例步骤、Expected Result、边界、数据、依赖与可执行性',
+    coverage: 'Requirement/TestPoint/TestCase 覆盖关系、遗漏、重复与阻塞项',
+  }[reviewerType]
+  return [
+    `你是只读 ${reviewerType} Reviewer，专注于${focus}。`,
+    '你拥有独立 Session 和独立 Context，只能读取固定 /workspace 与固定知识库索引。',
+    '禁止写 PostgreSQL、修改 Workflow Stage、发布 Requirement Release 或 TestCase Library、修改 Workspace、调用 Runner、Playwright 或 Shell，也不得修改 Expected Result 以获得 PASS。',
+    '不得生成或覆盖正式 ID、Version、Revision、Hash、Release 或 Snapshot；不得用 latest/current 替代任务给出的固定引用。',
+    '结果仅是 Parent PlanningAgent 的 ReviewCandidate 补充输入，最终采纳由 Workflow、Service 与 Validator 决定。',
+  ].join('\n')
+}
+
+function reviewerInstructions(reviewerType: ReviewerExecutionInput['reviewerType'], requiredReadPaths: string[]) {
+  return [
+    `Reviewer 类型固定为 ${reviewerType}，不得改为其他类型。`,
+    ...(requiredReadPaths.length ? [`提交前必须逐个使用 read 读取：${requiredReadPaths.map(path => `/workspace/${normalizeReviewPath(path)}`).join('、')}。`] : []),
+    '所有 evidenceRefs 必须指向已读取固定文件路径/行号、固定 Requirement/TestPoint/TestCase 引用或固定 Chunk ID；没有证据时不得编造 Finding。',
+    '完成后仅调用 reviewer_submit_result 一次提交 planning-review-candidate/v1。',
+  ].join('\n')
+}
+
+function normalizeReviewPath(value: string) {
+  const path = String(value).trim().replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  if (!path || /^[A-Za-z]:/u.test(path) || path.split('/').some(segment => !segment || segment === '.' || segment === '..')) throw new Error(`REVIEWER_PATH_INVALID: ${value}`)
+  return path
+}
+
+type ReviewValidation =
+  | { valid: true; candidate: ReviewCandidate; issues: [] }
+  | { valid: false; issues: Array<{ path: string; message: string }> }
+
+function validateReviewCandidate(value: Record<string, unknown>, reviewerType: ReviewerExecutionInput['reviewerType']): ReviewValidation {
+  const issues: Array<{ path: string; message: string }> = []
+  const candidate = value as unknown as ReviewCandidate
+  if (candidate.schemaVersion !== 'planning-review-candidate/v1') issues.push({ path: '/schemaVersion', message: '必须为 planning-review-candidate/v1' })
+  if (candidate.reviewerType !== reviewerType) issues.push({ path: '/reviewerType', message: `必须为 ${reviewerType}` })
+  if (!['pass', 'changes_required', 'blocked'].includes(candidate.verdict)) issues.push({ path: '/verdict', message: 'verdict 无效' })
+  if (!String(candidate.summary ?? '').trim()) issues.push({ path: '/summary', message: 'summary 不能为空' })
+  if (!Array.isArray(candidate.findings)) issues.push({ path: '/findings', message: 'findings 必须为数组' })
+  if (!Array.isArray(candidate.suggestedActions)) issues.push({ path: '/suggestedActions', message: 'suggestedActions 必须为数组' })
+  if (Array.isArray(candidate.findings)) {
+    const refs = new Set<string>()
+    candidate.findings.forEach((finding, index) => {
+      const path = `/findings/${index}`
+      if (!finding || typeof finding !== 'object') { issues.push({ path, message: 'Finding 必须为对象' }); return }
+      if (!String(finding.ref ?? '').trim()) issues.push({ path: `${path}/ref`, message: 'ref 不能为空' })
+      else if (refs.has(finding.ref)) issues.push({ path: `${path}/ref`, message: 'ref 必须唯一' })
+      else refs.add(finding.ref)
+      if (!['blocker', 'high', 'medium', 'low'].includes(finding.severity)) issues.push({ path: `${path}/severity`, message: 'severity 无效' })
+      for (const field of ['category', 'title', 'detail'] as const) if (!String(finding[field] ?? '').trim()) issues.push({ path: `${path}/${field}`, message: `${field} 不能为空` })
+      if (!Array.isArray(finding.evidenceRefs) || !finding.evidenceRefs.length) issues.push({ path: `${path}/evidenceRefs`, message: 'Finding 必须提供 evidenceRefs' })
+    })
+  }
+  if (candidate.verdict === 'pass' && Array.isArray(candidate.findings) && candidate.findings.some(item => item.severity === 'blocker' || item.severity === 'high')) issues.push({ path: '/verdict', message: '存在 blocker/high Finding 时不能判定 pass' })
+  return issues.length ? { valid: false, issues } : { valid: true, candidate: structuredClone(candidate), issues: [] }
+}
+
+function compactionCheckpoint(
+  stage: NonNullable<AgentExecutionInput['executionProfile']>['workflowStage'],
+  timing: 'before_prompt' | 'completed',
+): PlanningCompactionCheckpoint | undefined {
+  if (timing === 'before_prompt' && stage === 'test_case_design') return 'before_test_case_design'
+  if (timing !== 'completed') return undefined
+  if (stage === 'analysis' || stage === 'verification') return 'requirement_analysis_completed'
+  if (stage === 'release') return 'requirement_release_completed'
+  if (stage === 'test_design_repair') return 'coverage_repair_completed'
+  return undefined
 }
 
 function manifestEntry(batch: RequirementInputBatch, modelCallSequence: number) {
@@ -421,7 +961,7 @@ async function waitForRetry(delayMs: number, signal: AbortSignal) {
   })
 }
 
-function createModel(input: AgentExecutionInput): Model<Api> {
+function createModel(input: PiModelInput): Model<Api> {
   const api: Api = input.model.providerType === 'anthropic' ? 'anthropic-messages' : 'openai-completions'
   return {
     id: input.model.modelName,
@@ -437,8 +977,149 @@ function createModel(input: AgentExecutionInput): Model<Api> {
   } as Model<Api>
 }
 
-function createStreamFn(input: AgentExecutionInput): StreamFn {
+function createStreamFn(input: Pick<AgentExecutionInput, 'model'>): StreamFn {
   return (input.model.providerType === 'anthropic' ? streamAnthropic : streamOpenAi) as StreamFn
+}
+
+function configuredStreamFn(
+  connection: AgentModelConnection,
+  providerStreamFn: StreamFn,
+  controller?: AbortController,
+): StreamFn {
+  return (streamModel, context, options) => {
+    const requestSignal = connection.requestTimeoutMs
+      ? AbortSignal.any([
+          options?.signal ?? controller?.signal ?? new AbortController().signal,
+          AbortSignal.timeout(connection.requestTimeoutMs),
+        ])
+      : options?.signal
+    return providerStreamFn(streamModel, context, {
+      ...options,
+      maxTokens: connection.maxOutputTokens,
+      ...(requestSignal ? { signal: requestSignal } : {}),
+    })
+  }
+}
+
+function protectedCompactionExtension(streamFn: StreamFn): InlineExtension {
+  return {
+    name: 'smarthub-protected-compaction',
+    hidden: true,
+    factory: pi => {
+      pi.on('session_before_compact', async (event, context) => {
+        const model = context.model
+        if (!model) return { cancel: true }
+        const auth = await context.modelRegistry.getApiKeyAndHeaders(model)
+        if (!auth.ok) return { cancel: true }
+        try {
+          const requestModel = auth.baseUrl
+            ? { ...model, baseUrl: auth.baseUrl }
+            : model
+          const instructions = [
+            protectedCompactionInstructions(event.reason),
+            event.customInstructions,
+          ].filter(Boolean).join('\n')
+          return {
+            compaction: await compactPiContext(
+              event.preparation,
+              requestModel,
+              auth.apiKey,
+              auth.headers
+                ? Object.fromEntries(
+                    Object.entries(auth.headers).filter(
+                      (entry): entry is [string, string] => entry[1] != null,
+                    ),
+                  )
+                : undefined,
+              instructions,
+              event.signal,
+              context.thinkingLevel,
+              streamFn,
+              auth.env,
+            ),
+          }
+        } catch {
+          return { cancel: true }
+        }
+      })
+    },
+  }
+}
+
+async function createPiAgentSession(input: {
+  agent: Agent
+  manager: SessionManager
+  model: Model<Api>
+  tools: AgentTool[]
+  systemPrompt: string
+  input: PiModelInput
+  streamFn: StreamFn
+  compactionStreamFn: StreamFn
+}) {
+  const settings = SettingsManager.inMemory({
+    compaction: {
+      enabled: true,
+      reserveTokens: Math.max(16_384, input.input.snapshot.agentDefinition.limits.reservedOutputTokens ?? 16_384),
+      keepRecentTokens: 20_000,
+    },
+    retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+    images: { autoResize: false, blockImages: true },
+  }, { projectTrusted: false })
+  const resources = new DefaultResourceLoader({
+    cwd: '/workspace',
+    agentDir: '/workspace',
+    settingsManager: settings,
+    extensionFactories: [protectedCompactionExtension(input.compactionStreamFn)],
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    systemPrompt: input.systemPrompt,
+  })
+  await resources.reload()
+  const modelRuntime = await ModelRuntime.create({
+    modelsPath: null,
+    refreshOnCreate: false,
+    allowModelNetwork: false,
+  })
+  modelRuntime.registerProvider(input.model.provider, {
+    name: input.model.name,
+    baseUrl: input.model.baseUrl,
+    apiKey: input.input.model.apiKey,
+    api: input.model.api,
+    streamSimple: (model, context, options) => {
+      const stream = input.streamFn(model, context, options)
+      if (stream instanceof Promise) {
+        throw new Error('PI_SESSION_STREAM_MUST_BE_SYNCHRONOUS')
+      }
+      return stream
+    },
+    models: [{
+      id: input.model.id,
+      name: input.model.name,
+      api: input.model.api,
+      baseUrl: input.model.baseUrl,
+      reasoning: input.model.reasoning,
+      input: input.model.input,
+      cost: input.model.cost,
+      contextWindow: input.model.contextWindow,
+      maxTokens: input.model.maxTokens,
+    }],
+  })
+  const session = new AgentSession({
+    agent: input.agent,
+    sessionManager: input.manager,
+    settingsManager: settings,
+    cwd: '/workspace',
+    resourceLoader: resources,
+    modelRuntime,
+    initialActiveToolNames: input.tools.map(tool => tool.name),
+    allowedToolNames: input.tools.map(tool => tool.name),
+    baseToolsOverride: Object.fromEntries(input.tools.map(tool => [tool.name, tool])),
+  })
+  session.setAutoCompactionEnabled(true)
+  return session
 }
 
 function normalizeBaseUrl(value: string, api: Api) {

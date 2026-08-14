@@ -5,7 +5,7 @@ import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembl
 import type { TestDesignAgentRuntime } from '../application/test-design-service.js'
 import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, SkillResource, ToolResource } from '../domain/types.js'
-import type { AgentExecutionEvent, AgentModelConnection, InputDeliveryManifest, TestDesignAgentSnapshot } from '../domain/agent-types.js'
+import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, TestDesignAgentSnapshot } from '../domain/agent-types.js'
 import type { TestDesign, TestDesignRunAgentConfigurationSnapshot, TestDesignWorkflowRun, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
@@ -62,7 +62,15 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
       configurationSha256: configuration.contentSha256,
       agentDefinition: structuredClone(configuration.agentDefinition),
       routing: structuredClone(configuration.routing),
-      primaryModel: { sourceId: model.sourceId, modelId: model.modelId, modelName: model.modelName },
+      primaryModel: {
+        sourceId: model.sourceId,
+        providerType: model.providerType,
+        modelId: model.modelId,
+        modelName: model.modelName,
+        contextWindow: model.contextWindow,
+        maxOutputTokens: model.maxOutputTokens,
+        supportsReasoning: model.supportsReasoning,
+      },
       createdAt,
     }
     return { ...base, snapshotSha256: canonicalSha256(base) }
@@ -76,7 +84,16 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
     const state = await this.store.snapshot()
     validateConfiguration(configuration, state)
     const model = resolveModel(state, configuration)
-    if (model.sourceId !== input.run.agentConfigurationSnapshot.primaryModel.sourceId || model.modelId !== input.run.agentConfigurationSnapshot.primaryModel.modelId) throw new Error('TEST_DESIGN_AGENT_MODEL_DRIFT: Run 固定的模型路由不一致')
+    const frozenModel = input.run.agentConfigurationSnapshot.primaryModel
+    if (
+      model.sourceId !== frozenModel.sourceId
+      || model.providerType !== frozenModel.providerType
+      || model.modelId !== frozenModel.modelId
+      || model.modelName !== frozenModel.modelName
+      || model.contextWindow !== frozenModel.contextWindow
+      || model.maxOutputTokens !== frozenModel.maxOutputTokens
+      || model.supportsReasoning !== frozenModel.supportsReasoning
+    ) throw new Error('TEST_DESIGN_AGENT_MODEL_DRIFT: Run 固定的模型路由或能力不一致')
     const design = state.testDesignState?.designs.find(item => item.id === input.run.testDesignId && item.projectVersionId === input.run.projectVersionId)
     if (!design) throw new Error('TEST_DESIGN_INPUT_NOT_FOUND: 测试设计定义不存在')
     const workspace = stageWorkspace(input.run, stage)
@@ -105,7 +122,7 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
       return {
         schemaVersion: binding.schemaVersion,
         content: structuredClone(output.candidate),
-        execution: executionRecord(stage, configuration.agentDefinition.version, model.modelName, output.events, output.turns, output.toolCalls, output.toolErrors, output.framework),
+        execution: executionRecord(stage, configuration.agentDefinition.version, model.modelName, output.events, output.turns, output.toolCalls, output.toolErrors, output.framework, output.context),
       }
     } catch (error) {
       const failure = new Error(error instanceof Error ? error.message : String(error), { cause: error }) as Error & { execution?: ReturnType<typeof executionRecord> }
@@ -215,8 +232,8 @@ function approvedPointIds(run: TestDesignWorkflowRun) {
   return new Set(active.filter(item => item.applicability !== 'not_applicable' && !parents.has(item.nodeId)).map(item => item.nodeId))
 }
 
-function executionRecord(stage: TestDesignStage, agentVersion: string, modelLabel: string, events: AgentExecutionEvent[], turns?: number, toolCalls?: number, toolErrors?: number, framework = { name: 'pi-agent-core' as const, version: piVersion }) {
-  return { agentKey: 'test-design' as const, workflowStage: stage, agentVersion, modelLabel, degraded: false, turns: turns ?? Math.max(0, ...events.map(event => event.turn ?? 0)), toolCalls: toolCalls ?? events.filter(event => event.type === 'tool_execution_start').length, toolErrors: toolErrors ?? events.filter(event => event.type === 'tool_execution_end' && event.isError).length, events: structuredClone(events), framework }
+function executionRecord(stage: TestDesignStage, agentVersion: string, modelLabel: string, events: AgentExecutionEvent[], turns?: number, toolCalls?: number, toolErrors?: number, framework: AgentExecutionOutput['framework'] = { name: 'pi-agent-core', version: piVersion }, context?: AgentExecutionContext) {
+  return { agentKey: 'test-design' as const, workflowStage: stage, agentVersion, modelLabel, degraded: false, turns: turns ?? Math.max(0, ...events.map(event => event.turn ?? 0)), toolCalls: toolCalls ?? events.filter(event => event.type === 'tool_execution_start').length, toolErrors: toolErrors ?? events.filter(event => event.type === 'tool_execution_end' && event.isError).length, events: structuredClone(events), framework, ...(context ? { context: structuredClone(context) } : {}) }
 }
 
 function validateConfiguration(configuration: AgentConfigurationVersion, state: DatabaseState) {

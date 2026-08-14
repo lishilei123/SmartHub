@@ -929,7 +929,7 @@ function assertReleasePackageIntegrity(release: RequirementReleasePackage) {
 }
 
 function executionRecordForStage(output: AgentExecutionOutput, workflowStage: RequirementWorkflowStage): AgentExecutionRecord {
-  return { agentKey: 'requirement-analysis', workflowStage, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, events: output.events }
+  return { agentKey: 'requirement-analysis', workflowStage, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events }
 }
 function principalId(principal: Principal | undefined) { return String(principal?.subjectId ?? '').trim().slice(0, 200) || 'system' }
 
@@ -937,7 +937,7 @@ function latestRunningExecutionAttempt(run: ReviewRun) { return [...(run.executi
 
 function presentRunSummary(run: ReviewRun) {
   const assets = snapshotAssets(run)
-  return { id: run.id, analysisId: analysisIdFor(run), runId: run.id, retryOfRunId: run.retryOfRunId, retryMode: run.retryMode, projectVersionId: run.projectVersionId, assetId: run.assetId, assetVersionId: run.assetVersionId, assetIds: assets.map(asset => asset.assetId), assetVersionIds: assets.map(asset => asset.assetVersionId), documents: assets, documentTitle: run.documentTitle, documentVersion: `V${run.documentVersion}`, logicalPath: run.logicalPath, modelLabel: run.modelLabel, status: run.status, step: run.step, progress: run.progress, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error, queue: run.queue, retryEvents: run.retryEvents, modelRouteAttempts: run.modelRouteAttempts, degradations: run.degradations, workflow: presentWorkflowSummary(run.workflow), snapshot: redactSnapshot(run.snapshot) }
+  return { id: run.id, analysisId: analysisIdFor(run), runId: run.id, retryOfRunId: run.retryOfRunId, retryMode: run.retryMode, projectVersionId: run.projectVersionId, assetId: run.assetId, assetVersionId: run.assetVersionId, assetIds: assets.map(asset => asset.assetId), assetVersionIds: assets.map(asset => asset.assetVersionId), documents: assets, documentTitle: run.documentTitle, documentVersion: `V${run.documentVersion}`, logicalPath: run.logicalPath, modelLabel: run.modelLabel, status: run.status, step: run.step, progress: run.progress, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error, queue: run.queue, retryEvents: run.retryEvents, planningSubAgentRuns: structuredClone(run.planningSubAgentRuns ?? []), modelRouteAttempts: run.modelRouteAttempts, degradations: run.degradations, workflow: presentWorkflowSummary(run.workflow), snapshot: redactSnapshot(run.snapshot) }
 }
 
 function presentRun(run: ReviewRun) {
@@ -1035,7 +1035,7 @@ function cleanList(value: string[] | undefined) { return Array.isArray(value) ? 
 function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }
 function shouldCheckpointExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry', 'input_package_built', 'input_batch_delivered'].includes(event.type) }
 function executionProgress(events: AgentExecutionEvent[]): AgentExecutionRecord { const framework = events.find(event => event.framework)?.framework; return { agentKey: 'requirement-analysis', turns: events.reduce((maximum, event) => Math.max(maximum, event.turn ?? 0), 0), toolCalls: events.filter(event => event.type === 'tool_execution_start').length, toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length, ...(framework ? { framework } : {}), events: structuredClone(events) } }
-function executionRecord(output: AgentExecutionOutput): AgentExecutionRecord { return { agentKey: 'requirement-analysis', turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, events: output.events } }
+function executionRecord(output: AgentExecutionOutput): AgentExecutionRecord { return { agentKey: 'requirement-analysis', turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events } }
 function validationError(issues: Array<{ path: string; message: string }>) { return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${issues.slice(0, 6).map(issue => `${issue.path} ${issue.message}`).join('；')}${issues.length > 6 ? `；另有 ${issues.length - 6} 项` : ''}`) }
 function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) { let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'; if (credential) message = message.replaceAll(credential, '[已隐藏凭据]'); if (endpoint) message = message.replaceAll(endpoint, '[模型端点]'); return sanitize(message) }
 function sanitize(message: string) { return message.replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').slice(0, 500) }

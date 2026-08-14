@@ -1,5 +1,6 @@
 import type { TSchema } from 'typebox'
 import type {
+  PlanningReviewerSnapshot,
   ReviewRunSnapshot,
   TestDesignAgentSnapshot,
   TestExecutionAgentSnapshot,
@@ -26,6 +27,7 @@ export interface ToolExecutionContext {
     | ReviewRunSnapshot
     | TestDesignAgentSnapshot
     | TestExecutionAgentSnapshot
+    | PlanningReviewerSnapshot
   allowedToolIds: ReadonlySet<string>
 }
 

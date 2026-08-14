@@ -1,4 +1,4 @@
-import type { AgentDefinitionVersion, AgentExecutionEvent } from './agent-types.js'
+import type { AgentDefinitionVersion, AgentExecutionEvent, PlanningSubAgentRunRecord } from './agent-types.js'
 import type { AgentExecutionRecord } from './types.js'
 import type { AgentRoutingConfiguration } from './types.js'
 
@@ -110,7 +110,15 @@ export interface TestDesignRunAgentConfigurationSnapshot {
   configurationSha256: string
   agentDefinition: AgentDefinitionVersion
   routing: AgentRoutingConfiguration
-  primaryModel: { sourceId: string; modelId: string; modelName: string }
+  primaryModel: {
+    sourceId: string
+    providerType: 'openai' | 'anthropic' | 'openai_compatible'
+    modelId: string
+    modelName: string
+    contextWindow: number
+    maxOutputTokens: number
+    supportsReasoning: boolean
+  }
   createdAt: string
   snapshotSha256: string
 }
@@ -595,6 +603,7 @@ export interface TestDesignWorkflowRun {
   findings: DesignFinding[]
   confirmationItems: ConfirmationItem[]
   automaticRepair?: TestDesignAutomaticRepairState
+  planningSubAgentRuns?: PlanningSubAgentRunRecord[]
   events: AgentExecutionEvent[]
   createdBy: string
   createdAt: string

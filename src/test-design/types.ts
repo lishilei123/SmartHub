@@ -1,3 +1,5 @@
+import type { AgentExecutionContext, PlanningSubAgentRunRecord } from '../planning-api'
+
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
 export type ExecutionMethod = 'ui' | 'api'
 export type TestExecutionMethod = ExecutionMethod | 'performance_tool' | 'long_running' | 'environment_matrix'
@@ -80,7 +82,7 @@ export type TestDesignNodeRun = {
   finishedAt?: string
   errorCode?: string
   error?: string
-  execution?: { agentKey: 'test-design'; workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'; agentVersion: string; modelLabel: string; turns: number; toolCalls: number; toolErrors?: number; events: AgentEvent[] }
+  execution?: { agentKey: 'test-design'; workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'; agentVersion: string; modelLabel: string; turns: number; toolCalls: number; toolErrors?: number; context?: AgentExecutionContext; events: AgentEvent[] }
 }
 
 export type TestPointNode = {
@@ -149,6 +151,7 @@ export type TestCaseTraceability = {
 
 export type TestDesignCase = {
   id: string
+  treeVersionId: string
   candidateRef?: string
   origin: string
   currentRevision: number
@@ -159,7 +162,7 @@ export type TestDesignCase = {
 }
 
 export type TestDataSetVersion = { id: string; version: number; contentSha256: string; createdAt: string; requirements: Array<{ id: string; name: string; readiness: 'ready' | 'blocked' | 'needs_confirmation'; readinessReason?: string; caseIds: string[]; testPointIds: string[] }> }
-export type TestDesignCoverageAudit = { id: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalPoints: number; coveredPoints: number; totalCases: number; approvedCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' }>; createdAt: string }
+export type TestDesignCoverageAudit = { id: string; treeVersionId: string; dataSetVersionId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalPoints: number; coveredPoints: number; totalCases: number; approvedCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' }>; createdAt: string }
 export type WorkspaceProjection = { status: 'pending' | 'succeeded' | 'failed'; files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>; error?: string }
 export type TestCaseSetVersion = { id: string; projectId: string; projectVersionId: string; testDesignId: string; runId: string; version: number; name: string; members: Array<{ caseId: string; revision: number; ordinal: number; contentSha256: string }>; contentSha256: string; publishedBy: string; publishedAt: string; projection: WorkspaceProjection }
 export type TestSuiteVersion = { id: string; projectId: string; suiteType: 'smoke' | 'regression' | 'functional_domain'; version: number; name: string; members: Array<{ caseId: string; revision: number; executionMethods: ExecutionMethod[] }> }
@@ -202,6 +205,7 @@ export type TestDesignWorkflowRun = TestDesignRunSummary & {
   baseTestCaseLibraryVersionId?: string
   baseTestCaseLibraryVersionSha256?: string
   automaticRepair?: { status: string; attempt: number; maxAttempts: number; blockerCodes: string[] }
+  planningSubAgentRuns?: PlanningSubAgentRunRecord[]
   /** Legacy run payload shape retained only for the unmounted historical component. */
   caseSetVersions?: TestCaseSetVersion[]
 }

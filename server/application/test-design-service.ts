@@ -28,7 +28,17 @@ export interface TestCaseAssetProjector { ingest(input: { knowledgeBaseId: strin
 
 export class TestDesignService {
   private readonly activeRuns = new Map<string, AbortController>()
+  private testPointsConfirmedListener?: (
+    projectVersionId: string,
+  ) => void | Promise<void>
+
   constructor(private readonly store: StateStore, private readonly runtime?: TestDesignAgentRuntime, private readonly projector?: TestCaseAssetProjector) {}
+
+  onTestPointsConfirmed(
+    listener: (projectVersionId: string) => void | Promise<void>,
+  ) {
+    this.testPointsConfirmedListener = listener
+  }
 
   async inputCandidates(projectVersionId: string) {
     const state = await this.store.snapshot()
@@ -265,6 +275,7 @@ export class TestDesignService {
     const version = await this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成'); const revision = tree.revisions.find(item => item.revision === tree.currentRevision)!; assertEtag(ifMatch, etag('tree', tree.id, revision.revision, revision.treeSha256), 'TEST_POINT_TREE_REVISION_CONFLICT'); if (node(run, 'test_point_review').status !== 'waiting_gate') throw new TestDesignError('TEST_POINT_TREE_APPROVAL_REQUIRED', '当前不在测试点人工审核阶段', 409); const approved = approveCurrentTree(run, principal.subjectId); run.gateDecisions.push({ id: `gate_decision_${randomUUID()}`, gateKey: 'test-point-tree', targetId: tree.id, targetRevision: revision.revision, version: run.gateDecisions.length + 1, decision: 'approved', actorId: principal.subjectId, createdAt: now() }); return structuredClone(approved) })
     await this.projectTreeVersion(projectVersionId, designId, runId, version.id)
     await this.store.transaction(state => { const run = findRun(state, projectVersionId, designId, runId); Object.assign(node(run, 'test_point_review'), { status: 'succeeded', finishedAt: now() }); queueNode(run, 'test_case_design'); Object.assign(run, { status: 'queued', stage: 'test_case_design', progress: 50 }) })
+    await this.testPointsConfirmedListener?.(projectVersionId)
     await this.schedule(runId)
     return approvedTreeVersion(await this.loadRun(runId))
   }
