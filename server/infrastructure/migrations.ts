@@ -2229,6 +2229,157 @@ const migrations: Migration[] = [{
       BEFORE DELETE ON smarthub.test_execution_case_maintenance_proposals
       FOR EACH ROW EXECUTE FUNCTION smarthub.reject_test_execution_history_update();
   `,
+}, {
+  version: 29,
+  name: 'test-execution-maintenance-proposal-workflow',
+  sql: `
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM smarthub.test_execution_case_maintenance_proposals proposal
+        LEFT JOIN smarthub.test_execution_diagnoses diagnosis
+          ON diagnosis.id=proposal.diagnosis_id
+         AND diagnosis.run_id=proposal.run_id
+         AND diagnosis.task_id=proposal.task_id
+        LEFT JOIN smarthub.test_execution_script_revisions repair
+          ON repair.id=proposal.script_revision_id
+         AND repair.run_id=proposal.run_id
+         AND repair.task_id=proposal.task_id
+        LEFT JOIN smarthub.test_execution_script_revisions original
+          ON original.id=diagnosis.script_revision_id
+         AND original.run_id=proposal.run_id
+         AND original.task_id=proposal.task_id
+        WHERE diagnosis.id IS NULL
+          OR diagnosis.category NOT IN ('script_defect','selector_changed')
+          OR repair.id IS NULL
+          OR repair.generation_source <> 'repair'
+          OR repair.parent_revision_id IS DISTINCT FROM diagnosis.script_revision_id
+          OR repair.protected_assertion_sha256 IS DISTINCT FROM original.protected_assertion_sha256
+          OR repair.protected_assertions_canonical IS DISTINCT FROM original.protected_assertions_canonical
+          OR NOT EXISTS (
+            SELECT 1 FROM smarthub.test_execution_attempts attempt
+            WHERE attempt.run_id=proposal.run_id
+              AND attempt.task_id=proposal.task_id
+              AND attempt.script_revision_id=proposal.script_revision_id
+              AND attempt.attempt_kind='post_repair'
+              AND attempt.status='passed'
+          )
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_MAINTENANCE_EXISTING_HISTORY_INVALID';
+      END IF;
+      IF EXISTS (
+        SELECT 1
+        FROM smarthub.test_execution_case_maintenance_proposals
+        GROUP BY task_id,diagnosis_id,script_revision_id
+        HAVING count(*) > 1
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_MAINTENANCE_EXISTING_HISTORY_DUPLICATED';
+      END IF;
+    END $$;
+
+    DO $$
+    DECLARE constraint_name text;
+    BEGIN
+      SELECT con.conname INTO constraint_name
+      FROM pg_constraint con
+      WHERE con.conrelid='smarthub.test_execution_case_maintenance_proposals'::regclass
+        AND con.contype='f'
+        AND pg_get_constraintdef(con.oid) LIKE 'FOREIGN KEY (diagnosis_id, run_id, task_id, script_revision_id)%';
+      IF constraint_name IS NULL THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_MAINTENANCE_DIAGNOSIS_FK_NOT_FOUND';
+      END IF;
+      EXECUTE format(
+        'ALTER TABLE smarthub.test_execution_case_maintenance_proposals DROP CONSTRAINT %I',
+        constraint_name
+      );
+    END $$;
+
+    ALTER TABLE smarthub.test_execution_case_maintenance_proposals
+      ADD CONSTRAINT test_execution_maintenance_diagnosis_scope_fk
+      FOREIGN KEY (diagnosis_id,run_id,task_id)
+      REFERENCES smarthub.test_execution_diagnoses(id,run_id,task_id)
+      ON DELETE RESTRICT,
+      ADD CONSTRAINT test_execution_maintenance_business_key_uq
+      UNIQUE (task_id,diagnosis_id,script_revision_id);
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_maintenance_proposal_insert()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.status <> 'pending'
+        OR NEW.decided_by IS NOT NULL
+        OR NEW.decided_at IS NOT NULL
+        OR NEW.promoted_case_change_proposal_id IS NOT NULL
+        OR NOT EXISTS (
+          SELECT 1
+          FROM smarthub.test_execution_tasks task
+          JOIN smarthub.test_execution_runs run ON run.id=task.run_id
+          JOIN smarthub.test_execution_diagnoses diagnosis
+            ON diagnosis.id=NEW.diagnosis_id
+           AND diagnosis.run_id=task.run_id
+           AND diagnosis.task_id=task.id
+          JOIN smarthub.test_execution_script_revisions repair
+            ON repair.id=NEW.script_revision_id
+           AND repair.run_id=task.run_id
+           AND repair.task_id=task.id
+          JOIN smarthub.test_execution_script_revisions original
+            ON original.id=diagnosis.script_revision_id
+           AND original.run_id=task.run_id
+           AND original.task_id=task.id
+          WHERE task.id=NEW.task_id
+            AND task.run_id=NEW.run_id
+            AND task.case_id=NEW.case_id
+            AND task.case_revision=NEW.case_revision
+            AND task.current_script_revision_id=repair.id
+            AND run.test_case_library_version_id=NEW.baseline_library_version_id
+            AND run.test_case_library_version_sha256=NEW.baseline_library_version_sha256
+            AND diagnosis.category IN ('script_defect','selector_changed')
+            AND repair.generation_source='repair'
+            AND repair.parent_revision_id=original.id
+            AND repair.protected_assertion_sha256=original.protected_assertion_sha256
+            AND repair.protected_assertions_canonical=original.protected_assertions_canonical
+            AND EXISTS (
+              SELECT 1 FROM smarthub.test_execution_attempts attempt
+              WHERE attempt.run_id=task.run_id
+                AND attempt.task_id=task.id
+                AND attempt.script_revision_id=repair.id
+                AND attempt.attempt_kind='post_repair'
+                AND attempt.status='passed'
+            )
+        ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_MAINTENANCE_PROPOSAL_FACTS_INVALID';
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_execution_maintenance_proposals_insert_ck
+      BEFORE INSERT ON smarthub.test_execution_case_maintenance_proposals
+      FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_maintenance_proposal_insert();
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_maintenance_proposal_update()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF OLD.status <> 'pending'
+        OR NEW.status NOT IN ('accepted','rejected')
+        OR NEW.status=OLD.status
+        OR NEW.decided_by IS NULL
+        OR NEW.decided_at IS NULL
+        OR NEW.promoted_case_change_proposal_id IS NOT NULL
+        OR ROW(
+          NEW.id,NEW.run_id,NEW.task_id,NEW.case_id,NEW.case_revision,
+          NEW.diagnosis_id,NEW.script_revision_id,NEW.summary,NEW.proposed_change,
+          NEW.baseline_library_version_id,NEW.baseline_library_version_sha256,
+          NEW.promoted_case_change_proposal_id,NEW.created_at
+        ) IS DISTINCT FROM ROW(
+          OLD.id,OLD.run_id,OLD.task_id,OLD.case_id,OLD.case_revision,
+          OLD.diagnosis_id,OLD.script_revision_id,OLD.summary,OLD.proposed_change,
+          OLD.baseline_library_version_id,OLD.baseline_library_version_sha256,
+          OLD.promoted_case_change_proposal_id,OLD.created_at
+        ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_MAINTENANCE_PROPOSAL_IMMUTABLE';
+      END IF;
+      RETURN NEW;
+    END $$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

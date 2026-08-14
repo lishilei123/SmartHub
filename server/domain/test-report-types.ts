@@ -1,4 +1,5 @@
 import type {
+  CaseMaintenanceProposal,
   ExecutionArtifactType,
   ExecutionRunStatus,
   ExecutionTaskStatus,
@@ -43,6 +44,10 @@ export interface TestReportOverview {
   unsupported: number
   cancelled: number
   active: number
+  maintenanceProposalCount: number
+  pendingMaintenanceCount: number
+  acceptedMaintenanceCount: number
+  rejectedMaintenanceCount: number
   statusCounts: Record<ExecutionTaskStatus, number>
   finalPassRate: TestReportRate
 }
@@ -131,6 +136,13 @@ export interface TestReportNonPassedTask {
   artifacts: TestReportPublicArtifact[]
 }
 
+export interface TestReportMaintenanceProposal extends CaseMaintenanceProposal {
+  ordinal: number
+  title: string
+  diagnosisCategory: FailureDiagnosisCategory
+  diagnosisSummary: string
+}
+
 export interface TestReportAgentTraceability {
   agentKey: FrozenExecutionAgentSnapshot['agentKey']
   configurationId: string
@@ -184,7 +196,7 @@ export interface TestReportTraceability {
 }
 
 export interface TestExecutionReportContent {
-  schemaVersion: 'test-execution-report/v1'
+  schemaVersion: 'test-execution-report/v2'
   statisticsAt: string
   run: {
     id: string
@@ -202,6 +214,7 @@ export interface TestExecutionReportContent {
   selfHealing: TestReportSelfHealing
   diagnosisDistribution: TestReportDiagnosisDistribution
   nonPassedTasks: TestReportNonPassedTask[]
+  maintenanceProposals: TestReportMaintenanceProposal[]
   traceability: TestReportTraceability
 }
 

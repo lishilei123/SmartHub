@@ -12,6 +12,7 @@ import {
   unsupportedExecutionMethodReason,
 } from '../application/test-execution-validation.js'
 import type {
+  CaseMaintenanceProposal,
   ExecutionArtifact,
   ExecutionAttempt,
   ExecutionJob,
@@ -81,6 +82,7 @@ export interface TestExecutionTransaction {
     error?: string
   }): Promise<ExecutionAttempt>
   appendDiagnosis(diagnosis: FailureDiagnosis): Promise<void>
+  appendMaintenanceProposal(proposal: CaseMaintenanceProposal): Promise<CaseMaintenanceProposal>
   enqueueJob(job: ExecutionJob): Promise<void>
   recomputeRun(runId: string): Promise<ExecutionRun>
 }
@@ -92,6 +94,28 @@ export interface ExecutionTaskDetailSnapshot {
   diagnoses: FailureDiagnosis[]
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
+  maintenanceProposals: CaseMaintenanceProposal[]
+}
+
+export interface MaintenanceProposalDetailSnapshot {
+  proposal: CaseMaintenanceProposal
+  run: ExecutionRun
+  task: ExecutionTask
+  diagnosis: FailureDiagnosis
+  failureAttempts: ExecutionAttempt[]
+  originalScriptRevision: ScriptRevision
+  repairScriptRevision: ScriptRevision
+  postRepairAttempt: ExecutionAttempt
+  baselineCase: {
+    caseId: string
+    revision: number
+    content: TestCaseContent
+    contentSha256: string
+  }
+  baselineLibraryVersion: {
+    id: string
+    sha256: string
+  }
 }
 
 export interface TestExecutionReportSource {
@@ -101,6 +125,7 @@ export interface TestExecutionReportSource {
   diagnoses: FailureDiagnosis[]
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
+  maintenanceProposals: CaseMaintenanceProposal[]
   testCaseLibraryVersionSourceRunId?: string
 }
 
@@ -121,6 +146,17 @@ export interface TestExecutionStore {
   getTaskDetail(taskId: string): Promise<ExecutionTaskDetailSnapshot | null>
   listAttempts(taskId: string): Promise<ExecutionAttempt[]>
   listDiagnoses(taskId: string): Promise<FailureDiagnosis[]>
+  listMaintenanceProposals(runId: string): Promise<CaseMaintenanceProposal[]>
+  listTaskMaintenanceProposals(taskId: string): Promise<CaseMaintenanceProposal[]>
+  getMaintenanceProposal(proposalId: string): Promise<CaseMaintenanceProposal | null>
+  getMaintenanceProposalDetail(proposalId: string): Promise<MaintenanceProposalDetailSnapshot | null>
+  decideMaintenanceProposal(input: {
+    proposalId: string
+    expectedStatus: 'pending'
+    decision: 'accepted' | 'rejected'
+    decidedBy: string
+    decidedAt: string
+  }): Promise<CaseMaintenanceProposal>
   getScriptArtifactByCacheKey(cacheKey: string): Promise<ScriptArtifact | null>
   getScriptRevision(revisionId: string): Promise<ScriptRevision | null>
   getCacheSourceRevision(scriptArtifactId: string): Promise<ScriptRevision | null>
@@ -265,7 +301,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       }
       const run = await getRun(client, task.runId)
       if (!run) throw new Error('TEST_EXECUTION_RUN_NOT_FOUND')
-      const [attempts, diagnoses, revisions, artifacts] = await Promise.all([
+      const [attempts, diagnoses, revisions, artifacts, proposals] = await Promise.all([
         client.query<AttemptRow>('SELECT * FROM smarthub.test_execution_attempts WHERE task_id=$1 ORDER BY ordinal', [task.id]),
         client.query<DiagnosisRow>(`${diagnosisSelectSql}
           WHERE diagnosis.task_id=$1 ORDER BY diagnosis.created_at,diagnosis.id
@@ -273,6 +309,10 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE task_id=$1 ORDER BY revision,id', [task.id]),
         client.query<ArtifactRow>(`
           SELECT * FROM smarthub.test_execution_artifacts
+          WHERE task_id=$1 ORDER BY created_at,id
+        `, [task.id]),
+        client.query<MaintenanceProposalRow>(`
+          SELECT * FROM smarthub.test_execution_case_maintenance_proposals
           WHERE task_id=$1 ORDER BY created_at,id
         `, [task.id]),
       ])
@@ -284,6 +324,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         diagnoses: diagnoses.rows.map(diagnosisFromRow),
         scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
         artifacts: artifacts.rows.map(artifactFromRow),
+        maintenanceProposals: proposals.rows.map(maintenanceProposalFromRow),
       }
     } catch (error) {
       await client.query('ROLLBACK')
@@ -302,7 +343,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         await client.query('COMMIT')
         return null
       }
-      const [tasks, attempts, diagnoses, revisions, artifacts, handoff, library, suite] = await Promise.all([
+      const [tasks, attempts, diagnoses, revisions, artifacts, proposals, handoff, library, suite] = await Promise.all([
         client.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
           SELECT frozen_input,status,state_version,runner_attempt_count,
                  same_script_retry_count,repair_count,current_script_revision_id,
@@ -336,6 +377,13 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
             AND (artifact.attempt_id IS NULL OR attempt.run_id=$1)
           ORDER BY COALESCE(task.ordinal,-1),COALESCE(attempt.ordinal,-1),
                    artifact.created_at,artifact.id
+        `, [run.id]),
+        client.query<MaintenanceProposalRow>(`
+          SELECT proposal.*
+          FROM smarthub.test_execution_case_maintenance_proposals proposal
+          JOIN smarthub.test_execution_tasks task ON task.id=proposal.task_id
+          WHERE proposal.run_id=$1 AND task.run_id=$1
+          ORDER BY task.ordinal,proposal.created_at,proposal.id
         `, [run.id]),
         client.query<{ project_version_id: string; test_case_library_version_id: string | null; suite_version_id: string | null; content_sha256: string }>(`
           SELECT project_version_id,test_case_library_version_id,suite_version_id,content_sha256
@@ -378,6 +426,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         diagnoses: diagnoses.rows.map(diagnosisFromRow),
         scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
         artifacts: artifacts.rows.map(artifactFromRow),
+        maintenanceProposals: proposals.rows.map(maintenanceProposalFromRow),
         ...(persistedLibrary.source_run_id
           ? { testCaseLibraryVersionSourceRunId: persistedLibrary.source_run_id }
           : {}),
@@ -403,6 +452,165 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       WHERE diagnosis.task_id=$1 ORDER BY diagnosis.created_at,diagnosis.id
     `, [taskId])
     return result.rows.map(diagnosisFromRow)
+  }
+
+  async listMaintenanceProposals(runId: string) {
+    const result = await this.pool.query<MaintenanceProposalRow>(`
+      SELECT proposal.*
+      FROM smarthub.test_execution_case_maintenance_proposals proposal
+      JOIN smarthub.test_execution_tasks task ON task.id=proposal.task_id
+      WHERE proposal.run_id=$1 AND task.run_id=$1
+      ORDER BY task.ordinal,proposal.created_at,proposal.id
+    `, [runId])
+    return result.rows.map(maintenanceProposalFromRow)
+  }
+
+  async listTaskMaintenanceProposals(taskId: string) {
+    const result = await this.pool.query<MaintenanceProposalRow>(`
+      SELECT * FROM smarthub.test_execution_case_maintenance_proposals
+      WHERE task_id=$1 ORDER BY created_at,id
+    `, [taskId])
+    return result.rows.map(maintenanceProposalFromRow)
+  }
+
+  async getMaintenanceProposal(proposalId: string) {
+    const result = await this.pool.query<MaintenanceProposalRow>(`
+      SELECT * FROM smarthub.test_execution_case_maintenance_proposals WHERE id=$1
+    `, [proposalId])
+    return result.rows[0] ? maintenanceProposalFromRow(result.rows[0]) : null
+  }
+
+  async getMaintenanceProposalDetail(proposalId: string): Promise<MaintenanceProposalDetailSnapshot | null> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const proposalResult = await client.query<MaintenanceProposalRow>(`
+        SELECT * FROM smarthub.test_execution_case_maintenance_proposals WHERE id=$1
+      `, [proposalId])
+      const proposalRow = proposalResult.rows[0]
+      if (!proposalRow) {
+        await client.query('COMMIT')
+        return null
+      }
+      const proposal = maintenanceProposalFromRow(proposalRow)
+      const [run, task, diagnosisResult, originalResult, repairResult, failureAttemptsResult, postRepairResult, baselineResult] = await Promise.all([
+        getRun(client, proposal.runId),
+        getTaskWithQueryable(client, proposal.taskId),
+        client.query<DiagnosisRow>(`${diagnosisSelectSql} WHERE diagnosis.id=$1`, [proposal.diagnosisId]),
+        client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE id=(SELECT script_revision_id FROM smarthub.test_execution_diagnoses WHERE id=$1)', [proposal.diagnosisId]),
+        client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE id=$1', [proposal.scriptRevisionId]),
+        client.query<AttemptRow>(`
+          SELECT attempt.*
+          FROM smarthub.test_execution_attempts attempt
+          JOIN smarthub.test_execution_diagnosis_attempts binding
+            ON binding.diagnosis_id=$1 AND binding.attempt_id=attempt.id
+          ORDER BY binding.ordinal
+        `, [proposal.diagnosisId]),
+        client.query<AttemptRow>(`
+          SELECT * FROM smarthub.test_execution_attempts
+          WHERE run_id=$1 AND task_id=$2 AND script_revision_id=$3
+            AND attempt_kind='post_repair' AND status='passed'
+          ORDER BY ordinal DESC,id DESC LIMIT 1
+        `, [proposal.runId, proposal.taskId, proposal.scriptRevisionId]),
+        client.query<PersistedLibraryMemberRow>(`
+          SELECT member.case_id,member.case_revision,member.ordinal,member.content_sha256,
+                 member.frozen_content,member.traceability,member.execution_readiness,
+                 revision.content_sha256 AS revision_content_sha256,
+                 revision.content AS revision_content,revision.traceability AS revision_traceability
+          FROM smarthub.test_case_library_version_members member
+          JOIN smarthub.library_test_case_revisions revision
+            ON revision.case_id=member.case_id AND revision.revision=member.case_revision
+          WHERE member.version_id=$1 AND member.case_id=$2 AND member.case_revision=$3
+        `, [proposal.baselineLibraryVersionId, proposal.caseId, proposal.caseRevision]),
+      ])
+      const diagnosisRow = diagnosisResult.rows[0]
+      const originalRow = originalResult.rows[0]
+      const repairRow = repairResult.rows[0]
+      const postRepairRow = postRepairResult.rows[0]
+      const baselineRow = baselineResult.rows[0]
+      if (!run || !task || !diagnosisRow || !originalRow || !repairRow || !postRepairRow || !baselineRow) {
+        throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_TRACE_INCOMPLETE')
+      }
+      const diagnosis = diagnosisFromRow(diagnosisRow)
+      const originalScriptRevision = scriptRevisionFromRow(originalRow)
+      const repairScriptRevision = scriptRevisionFromRow(repairRow)
+      const failureAttempts = failureAttemptsResult.rows.map(attemptFromRow)
+      const postRepairAttempt = attemptFromRow(postRepairRow)
+      const baselineMember = persistedLibraryMember(baselineRow)
+      if (
+        run.id !== proposal.runId
+        || task.id !== proposal.taskId
+        || task.runId !== run.id
+        || task.input.caseId !== proposal.caseId
+        || task.input.caseRevision !== proposal.caseRevision
+        || run.handoff.testCaseLibraryVersionId !== proposal.baselineLibraryVersionId
+        || run.handoff.testCaseLibraryVersionSha256 !== proposal.baselineLibraryVersionSha256
+        || diagnosis.runId !== run.id
+        || diagnosis.taskId !== task.id
+        || originalScriptRevision.id !== diagnosis.scriptRevisionId
+        || repairScriptRevision.id !== proposal.scriptRevisionId
+        || repairScriptRevision.runId !== run.id
+        || repairScriptRevision.taskId !== task.id
+        || repairScriptRevision.parentRevisionId !== originalScriptRevision.id
+        || failureAttempts.length !== diagnosis.attemptIds.length
+        || failureAttempts.some(attempt => attempt.runId !== run.id || attempt.taskId !== task.id || attempt.scriptRevisionId !== originalScriptRevision.id)
+        || postRepairAttempt.runId !== run.id
+        || postRepairAttempt.taskId !== task.id
+        || postRepairAttempt.scriptRevisionId !== repairScriptRevision.id
+        || postRepairAttempt.kind !== 'post_repair'
+        || postRepairAttempt.status !== 'passed'
+        || baselineMember.caseId !== proposal.caseId
+        || baselineMember.revision !== proposal.caseRevision
+      ) {
+        throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_TRACE_MISMATCH')
+      }
+      const detail: MaintenanceProposalDetailSnapshot = {
+        proposal,
+        run,
+        task,
+        diagnosis,
+        failureAttempts,
+        originalScriptRevision,
+        repairScriptRevision,
+        postRepairAttempt,
+        baselineCase: {
+          caseId: baselineMember.caseId,
+          revision: baselineMember.revision,
+          content: baselineMember.frozenContent,
+          contentSha256: baselineMember.contentSha256,
+        },
+        baselineLibraryVersion: {
+          id: proposal.baselineLibraryVersionId,
+          sha256: proposal.baselineLibraryVersionSha256,
+        },
+      }
+      await client.query('COMMIT')
+      return detail
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async decideMaintenanceProposal(input: {
+    proposalId: string
+    expectedStatus: 'pending'
+    decision: 'accepted' | 'rejected'
+    decidedBy: string
+    decidedAt: string
+  }) {
+    const result = await this.pool.query<MaintenanceProposalRow>(`
+      UPDATE smarthub.test_execution_case_maintenance_proposals
+      SET status=$3,decided_by=$4,decided_at=$5
+      WHERE id=$1 AND status=$2
+      RETURNING *
+    `, [input.proposalId, input.expectedStatus, input.decision, input.decidedBy, input.decidedAt])
+    if (result.rows[0]) return maintenanceProposalFromRow(result.rows[0])
+    const existing = await this.getMaintenanceProposal(input.proposalId)
+    if (!existing) throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_NOT_FOUND')
+    throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_STATE_CONFLICT')
   }
 
   async getScriptArtifactByCacheKey(cacheKey: string) {
@@ -965,6 +1173,11 @@ function transactionFor(client: PoolClient, scope: ExecutionLeaseScope, cancella
       requireNormal()
       assertLeaseAggregate(scope, diagnosis.runId, diagnosis.taskId)
       return insertDiagnosis(client, diagnosis)
+    },
+    appendMaintenanceProposal: proposal => {
+      requireNormal()
+      assertLeaseAggregate(scope, proposal.runId, proposal.taskId)
+      return insertMaintenanceProposal(client, proposal)
     },
     enqueueJob: async job => {
       requireNormal()
@@ -1893,6 +2106,60 @@ async function insertDiagnosis(client: PoolClient, diagnosis: FailureDiagnosis) 
   }
 }
 
+async function insertMaintenanceProposal(
+  client: PoolClient,
+  proposal: CaseMaintenanceProposal,
+): Promise<CaseMaintenanceProposal> {
+  if (
+    proposal.status !== 'pending'
+    || proposal.promotedCaseChangeProposalId !== undefined
+    || proposal.decidedBy !== undefined
+    || proposal.decidedAt !== undefined
+  ) {
+    throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_INITIAL_STATE_INVALID')
+  }
+  const inserted = await client.query<MaintenanceProposalRow>(`
+    INSERT INTO smarthub.test_execution_case_maintenance_proposals (
+      id,run_id,task_id,case_id,case_revision,diagnosis_id,script_revision_id,
+      status,summary,proposed_change,baseline_library_version_id,
+      baseline_library_version_sha256,promoted_case_change_proposal_id,
+      decided_by,decided_at,created_at
+    ) VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULL,NULL,NULL,$13
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING *
+  `, [
+    proposal.id,
+    proposal.runId,
+    proposal.taskId,
+    proposal.caseId,
+    proposal.caseRevision,
+    proposal.diagnosisId,
+    proposal.scriptRevisionId,
+    proposal.status,
+    proposal.summary,
+    proposal.proposedChange,
+    proposal.baselineLibraryVersionId,
+    proposal.baselineLibraryVersionSha256,
+    proposal.createdAt,
+  ])
+  if (inserted.rows[0]) return maintenanceProposalFromRow(inserted.rows[0])
+
+  const existing = await client.query<MaintenanceProposalRow>(`
+    SELECT * FROM smarthub.test_execution_case_maintenance_proposals
+    WHERE id=$1 OR (task_id=$2 AND diagnosis_id=$3 AND script_revision_id=$4)
+    ORDER BY id
+  `, [proposal.id, proposal.taskId, proposal.diagnosisId, proposal.scriptRevisionId])
+  if (
+    existing.rows.length !== 1
+    || !sameCanonicalRecord(maintenanceProposalFromRow(existing.rows[0]), proposal)
+  ) {
+    throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_CONFLICT')
+  }
+  return maintenanceProposalFromRow(existing.rows[0])
+}
+
 async function insertDiagnosisChildren(client: PoolClient, diagnosis: FailureDiagnosis) {
   for (const [ordinal, attemptId] of diagnosis.attemptIds.entries()) {
     await client.query(`
@@ -1998,9 +2265,12 @@ function assertReportSourceScope(source: TestExecutionReportSource) {
     || source.diagnoses.some(diagnosis => diagnosis.runId !== run.id)
     || source.scriptRevisions.some(revision => revision.runId !== run.id)
     || source.artifacts.some(artifact => artifact.runId !== run.id)
+    || source.maintenanceProposals.some(proposal => proposal.runId !== run.id)
   ) throw new Error('TEST_REPORT_SOURCE_SCOPE_MISMATCH')
   const taskIds = new Set(source.tasks.map(task => task.id))
   const attemptIds = new Set(source.attempts.map(attempt => attempt.id))
+  const diagnosisIds = new Set(source.diagnoses.map(diagnosis => diagnosis.id))
+  const revisionIds = new Set(source.scriptRevisions.map(revision => revision.id))
   if (
     source.attempts.some(attempt => !taskIds.has(attempt.taskId))
     || source.diagnoses.some(diagnosis =>
@@ -2010,6 +2280,12 @@ function assertReportSourceScope(source: TestExecutionReportSource) {
     || source.artifacts.some(artifact =>
       (artifact.taskId !== undefined && !taskIds.has(artifact.taskId))
       || (artifact.attemptId !== undefined && !attemptIds.has(artifact.attemptId)))
+    || source.maintenanceProposals.some(proposal =>
+      !taskIds.has(proposal.taskId)
+      || !diagnosisIds.has(proposal.diagnosisId)
+      || !revisionIds.has(proposal.scriptRevisionId)
+      || proposal.baselineLibraryVersionId !== run.handoff.testCaseLibraryVersionId
+      || proposal.baselineLibraryVersionSha256 !== run.handoff.testCaseLibraryVersionSha256)
   ) throw new Error('TEST_REPORT_SOURCE_RELATION_INVALID')
 }
 
@@ -2168,6 +2444,48 @@ type DiagnosisRow = {
 }
 function diagnosisFromRow(row: DiagnosisRow): FailureDiagnosis {
   return { id: row.id, runId: row.run_id, taskId: row.task_id, scriptRevisionId: row.script_revision_id, attemptIds: row.attempt_ids, category: row.category, confidence: Number(row.confidence), summary: row.summary, evidence: structuredClone(row.evidence), repairable: row.repairable, recommendedAction: row.recommended_action, source: row.source, ...(row.agent_snapshot ? { agent: structuredClone(row.agent_snapshot) } : {}), createdAt: iso(row.created_at) }
+}
+
+type MaintenanceProposalRow = {
+  id: string
+  run_id: string
+  task_id: string
+  case_id: string
+  case_revision: number
+  diagnosis_id: string
+  script_revision_id: string
+  status: CaseMaintenanceProposal['status']
+  summary: string
+  proposed_change: string
+  baseline_library_version_id: string
+  baseline_library_version_sha256: string
+  promoted_case_change_proposal_id: string | null
+  decided_by: string | null
+  decided_at: Date | string | null
+  created_at: Date | string
+}
+
+function maintenanceProposalFromRow(row: MaintenanceProposalRow): CaseMaintenanceProposal {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    caseId: row.case_id,
+    caseRevision: Number(row.case_revision),
+    diagnosisId: row.diagnosis_id,
+    scriptRevisionId: row.script_revision_id,
+    status: row.status,
+    summary: row.summary,
+    proposedChange: row.proposed_change,
+    baselineLibraryVersionId: row.baseline_library_version_id,
+    baselineLibraryVersionSha256: row.baseline_library_version_sha256,
+    ...(row.promoted_case_change_proposal_id
+      ? { promotedCaseChangeProposalId: row.promoted_case_change_proposal_id }
+      : {}),
+    ...(row.decided_by ? { decidedBy: row.decided_by } : {}),
+    ...(row.decided_at ? { decidedAt: iso(row.decided_at) } : {}),
+    createdAt: iso(row.created_at),
+  }
 }
 
 type JobRow = {

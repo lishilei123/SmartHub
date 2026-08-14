@@ -1,4 +1,5 @@
 import type {
+  CaseMaintenanceProposal,
   ExecutionRunStatus,
   ExecutionTaskStatus,
   TestExecutionMethod,
@@ -36,7 +37,7 @@ export type TestReportListItem = {
 }
 
 export type TestReport = {
-  schemaVersion: 'test-execution-report/v1'
+  schemaVersion: 'test-execution-report/v2'
   statisticsAt: string
   reportSha256: string
   run: {
@@ -57,6 +58,10 @@ export type TestReport = {
     unsupported: number
     cancelled: number
     active: number
+    maintenanceProposalCount: number
+    pendingMaintenanceCount: number
+    acceptedMaintenanceCount: number
+    rejectedMaintenanceCount: number
     statusCounts: Record<ExecutionTaskStatus, number>
     finalPassRate: ReportRate
   }
@@ -100,6 +105,12 @@ export type TestReport = {
       percentage: number
     }>
   }
+  maintenanceProposals: Array<CaseMaintenanceProposal & {
+    ordinal: number
+    title: string
+    diagnosisCategory: FailureDiagnosisCategory
+    diagnosisSummary: string
+  }>
   nonPassedTasks: Array<{
     taskId: string
     ordinal: number

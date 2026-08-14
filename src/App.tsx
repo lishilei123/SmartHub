@@ -132,7 +132,7 @@ function App() {
     if (next.page) url.searchParams.set('page', next.page)
     if (next.projectVersionId) url.searchParams.set('projectVersionId', next.projectVersionId)
     else if (next.projectVersionId === '') url.searchParams.delete('projectVersionId')
-    if (next.resetReviewContext) ['reviewId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'reportRunId', 'tab', 'assetView'].forEach(key => url.searchParams.delete(key))
+    if (next.resetReviewContext) ['reviewId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'executionMaintenanceProposalId', 'testDesignEntry', 'libraryCaseId', 'reportRunId', 'tab', 'assetView'].forEach(key => url.searchParams.delete(key))
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', url)
   }, [])
   const navigate = useCallback((nextPage: PageKey) => {
@@ -222,10 +222,9 @@ function App() {
         <button className={page === 'documents' ? 'active' : ''} onClick={() => navigate('documents')}><Library size={18} /><span>知识库</span></button>
         <button className={page === 'settings' ? 'active' : ''} onClick={() => navigate('settings')}><Settings size={18} /><span>系统管理</span></button>
       </nav>
-      <button className="sidebar-account" onClick={() => notify('当前账号：李磊 · 测试负责人')} aria-label="查看当前账号">
+      <button className="sidebar-account" onClick={() => notify('当前账号：李世磊 · 测试负责人')} aria-label="查看当前账号">
         <span className="avatar">LS</span><span className="sidebar-account-info"><b>李磊</b><small>测试负责人</small></span><ChevronRight />
       </button>
-      <button className="sidebar-foot" onClick={() => notify('帮助与反馈为静态原型说明：当前数据仅保留在本次会话中。')}><CircleHelp size={17} /><span>帮助与反馈</span><span className="version">v0.1</span></button>
     </aside>
     <main>
       <section className={`content ${page === 'requirements' ? 'requirements-content' : ''} ${page === 'test-design' ? 'test-design-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>

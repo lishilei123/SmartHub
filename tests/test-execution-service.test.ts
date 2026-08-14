@@ -21,6 +21,7 @@ import type {
   TestExecutionAgentRuntimeOutput,
 } from '../server/agent/pi-test-execution-runtime.js'
 import type {
+  CaseMaintenanceProposal,
   ExecutionArtifact,
   ExecutionAttempt,
   ExecutionEnvironmentSnapshot,
@@ -237,6 +238,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
   artifacts: ExecutionArtifact[] = []
   scriptArtifacts: ScriptArtifact[] = []
   revisions: ScriptRevision[] = []
+  maintenanceProposals: CaseMaintenanceProposal[] = []
 
   constructor(value: ReturnType<typeof fixture>) {
     this.run = structuredClone(value.run)
@@ -289,6 +291,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
       diagnoses: this.diagnoses.map(item => structuredClone(item)),
       scriptRevisions: this.revisions.map(item => structuredClone(item)),
       artifacts: this.artifacts.map(item => structuredClone(item)),
+      maintenanceProposals: this.maintenanceProposals.map(item => structuredClone(item)),
     }
   }
 
@@ -302,6 +305,48 @@ class InMemoryExecutionStore implements TestExecutionStore {
     return this.diagnoses
       .filter(item => item.taskId === taskId)
       .map(item => structuredClone(item))
+  }
+
+  async listMaintenanceProposals(runId: string) {
+    return this.maintenanceProposals
+      .filter(item => item.runId === runId)
+      .map(item => structuredClone(item))
+  }
+
+  async listTaskMaintenanceProposals(taskId: string) {
+    return this.maintenanceProposals
+      .filter(item => item.taskId === taskId)
+      .map(item => structuredClone(item))
+  }
+
+  async getMaintenanceProposal(proposalId: string) {
+    const proposal = this.maintenanceProposals.find(item => item.id === proposalId)
+    return proposal ? structuredClone(proposal) : null
+  }
+
+  async getMaintenanceProposalDetail() {
+    throw new Error('NOT_USED')
+  }
+
+  async decideMaintenanceProposal(input: {
+    proposalId: string
+    expectedStatus: 'pending'
+    decision: 'accepted' | 'rejected'
+    decidedBy: string
+    decidedAt: string
+  }) {
+    const index = this.maintenanceProposals.findIndex(item => item.id === input.proposalId)
+    if (index < 0) throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_NOT_FOUND')
+    if (this.maintenanceProposals[index].status !== input.expectedStatus) {
+      throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_STATE_CONFLICT')
+    }
+    this.maintenanceProposals[index] = {
+      ...this.maintenanceProposals[index],
+      status: input.decision,
+      decidedBy: input.decidedBy,
+      decidedAt: input.decidedAt,
+    }
+    return structuredClone(this.maintenanceProposals[index])
   }
 
   async getScriptArtifactByCacheKey(cacheKey: string) {
@@ -458,6 +503,19 @@ class InMemoryExecutionStore implements TestExecutionStore {
         assert.equal(this.diagnoses.some(item => item.id === diagnosis.id), false)
         this.diagnoses.push(structuredClone(diagnosis))
       },
+      appendMaintenanceProposal: async proposal => {
+        const existing = this.maintenanceProposals.find(item =>
+          item.id === proposal.id
+          || item.taskId === proposal.taskId
+            && item.diagnosisId === proposal.diagnosisId
+            && item.scriptRevisionId === proposal.scriptRevisionId)
+        if (existing) {
+          assert.deepEqual(existing, proposal)
+          return structuredClone(existing)
+        }
+        this.maintenanceProposals.push(structuredClone(proposal))
+        return structuredClone(proposal)
+      },
       enqueueJob: async () => undefined,
       recomputeRun: async () => structuredClone(this.run),
     }
@@ -471,7 +529,14 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
   calls: Array<Pick<TestExecutionAgentRuntimeInput, 'stage' | 'stageContext'>> = []
   repairOrdinal = 0
 
-  constructor(private readonly agents: ExecutionRun['agents']) {}
+  constructor(
+    private readonly agents: ExecutionRun['agents'],
+    private readonly options: {
+      diagnosisCategory?: FailureDiagnosis['category']
+      repairable?: boolean
+      repairSource?: (ordinal: number) => string
+    } = {},
+  ) {}
 
   async readiness() {
     return { ready: true, agents: [] }
@@ -507,14 +572,14 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
         taskId: input.task.id,
         scriptRevisionId: input.stageContext?.scriptRevisionId,
         attemptIds: input.stageContext?.attemptIds,
-        category: 'selector_changed',
+        category: this.options.diagnosisCategory ?? 'selector_changed',
         confidence: 0.95,
         summary: '页面选择器已变化',
         evidence: input.stageContext?.attemptIds?.map(attemptId => ({
           attemptId,
           observation: '同一脚本选择器无法匹配元素',
         })),
-        repairable: true,
+        repairable: this.options.repairable ?? true,
         recommendedAction: '更新 locator，保留断言语义',
       }
     } else {
@@ -527,7 +592,8 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
         parentScriptRevisionId: input.stageContext?.parentScriptRevisionId,
         files: [{
           path: `tests/${input.task.id}.spec.ts`,
-          content: scriptSource(`status-v${this.repairOrdinal + 1}`),
+          content: this.options.repairSource?.(this.repairOrdinal)
+            ?? scriptSource(`status-v${this.repairOrdinal + 1}`),
         }],
         summary: `第 ${this.repairOrdinal} 次修复选择器`,
       }
@@ -599,6 +665,9 @@ async function withService(
   }) => Promise<void>,
   options: {
     environmentReadiness?: { ready: boolean; reason?: string }
+    diagnosisCategory?: FailureDiagnosis['category']
+    repairable?: boolean
+    repairSource?: (ordinal: number) => string
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
@@ -607,7 +676,7 @@ async function withService(
     const store = new InMemoryExecutionStore(value)
     const artifactStore = new LocalExecutionArtifactStore(root)
     const runner = new SequenceRunner(results)
-    const runtime = new ScriptAgentRuntime(value.run.agents)
+    const runtime = new ScriptAgentRuntime(value.run.agents, options)
     const service = new TestExecutionService(
       {
         async getHandoff() { throw new Error('NOT_USED') },
@@ -762,7 +831,108 @@ test('TestExecutionService 两次真实失败后才诊断，并在两次自动�
       runtime.calls.filter(call => call.stage === 'script_repair').length,
       2,
     )
+    assert.equal(store.maintenanceProposals.length, 0)
   })
+})
+
+for (const diagnosisCategory of ['script_defect', 'selector_changed'] as const) {
+  test(`TestExecutionService ${diagnosisCategory} repair 经真实 post_repair PASS 后创建唯一维护建议`, async () => {
+    await withService([
+      { status: 'failed', exitCode: 1, durationMs: 10, summary: '首次失败', error: 'locator 未匹配', artifacts: [] },
+      { status: 'failed', exitCode: 1, durationMs: 11, summary: '重试失败', error: 'locator 未匹配', artifacts: [] },
+      { status: 'passed', exitCode: 0, durationMs: 8, summary: '修复后通过', artifacts: [] },
+    ], async ({ service, store, job }) => {
+      const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+      assert.equal(task.status, 'passed')
+      assert.equal(store.maintenanceProposals.length, 1)
+      const proposal = store.maintenanceProposals[0]
+      const original = store.revisions[0]
+      const repair = store.revisions[1]
+      assert.equal(proposal.status, 'pending')
+      assert.equal(proposal.taskId, task.id)
+      assert.equal(proposal.diagnosisId, store.diagnoses[0].id)
+      assert.equal(proposal.scriptRevisionId, repair.id)
+      assert.equal(repair.parentRevisionId, original.id)
+      assert.equal(repair.protectedAssertionSha256, original.protectedAssertionSha256)
+      assert.equal(store.attempts.at(-1)?.kind, 'post_repair')
+      assert.equal(store.attempts.at(-1)?.status, 'passed')
+      assert.equal(proposal.baselineLibraryVersionId, store.run.handoff.testCaseLibraryVersionId)
+      assert.match(proposal.proposedChange, /不得修改 Expected Result、Verification Check、matcher、Requirement/u)
+
+      const replay = await store.transactionWithLease(job.id, lease, transaction =>
+        transaction.appendMaintenanceProposal(structuredClone(proposal)))
+      assert.deepEqual(replay, proposal)
+      assert.equal(store.maintenanceProposals.length, 1)
+    }, { diagnosisCategory })
+  })
+}
+
+for (const diagnosisCategory of [
+  'product_defect',
+  'environment_defect',
+  'test_data_defect',
+  'flaky',
+  'timeout',
+  'unknown',
+  'assertion_mismatch',
+] as const) {
+  test(`TestExecutionService ${diagnosisCategory} 不生成维护建议`, async () => {
+    await withService([
+      { status: 'failed', exitCode: 1, durationMs: 10, summary: '首次失败', error: '执行失败', artifacts: [] },
+      { status: 'failed', exitCode: 1, durationMs: 11, summary: '重试失败', error: '执行失败', artifacts: [] },
+    ], async ({ service, store, runtime, job }) => {
+      await service.processPreparedTask(job, lease, new AbortController().signal)
+      assert.equal(store.maintenanceProposals.length, 0)
+      assert.equal(store.revisions.filter(item => item.source === 'repair').length, 0)
+      assert.equal(runtime.calls.filter(item => item.stage === 'script_repair').length, 0)
+    }, { diagnosisCategory })
+  })
+}
+
+test('TestExecutionService repair 修改受保护断言时在 Runner 前拒绝且不生成维护建议', async () => {
+  await withService([
+    { status: 'failed', exitCode: 1, durationMs: 10, summary: '首次失败', error: '执行失败', artifacts: [] },
+    { status: 'failed', exitCode: 1, durationMs: 11, summary: '重试失败', error: '执行失败', artifacts: [] },
+  ], async ({ service, store, runner, job }) => {
+    await assert.rejects(service.processPreparedTask(job, lease, new AbortController().signal))
+    assert.equal(runner.calls.length, 2)
+    assert.equal(store.revisions.filter(item => item.source === 'repair').length, 0)
+    assert.equal(store.maintenanceProposals.length, 0)
+  }, {
+    diagnosisCategory: 'script_defect',
+    repairSource: () => source.replace("toHaveText('Ready')", "toHaveText('Changed')"),
+  })
+})
+
+test('TestExecutionService 维护建议 accepted/rejected 使用服务端审计且终态拒绝再次决策', async () => {
+  for (const decision of ['accepted', 'rejected'] as const) {
+    await withService([
+      { status: 'failed', exitCode: 1, durationMs: 10, summary: '首次失败', error: '执行失败', artifacts: [] },
+      { status: 'failed', exitCode: 1, durationMs: 11, summary: '重试失败', error: '执行失败', artifacts: [] },
+      { status: 'passed', exitCode: 0, durationMs: 8, summary: '修复后通过', artifacts: [] },
+    ], async ({ service, store, job }) => {
+      await service.processPreparedTask(job, lease, new AbortController().signal)
+      const pending = store.maintenanceProposals[0]
+      const decided = await service.decideMaintenanceProposal({
+        proposalId: pending.id,
+        decision,
+        decidedBy: 'operator-1',
+      })
+      assert.equal(decided.status, decision)
+      assert.equal(decided.decidedBy, 'operator-1')
+      assert.equal(decided.decidedAt, '2026-08-13T12:00:00.000Z')
+      await assert.rejects(
+        service.decideMaintenanceProposal({
+          proposalId: pending.id,
+          decision: decision === 'accepted' ? 'rejected' : 'accepted',
+          decidedBy: 'operator-2',
+        }),
+        (error: unknown) => error instanceof Error
+          && 'code' in error
+          && error.code === 'TEST_EXECUTION_MAINTENANCE_PROPOSAL_STATE_CONFLICT',
+      )
+    }, { diagnosisCategory: 'script_defect' })
+  }
 })
 
 test('TestExecutionService 缓存复用 Revision 显式保存原始非缓存 Revision 来源', async () => {

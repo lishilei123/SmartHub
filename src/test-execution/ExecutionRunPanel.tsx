@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type {
+  CaseMaintenanceProposal,
   ExecutionEnvironment,
   ExecutionHandoff,
   ExecutionReadiness,
@@ -26,24 +27,30 @@ export function ExecutionRunPanel({
   handoffs,
   runs,
   run,
+  maintenanceProposals,
+  maintenanceFilter,
   busy,
   loading,
   onRefresh,
   onCreate,
   onOpen,
   onCancel,
+  onToggleMaintenanceFilter,
 }: {
   readiness: ExecutionReadiness | null
   environments: ExecutionEnvironment[]
   handoffs: ExecutionHandoff[]
   runs: ExecutionRun[]
   run: Versioned<ExecutionRun> | null
+  maintenanceProposals: CaseMaintenanceProposal[]
+  maintenanceFilter: boolean
   busy: string
   loading: boolean
   onRefresh: () => Promise<void>
   onCreate: (handoffId: string, environmentId: string) => Promise<ExecutionRun | undefined>
   onOpen: (runId: string) => Promise<ExecutionRun | undefined>
   onCancel: () => Promise<void>
+  onToggleMaintenanceFilter: () => void
 }) {
   const [handoffId, setHandoffId] = useState('')
   const [environmentId, setEnvironmentId] = useState('')
@@ -58,6 +65,7 @@ export function ExecutionRunPanel({
       : environments[0]?.environmentId ?? '')
   }, [environments])
   const handoff = handoffs.find(item => item.id === handoffId)
+  const pendingMaintenanceCount = maintenanceProposals.filter(item => item.status === 'pending').length
   const counts = useMemo(() => handoff?.members.reduce((result, member) => {
     if (member.method === 'ui') result.ui += 1
     else if (member.method === 'api') result.api += 1
@@ -100,6 +108,11 @@ export function ExecutionRunPanel({
       </div>
     </section>
 
+    {run && <section className="te-card te-maintenance-summary">
+      <header><div><h2>用例维护</h2><p>当前 Run 的建议只确认是否需要人工维护，不自动修改正式用例。</p></div><button className={maintenanceFilter ? 'te-primary' : 'te-secondary'} onClick={onToggleMaintenanceFilter}>待确认 {pendingMaintenanceCount}</button></header>
+      <div className="te-task-metrics"><Metric label="全部建议" value={maintenanceProposals.length} /><Metric label="待确认" value={pendingMaintenanceCount} /><Metric label="已确认" value={maintenanceProposals.filter(item => item.status === 'accepted').length} /><Metric label="已拒绝" value={maintenanceProposals.filter(item => item.status === 'rejected').length} /></div>
+    </section>}
+
     {run && <section className="te-card te-run-snapshot">
       <header><div><h2>Run 冻结快照</h2><p>开始后不再解析 latest、current 或 active。</p></div>{['queued', 'running'].includes(run.value.status) && <button className="te-danger" disabled={Boolean(busy) || Boolean(run.value.cancelRequestedAt)} onClick={() => void onCancel()}><Square />{run.value.cancelRequestedAt ? '已请求取消' : busy === 'cancel' ? '正在取消…' : '取消 Run'}</button>}</header>
       <dl>
@@ -112,6 +125,10 @@ export function ExecutionRunPanel({
       </dl>
     </section>}
   </div>
+}
+
+function Metric({ label, value }: { label: string; value: number }) {
+  return <div><span>{label}</span><b>{value}</b></div>
 }
 
 function ReadinessItem({ icon, label, ready, reason }: { icon: React.ReactNode; label: string; ready?: boolean; reason?: string }) {

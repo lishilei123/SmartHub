@@ -150,6 +150,95 @@ export async function routeTestExecution(
     })
   }
 
+  const runMaintenanceProposals = /^\/api\/project-versions\/([^/]+)\/test-execution-runs\/([^/]+)\/maintenance-proposals$/.exec(url.pathname)
+  if (runMaintenanceProposals && method === 'GET') {
+    const executionService = requireService(service)
+    const run = await scopedRun(
+      executionService,
+      controls,
+      principal,
+      runMaintenanceProposals[1],
+      runMaintenanceProposals[2],
+      'test-execution:read',
+    )
+    privateNoStore(response)
+    return send(response, 200, {
+      items: await executionService.listMaintenanceProposals(run.id),
+    })
+  }
+
+  const taskMaintenanceProposals = /^\/api\/project-versions\/([^/]+)\/test-execution-runs\/([^/]+)\/tasks\/([^/]+)\/maintenance-proposals$/.exec(url.pathname)
+  if (taskMaintenanceProposals && method === 'GET') {
+    const executionService = requireService(service)
+    const scoped = await scopedTask(
+      executionService,
+      controls,
+      principal,
+      taskMaintenanceProposals[1],
+      taskMaintenanceProposals[2],
+      taskMaintenanceProposals[3],
+      'test-execution:read',
+    )
+    privateNoStore(response)
+    return send(response, 200, {
+      items: await executionService.listTaskMaintenanceProposals(scoped.task.id),
+    })
+  }
+
+  const maintenanceProposalDecision = /^\/api\/project-versions\/([^/]+)\/test-execution-runs\/([^/]+)\/maintenance-proposals\/([^/]+)\/decision$/.exec(url.pathname)
+  if (maintenanceProposalDecision && method === 'POST') {
+    const executionService = requireService(service)
+    const scoped = await scopedMaintenanceProposal(
+      executionService,
+      controls,
+      principal,
+      maintenanceProposalDecision[1],
+      maintenanceProposalDecision[2],
+      maintenanceProposalDecision[3],
+      'test-execution:maintain',
+    )
+    parseProposalIfMatch(request, scoped.proposal)
+    const body = await json(request)
+    rejectUnknownFields(body, ['decision'])
+    const decision = String(body.decision ?? '')
+    if (decision !== 'accepted' && decision !== 'rejected') {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_MAINTENANCE_DECISION_INVALID',
+        'decision 只能是 accepted 或 rejected',
+        400,
+      )
+    }
+    const proposal = await executionService.decideMaintenanceProposal({
+      proposalId: scoped.proposal.id,
+      decision,
+      decidedBy: principal.subjectId,
+    })
+    privateNoStore(response)
+    response.setHeader('ETag', representationEtag(proposal))
+    response.setHeader('Proposal-State-ETag', representationEtag(proposal))
+    return send(response, 200, proposal)
+  }
+
+  const maintenanceProposalDetail = /^\/api\/project-versions\/([^/]+)\/test-execution-runs\/([^/]+)\/maintenance-proposals\/([^/]+)$/.exec(url.pathname)
+  if (maintenanceProposalDetail && method === 'GET') {
+    const executionService = requireService(service)
+    const scoped = await scopedMaintenanceProposal(
+      executionService,
+      controls,
+      principal,
+      maintenanceProposalDetail[1],
+      maintenanceProposalDetail[2],
+      maintenanceProposalDetail[3],
+      'test-execution:read',
+    )
+    const detail = await executionService.maintenanceProposalDetail(scoped.proposal.id)
+    assertMaintenanceProposalDetailScope(detail, scoped.run, scoped.task)
+    privateNoStore(response)
+    response.setHeader('ETag', representationEtag(detail))
+    response.setHeader('Proposal-State-ETag', representationEtag(detail.proposal))
+    return send(response, 200, detail)
+  }
+
   const taskPath = /^\/api\/project-versions\/([^/]+)\/test-execution-runs\/([^/]+)\/tasks\/([^/]+)$/.exec(url.pathname)
   if (taskPath && method === 'GET') {
     const executionService = requireService(service)
@@ -162,6 +251,7 @@ export async function routeTestExecution(
       taskPath[2],
       'test-execution:read',
     )
+    privateNoStore(response)
     response.setHeader('ETag', taskEtag(
       detail.task.stateVersion,
       detail.run.stateVersion,
@@ -372,6 +462,54 @@ async function authorizeTaskDetail(
   }
 }
 
+async function scopedMaintenanceProposal(
+  service: TestExecutionService,
+  controls: AccessControl,
+  principal: Principal,
+  projectVersionId: string,
+  runId: string,
+  proposalId: string,
+  permission: ProjectVersionPermission,
+) {
+  const proposal = await service.getMaintenanceProposal(proposalId)
+  const task = await service.getTask(proposal.taskId)
+  const run = await service.getRun(task.runId)
+  await controls.authorize(principal, run.projectVersionId, permission)
+  if (
+    run.projectVersionId !== projectVersionId
+    || run.id !== runId
+    || task.runId !== run.id
+    || proposal.runId !== run.id
+    || proposal.taskId !== task.id
+  ) {
+    throw maintenanceProposalNotFound()
+  }
+  return { proposal, task, run }
+}
+
+function assertMaintenanceProposalDetailScope(
+  detail: Awaited<ReturnType<TestExecutionService['maintenanceProposalDetail']>>,
+  run: Awaited<ReturnType<TestExecutionService['getRun']>>,
+  task: Awaited<ReturnType<TestExecutionService['getTask']>>,
+) {
+  if (
+    detail.run.id !== run.id
+    || detail.run.projectVersionId !== run.projectVersionId
+    || detail.task.id !== task.id
+    || detail.task.runId !== run.id
+    || detail.proposal.runId !== run.id
+    || detail.proposal.taskId !== task.id
+  ) throw maintenanceProposalNotFound()
+}
+
+function maintenanceProposalNotFound() {
+  return new TestExecutionServiceError(
+    'TEST_EXECUTION_MAINTENANCE_PROPOSAL_NOT_FOUND',
+    '用例维护建议不存在',
+    404,
+  )
+}
+
 async function readArtifactStore<T>(operation: () => Promise<T>) {
   try {
     return await operation()
@@ -457,6 +595,18 @@ function invalidIfMatch(resource: string) {
     `${resource} If-Match 无效`,
     400,
   )
+}
+
+function parseProposalIfMatch(request: IncomingMessage, proposal: unknown) {
+  const value = ifMatch(request)
+  if (!/^"sha256-[a-f0-9]{64}"$/u.test(value)) throw invalidIfMatch('用例维护建议')
+  if (value !== representationEtag(proposal)) {
+    throw new TestExecutionServiceError(
+      'TEST_EXECUTION_MAINTENANCE_PROPOSAL_STATE_CONFLICT',
+      '用例维护建议状态已变化',
+      412,
+    )
+  }
 }
 
 function safeStateVersion(value: string, resource: string) {
@@ -591,8 +741,13 @@ function cors(response: ServerResponse) {
   )
   response.setHeader(
     'Access-Control-Expose-Headers',
-    'etag, content-disposition, content-length',
+    'etag, proposal-state-etag, content-disposition, content-length',
   )
+}
+
+function privateNoStore(response: ServerResponse) {
+  response.setHeader('Cache-Control', 'private, no-store')
+  response.setHeader('Vary', 'Authorization')
 }
 
 function send(response: ServerResponse, status: number, value: unknown) {

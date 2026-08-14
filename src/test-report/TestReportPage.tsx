@@ -6,6 +6,7 @@ import { reportExportUrl } from './api'
 import { useTestReport } from './hooks/useTestReport'
 import { TestReportDiagnosisPanel } from './TestReportDiagnosisPanel'
 import { TestReportFailureTable } from './TestReportFailureTable'
+import { TestReportMaintenanceTable } from './TestReportMaintenanceTable'
 import { TestReportMetrics } from './TestReportMetrics'
 import { TestReportOverview } from './TestReportOverview'
 import { TestReportTraceability } from './TestReportTraceability'
@@ -63,10 +64,11 @@ export function TestReportPage({
       <div className={`tr-report ${model.refreshing ? 'refreshing' : ''}`}>
         {!model.report && <section className="tr-section tr-report-empty"><Activity /><h2>选择一个 ExecutionRun</h2><p>报告只读取正式执行事实，不调用 Agent、Runner，也不修改状态。</p></section>}
         {model.report && <>
-          <section className="tr-report-toolbar"><div><span className={`tr-status ${model.report.run.status}`}>{runStatusLabel(model.report.run.status)}</span><b>{model.report.run.id}</b><small>统计截至 {formatDate(model.report.statisticsAt)} · SHA-256 {model.report.reportSha256}</small></div><div>{model.refreshing && <span className="tr-refreshing"><RefreshCw />正在刷新</span>}<a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')}><FileJson2 />导出 JSON</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'markdown')}><FileText />导出 Markdown</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')} aria-label="下载报告"><Download /></a></div></section>
+          <section className="tr-report-toolbar"><div><span className={`tr-status ${model.report.run.status}`}>{runStatusLabel(model.report.run.status)}</span><b>{model.report.run.id}</b><small>统计截至 {formatDate(model.report.statisticsAt)} · SHA-256 {model.report.reportSha256}</small></div><div>{model.refreshing && <span className="tr-refreshing"><RefreshCw />正在刷新</span>}<button className="tr-icon-button" aria-label="刷新当前报告" title="刷新当前报告" disabled={model.refreshing} onClick={() => void model.openReport(model.report!.run.id, true).catch(cause => notify(messageOf(cause), 'error'))}><RefreshCw className={model.refreshing ? 'spinning' : ''} /></button><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')}><FileJson2 />导出 JSON</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'markdown')}><FileText />导出 Markdown</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')} aria-label="下载报告"><Download /></a></div></section>
           <TestReportOverview report={model.report} />
           <TestReportMetrics report={model.report} />
           <TestReportDiagnosisPanel report={model.report} />
+          <TestReportMaintenanceTable report={model.report} />
           <TestReportFailureTable report={model.report} />
           <TestReportTraceability report={model.report} />
         </>}

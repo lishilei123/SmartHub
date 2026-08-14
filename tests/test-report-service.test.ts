@@ -11,8 +11,8 @@ import { reportSourceFixture, reportSourceReader } from './test-report-fixture.j
 
 test('报告 Service 按正式口径计算概览、效率、首次质量、稳定性和自愈', () => {
   const report = buildTestExecutionReport(reportSourceFixture())
-  assert.equal(report.schemaVersion, 'test-execution-report/v1')
-  assert.equal(report.statisticsAt, '2026-08-14T00:00:25.000Z')
+  assert.equal(report.schemaVersion, 'test-execution-report/v2')
+  assert.equal(report.statisticsAt, '2026-08-14T00:00:26.000Z')
   assert.deepEqual(report.overview, {
     totalCases: 9,
     passed: 3,
@@ -22,6 +22,10 @@ test('报告 Service 按正式口径计算概览、效率、首次质量、稳�
     unsupported: 1,
     cancelled: 1,
     active: 1,
+    maintenanceProposalCount: 1,
+    pendingMaintenanceCount: 1,
+    acceptedMaintenanceCount: 0,
+    rejectedMaintenanceCount: 0,
     statusCounts: {
       pending: 0,
       script_generating: 0,
@@ -40,7 +44,7 @@ test('报告 Service 按正式口径计算概览、效率、首次质量、稳�
     finalPassRate: { numerator: 3, denominator: 9, percentage: 33.33 },
   })
   assert.deepEqual(report.efficiency, {
-    totalDurationMs: 25_000,
+    totalDurationMs: 26_000,
     durationSampleCount: 7,
     averageCaseDurationMs: 643,
     minimumCaseDurationMs: 100,
@@ -112,11 +116,58 @@ test('报告固定返回九类诊断并按 Attempt ordinal 选择最新正式诊
       'unknown',
     ],
   )
-  assert.equal(report.diagnosisDistribution.totalDiagnoses, 4)
-  assert.equal(report.diagnosisDistribution.categories.find(item => item.category === 'script_defect')?.count, 0)
+  assert.equal(report.diagnosisDistribution.totalDiagnoses, 5)
+  assert.equal(report.diagnosisDistribution.categories.find(item => item.category === 'script_defect')?.count, 1)
   assert.equal(report.nonPassedTasks.find(task => task.taskId === 'task-4')?.diagnosis?.id, 'diagnosis-higher-attempt')
   assert.equal(report.nonPassedTasks.find(task => task.taskId === 'task-5')?.terminal, false)
   assert.equal(report.nonPassedTasks.find(task => task.taskId === 'task-7')?.diagnosis, null)
+})
+
+test('报告独立投影维护建议并将状态、内容和时间纳入正式契约', async () => {
+  const pendingSource = reportSourceFixture()
+  const pending = buildTestExecutionReport(pendingSource)
+  assert.equal(pending.overview.maintenanceProposalCount, 1)
+  assert.equal(pending.overview.pendingMaintenanceCount, 1)
+  assert.equal(pending.overview.acceptedMaintenanceCount, 0)
+  assert.equal(pending.overview.rejectedMaintenanceCount, 0)
+  assert.equal(pending.maintenanceProposals[0].diagnosisCategory, 'script_defect')
+  assert.equal(pending.maintenanceProposals[0].scriptRevisionId, 'task-3-revision-2')
+  assert.equal(pending.nonPassedTasks.some(task => task.taskId === 'task-3'), false)
+
+  const acceptedSource = reportSourceFixture()
+  acceptedSource.maintenanceProposals[0] = {
+    ...acceptedSource.maintenanceProposals[0],
+    status: 'accepted',
+    decidedBy: 'operator-1',
+    decidedAt: '2026-08-14T00:00:30.000Z',
+  }
+  const accepted = buildTestExecutionReport(acceptedSource)
+  assert.equal(accepted.statisticsAt, '2026-08-14T00:00:30.000Z')
+  assert.equal(accepted.overview.pendingMaintenanceCount, 0)
+  assert.equal(accepted.overview.acceptedMaintenanceCount, 1)
+  assert.notEqual(accepted.reportSha256, pending.reportSha256)
+
+  const rejectedSource = reportSourceFixture()
+  rejectedSource.maintenanceProposals[0] = {
+    ...rejectedSource.maintenanceProposals[0],
+    status: 'rejected',
+    decidedBy: 'operator-2',
+    decidedAt: '2026-08-14T00:00:31.000Z',
+  }
+  const rejected = buildTestExecutionReport(rejectedSource)
+  assert.equal(rejected.overview.rejectedMaintenanceCount, 1)
+  assert.notEqual(rejected.reportSha256, accepted.reportSha256)
+
+  const changedSource = reportSourceFixture()
+  changedSource.maintenanceProposals[0].proposedChange += ' 人工复核。'
+  assert.notEqual(buildTestExecutionReport(changedSource).reportSha256, pending.reportSha256)
+
+  const markdown = await new TestReportService(reportSourceReader(acceptedSource))
+    .exportMarkdown(acceptedSource.run.id)
+  assert.match(markdown.body, /## 用例维护建议/u)
+  assert.match(markdown.body, /已确认维护建议 \| 1/u)
+  assert.match(markdown.body, /operator-1/u)
+  assert.match(markdown.body, /不会自动修改正式 TestCase/u)
 })
 
 test('报告 Artifact 只投影公开元数据且不泄露 storagePath', () => {
@@ -141,6 +192,7 @@ test('报告输入乱序不改变 Hash 或导出字节，正式事实变化会�
   shuffled.attempts.reverse()
   shuffled.diagnoses.reverse()
   shuffled.scriptRevisions.reverse()
+  shuffled.maintenanceProposals.reverse()
   shuffled.artifacts.reverse()
   const first = buildTestExecutionReport(source)
   const second = buildTestExecutionReport(shuffled)
@@ -168,6 +220,7 @@ test('无时长和无分母时返回 null 与数值 0，终态耗时使用 finis
   source.attempts = []
   source.diagnoses = []
   source.scriptRevisions = []
+  source.maintenanceProposals = []
   source.artifacts = []
   source.tasks = source.tasks.slice(6, 7).map(task => ({
     ...task,

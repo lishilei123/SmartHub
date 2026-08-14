@@ -81,6 +81,16 @@ const diagnosisCategories = new Set<FailureDiagnosisCategory>([
 ])
 
 const allowedStaticImports = new Set(['@playwright/test', './smarthub-fixture.js'])
+const maintenanceLocatorMethods = new Set([
+  'locator',
+  'frameLocator',
+  'getByAltText',
+  'getByLabel',
+  'getByPlaceholder',
+  'getByTestId',
+  'getByText',
+  'getByTitle',
+])
 const forbiddenIdentifiers = new Set([
   'eval',
   'Function',
@@ -434,6 +444,50 @@ export function automaticRepairAllowed(diagnosis: Pick<FailureDiagnosis, 'catego
   return diagnosis.repairable
     && repairCount < 2
     && ['script_defect', 'selector_changed'].includes(diagnosis.category)
+}
+
+export function scriptMaintenanceSemanticSha256(source: string) {
+  let ast: ReturnType<typeof parse>
+  try {
+    ast = parse(source, { sourceType: 'module', plugins: ['typescript'], errorRecovery: false })
+  } catch (cause) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_SCRIPT_SYNTAX_INVALID',
+      cause instanceof Error ? cause.message : '执行脚本语法无效',
+    )
+  }
+  return canonicalSha256(normalizeMaintenanceAst(ast))
+}
+
+function normalizeMaintenanceAst(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map(normalizeMaintenanceAst)
+  const node = isAstNode(value) ? value : undefined
+  const result: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (child === undefined || ['start', 'end', 'loc', 'extra', 'leadingComments', 'trailingComments', 'innerComments'].includes(key)) continue
+    if (key === 'arguments' && node && maintenanceLocatorCall(node) && Array.isArray(child)) {
+      result[key] = child.map((argument, index) => index === 0 && maintenanceLocatorToken(argument)
+        ? '__smarthub_maintenance_locator__'
+        : normalizeMaintenanceAst(argument))
+      continue
+    }
+    result[key] = normalizeMaintenanceAst(child)
+  }
+  return result
+}
+
+function maintenanceLocatorCall(node: Node) {
+  return node.type === 'CallExpression'
+    && node.callee.type === 'MemberExpression'
+    && !node.callee.computed
+    && node.callee.property.type === 'Identifier'
+    && maintenanceLocatorMethods.has(node.callee.property.name)
+}
+
+function maintenanceLocatorToken(value: unknown) {
+  return isAstNode(value)
+    && (value.type === 'StringLiteral' || value.type === 'RegExpLiteral')
 }
 
 function normalizePackageFiles(candidateFiles: ExecutionPackageCandidate['files']): ExecutionPackageFile[] {

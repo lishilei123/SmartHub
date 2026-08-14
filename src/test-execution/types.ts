@@ -217,6 +217,25 @@ export type ExecutionArtifact = {
   createdAt: string
 }
 
+export type CaseMaintenanceProposal = {
+  id: string
+  runId: string
+  taskId: string
+  caseId: string
+  caseRevision: number
+  diagnosisId: string
+  scriptRevisionId: string
+  status: 'pending' | 'accepted' | 'rejected'
+  summary: string
+  proposedChange: string
+  baselineLibraryVersionId: string
+  baselineLibraryVersionSha256: string
+  promotedCaseChangeProposalId?: string
+  decidedBy?: string
+  decidedAt?: string
+  createdAt: string
+}
+
 export type ExecutionTaskDetail = {
   run: ExecutionRun
   task: ExecutionTask
@@ -224,6 +243,7 @@ export type ExecutionTaskDetail = {
   diagnoses: FailureDiagnosis[]
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
+  maintenanceProposals: CaseMaintenanceProposal[]
 }
 
 export type ScriptRevisionDiff = {
@@ -237,7 +257,27 @@ export type ScriptRevisionDiff = {
   }
 }
 
+export type MaintenanceProposalDetail = {
+  proposal: CaseMaintenanceProposal
+  run: ExecutionRun
+  task: ExecutionTask
+  diagnosis: FailureDiagnosis
+  failureAttempts: ExecutionAttempt[]
+  originalScriptRevision: ScriptRevision
+  repairScriptRevision: ScriptRevision
+  postRepairAttempt: ExecutionAttempt
+  baselineCase: {
+    caseId: string
+    revision: number
+    content: { title: string; objective: string }
+    contentSha256: string
+  }
+  baselineLibraryVersion: { id: string; sha256: string }
+  diff: ScriptRevisionDiff
+}
+
 export type Versioned<T> = {
   value: T
   etag: string
+  decisionEtag?: string
 }

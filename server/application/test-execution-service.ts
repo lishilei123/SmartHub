@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { InputDeliveryManifest, TestExecutionAgentWorkspaceProjection } from '../domain/agent-types.js'
 import type {
+  CaseMaintenanceProposal,
   ExecutionArtifact,
   ExecutionAttempt,
   ExecutionAttemptKind,
@@ -39,6 +40,7 @@ import {
   buildExecutionPackage,
   freezeExecutionTaskInput,
   scriptCacheKey,
+  scriptMaintenanceSemanticSha256,
   unsupportedExecutionMethodReason,
   validateFailureDiagnosisCandidate,
 } from './test-execution-validation.js'
@@ -191,6 +193,67 @@ export class TestExecutionService {
       diagnoses: snapshot.diagnoses,
       scriptRevisions: snapshot.scriptRevisions,
       artifacts: snapshot.artifacts.map(publicArtifact),
+      maintenanceProposals: snapshot.maintenanceProposals,
+    }
+  }
+
+  async listMaintenanceProposals(runId: string) {
+    const run = await this.getRun(runId)
+    return this.store.listMaintenanceProposals(run.id)
+  }
+
+  async listTaskMaintenanceProposals(taskId: string) {
+    const task = await this.getTask(taskId)
+    return this.store.listTaskMaintenanceProposals(task.id)
+  }
+
+  async getMaintenanceProposal(proposalId: string) {
+    return required(
+      await this.store.getMaintenanceProposal(requiredIdentity(proposalId, 'proposalId')),
+      'TEST_EXECUTION_MAINTENANCE_PROPOSAL_NOT_FOUND',
+      '用例维护建议不存在',
+      404,
+    )
+  }
+
+  async maintenanceProposalDetail(proposalId: string) {
+    const detail = required(
+      await this.store.getMaintenanceProposalDetail(requiredIdentity(proposalId, 'proposalId')),
+      'TEST_EXECUTION_MAINTENANCE_PROPOSAL_NOT_FOUND',
+      '用例维护建议不存在',
+      404,
+    )
+    const diff = await this.scriptRevisionDiff(
+      detail.task.id,
+      detail.originalScriptRevision.id,
+      detail.repairScriptRevision.id,
+    )
+    return { ...detail, diff }
+  }
+
+  async decideMaintenanceProposal(input: {
+    proposalId: string
+    decision: 'accepted' | 'rejected'
+    decidedBy: string
+  }) {
+    const proposal = await this.getMaintenanceProposal(input.proposalId)
+    if (input.decision !== 'accepted' && input.decision !== 'rejected') {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_MAINTENANCE_DECISION_INVALID',
+        'decision 只能是 accepted 或 rejected',
+        400,
+      )
+    }
+    try {
+      return await this.store.decideMaintenanceProposal({
+        proposalId: proposal.id,
+        expectedStatus: 'pending',
+        decision: input.decision,
+        decidedBy: requiredIdentity(input.decidedBy, 'decidedBy'),
+        decidedAt: this.clock(),
+      })
+    } catch (error) {
+      throw storeCommandError(error)
     }
   }
 
@@ -961,6 +1024,24 @@ export class TestExecutionService {
     }
 
     const failedAttempts = revisionAttempts.filter(item => item.status === 'failed')
+    let passingRepairProposal: CaseMaintenanceProposal | null = null
+    if (result.status === 'passed' && kind === 'post_repair' && revision.parentRevisionId) {
+      const scriptRevisions = await this.store.listScriptRevisions(task.id)
+      const original = scriptRevisions.find(item => item.id === revision.parentRevisionId)
+      if (original) {
+        const originalPackage = await this.reconstructPackage(run, task, original)
+        passingRepairProposal = maintenanceProposalForPassingRepair({
+          run,
+          task,
+          repairRevision: revision,
+          diagnoses: await this.store.listDiagnoses(task.id),
+          scriptRevisions,
+          originalSource: originalPackage.files[0].content,
+          repairSource: executionPackage.files[0].content,
+          createdAt: finishedAt,
+        })
+      }
+    }
     await requiredLeaseTransaction(
       this.store,
       job.id,
@@ -994,6 +1075,9 @@ export class TestExecutionService {
               success: { ...attempt, status: 'passed', finishedAt },
               createdAt: finishedAt,
             }))
+          }
+          if (passingRepairProposal) {
+            await transaction.appendMaintenanceProposal(passingRepairProposal)
           }
           return transaction.transitionTask({
             taskId: task.id,
@@ -1342,6 +1426,63 @@ function diagnosisTaskStatus(
     || diagnosis.category === 'timeout'
   ) return 'blocked'
   return 'waiting_manual'
+}
+
+function maintenanceProposalForPassingRepair(input: {
+  run: ExecutionRun
+  task: ExecutionTask
+  repairRevision: ScriptRevision
+  diagnoses: readonly FailureDiagnosis[]
+  scriptRevisions: readonly ScriptRevision[]
+  originalSource: string
+  repairSource: string
+  createdAt: string
+}): CaseMaintenanceProposal | null {
+  const repair = input.repairRevision
+  if (repair.source !== 'repair' || !repair.parentRevisionId) return null
+  const original = input.scriptRevisions.find(revision => revision.id === repair.parentRevisionId)
+  const diagnosis = [...input.diagnoses]
+    .reverse()
+    .find(item => item.scriptRevisionId === repair.parentRevisionId)
+  if (
+    !original
+    || !diagnosis
+    || !automaticRepairAllowed(diagnosis, 0)
+    || !['script_defect', 'selector_changed'].includes(diagnosis.category)
+    || repair.runId !== input.run.id
+    || repair.taskId !== input.task.id
+    || original.runId !== input.run.id
+    || original.taskId !== input.task.id
+    || diagnosis.runId !== input.run.id
+    || diagnosis.taskId !== input.task.id
+    || repair.protectedAssertionSha256 !== original.protectedAssertionSha256
+    || canonicalSha256(repair.package.assertions) !== canonicalSha256(original.package.assertions)
+    || scriptMaintenanceSemanticSha256(input.repairSource)
+      !== scriptMaintenanceSemanticSha256(input.originalSource)
+  ) return null
+
+  const id = stableIdentity('test_execution_case_maintenance_proposal', {
+    taskId: input.task.id,
+    diagnosisId: diagnosis.id,
+    scriptRevisionId: repair.id,
+  })
+  return {
+    id,
+    runId: input.run.id,
+    taskId: input.task.id,
+    caseId: input.task.input.caseId,
+    caseRevision: input.task.input.caseRevision,
+    diagnosisId: diagnosis.id,
+    scriptRevisionId: repair.id,
+    status: 'pending',
+    summary: diagnosis.category === 'selector_changed'
+      ? '已验证 selector 修复，建议人工维护正式测试用例的自动化执行表达'
+      : '已验证脚本缺陷修复，建议人工维护正式测试用例的自动化执行表达',
+    proposedChange: '请人工比较原 Script Revision 与已通过真实 Runner 验证的 repair Revision，仅维护 selector、automation hint 或脚本执行表达；不得修改 Expected Result、Verification Check、matcher、Requirement 或任何业务断言与业务语义。',
+    baselineLibraryVersionId: input.run.handoff.testCaseLibraryVersionId,
+    baselineLibraryVersionSha256: input.run.handoff.testCaseLibraryVersionSha256,
+    createdAt: input.createdAt,
+  }
 }
 
 function deterministicFlakyDiagnosis(input: {

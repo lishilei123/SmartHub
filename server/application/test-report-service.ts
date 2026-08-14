@@ -141,7 +141,7 @@ export function buildTestExecutionReport(
 ): TestExecutionReport {
   const source = normalizedSource(rawSource)
   assertSourceConsistency(source)
-  const { run, tasks, attempts, diagnoses, scriptRevisions, artifacts } = source
+  const { run, tasks, attempts, diagnoses, scriptRevisions, artifacts, maintenanceProposals } = source
   const statusCounts = Object.fromEntries(
     taskStatuses.map(status => [
       status,
@@ -150,6 +150,15 @@ export function buildTestExecutionReport(
   ) as Record<ExecutionTaskStatus, number>
   const statisticsAt = reportStatisticsAt(source)
   const passed = statusCounts.passed
+  const pendingMaintenanceCount = maintenanceProposals.filter(
+    proposal => proposal.status === 'pending',
+  ).length
+  const acceptedMaintenanceCount = maintenanceProposals.filter(
+    proposal => proposal.status === 'accepted',
+  ).length
+  const rejectedMaintenanceCount = maintenanceProposals.filter(
+    proposal => proposal.status === 'rejected',
+  ).length
   const active = taskStatuses
     .filter(status => !terminalTaskStatuses.has(status))
     .reduce((sum, status) => sum + statusCounts[status], 0)
@@ -162,6 +171,7 @@ export function buildTestExecutionReport(
     artifact => artifact.taskId!,
   )
   const revisionById = new Map(scriptRevisions.map(revision => [revision.id, revision]))
+  const diagnosisById = new Map(diagnoses.map(diagnosis => [diagnosis.id, diagnosis]))
   const attemptById = new Map(attempts.map(attempt => [attempt.id, attempt]))
 
   const durationSamples = tasks.flatMap(task => {
@@ -229,7 +239,7 @@ export function buildTestExecutionReport(
   })
 
   const content: TestExecutionReportContent = {
-    schemaVersion: 'test-execution-report/v1',
+    schemaVersion: 'test-execution-report/v2',
     statisticsAt,
     run: {
       id: run.id,
@@ -249,6 +259,10 @@ export function buildTestExecutionReport(
       unsupported: statusCounts.unsupported,
       cancelled: statusCounts.cancelled,
       active,
+      maintenanceProposalCount: maintenanceProposals.length,
+      pendingMaintenanceCount,
+      acceptedMaintenanceCount,
+      rejectedMaintenanceCount,
       statusCounts,
       finalPassRate: rate(passed, tasks.length),
     },
@@ -309,6 +323,17 @@ export function buildTestExecutionReport(
         artifactsByTask.get(task.id) ?? [],
         attemptById,
       )),
+    maintenanceProposals: maintenanceProposals.map(proposal => {
+      const task = tasks.find(item => item.id === proposal.taskId)!
+      const diagnosis = diagnosisById.get(proposal.diagnosisId)!
+      return {
+        ...structuredClone(proposal),
+        ordinal: task.input.ordinal,
+        title: task.input.caseContent.title,
+        diagnosisCategory: diagnosis.category,
+        diagnosisSummary: diagnosis.summary,
+      }
+    }),
     traceability: {
       projectId: run.projectId,
       projectVersionId: run.projectVersionId,
@@ -362,6 +387,10 @@ export function testExecutionReportMarkdown(report: TestExecutionReport) {
     ? report.nonPassedTasks.map(task =>
         `| ${task.ordinal} | ${md(task.caseId)}@${task.caseRevision} | ${md(task.title)} | ${md(task.status)} | ${md(task.diagnosis?.category ?? '无正式诊断')} | ${task.attemptCount} | ${task.scriptRevisionCount} |`)
     : ['| - | - | 无 | - | - | 0 | 0 |']
+  const maintenanceRows = report.maintenanceProposals.length
+    ? report.maintenanceProposals.map(proposal =>
+        `| ${proposal.ordinal} | ${md(proposal.caseId)}@${proposal.caseRevision} | ${md(proposal.title)} | ${md(proposal.status)} | ${md(proposal.summary)}<br>${md(proposal.proposedChange)} | ${md(proposal.diagnosisCategory)}<br>${md(proposal.diagnosisSummary)}<br>${md(proposal.diagnosisId)} | ${md(proposal.scriptRevisionId)} | ${md(proposal.baselineLibraryVersionId)}<br>${md(proposal.baselineLibraryVersionSha256)} | ${md(proposal.createdAt)} | ${md(proposal.decidedBy ?? '-')}<br>${md(proposal.decidedAt ?? '-')} |`)
+    : ['| - | - | 无 | - | - | - | - | - | - | - |']
   const trace = report.traceability
   const agentRows = Object.values(trace.agents).map(agent =>
     `| ${md(agent.agentKey)} | ${agent.configurationVersion} | ${md(agent.configurationSha256)} | ${md(agent.snapshotSha256)} |`)
@@ -386,6 +415,10 @@ export function testExecutionReportMarkdown(report: TestExecutionReport) {
     `| 未支持 | ${report.overview.unsupported} |`,
     `| 已取消 | ${report.overview.cancelled} |`,
     `| 进行中 | ${report.overview.active} |`,
+    `| 用例维护建议 | ${report.overview.maintenanceProposalCount} |`,
+    `| 待确认维护建议 | ${report.overview.pendingMaintenanceCount} |`,
+    `| 已确认维护建议 | ${report.overview.acceptedMaintenanceCount} |`,
+    `| 已拒绝维护建议 | ${report.overview.rejectedMaintenanceCount} |`,
     `| 最终通过率 | ${formatPercentage(report.overview.finalPassRate.percentage)} (${report.overview.finalPassRate.numerator}/${report.overview.finalPassRate.denominator}) |`,
     '',
     '## 执行效率',
@@ -430,6 +463,14 @@ export function testExecutionReportMarkdown(report: TestExecutionReport) {
     '| 序号 | 用例 | 标题 | 状态 | 最新正式诊断 | Attempts | Revisions |',
     '|---:|---|---|---|---|---:|---:|',
     ...failureRows,
+    '',
+    '## 用例维护建议',
+    '',
+    '接受仅表示确认该正式用例需要人工维护，不会自动修改正式 TestCase。',
+    '',
+    '| 序号 | 用例 | 标题 | 状态 | 建议 | Diagnosis | Repair Revision | Baseline Library | 创建时间 | 审批 |',
+    '|---:|---|---|---|---|---|---|---|---|---|',
+    ...maintenanceRows,
     '',
     '## 完整追溯',
     '',
@@ -506,6 +547,10 @@ function normalizedSource(source: TestExecutionReportSource): TestExecutionRepor
       || (attemptOrdinal.get(left.attemptId ?? '') ?? -1) - (attemptOrdinal.get(right.attemptId ?? '') ?? -1)
       || compare(left.createdAt, right.createdAt)
       || compare(left.id, right.id)),
+    maintenanceProposals: structuredClone(source.maintenanceProposals).sort((left, right) =>
+      (taskOrdinal.get(left.taskId) ?? 0) - (taskOrdinal.get(right.taskId) ?? 0)
+      || compare(left.createdAt, right.createdAt)
+      || compare(left.id, right.id)),
     ...(source.testCaseLibraryVersionSourceRunId
       ? { testCaseLibraryVersionSourceRunId: source.testCaseLibraryVersionSourceRunId }
       : {}),
@@ -513,10 +558,13 @@ function normalizedSource(source: TestExecutionReportSource): TestExecutionRepor
 }
 
 function assertSourceConsistency(source: TestExecutionReportSource) {
-  const { run, tasks, attempts, diagnoses, scriptRevisions, artifacts } = source
+  const { run, tasks, attempts, diagnoses, scriptRevisions, artifacts, maintenanceProposals } = source
   const taskIds = new Set(tasks.map(task => task.id))
+  const taskById = new Map(tasks.map(task => [task.id, task]))
   const attemptIds = new Set(attempts.map(attempt => attempt.id))
   const revisionIds = new Set(scriptRevisions.map(revision => revision.id))
+  const revisionById = new Map(scriptRevisions.map(revision => [revision.id, revision]))
+  const diagnosisById = new Map(diagnoses.map(diagnosis => [diagnosis.id, diagnosis]))
   if (
     tasks.length !== run.taskCount
     || tasks.some(task => task.runId !== run.id)
@@ -534,6 +582,39 @@ function assertSourceConsistency(source: TestExecutionReportSource) {
       artifact.runId !== run.id
       || (artifact.taskId !== undefined && !taskIds.has(artifact.taskId))
       || (artifact.attemptId !== undefined && !attemptIds.has(artifact.attemptId)))
+    || maintenanceProposals.some(proposal => {
+      const task = taskById.get(proposal.taskId)
+      const diagnosis = diagnosisById.get(proposal.diagnosisId)
+      const revision = revisionById.get(proposal.scriptRevisionId)
+      const original = diagnosis
+        ? revisionById.get(diagnosis.scriptRevisionId)
+        : undefined
+      const postRepairAttempt = attempts.find(attempt =>
+        attempt.runId === run.id
+        && attempt.taskId === proposal.taskId
+        && attempt.scriptRevisionId === proposal.scriptRevisionId
+        && attempt.kind === 'post_repair'
+        && attempt.status === 'passed')
+      return proposal.runId !== run.id
+        || !task
+        || proposal.caseId !== task.input.caseId
+        || proposal.caseRevision !== task.input.caseRevision
+        || !diagnosis
+        || diagnosis.runId !== run.id
+        || diagnosis.taskId !== proposal.taskId
+        || !['script_defect', 'selector_changed'].includes(diagnosis.category)
+        || !revision
+        || !original
+        || revision.runId !== run.id
+        || revision.taskId !== proposal.taskId
+        || revision.source !== 'repair'
+        || revision.parentRevisionId !== diagnosis.scriptRevisionId
+        || revision.protectedAssertionSha256 !== original.protectedAssertionSha256
+        || canonicalSha256(revision.package.assertions) !== canonicalSha256(original.package.assertions)
+        || !postRepairAttempt
+        || proposal.baselineLibraryVersionId !== run.handoff.testCaseLibraryVersionId
+        || proposal.baselineLibraryVersionSha256 !== run.handoff.testCaseLibraryVersionSha256
+    })
   ) throw new TestReportServiceError('TEST_REPORT_SOURCE_INVALID', '测试报告正式事实范围不一致', 409)
   if (
     tasks.reduce((sum, task) => sum + task.runnerAttemptCount, 0) !== attempts.length
@@ -603,6 +684,10 @@ function reportStatisticsAt(source: TestExecutionReportSource) {
     ...source.diagnoses.map(diagnosis => diagnosis.createdAt),
     ...source.scriptRevisions.map(revision => revision.createdAt),
     ...source.artifacts.map(artifact => artifact.createdAt),
+    ...source.maintenanceProposals.flatMap(proposal => [
+      proposal.createdAt,
+      proposal.decidedAt,
+    ]),
   ].filter((value): value is string => Boolean(value))
   const timestamp = Math.max(...values.map(value => Date.parse(value)))
   if (!Number.isFinite(timestamp)) {

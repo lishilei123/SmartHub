@@ -1,10 +1,12 @@
 import type {
+  CaseMaintenanceProposal,
   ExecutionEnvironment,
   ExecutionHandoff,
   ExecutionReadiness,
   ExecutionRun,
   ExecutionTask,
   ExecutionTaskDetail,
+  MaintenanceProposalDetail,
   ScriptRevisionDiff,
   Versioned,
 } from './types'
@@ -47,6 +49,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<Versioned<T
   return {
     value: body,
     etag: response.headers.get('etag') ?? '',
+    ...(response.headers.get('proposal-state-etag')
+      ? { decisionEtag: response.headers.get('proposal-state-etag')! }
+      : {}),
   }
 }
 
@@ -98,6 +103,42 @@ export function loadTask(
 ) {
   return request<ExecutionTaskDetail>(
     taskScope(projectVersionId, runId, taskId),
+  )
+}
+
+export async function loadRunMaintenanceProposals(
+  projectVersionId: string,
+  runId: string,
+) {
+  return (await request<{ items: CaseMaintenanceProposal[] }>(
+    `${runScope(projectVersionId, runId)}/maintenance-proposals`,
+  )).value.items
+}
+
+export function loadMaintenanceProposal(
+  projectVersionId: string,
+  runId: string,
+  proposalId: string,
+) {
+  return request<MaintenanceProposalDetail>(
+    `${runScope(projectVersionId, runId)}/maintenance-proposals/${encodeURIComponent(proposalId)}`,
+  )
+}
+
+export function decideMaintenanceProposal(
+  projectVersionId: string,
+  runId: string,
+  proposalId: string,
+  etag: string,
+  decision: 'accepted' | 'rejected',
+) {
+  return request<CaseMaintenanceProposal>(
+    `${runScope(projectVersionId, runId)}/maintenance-proposals/${encodeURIComponent(proposalId)}/decision`,
+    {
+      method: 'POST',
+      headers: { 'if-match': etag },
+      body: JSON.stringify({ decision }),
+    },
   )
 }
 

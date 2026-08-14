@@ -56,8 +56,21 @@ test('报告详情返回稳定 ETag、报告 Hash 和脱敏 JSON', async () => {
     path: '/api/project-versions/pv-1/test-reports/run-report-1',
     service,
   })
-  const report = result.body as { reportSha256: string }
+  const report = result.body as {
+    schemaVersion: string
+    reportSha256: string
+    overview: { maintenanceProposalCount: number; pendingMaintenanceCount: number }
+    maintenanceProposals: Array<{ taskId: string; status: string }>
+  }
   assert.equal(result.status, 200)
+  assert.equal(report.schemaVersion, 'test-execution-report/v2')
+  assert.equal(report.overview.maintenanceProposalCount, 1)
+  assert.equal(report.overview.pendingMaintenanceCount, 1)
+  assert.equal(report.maintenanceProposals.length, 1)
+  assert.deepEqual(
+    report.maintenanceProposals.map(item => ({ taskId: item.taskId, status: item.status })),
+    [{ taskId: 'task-3', status: 'pending' }],
+  )
   assert.equal(result.headers.get('etag'), `"test-report-sha256-${report.reportSha256}"`)
   assert.equal(result.headers.get('x-report-sha256'), report.reportSha256)
   assert.equal(result.headers.get('cache-control'), 'private, no-store')
@@ -125,6 +138,9 @@ test('Markdown 导出 ETag 绑定实际表示字节并正确计算 UTF-8 长度'
   assert.equal(result.headers.get('content-type'), 'text/markdown; charset=utf-8')
   assert.equal(result.headers.get('content-disposition'), 'attachment; filename="test-report-run-report-1.md"')
   assert.match(body, /失败 \\| &lt;script&gt;<br>路径\\\\名称/u)
+  assert.match(body, /## 用例维护建议/u)
+  assert.match(body, /待确认维护建议 \\| 1/u)
+  assert.match(body, /不会自动修改正式 TestCase/u)
   assert.doesNotMatch(body, /storagePath|private\/objects/u)
 })
 

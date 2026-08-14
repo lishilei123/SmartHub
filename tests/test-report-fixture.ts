@@ -1,6 +1,7 @@
 import { canonicalSha256 } from '../server/application/canonical-json.js'
 import type {
   ExecutionArtifact,
+  CaseMaintenanceProposal,
   ExecutionAttempt,
   ExecutionPackageManifest,
   ExecutionRun,
@@ -252,9 +253,25 @@ export function reportSourceFixture(): TestExecutionReportSource {
   ]
   const diagnoses = [
     diagnosis(requiredTask(2), 'diagnosis-flaky', 'flaky', ['task-2-attempt-1', 'task-2-attempt-2'], '2026-08-14T00:00:12.000Z', '同一脚本重试后通过'),
+    diagnosis(requiredTask(3), 'diagnosis-script-defect', 'script_defect', ['task-3-attempt-1'], '2026-08-14T00:00:13.000Z', '定位器脚本缺陷已由修复脚本验证'),
     diagnosis(requiredTask(4), 'diagnosis-product', 'product_defect', ['task-4-attempt-1'], '2026-08-14T00:00:13.000Z', '旧产品诊断'),
     diagnosis(requiredTask(4), 'diagnosis-timeout', 'timeout', ['task-4-attempt-1'], '2026-08-14T00:00:14.000Z', '最新超时诊断'),
   ]
+  const maintenanceProposals: CaseMaintenanceProposal[] = [{
+    id: 'maintenance-proposal-1',
+    runId: 'run-report-1',
+    taskId: 'task-3',
+    caseId: 'case-3',
+    caseRevision: 1,
+    diagnosisId: 'diagnosis-script-defect',
+    scriptRevisionId: 'task-3-revision-2',
+    status: 'pending',
+    summary: '修复脚本通过真实 Runner，建议人工维护 selector',
+    proposedChange: '仅人工比较 Script Revision 并维护 selector；不得修改 Expected Result、Verification Check、matcher、Requirement 或业务语义。',
+    baselineLibraryVersionId: 'library-version-1',
+    baselineLibraryVersionSha256: 'c'.repeat(64),
+    createdAt: '2026-08-14T00:00:26.000Z',
+  }]
   const artifacts: ExecutionArtifact[] = [{
     id: 'artifact-private-path',
     runId: 'run-report-1',
@@ -311,6 +328,7 @@ export function reportSourceFixture(): TestExecutionReportSource {
     attempts,
     diagnoses,
     scriptRevisions,
+    maintenanceProposals,
     artifacts,
     testCaseLibraryVersionSourceRunId: 'design-run-1',
   }

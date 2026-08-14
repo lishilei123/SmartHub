@@ -70,6 +70,21 @@ test('诊断与失败明细使用语义表格、正式空状态和安全 Artifac
   assert.doesNotMatch(`${failures}\n${api}`, /storagePath/u)
 })
 
+test('报告独立展示维护建议统计、正式追溯和人工维护边界', () => {
+  const page = read('../src/test-report/TestReportPage.tsx')
+  const maintenance = read('../src/test-report/TestReportMaintenanceTable.tsx')
+  assert.match(page, /<TestReportMaintenanceTable report=\{model\.report\}/u)
+  assert.match(maintenance, /report\.overview\.maintenanceProposalCount/u)
+  assert.match(maintenance, /report\.overview\.pendingMaintenanceCount/u)
+  assert.match(maintenance, /report\.overview\.acceptedMaintenanceCount/u)
+  assert.match(maintenance, /report\.overview\.rejectedMaintenanceCount/u)
+  assert.match(maintenance, /proposal\.diagnosisId/u)
+  assert.match(maintenance, /proposal\.scriptRevisionId/u)
+  assert.match(maintenance, /proposal\.baselineLibraryVersionId/u)
+  assert.match(maintenance, /不会自动修改正式 TestCase/u)
+  assert.doesNotMatch(maintenance, /nonPassedTasks/u)
+})
+
 test('报告提供 JSON/Markdown 导出与完整追溯且不引入大型图表库', () => {
   const page = read('../src/test-report/TestReportPage.tsx')
   const trace = read('../src/test-report/TestReportTraceability.tsx')
