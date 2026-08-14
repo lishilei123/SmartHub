@@ -1,6 +1,8 @@
 
 import type { AgentExecutionContext, PlanningSubAgentRunRecord } from './planning-api'
 
+export type ProjectWorkspaceSourceScope = 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output'
+
 const apiBase = 'http://127.0.0.1:8787/api'
 
 export type AnalysisFindingType = 'missing_requirement' | 'ambiguity' | 'conflict' | 'boundary_gap' | 'state_gap' | 'exception_gap' | 'security_risk' | 'testability_gap' | 'dependency_risk' | 'other'
@@ -88,7 +90,7 @@ export type AgentExecutionEvent = {
 }
 
 export type AgentExecutionRecord = {
-  agentKey?: 'requirement-analysis'
+  agentKey?: 'planning'
   turns: number
   toolCalls: number
   toolErrors?: number
@@ -143,18 +145,19 @@ export type AgentDefinitionSnapshot = {
   toolsetVersion: string
   toolsetContentSha256: string
   skillBindings: { skillKey: string; version: string; enabled: boolean; configurationHash: string }[]
+  enabledSkills: string[]
   mcpBindings: { serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }[]
   resultSchemaVersion: string
 }
 
 export type AgentExecutions = {
-  requirementAnalysis?: AgentExecutionRecord
+  planning?: AgentExecutionRecord
 }
 
 export type RequirementAnalysisRunExecutionAttempt = {
   attempt: number
   maxAttempts: number
-  activeAgentKey?: 'requirement-analysis'
+  activeAgentKey?: 'planning'
   status: 'running' | 'succeeded' | 'failed' | 'cancelled'
   startedAt: string
   finishedAt?: string
@@ -168,7 +171,7 @@ export type InputDeliveryManifest = {
   mode: 'full_context' | 'segmented_context' | 'agent_directory'
   packageSha256: string
   entries: Array<{ batchId: string; ordinal: number; assetVersionIds: string[]; chunkIds: string[]; contentSha256: string; tokenCount: number; modelCallSequence: number }>
-  toolReads?: Array<{ toolCallId: string; toolId: 'workspace.read_file'; relativePath: string; assetVersionIds: string[]; chunkIds: string[]; startLine: number; endLine: number }>
+  toolReads?: Array<{ toolCallId: string; toolId: 'workspace.read_file'; relativePath: string; assetVersionIds: string[]; chunkIds: string[]; startLine: number; endLine: number; sourceScope?: ProjectWorkspaceSourceScope }>
   finalMergeCompleted: boolean
 }
 
@@ -187,6 +190,17 @@ export type RequirementAnalysisResponse = {
     indexVersionId: string
     logicalPath: string
     assets: { assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }[]
+    currentInputRefs: Array<{ assetId: string; assetVersionId: string; logicalPath: string; contentSha256: string }>
+    workspaceSnapshot: {
+      schemaVersion: 'project-workspace-snapshot/v1'
+      projectId: string
+      projectVersionId: string
+      rootLogicalPath: 'workspace'
+      activeBranchLogicalPath: string
+      files: Array<{ assetId?: string; assetVersionId?: string; logicalPath: string; displayName: string; contentSha256: string; sourceScope: ProjectWorkspaceSourceScope }>
+      snapshotSha256: string
+      createdAt: string
+    }
     documentWorkspace?: { mode: 'agent_directory'; logicalPath: string; rootLogicalPath?: string; activeBranchLogicalPath?: string; branchLogicalPaths?: string[]; agentLogicalPath?: string; layoutVersion?: 'workspace/v1'; candidateAssetVersionIds: string[] }
     modelRef: { sourceId: string; modelId: string; providerType: string; modelName: string; contextWindow: number; maxOutputTokens: number; supportsReasoning: boolean }
     agentConfigurationRef?: { id: string; version: number; contentSha256: string }
@@ -234,13 +248,13 @@ export type RequirementAnalysisRun = {
     availableAt: string
     error?: string
   }
-  retryEvents?: Array<{ attempt: number; maxAttempts: number; agentKey?: 'requirement-analysis'; status: 'scheduled' | 'exhausted'; error: string; occurredAt: string; nextAttemptAt?: string }>
+  retryEvents?: Array<{ attempt: number; maxAttempts: number; agentKey?: 'planning'; status: 'scheduled' | 'exhausted'; error: string; occurredAt: string; nextAttemptAt?: string }>
   createdAt: string
   startedAt: string
   finishedAt?: string
   error?: string
-  modelRouteAttempts?: Array<{ id: string; agentKey: 'requirement-analysis'; sourceId: string; modelId: string; modelLabel: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; startedAt: string; finishedAt?: string; error?: string }>
-  degradations?: Array<{ agentKey: 'requirement-analysis'; fromSourceId: string; fromModelId: string; toSourceId: string; toModelId: string; reason: string; occurredAt: string }>
+  modelRouteAttempts?: Array<{ id: string; agentKey: 'planning'; sourceId: string; modelId: string; modelLabel: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; startedAt: string; finishedAt?: string; error?: string }>
+  degradations?: Array<{ agentKey: 'planning'; fromSourceId: string; fromModelId: string; toSourceId: string; toModelId: string; reason: string; occurredAt: string }>
   snapshot?: RequirementAnalysisResponse['snapshot']
   execution?: AgentExecutionRecord
   executions?: AgentExecutions

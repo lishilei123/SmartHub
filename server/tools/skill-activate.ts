@@ -11,6 +11,7 @@ export function registerSkillActivateTool(registry: ToolRegistry, session: Agent
     return {
       data: {
         workflowStage: session.workflowStage,
+        catalogSource: session.catalogSource,
         skillKey: activated.key,
         version: activated.version,
         content: activated.content,

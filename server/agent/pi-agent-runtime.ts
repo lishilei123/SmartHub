@@ -216,6 +216,31 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
   }
 
+  async appendPlanningTask(input: { projectId: string; projectVersionId: string; task: string; taskType: string; metadata?: Record<string, unknown> }) {
+    const scope: PiSessionScope = {
+      role: 'planning_parent',
+      key: `planning:${input.projectId}:${input.projectVersionId}`,
+    }
+    const lease = await this.sessions.acquire(scope)
+    try {
+      lease.manager.appendCustomMessageEntry(
+        'planning_workflow_task',
+        planningWorkflowTaskContext(input.task, input.taskType),
+        false,
+        {
+          taskType: input.taskType,
+          projectId: input.projectId,
+          projectVersionId: input.projectVersionId,
+          formalBusinessFact: false,
+          ...(input.metadata ?? {}),
+        },
+      )
+      return { parentSessionId: lease.manager.getSessionId(), scopeKey: scope.key }
+    } finally {
+      lease.release()
+    }
+  }
+
   async review(input: ReviewerExecutionInput, signal: AbortSignal): Promise<ReviewerExecutionOutput> {
     const parentScope = this.sessions.scopeFor(input)
     const scope = this.sessions.reviewerScope(parentScope, input.reviewerType, input.runId)
@@ -406,7 +431,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const piDocumentWorkspace = new RequirementDocumentWorkspace(this.store, input.snapshot)
     const workspaceProfile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
     const skillRuntime = new AgentSkillRuntime(this.store, this.skillPackages)
-    const skillSession = await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage, workspaceProfile.allowedSkillKeys)
+    const skillSession = await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage)
     const deliveryManifest: InputDeliveryManifest = {
       policyVersion: inputPlan.policyVersion,
       mode: inputPlan.mode,
@@ -427,7 +452,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       deliveryManifest.toolReads ??= []
       deliveryManifest.toolReads.push(structuredClone(observation))
     }, piDocumentWorkspace, skillSession, this.knowledge)
-    const skillPrompt = skillSession?.renderCatalogPrompt() ?? await skillRuntime.render(input.snapshot.agentDefinition)
+    const skillPrompt = skillSession.renderCatalogPrompt()
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
@@ -450,7 +475,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
     for (const warning of capabilityLoad.warnings) await record({ type: 'capability_binding_unavailable', content: warning })
     if (unavailableToolIds.length) await record({ type: 'tool_bindings_unavailable', content: `以下目录绑定尚未注册到当前 Agent 运行时，因此不会暴露给模型：${unavailableToolIds.join('、')}` })
-    if (skillSession) await record({ type: 'skill_catalog_loaded', content: JSON.stringify({ workflowStage: skillSession.workflowStage, skills: skillSession.catalog().map(skill => ({ key: skill.key, version: skill.version })) }) })
+    if (skillSession) await record({ type: 'skill_catalog_loaded', content: JSON.stringify({ workflowStage: skillSession.workflowStage, catalogSource: skillSession.catalogSource, enabledSkills: skillSession.catalog().map(skill => ({ key: skill.key, version: skill.version })) }) })
     else if (skillPrompt) await record({ type: 'skill_bindings_loaded', content: `${input.snapshot.agentDefinition.skillBindings.filter(binding => binding.enabled).length} 个 Skill 已按发布快照加载。` })
     const controller = new AbortController()
     const deadline = setTimeout(() => controller.abort(new Error('AGENT_DEADLINE_EXCEEDED')), limits.deadlineMs)
@@ -753,6 +778,15 @@ function reviewCandidateContext(output: ReviewerExecutionOutput) {
   ].join('\n')
 }
 
+function planningWorkflowTaskContext(task: string, taskType: string) {
+  return [
+    '[PlanningWorkflow 下一阶段任务；正式事实必须由 Service 和冻结 Workspace Snapshot 重新读取]',
+    `Task Type：${taskType}`,
+    task.trim(),
+    '继续使用当前 PlanningAgent、Planning Session、Agent Configuration 和 Enabled Skills。Workflow 没有替你选择 Skill；请根据任务与正式状态自主决定。',
+  ].join('\n')
+}
+
 function reviewerTool(
   descriptor: ToolDescriptor,
   runtime: GovernedToolRuntime,
@@ -895,9 +929,7 @@ function stageConfiguration(input: AgentExecutionInput): StageConfiguration {
   const workspaceStage = input.executionProfile
   if (workspaceStage?.mode !== 'workspace_tools') throw new Error(`AGENT_STAGE_UNSUPPORTED: ${input.snapshot.agentDefinition.agentKey}`)
   return stage({
-    isGovernedCandidate:
-      input.snapshot.agentDefinition.agentKey
-        !== 'requirement-analysis',
+    isGovernedCandidate: workspaceStage.schemaVersion !== 'requirement-analysis/v1',
     submitToolId: workspaceStage.submitToolId,
     schemaVersion: workspaceStage.schemaVersion,
     agentLabel: workspaceStage.agentLabel,

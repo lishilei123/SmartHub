@@ -95,13 +95,13 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
 
   const redesign = useCallback(async () => {
     if (!projectVersionId || !design || !run) return
-    await guarded('redesign', () => api.redesignTestPoints(projectVersionId, design.id, run.id), '已要求 TestDesignAgent 重新设计测试点。')
+    await guarded('redesign', () => api.redesignTestPoints(projectVersionId, design.id, run.id), '已要求 PlanningAgent 重新设计测试点。')
     setTree(null); await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 
   const resynthesize = useCallback(async () => {
     if (!projectVersionId || !design || !run) return
-    await guarded('resynthesize', () => api.resynthesizeCases(projectVersionId, design.id, run.id), '已要求 TestDesignAgent 重新生成用例。')
+    await guarded('resynthesize', () => api.resynthesizeCases(projectVersionId, design.id, run.id), '已要求 PlanningAgent 重新生成用例。')
     await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 

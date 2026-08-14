@@ -124,11 +124,10 @@ export interface ToolResource extends AiResourceBase {
 
 export type AiResource = McpServerResource | SkillResource | ToolResource
 
-export type AgentConfigurationScene = 'requirement_analysis' | 'test_design' | 'test_execution'
+export type AgentConfigurationScene = 'planning' | 'test_execution'
 export type AgentConfigurationStatus = 'active' | 'superseded'
 export type AgentConfigurationAgentKey =
-  | 'requirementAnalysis'
-  | 'testDesign'
+  | 'planning'
   | 'testScript'
   | 'failureAnalysis'
   | 'scriptRepair'
@@ -257,7 +256,7 @@ export interface ReviewRunQueueState {
 export interface ReviewRunRetryEvent {
   attempt: number
   maxAttempts: number
-  agentKey?: 'requirement-analysis'
+  agentKey?: 'planning'
   status: 'scheduled' | 'exhausted'
   error: string
   occurredAt: string
@@ -299,7 +298,7 @@ export interface ToolApproval {
   consumedAt?: string
 }
 export interface AgentExecutionRecord {
-  agentKey?: 'requirement-analysis' | 'test-design' | 'test-script' | 'failure-analysis' | 'script-repair'
+  agentKey?: 'planning' | 'test-script' | 'failure-analysis' | 'script-repair'
   turns: number
   toolCalls: number
   toolErrors?: number
@@ -309,12 +308,12 @@ export interface AgentExecutionRecord {
   events: AgentExecutionEvent[]
 }
 export interface ReviewRunStageExecutions {
-  requirementAnalysis?: AgentExecutionRecord
+  planning?: AgentExecutionRecord
 }
 export interface ReviewRunExecutionAttempt {
   attempt: number
   maxAttempts: number
-  activeAgentKey?: 'requirement-analysis'
+  activeAgentKey?: 'planning'
   status: 'running' | 'succeeded' | 'failed' | 'cancelled'
   startedAt: string
   finishedAt?: string
@@ -354,7 +353,7 @@ export interface ReviewRun {
   planningSubAgentRuns?: PlanningSubAgentRunRecord[]
   modelRouteAttempts?: Array<{
     id: string
-    agentKey: 'requirement-analysis'
+    agentKey: 'planning'
     sourceId: string
     modelId: string
     modelLabel: string
@@ -364,7 +363,7 @@ export interface ReviewRun {
     error?: string
   }>
   degradations?: Array<{
-    agentKey: 'requirement-analysis'
+    agentKey: 'planning'
     fromSourceId: string
     fromModelId: string
     toSourceId: string

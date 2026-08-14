@@ -59,7 +59,7 @@ export class PiSessionRuntime {
     }
   }): PiSessionScope {
     const agentKey = input.snapshot.agentDefinition.agentKey
-    if (agentKey === 'requirement-analysis' || agentKey === 'test-design') {
+    if (agentKey === 'planning') {
       return {
         role: 'planning_parent',
         key: `planning:${input.snapshot.projectId}:${input.snapshot.projectVersionId}`,
@@ -267,8 +267,7 @@ function validateParentBinding(
     && typeof model.maxOutputTokens === 'number'
     && typeof model.supportsReasoning === 'boolean'
     && definition != null
-    && (definition.agentKey === 'requirement-analysis'
-      || definition.agentKey === 'test-design')
+    && definition.agentKey === 'planning'
     ? structuredClone(binding as PersistedParentSessionBinding)
     : undefined
 }

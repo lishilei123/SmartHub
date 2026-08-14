@@ -2,14 +2,12 @@ const apiBase = 'http://127.0.0.1:8787/api'
 
 export type AgentModelReference = { sourceId: string; modelId: string }
 export type AgentConfigurationAgentKey =
-  | 'requirementAnalysis'
-  | 'testDesign'
+  | 'planning'
   | 'testScript'
   | 'failureAnalysis'
   | 'scriptRepair'
 export type AgentConfigurationScene =
-  | 'requirement_analysis'
-  | 'test_design'
+  | 'planning'
   | 'test_execution'
 export type AgentExecutionLimits = {
   maxTurns: number
@@ -53,7 +51,7 @@ export type AgentConfigurationVersionSummary = {
 export type AgentConfigurationVersion = AgentConfigurationVersionSummary & {
   scene: AgentConfigurationScene
   routing: AgentRoutingConfiguration
-  agentDefinition: { version: string; systemPrompt: string; taskTemplate: string; promptRef: { version: string }; skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>; mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>; toolIds: string[]; limits: AgentExecutionLimits; contentSha256: string }
+  agentDefinition: { version: string; systemPrompt: string; taskTemplate: string; promptRef: { version: string }; skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>; enabledSkills: string[]; mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>; toolIds: string[]; limits: AgentExecutionLimits; contentSha256: string }
 }
 export type AgentConfigurationAgentState = {
   draft: AgentConfigurationAgentDraft
@@ -73,14 +71,12 @@ type AgentConfigurationSceneState = {
 }
 
 const scenePaths: Record<AgentConfigurationScene, string> = {
-  requirement_analysis: 'requirement-analysis',
-  test_design: 'test-design',
+  planning: 'planning',
   test_execution: 'test-execution',
 }
 
 const agentScenes: Record<AgentConfigurationAgentKey, AgentConfigurationScene> = {
-  requirementAnalysis: 'requirement_analysis',
-  testDesign: 'test_design',
+  planning: 'planning',
   testScript: 'test_execution',
   failureAnalysis: 'test_execution',
   scriptRepair: 'test_execution',

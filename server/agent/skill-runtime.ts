@@ -29,6 +29,7 @@ export class AgentSkillSession {
     readonly workflowStage: string,
     private readonly skills: Map<string, SkillResource>,
     private readonly readSkill: (skill: SkillResource) => Promise<string>,
+    readonly catalogSource: 'agent_configuration' | 'stage_policy' = 'stage_policy',
   ) {}
 
   catalog(): AgentSkillCatalogEntry[] {
@@ -43,7 +44,16 @@ export class AgentSkillSession {
 
   renderCatalogPrompt() {
     const catalog = this.catalog()
-    if (!catalog.length) return `当前 Workflow Stage：${this.workflowStage}。本阶段没有可激活的 Skill；直接按阶段任务和提交契约执行。`
+    if (!catalog.length) return this.catalogSource === 'agent_configuration'
+      ? `当前 PlanningAgent 配置没有启用 Skill。直接按 Workflow 任务、Workspace 事实与提交契约执行。`
+      : `当前 Workflow Stage：${this.workflowStage}。本阶段没有可激活的 Skill；直接按阶段任务和提交契约执行。`
+    if (this.catalogSource === 'agent_configuration') return [
+      `当前正式业务 Stage：${this.workflowStage}。Workflow 只提供任务与 Gate，不调度 Skill。`,
+      '下面是 PlanningAgent 当前发布配置的完整 Enabled Skills Catalog，不包含 Skill 正文，也没有按 Stage 过滤。',
+      '请根据用户任务、Workspace、Planning Session 上下文和正式业务状态自主决定是否激活一个或多个 Skill。需要方法时调用 skill_activate；未列出的 Skill 已被管理员禁用。',
+      'Skill 不能切换 Stage、扩大 Tool 白名单、修改数据库、发布正式版本或绕过 Service/Validator。',
+      JSON.stringify(catalog),
+    ].join('\n')
     return [
       `当前 Workflow Stage：${this.workflowStage}。Workflow 已固定本阶段，Agent 和 Skill 均不能改变 Stage。`,
       '下面仅是 Runtime 为当前 Stage 过滤后的 Skill Catalog，不包含 Skill 正文。你可以根据任务选择不激活、激活一个或激活多个；不得把激活某个 Skill 当作提交前置条件。',
@@ -58,7 +68,9 @@ export class AgentSkillSession {
     const cached = this.activated.get(skillKey)
     if (cached) return structuredClone(cached)
     const skill = this.skills.get(skillKey)
-    if (!skill) throw new Error(`SKILL_NOT_ALLOWED_IN_STAGE: ${skillKey} 不在 ${this.workflowStage} Stage 的 Skill Catalog 中`)
+    if (!skill) throw new Error(this.catalogSource === 'agent_configuration'
+      ? `SKILL_DISABLED_IN_AGENT_CONFIGURATION: ${skillKey} 未在 PlanningAgent 配置中启用`
+      : `SKILL_NOT_ALLOWED_IN_STAGE: ${skillKey} 不在 ${this.workflowStage} Stage 的 Skill Catalog 中`)
     const content = await this.readSkill(skill)
     const bytes = Buffer.byteLength(content, 'utf8')
     if (bytes > MAX_SKILL_BYTES) throw new Error(`SKILL_CONTENT_TOO_LARGE: ${skill.key}`)
@@ -80,9 +92,14 @@ export class AgentSkillSession {
 export class AgentSkillRuntime {
   constructor(private readonly store: StateStore, private readonly packages?: SkillPackageStore) {}
 
-  async prepare(definition: AgentDefinitionVersion, workflowStage: string, allowedSkillKeys: readonly string[]) {
-    const uniqueAllowed = [...new Set(allowedSkillKeys.map(key => key.trim()).filter(Boolean))]
+  async prepare(definition: AgentDefinitionVersion, workflowStage: string, allowedSkillKeys?: readonly string[]) {
     const bindings = definition.skillBindings.filter(binding => binding.enabled)
+    const configuredSkills = definition.enabledSkills
+    if (configuredSkills.length !== bindings.length || configuredSkills.some(key => !bindings.some(binding => binding.skillKey === key))) throw new Error('AGENT_ENABLED_SKILLS_SNAPSHOT_INVALID')
+    const configurationDriven = definition.agentKey === 'planning'
+    const uniqueAllowed = configurationDriven
+      ? [...configuredSkills]
+      : [...new Set((allowedSkillKeys ?? []).map(key => key.trim()).filter(Boolean))]
     const bindingsByKey = new Map(bindings.map(binding => [binding.skillKey, binding]))
     const missingBindings = uniqueAllowed.filter(key => !bindingsByKey.has(key))
     if (missingBindings.length) throw new Error(`STAGE_SKILL_BINDING_UNAVAILABLE: ${workflowStage} 缺少已发布 Skill 绑定 ${missingBindings.join(', ')}`)
@@ -95,16 +112,7 @@ export class AgentSkillRuntime {
       if (!matchesSkillConfigurationHash(skill, binding.configurationHash)) throw new Error(`SKILL_BINDING_CHANGED: ${binding.skillKey}@${binding.version}`)
       skills.set(skill.key, skill)
     }
-    return new AgentSkillSession(workflowStage, skills, skill => this.read(skill))
-  }
-
-  /** 仅供仍未迁移到 Stage Catalog 的旧 Agent 使用。 */
-  async render(definition: AgentDefinitionVersion) {
-    const allowed = definition.skillBindings.filter(binding => binding.enabled).map(binding => binding.skillKey)
-    const session = await this.prepare(definition, 'legacy', allowed)
-    const activated = await Promise.all(allowed.map(key => session.activate(key)))
-    if (!activated.length) return ''
-    return `以下 Skill 是管理员发布并由版本 Hash 固定的工作流指令；其中提及的工具仍受当前 Agent Tool 白名单和服务端权限控制。\n\n${activated.map(item => item.content).join('\n\n')}`
+    return new AgentSkillSession(workflowStage, skills, skill => this.read(skill), configurationDriven ? 'agent_configuration' : 'stage_policy')
   }
 
   private async read(skill: SkillResource) {

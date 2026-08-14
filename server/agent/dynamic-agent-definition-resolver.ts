@@ -1,5 +1,5 @@
 import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/agent-types.js'
-import { createAgentDefinitionVersion } from './requirement-analysis-agent.js'
+import { createAgentDefinitionVersion } from './planning-agent.js'
 import type { AgentDefinitionConfigDictionary } from './agent-definition-config.js'
 import { defaultAgentDefinitionConfigDictionary } from './agent-definition-config.js'
 

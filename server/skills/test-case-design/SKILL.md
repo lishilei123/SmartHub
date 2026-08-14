@@ -5,7 +5,7 @@ description: Convert an approved immutable TestPointTreeVersion and frozen histo
 
 # Test case design
 
-1. Read the approved `test_design/test-point-tree.json`, relevant requirements, and `agent_workspace/design_agent/historical-test-cases.json` when present. Use only its frozen Case IDs and Revisions.
+1. Read the approved `test-design/test-point-tree.json`, relevant requirements, and `agent_workspace/planning_agent/historical-test-cases.json` when present. Use only its frozen Case IDs and Revisions.
 2. Cover every applicable executable leaf test point. Split cases when role, precondition, state, input partition or boundary, action, expected outcome, cleanup, or execution lifecycle differs.
 3. Use temporary case `ref` values. Dependencies and `dataRequirements[].caseRefs` must use those refs; leave `dataRequirementIds` empty because the server owns formal relationships.
 4. Emit `test-case/v2` and one dimension-specific `executionSpec` per case. Functional/security use `kind=functional` with UI or API steps/checks/preconditions/data/readiness/hint. Performance uses `method=performance_tool`; stability uses `method=long_running`; compatibility uses `method=environment_matrix` with a UI/API base method.

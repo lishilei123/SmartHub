@@ -8,9 +8,10 @@ import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RequirementAnalysisValidator } from '../agent/result-validator.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import { buildRequirementDirectoryInputPlan } from '../agent/requirement-context-assembler.js'
-import { renderRequirementAnalysisTask } from '../agent/requirement-analysis-agent.js'
+import { renderPlanningRequirementTask } from '../agent/planning-agent.js'
 import type { KnowledgeService } from './knowledge-service.js'
 import { buildRequirementReleaseArtifacts } from './requirement-release-artifacts.js'
+import { buildCurrentInputRefs, buildProjectWorkspaceSnapshot } from './project-workspace-snapshot.js'
 
 const REQUIREMENT_WORKSPACE_TOOL_IDS = [
   'workspace.read_file',
@@ -148,7 +149,7 @@ export class RequirementAnalysisService {
     const unconfirmed = findingIds.filter(findingId => states.get(findingId) !== 'confirmed')
     if (unconfirmed.length) throw new Error(`REPAIR_FINDING_NOT_CONFIRMED: 只有人工确认的 Finding 可进入修复：${unconfirmed.join('、')}`)
     const task = renderRepairTask(run, findingIds)
-    const output = await this.executeWorkspaceStage(run, 'repair', ['requirement.repair'], 'requirement-repair.submit_result', 'requirement-repair/v1', 'RequirementAnalysisAgent', task, async candidate => normalizeRepairCandidate(candidate, run, state, findingIds), signal)
+    const output = await this.executeWorkspaceStage(run, 'repair', 'requirement-repair.submit_result', 'requirement-repair/v1', 'PlanningAgent', task, async candidate => normalizeRepairCandidate(candidate, run, state, findingIds), signal)
     const draft: RequirementRepairDraft = {
       id: `requirement_repair_${randomUUID()}`,
       sourceRunId: run.id,
@@ -316,7 +317,7 @@ export class RequirementAnalysisService {
     if (run.workflow?.release) return structuredClone(run.workflow.release)
     const expectedAssetVersionIds = run.snapshot.assets.map(item => item.assetVersionId)
     const task = renderReleaseTask(run)
-    const output = await this.executeWorkspaceStage(run, 'release', ['requirement.release'], 'requirement-release.submit_result', 'requirement-release-candidate/v1', 'RequirementAnalysisAgent', task, async candidate => normalizeReleaseCandidate(candidate, expectedAssetVersionIds), signal)
+    const output = await this.executeWorkspaceStage(run, 'release', 'requirement-release.submit_result', 'requirement-release-candidate/v1', 'PlanningAgent', task, async candidate => normalizeReleaseCandidate(candidate, expectedAssetVersionIds), signal)
     const candidate = output.candidate as unknown as RequirementReleaseCandidate
     const releaseId = `requirement_release_${randomUUID()}`
     const generatedAt = new Date().toISOString()
@@ -392,7 +393,7 @@ export class RequirementAnalysisService {
     if (documentDirectoryPath !== requiredInputDirectory) throw new Error(`PI_WORKSPACE_INPUT_REQUIRED: 当前版本需求输入目录固定为 /${requiredInputDirectory}`)
     const workspacePairs = state.assets.flatMap(asset => {
       if (asset.knowledgeBaseId !== knowledgeBase.id || !isWithinDirectory(asset.logicalPath, 'workspace') || !asset.activeVersionId) return []
-      const version = state.versions.find(item => item.id === asset.activeVersionId && item.assetId === asset.id && item.status === 'ready' && index.assetVersionIds.includes(item.id))
+      const version = state.versions.find(item => item.id === asset.activeVersionId && item.assetId === asset.id && item.status === 'ready')
       return version ? [{ asset, version }] : []
     }).sort((left, right) => left.asset.logicalPath.localeCompare(right.asset.logicalPath, 'zh-CN') || left.version.id.localeCompare(right.version.id))
     const boundPairs = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === projectVersion.id).flatMap(binding => {
@@ -403,27 +404,37 @@ export class RequirementAnalysisService {
     const inputPairs = (boundPairs.length ? boundPairs : workspacePairs.filter(({ asset }) => isWithinDirectory(asset.logicalPath, documentDirectoryPath)))
       .sort((left, right) => left.asset.logicalPath.localeCompare(right.asset.logicalPath, 'zh-CN') || left.version.id.localeCompare(right.version.id))
     if (!inputPairs.length) throw new Error(`Agent 输入目录 /${documentDirectoryPath} 中没有已进入活动索引的 ready 文档`)
-    const analysisConfiguration = this.definitions.resolveActive ? await this.definitions.resolveActive('requirement-analysis') : null
-    if (this.definitions.resolveActive && !analysisConfiguration) throw new Error('请先在系统管理的 Agent 配置中发布需求分析 Agent，再发起需求分析')
+    const analysisConfiguration = this.definitions.resolveActive ? await this.definitions.resolveActive('planning') : null
+    if (this.definitions.resolveActive && !analysisConfiguration) throw new Error('请先在系统管理的 Agent 配置中发布 PlanningAgent，再发起需求分析')
     const requestModel = request.sourceId && request.modelId ? { sourceId: request.sourceId, modelId: request.modelId } : null
-    const models = selectAgentModels(state, analysisConfiguration, requestModel, '需求分析 Agent')
+    const models = selectAgentModels(state, analysisConfiguration, requestModel, 'PlanningAgent')
     const model = models[0]
-    const definition = analysisConfiguration?.agentDefinition ?? await this.definitions.resolve('requirement-analysis')
+    const definition = analysisConfiguration?.agentDefinition ?? await this.definitions.resolve('planning')
     requirePiWorkspaceAgentDefinition(definition)
     const coveragePlan = buildAnalysisCoveragePlan(inputPairs.map(item => item.version), request.excludedAreas)
     const effectiveMaxOutputTokens = analysisConfiguration?.routing.maxOutputTokens ?? model.model.maxOutputTokens
     const documentWorkspace = requirementDocumentWorkspace(projectVersion, state.projectVersions, documentDirectoryPath)
+    const now = new Date().toISOString()
+    const currentInputRefs = buildCurrentInputRefs(inputPairs)
+    const workspaceSnapshot = buildProjectWorkspaceSnapshot({
+      projectId: project.id,
+      projectVersion,
+      files: workspacePairs,
+      currentInputVersionIds: new Set(currentInputRefs.map(item => item.assetVersionId)),
+      createdAt: now,
+    })
     const requirementInputPlan = buildRequirementDirectoryInputPlan({
       workspacePath: documentDirectoryPath,
       workspaceRootPath: documentWorkspace.rootLogicalPath,
       activeBranchPath: documentWorkspace.activeBranchLogicalPath,
       agentWorkspacePath: documentWorkspace.agentLogicalPath,
       assets: inputPairs,
+      currentInputRefs,
+      workspaceSnapshot,
       definition,
       contextWindow: model.model.contextWindow,
       maxOutputTokens: effectiveMaxOutputTokens,
     })
-    const now = new Date().toISOString()
     const analysisId = request.analysisId ?? `analysis_${randomUUID()}`
     const snapshot: ReviewRunSnapshot = {
       runId: `analysis_run_${randomUUID()}`,
@@ -439,6 +450,8 @@ export class RequirementAnalysisService {
       indexVersionId: index.id,
       logicalPath: inputPairs[0].asset.logicalPath,
       assets: inputPairs.map(({ asset, version }) => ({ assetId: asset.id, assetVersionId: version.id, assetContentHash: version.contentHash, logicalPath: asset.logicalPath, displayName: asset.displayName, assetType: asset.assetType })),
+      currentInputRefs,
+      workspaceSnapshot,
       documentWorkspace: { ...documentWorkspace, candidateAssetVersionIds: inputPairs.map(item => item.version.id) },
       modelRef: modelSnapshot(model, effectiveMaxOutputTokens),
       ...(analysisConfiguration ? { agentConfigurationRef: configurationRef(analysisConfiguration) } : {}),
@@ -483,8 +496,8 @@ export class RequirementAnalysisService {
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
     if (run.status !== 'running') throw new Error('需求分析运行已结束，不能由 Worker 重复执行')
     const configurationRef = run.snapshot.agentConfigurationRef
-    const configuration = configurationRef ? required(state.agentConfigurationVersions.find(item => item.id === configurationRef.id), '需求分析 Agent 固定配置版本不存在') : null
-    const models = selectAgentModels(state, configuration, { sourceId: run.snapshot.modelRef.sourceId, modelId: run.snapshot.modelRef.modelId }, '需求分析 Agent')
+    const configuration = configurationRef ? required(state.agentConfigurationVersions.find(item => item.id === configurationRef.id), 'PlanningAgent 固定配置版本不存在') : null
+    const models = selectAgentModels(state, configuration, { sourceId: run.snapshot.modelRef.sourceId, modelId: run.snapshot.modelRef.modelId }, 'PlanningAgent')
     const fixedPairs = run.snapshot.assets.map(item => {
       const version = required(state.versions.find(candidate => candidate.id === item.assetVersionId && candidate.status === 'ready'), '固定需求资产版本不可用')
       if (version.contentHash !== item.assetContentHash) throw new Error('固定需求资产内容 Hash 已漂移')
@@ -499,6 +512,8 @@ export class RequirementAnalysisService {
       activeBranchPath: run.snapshot.documentWorkspace?.activeBranchLogicalPath,
       agentWorkspacePath: run.snapshot.documentWorkspace?.agentLogicalPath,
       assets: fixedPairs,
+      currentInputRefs: run.snapshot.currentInputRefs,
+      workspaceSnapshot: run.snapshot.workspaceSnapshot,
       definition: run.snapshot.agentDefinition,
       contextWindow: models[0].model.contextWindow,
       maxOutputTokens: configuration?.routing.maxOutputTokens ?? models[0].model.maxOutputTokens,
@@ -515,7 +530,6 @@ export class RequirementAnalysisService {
   private async executeWorkspaceStage(
     run: ReviewRun,
     workflowStage: RequirementWorkflowStage,
-    allowedSkillKeys: string[],
     submitToolId: string,
     schemaVersion: string,
     agentLabel: string,
@@ -525,9 +539,9 @@ export class RequirementAnalysisService {
   ) {
     const state = await this.store.snapshot()
     const configuration = run.snapshot.agentConfigurationRef
-      ? required(state.agentConfigurationVersions.find(item => item.id === run.snapshot.agentConfigurationRef!.id), '需求分析 Agent 固定配置版本不存在')
+      ? required(state.agentConfigurationVersions.find(item => item.id === run.snapshot.agentConfigurationRef!.id), 'PlanningAgent 固定配置版本不存在')
       : null
-    const models = selectAgentModels(state, configuration, { sourceId: run.snapshot.modelRef.sourceId, modelId: run.snapshot.modelRef.modelId }, '需求分析 Agent')
+    const models = selectAgentModels(state, configuration, { sourceId: run.snapshot.modelRef.sourceId, modelId: run.snapshot.modelRef.modelId }, 'PlanningAgent')
     const model = models[0]
     const fixedPairs = run.snapshot.assets.map(item => {
       const version = required(state.versions.find(candidate => candidate.id === item.assetVersionId && candidate.status === 'ready'), '固定需求资产版本不可用')
@@ -541,6 +555,8 @@ export class RequirementAnalysisService {
       activeBranchPath: run.snapshot.documentWorkspace?.activeBranchLogicalPath,
       agentWorkspacePath: run.snapshot.documentWorkspace?.agentLogicalPath,
       assets: fixedPairs,
+      currentInputRefs: run.snapshot.currentInputRefs,
+      workspaceSnapshot: run.snapshot.workspaceSnapshot,
       definition: run.snapshot.agentDefinition,
       contextWindow: model.model.contextWindow,
       maxOutputTokens: configuration?.routing.maxOutputTokens ?? model.model.maxOutputTokens,
@@ -558,7 +574,6 @@ export class RequirementAnalysisService {
         executionProfile: {
           mode: 'workspace_tools',
           workflowStage,
-          allowedSkillKeys,
           allowedToolIds: [...REQUIREMENT_WORKSPACE_TOOL_IDS, submitToolId],
           submitToolId,
           schemaVersion,
@@ -578,20 +593,20 @@ export class RequirementAnalysisService {
       const now = new Date().toISOString()
       if (retry && !cancelled) {
         run.retryEvents ??= []
-        run.retryEvents.push({ attempt: retry.attempt, maxAttempts: retry.maxAttempts, agentKey: 'requirement-analysis', status: retryable ? 'scheduled' : 'exhausted', error: message, occurredAt: now, ...(retry.nextAttemptAt ? { nextAttemptAt: retry.nextAttemptAt } : {}) })
+        run.retryEvents.push({ attempt: retry.attempt, maxAttempts: retry.maxAttempts, agentKey: 'planning', status: retryable ? 'scheduled' : 'exhausted', error: message, occurredAt: now, ...(retry.nextAttemptAt ? { nextAttemptAt: retry.nextAttemptAt } : {}) })
       }
       if (retryable && !cancelled) { run.step = 'waiting_worker'; run.finishedAt = undefined }
       else { run.status = cancelled ? 'cancelled' : 'failed'; run.step = cancelled ? 'cancelled' : 'failed'; run.finishedAt = now }
       run.error = message
       const attempt = latestRunningExecutionAttempt(run)
-      if (attempt) { attempt.status = cancelled ? 'cancelled' : 'failed'; attempt.finishedAt = now; attempt.error = message; attempt.modelLabel = run.modelLabel; if (run.execution) attempt.executions.requirementAnalysis = structuredClone(run.execution) }
+      if (attempt) { attempt.status = cancelled ? 'cancelled' : 'failed'; attempt.finishedAt = now; attempt.error = message; attempt.modelLabel = run.modelLabel; if (run.execution) attempt.executions.planning = structuredClone(run.execution) }
     })
   }
 
   private async executeAnalysis(input: { run: ReviewRun; snapshot: ReviewRunSnapshot; requirementInputPlan: RequirementInputPlan; models: AgentModelSelection[]; configuration: AgentConfigurationVersion | null; signal: AbortSignal; lease?: TaskLease; retryable?: boolean }) {
     const events: AgentExecutionEvent[] = []
     const model = input.models.find(selection => supportsInputPlan(selection, input.requirementInputPlan, input.configuration))
-    if (!model) throw new Error('需求分析 Agent 没有满足固定工作区上下文和工具能力的可用模型')
+    if (!model) throw new Error('PlanningAgent 没有满足固定工作区上下文和工具能力的可用模型')
     try {
       const output = await this.executeOnce({
         runId: input.run.id,
@@ -607,14 +622,11 @@ export class RequirementAnalysisService {
           executionProfile: {
             mode: 'workspace_tools',
             workflowStage: input.run.workflow?.currentStage === 'verification' ? 'verification' : 'analysis',
-            allowedSkillKeys: input.run.workflow?.currentStage === 'verification'
-              ? ['requirement.baseline', 'requirement.analysis', 'requirement.verification']
-              : ['requirement.baseline', 'requirement.analysis'],
             allowedToolIds: [...REQUIREMENT_WORKSPACE_TOOL_IDS, 'requirement-analysis.submit_result'],
             submitToolId: 'requirement-analysis.submit_result',
             schemaVersion: 'requirement-analysis/v1',
-            agentLabel: 'RequirementAnalysisAgent',
-            initialTask: renderRequirementAnalysisTask(input.snapshot),
+            agentLabel: 'PlanningAgent',
+            initialTask: renderPlanningRequirementTask(input.snapshot),
             validateCandidate: async (candidate, manifest) => {
               const normalized = await this.validator.normalize(candidate as unknown as CandidateRequirementAnalysisV1, input.snapshot, manifest)
               return { valid: normalized.report.valid, result: normalized.result, issues: normalized.report.issues }
@@ -635,10 +647,10 @@ export class RequirementAnalysisService {
       const finishedAt = new Date().toISOString()
       await this.reviewTransaction(input.run.id, input.lease, draft => {
         const current = required(draft.reviewRuns.find(item => item.id === input.run.id), '需求分析运行不存在')
-        Object.assign(current, { status: 'succeeded', step: 'completed', progress: 100, finishedAt, result, inputDeliveryManifest: manifest, execution, executions: { requirementAnalysis: execution }, error: undefined } satisfies Partial<ReviewRun>)
+        Object.assign(current, { status: 'succeeded', step: 'completed', progress: 100, finishedAt, result, inputDeliveryManifest: manifest, execution, executions: { planning: execution }, error: undefined } satisfies Partial<ReviewRun>)
         if (current.workflow?.currentStage === 'verification' && current.workflow.verificationOf) completeVerificationClosure(draft, current)
         const attempt = latestRunningExecutionAttempt(current)
-        if (attempt) { attempt.activeAgentKey = 'requirement-analysis'; attempt.status = 'succeeded'; attempt.finishedAt = finishedAt; attempt.modelLabel = current.modelLabel; attempt.executions = { requirementAnalysis: structuredClone(execution) } }
+        if (attempt) { attempt.activeAgentKey = 'planning'; attempt.status = 'succeeded'; attempt.finishedAt = finishedAt; attempt.modelLabel = current.modelLabel; attempt.executions = { planning: structuredClone(execution) } }
       })
       return required((await this.get(input.run.id)).response, '需求分析结果不存在')
     } catch (error) {
@@ -654,7 +666,7 @@ export class RequirementAnalysisService {
     await this.reviewTransaction(input.runId, input.lease, state => {
       const run = required(state.reviewRuns.find(item => item.id === input.runId), '需求分析运行不存在')
       run.modelRouteAttempts ??= []
-      run.modelRouteAttempts.push({ id: attemptId, agentKey: 'requirement-analysis', sourceId: input.selection.source.id, modelId: input.selection.model.id, modelLabel: `${input.selection.source.name} · ${input.selection.model.displayName}`, status: 'running', startedAt })
+      run.modelRouteAttempts.push({ id: attemptId, agentKey: 'planning', sourceId: input.selection.source.id, modelId: input.selection.model.id, modelLabel: `${input.selection.source.name} · ${input.selection.model.displayName}`, status: 'running', startedAt })
       run.snapshot.modelRef = modelRef
       run.sourceId = modelRef.sourceId
       run.modelId = modelRef.modelId
@@ -691,7 +703,7 @@ export class RequirementAnalysisService {
         ? { status: 'running', step: 'waiting_worker', finishedAt: undefined, error: message, ...(events.length ? { execution: executionProgress(events) } : {}) }
         : { status: cancelled ? 'cancelled' : 'failed', step: cancelled ? 'cancelled' : 'failed', finishedAt: new Date().toISOString(), error: message, ...(events.length ? { execution: executionProgress(events) } : {}) } satisfies Partial<ReviewRun>)
       const attempt = latestRunningExecutionAttempt(current)
-      if (attempt) { attempt.activeAgentKey = 'requirement-analysis'; attempt.status = cancelled ? 'cancelled' : 'failed'; attempt.finishedAt = new Date().toISOString(); attempt.error = message; if (events.length) attempt.executions.requirementAnalysis = executionProgress(events) }
+      if (attempt) { attempt.activeAgentKey = 'planning'; attempt.status = cancelled ? 'cancelled' : 'failed'; attempt.finishedAt = new Date().toISOString(); attempt.error = message; if (events.length) attempt.executions.planning = executionProgress(events) }
     })
     return message
   }
@@ -714,9 +726,9 @@ export class RequirementAnalysisService {
     await this.reviewTransaction(runId, lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
       current.execution = execution
-      current.executions = { requirementAnalysis: execution }
+      current.executions = { planning: execution }
       const attempt = latestRunningExecutionAttempt(current)
-      if (attempt) { attempt.activeAgentKey = 'requirement-analysis'; attempt.executions.requirementAnalysis = structuredClone(execution) }
+      if (attempt) { attempt.activeAgentKey = 'planning'; attempt.executions.planning = structuredClone(execution) }
     })
   }
 
@@ -732,7 +744,7 @@ export class RequirementAnalysisService {
         if (previous.status !== 'running' || previous.attempt >= Math.max(1, attemptNumber)) continue
         previous.status = 'failed'; previous.finishedAt = previous.finishedAt ?? startedAt; previous.error = previous.error ?? 'WORKER_ATTEMPT_SUPERSEDED: 后续重试已开始，本次尝试未完成'
       }
-      const value = { attempt: Math.max(1, attemptNumber), maxAttempts: Math.max(1, maxAttempts), status: 'running' as const, activeAgentKey: 'requirement-analysis' as const, startedAt, modelLabel: run.modelLabel, executions: {} }
+      const value = { attempt: Math.max(1, attemptNumber), maxAttempts: Math.max(1, maxAttempts), status: 'running' as const, activeAgentKey: 'planning' as const, startedAt, modelLabel: run.modelLabel, executions: {} }
       const existing = run.executionAttempts.findIndex(item => item.attempt === value.attempt)
       if (existing >= 0) run.executionAttempts[existing] = value
       else run.executionAttempts.push(value)
@@ -929,7 +941,7 @@ function assertReleasePackageIntegrity(release: RequirementReleasePackage) {
 }
 
 function executionRecordForStage(output: AgentExecutionOutput, workflowStage: RequirementWorkflowStage): AgentExecutionRecord {
-  return { agentKey: 'requirement-analysis', workflowStage, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events }
+  return { agentKey: 'planning', workflowStage, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events }
 }
 function principalId(principal: Principal | undefined) { return String(principal?.subjectId ?? '').trim().slice(0, 200) || 'system' }
 
@@ -992,7 +1004,7 @@ function presentWorkflowSummary(workflow: RequirementWorkflowState | undefined) 
 function requirementDocumentWorkspace(projectVersion: DatabaseState['projectVersions'][number], projectVersions: DatabaseState['projectVersions'], logicalPath: string): NonNullable<ReviewRunSnapshot['documentWorkspace']> {
   const rootLogicalPath = 'workspace'
   const activeBranchLogicalPath = `${rootLogicalPath}/branches/${safeWorkspaceSegment(projectVersion.name)}`
-  return { mode: 'agent_directory', logicalPath, rootLogicalPath, activeBranchLogicalPath, branchLogicalPaths: [...new Set(projectVersions.filter(item => item.projectId === projectVersion.projectId).map(item => `${rootLogicalPath}/branches/${safeWorkspaceSegment(item.name)}`))].sort((left, right) => left.localeCompare(right, 'zh-CN')), agentLogicalPath: `${rootLogicalPath}/agent_workspace/requirement_agent`, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] }
+  return { mode: 'agent_directory', logicalPath, rootLogicalPath, activeBranchLogicalPath, branchLogicalPaths: [...new Set(projectVersions.filter(item => item.projectId === projectVersion.projectId).map(item => `${rootLogicalPath}/branches/${safeWorkspaceSegment(item.name)}`))].sort((left, right) => left.localeCompare(right, 'zh-CN')), agentLogicalPath: `${rootLogicalPath}/agent_workspace/planning_agent`, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] }
 }
 
 type AgentModelSelection = { source: DatabaseState['modelSources'][number]; model: DatabaseState['modelSources'][number]['models'][number] }
@@ -1011,7 +1023,7 @@ function selectAgentModels(state: DatabaseState, configuration: AgentConfigurati
 function requirePiWorkspaceAgentDefinition(definition: ReviewRunSnapshot['agentDefinition']) {
   const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result']
   const missing = requiredTools.filter(toolId => !definition.toolIds.includes(toolId))
-  if (definition.agentKey !== 'requirement-analysis' || definition.resultSchemaVersion !== 'requirement-analysis/v1' || missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布统一需求分析 Agent${missing.length ? `；缺少工具 ${missing.join(', ')}` : ''}`)
+  if (definition.agentKey !== 'planning' || definition.resultSchemaVersion !== 'planning/v1' || missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布 PlanningAgent${missing.length ? `；缺少工具 ${missing.join(', ')}` : ''}`)
 }
 
 function supportsInputPlan(selection: AgentModelSelection, plan: RequirementInputPlan, configuration: AgentConfigurationVersion | null) {
@@ -1034,10 +1046,10 @@ function buildAnalysisCoveragePlan(versions: Array<{ id: string; chunks: Array<{
 function cleanList(value: string[] | undefined) { return Array.isArray(value) ? [...new Set(value.map(item => String(item).trim()).filter(Boolean))].slice(0, 20) : [] }
 function required<T>(value: T | undefined | null, message: string): T { if (value == null) throw new Error(message); return value }
 function shouldCheckpointExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry', 'input_package_built', 'input_batch_delivered'].includes(event.type) }
-function executionProgress(events: AgentExecutionEvent[]): AgentExecutionRecord { const framework = events.find(event => event.framework)?.framework; return { agentKey: 'requirement-analysis', turns: events.reduce((maximum, event) => Math.max(maximum, event.turn ?? 0), 0), toolCalls: events.filter(event => event.type === 'tool_execution_start').length, toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length, ...(framework ? { framework } : {}), events: structuredClone(events) } }
-function executionRecord(output: AgentExecutionOutput): AgentExecutionRecord { return { agentKey: 'requirement-analysis', turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events } }
+function executionProgress(events: AgentExecutionEvent[]): AgentExecutionRecord { const framework = events.find(event => event.framework)?.framework; return { agentKey: 'planning', turns: events.reduce((maximum, event) => Math.max(maximum, event.turn ?? 0), 0), toolCalls: events.filter(event => event.type === 'tool_execution_start').length, toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length, ...(framework ? { framework } : {}), events: structuredClone(events) } }
+function executionRecord(output: AgentExecutionOutput): AgentExecutionRecord { return { agentKey: 'planning', turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events } }
 function validationError(issues: Array<{ path: string; message: string }>) { return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${issues.slice(0, 6).map(issue => `${issue.path} ${issue.message}`).join('；')}${issues.length > 6 ? `；另有 ${issues.length - 6} 项` : ''}`) }
-function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) { let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'; if (credential) message = message.replaceAll(credential, '[已隐藏凭据]'); if (endpoint) message = message.replaceAll(endpoint, '[模型端点]'); return sanitize(message) }
+function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) { let message = error instanceof Error ? error.message : 'PlanningAgent 执行失败'; if (credential) message = message.replaceAll(credential, '[已隐藏凭据]'); if (endpoint) message = message.replaceAll(endpoint, '[模型端点]'); return sanitize(message) }
 function sanitize(message: string) { return message.replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').slice(0, 500) }
 function encodeCursor(run: ReviewRun) { return Buffer.from(JSON.stringify([run.createdAt, run.id])).toString('base64url') }
 function decodeCursor(cursor: string | undefined, runs: ReviewRun[]) { if (!cursor) return 0; try { const [createdAt, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[]; if (typeof createdAt !== 'string' || typeof id !== 'string') throw new Error('invalid'); const index = runs.findIndex(run => run.createdAt === createdAt && run.id === id); if (index < 0) throw new Error('invalid'); return index + 1 } catch { throw new Error('需求分析历史游标无效') } }

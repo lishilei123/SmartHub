@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { createAgentDefinitionVersion } from '../agent/requirement-analysis-agent.js'
+import { createAgentDefinitionVersion } from '../agent/planning-agent.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import type { AgentDefinitionResolver, AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { AgentConfigurationAgentDraft, AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentDefinitionDraft, AgentModelReference, AgentRoutingConfiguration, DatabaseState, McpServerResource, SkillResource, ToolResource } from '../domain/types.js'
@@ -48,7 +48,6 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
   async save(scene: AgentConfigurationScene, input: AgentConfigurationInput) {
     const agentKey = requireSceneAgent(scene, input.agentKey)
     return await this.transaction(state => {
-      migrateState(state)
       const normalized = normalizeAgentDraft(agentKey, input, state)
       const index = state.agentConfigurationDrafts.findIndex(item => item.scene === scene)
       const draft = index < 0 ? defaultDraft(scene) : normalizeStoredDraft(state.agentConfigurationDrafts[index], scene)
@@ -65,7 +64,6 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
   async publish(scene: AgentConfigurationScene, input: { agentKey: AgentConfigurationAgentKey; revision: number; publishedBy?: string }) {
     const agentKey = requireSceneAgent(scene, input.agentKey)
     return await this.transaction(state => {
-      migrateState(state)
       const draft = required(state.agentConfigurationDrafts.find(item => item.scene === scene), `请先保存${agentLabel(agentKey)}草稿`)
       const agentDraft = required(draft.agents[agentKey], `请先保存${agentLabel(agentKey)}草稿`)
       if (agentDraft.revision !== input.revision) throw new Error(`${agentLabel(agentKey)}草稿已更新，请刷新后再发布`)
@@ -121,19 +119,11 @@ export class AgentConfigurationService implements AgentDefinitionResolver {
 
 async function loadStoredConfiguration(store: StateStore, scene: AgentConfigurationScene) {
   if (store.getAgentConfigurationState) {
-    const configuration = await store.getAgentConfigurationState(scene)
-    if (configuration.draft || scene === 'requirement_analysis') return configuration
-    const legacy = await store.getAgentConfigurationState('requirement_analysis')
-    return {
-      draft: legacy.draft,
-      versions: configuration.versions,
-    }
+    return store.getAgentConfigurationState(scene)
   }
   const state = await store.snapshot()
   return {
-    draft: state.agentConfigurationDrafts.find(item => item.scene === scene)
-      ?? state.agentConfigurationDrafts.find(item => item.scene === 'requirement_analysis')
-      ?? null,
+    draft: state.agentConfigurationDrafts.find(item => item.scene === scene) ?? null,
     versions: state.agentConfigurationVersions.filter(item => item.scene === scene),
   }
 }
@@ -394,25 +384,6 @@ function expandStoredVersions(values: AgentConfigurationVersion[]): AgentConfigu
 
 function normalizeStoredVersion(value: AgentConfigurationVersion, agentKey: AgentConfigurationVersion['agentKey']): AgentConfigurationVersion {
   return { ...structuredClone(value), agentKey, routing: normalizeRouting(value.routing) }
-}
-
-function migrateState(state: DatabaseState) {
-  const legacyAgents = Object.assign(
-    {},
-    ...state.agentConfigurationDrafts.map(draft => draft.agents),
-  ) as Partial<Record<AgentConfigurationAgentKey, AgentConfigurationAgentDraft>>
-  state.agentConfigurationDrafts = AGENT_CONFIGURATION_SCENES.map(scene => normalizeStoredDraft({
-    scene,
-    agents: Object.fromEntries(
-      configurationKeysForScene(scene).map(agentKey => [agentKey, legacyAgents[agentKey]]),
-    ),
-  }, scene))
-  const scenes = new Set(AGENT_CONFIGURATION_SCENES)
-  const retained = expandStoredVersions(state.agentConfigurationVersions.filter(item => scenes.has(item.scene)))
-  state.agentConfigurationVersions = [
-    ...state.agentConfigurationVersions.filter(item => !scenes.has(item.scene)),
-    ...retained,
-  ]
 }
 
 function defaultDefinition(agentKey: AgentConfigurationAgentKey) {

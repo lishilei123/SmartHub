@@ -1,4 +1,4 @@
-import type { AgentDefinitionVersion, AgentExecutionEvent, PlanningSubAgentRunRecord } from './agent-types.js'
+import type { AgentDefinitionVersion, AgentExecutionEvent, CurrentInputRef, InputDeliveryManifest, PlanningSubAgentRunRecord, ProjectWorkspaceSnapshot, ProjectWorkspaceSnapshotFile } from './agent-types.js'
 import type { AgentExecutionRecord } from './types.js'
 import type { AgentRoutingConfiguration } from './types.js'
 
@@ -76,7 +76,7 @@ export interface TestDesignBasisSnapshot {
   snapshotSha256: string
 }
 
-export interface TestDesignWorkspaceFile {
+export interface TestDesignWorkspaceFile extends ProjectWorkspaceSnapshotFile {
   logicalPath: string
   sourceType: 'asset_version' | 'requirement_release' | 'test_point_tree_version' | 'test_case_set_version' | 'test_case_library_version' | 'run_candidate'
   sourceId: string
@@ -87,12 +87,8 @@ export interface TestDesignWorkspaceFile {
   displayName: string
 }
 
-export interface TestDesignWorkspaceSnapshot {
-  schemaVersion: 'test-design-workspace-snapshot/v1'
-  rootLogicalPath: 'workspace'
-  activeBranchLogicalPath: string
-  agentLogicalPath: 'workspace/agent_workspace/design_agent'
-  projectVersionId: string
+export interface TestDesignWorkspaceSnapshot extends Omit<ProjectWorkspaceSnapshot, 'files'> {
+  agentLogicalPath: 'workspace/agent_workspace/planning_agent'
   projectVersionName: string
   knowledgeBaseId: string
   indexVersionId: string
@@ -145,12 +141,13 @@ export interface HistoricalCaseSnapshot {
 }
 
 export type TestDesignNodeKey = 'test_point_design' | 'test_point_review' | 'test_case_design' | 'coverage_audit' | 'test_design_repair'
-export type TestDesignAgentExecutionRecord = Omit<AgentExecutionRecord, 'agentKey' | 'workflowStage'> & {
-  agentKey: 'test-design'
+export type PlanningTestDesignExecutionRecord = Omit<AgentExecutionRecord, 'agentKey' | 'workflowStage'> & {
+  agentKey: 'planning'
   workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'
   agentVersion: string
   modelLabel: string
   degraded: boolean
+  inputDeliveryManifest?: InputDeliveryManifest
 }
 export interface WorkflowNodeRun {
   id: string
@@ -165,7 +162,7 @@ export interface WorkflowNodeRun {
   finishedAt?: string
   errorCode?: string
   error?: string
-  execution?: TestDesignAgentExecutionRecord
+  execution?: PlanningTestDesignExecutionRecord
 }
 
 export interface WorkflowArtifact {
@@ -584,6 +581,7 @@ export interface TestDesignWorkflowRun {
   idempotencyKey: string
   basisSnapshot: TestDesignBasisSnapshot
   agentConfigurationSnapshot: TestDesignRunAgentConfigurationSnapshot
+  currentInputRefs: CurrentInputRef[]
   workspaceSnapshot: TestDesignWorkspaceSnapshot
   formalWorkspaceFiles: TestDesignWorkspaceFile[]
   retrievalSnapshot: RetrievalSnapshot

@@ -2,7 +2,7 @@ import type { TSchema } from 'typebox'
 import type {
   PlanningReviewerSnapshot,
   ReviewRunSnapshot,
-  TestDesignAgentSnapshot,
+  PlanningTestDesignSnapshot,
   TestExecutionAgentSnapshot,
 } from './agent-types.js'
 
@@ -25,7 +25,7 @@ export interface ToolDescriptor {
 export interface ToolExecutionContext {
   snapshot:
     | ReviewRunSnapshot
-    | TestDesignAgentSnapshot
+    | PlanningTestDesignSnapshot
     | TestExecutionAgentSnapshot
     | PlanningReviewerSnapshot
   allowedToolIds: ReadonlySet<string>

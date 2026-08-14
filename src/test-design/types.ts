@@ -82,7 +82,7 @@ export type TestDesignNodeRun = {
   finishedAt?: string
   errorCode?: string
   error?: string
-  execution?: { agentKey: 'test-design'; workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'; agentVersion: string; modelLabel: string; turns: number; toolCalls: number; toolErrors?: number; context?: AgentExecutionContext; events: AgentEvent[] }
+  execution?: { agentKey: 'planning'; workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'; agentVersion: string; modelLabel: string; turns: number; toolCalls: number; toolErrors?: number; context?: AgentExecutionContext; inputDeliveryManifest?: { toolReads?: Array<{ toolCallId: string; relativePath: string; sourceScope?: 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output' }> }; events: AgentEvent[] }
 }
 
 export type TestPointNode = {
@@ -191,8 +191,9 @@ export type LibraryExecutionHandoff = { id: string; projectId: string; projectVe
 export type TestDesignWorkflowRun = TestDesignRunSummary & {
   basisSnapshot: { schemaVersion: string; projectVersionId: string; requirementReleaseId: string; verificationRunId: string; requirementsJsonSha256: string; items: unknown[]; snapshotSha256: string; createdAt: string }
   agentConfigurationSnapshot: { configurationId: string; configurationVersion: number; configurationSha256: string; primaryModel: { modelName: string }; snapshotSha256: string }
-  workspaceSnapshot: { activeBranchLogicalPath: string; requirementReleaseId: string; verificationRunId: string; requirementsJsonSha256: string; files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>; snapshotSha256: string }
-  formalWorkspaceFiles: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>
+  currentInputRefs: Array<{ assetId: string; assetVersionId: string; logicalPath: string; contentSha256: string }>
+  workspaceSnapshot: { schemaVersion: 'project-workspace-snapshot/v1'; projectId: string; projectVersionId: string; rootLogicalPath: 'workspace'; activeBranchLogicalPath: string; requirementReleaseId: string; verificationRunId: string; requirementsJsonSha256: string; files: Array<{ logicalPath: string; displayName: string; contentSha256: string; assetId?: string; assetVersionId?: string; sourceScope: 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output' }>; snapshotSha256: string; createdAt: string }
+  formalWorkspaceFiles: Array<{ logicalPath: string; displayName: string; contentSha256: string; assetVersionId?: string; sourceScope: 'formal_output' }>
   nodeRuns: TestDesignNodeRun[]
   testPointTree?: TestPointTree
   testCases: TestDesignCase[]

@@ -12,12 +12,13 @@ import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { auditTestDesignCoverage } from './test-design-coverage-auditor.js'
 import { assertEtag, etag, executableTestPointIds, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, validateTreeNodes, type TestCaseDesignCandidate, type TestPointDesignCandidate } from './test-design-validation.js'
+import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 2
 
-export interface TestDesignAgentRuntime {
-  readiness?(): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
-  freezeConfiguration?(): Promise<TestDesignRunAgentConfigurationSnapshot>
+export interface PlanningAgentRuntime {
+  readiness?(projectVersionId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
+  freezeConfiguration?(projectVersionId: string): Promise<TestDesignRunAgentConfigurationSnapshot>
   execute(input: {
     stage: 'test_point_design' | 'test_case_design' | 'test_design_repair'
     run: TestDesignWorkflowRun
@@ -32,7 +33,7 @@ export class TestDesignService {
     projectVersionId: string,
   ) => void | Promise<void>
 
-  constructor(private readonly store: StateStore, private readonly runtime?: TestDesignAgentRuntime, private readonly projector?: TestCaseAssetProjector) {}
+  constructor(private readonly store: StateStore, private readonly runtime?: PlanningAgentRuntime, private readonly projector?: TestCaseAssetProjector) {}
 
   onTestPointsConfirmed(
     listener: (projectVersionId: string) => void | Promise<void>,
@@ -47,7 +48,7 @@ export class TestDesignService {
     const requirementRelease = boundRequirementRelease(state, projectVersionId)
     const knowledgeAssets = projectBases.flatMap(base => state.assets.filter(asset => asset.knowledgeBaseId === base.id).flatMap(asset => state.versions.filter(version => version.assetId === asset.id).map(version => ({ assetId: asset.id, assetVersionId: version.id, version: version.number, contentHash: version.contentHash, displayName: asset.displayName, logicalPath: asset.logicalPath, assetType: asset.assetType, status: version.status, selectable: version.status === 'ready', reason: version.status === 'ready' ? undefined : '资产版本未就绪' }))))
     const designState = readDesignState(state)
-    const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness() : { ready: Boolean(this.runtime), agents: [{ agentKey: 'test-design', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'TestDesignAgent Runtime 未配置' }] }
+    const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId) : { ready: Boolean(this.runtime), agents: [{ agentKey: 'planning', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'PlanningAgent Runtime 未配置' }] }
     return {
       projectVersion: { id: projectVersion.id, projectId: projectVersion.projectId, name: projectVersion.name, status: projectVersion.status },
       requirementRelease: requirementRelease ? { id: requirementRelease.release.id, analysisRunId: requirementRelease.analysisRun.id, contentSha256: requirementRelease.release.contentSha256, publishedAt: requirementRelease.release.publishedAt, label: `${requirementRelease.analysisRun.documentTitle ?? '正式需求'} / ${requirementRelease.release.id.slice(-8)}` } : null,
@@ -84,10 +85,10 @@ export class TestDesignService {
 
   async createRun(projectVersionId: string, designId: string, idempotencyKey: string, principal: Principal) {
     if (!idempotencyKey?.trim()) throw new TestDesignError('IDEMPOTENCY_KEY_REQUIRED', '创建运行必须提供 Idempotency-Key', 400)
-    const readiness = this.runtime?.readiness ? await this.runtime.readiness() : { ready: Boolean(this.runtime) }
-    if (!readiness.ready) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'TestDesignAgent 尚未发布或未通过模型门禁', 409, readiness)
-    const agentConfigurationSnapshot = this.runtime?.freezeConfiguration ? await this.runtime.freezeConfiguration() : undefined
-    if (!agentConfigurationSnapshot) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'TestDesignAgent Runtime 无法冻结配置版本', 409)
+    const readiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId) : { ready: Boolean(this.runtime) }
+    if (!readiness.ready) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent 尚未发布或未通过模型门禁', 409, readiness)
+    const agentConfigurationSnapshot = this.runtime?.freezeConfiguration ? await this.runtime.freezeConfiguration(projectVersionId) : undefined
+    if (!agentConfigurationSnapshot) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent Runtime 无法冻结配置版本', 409)
     const created = await this.store.transaction(async state => {
       const design = findDesign(state, projectVersionId, designId)
       const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
@@ -95,7 +96,7 @@ export class TestDesignService {
       const aggregate = designState(state)
       const existing = aggregate.runs.find(run => run.testDesignId === designId && run.idempotencyKey === idempotencyKey)
       if (existing) return { run: structuredClone(existing), created: false }
-      if (!this.runtime) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'TestDesignAgent 尚未完成运行时配置', 409)
+      if (!this.runtime) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent 尚未完成运行时配置', 409)
       const requirement = required(boundRequirementRelease(state, projectVersionId), 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '当前 ProjectVersion 尚未绑定 Requirement Release')
       const requirements = publishedRequirements(requirement.analysisRun)
       if (requirements.artifact.contentSha256 !== projectVersion.requirementReleaseBinding?.requirementsJsonSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 绑定的 requirements.json Hash 与发布包不一致', 409)
@@ -107,7 +108,7 @@ export class TestDesignService {
       const workspaceSnapshot = buildWorkspaceSnapshot(state, design, requirement, requirements, historicalSnapshot, createdAt)
       const run: TestDesignWorkflowRun = {
         id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_point_design', progress: 0, idempotencyKey,
-        basisSnapshot, agentConfigurationSnapshot, retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
+        basisSnapshot, agentConfigurationSnapshot, currentInputRefs: structuredClone(requirement.analysisRun.snapshot.currentInputRefs), retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
         ...(historicalSnapshot.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: historicalSnapshot.baseTestCaseLibraryVersionId, baseTestCaseLibraryVersionSha256: historicalSnapshot.baseTestCaseLibraryVersionSha256 } : {}),
         nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], caseChangeProposals: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
       }
@@ -186,7 +187,7 @@ export class TestDesignService {
     if (!this.runtime) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', '测试设计 Agent Runtime 未配置', 409)
     const initial = await this.loadRun(runId)
     const claimed = required(initial.nodeRuns.find(item => item.id === nodeRunId), 'WORKFLOW_NODE_NOT_FOUND', '领取的工作流节点不存在')
-    if (!['test_point_design', 'test_case_design', 'test_design_repair'].includes(claimed.nodeKey)) throw new TestDesignError('WORKFLOW_NODE_NOT_RETRYABLE', '领取的节点不是 TestDesignAgent Stage', 409)
+    if (!['test_point_design', 'test_case_design', 'test_design_repair'].includes(claimed.nodeKey)) throw new TestDesignError('WORKFLOW_NODE_NOT_RETRYABLE', '领取的节点不是 PlanningAgent Stage', 409)
     if (initial.status === 'cancelled' || claimed.status === 'succeeded' || claimed.status === 'cancelled') return initial
 
     const key = claimed.nodeKey as 'test_point_design' | 'test_case_design' | 'test_design_repair'
@@ -732,7 +733,7 @@ function caseDesignInput(run: TestDesignWorkflowRun) {
 function repairInput(run: TestDesignWorkflowRun) {
   const state = required(run.automaticRepair, 'TEST_DESIGN_REPAIR_NOT_QUEUED', '自动修复状态不存在')
   const audit = required(run.coverageAudits.find(item => item.id === state.triggerAuditId), 'TEST_DESIGN_REPAIR_AUDIT_NOT_FOUND', '触发修复的 Coverage Audit 不存在')
-  return { schemaVersion: 'test-design-repair-context/v1', attempt: state.attempt, maxAttempts: state.maxAttempts, auditId: audit.id, blockers: audit.blockers.filter(item => item.resolution === 'agent_repair'), candidateWorkspacePath: 'workspace/agent_workspace/design_agent/current-test-cases.json' }
+  return { schemaVersion: 'test-design-repair-context/v1', attempt: state.attempt, maxAttempts: state.maxAttempts, auditId: audit.id, blockers: audit.blockers.filter(item => item.resolution === 'agent_repair'), candidateWorkspacePath: 'workspace/agent_workspace/planning_agent/current-test-cases.json' }
 }
 
 function materializeDesignIssues(run: TestDesignWorkflowRun, raw: unknown) {
@@ -934,24 +935,26 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
   const knowledgeBase = required(state.knowledgeBases.find(item => item.projectId === design.projectId), 'TEST_DESIGN_WORKSPACE_REQUIRED', '项目知识库不存在')
   const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), 'TEST_DESIGN_WORKSPACE_REQUIRED', '项目 Workspace 没有活动索引')
   const files = new Map<string, TestDesignWorkspaceFile>()
+  const branch = `workspace/branches/${safeWorkspaceSegment(projectVersion.name)}`
+  const currentInputVersionIds = new Set(requirement.analysisRun.snapshot.currentInputRefs.map(item => item.assetVersionId))
   for (const asset of state.assets) {
     if (asset.knowledgeBaseId !== knowledgeBase.id || !asset.activeVersionId || !isWithinWorkspace(asset.logicalPath)) continue
-    const version = state.versions.find(item => item.id === asset.activeVersionId && item.assetId === asset.id && item.status === 'ready' && index.assetVersionIds.includes(item.id))
+    const version = state.versions.find(item => item.id === asset.activeVersionId && item.assetId === asset.id && item.status === 'ready')
     if (!version) continue
-    files.set(normalizeWorkspacePath(asset.logicalPath), { logicalPath: normalizeWorkspacePath(asset.logicalPath), sourceType: 'asset_version', sourceId: version.id, assetId: asset.id, assetVersionId: version.id, contentSha256: version.contentHash, content: version.content, displayName: asset.displayName })
+    const logicalPath = normalizeWorkspacePath(asset.logicalPath)
+    files.set(logicalPath, { logicalPath, sourceType: 'asset_version', sourceId: version.id, assetId: asset.id, assetVersionId: version.id, contentSha256: version.contentHash, content: version.content, displayName: asset.displayName, sourceScope: classifyWorkspaceSourceScope(logicalPath, branch, currentInputVersionIds.has(version.id)) })
   }
-  const branch = `workspace/branches/${safeWorkspaceSegment(projectVersion.name)}`
   for (const releaseArtifact of requirement.release.artifacts) {
     const logicalPath = `${branch}/requirements/${releaseArtifact.fileName}`
-    files.set(logicalPath, { logicalPath, sourceType: 'requirement_release', sourceId: `${requirement.release.id}:${releaseArtifact.fileName}`, contentSha256: releaseArtifact.contentSha256, content: releaseArtifact.content, displayName: releaseArtifact.fileName })
+    files.set(logicalPath, { logicalPath, sourceType: 'requirement_release', sourceId: `${requirement.release.id}:${releaseArtifact.fileName}`, contentSha256: releaseArtifact.contentSha256, content: releaseArtifact.content, displayName: releaseArtifact.fileName, sourceScope: 'current_input' })
   }
   if (historical.items.length) {
     const content = `${canonicalJson({ schemaVersion: historical.schemaVersion, snapshotSha256: historical.snapshotSha256, items: historical.items })}\n`
-    const logicalPath = 'workspace/agent_workspace/design_agent/historical-test-cases.json'
-    files.set(logicalPath, { logicalPath, sourceType: 'run_candidate', sourceId: historical.snapshotSha256, contentSha256: canonicalSha256Text(content), content, displayName: 'historical-test-cases.json' })
+    const logicalPath = 'workspace/agent_workspace/planning_agent/historical-test-cases.json'
+    files.set(logicalPath, { logicalPath, sourceType: 'run_candidate', sourceId: historical.snapshotSha256, contentSha256: canonicalSha256Text(content), content, displayName: 'historical-test-cases.json', sourceScope: 'historical_branch' })
   }
   const ordered = [...files.values()].sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'zh-CN'))
-  const base = { schemaVersion: 'test-design-workspace-snapshot/v1' as const, rootLogicalPath: 'workspace' as const, activeBranchLogicalPath: branch, agentLogicalPath: 'workspace/agent_workspace/design_agent' as const, projectVersionId: projectVersion.id, projectVersionName: projectVersion.name, knowledgeBaseId: knowledgeBase.id, indexVersionId: index.id, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementsJsonSha256: machine.artifact.contentSha256, files: ordered, createdAt }
+  const base = { schemaVersion: 'project-workspace-snapshot/v1' as const, projectId: design.projectId, rootLogicalPath: 'workspace' as const, activeBranchLogicalPath: branch, agentLogicalPath: 'workspace/agent_workspace/planning_agent' as const, projectVersionId: projectVersion.id, projectVersionName: projectVersion.name, knowledgeBaseId: knowledgeBase.id, indexVersionId: index.id, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementsJsonSha256: machine.artifact.contentSha256, files: ordered, createdAt }
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
@@ -978,7 +981,7 @@ function materializeTestPointDesign(run: TestDesignWorkflowRun, raw: unknown, ac
   }))
   validateTreeReferences(run, nodes)
   const treeSha256 = validateTreeNodes(nodes)
-  run.testPointTree = { id: `test_point_tree_${randomUUID()}`, runId: run.id, currentRevision: 0, revisions: [{ revision: 0, parentRevision: null, nodes, operations: [], reason: 'TestDesignAgent 测试点候选', actorId, treeSha256, createdAt: now() }], versions: [] }
+  run.testPointTree = { id: `test_point_tree_${randomUUID()}`, runId: run.id, currentRevision: 0, revisions: [{ revision: 0, parentRevision: null, nodes, operations: [], reason: 'PlanningAgent 测试点候选', actorId, treeSha256, createdAt: now() }], versions: [] }
 }
 
 function validateTreeReferences(run: TestDesignWorkflowRun, nodes: TestPointNodeRevision[]) { const allowedBasis = new Set([...run.basisSnapshot.items.map(item => item.id), ...run.retrievalSnapshot.hits.map(item => item.id)]); const allowedHistorical = new Set(run.historicalSnapshot.items.map(item => item.id)); for (const node of nodes.filter(item => !item.deleted)) { const invalidBasis = node.basisRefs.filter(reference => !allowedBasis.has(reference)); if (invalidBasis.length) throw new TestDesignError('TEST_POINT_BASIS_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定输入之外的依据`, 422, { nodeId: node.nodeId, invalidRefs: invalidBasis }); const invalidHistorical = node.historicalRefs.filter(reference => !allowedHistorical.has(reference)); if (invalidHistorical.length) throw new TestDesignError('TEST_POINT_HISTORICAL_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定快照之外的历史用例`, 422, { nodeId: node.nodeId, invalidRefs: invalidHistorical }) } }
@@ -996,7 +999,7 @@ function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId
     if (current) {
       const previous = currentCaseRevision(current)
       if (previous.contentSha256 !== canonicalSha256(content)) {
-        const revision = createCaseRevision(previous.revision + 1, content, actorId, 'TestDesignAgent 自动修复', previous.content)
+        const revision = createCaseRevision(previous.revision + 1, content, actorId, 'PlanningAgent 自动修复', previous.content)
         current.revisions.push(revision)
         current.currentRevision = revision.revision
         current.reviewState = 'draft'
@@ -1006,7 +1009,7 @@ function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId
     }
     const semanticSha256 = canonicalSha256({ ...content, tags: [...content.tags].sort() })
     const historical = run.historicalSnapshot.items.find(item => item.contentSha256 === semanticSha256)
-    const testCase = newCase(run.id, treeVersion.id, content, historical ? 'historical_unchanged' : 'ai', actorId, historical ? '固定历史用例原样复用' : 'TestDesignAgent 候选')
+    const testCase = newCase(run.id, treeVersion.id, content, historical ? 'historical_unchanged' : 'ai', actorId, historical ? '固定历史用例原样复用' : 'PlanningAgent 候选')
     testCase.candidateRef = candidate.ref
     if (historical) testCase.historicalSourceRef = historical.id
     return testCase
@@ -1131,7 +1134,7 @@ function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { const tre
 function initialAutomaticRepairState(): NonNullable<TestDesignWorkflowRun['automaticRepair']> { return { status: 'idle', attempt: 0, maxAttempts: AUTOMATIC_REPAIR_MAX_ATTEMPTS, blockerCodes: [] } }
 
 function testPointProjectionFiles(projectVersionName: string, tree: NonNullable<TestDesignWorkflowRun['testPointTree']>, version: NonNullable<TestDesignWorkflowRun['testPointTree']>['versions'][number], revision: TestPointTreeRevision): TestDesignWorkspaceFile[] {
-  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test_design`
+  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test-design`
   const canonicalContent = { schemaVersion: 'test-point-tree/v1', treeId: tree.id, runId: tree.runId, version: version.version, versionId: version.id, revision: revision.revision, treeSha256: revision.treeSha256, nodes: revision.nodes }
   const json = `${canonicalJson(canonicalContent)}\n`
   const markdown = [
@@ -1146,7 +1149,7 @@ function testPointProjectionFiles(projectVersionName: string, tree: NonNullable<
 }
 
 function testCaseProjectionFiles(projectVersionName: string, version: TestCaseSetVersion, dataSet: TestDataRequirementSetVersion): TestDesignWorkspaceFile[] {
-  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test_cases`
+  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test-cases`
   const casesJson = `${canonicalJson(version.canonicalContent)}\n`
   const casesMarkdown = markdownCaseSet(version)
   const dataJson = `${canonicalJson({ schemaVersion: 'test-data/v1', id: dataSet.id, version: dataSet.version, contentSha256: dataSet.contentSha256, requirements: dataSet.requirements })}\n`
@@ -1160,7 +1163,7 @@ function testCaseProjectionFiles(projectVersionName: string, version: TestCaseSe
 }
 
 function formalWorkspaceFile(logicalPath: string, sourceType: 'test_point_tree_version' | 'test_case_set_version', sourceId: string, content: string): TestDesignWorkspaceFile {
-  return { logicalPath, sourceType, sourceId, contentSha256: canonicalSha256Text(content), content, displayName: logicalPath.split('/').at(-1) ?? logicalPath }
+  return { logicalPath, sourceType, sourceId, contentSha256: canonicalSha256Text(content), content, displayName: logicalPath.split('/').at(-1) ?? logicalPath, sourceScope: 'formal_output' }
 }
 
 function normalizeWorkspacePath(value: string) { return value.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '') }
@@ -1415,7 +1418,7 @@ function validateSuiteMembers(aggregate: TestDesignState, projectId: string, tes
 function suiteDraftEtag(draft: TestSuiteDraft) { return `"suite-draft:${draft.id}:${canonicalSha256({ contentSha256: draft.contentSha256, status: draft.status, updatedAt: draft.updatedAt })}"` }
 function versionMemberDiff<T extends { caseId: string; revision: number }>(left: T[], right: T[]) { const before = new Map(left.map(item => [item.caseId, item])); const after = new Map(right.map(item => [item.caseId, item])); return [...new Set([...before.keys(), ...after.keys()])].sort().map(caseId => { const from = before.get(caseId); const to = after.get(caseId); return { caseId, change: !from ? 'added' as const : !to ? 'removed' as const : canonicalSha256(from) === canonicalSha256(to) ? 'unchanged' as const : 'modified' as const, ...(from ? { from: structuredClone(from) } : {}), ...(to ? { to: structuredClone(to) } : {}) } }).filter(item => item.change !== 'unchanged') }
 function libraryProjectionFiles(projectVersionName: string, version: TestCaseLibraryVersion, cases: LibraryTestCase[]): TestDesignWorkspaceFile[] {
-  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test_case_library/v${version.version}`
+  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test-case-library/v${version.version}`
   const entries = version.members.map(member => {
     const testCase = required(cases.find(item => item.id === member.caseId), 'LIBRARY_TEST_CASE_NOT_FOUND', '正式用例不存在')
     const revision = required(testCase.revisions.find(item => item.revision === member.revision), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '正式用例 Revision 不存在')
@@ -1436,7 +1439,7 @@ function libraryProjectionFiles(projectVersionName: string, version: TestCaseLib
   })].join('\n')
   const manifestBody = { schemaVersion: 'test-case-library-manifest/v2', versionId: version.id, contentSha256: version.contentSha256, members: entries.map(item => ({ caseId: item.caseId, revision: item.revision, contentSha256: item.contentSha256, executionSpec: item.content.executionSpec, executionReadiness: item.executionReadiness, ...(item.traceability ? { traceability: item.traceability } : { traceabilityStatus: '历史数据未建立正式追溯' }) })), files: [{ name: 'test-cases.json', sha256: canonicalSha256Text(json) }, { name: 'test-cases.md', sha256: canonicalSha256Text(markdown) }] }
   const manifest = `${canonicalJson(manifestBody)}\n`
-  return [{ logicalPath: `${directory}/test-cases.json`, sourceType: 'test_case_library_version', sourceId: version.id, contentSha256: canonicalSha256Text(json), content: json, displayName: `用例库 V${version.version} JSON` }, { logicalPath: `${directory}/test-cases.md`, sourceType: 'test_case_library_version', sourceId: version.id, contentSha256: canonicalSha256Text(markdown), content: markdown, displayName: `用例库 V${version.version} 文档` }, { logicalPath: `${directory}/manifest.json`, sourceType: 'test_case_library_version', sourceId: version.id, contentSha256: canonicalSha256Text(manifest), content: manifest, displayName: `用例库 V${version.version} Manifest` }]
+  return [{ logicalPath: `${directory}/test-cases.json`, sourceType: 'test_case_library_version', sourceId: version.id, contentSha256: canonicalSha256Text(json), content: json, displayName: `用例库 V${version.version} JSON`, sourceScope: 'formal_output' }, { logicalPath: `${directory}/test-cases.md`, sourceType: 'test_case_library_version', sourceId: version.id, contentSha256: canonicalSha256Text(markdown), content: markdown, displayName: `用例库 V${version.version} 文档`, sourceScope: 'formal_output' }, { logicalPath: `${directory}/manifest.json`, sourceType: 'test_case_library_version', sourceId: version.id, contentSha256: canonicalSha256Text(manifest), content: manifest, displayName: `用例库 V${version.version} Manifest`, sourceScope: 'formal_output' }]
 }
 function structuralDiff(before: unknown, after: unknown, path = ''): Array<{ path: string; before?: unknown; after?: unknown }> { if (canonicalSha256(before) === canonicalSha256(after)) return []; if (!before || !after || typeof before !== 'object' || typeof after !== 'object' || Array.isArray(before) || Array.isArray(after)) return [{ path: path || '/', before, after }]; const left = before as Record<string, unknown>; const right = after as Record<string, unknown>; return [...new Set([...Object.keys(left), ...Object.keys(right)])].sort().flatMap(key => structuralDiff(left[key], right[key], `${path}/${key}`)) }
 function applyTreeOperations(current: TestPointNodeRevision[], operations: TestPointTreeOperation[]) { const nodes = structuredClone(current); const active = (id: string) => required(nodes.find(item => item.nodeId === id && !item.deleted), 'TEST_POINT_NOT_FOUND', `测试点 ${id} 不存在`); for (const operation of operations) { if (operation.op === 'add') { if (operation.parentId) active(operation.parentId); nodes.push({ nodeId: `test_point_${randomUUID()}`, parentId: operation.parentId, sortKey: cleanRequired(operation.sortKey, 'sortKey', 200), ...structuredClone(operation.value) }) } else if (operation.op === 'rename') active(operation.nodeId).title = cleanRequired(operation.title, 'title', 500); else if (operation.op === 'update') Object.assign(active(operation.nodeId), structuredClone(operation.patch), { nodeId: operation.nodeId }); else if (operation.op === 'move') { const node = active(operation.nodeId); if (operation.parentId) active(operation.parentId); node.parentId = operation.parentId; node.sortKey = cleanRequired(operation.sortKey, 'sortKey', 200) } else if (operation.op === 'delete') { const target = active(operation.nodeId); target.deleted = true; nodes.filter(item => item.parentId === target.nodeId && !item.deleted).forEach(item => { item.parentId = target.parentId }) } else if (operation.op === 'mark_not_applicable') { const target = active(operation.nodeId); target.applicability = 'not_applicable'; target.assumptions = [...target.assumptions, cleanRequired(operation.reason, 'reason', 2_000)] } else if (operation.op === 'reorder') active(operation.nodeId).sortKey = cleanRequired(operation.sortKey, 'sortKey', 200); else if (operation.op === 'split') { const target = active(operation.nodeId); operation.children.forEach(child => nodes.push({ nodeId: `test_point_${randomUUID()}`, parentId: target.parentId, sortKey: child.sortKey, ...structuredClone(child.value) })); target.deleted = true } else if (operation.op === 'merge') { const target = active(operation.targetNodeId); operation.sourceNodeIds.filter(id => id !== target.nodeId).forEach(id => { active(id).deleted = true }); Object.assign(target, structuredClone(operation.value), { nodeId: target.nodeId }) } } validateTreeNodes(nodes); return nodes }

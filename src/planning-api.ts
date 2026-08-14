@@ -88,8 +88,7 @@ export type PlanningSubAgentRunRecord = {
 
 export type PlanningStageProfile = {
   stage: PlanningWorkflowStage
-  agentKey: 'requirement-analysis' | 'test-design'
-  allowedSkillKeys: string[]
+  agentKey: 'planning'
   allowedToolIds: string[]
   submitToolId?: string
   resultSchemaVersion?: string
@@ -116,8 +115,8 @@ export type PlanningAgentProfile = {
   }
   stageProfiles: PlanningStageProfile[]
   configurations: Array<{
-    scene: 'requirement_analysis' | 'test_design'
-    agentKey: 'requirementAnalysis' | 'testDesign'
+    scene: 'planning'
+    agentKey: 'planning'
     activeVersion: AgentConfigurationVersion | null
   }>
 }

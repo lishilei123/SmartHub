@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { createReadOnlyTools } from '@earendil-works/pi-coding-agent'
 import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { glob as globFiles } from 'glob'
-import type { InputDeliveryManifest, PlanningReviewerSnapshot, ReviewRunSnapshot, TestDesignAgentSnapshot, TestExecutionAgentSnapshot } from '../domain/agent-types.js'
+import type { InputDeliveryManifest, PlanningReviewerSnapshot, PlanningTestDesignSnapshot, ProjectWorkspaceSourceScope, ReviewRunSnapshot, TestExecutionAgentSnapshot } from '../domain/agent-types.js'
 import type { ToolExecutionRequest, ToolExecutionResult } from '../domain/tool-types.js'
 import type { AssetVersion } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -31,6 +31,7 @@ type WorkspaceFile = {
   displayName: string
   content: string
   version?: AssetVersion
+  sourceScope?: ProjectWorkspaceSourceScope
 }
 
 type MaterializedWorkspace = {
@@ -56,7 +57,7 @@ const toolIdByName = new Map(Object.entries(toolNameById).map(([id, name]) => [n
 export class RequirementDocumentWorkspace {
   private materialized?: Promise<MaterializedWorkspace>
 
-  constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot | TestExecutionAgentSnapshot | PlanningReviewerSnapshot) {}
+  constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot | PlanningTestDesignSnapshot | TestExecutionAgentSnapshot | PlanningReviewerSnapshot) {}
 
   async execute(toolId: RequirementWorkspaceToolId, request: ToolExecutionRequest, signal: AbortSignal, onRead?: (observation: RequirementDocumentReadObservation) => void): Promise<ToolExecutionResult> {
     const workspace = await this.ensureMaterialized()
@@ -81,6 +82,7 @@ export class RequirementDocumentWorkspace {
         relativePath: file.relativePath,
          assetVersionIds: file.assetVersionId ? [file.assetVersionId] : [],
         chunkIds,
+        ...(file.sourceScope ? { sourceScope: file.sourceScope } : {}),
         ...range,
       })
       return {
@@ -126,20 +128,37 @@ export class RequirementDocumentWorkspace {
       const filesByPath = new Map<string, WorkspaceFile>()
       for (const directory of workspaceDirectories(workspace)) await mkdir(join(root, ...directory.split('/')), { recursive: true })
       const logicalRoot = workspace.rootLogicalPath ?? workspace.logicalPath
-      const fixedFiles: Array<{ logicalPath: string; assetId?: string; assetVersionId?: string; contentHash: string; displayName: string; content: string; version?: AssetVersion }> = 'workspaceFiles' in this.snapshot
-        ? this.snapshot.workspaceFiles.map(file => ({
-            logicalPath: file.logicalPath,
-            assetId: file.assetId,
-            assetVersionId: file.assetVersionId,
-            contentHash: file.contentSha256,
-            displayName: file.displayName,
-            content: file.content,
-          }))
-        : this.snapshot.assets.map(fixed => {
-            const version = required(state.versions.find(item => item.id === fixed.assetVersionId && item.status === 'ready'), `PI_WORKSPACE_VERSION_UNAVAILABLE: ${fixed.assetVersionId}`)
-            if (version.assetId !== fixed.assetId || version.contentHash !== fixed.assetContentHash) throw new Error(`PI_WORKSPACE_VERSION_DRIFT: ${fixed.assetVersionId}`)
-            return { ...fixed, contentHash: fixed.assetContentHash, content: version.content, version }
+      const fixedFiles: Array<{ logicalPath: string; assetId?: string; assetVersionId?: string; contentHash: string; displayName: string; content: string; version?: AssetVersion; sourceScope?: ProjectWorkspaceSourceScope }> = 'workspaceSnapshot' in this.snapshot
+        ? this.snapshot.workspaceSnapshot.files.map(fixed => {
+            const embedded = 'workspaceFiles' in this.snapshot
+              ? this.snapshot.workspaceFiles.find(file => file.logicalPath === fixed.logicalPath && file.contentSha256 === fixed.contentSha256)
+              : undefined
+            if (embedded) return {
+              logicalPath: fixed.logicalPath,
+              assetId: fixed.assetId,
+              assetVersionId: fixed.assetVersionId,
+              contentHash: fixed.contentSha256,
+              displayName: fixed.displayName,
+              content: embedded.content,
+              sourceScope: fixed.sourceScope,
+            }
+            const assetVersionId = required(fixed.assetVersionId, `PI_WORKSPACE_ASSET_VERSION_REQUIRED: ${fixed.logicalPath}`)
+            const assetId = required(fixed.assetId, `PI_WORKSPACE_ASSET_REQUIRED: ${fixed.logicalPath}`)
+            const version = required(state.versions.find(item => item.id === assetVersionId && item.status === 'ready'), `PI_WORKSPACE_VERSION_UNAVAILABLE: ${assetVersionId}`)
+            if (version.assetId !== assetId || version.contentHash !== fixed.contentSha256) throw new Error(`PI_WORKSPACE_VERSION_DRIFT: ${assetVersionId}`)
+            return { ...fixed, contentHash: fixed.contentSha256, content: version.content, version }
           })
+        : 'workspaceFiles' in this.snapshot
+          ? this.snapshot.workspaceFiles.map(file => ({
+              logicalPath: file.logicalPath,
+              assetId: file.assetId,
+              assetVersionId: file.assetVersionId,
+              contentHash: file.contentSha256,
+              displayName: file.displayName,
+              content: file.content,
+              ...('sourceScope' in file && isProjectWorkspaceSourceScope(file.sourceScope) ? { sourceScope: file.sourceScope } : {}),
+            }))
+          : (() => { throw new Error('PROJECT_WORKSPACE_SNAPSHOT_REQUIRED') })()
       for (const fixed of fixedFiles) {
         const relativePath = relativeLogicalPath(logicalRoot, fixed.logicalPath)
         const key = pathKey(relativePath)
@@ -157,6 +176,7 @@ export class RequirementDocumentWorkspace {
           contentHash: fixed.contentHash,
           displayName: fixed.displayName,
           content: fixed.content,
+          sourceScope: fixed.sourceScope,
           ...(fixed.version ? { version: fixed.version } : {}),
         })
       }
@@ -252,6 +272,7 @@ function workspaceDirectories(workspace: NonNullable<ReviewRunSnapshot['document
   const root = normalizedLogicalPath(workspace.rootLogicalPath)
   const relativeBranchPaths = [...new Set([...(workspace.branchLogicalPaths ?? []), workspace.activeBranchLogicalPath])].map(branch => relativeLogicalPath(root, branch))
   return [
+    'branches',
     ...relativeBranchPaths.flatMap(branch => [
       branch,
       `${branch}/input`,
@@ -260,20 +281,29 @@ function workspaceDirectories(workspace: NonNullable<ReviewRunSnapshot['document
       `${branch}/input/ui`,
       `${branch}/input/environment`,
       `${branch}/requirements`,
-      `${branch}/test_design`,
-      `${branch}/test_cases`,
+      `${branch}/test-design`,
+      `${branch}/test-cases`,
       `${branch}/scripts`,
       `${branch}/execution`,
       `${branch}/reports`,
     ]),
+    'shared',
     'shared/knowledge',
     'shared/common_scripts',
     'shared/common_docs',
-    'agent_workspace/requirement_agent',
-    'agent_workspace/design_agent',
+    'formal-output',
+    'agent_workspace/planning_agent',
     'agent_workspace/execution_agent',
     'agent_workspace/report_agent',
   ]
+}
+
+function isProjectWorkspaceSourceScope(value: unknown): value is ProjectWorkspaceSourceScope {
+  return value === 'current_input'
+    || value === 'current_branch'
+    || value === 'shared'
+    || value === 'historical_branch'
+    || value === 'formal_output'
 }
 
 function observedReadRange(content: string, args: Record<string, unknown>, details: unknown) {

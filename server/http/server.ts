@@ -73,7 +73,7 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'OPTIONS') return send(response, 204, null)
   if (method === 'GET' && url.pathname === '/api/health') return send(response, 200, { status: 'ok' })
   const principal = await controls.authenticate(request).catch(() => { throw new UnauthenticatedError() })
-  const agentConfiguration = /^\/api\/agent-configurations\/(requirement-analysis|test-design|test-execution)(?:\/(draft|publish))?$/.exec(url.pathname)
+  const agentConfiguration = /^\/api\/agent-configurations\/(planning|test-execution)(?:\/(draft|publish))?$/.exec(url.pathname)
   if (agentConfiguration) {
     const scene = agentConfigurationScene(agentConfiguration[1])
     if (method === 'GET' && !agentConfiguration[2]) return send(response, 200, await agentConfigurationService.get(scene))
@@ -214,7 +214,12 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   const releaseCandidate = /^\/api\/requirement-analysis-runs\/([^/]+)\/release-candidate$/.exec(url.pathname)
   if (method === 'POST' && releaseCandidate) { await requireRun(releaseCandidate[1], 'requirement-analysis:create'); return send(response, 201, await requirementAnalysisService.createReleaseCandidate(releaseCandidate[1], { principal })) }
   const releasePublish = /^\/api\/requirement-analysis-runs\/([^/]+)\/release\/publish$/.exec(url.pathname)
-  if (method === 'POST' && releasePublish) { await requireRun(releasePublish[1], 'project-version:manage'); return send(response, 200, await requirementAnalysisService.publishRelease(releasePublish[1], { principal })) }
+  if (method === 'POST' && releasePublish) {
+    await requireRun(releasePublish[1], 'project-version:manage')
+    const release = await requirementAnalysisService.publishRelease(releasePublish[1], { principal })
+    await planningWorkflowService.requirementReleasePublished(releasePublish[1])
+    return send(response, 200, release)
+  }
   const releaseArtifact = /^\/api\/requirement-analysis-runs\/([^/]+)\/release\/artifacts\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && releaseArtifact) {
     await requireRun(releaseArtifact[1], 'requirement-analysis:read')
@@ -504,8 +509,7 @@ async function json(request: IncomingMessage, maximumBytes = 128 * 1024 * 1024) 
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {}
 }
 function agentConfigurationScene(path: string): AgentConfigurationScene {
-  if (path === 'requirement-analysis') return 'requirement_analysis'
-  if (path === 'test-design') return 'test_design'
+  if (path === 'planning') return 'planning'
   return 'test_execution'
 }
 function send(response: ServerResponse, status: number, body: unknown) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'content-type, authorization, idempotency-key, if-match', 'access-control-expose-headers': 'etag, content-disposition' }); response.end(body == null ? '' : JSON.stringify(body)) }

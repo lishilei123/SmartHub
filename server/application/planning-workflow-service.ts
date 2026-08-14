@@ -29,6 +29,7 @@ import type { AgentConfigurationService } from './agent-configuration-service.js
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import type { RequirementAnalysisService } from './requirement-analysis-service.js'
 import type { TestDesignService } from './test-design-service.js'
+import { safeWorkspaceSegment } from './project-workspace-snapshot.js'
 
 export interface TestDesignReviewerSourceSelection {
   testPointTreeRevision: number
@@ -49,7 +50,7 @@ const REQUIREMENT_WORKSPACE_TOOLS = [
   'workspace.list_directory',
 ] as const
 
-const TEST_DESIGN_WORKSPACE_TOOLS = [
+const PLANNING_WORKSPACE_TOOLS = [
   ...REQUIREMENT_WORKSPACE_TOOLS,
   'knowledge.search',
   'knowledge.read_chunk',
@@ -59,18 +60,14 @@ const TEST_DESIGN_WORKSPACE_TOOLS = [
 const STAGE_PROFILES: PlanningStageProfile[] = [
   stage(
     'requirement_analysis',
-    'requirement-analysis',
-    ['requirement.baseline', 'requirement.analysis'],
-    [...REQUIREMENT_WORKSPACE_TOOLS, 'requirement-analysis.submit_result'],
+    [...PLANNING_WORKSPACE_TOOLS, 'requirement-analysis.submit_result'],
     'requirement-analysis.submit_result',
     'requirement-analysis/v1',
     ['requirement'],
   ),
   stage(
     'requirement_repair',
-    'requirement-analysis',
-    ['requirement.repair'],
-    [...REQUIREMENT_WORKSPACE_TOOLS, 'requirement-repair.submit_result'],
+    [...PLANNING_WORKSPACE_TOOLS, 'requirement-repair.submit_result'],
     'requirement-repair.submit_result',
     'requirement-repair/v1',
     ['requirement'],
@@ -78,22 +75,14 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
   ),
   stage(
     'requirement_verification',
-    'requirement-analysis',
-    [
-      'requirement.baseline',
-      'requirement.analysis',
-      'requirement.verification',
-    ],
-    [...REQUIREMENT_WORKSPACE_TOOLS, 'requirement-analysis.submit_result'],
+    [...PLANNING_WORKSPACE_TOOLS, 'requirement-analysis.submit_result'],
     'requirement-analysis.submit_result',
     'requirement-analysis/v1',
     ['requirement'],
   ),
   stage(
     'requirement_release',
-    'requirement-analysis',
-    ['requirement.release'],
-    [...REQUIREMENT_WORKSPACE_TOOLS, 'requirement-release.submit_result'],
+    [...PLANNING_WORKSPACE_TOOLS, 'requirement-release.submit_result'],
     'requirement-release.submit_result',
     'requirement-release-candidate/v1',
     [],
@@ -101,10 +90,8 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
   ),
   stage(
     'test_point_design',
-    'test-design',
-    [...TEST_DESIGN_STAGE_BINDINGS.test_point_design.skills],
     [
-      ...TEST_DESIGN_WORKSPACE_TOOLS,
+      ...PLANNING_WORKSPACE_TOOLS,
       TEST_DESIGN_STAGE_BINDINGS.test_point_design.submitToolId,
     ],
     TEST_DESIGN_STAGE_BINDINGS.test_point_design.submitToolId,
@@ -113,8 +100,6 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
   ),
   stage(
     'test_point_review',
-    'test-design',
-    [],
     [],
     undefined,
     undefined,
@@ -123,10 +108,8 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
   ),
   stage(
     'test_case_design',
-    'test-design',
-    [...TEST_DESIGN_STAGE_BINDINGS.test_case_design.skills],
     [
-      ...TEST_DESIGN_WORKSPACE_TOOLS,
+      ...PLANNING_WORKSPACE_TOOLS,
       TEST_DESIGN_STAGE_BINDINGS.test_case_design.submitToolId,
     ],
     TEST_DESIGN_STAGE_BINDINGS.test_case_design.submitToolId,
@@ -135,10 +118,8 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
   ),
   stage(
     'test_design_repair',
-    'test-design',
-    [...TEST_DESIGN_STAGE_BINDINGS.test_design_repair.skills],
     [
-      ...TEST_DESIGN_WORKSPACE_TOOLS,
+      ...PLANNING_WORKSPACE_TOOLS,
       TEST_DESIGN_STAGE_BINDINGS.test_design_repair.submitToolId,
     ],
     TEST_DESIGN_STAGE_BINDINGS.test_design_repair.submitToolId,
@@ -147,8 +128,6 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
   ),
   stage(
     'test_design_release',
-    'test-design',
-    [],
     [],
     undefined,
     undefined,
@@ -167,10 +146,7 @@ export class PlanningWorkflowService {
   ) {}
 
   async profile(): Promise<PlanningAgentProfile> {
-    const [requirementAnalysis, testDesign] = await Promise.all([
-      this.configurations.resolveActive('requirement-analysis'),
-      this.configurations.resolveActive('test-design'),
-    ])
+    const planning = await this.configurations.resolveActive('planning')
     const context = this.runtime.contextProfile()
     return {
       agentKey: 'planning',
@@ -192,14 +168,9 @@ export class PlanningWorkflowService {
       stageProfiles: structuredClone(STAGE_PROFILES),
       configurations: [
         {
-          scene: 'requirement_analysis',
-          agentKey: 'requirementAnalysis',
-          activeVersion: requirementAnalysis,
-        },
-        {
-          scene: 'test_design',
-          agentKey: 'testDesign',
-          activeVersion: testDesign,
+          scene: 'planning',
+          agentKey: 'planning',
+          activeVersion: planning,
         },
       ],
     }
@@ -225,6 +196,37 @@ export class PlanningWorkflowService {
         planningScope(projectVersion.projectId, projectVersion.id),
       ) ?? null,
     }
+  }
+
+  async requirementReleasePublished(runId: string) {
+    const state = await this.store.snapshot()
+    const run = required(state.reviewRuns.find(item => item.id === runId), 'REQUIREMENT_RUN_NOT_FOUND')
+    const release = required(run.workflow?.release, 'REQUIREMENT_RELEASE_NOT_FOUND')
+    if (release.status !== 'published') throw new Error('REQUIREMENT_RELEASE_NOT_PUBLISHED')
+    const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), 'PROJECT_VERSION_NOT_FOUND')
+    const project = required(state.projects.find(item => item.id === projectVersion.projectId), 'PROJECT_NOT_FOUND')
+    return this.runtime.appendPlanningTask({
+      projectId: project.id,
+      projectVersionId: projectVersion.id,
+      taskType: 'test_design_after_requirement_release',
+      task: [
+        '需求分析已经完成。',
+        '',
+        `当前正式需求基线：Requirement Release = ${release.id}`,
+        `requirements.json SHA-256 = ${projectVersion.requirementReleaseBinding?.requirementsJsonSha256 ?? '未绑定'}`,
+        '',
+        '现在开始测试设计。',
+        '',
+        '请以当前 ProjectVersion 绑定的 Requirement Release 为正式需求基线，结合冻结 Project Workspace 中的产品原型、API 文档、shared、公共资料和可参考资料，自主完成测试点设计和测试用例编写。',
+        '请自主选择当前 Agent Configuration 中已启用的测试设计 Skills，并按需使用 workspace.list_directory、workspace.find_files、workspace.grep_files、workspace.read_file、knowledge.search 与 knowledge.read_chunk。',
+        '未实际读取的文件不得假设其内容；缺少阈值、时长、兼容矩阵或其他业务事实时保持 needs_confirmation/blocked。正式 TestCase、Library 与 Handoff 仍由 TestDesignService、Validator 和人工 Gate 控制。',
+      ].join('\n'),
+      metadata: {
+        requirementReleaseId: release.id,
+        verificationRunId: release.verificationRunId,
+        releaseContentSha256: release.contentSha256,
+      },
+    })
   }
 
   async reviewRequirement(
@@ -420,8 +422,6 @@ export class PlanningWorkflowService {
 
 function stage(
   planningStage: PlanningStageProfile['stage'],
-  agentKey: PlanningStageProfile['agentKey'],
-  allowedSkillKeys: string[],
   allowedToolIds: string[],
   submitToolId: string | undefined,
   resultSchemaVersion: string | undefined,
@@ -430,8 +430,7 @@ function stage(
 ): PlanningStageProfile {
   return {
     stage: planningStage,
-    agentKey,
-    allowedSkillKeys,
+    agentKey: 'planning',
     allowedToolIds,
     ...(submitToolId ? { submitToolId } : {}),
     ...(resultSchemaVersion ? { resultSchemaVersion } : {}),
@@ -764,7 +763,7 @@ function testDesignReviewerProjection(
     )?.logicalPath,
     'TEST_DESIGN_REQUIREMENTS_FILE_NOT_FOUND',
   )
-  const reviewRoot = `workspace/agent_workspace/design_agent/reviewer/${run.id}`
+  const reviewRoot = `workspace/agent_workspace/planning_agent/reviewer/${run.id}`
   const tree = required(
     run.testPointTree?.id === sourceReference.testPointTreeId
       ? run.testPointTree
@@ -911,7 +910,7 @@ function testDesignReviewerProjection(
       logicalPath: run.workspaceSnapshot.rootLogicalPath,
       rootLogicalPath: run.workspaceSnapshot.rootLogicalPath,
       activeBranchLogicalPath: run.workspaceSnapshot.activeBranchLogicalPath,
-      branchLogicalPaths: [run.workspaceSnapshot.activeBranchLogicalPath],
+      branchLogicalPaths: state.projectVersions.filter(item => item.projectId === project.id).map(item => `workspace/branches/${safeWorkspaceSegment(item.name)}`),
       agentLogicalPath: run.workspaceSnapshot.agentLogicalPath,
       layoutVersion: 'workspace/v1',
       candidateAssetVersionIds: [],
@@ -977,6 +976,7 @@ function candidateFile(
     contentSha256: sha256Text(content),
     content,
     displayName: logicalPath.split('/').at(-1) ?? logicalPath,
+    sourceScope: 'formal_output',
   }
 }
 

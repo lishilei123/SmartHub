@@ -2,29 +2,27 @@ import { createHash } from 'node:crypto'
 import type { AgentConfigurationService } from '../application/agent-configuration-service.js'
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
-import type { TestDesignAgentRuntime } from '../application/test-design-service.js'
+import type { PlanningAgentRuntime } from '../application/test-design-service.js'
 import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate } from '../application/test-design-validation.js'
-import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, SkillResource, ToolResource } from '../domain/types.js'
-import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, TestDesignAgentSnapshot } from '../domain/agent-types.js'
+import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
+import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
 import type { TestDesign, TestDesignRunAgentConfigurationSnapshot, TestDesignWorkflowRun, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
 import type { StateStore } from '../infrastructure/store.js'
+import { safeWorkspaceSegment } from '../application/project-workspace-snapshot.js'
 import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
 
 const WORKSPACE_TOOL_IDS = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate'] as const
 
 export const TEST_DESIGN_STAGE_BINDINGS = {
   test_point_design: {
-    skills: ['test-design-baseline', 'test-point-design'],
     submitToolId: 'test_design_points.submit_result',
     schemaVersion: 'test-point-design/v1',
   },
   test_case_design: {
-    skills: ['test-case-design'],
     submitToolId: 'test_design_cases.submit_result',
     schemaVersion: 'test-case-design/v1',
   },
   test_design_repair: {
-    skills: ['test-design-repair'],
     submitToolId: 'test_design_repair.submit_result',
     schemaVersion: 'test-design-repair/v1',
   },
@@ -32,27 +30,37 @@ export const TEST_DESIGN_STAGE_BINDINGS = {
 
 type TestDesignStage = keyof typeof TEST_DESIGN_STAGE_BINDINGS
 const ALL_SUBMISSION_TOOLS = Object.values(TEST_DESIGN_STAGE_BINDINGS).map(item => item.submitToolId)
-const ALL_SKILLS = [...new Set(Object.values(TEST_DESIGN_STAGE_BINDINGS).flatMap(item => [...item.skills]))]
 
-export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
+export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
   constructor(private readonly store: StateStore, private readonly piRuntime: PiAgentRuntimeAdapter, private readonly configurations: AgentConfigurationService) {}
 
-  async readiness() {
-    const agentKey = 'test-design'
-    const configuration = await this.configurations.resolveActive(agentKey)
-    if (!configuration) return { ready: false, agents: [{ agentKey, ready: false, reason: '未发布 TestDesignAgent 配置' }] }
+  async readiness(projectVersionId?: string) {
+    const agentKey = 'planning'
+    const state = await this.store.snapshot()
+    const projectVersion = projectVersionId ? state.projectVersions.find(item => item.id === projectVersionId) : undefined
+    const verificationRun = projectVersion?.requirementReleaseBinding
+      ? state.reviewRuns.find(item => item.id === projectVersion.requirementReleaseBinding?.verificationRunId)
+      : undefined
+    const configurationId = verificationRun?.snapshot.agentConfigurationRef?.id
+    const configuration = configurationId
+      ? await this.configurations.resolveVersion(configurationId)
+      : await this.configurations.resolveActive(agentKey)
+    if (!configuration) return { ready: false, agents: [{ agentKey, ready: false, reason: '未发布 PlanningAgent 配置' }] }
     try {
-      validateConfiguration(configuration, await this.store.snapshot())
+      validateConfiguration(configuration, state)
       return { ready: true, agents: [{ agentKey, ready: true }] }
     } catch (error) {
       return { ready: false, agents: [{ agentKey, ready: false, reason: error instanceof Error ? error.message : String(error) }] }
     }
   }
 
-  async freezeConfiguration(): Promise<TestDesignRunAgentConfigurationSnapshot> {
-    const configuration = await this.configurations.resolveActive('test-design')
-    if (!configuration) throw new Error('TEST_DESIGN_AGENT_NOT_READY: TestDesignAgent 未发布')
+  async freezeConfiguration(projectVersionId: string): Promise<TestDesignRunAgentConfigurationSnapshot> {
     const state = await this.store.snapshot()
+    const projectVersion = state.projectVersions.find(item => item.id === projectVersionId)
+    const verificationRun = state.reviewRuns.find(item => item.id === projectVersion?.requirementReleaseBinding?.verificationRunId)
+    const configurationId = verificationRun?.snapshot.agentConfigurationRef?.id
+    if (!configurationId) throw new Error('TEST_DESIGN_AGENT_NOT_READY: Requirement Release 未绑定固定 PlanningAgent 配置')
+    const configuration = await this.configurations.resolveVersion(configurationId)
     validateConfiguration(configuration, state)
     const model = resolveModel(state, configuration)
     const createdAt = new Date().toISOString()
@@ -76,7 +84,7 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
     return { ...base, snapshotSha256: canonicalSha256(base) }
   }
 
-  async execute(input: Parameters<TestDesignAgentRuntime['execute']>[0], signal: AbortSignal): Promise<Awaited<ReturnType<TestDesignAgentRuntime['execute']>>> {
+  async execute(input: Parameters<PlanningAgentRuntime['execute']>[0], signal: AbortSignal): Promise<Awaited<ReturnType<PlanningAgentRuntime['execute']>>> {
     const stage = input.stage as TestDesignStage
     const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
     const configuration = await this.configurations.resolveVersion(input.run.agentConfigurationSnapshot.configurationId)
@@ -97,7 +105,7 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
     const design = state.testDesignState?.designs.find(item => item.id === input.run.testDesignId && item.projectVersionId === input.run.projectVersionId)
     if (!design) throw new Error('TEST_DESIGN_INPUT_NOT_FOUND: 测试设计定义不存在')
     const workspace = stageWorkspace(input.run, stage)
-    const task = buildTestDesignAgentTask(input.run, design, stage, workspace)
+    const task = buildPlanningTestDesignTask(input.run, design, stage, workspace)
     const snapshot = buildAgentSnapshot(state, input.run, workspace, configuration, task)
     const inputPlan = buildTestDesignDirectoryInputPlan({ workspace, definition: configuration.agentDefinition, contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens })
     const events: AgentExecutionEvent[] = []
@@ -109,11 +117,10 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
         executionProfile: {
           mode: 'workspace_tools',
           workflowStage: stage,
-          allowedSkillKeys: [...binding.skills],
           allowedToolIds: [...WORKSPACE_TOOL_IDS, binding.submitToolId],
           submitToolId: binding.submitToolId,
           schemaVersion: binding.schemaVersion,
-          agentLabel: 'TestDesignAgent',
+          agentLabel: 'PlanningAgent',
           initialTask: task,
           validateCandidate: async (candidate, manifest) => validateStageCandidate(stage, candidate, input.run, manifest),
         },
@@ -122,7 +129,7 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
       return {
         schemaVersion: binding.schemaVersion,
         content: structuredClone(output.candidate),
-        execution: executionRecord(stage, configuration.agentDefinition.version, model.modelName, output.events, output.turns, output.toolCalls, output.toolErrors, output.framework, output.context),
+        execution: executionRecord(stage, configuration.agentDefinition.version, model.modelName, output.events, output.turns, output.toolCalls, output.toolErrors, output.framework, output.context, output.inputDeliveryManifest),
       }
     } catch (error) {
       const failure = new Error(error instanceof Error ? error.message : String(error), { cause: error }) as Error & { execution?: ReturnType<typeof executionRecord> }
@@ -132,23 +139,24 @@ export class PiTestDesignRuntimeAdapter implements TestDesignAgentRuntime {
   }
 }
 
-export function buildTestDesignAgentTask(run: TestDesignWorkflowRun, design: TestDesign, stage: TestDesignStage, workspace: TestDesignWorkspaceSnapshot) {
+export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: TestDesign, stage: TestDesignStage, workspace: TestDesignWorkspaceSnapshot) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
   const treeVersion = run.testPointTree?.versions.find(item => item.id === run.testPointTree?.currentApprovedVersionId)
   const repairAudit = stage === 'test_design_repair' ? run.coverageAudits.find(item => item.id === run.automaticRepair?.triggerAuditId) : undefined
   return canonicalJson({
     schemaVersion: 'test-design-agent-task/v1',
-    agent: 'TestDesignAgent',
+    agent: 'PlanningAgent',
     stage,
     runId: run.id,
     projectVersionId: run.projectVersionId,
     requirementRelease: { releaseId: run.basisSnapshot.requirementReleaseId, verificationRunId: run.basisSnapshot.verificationRunId, requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256 },
     workspace: { root: '/workspace', activeBranch: `/${workspace.activeBranchLogicalPath}`, agentDirectory: `/${workspace.agentLogicalPath}`, snapshotSha256: workspace.snapshotSha256 },
     design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
-    stageContract: { allowedSkills: binding.skills, submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
-    ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test_design/test-point-tree.json` } } : {}),
-    ...(repairAudit ? { repair: { attempt: run.automaticRepair?.attempt, maxAttempts: run.automaticRepair?.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/design_agent/current-test-cases.json' } } : {}),
-    instructions: ['Workflow 已固定 Stage，不能自行切换。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', '如存在 /workspace/agent_workspace/design_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须分离；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
+    agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
+    stageContract: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
+    ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test-design/test-point-tree.json` } } : {}),
+    ...(repairAudit ? { repair: { attempt: run.automaticRepair?.attempt, maxAttempts: run.automaticRepair?.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
+    instructions: ['Workflow 已固定业务任务与提交协议，但不调度 Skill；PlanningAgent 从 Enabled Skills 自主选择需要的能力。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', '如存在 /workspace/agent_workspace/planning_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须分离；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
   })
 }
 
@@ -157,7 +165,7 @@ function stageWorkspace(run: TestDesignWorkflowRun, stage: TestDesignStage): Tes
   for (const file of run.formalWorkspaceFiles) byPath.set(file.logicalPath, structuredClone(file))
   if (stage === 'test_design_repair') {
     const content = repairCandidateContent(run)
-    const file: TestDesignWorkspaceFile = { logicalPath: 'workspace/agent_workspace/design_agent/current-test-cases.json', sourceType: 'run_candidate', sourceId: `${run.id}:repair:${run.automaticRepair?.attempt ?? 0}`, contentSha256: canonicalSha256(content), content: `${canonicalJson(content)}\n`, displayName: 'current-test-cases.json' }
+    const file: TestDesignWorkspaceFile = { logicalPath: 'workspace/agent_workspace/planning_agent/current-test-cases.json', sourceType: 'run_candidate', sourceId: `${run.id}:repair:${run.automaticRepair?.attempt ?? 0}`, contentSha256: canonicalSha256(content), content: `${canonicalJson(content)}\n`, displayName: 'current-test-cases.json', sourceScope: 'formal_output' }
     file.contentSha256 = sha256Text(file.content)
     byPath.set(file.logicalPath, file)
   }
@@ -181,7 +189,7 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
   }
 }
 
-function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, workspace: TestDesignWorkspaceSnapshot, configuration: AgentConfigurationVersion, task: string): TestDesignAgentSnapshot {
+function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, workspace: TestDesignWorkspaceSnapshot, configuration: AgentConfigurationVersion, task: string): PlanningTestDesignSnapshot {
   const projectVersion = state.projectVersions.find(item => item.id === run.projectVersionId)
   const project = state.projects.find(item => item.id === projectVersion?.projectId)
   if (!projectVersion || !project) throw new Error('TEST_DESIGN_PROJECT_SNAPSHOT_INVALID: 项目版本不存在')
@@ -194,8 +202,9 @@ function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, wo
     knowledgeBaseId: workspace.knowledgeBaseId,
     indexVersionId: workspace.indexVersionId,
     assets: workspace.files.flatMap(file => file.assetId && file.assetVersionId ? [{ assetId: file.assetId, assetVersionId: file.assetVersionId, assetContentHash: file.contentSha256, logicalPath: file.logicalPath, displayName: file.displayName }] : []),
-    documentWorkspace: { mode: 'agent_directory', logicalPath: workspace.rootLogicalPath, rootLogicalPath: workspace.rootLogicalPath, activeBranchLogicalPath: workspace.activeBranchLogicalPath, branchLogicalPaths: [workspace.activeBranchLogicalPath], agentLogicalPath: workspace.agentLogicalPath, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] },
+    documentWorkspace: { mode: 'agent_directory', logicalPath: workspace.rootLogicalPath, rootLogicalPath: workspace.rootLogicalPath, activeBranchLogicalPath: workspace.activeBranchLogicalPath, branchLogicalPaths: state.projectVersions.filter(item => item.projectId === project.id).map(item => `workspace/branches/${safeWorkspaceSegment(item.name)}`), agentLogicalPath: workspace.agentLogicalPath, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] },
     workspaceFiles: workspace.files,
+    workspaceSnapshot: workspace,
     agentDefinition: structuredClone(configuration.agentDefinition),
     taskSha256: canonicalSha256(task),
     createdAt: new Date().toISOString(),
@@ -208,9 +217,9 @@ async function validateStageCandidate(stage: TestDesignStage, candidate: Record<
   const requiredPaths = stage === 'test_point_design'
     ? [`${branchRelative}/requirements/requirements.json`]
     : stage === 'test_case_design'
-    ? [`${branchRelative}/requirements/requirements.json`, `${branchRelative}/test_design/test-point-tree.json`]
-    : ['agent_workspace/design_agent/current-test-cases.json', `${branchRelative}/test_design/test-point-tree.json`]
-  if (run.historicalSnapshot.items.length && stage !== 'test_design_repair') requiredPaths.push('agent_workspace/design_agent/historical-test-cases.json')
+    ? [`${branchRelative}/requirements/requirements.json`, `${branchRelative}/test-design/test-point-tree.json`]
+    : ['agent_workspace/planning_agent/current-test-cases.json', `${branchRelative}/test-design/test-point-tree.json`]
+  if (run.historicalSnapshot.items.length && stage !== 'test_design_repair') requiredPaths.push('agent_workspace/planning_agent/historical-test-cases.json')
   const missingReads = requiredPaths.filter(path => !readPaths.has(path))
   if (missingReads.length) return { valid: false, issues: missingReads.map(path => ({ path: '/workspaceReads', message: `提交前必须用 read 读取 /workspace/${path}` })) }
   try {
@@ -232,25 +241,16 @@ function approvedPointIds(run: TestDesignWorkflowRun) {
   return new Set(active.filter(item => item.applicability !== 'not_applicable' && !parents.has(item.nodeId)).map(item => item.nodeId))
 }
 
-function executionRecord(stage: TestDesignStage, agentVersion: string, modelLabel: string, events: AgentExecutionEvent[], turns?: number, toolCalls?: number, toolErrors?: number, framework: AgentExecutionOutput['framework'] = { name: 'pi-agent-core', version: piVersion }, context?: AgentExecutionContext) {
-  return { agentKey: 'test-design' as const, workflowStage: stage, agentVersion, modelLabel, degraded: false, turns: turns ?? Math.max(0, ...events.map(event => event.turn ?? 0)), toolCalls: toolCalls ?? events.filter(event => event.type === 'tool_execution_start').length, toolErrors: toolErrors ?? events.filter(event => event.type === 'tool_execution_end' && event.isError).length, events: structuredClone(events), framework, ...(context ? { context: structuredClone(context) } : {}) }
+function executionRecord(stage: TestDesignStage, agentVersion: string, modelLabel: string, events: AgentExecutionEvent[], turns?: number, toolCalls?: number, toolErrors?: number, framework: AgentExecutionOutput['framework'] = { name: 'pi-agent-core', version: piVersion }, context?: AgentExecutionContext, inputDeliveryManifest?: InputDeliveryManifest) {
+  return { agentKey: 'planning' as const, workflowStage: stage, agentVersion, modelLabel, degraded: false, turns: turns ?? Math.max(0, ...events.map(event => event.turn ?? 0)), toolCalls: toolCalls ?? events.filter(event => event.type === 'tool_execution_start').length, toolErrors: toolErrors ?? events.filter(event => event.type === 'tool_execution_end' && event.isError).length, events: structuredClone(events), framework, ...(context ? { context: structuredClone(context) } : {}), ...(inputDeliveryManifest ? { inputDeliveryManifest: structuredClone(inputDeliveryManifest) } : {}) }
 }
 
 function validateConfiguration(configuration: AgentConfigurationVersion, state: DatabaseState) {
   const definition = configuration.agentDefinition
-  if (definition.agentKey !== 'test-design' || definition.agentType !== 'test_design' || definition.modelScene !== 'test_design' || definition.resultSchemaVersion !== 'test-design/v1') throw new Error('TestDesignAgent 配置类型不兼容')
+  if (definition.agentKey !== 'planning' || definition.agentType !== 'planning' || definition.modelScene !== 'planning' || definition.resultSchemaVersion !== 'planning/v1') throw new Error('PlanningAgent 配置类型不兼容')
   const allowedTools = new Set<string>([...WORKSPACE_TOOL_IDS, ...ALL_SUBMISSION_TOOLS])
   const missingTools = [...allowedTools].filter(toolId => !definition.toolIds.includes(toolId))
-  const extraTools = definition.toolIds.filter(toolId => !allowedTools.has(toolId))
-  if (missingTools.length || extraTools.length) throw new Error(`TestDesignAgent 工具白名单不兼容${missingTools.length ? `；缺少 ${missingTools.join(', ')}` : ''}${extraTools.length ? `；包含未授权工具 ${extraTools.join(', ')}` : ''}`)
-  if (definition.mcpBindings.some(item => item.enabled)) throw new Error('TestDesignAgent 不允许绑定 MCP')
-  const enabledSkills = new Set(definition.skillBindings.filter(item => item.enabled).map(item => item.skillKey))
-  const missingSkills = ALL_SKILLS.filter(skill => !enabledSkills.has(skill))
-  if (missingSkills.length) throw new Error(`TestDesignAgent 缺少 Skill 绑定 ${missingSkills.join(', ')}`)
-  for (const skillKey of ALL_SKILLS) {
-    const skill = state.aiResources.find((item): item is SkillResource => item.kind === 'skill' && item.key === skillKey && item.enabled)
-    if (!skill) throw new Error(`Skill ${skillKey} 不可用`)
-  }
+  if (missingTools.length) throw new Error(`PlanningAgent 工具白名单不兼容；缺少 ${missingTools.join(', ')}`)
   for (const toolId of ALL_SUBMISSION_TOOLS) {
     const tool = state.aiResources.find((item): item is ToolResource => item.kind === 'tool' && item.key === toolId && item.enabled)
     if (!tool || tool.risk !== 'internal_write') throw new Error(`结果提交工具 ${toolId} 不可用`)
@@ -260,7 +260,7 @@ function validateConfiguration(configuration: AgentConfigurationVersion, state: 
 
 function resolveModel(state: DatabaseState, configuration: AgentConfigurationVersion): AgentModelConnection {
   const reference = configuration.routing.primaryModel
-  if (!reference) throw new Error('TestDesignAgent 未选择默认模型')
+  if (!reference) throw new Error('PlanningAgent 未选择默认模型')
   const { source, model } = modelByReference(state, reference)
   if (!source.enabled || !model.enabled || model.health !== 'healthy' || !model.qualityGate?.passed || !model.capabilities.includes('tool_calling')) throw new Error(`${source.name} / ${model.displayName} 未通过模型门禁`)
   return { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: model.contextWindow, maxOutputTokens: configuration.routing.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning'), requestTimeoutMs: configuration.routing.requestTimeoutSeconds * 1_000, retryCount: configuration.routing.retryCount }
@@ -269,7 +269,7 @@ function resolveModel(state: DatabaseState, configuration: AgentConfigurationVer
 function modelByReference(state: DatabaseState, reference: AgentModelReference): { source: GenerativeModelSource; model: GenerativeModel } {
   const source = state.modelSources.find(item => item.id === reference.sourceId)
   const model = source?.models.find(item => item.id === reference.modelId)
-  if (!source || !model) throw new Error('TestDesignAgent 模型引用不存在')
+  if (!source || !model) throw new Error('PlanningAgent 模型引用不存在')
   return { source, model }
 }
 

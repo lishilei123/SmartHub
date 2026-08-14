@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { defaultTokenCodec } from '../application/content.js'
 import type {
   AgentDefinitionVersion,
+  CurrentInputRef,
+  ProjectWorkspaceSnapshot,
   RequirementInputPlan,
   TestExecutionAgentSnapshot,
 } from '../domain/agent-types.js'
@@ -22,16 +24,13 @@ export function buildRequirementDirectoryInputPlan(input: {
   activeBranchPath?: string
   agentWorkspacePath?: string
   assets: RequirementContextAsset[]
+  currentInputRefs: CurrentInputRef[]
+  workspaceSnapshot: ProjectWorkspaceSnapshot
   definition: AgentDefinitionVersion
   contextWindow: number
   maxOutputTokens: number
 }): RequirementInputPlan {
   const safeInputBudget = safeBudget(input)
-  const workspaceSnapshotSha256 = sha256(JSON.stringify(input.assets.map(({ asset, version }) => ({
-    logicalPath: asset.logicalPath,
-    assetVersionId: version.id,
-    contentHash: version.contentHash,
-  }))))
   const content = [
     '<<<SMARTHUB_PI_DOCUMENT_WORKSPACE_BEGIN>>>',
     JSON.stringify({
@@ -41,9 +40,12 @@ export function buildRequirementDirectoryInputPlan(input: {
       activeBranchPath: input.activeBranchPath,
       requirementInputPath: input.workspacePath,
       agentWorkspacePath: input.agentWorkspacePath,
-      fileCount: input.assets.length,
-      workspaceSnapshotSha256,
-      instructions: '当前工作目录开始，使用 ls 查看目录、find 按文件名查找、grep 搜索文本位置，再用 read 按相对路径读取文件。不要假设文件内容，也不要越过工作目录。grep 只用于定位；需要分析或引用的正文必须通过 read 实际读取。',
+      currentInputRefs: input.currentInputRefs.map(item => ({ logicalPath: item.logicalPath.replace(/^workspace\//u, ''), assetVersionId: item.assetVersionId, contentSha256: item.contentSha256 })),
+      currentInputCount: input.currentInputRefs.length,
+      workspaceFileCount: input.workspaceSnapshot.files.length,
+      workspaceSourceScopes: Object.fromEntries([...new Set(input.workspaceSnapshot.files.map(item => item.sourceScope))].map(scope => [scope, input.workspaceSnapshot.files.filter(item => item.sourceScope === scope).length])),
+      workspaceSnapshotSha256: input.workspaceSnapshot.snapshotSha256,
+      instructions: 'currentInputRefs 是本次重点，不是读取白名单。优先读取重点输入，再从工作区根目录使用 ls 查看 branches/shared/formal-output，使用 find 和 grep 定位其他相关资料，并用 read 阅读正文。不要假设未读取内容，不得越过工作目录。',
     }),
     '<<<SMARTHUB_PI_DOCUMENT_WORKSPACE_END>>>',
   ].join('\n')
@@ -59,7 +61,7 @@ export function buildRequirementDirectoryInputPlan(input: {
       batchId: 'document_workspace_manifest',
       ordinal: 0,
       tokenCount: estimatedInputTokens,
-      assetVersionIds: input.assets.map(item => item.version.id),
+      assetVersionIds: input.currentInputRefs.map(item => item.assetVersionId),
       chunkIds: [],
       content,
     }],
@@ -84,7 +86,8 @@ export function buildTestDesignDirectoryInputPlan(input: {
       fileCount: input.workspace.files.length,
       workspaceSnapshotSha256: input.workspace.snapshotSha256,
       requirementReleaseId: input.workspace.requirementReleaseId,
-      instructions: '从工作区根目录使用 ls/find/grep 探索，再用 read 读取事实资料。不得调用 Shell、write、edit 或越过工作区。',
+      currentInputRefs: input.workspace.files.filter(file => file.sourceScope === 'current_input').map(file => ({ logicalPath: file.logicalPath.replace(/^workspace\//u, ''), assetVersionId: file.assetVersionId, contentSha256: file.contentSha256 })),
+      instructions: 'Requirement Release 是当前正式需求基线和重点输入，但不是 Workspace 读取白名单。从工作区根目录使用 ls/find/grep 自主探索 branches/shared/formal-output，再用 read 读取事实资料。不得调用 Shell、write、edit 或越过工作区。',
     }),
     '<<<SMARTHUB_PI_TEST_DESIGN_WORKSPACE_END>>>',
   ].join('\n')

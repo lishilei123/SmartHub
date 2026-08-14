@@ -17,21 +17,56 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'requirement-analysis' | 'test-design' | 'test-script' | 'failure-analysis' | 'script-repair'
-  agentType: 'requirement_analysis' | 'test_design' | 'test_script' | 'failure_analysis' | 'script_repair'
+  agentKey: 'planning' | 'test-script' | 'failure-analysis' | 'script-repair'
+  agentType: 'planning' | 'test_script' | 'failure_analysis' | 'script_repair'
   version: string
   status: 'published'
-  modelScene: 'requirement_analysis' | 'test_design' | 'test_execution'
-  resultSchemaVersion: 'requirement-analysis/v1' | 'test-design/v1' | 'test-script-generation/v1' | 'failure-analysis/v1' | 'script-repair/v1'
+  modelScene: 'planning' | 'test_execution'
+  resultSchemaVersion: 'planning/v1' | 'test-script-generation/v1' | 'failure-analysis/v1' | 'script-repair/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
   toolsetVersion: string
   toolsetContentSha256: string
   skillBindings: Array<{ skillKey: string; version: string; enabled: boolean; configurationHash: string }>
+  enabledSkills: string[]
   mcpBindings: Array<{ serverKey: string; version: string; enabled: boolean; toolIds: string[]; policyHash: string }>
   toolIds: string[]
   limits: AgentExecutionLimits
+  contentSha256: string
+}
+
+export type ProjectWorkspaceSourceScope =
+  | 'current_input'
+  | 'current_branch'
+  | 'shared'
+  | 'historical_branch'
+  | 'formal_output'
+
+export interface ProjectWorkspaceSnapshotFile {
+  assetId?: string
+  assetVersionId?: string
+  logicalPath: string
+  displayName: string
+  contentSha256: string
+  sourceScope: ProjectWorkspaceSourceScope
+}
+
+export interface ProjectWorkspaceSnapshot {
+  schemaVersion: 'project-workspace-snapshot/v1'
+  projectId: string
+  projectVersionId: string
+  rootLogicalPath: 'workspace'
+  activeBranchLogicalPath: string
+  files: ProjectWorkspaceSnapshotFile[]
+  snapshotSha256: string
+  createdAt: string
+}
+
+export interface CurrentInputRef {
+  assetId: string
+  assetVersionId: string
+  logicalPath: string
   contentSha256: string
 }
 
@@ -55,6 +90,8 @@ export interface ReviewRunSnapshot {
   indexVersionId: string
   logicalPath: string
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }>
+  currentInputRefs: CurrentInputRef[]
+  workspaceSnapshot: ProjectWorkspaceSnapshot
   documentWorkspace?: {
     mode: 'agent_directory'
     logicalPath: string
@@ -127,6 +164,7 @@ export interface InputDeliveryManifest {
     chunkIds: string[]
     startLine: number
     endLine: number
+    sourceScope?: ProjectWorkspaceSourceScope
   }>
   finalMergeCompleted: boolean
 }
@@ -237,7 +275,7 @@ export interface PlanningReviewerSnapshot {
 export interface ReviewerExecutionInput {
   runId: string
   reviewerType: PlanningReviewerType
-  snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot | PlanningReviewerSnapshot
+  snapshot: ReviewRunSnapshot | PlanningTestDesignSnapshot | PlanningReviewerSnapshot
   model: AgentModelConnection
   task: string
   requiredReadPaths: string[]
@@ -258,13 +296,13 @@ export interface ReviewerExecutionOutput {
 }
 
 export interface AgentExecutionInput {
-  snapshot: ReviewRunSnapshot | TestDesignAgentSnapshot | TestExecutionAgentSnapshot
+  snapshot: ReviewRunSnapshot | PlanningTestDesignSnapshot | TestExecutionAgentSnapshot
   model: AgentModelConnection
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
     workflowStage: 'analysis' | 'repair' | 'verification' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
-    allowedSkillKeys: string[]
+    allowedSkillKeys?: string[]
     allowedToolIds: string[]
     submitToolId: string
     schemaVersion: string
@@ -351,8 +389,7 @@ export type PlanningWorkflowStage =
 
 export interface PlanningStageProfile {
   stage: PlanningWorkflowStage
-  agentKey: 'requirement-analysis' | 'test-design'
-  allowedSkillKeys: string[]
+  agentKey: 'planning'
   allowedToolIds: string[]
   submitToolId?: string
   resultSchemaVersion?: string
@@ -379,8 +416,8 @@ export interface PlanningAgentProfile {
   }
   stageProfiles: PlanningStageProfile[]
   configurations: Array<{
-    scene: 'requirement_analysis' | 'test_design'
-    agentKey: 'requirementAnalysis' | 'testDesign'
+    scene: 'planning'
+    agentKey: 'planning'
     activeVersion: import('./types.js').AgentConfigurationVersion | null
   }>
 }
@@ -414,7 +451,7 @@ export interface TestExecutionAgentSnapshot
   createdAt: string
 }
 
-export interface TestDesignAgentSnapshot {
+export interface PlanningTestDesignSnapshot {
   runId: string
   projectId: string
   projectName: string
@@ -425,6 +462,7 @@ export interface TestDesignAgentSnapshot {
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }>
   documentWorkspace: NonNullable<ReviewRunSnapshot['documentWorkspace']>
   workspaceFiles: import('./test-design-types.js').TestDesignWorkspaceFile[]
+  workspaceSnapshot: import('./test-design-types.js').TestDesignWorkspaceSnapshot
   agentDefinition: AgentDefinitionVersion
   taskSha256: string
   createdAt: string
