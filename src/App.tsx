@@ -22,6 +22,7 @@ import { buildWorkspaceKnowledgeTree, type WorkspaceKnowledgeDirectory } from '.
 const RequirementReviewPage = lazy(() => import('./RequirementReviewPage').then(module => ({ default: module.RequirementReviewPage })))
 const TestDesignPage = lazy(() => import('./test-design/TestDesignPage').then(module => ({ default: module.TestDesignPage })))
 const TestExecutionPage = lazy(() => import('./test-execution/TestExecutionPage').then(module => ({ default: module.TestExecutionPage })))
+const TestReportPage = lazy(() => import('./test-report/TestReportPage').then(module => ({ default: module.TestReportPage })))
 
 type PageKey = 'dashboard' | 'requirements' | 'documents' | 'test-design' | 'execution' | 'reports' | 'settings'
 type NotifyTone = 'success' | 'error' | 'warning'
@@ -59,7 +60,7 @@ const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: 
   { key: 'requirements', label: '需求评审', icon: Sparkles },
   { key: 'test-design', label: '测试设计', icon: TestTube2 },
   { key: 'execution', label: '测试执行', icon: Play },
-  { key: 'reports', label: '报告与诊断', icon: Activity, hint: '占位' },
+  { key: 'reports', label: '报告与诊断', icon: Activity },
 ]
 
 const pageMeta: Record<PageKey, { title: string; desc: string }> = {
@@ -68,7 +69,7 @@ const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
   'test-design': { title: '测试设计', desc: '由 TestDesignAgent 与按阶段 Skill 完成可追溯的测试点、用例与覆盖设计' },
   execution: { title: '测试执行', desc: '基于不可变 Handoff、独立执行 Agents 与 OCI Playwright Runner 的正式执行工作台' },
-  reports: { title: '报告与诊断', desc: '功能占位：当前仅有独立报告与用例集导出能力' },
+  reports: { title: '报告与诊断', desc: '基于 PostgreSQL 正式执行事实的确定性单 Run 报告、失败诊断与完整追溯' },
   settings: { title: '系统管理', desc: '配置模型、集成、权限与平台策略' },
 }
 
@@ -131,7 +132,7 @@ function App() {
     if (next.page) url.searchParams.set('page', next.page)
     if (next.projectVersionId) url.searchParams.set('projectVersionId', next.projectVersionId)
     else if (next.projectVersionId === '') url.searchParams.delete('projectVersionId')
-    if (next.resetReviewContext) ['reviewId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'tab', 'assetView'].forEach(key => url.searchParams.delete(key))
+    if (next.resetReviewContext) ['reviewId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'reportRunId', 'tab', 'assetView'].forEach(key => url.searchParams.delete(key))
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', url)
   }, [])
   const navigate = useCallback((nextPage: PageKey) => {
@@ -234,7 +235,7 @@ function App() {
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={workspaceKnowledgeTree.directories} documents={workspaceKnowledgeTree.documents} workspaceRootDirectoryId={workspaceKnowledgeTree.rootDirectoryId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'test-design' && <Suspense fallback={<PageLoading label="正在加载测试设计工作台…" />}><TestDesignPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'execution' && <Suspense fallback={<PageLoading label="正在加载测试执行工作台…" />}><TestExecutionPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
-        {page === 'reports' && <PlaceholderNotice title="报告与诊断" boundary="需求分析报告和已发布测试用例集支持独立导出。" missing="跨运行质量汇总、趋势分析、失败诊断与发布建议尚未实现；这些导出能力不等同于报告与诊断模块。" />}
+        {page === 'reports' && <Suspense fallback={<PageLoading label="正在加载报告与诊断工作台…" />}><TestReportPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'settings' && <SystemSettings knowledgeBaseId={knowledgeBaseId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
       </section>
     </main>

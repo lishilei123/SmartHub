@@ -10,13 +10,14 @@
 | --- | --- | --- |
 | 知识库、需求分析、测试设计 | 已实现 | 已接入真实 API、持久化数据、Agent Workflow 和服务端治理。 |
 | 测试执行 | 已实现 | 以不可变 `TestExecutionHandoff` 为唯一正式输入；Service 确定性编排、三个隔离 Agent、OCI-only Runner、不可变 Attempt/Revision/Diagnosis/Artifact 与真实状态前端。 |
-| 报告与诊断 | 占位 | 需求分析报告和测试用例集可独立导出；跨运行质量汇总、趋势、失败诊断和发布建议尚未实现。 |
+| 报告与诊断 | 已实现 | 绑定单个 `ExecutionRun`，从 PostgreSQL 正式事实确定性投影指标、九类诊断、非通过明细与完整追溯，并提供 canonical JSON 和 Markdown 导出。 |
 
-左侧“测试执行”展示 PostgreSQL 中的真实 Run/Task、就绪状态、冻结快照和不可变历史，不生成示例进度；“报告与诊断”仍为产品规划入口。
+左侧“测试执行”展示 PostgreSQL 中的真实 Run/Task、就绪状态、冻结快照和不可变历史，不生成示例进度；“报告与诊断”只读汇总同一 Run 的正式事实，不调用 Agent 或 Runner，也不修改执行状态。
 
 ## 已实现
 
 - 测试执行：固定 `RequirementAnalysisAgent → TestDesignAgent → TestExecutionService → ExecutionPackage → OCI Playwright Runner` 边界，三个执行 Agent 分别发布与冻结，Service 独占状态、重试、诊断和修复决策；支持 UI/API 与 smoke/regression/full/custom，不支持的方法明确落为 `unsupported` 且不创建脚本或 Runner Attempt；
+- 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和三个 Agent 快照；
 - 测试设计：唯一 `TestDesignAgent`、四个内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、测试点树唯一人工门禁、服务端 Coverage Audit、最多两轮 Agent Repair、人工用例集发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
@@ -180,7 +181,7 @@ npm test
 npm run build
 ```
 
-测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、两个单 Agent 配置发布、只读 Workspace、Requirement Release 冻结、Stage/Skill/Submit Tool 映射、测试点人工批准、Coverage Audit/Repair、正式资产投影、TestCaseSet 发布、执行交接、检索降级、FindingAction 并发控制和参数 Hash 审批。
+测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、两个单 Agent 配置发布、只读 Workspace、Requirement Release 冻结、Stage/Skill/Submit Tool 映射、测试点人工批准、Coverage Audit/Repair、正式资产投影、TestCaseSet 发布、执行交接、确定性单 Run 报告指标与导出、PostgreSQL 只读报告快照、检索降级、FindingAction 并发控制和参数 Hash 审批。
 
 ## 接口摘要
 
@@ -228,6 +229,10 @@ npm run build
 - `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/actions/re-audit`
 - `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/test-case-set-versions`
 - `POST /api/test-case-set-versions/:versionId/execution-handoffs`
+- `GET /api/project-versions/:projectVersionId/test-reports`
+- `GET /api/project-versions/:projectVersionId/test-reports/:runId`
+- `GET /api/project-versions/:projectVersionId/test-reports/:runId/export.json`
+- `GET /api/project-versions/:projectVersionId/test-reports/:runId/report.md`
 - `GET /api/knowledge-bases/:id/overview`
 - `GET|PUT /api/knowledge-bases/:id/config`
 - `POST /api/knowledge-bases/:id/embedding/test`
@@ -244,7 +249,7 @@ npm run build
 - `POST /api/knowledge-bases/:id/search`
 - `POST /api/knowledge-bases/:id/rebuild`
 
-当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。测试执行只支持服务端固定编排的三个隔离 Agent 与 OCI Playwright UI/API 自动化。
+当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。报告一期不新增数据库表或持久化报告快照：人工重试追加正式事实后会生成新的报告 Hash，但不会独立保留重试前文档；也不由 Agent 计算正式指标或生成发布建议。测试执行只支持服务端固定编排的三个隔离 Agent 与 OCI Playwright UI/API 自动化。
 
 需求评审采用独立 Worker 后台运行：启动接口创建 `ReviewRun + ReviewJob` 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page + projectVersionId + reviewId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `reviewId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
 

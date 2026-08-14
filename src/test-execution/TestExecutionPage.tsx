@@ -68,7 +68,7 @@ export function TestExecutionPage({
 
   return <main className="te-shell">
     <header className="te-page-header">
-      <div className="te-page-title"><span><Play /></span><div><h1>SmartHub · 测试执行</h1><p>{projectVersion.name} · Deterministic Service + three isolated Agents + OCI Playwright Runner</p></div></div>
+      <div className="te-page-title"><span><Play /></span><div><h1>测试执行</h1><p>{projectVersion.name} · Deterministic Service + three isolated Agents + OCI Playwright Runner</p></div></div>
       <div className="te-boundary"><ShieldCheck /><span><small>执行边界</small><b>Agent candidate → Server validation → Runner</b></span></div>
       <button className="te-secondary" onClick={onManageVersions}><Settings2 />项目版本</button>
     </header>

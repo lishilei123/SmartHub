@@ -19,6 +19,7 @@ import { TestDesignService } from './application/test-design-service.js'
 import { PiTestDesignRuntimeAdapter } from './agent/pi-test-design-runtime.js'
 import { PiTestExecutionRuntimeAdapter } from './agent/pi-test-execution-runtime.js'
 import { TestExecutionService } from './application/test-execution-service.js'
+import { TestReportService } from './application/test-report-service.js'
 import {
   ConfiguredExecutionEnvironmentCatalog,
   executionEnvironmentProfilesFromJson,
@@ -163,3 +164,6 @@ export const testExecutionService =
         playwrightRunner,
       )
     : undefined
+export const testReportService = testExecutionStore
+  ? new TestReportService(testExecutionStore)
+  : undefined

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfigurationScene, AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
@@ -14,10 +14,12 @@ import { TestDesignError } from '../application/test-design-validation.js'
 import { TestExecutionServiceError } from '../application/test-execution-service.js'
 import { TestExecutionValidationError } from '../application/test-execution-validation.js'
 import { routeTestExecution } from './test-execution-routes.js'
+import { TestReportServiceError } from '../application/test-report-service.js'
+import { routeTestReport } from './test-report-routes.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionService, testExecutionStore }
+export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionService, testExecutionStore, testReportService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -33,11 +35,14 @@ export async function start(port = Number(process.env.PORT ?? 8787), controls: A
             ? error.status
             : error instanceof TestExecutionServiceError
               ? error.status
-              : error instanceof TestExecutionValidationError
-                ? 422
-                : 400
+              : error instanceof TestReportServiceError
+                ? error.status
+                : error instanceof TestExecutionValidationError
+                  ? 422
+                  : 400
       const structured = error instanceof TestDesignError
         || error instanceof TestExecutionServiceError
+        || error instanceof TestReportServiceError
         || error instanceof TestExecutionValidationError
       send(response, status, structured
         ? { code: error.code, message: error.message.replace(/^[A-Z][A-Z0-9_]+:\s*/u, ''), details: error.details }
@@ -91,6 +96,14 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     environments: () => executionEnvironmentCatalog.listSnapshots(),
     handoffs: async projectVersionId =>
       testDesignService.listLibraryHandoffs(projectVersionId),
+  })) return
+  if (await routeTestReport(request, response, {
+    method,
+    url,
+    principal,
+    controls,
+    service: testReportService,
+    resolveProjectVersion: loadProjectVersion,
   })) return
   if (await routeTestDesign(request, response, { method, url, principal, controls, service: testDesignService, store: stateStore })) return
   const requireProjectVersion = async (projectVersionId: string, permission: ProjectVersionPermission) => {

@@ -94,6 +94,22 @@ export interface ExecutionTaskDetailSnapshot {
   artifacts: ExecutionArtifact[]
 }
 
+export interface TestExecutionReportSource {
+  run: ExecutionRun
+  tasks: ExecutionTask[]
+  attempts: ExecutionAttempt[]
+  diagnoses: FailureDiagnosis[]
+  scriptRevisions: ScriptRevision[]
+  artifacts: ExecutionArtifact[]
+  testCaseLibraryVersionSourceRunId?: string
+}
+
+export interface TestExecutionReportSourceReader {
+  listRuns(projectVersionId: string, limit: number): Promise<ExecutionRun[]>
+  getRun(runId: string): Promise<ExecutionRun | null>
+  getRunReportSource(runId: string): Promise<TestExecutionReportSource | null>
+}
+
 export interface TestExecutionStore {
   readiness(): Promise<{ ready: boolean; reason?: string }>
   createAggregate(input: CreateExecutionAggregateInput): Promise<ExecutionRun>
@@ -269,6 +285,106 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
         artifacts: artifacts.rows.map(artifactFromRow),
       }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async getRunReportSource(runId: string): Promise<TestExecutionReportSource | null> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const run = await getRun(client, runId)
+      if (!run) {
+        await client.query('COMMIT')
+        return null
+      }
+      const [tasks, attempts, diagnoses, revisions, artifacts, handoff, library, suite] = await Promise.all([
+        client.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
+          SELECT frozen_input,status,state_version,runner_attempt_count,
+                 same_script_retry_count,repair_count,current_script_revision_id,
+                 unsupported_reason,error,created_at,updated_at,finished_at
+          FROM smarthub.test_execution_tasks
+          WHERE run_id=$1 ORDER BY ordinal,id
+        `, [run.id]),
+        client.query<AttemptRow>(`
+          SELECT attempt.* FROM smarthub.test_execution_attempts attempt
+          JOIN smarthub.test_execution_tasks task ON task.id=attempt.task_id
+          WHERE attempt.run_id=$1 AND task.run_id=$1
+          ORDER BY task.ordinal,attempt.ordinal,attempt.id
+        `, [run.id]),
+        client.query<DiagnosisRow>(`${diagnosisSelectSql}
+          JOIN smarthub.test_execution_tasks task ON task.id=diagnosis.task_id
+          WHERE diagnosis.run_id=$1 AND task.run_id=$1
+          ORDER BY task.ordinal,diagnosis.created_at,diagnosis.id
+        `, [run.id]),
+        client.query<ScriptRevisionRow>(`
+          SELECT revision.* FROM smarthub.test_execution_script_revisions revision
+          JOIN smarthub.test_execution_tasks task ON task.id=revision.task_id
+          WHERE revision.run_id=$1 AND task.run_id=$1
+          ORDER BY task.ordinal,revision.revision,revision.id
+        `, [run.id]),
+        client.query<ArtifactRow>(`
+          SELECT artifact.* FROM smarthub.test_execution_artifacts artifact
+          LEFT JOIN smarthub.test_execution_tasks task ON task.id=artifact.task_id
+          LEFT JOIN smarthub.test_execution_attempts attempt ON attempt.id=artifact.attempt_id
+          WHERE artifact.run_id=$1
+            AND (artifact.task_id IS NULL OR task.run_id=$1)
+            AND (artifact.attempt_id IS NULL OR attempt.run_id=$1)
+          ORDER BY COALESCE(task.ordinal,-1),COALESCE(attempt.ordinal,-1),
+                   artifact.created_at,artifact.id
+        `, [run.id]),
+        client.query<{ project_version_id: string; test_case_library_version_id: string | null; suite_version_id: string | null; content_sha256: string }>(`
+          SELECT project_version_id,test_case_library_version_id,suite_version_id,content_sha256
+          FROM smarthub.test_execution_handoffs WHERE id=$1
+        `, [run.handoff.handoffId]),
+        client.query<{ project_id: string; source_run_id: string | null; content_sha256: string }>(`
+          SELECT project_id,source_run_id,content_sha256
+          FROM smarthub.test_case_library_versions WHERE id=$1
+        `, [run.handoff.testCaseLibraryVersionId]),
+        run.handoff.suiteVersionId
+          ? client.query<{ project_id: string; test_case_library_version_id: string | null; content_sha256: string }>(`
+              SELECT project_id,test_case_library_version_id,content_sha256
+              FROM smarthub.test_suite_versions WHERE id=$1
+            `, [run.handoff.suiteVersionId])
+          : Promise.resolve({ rows: [] }),
+      ])
+      const persistedHandoff = handoff.rows[0]
+      const persistedLibrary = library.rows[0]
+      const persistedSuite = suite.rows[0]
+      if (
+        !persistedHandoff
+        || persistedHandoff.project_version_id !== run.projectVersionId
+        || persistedHandoff.test_case_library_version_id !== run.handoff.testCaseLibraryVersionId
+        || (persistedHandoff.suite_version_id ?? undefined) !== run.handoff.suiteVersionId
+        || persistedHandoff.content_sha256 !== run.handoff.handoffSha256
+        || !persistedLibrary
+        || persistedLibrary.project_id !== run.projectId
+        || persistedLibrary.content_sha256 !== run.handoff.testCaseLibraryVersionSha256
+        || Boolean(run.handoff.suiteVersionId) !== Boolean(persistedSuite)
+        || (persistedSuite && (
+          persistedSuite.project_id !== run.projectId
+          || persistedSuite.test_case_library_version_id !== run.handoff.testCaseLibraryVersionId
+          || persistedSuite.content_sha256 !== run.handoff.suiteVersionSha256
+        ))
+      ) throw new Error('TEST_REPORT_FROZEN_SOURCE_MISMATCH')
+      const source: TestExecutionReportSource = {
+        run,
+        tasks: tasks.rows.map(taskFromRow),
+        attempts: attempts.rows.map(attemptFromRow),
+        diagnoses: diagnoses.rows.map(diagnosisFromRow),
+        scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
+        artifacts: artifacts.rows.map(artifactFromRow),
+        ...(persistedLibrary.source_run_id
+          ? { testCaseLibraryVersionSourceRunId: persistedLibrary.source_run_id }
+          : {}),
+      }
+      assertReportSourceScope(source)
+      await client.query('COMMIT')
+      return source
     } catch (error) {
       await client.query('ROLLBACK')
       throw error
@@ -1871,6 +1987,30 @@ function executionAggregateSha256(input: CreateExecutionAggregateInput) {
       .slice()
       .sort((left, right) => left.taskId.localeCompare(right.taskId) || left.id.localeCompare(right.id)),
   })
+}
+
+function assertReportSourceScope(source: TestExecutionReportSource) {
+  const { run } = source
+  if (
+    source.tasks.length !== run.taskCount
+    || source.tasks.some(task => task.runId !== run.id)
+    || source.attempts.some(attempt => attempt.runId !== run.id)
+    || source.diagnoses.some(diagnosis => diagnosis.runId !== run.id)
+    || source.scriptRevisions.some(revision => revision.runId !== run.id)
+    || source.artifacts.some(artifact => artifact.runId !== run.id)
+  ) throw new Error('TEST_REPORT_SOURCE_SCOPE_MISMATCH')
+  const taskIds = new Set(source.tasks.map(task => task.id))
+  const attemptIds = new Set(source.attempts.map(attempt => attempt.id))
+  if (
+    source.attempts.some(attempt => !taskIds.has(attempt.taskId))
+    || source.diagnoses.some(diagnosis =>
+      !taskIds.has(diagnosis.taskId)
+      || diagnosis.attemptIds.some(attemptId => !attemptIds.has(attemptId)))
+    || source.scriptRevisions.some(revision => !taskIds.has(revision.taskId))
+    || source.artifacts.some(artifact =>
+      (artifact.taskId !== undefined && !taskIds.has(artifact.taskId))
+      || (artifact.attemptId !== undefined && !attemptIds.has(artifact.attemptId)))
+  ) throw new Error('TEST_REPORT_SOURCE_RELATION_INVALID')
 }
 
 function assertLeaseTask(scope: ExecutionLeaseScope, taskId: string) {
