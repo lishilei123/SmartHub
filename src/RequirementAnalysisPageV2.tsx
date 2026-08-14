@@ -89,7 +89,7 @@ const agentEventLabels: Record<string, string> = {
   message_start: '消息开始', message_end: '消息完成', tool_execution_start: '工具调用开始', tool_execution_end: '工具调用结束',
   input_package_built: '输入包已构建', input_batch_delivered: '输入批次已投递', input_final_merge_started: '开始合并输入',
   result_submission_required: '等待提交正式结果', result_submission_retry: '结果校验未通过，等待修正', evidence_repair_tools_enabled: '证据修复工具已启用',
-  skill_catalog_loaded: '已加载 PlanningAgent Enabled Skills', skill_activated: 'Agent 已按需激活 Skill',
+  skill_bindings_loaded: '已加载 Agent 绑定的全部 Skill',
 }
 function eventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
 function formatTraceValue(value: unknown) { if (value === undefined) return ''; try { return JSON.stringify(value, null, 2) } catch { return String(value) } }

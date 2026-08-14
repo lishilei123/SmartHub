@@ -60,13 +60,13 @@ test('Agent 配置接口按场景返回精确 Agent 集合并隔离保存', asyn
     assert.equal(requirementAnalysis.scene, 'requirement_analysis')
     assert.deepEqual(Object.keys(requirementAnalysis.agents), ['requirementAnalysis'])
     assert.equal(requirementAnalysis.agents.requirementAnalysis.draft.revision, 0)
-    assert.deepEqual(requirementAnalysis.agents.requirementAnalysis.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
+    assert.deepEqual(requirementAnalysis.agents.requirementAnalysis.requiredToolIds, ['requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
 
     const testDesign = await loadAgentConfiguration(baseUrl, 'test-design')
     assert.equal(testDesign.scene, 'test_design')
     assert.deepEqual(Object.keys(testDesign.agents), ['testDesign'])
     assert.equal(testDesign.agents.testDesign.draft.revision, 0)
-    assert.deepEqual(testDesign.agents.testDesign.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
+    assert.deepEqual(testDesign.agents.testDesign.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
     assert.deepEqual(testDesign.agents.testDesign.requiredSkillKeys, ['test-design-baseline', 'test-point-design', 'test-case-design', 'test-design-repair'])
 
     const testExecution = await loadAgentConfiguration(baseUrl, 'test-execution')

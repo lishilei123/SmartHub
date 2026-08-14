@@ -302,7 +302,6 @@ export interface AgentExecutionInput {
   executionProfile?: {
     mode: 'workspace_tools'
     workflowStage: 'analysis' | 'repair' | 'verification' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
-    allowedSkillKeys?: string[]
     allowedToolIds: string[]
     submitToolId: string
     schemaVersion: string

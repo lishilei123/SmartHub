@@ -13,4 +13,4 @@ description: Read the fixed current requirement workspace and establish a comple
 6. 语义等价项可以合并；互相冲突的当前要求分别保留，交给审核阶段形成 Finding。
 7. 在进入审核前检查文件覆盖、需求遗漏、重复点、临时 ID 和原文追溯。
 
-本 Skill 只指导建立基线，不修改需求、不关闭 Finding、不发布产物。后续是否激活其他 Skill 由 Agent 根据当前 Stage 的任务自行决定。
+本 Skill 只指导建立基线，不修改需求、不关闭 Finding、不发布产物。其他已绑定 Skill 同样由 Runtime 在运行开始时加载，Agent 根据当前任务自行组合使用。

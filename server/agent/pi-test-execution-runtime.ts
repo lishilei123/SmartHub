@@ -207,7 +207,6 @@ export class PiTestExecutionRuntimeAdapter {
         executionProfile: {
           mode: 'workspace_tools',
           workflowStage: input.stage,
-          allowedSkillKeys: [binding.skillKey],
           allowedToolIds: [...agentCatalogEntryByDefinition(binding.agentKey).runtimeToolIds, binding.submitToolId],
           submitToolId: binding.submitToolId,
           schemaVersion: binding.schemaVersion,

@@ -263,7 +263,6 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       },
       observation => { readPaths.add(normalizeReviewPath(observation.relativePath)) },
       workspace,
-      undefined,
       this.knowledge,
     )
     if (!requiredReadPaths.length) throw new Error('REVIEWER_REQUIRED_READS_EMPTY')
@@ -451,9 +450,9 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
       deliveryManifest.toolReads ??= []
       deliveryManifest.toolReads.push(structuredClone(observation))
-    }, piDocumentWorkspace, skillSession, this.knowledge)
-    const skillPrompt = skillSession.renderCatalogPrompt()
-    const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
+    }, piDocumentWorkspace, this.knowledge)
+    const skillPrompt = skillSession.renderPrompt()
+    const capabilityLoad = await new AgentCapabilityLoader(this.store).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
     const allowedToolIds = runtimeAllowedToolIds(input)
@@ -475,8 +474,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
     for (const warning of capabilityLoad.warnings) await record({ type: 'capability_binding_unavailable', content: warning })
     if (unavailableToolIds.length) await record({ type: 'tool_bindings_unavailable', content: `以下目录绑定尚未注册到当前 Agent 运行时，因此不会暴露给模型：${unavailableToolIds.join('、')}` })
-    if (skillSession) await record({ type: 'skill_catalog_loaded', content: JSON.stringify({ workflowStage: skillSession.workflowStage, catalogSource: skillSession.catalogSource, enabledSkills: skillSession.catalog().map(skill => ({ key: skill.key, version: skill.version })) }) })
-    else if (skillPrompt) await record({ type: 'skill_bindings_loaded', content: `${input.snapshot.agentDefinition.skillBindings.filter(binding => binding.enabled).length} 个 Skill 已按发布快照加载。` })
+    await record({ type: 'skill_bindings_loaded', content: JSON.stringify({ workflowStage: skillSession.workflowStage, enabledSkills: skillSession.catalog().map(skill => ({ key: skill.key, version: skill.version })) }) })
     const controller = new AbortController()
     const deadline = setTimeout(() => controller.abort(new Error('AGENT_DEADLINE_EXCEEDED')), limits.deadlineMs)
     const abort = () => controller.abort(signal.reason ?? new Error('AGENT_CANCELLED'))
@@ -594,9 +592,6 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         if (!isTransientAgentEvent(event)) {
           const auditEvent = toAuditEvent(event, turns, input.model.baseUrl, input.model.apiKey)
           await record(auditEvent)
-          if (auditEvent.type === 'tool_execution_end' && auditEvent.toolId === defaultBuiltInToolConfigResolver.toDescriptor('skill.activate').piName && !auditEvent.isError) {
-            await record({ type: 'skill_activated', turn: turns, toolId: 'skill.activate', toolCallId: auditEvent.toolCallId, content: JSON.stringify({ workflowStage: workspaceProfile?.workflowStage, activatedSkillKeys: skillSession?.activatedKeys() ?? [] }) })
-          }
         }
         if (resultSubmissionRequired) await record({ type: 'result_submission_required', turn: turns })
         if (eventSignal.aborted || controller.signal.aborted) agent?.abort()

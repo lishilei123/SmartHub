@@ -7,14 +7,12 @@ import { ToolRegistry } from '../server/tools/registry.js'
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
 test('checked-in built-in Tool config includes five-Agent submission tools', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 18)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 16)
-  assert.ok(!defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).includes('skill.execute_script'))
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 16)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 15)
+  assert.ok(defaultBuiltInToolConfigResolver.keys().every(key => !key.startsWith('skill.')))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.list_directory').piName, 'ls')
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('skill.http_request').piName, 'skill_http_request')
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('skill.activate').piName, 'skill_activate')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').piName, 'test_script_submit_result')

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import JSZip from 'jszip'
 import { normalizeSkillRuntimePolicy, SKILL_RUNTIME_MANIFEST } from '../application/skill-runtime-policy.js'
-import type { SkillPackageMetadata } from '../domain/types.js'
+import type { SkillPackageMetadata, SkillRuntimePolicy } from '../domain/types.js'
 
 export const MAX_SKILL_ARCHIVE_BYTES = 20 * 1024 * 1024
 const MAX_SKILL_FILES = 200
@@ -15,7 +15,7 @@ export class SkillPackageStore {
 
   constructor(root: string) { this.root = resolve(root) }
 
-  async install(input: { key: string; version: string; fileName: string; archive: Buffer }): Promise<{ entrypoint: string; package: SkillPackageMetadata; runtime?: import('../domain/types.js').SkillRuntimePolicy }> {
+  async install(input: { key: string; version: string; fileName: string; archive: Buffer }): Promise<{ entrypoint: string; package: SkillPackageMetadata; runtime?: SkillRuntimePolicy }> {
     if (!input.fileName.toLocaleLowerCase().endsWith('.zip')) throw new Error('Skill 包必须是 ZIP 文件')
     if (!input.archive.length) throw new Error('Skill ZIP 不能为空')
     if (input.archive.length > MAX_SKILL_ARCHIVE_BYTES) throw new Error('Skill ZIP 不能超过 20 MB')
@@ -57,7 +57,7 @@ export class SkillPackageStore {
     const entrypointDirectory = dirname(entrypoints[0].path).replaceAll('\\', '/')
     const manifestPath = entrypointDirectory === '.' ? SKILL_RUNTIME_MANIFEST : `${entrypointDirectory}/${SKILL_RUNTIME_MANIFEST}`
     const manifestEntry = entries.find(entry => entry.path.toLocaleLowerCase() === manifestPath.toLocaleLowerCase())
-    let runtime: import('../domain/types.js').SkillRuntimePolicy | undefined
+    let runtime: SkillRuntimePolicy | undefined
     if (manifestEntry) {
       let manifest: unknown
       try { manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(manifestEntry.data)) }
@@ -66,7 +66,6 @@ export class SkillPackageStore {
       const relativeFiles = new Set(entries.filter(entry => entry.path.startsWith(prefix)).map(entry => entry.path.slice(prefix.length).toLocaleLowerCase()))
       runtime = normalizeSkillRuntimePolicy(manifest, relativeFiles)
     }
-
     const unpackedBytes = entries.reduce((sum, entry) => sum + entry.data.length, 0)
     if (unpackedBytes > MAX_SKILL_UNPACKED_BYTES) throw new Error('Skill ZIP 解压后不能超过 50 MB')
     const files = entries.map(entry => entry.path).sort((left, right) => left.localeCompare(right, 'en'))

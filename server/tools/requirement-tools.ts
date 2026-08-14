@@ -7,8 +7,6 @@ import { registerKnowledgeSearchTool } from './knowledge-search.js'
 import { registerKnowledgeReadChunkTool } from './knowledge-read-chunk.js'
 import type { ReviewSubmissionFeedback } from './submission-feedback.js'
 import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
-import type { AgentSkillSession } from '../agent/skill-runtime.js'
-import { registerSkillActivateTool } from './skill-activate.js'
 import { KnowledgeService } from '../application/knowledge-service.js'
 
 export type { ReviewSubmissionFeedback } from './submission-feedback.js'
@@ -19,7 +17,6 @@ export function createWorkspaceAgentToolRegistry(
   submit: (candidate: Record<string, unknown>) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>,
   onRead?: (observation: RequirementDocumentReadObservation) => void,
   documentWorkspace?: RequirementDocumentWorkspace,
-  skillSession?: AgentSkillSession,
   knowledge = new KnowledgeService(store),
 ) {
   const registry = new ToolRegistry()
@@ -27,7 +24,6 @@ export function createWorkspaceAgentToolRegistry(
   registerRequirementDocumentWorkspaceTools(registry, documentWorkspace, onRead)
   registerKnowledgeSearchTool(registry, knowledge)
   registerKnowledgeReadChunkTool(registry, store)
-  if (skillSession) registerSkillActivateTool(registry, skillSession)
   registry.register(defaultBuiltInToolConfigResolver.toDescriptor(submitToolId), async request => {
     const feedback = await submit(structuredClone(request.arguments) as Record<string, unknown>)
     return feedback.accepted

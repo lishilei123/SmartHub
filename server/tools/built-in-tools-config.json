@@ -351,36 +351,6 @@
         "additionalProperties": false
       }
     },
-    "skill.activate": {
-      "version": "1.0.0",
-      "piName": "skill_activate",
-      "label": "激活阶段 Skill",
-      "catalogName": "激活阶段 Skill",
-      "description": "按 Skill Key 激活当前 Workflow Stage Catalog 中的一个 Skill，并返回该发布版本的受信正文。可调用零次、一次或多次；不能切换 Stage。",
-      "catalogDescription": "按需激活当前 Workflow Stage 允许的 Skill。",
-      "risk": "read",
-      "timeoutMs": 30000,
-      "idempotent": true,
-      "repeatPolicy": "replay_success_once",
-      "sourcePath": "server/tools/skill-activate.ts",
-      "handlerKey": "skill.activate",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "skillKey": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200,
-            "description": "必须来自当前 Stage 暴露的 Skill Catalog。"
-          }
-        },
-        "required": [
-          "skillKey"
-        ],
-        "additionalProperties": false
-      }
-    },
     "requirement-analysis.submit_result": {
       "version": "1.0.0",
       "piName": "requirement_analysis_submit_result",
@@ -2195,87 +2165,6 @@
           }
         },
         "required": ["schemaVersion", "reviewerType", "verdict", "summary", "findings", "suggestedActions"],
-        "additionalProperties": false
-      }
-    },
-    "skill.execute_script": {
-      "version": "1.0.0",
-      "piName": "skill_execute_script",
-      "label": "执行 Skill 脚本",
-      "catalogName": "执行 Skill 脚本",
-      "description": "执行已绑定 Skill 在 skill-runtime.json 中明确声明的 PowerShell 脚本。只能使用相对脚本路径和字符串参数；服务端会按脚本路径解析唯一 Skill，只有同路径存在歧义时才需要 skillKey。",
-      "catalogDescription": "仅供已绑定 Skill 的受控脚本运行时使用，不出现在普通工具目录中。",
-      "risk": "code_execution",
-      "timeoutMs": 120000,
-      "idempotent": false,
-      "sourcePath": "server/tools/skill-capability.ts",
-      "handlerKey": "skill.execute_script",
-      "catalogVisible": false,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "skillKey": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 100
-          },
-          "script": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 500
-          },
-          "args": {
-            "type": "array",
-            "maxItems": 20,
-            "items": {
-              "type": "string",
-              "maxLength": 500
-            }
-          }
-        },
-        "required": [
-          "script"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "skill.http_request": {
-      "version": "1.0.0",
-      "piName": "skill_http_request",
-      "label": "访问 Skill 允许的网络目标",
-      "catalogName": "访问 Skill 允许的网络目标",
-      "description": "向已绑定 Skill 在 skill-runtime.json 中明确允许的 HTTP/HTTPS Origin 发起 GET 或 HEAD 请求。",
-      "catalogDescription": "仅供已绑定 Skill 的受控网络运行时使用，不出现在普通工具目录中。",
-      "risk": "network_read",
-      "timeoutMs": 60000,
-      "idempotent": true,
-      "sourcePath": "server/tools/skill-capability.ts",
-      "handlerKey": "skill.http_request",
-      "catalogVisible": false,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "skillKey": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 100
-          },
-          "url": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 2000
-          },
-          "method": {
-            "enum": [
-              "GET",
-              "HEAD"
-            ]
-          }
-        },
-        "required": [
-          "skillKey",
-          "url"
-        ],
         "additionalProperties": false
       }
     }

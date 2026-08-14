@@ -11,7 +11,7 @@ import type { StateStore } from '../infrastructure/store.js'
 import { safeWorkspaceSegment } from '../application/project-workspace-snapshot.js'
 import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
 
-const WORKSPACE_TOOL_IDS = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate'] as const
+const WORKSPACE_TOOL_IDS = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk'] as const
 
 export const TEST_DESIGN_STAGE_BINDINGS = {
   test_point_design: {

@@ -40,7 +40,6 @@ export const BUILT_IN_HANDLER_KEYS = [
   'workspace.list_directory',
   'knowledge.search',
   'knowledge.read_chunk',
-  'skill.activate',
   'requirement-analysis.submit_result',
   'requirement-repair.submit_result',
   'requirement-release.submit_result',
@@ -51,8 +50,6 @@ export const BUILT_IN_HANDLER_KEYS = [
   'failure_analysis.submit_result',
   'script_repair.submit_result',
   'reviewer.submit_result',
-  'skill.execute_script',
-  'skill.http_request',
 ] as const
 
 const allowedRisks = ['read', 'network_read', 'code_execution', 'internal_write', 'write_reversible', 'write_high_risk'] as const

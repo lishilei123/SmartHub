@@ -1,4 +1,0 @@
-interface:
-  display_name: "查询本机 IP"
-  short_description: "查询 SmartHub 服务主机的本地 IPv4 与 IPv6 地址"
-  default_prompt: "Use $query-local-ip to query this host local IP addresses."

@@ -5,7 +5,7 @@ import type { AiResource, AiResourceKind, McpServerResource, SkillPackageMetadat
 import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { applicationRoot, codeRoot, deployedModuleCandidates } from '../infrastructure/runtime-paths.js'
-import { isSkillRuntimeToolId, normalizeSkillRuntimePolicy, SKILL_RUNTIME_TOOL_IDS } from './skill-runtime-policy.js'
+import { isSkillRuntimeToolId, normalizeSkillRuntimePolicy } from './skill-runtime-policy.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { scanAiExtensions, type AiExtensionCandidate } from '../infrastructure/ai-extension-scanner.js'
 
@@ -17,26 +17,23 @@ export type AiResourceCatalog = {
 
 const builtInTools: ToolResource[] = defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).map(key => defaultBuiltInToolConfigResolver.toToolResource(key))
 const builtInSkills: SkillResource[] = [
-  builtInSkill('system.query-local-ip', '查询本机 IP', '查询 SmartHub 服务所在主机的非回环 IPv4 与 IPv6 地址。', '1.1.0', 'server/skills/query-local-ip/SKILL.md', [], ['系统', '网络', 'IP'], {
-    scripts: [{ path: 'scripts/get-local-ip.ps1', runner: 'powershell', timeoutMs: 15_000 }],
-  }),
-  builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例'], undefined),
-  builtInSkill('requirement.baseline', '需求基线', '读取固定需求正文并建立完整、原子且可追溯到原文证据的需求基线草稿。', '1.0.0', 'server/skills/requirement-baseline/SKILL.md', [], ['需求分析', '基线', 'baseline'], undefined),
-  builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成整体理解、需求基线、跨需求分析、Finding、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'finding', 'traceability'], undefined),
-  builtInSkill('requirement.repair', '需求修复', '针对人工确认的 Finding 生成基于固定原文且可安全应用的 Patch 草稿。', '1.0.0', 'server/skills/requirement-repair/SKILL.md', [], ['需求分析', '修复', 'patch'], undefined),
-  builtInSkill('requirement.verification', '需求复验', '完整复查修复后的需求版本并判定原 Finding 是否真正完成闭环。', '1.0.0', 'server/skills/requirement-verification/SKILL.md', [], ['需求分析', '复验', 'verification'], undefined),
-  builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact'], undefined),
-  builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release、正式用例库或套件建立测试设计事实和变化基线。', '1.2.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace'], undefined),
-  builtInSkill('test-point-design', '测试点设计', '基于冻结需求和历史映射直接设计完整且可审核的 Test Point Tree 候选。', '1.1.0', 'server/skills/test-point-design/SKILL.md', [], ['测试设计', '测试点', 'tree'], undefined),
-  builtInSkill('test-case-design', '测试用例设计', '生成按维度区分的 executionSpec、测试数据和正式用例库变更 Proposal。', '1.2.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'Proposal'], undefined),
-  builtInSkill('test-design-repair', '测试设计修复', '保留 Proposal 与 executionSpec，仅修复 Coverage Audit 标记为 agent_repair 的质量问题。', '1.2.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage'], undefined),
-  builtInSkill('test-script-generation', '测试脚本生成', '从冻结执行任务生成单文件 Playwright UI 或 API 脚本候选。', '1.0.0', 'server/skills/test-script-generation/SKILL.md', [], ['测试执行', 'Playwright', '脚本生成'], undefined),
-  builtInSkill('failure-analysis', '执行失败分析', '根据同脚本终态 Attempt 与不可变证据生成失败诊断候选。', '1.0.0', 'server/skills/failure-analysis/SKILL.md', [], ['测试执行', '诊断', '失败分析'], undefined),
-  builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下修复 Playwright 实现候选。', '1.0.0', 'server/skills/script-repair/SKILL.md', [], ['测试执行', 'Playwright', '脚本修复'], undefined),
+  builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例']),
+  builtInSkill('requirement.baseline', '需求基线', '读取固定需求正文并建立完整、原子且可追溯到原文证据的需求基线草稿。', '1.0.0', 'server/skills/requirement-baseline/SKILL.md', [], ['需求分析', '基线', 'baseline']),
+  builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成整体理解、需求基线、跨需求分析、Finding、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'finding', 'traceability']),
+  builtInSkill('requirement.repair', '需求修复', '针对人工确认的 Finding 生成基于固定原文且可安全应用的 Patch 草稿。', '1.0.0', 'server/skills/requirement-repair/SKILL.md', [], ['需求分析', '修复', 'patch']),
+  builtInSkill('requirement.verification', '需求复验', '完整复查修复后的需求版本并判定原 Finding 是否真正完成闭环。', '1.0.0', 'server/skills/requirement-verification/SKILL.md', [], ['需求分析', '复验', 'verification']),
+  builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact']),
+  builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release、正式用例库或套件建立测试设计事实和变化基线。', '1.2.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace']),
+  builtInSkill('test-point-design', '测试点设计', '基于冻结需求和历史映射直接设计完整且可审核的 Test Point Tree 候选。', '1.1.0', 'server/skills/test-point-design/SKILL.md', [], ['测试设计', '测试点', 'tree']),
+  builtInSkill('test-case-design', '测试用例设计', '生成按维度区分的 executionSpec、测试数据和正式用例库变更 Proposal。', '1.2.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'Proposal']),
+  builtInSkill('test-design-repair', '测试设计修复', '保留 Proposal 与 executionSpec，仅修复 Coverage Audit 标记为 agent_repair 的质量问题。', '1.2.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage']),
+  builtInSkill('test-script-generation', '测试脚本生成', '从冻结执行任务生成单文件 Playwright UI 或 API 脚本候选。', '1.0.0', 'server/skills/test-script-generation/SKILL.md', [], ['测试执行', 'Playwright', '脚本生成']),
+  builtInSkill('failure-analysis', '执行失败分析', '根据同脚本终态 Attempt 与不可变证据生成失败诊断候选。', '1.0.0', 'server/skills/failure-analysis/SKILL.md', [], ['测试执行', '诊断', '失败分析']),
+  builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下修复 Playwright 实现候选。', '1.0.0', 'server/skills/script-repair/SKILL.md', [], ['测试执行', 'Playwright', '脚本修复']),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
-const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', ...SKILL_RUNTIME_TOOL_IDS])
-const retiredBuiltInSkillKeys = new Set(['system.requirement-analysis', 'requirement.review'])
+const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', 'skill.activate', 'skill.execute_script', 'skill.http_request'])
+const retiredBuiltInSkillKeys = new Set(['system.requirement-analysis', 'requirement.review', 'system.query-local-ip'])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 
@@ -177,7 +174,7 @@ export class AiResourceService {
       state.aiResources = state.aiResources.map(item => {
         if (item.builtIn) return item
         if (item.kind === 'mcp') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', ...(item.authType === 'none' || item.credentialEnv ? {} : { credentialEnv: defaultCredentialEnv('MCP', item.key) }) }
-        if (item.kind === 'skill') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', toolIds: item.toolIds.filter(toolId => !isSkillRuntimeToolId(toolId)) }
+        if (item.kind === 'skill') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', toolIds: item.toolIds.filter(toolId => !retiredBuiltInToolKeys.has(toolId)) }
         return { ...item, managedBy: item.managedBy ?? 'catalog', status: item.source !== 'http' || item.endpoint ? 'ready' : 'draft' }
       })
       for (const builtIn of builtInResources) {
@@ -227,7 +224,7 @@ function catalogMetadataNeedsSync(resources: AiResource[]) {
   return resources.some(item => !item.builtIn && (
     !item.managedBy
     || (item.kind === 'mcp' && (item.status !== 'ready' || (item.authType !== 'none' && !item.credentialEnv)))
-    || (item.kind === 'skill' && (item.status !== 'ready' || item.toolIds.some(isSkillRuntimeToolId)))
+    || (item.kind === 'skill' && (item.status !== 'ready' || item.toolIds.some(toolId => retiredBuiltInToolKeys.has(toolId))))
     || (item.kind === 'tool' && item.status !== (item.source !== 'http' || item.endpoint ? 'ready' : 'draft'))
   ))
 }
@@ -260,8 +257,8 @@ function builtInsNeedSync(resources: AiResource[]) {
 }
 
 
-function builtInSkill(key: string, name: string, description: string, version: string, entrypoint: string, toolIds: string[], tags: string[], runtime: SkillResource['runtime']): SkillResource {
-  return { id: `builtin_skill_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'skill', key, name, description, version, enabled: true, status: 'ready', builtIn: true, managedBy: 'builtin', entrypoint, toolIds, tags, runtime, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
+function builtInSkill(key: string, name: string, description: string, version: string, entrypoint: string, toolIds: string[], tags: string[]): SkillResource {
+  return { id: `builtin_skill_${key.replace(/[^a-z0-9]+/giu, '_')}`, kind: 'skill', key, name, description, version, enabled: true, status: 'ready', builtIn: true, managedBy: 'builtin', entrypoint, toolIds, tags, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
 }
 
 function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiResource, 'id' | 'builtIn' | 'createdAt' | 'updatedAt'> & Pick<AiResource, 'managedBy'>): AiResource {
@@ -286,7 +283,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
   }
   if (kind === 'skill') {
     const runtime = normalizeSkillRuntimePolicy(value.runtime)
-    const toolIds = keys(value.toolIds).filter(toolId => !isSkillRuntimeToolId(toolId))
+    const toolIds = keys(value.toolIds).filter(toolId => !isSkillRuntimeToolId(toolId) && !retiredBuiltInToolKeys.has(toolId))
     return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds, tags: stringList(value.tags, 20, 50), runtime, package: value.package === undefined ? undefined : skillPackage(value.package), contentSha256: optionalSha256(value.contentSha256) }
   }
   const source = oneOf(value.source ?? 'local', ['builtin', 'local', 'http', 'mcp'] as const, '工具来源')
@@ -304,6 +301,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
 
 function validateUnique(resources: AiResource[], candidate: AiResource) {
   if (candidate.kind === 'tool' && isSkillRuntimeToolId(candidate.key)) throw new Error('Skill 运行能力由运行权限清单管理，不能注册为独立工具')
+  if (candidate.kind === 'tool' && retiredBuiltInToolKeys.has(candidate.key)) throw new Error(`工具 ${candidate.key} 已退役，不能重新注册`)
   if (candidate.kind === 'tool' && !candidate.builtIn && defaultBuiltInToolConfigResolver.has(candidate.key)) throw new Error('内置工具标识由受版本控制的配置保留，不能注册为自定义工具')
   if (resources.some(item => item.kind === candidate.kind && item.key.toLocaleLowerCase() === candidate.key.toLocaleLowerCase())) throw new Error(`已存在相同标识的${kindLabel(candidate.kind)}资源`)
 }

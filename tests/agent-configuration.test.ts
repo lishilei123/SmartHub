@@ -48,7 +48,7 @@ async function fixture() {
 test('统一需求分析 Agent 独立发布 Workspace、Knowledge、Skill 与提交协议快照', async () => {
   const { service } = await fixture()
   const initial = (await service.get('requirement_analysis')).agents.requirementAnalysis
-  assert.deepEqual(initial.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
+  assert.deepEqual(initial.requiredToolIds, ['requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
   assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
   assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
   const saved = await service.save('requirement_analysis', {
@@ -73,7 +73,7 @@ test('旧需求分析草稿加载和前端发布 payload 都会补齐新增的�
     routing: { ...initialState.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
     definition: initialState.draft.definition,
   })
-  const newlyRequiredTools = new Set(['skill.activate', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
+  const newlyRequiredTools = new Set(['requirement-repair.submit_result', 'requirement-release.submit_result'])
   await store.transaction(state => {
     const stored = state.agentConfigurationDrafts.find(item => item.scene === 'requirement_analysis')!.agents.requirementAnalysis
     stored.definition.toolIds = stored.definition.toolIds.filter(toolId => !newlyRequiredTools.has(toolId))
@@ -91,7 +91,6 @@ test('旧需求分析草稿加载和前端发布 payload 都会补齐新增的�
   const publishPayload = materializeRequiredAgentCapabilities(staleBrowserDraft, reloaded)
   assert.ok(reloaded.requiredToolIds.every(toolId => publishPayload.definition.toolIds.includes(toolId)))
   assert.ok(reloaded.requiredSkillKeys.every(skillKey => publishPayload.definition.skillKeys.includes(skillKey)))
-  assert.equal(staleBrowserDraft.definition.toolIds.includes('skill.activate'), false)
 
   const migrated = await service.save('requirement_analysis', { agentKey: 'requirementAnalysis', revision: publishPayload.revision, routing: publishPayload.routing, definition: publishPayload.definition })
   const published = await service.publish('requirement_analysis', { agentKey: 'requirementAnalysis', revision: migrated.revision })
@@ -109,7 +108,7 @@ test('统一需求分析与测试设计 Agent 分别发布独立不可变版本'
   assert.deepEqual(Object.keys(testDesign.agents), ['testDesign'])
   assert.equal('technicalSolutionExtraction' in testDesign.agents, false)
   assert.equal('technicalSolutionReview' in testDesign.agents, false)
-  assert.deepEqual(testDesign.agents.testDesign!.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
+  assert.deepEqual(testDesign.agents.testDesign!.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
   assert.deepEqual(testDesign.agents.testDesign!.requiredSkillKeys, ['test-design-baseline', 'test-point-design', 'test-case-design', 'test-design-repair'])
   assert.equal('testAnalysis' in testDesign.agents, false)
   assert.equal('functionalTestDesign' in testDesign.agents, false)
@@ -204,17 +203,17 @@ test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
   const expected = {
     testScript: {
       definitionKey: 'test-script',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'skill.activate', 'test_script.submit_result'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'test_script.submit_result'],
       skill: 'test-script-generation',
     },
     failureAnalysis: {
       definitionKey: 'failure-analysis',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'skill.activate', 'failure_analysis.submit_result'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'failure_analysis.submit_result'],
       skill: 'failure-analysis',
     },
     scriptRepair: {
       definitionKey: 'script-repair',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'skill.activate', 'script_repair.submit_result'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'script_repair.submit_result'],
       skill: 'script-repair',
     },
   } as const
@@ -326,13 +325,11 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
     }, new AbortController().signal)
     const input = captured.at(-1)!
     assert.equal(input.snapshot.agentDefinition.agentKey, binding.agentKey)
-    assert.deepEqual(input.executionProfile?.allowedSkillKeys, [binding.skillKey])
     assert.deepEqual(input.executionProfile?.allowedToolIds, [
       'workspace.read_file',
       'workspace.grep_files',
       'workspace.find_files',
       'workspace.list_directory',
-      'skill.activate',
       binding.submitToolId,
     ])
     assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.search'), false)

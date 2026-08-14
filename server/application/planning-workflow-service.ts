@@ -54,7 +54,6 @@ const PLANNING_WORKSPACE_TOOLS = [
   ...REQUIREMENT_WORKSPACE_TOOLS,
   'knowledge.search',
   'knowledge.read_chunk',
-  'skill.activate',
 ] as const
 
 const STAGE_PROFILES: PlanningStageProfile[] = [

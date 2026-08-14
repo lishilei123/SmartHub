@@ -20,7 +20,6 @@ const REQUIREMENT_WORKSPACE_TOOL_IDS = [
   'workspace.list_directory',
   'knowledge.search',
   'knowledge.read_chunk',
-  'skill.activate',
 ] as const
 
 export interface RequirementAnalysisRequest {
@@ -830,7 +829,7 @@ function renderRepairTask(run: ReviewRun, findingIds: string[]) {
     `Source Run：${run.id}`,
     `固定资产：${JSON.stringify(run.snapshot.assets.map(item => ({ assetVersionId: item.assetVersionId, logicalPath: item.logicalPath, contentSha256: item.assetContentHash })))}`,
     `已确认 Findings：${JSON.stringify(findings)}`,
-    '你可自行决定是否调用 skill_activate 激活 requirement.repair。通过 requirement_repair_submit_result 提交 requirement-repair/v1。',
+    'requirement.repair Skill 已由 Runtime 按发布绑定直接加载。通过 requirement_repair_submit_result 提交 requirement-repair/v1。',
   ].join('\n')
 }
 
@@ -839,7 +838,7 @@ function renderReleaseTask(run: ReviewRun) {
     'Workflow Stage 固定为 release。服务端已通过版本、复验和 Finding 门禁。只生成 refinedRequirementsMarkdown 候选；requirements.json、findings.json、test-focus.json、traceability.json 与 manifest.json 由服务端生成。',
     `Verification Run：${run.id}`,
     `固定 AssetVersion：${JSON.stringify(run.snapshot.assets.map(item => ({ assetVersionId: item.assetVersionId, logicalPath: item.logicalPath, contentSha256: item.assetContentHash })))}`,
-    '你可自行决定是否调用 skill_activate 激活 requirement.release。通过 requirement_release_submit_result 提交 requirement-release-candidate/v1；不得自行发布。',
+    'requirement.release Skill 已由 Runtime 按发布绑定直接加载。通过 requirement_release_submit_result 提交 requirement-release-candidate/v1；不得自行发布。',
   ].join('\n')
 }
 
@@ -1021,7 +1020,7 @@ function selectAgentModels(state: DatabaseState, configuration: AgentConfigurati
 }
 
 function requirePiWorkspaceAgentDefinition(definition: ReviewRunSnapshot['agentDefinition']) {
-  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result']
+  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result']
   const missing = requiredTools.filter(toolId => !definition.toolIds.includes(toolId))
   if (definition.agentKey !== 'planning' || definition.resultSchemaVersion !== 'planning/v1' || missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布 PlanningAgent${missing.length ? `；缺少工具 ${missing.join(', ')}` : ''}`)
 }
