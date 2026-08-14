@@ -43,9 +43,6 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (treeRevisions && method === 'GET') { await authorize(treeRevisions[1], 'test-design:read'); return send(response, 200, { items: await service.treeRevisions(treeRevisions[1], treeRevisions[2], treeRevisions[3]) }) }
   const treeDiff = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-point-tree\/diff$/.exec(url.pathname)
   if (treeDiff && method === 'GET') { await authorize(treeDiff[1], 'test-design:read'); return send(response, 200, { changes: await service.treeDiff(treeDiff[1], treeDiff[2], treeDiff[3], Number(url.searchParams.get('from')), Number(url.searchParams.get('to'))) }) }
-  const approveTree = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-point-tree\/approve$/.exec(url.pathname)
-  if (approveTree && method === 'POST') { await authorize(approveTree[1], 'test-design:review'); return send(response, 201, await service.approveTree(approveTree[1], approveTree[2], approveTree[3], request.headers['if-match'], principal)) }
-
   const cases = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-cases$/.exec(url.pathname)
   if (cases && method === 'GET') { await authorize(cases[1], 'test-design:read'); return send(response, 200, { items: await service.listCases(cases[1], cases[2], cases[3], { dimension: url.searchParams.get('dimension') ?? undefined, executionMethod: url.searchParams.get('executionMethod') ?? undefined, status: url.searchParams.get('status') ?? undefined }) }) }
   if (cases && method === 'POST') { await authorize(cases[1], 'test-design:edit'); const body = await json(request); return send(response, 201, await service.createCase(cases[1], cases[2], cases[3], body.content ?? body, principal)) }

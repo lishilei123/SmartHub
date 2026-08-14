@@ -30,7 +30,7 @@ const stageLabels: Record<string, string> = {
   requirement_verification: '需求验证',
   requirement_release: '需求发布',
   test_point_design: '测试点设计',
-  test_point_review: '测试点评审',
+  test_point_review: '测试点自动校验',
   test_case_design: '测试用例设计',
   test_design_repair: 'Coverage 修复',
   test_design_release: '测试设计发布',
@@ -78,11 +78,11 @@ export function PlanningPage(props: Props) {
     {tab === 'requirements' && <Suspense fallback={<PlanningLoading label="正在加载需求分析工作台…" />}><RequirementAnalysisPage {...props} /></Suspense>}
     {tab === 'test-design' && <Suspense fallback={<PlanningLoading label="正在加载测试设计工作台…" />}><TestDesignPage projectVersion={props.projectVersion} onManageVersions={props.onManageVersions} notify={props.notify} /></Suspense>}
     {tab === 'workflow' && <section className="planning-workflow-view">
-      <header><span><BrainCircuit /><div><b>PlanningWorkflow</b><small>Requirement Release 与 Test Design Release 之间保留正式 Service、Validator、Snapshot 和人工门禁。</small></div></span><button disabled={loadingWorkflow} onClick={() => void loadWorkflow()}><RefreshCw className={loadingWorkflow ? 'planning-spin' : ''} />刷新</button></header>
+      <header><span><BrainCircuit /><div><b>PlanningWorkflow</b><small>Workflow 推进业务阶段；测试点由 Validator 自动校验，测试用例与发布仍保留人工门禁。</small></div></span><button disabled={loadingWorkflow} onClick={() => void loadWorkflow()}><RefreshCw className={loadingWorkflow ? 'planning-spin' : ''} />刷新</button></header>
       {workflowError && <div className="planning-error"><AlertTriangle />{workflowError}</div>}
       {!props.projectVersion ? <div className="planning-empty">请先选择 ProjectVersion。</div> : !workflow ? <PlanningLoading label="正在读取 Planning Workflow…" /> : <>
         <PlanningContextMetrics context={workflow.context} compacting={compacting} onCompact={() => void compact()} />
-        <div className="planning-stage-grid">{workflow.stageProfiles.map((stage, index) => <article key={stage.stage}><header><i>{index + 1}</i><span><b>{stageLabels[stage.stage] ?? stage.stage}</b><small>{stage.agentKey}</small></span>{stage.humanGate && <em>Human Gate</em>}</header><dl><div><dt>Allowed Tools</dt><dd>{stage.allowedToolIds.length ? stage.allowedToolIds.join(' · ') : '—'}</dd></div><div><dt>Submit Tool</dt><dd>{stage.submitToolId ?? '—'}</dd></div><div><dt>Result Schema</dt><dd>{stage.resultSchemaVersion ?? '—'}</dd></div><div><dt>Reviewer</dt><dd>{stage.reviewers.length ? stage.reviewers.join(' · ') : '—'}</dd></div></dl></article>)}</div>
+        <div className="planning-stage-grid">{workflow.stageProfiles.map((stage, index) => <article key={stage.stage}><header><i>{index + 1}</i><span><b>{stageLabels[stage.stage] ?? stage.stage}</b><small>{stage.stage === 'test_point_review' ? 'Service Validator' : stage.agentKey}</small></span>{stage.humanGate && <em>Human Gate</em>}</header><dl><div><dt>Allowed Tools</dt><dd>{stage.allowedToolIds.length ? stage.allowedToolIds.join(' · ') : '—'}</dd></div><div><dt>Submit Tool</dt><dd>{stage.submitToolId ?? '—'}</dd></div><div><dt>Result Schema</dt><dd>{stage.resultSchemaVersion ?? '—'}</dd></div><div><dt>Reviewer</dt><dd>{stage.reviewers.length ? stage.reviewers.join(' · ') : '—'}</dd></div></dl></article>)}</div>
         <footer className="planning-boundary"><CheckCircle2 /><span><b>正式事实边界</b><small>Compaction Summary 与 Reviewer Candidate 不是正式业务事实；Release、TestCase、Revision、Hash 与 Snapshot 均由 Service 重新读取。</small></span></footer>
       </>}
     </section>}

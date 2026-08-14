@@ -87,7 +87,7 @@ export function buildTestDesignDirectoryInputPlan(input: {
       workspaceSnapshotSha256: input.workspace.snapshotSha256,
       requirementReleaseId: input.workspace.requirementReleaseId,
       currentInputRefs: input.workspace.files.filter(file => file.sourceScope === 'current_input').map(file => ({ logicalPath: file.logicalPath.replace(/^workspace\//u, ''), assetVersionId: file.assetVersionId, contentSha256: file.contentSha256 })),
-      instructions: 'Requirement Release 是当前正式需求基线和重点输入，但不是 Workspace 读取白名单。从工作区根目录使用 ls/find/grep 自主探索 branches/shared/formal-output，再用 read 读取事实资料。不得调用 Shell、write、edit 或越过工作区。',
+      instructions: 'Requirement Release 是当前正式需求基线，currentInputRefs 是本次上传资料重点；两者都不是 Workspace 读取白名单。先读取重点输入，再从工作区根目录使用 ls/find/grep 自主探索 branches/shared/formal-output，并用 read 读取事实资料。不得调用 Shell、write、edit 或越过工作区。',
     }),
     '<<<SMARTHUB_PI_TEST_DESIGN_WORKSPACE_END>>>',
   ].join('\n')

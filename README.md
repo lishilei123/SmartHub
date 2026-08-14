@@ -1,6 +1,6 @@
 # SmartHub 需求分析、测试设计与测试执行闭环
 
-当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析使用 `RequirementAnalysisAgent`，测试设计使用唯一的 `TestDesignAgent`；测试执行由确定性的 `TestExecutionService` 编排三个独立发布的 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`，并只把服务端校验后的 `ExecutionPackage` 交给非 Agentic OCI Playwright Runner。PostgreSQL 保存正式状态，Workspace 与 Artifact Store 只保存不可变投影和产物。
+当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 编排三个独立发布的 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`，并只把服务端校验后的 `ExecutionPackage` 交给非 Agentic OCI Playwright Runner。PostgreSQL 保存正式状态，Workspace 与 Artifact Store 只保存不可变投影和产物。
 
 测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`requirements.json` Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库、套件与 `TestExecutionHandoff`。执行 Run 仅接受 Handoff 与服务端环境标识，冻结业务输入、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
 
@@ -16,9 +16,9 @@
 
 ## 已实现
 
-- 测试执行：固定 `RequirementAnalysisAgent → TestDesignAgent → TestExecutionService → ExecutionPackage → OCI Playwright Runner` 边界，三个执行 Agent 分别发布与冻结，Service 独占状态、重试、诊断和修复决策；支持 UI/API 与 smoke/regression/full/custom，不支持的方法明确落为 `unsupported` 且不创建脚本或 Runner Attempt；
+- 测试执行：固定 `PlanningAgent → TestExecutionService → ExecutionPackage → OCI Playwright Runner` 边界，三个执行 Agent 分别发布与冻结，Service 独占状态、重试、诊断和修复决策；支持 UI/API 与 smoke/regression/full/custom，不支持的方法明确落为 `unsupported` 且不创建脚本或 Runner Attempt；
 - 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和三个 Agent 快照；
-- 测试设计：唯一 `TestDesignAgent`、四个内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、测试点树唯一人工门禁、服务端 Coverage Audit、最多两轮 Agent Repair、人工用例集发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
+- 测试设计：统一 `PlanningAgent`、Agent 配置启用并由运行时统一加载的内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、测试点树自动校验与固化、服务端 Coverage Audit、最多两轮 Agent Repair、人工用例审核与发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
 - 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承需求分析运行与对话；
@@ -43,21 +43,22 @@
 - 需求分析上传支持 Markdown、TXT 和 ZIP；知识库页面以“知识库”为根节点，直接展示与 Pi Agent 相同的 `/workspace` 文件树，并补齐各项目版本、`shared` 和 `agent_workspace` 的标准空目录；当前版本需求固定上传到 `workspace/branches/{项目版本名}/input/requirements/`。ZIP 保留包内子目录和图片相对路径；启动评审时服务端固定需求输入范围，并把活动索引中整个 `/workspace` 的 ready 文档版本物化为本次运行的只读文件快照，让 Pi Agent 可自主查看当前分支、其他分支和 `shared` 资料；正式 ReviewRun、工作区快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON；
 - AC-001～AC-009 自动化验收场景。
 
-## 当前已实现的单 Agent 测试设计流程
+## 当前已实现的统一 PlanningAgent 测试设计流程
 
-- `test_point_design` 固定开放 `test-design-baseline`、`test-point-design` 与 `test_design_points.submit_result`；Agent 从冻结 Workspace 自主读取正式需求发布包和按需增强资料，直接生成 Test Point Tree Candidate，不存在 CoverageUnit 中间层。
-- 测试点树是唯一人工门禁。批准、修改、增加、删除、拆分、合并或要求 AI 重新设计均由人工触发；只有批准后的 `TestPointTreeVersion` 能进入用例设计。
-- `test_case_design` 固定开放 `test-case-design` 与 `test_design_cases.submit_result`；`test_design_repair` 固定开放 `test-design-repair` 与 `test_design_repair.submit_result`。Agent 和 Skill 均不能切换 Stage、扩大权限或发布版本。
+- `PlanningAgent` 发布配置决定启用哪些 Skill；运行开始时一次性加载全部已启用 Skill，Agent 自主判断何时使用。Workflow 只推进业务 Stage、收窄 Tool/提交协议和执行 Gate，不调度或激活 Skill。
+- `test_point_design` 阶段从冻结的 `currentInputRefs` 识别本次任务重点，同时可在完整 Project Workspace Snapshot 内自主读取正式需求发布包和旁证资料，直接生成 Test Point Tree Candidate，不存在 CoverageUnit 中间层。
+- Service/Validator 自动校验测试点树的结构、引用与内容 Hash，创建不可变 `TestPointTreeVersion` 并投影 Workspace，然后立即进入 `test_case_design`。人工仍可增加、编辑、删除、拆分、合并或要求 AI 重新设计测试点，但测试点不再是强制人工 Gate；每次修改后都会重新自动校验并生成用例。
+- `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；用例生成后必须经过人工用例审核，发布仍由 Service 门禁控制。
 - Coverage Audit 是服务端确定性步骤，不是 Agent Stage。引用、覆盖、重复、过度合并、维度一致性、UI/API 与数据 readiness、Finding/Confirmation 闭环均由服务端判断。
-- 批准树投影到 `workspace/branches/{version}/test_design/test-point-tree.json|test-design.md`；发布用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|test-data.json|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
+- 自动校验固化的树投影到 `workspace/branches/{version}/test_design/test-point-tree.json|test-design.md`；发布用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|test-data.json|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、资产版本、索引、同步任务、模型与 AI 资源、Agent 配置、ReviewRun/Job，以及 TestDesign Workflow、Snapshot、树、用例 revision、Coverage、用例集、套件和交接均写入 `smarthub` schema。旧技术方案表和旧测试设计数据由迁移直接删除。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除；未配置 `DATABASE_URL` 时回退到 JSON 文件，生产模式必须使用 PostgreSQL Worker。
 
 生产 API 注入 SmartHub 内置模型运行池。知识库配置先选择来源，再选择该来源中的生效模型；本地模式下上传解析、索引重建和向量/混合检索均路由到所选模型，发现模型未运行时会自动拉取并启动，同时不会停止池内其他模型。单元测试通过运行时接口注入轻量测试模型，不下载大模型。
 
-## 当前已实现的统一需求分析 Agent 流程
+## 当前已实现的统一 PlanningAgent 需求分析流程
 
-> 需求分析只保留统一的 `RequirementAnalysisAgent`，并且只接受 `/workspace` 文件工作区。Agent 基于 Pi Agent Core 运行，使用只读 `ls / find / grep / read` 与受控 Knowledge 工具自主探索固定资料，在同一 Session 内完成需求基线、整体与跨需求分析、自检和结构化提交；旧 `RequirementPointExtractionAgent`、`RequirementReviewAgent` 及其独立提交工具、草稿和配置快照均已删除。
+> 需求分析与测试设计只保留同一个 `PlanningAgent`，并且只接受 `/workspace` 文件工作区。Agent 基于 Pi Agent Core 运行，使用只读 `ls / find / grep / read` 与受控 Knowledge 工具自主探索固定资料，在同一个 ProjectVersion Planning Session 内完成需求分析；Requirement Release 发布后，Workflow 把“开始测试设计”作为下一项真实 Session 消息下发给同一个 Agent，后续上下文可直接读取该任务。旧 `RequirementPointExtractionAgent`、`RequirementReviewAgent` 及其独立提交工具、草稿和配置快照均已删除。
 
 统一逻辑目录如下：
 
@@ -181,7 +182,7 @@ npm test
 npm run build
 ```
 
-测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、两个单 Agent 配置发布、只读 Workspace、Requirement Release 冻结、Stage/Skill/Submit Tool 映射、测试点人工批准、Coverage Audit/Repair、正式资产投影、TestCaseSet 发布、执行交接、确定性单 Run 报告指标与导出、PostgreSQL 只读报告快照、检索降级、FindingAction 并发控制和参数 Hash 审批。
+测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、统一 PlanningAgent 配置发布、只读 Workspace、Requirement Release 冻结、Stage/Skill/Submit Tool 映射、测试点自动校验、Coverage Audit/Repair、正式资产投影、TestCaseSet 发布、执行交接、确定性单 Run 报告指标与导出、PostgreSQL 只读报告快照、检索降级、FindingAction 并发控制和参数 Hash 审批。
 
 ## 接口摘要
 
@@ -223,7 +224,6 @@ npm run build
 - `GET|POST /api/project-versions/:projectVersionId/test-designs`
 - `GET|POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs`
 - `GET /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId`
-- `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/test-point-tree/approve`
 - `GET /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/coverage-audits`
 - `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/actions/re-audit`
 - `POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs/:runId/test-case-set-versions`

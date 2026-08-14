@@ -151,12 +151,13 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     projectVersionId: run.projectVersionId,
     requirementRelease: { releaseId: run.basisSnapshot.requirementReleaseId, verificationRunId: run.basisSnapshot.verificationRunId, requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256 },
     workspace: { root: '/workspace', activeBranch: `/${workspace.activeBranchLogicalPath}`, agentDirectory: `/${workspace.agentLogicalPath}`, snapshotSha256: workspace.snapshotSha256 },
+    currentInputRefs: run.currentInputRefs.map(item => ({ logicalPath: item.logicalPath.replace(/^workspace\//u, ''), assetVersionId: item.assetVersionId, contentSha256: item.contentSha256 })),
     design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     stageContract: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
     ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test-design/test-point-tree.json` } } : {}),
     ...(repairAudit ? { repair: { attempt: run.automaticRepair?.attempt, maxAttempts: run.automaticRepair?.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
-    instructions: ['Workflow 已固定业务任务与提交协议，但不调度 Skill；PlanningAgent 从 Enabled Skills 自主选择需要的能力。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', '如存在 /workspace/agent_workspace/planning_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须分离；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
+    instructions: ['Workflow 已固定业务任务与提交协议，但不调度 Skill；PlanningAgent 从 Enabled Skills 自主选择需要的能力。', 'currentInputRefs 是本次上传资料重点，不是读取白名单；先读取重点输入，再从完整 ProjectWorkspaceSnapshot 自主查找相关资料。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', '如存在 /workspace/agent_workspace/planning_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须分离；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
   })
 }
 
@@ -202,6 +203,7 @@ function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, wo
     knowledgeBaseId: workspace.knowledgeBaseId,
     indexVersionId: workspace.indexVersionId,
     assets: workspace.files.flatMap(file => file.assetId && file.assetVersionId ? [{ assetId: file.assetId, assetVersionId: file.assetVersionId, assetContentHash: file.contentSha256, logicalPath: file.logicalPath, displayName: file.displayName }] : []),
+    currentInputRefs: structuredClone(run.currentInputRefs),
     documentWorkspace: { mode: 'agent_directory', logicalPath: workspace.rootLogicalPath, rootLogicalPath: workspace.rootLogicalPath, activeBranchLogicalPath: workspace.activeBranchLogicalPath, branchLogicalPaths: state.projectVersions.filter(item => item.projectId === project.id).map(item => `workspace/branches/${safeWorkspaceSegment(item.name)}`), agentLogicalPath: workspace.agentLogicalPath, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] },
     workspaceFiles: workspace.files,
     workspaceSnapshot: workspace,
@@ -235,7 +237,7 @@ function approvedPointIds(run: TestDesignWorkflowRun) {
   const tree = run.testPointTree
   const version = tree?.versions.find(item => item.id === tree.currentApprovedVersionId)
   const revision = tree?.revisions.find(item => item.revision === version?.revision)
-  if (!tree || !version || !revision) throw new TestDesignError('TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树未批准', 409)
+  if (!tree || !version || !revision) throw new TestDesignError('TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树尚未通过自动校验并固化', 409)
   const active = revision.nodes.filter(item => !item.deleted)
   const parents = new Set(active.flatMap(item => item.parentId ? [item.parentId] : []))
   return new Set(active.filter(item => item.applicability !== 'not_applicable' && !parents.has(item.nodeId)).map(item => item.nodeId))

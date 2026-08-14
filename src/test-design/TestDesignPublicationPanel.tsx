@@ -26,7 +26,7 @@ export function TestDesignPublicationPanel({ projectId, run, cases, versions, su
   const [overrideReasons, setOverrideReasons] = useState<Record<string, string>>({})
   const audit = run ? [...run.coverageAudits].reverse().find(item => item.status === 'valid') : undefined
   const publishBlockers = run ? [
-    !run.testPointTree?.currentApprovedVersionId ? '测试点树未批准' : '',
+    !run.testPointTree?.currentApprovedVersionId ? '测试点树未通过自动校验并固化' : '',
     run.testCases.some(item => !item.tombstonedAt && item.reviewState !== 'approved') ? '候选用例未全部批准' : '',
     run.caseChangeProposals.some(item => item.decision === 'pending') ? 'Proposal 尚未全部处置' : '',
     !audit ? 'Coverage Audit 未通过或已失效' : '',

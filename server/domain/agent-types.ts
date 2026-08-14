@@ -459,6 +459,7 @@ export interface PlanningTestDesignSnapshot {
   knowledgeBaseId: string
   indexVersionId: string
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }>
+  currentInputRefs: CurrentInputRef[]
   documentWorkspace: NonNullable<ReviewRunSnapshot['documentWorkspace']>
   workspaceFiles: import('./test-design-types.js').TestDesignWorkspaceFile[]
   workspaceSnapshot: import('./test-design-types.js').TestDesignWorkspaceSnapshot

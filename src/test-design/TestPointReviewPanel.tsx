@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Plus, RefreshCw, ShieldCheck, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Plus, RefreshCw, X } from 'lucide-react'
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { TestPointTreePanel } from './TestPointTreePanel'
 import type { TestDimension, TestPointNode, TestPointTreeOperation, TestDesignWorkflowRun } from './types'
@@ -15,21 +15,20 @@ type Props = {
   nodes: TestPointNode[]
   busy: boolean
   onOperation: (operations: TestPointTreeOperation[], reason: string) => void
-  onApprove: () => void
   onRedesign: () => void
 }
 
-export function TestPointReviewPanel({ run, nodes, busy, onOperation, onApprove, onRedesign }: Props) {
+export function TestPointReviewPanel({ run, nodes, busy, onOperation, onRedesign }: Props) {
   const [selected, setSelected] = useState<string[]>([])
   const [dialog, setDialog] = useState<DialogState | null>(null)
-  const approved = Boolean(run.testPointTree?.currentApprovedVersionId)
-  const waiting = run.stage === 'test_point_review' && !approved
+  const validated = Boolean(run.testPointTree?.currentApprovedVersionId)
+  const locked = busy || ['queued', 'running'].includes(run.status)
   const version = run.testPointTree?.versions.find(item => item.id === run.testPointTree?.currentApprovedVersionId)
   const submitOperation = (operations: TestPointTreeOperation[], reason: string) => { onOperation(operations, reason); setDialog(null); setSelected([]) }
   return <section className="td2-card td2-review">
-    <header className="td2-section-head"><div><p className="td2-kicker">唯一人工门禁</p><h2>Test Point Tree 审核</h2><p>通过页面内结构化表单修改、增加、删除、拆分和合并；每次保存都生成可审计的 Tree Revision。</p></div><div className="td2-run-actions"><button className="td2-button ghost" disabled={busy || approved} onClick={() => setDialog({ mode: 'add' })}><Plus />增加</button><button className="td2-button ghost" disabled={busy || approved} onClick={onRedesign}><RefreshCw />AI 重新设计</button><button className="td2-button primary" disabled={busy || !waiting} onClick={onApprove}><ShieldCheck />批准 TestPointTreeVersion</button></div></header>
-    {approved && version && <div className="td2-approved"><CheckCircle2 /><div><b>已批准 {version.id}</b><small>Version {version.version} · Revision {version.revision} · {version.projection.status}</small><code>{version.treeSha256}</code></div></div>}
-    <TestPointTreePanel nodes={nodes} selected={selected} onSelect={setSelected} onEdit={node => setDialog({ mode: 'edit', node })} onSplit={node => setDialog({ mode: 'split', node })} onDelete={node => setDialog({ mode: 'delete', node })} onMerge={mergeNodes => setDialog({ mode: 'merge', nodes: mergeNodes })} readOnly={approved} />
+    <header className="td2-section-head"><div><p className="td2-kicker">服务端自动校验</p><h2>Test Point Tree</h2><p>PlanningAgent 提交后由 Validator 自动检查结构、依据引用与内容 Hash，并直接固化 Version、投影 Workspace、进入用例生成，不需要人工批准。仍可通过结构化表单调整；保存后会自动复验并重新生成用例。</p></div><div className="td2-run-actions"><button className="td2-button ghost" disabled={locked} onClick={() => setDialog({ mode: 'add' })}><Plus />增加</button><button className="td2-button ghost" disabled={locked} onClick={onRedesign}><RefreshCw />AI 重新设计</button></div></header>
+    {validated && version && <div className="td2-approved"><CheckCircle2 /><div><b>自动校验通过 · {version.id}</b><small>Version {version.version} · Revision {version.revision} · Workspace {version.projection.status}</small><code>{version.treeSha256}</code></div></div>}
+    <TestPointTreePanel nodes={nodes} selected={selected} onSelect={setSelected} onEdit={node => setDialog({ mode: 'edit', node })} onSplit={node => setDialog({ mode: 'split', node })} onDelete={node => setDialog({ mode: 'delete', node })} onMerge={mergeNodes => setDialog({ mode: 'merge', nodes: mergeNodes })} readOnly={locked} />
     {(dialog?.mode === 'add' || dialog?.mode === 'edit') && <PointFormDialog mode={dialog.mode} node={dialog.mode === 'edit' ? dialog.node : undefined} nodes={nodes} busy={busy} onClose={() => setDialog(null)} onSubmit={submitOperation} />}
     {dialog?.mode === 'split' && <SplitDialog node={dialog.node} busy={busy} onClose={() => setDialog(null)} onSubmit={submitOperation} />}
     {dialog?.mode === 'merge' && <MergeDialog nodes={dialog.nodes} busy={busy} onClose={() => setDialog(null)} onSubmit={submitOperation} />}

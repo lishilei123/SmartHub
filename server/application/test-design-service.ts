@@ -15,6 +15,7 @@ import { assertEtag, etag, executableTestPointIds, TestDesignError, validateCase
 import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 2
+const AUTOMATIC_TEST_POINT_REVIEW_ACTOR = 'system:test-point-validator'
 
 export interface PlanningAgentRuntime {
   readiness?(projectVersionId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
@@ -29,16 +30,16 @@ export interface TestCaseAssetProjector { ingest(input: { knowledgeBaseId: strin
 
 export class TestDesignService {
   private readonly activeRuns = new Map<string, AbortController>()
-  private testPointsConfirmedListener?: (
+  private testPointsValidatedListener?: (
     projectVersionId: string,
   ) => void | Promise<void>
 
   constructor(private readonly store: StateStore, private readonly runtime?: PlanningAgentRuntime, private readonly projector?: TestCaseAssetProjector) {}
 
-  onTestPointsConfirmed(
+  onTestPointsValidated(
     listener: (projectVersionId: string) => void | Promise<void>,
   ) {
-    this.testPointsConfirmedListener = listener
+    this.testPointsValidatedListener = listener
   }
 
   async inputCandidates(projectVersionId: string) {
@@ -136,16 +137,17 @@ export class TestDesignService {
     try {
       if (['pending', 'queued', 'running', 'failed'].includes(node(run, 'test_point_design').status)) {
         const output = await this.executeNode(runId, 'test_point_design', signal, pointDesignInput(run))
-        await this.store.transaction(state => {
+        const treeVersionId = await this.store.transaction(state => {
           const current = findRunById(state, runId)
           publishArtifact(current, 'test_point_design', output)
           materializeTestPointDesign(current, output.content, current.createdBy)
           materializeDesignIssues(current, output.content)
           finishNode(current, 'test_point_design', output.execution)
-          startTestPointReview(current)
-          Object.assign(current, { status: 'waiting_gate', stage: 'test_point_review', progress: 40 })
+          return startAutomaticTestPointReview(current).id
         })
-        return this.loadRun(runId)
+        await this.projectTreeVersion(run.projectVersionId, run.testDesignId, runId, treeVersionId)
+        await this.store.transaction(state => { completeAutomaticTestPointReview(findRunById(state, runId)) })
+        await this.testPointsValidatedListener?.(run.projectVersionId)
       }
       const refreshed = await this.loadRun(runId)
       if (!refreshed.testPointTree?.currentApprovedVersionId) return refreshed
@@ -203,7 +205,7 @@ export class TestDesignService {
       const running = await this.loadRun(runId)
       const upstream = key === 'test_point_design' ? pointDesignInput(running) : key === 'test_case_design' ? caseDesignInput(running) : repairInput(running)
       const output = await this.runtime.execute({ stage: key, run: running, upstream }, signal)
-      const repairQueued = await this.fencedNodeTransaction(nodeRunId, lease, state => {
+      const result = await this.fencedNodeTransaction(nodeRunId, lease, state => {
         const run = findRunById(state, runId)
         const target = required(run.nodeRuns.find(item => item.id === nodeRunId && item.nodeKey === key), 'WORKFLOW_NODE_NOT_FOUND', '节点已被新 generation 替换')
         if (target.status !== 'running') throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '节点已不处于当前执行状态', 409)
@@ -212,13 +214,16 @@ export class TestDesignService {
         if (key === 'test_point_design') {
           materializeTestPointDesign(run, output.content, run.createdBy)
           materializeDesignIssues(run, output.content)
-          startTestPointReview(run)
-          Object.assign(run, { status: 'waiting_gate', stage: 'test_point_review', progress: 40 })
-          return false
+          return { repairQueued: false, treeVersionId: startAutomaticTestPointReview(run).id }
         }
-        return finalizeCaseDesignAndAudit(run, output.content, run.createdBy, key === 'test_design_repair')
+        return { repairQueued: finalizeCaseDesignAndAudit(run, output.content, run.createdBy, key === 'test_design_repair'), treeVersionId: undefined }
       })
-      if (repairQueued) await this.schedule(runId)
+      if (result.treeVersionId) {
+        await this.projectTreeVersion(running.projectVersionId, running.testDesignId, runId, result.treeVersionId)
+        await this.fencedNodeTransaction(nodeRunId, lease, state => { completeAutomaticTestPointReview(findRunById(state, runId)) })
+        await this.testPointsValidatedListener?.(running.projectVersionId)
+        await this.schedule(runId)
+      } else if (result.repairQueued) await this.schedule(runId)
       return this.loadRun(runId)
     } catch (error) {
       if (!String(error instanceof Error ? error.message : error).includes('WORKFLOW_JOB_LEASE_LOST')) {
@@ -226,7 +231,8 @@ export class TestDesignService {
           const run = readDesignState(state).runs.find(item => item.id === runId)
           const target = run?.nodeRuns.find(item => item.id === nodeRunId)
           if (!run || !target || run.status === 'cancelled') return
-          failNode(run, target.nodeKey, error)
+          const active = run.nodeRuns.find(item => item.status === 'running')
+          failNode(run, active?.nodeKey ?? target.nodeKey, error)
           const message = error instanceof Error ? error.message : String(error)
           Object.assign(run, { status: 'failed', stage: 'failed', finishedAt: now(), error: message, errorCode: errorCode(message) })
         }).catch(() => undefined)
@@ -259,26 +265,23 @@ export class TestDesignService {
   async treeDiff(projectVersionId: string, designId: string, runId: string, from: number, to: number) { const run = await this.loadScopedRun(projectVersionId, designId, runId); const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成'); const left = required(tree.revisions.find(item => item.revision === from), 'TEST_POINT_TREE_REVISION_NOT_FOUND', '起始树 revision 不存在'); const right = required(tree.revisions.find(item => item.revision === to), 'TEST_POINT_TREE_REVISION_NOT_FOUND', '目标树 revision 不存在'); return structuralDiff(left.nodes, right.nodes) }
 
   async patchTree(projectVersionId: string, designId: string, runId: string, ifMatch: string | undefined, input: { operations: TestPointTreeOperation[]; reason: string }, principal: Principal) {
-    return this.store.transaction(state => {
+    const treeVersionId = await this.store.transaction(state => {
       assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成'); const current = tree.revisions.find(item => item.revision === tree.currentRevision)!
+      if (['queued', 'running'].includes(run.status)) throw new TestDesignError('TEST_DESIGN_RUN_BUSY', 'PlanningAgent 正在处理当前测试设计，暂不能修改测试点', 409)
       assertEtag(ifMatch, etag('tree', tree.id, current.revision, current.treeSha256), 'TEST_POINT_TREE_REVISION_CONFLICT')
       if (!Array.isArray(input.operations) || !input.operations.length || input.operations.length > 100) throw new TestDesignError('TEST_POINT_TREE_OPERATION_INVALID', 'operations 必须包含 1 到 100 个操作', 422)
       const nodes = applyTreeOperations(current.nodes, input.operations)
       validateTreeReferences(run, nodes)
       const revision: TestPointTreeRevision = { revision: current.revision + 1, parentRevision: current.revision, nodes, operations: structuredClone(input.operations), reason: cleanRequired(input.reason, '修改说明', 2_000), actorId: principal.subjectId, treeSha256: validateTreeNodes(nodes), createdAt: now() }
       tree.revisions.push(revision); tree.currentRevision = revision.revision; tree.currentApprovedVersionId = undefined
-      run.testCases.forEach(testCase => { if (!testCase.tombstonedAt) testCase.reviewState = 'draft' }); run.coverageAudits.forEach(audit => { audit.status = 'stale' }); node(run, 'test_point_review').status = 'waiting_gate'; Object.assign(run, { status: 'waiting_gate', stage: 'test_point_review', progress: 40 })
-      return { tree: structuredClone(tree), revision: structuredClone(revision), etag: etag('tree', tree.id, revision.revision, revision.treeSha256) }
+      run.testCases.forEach(testCase => { if (!testCase.tombstonedAt) testCase.reviewState = 'draft' }); run.coverageAudits.forEach(audit => { audit.status = 'stale' })
+      return startAutomaticTestPointReview(run).id
     })
-  }
-
-  async approveTree(projectVersionId: string, designId: string, runId: string, ifMatch: string | undefined, principal: Principal) {
-    const version = await this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成'); const revision = tree.revisions.find(item => item.revision === tree.currentRevision)!; assertEtag(ifMatch, etag('tree', tree.id, revision.revision, revision.treeSha256), 'TEST_POINT_TREE_REVISION_CONFLICT'); if (node(run, 'test_point_review').status !== 'waiting_gate') throw new TestDesignError('TEST_POINT_TREE_APPROVAL_REQUIRED', '当前不在测试点人工审核阶段', 409); const approved = approveCurrentTree(run, principal.subjectId); run.gateDecisions.push({ id: `gate_decision_${randomUUID()}`, gateKey: 'test-point-tree', targetId: tree.id, targetRevision: revision.revision, version: run.gateDecisions.length + 1, decision: 'approved', actorId: principal.subjectId, createdAt: now() }); return structuredClone(approved) })
-    await this.projectTreeVersion(projectVersionId, designId, runId, version.id)
-    await this.store.transaction(state => { const run = findRun(state, projectVersionId, designId, runId); Object.assign(node(run, 'test_point_review'), { status: 'succeeded', finishedAt: now() }); queueNode(run, 'test_case_design'); Object.assign(run, { status: 'queued', stage: 'test_case_design', progress: 50 }) })
-    await this.testPointsConfirmedListener?.(projectVersionId)
+    await this.projectTreeVersion(projectVersionId, designId, runId, treeVersionId)
+    await this.store.transaction(state => { completeAutomaticTestPointReview(findRun(state, projectVersionId, designId, runId)) })
+    await this.testPointsValidatedListener?.(projectVersionId)
     await this.schedule(runId)
-    return approvedTreeVersion(await this.loadRun(runId))
+    return this.getTree(projectVersionId, designId, runId)
   }
 
   async listCases(projectVersionId: string, designId: string, runId: string, filters: { dimension?: string; executionMethod?: string; status?: string } = {}) {
@@ -726,7 +729,7 @@ function pointDesignInput(run: TestDesignWorkflowRun) {
 
 function caseDesignInput(run: TestDesignWorkflowRun) {
   const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在')
-  const treeVersion = required(tree.versions.find(item => item.id === tree.currentApprovedVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树未批准')
+  const treeVersion = required(tree.versions.find(item => item.id === tree.currentApprovedVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树尚未通过自动校验并固化')
   return { treeVersionId: treeVersion.id, treeSha256: treeVersion.treeSha256, projectionFiles: treeVersion.projection.files }
 }
 
@@ -1444,7 +1447,34 @@ function libraryProjectionFiles(projectVersionName: string, version: TestCaseLib
 function structuralDiff(before: unknown, after: unknown, path = ''): Array<{ path: string; before?: unknown; after?: unknown }> { if (canonicalSha256(before) === canonicalSha256(after)) return []; if (!before || !after || typeof before !== 'object' || typeof after !== 'object' || Array.isArray(before) || Array.isArray(after)) return [{ path: path || '/', before, after }]; const left = before as Record<string, unknown>; const right = after as Record<string, unknown>; return [...new Set([...Object.keys(left), ...Object.keys(right)])].sort().flatMap(key => structuralDiff(left[key], right[key], `${path}/${key}`)) }
 function applyTreeOperations(current: TestPointNodeRevision[], operations: TestPointTreeOperation[]) { const nodes = structuredClone(current); const active = (id: string) => required(nodes.find(item => item.nodeId === id && !item.deleted), 'TEST_POINT_NOT_FOUND', `测试点 ${id} 不存在`); for (const operation of operations) { if (operation.op === 'add') { if (operation.parentId) active(operation.parentId); nodes.push({ nodeId: `test_point_${randomUUID()}`, parentId: operation.parentId, sortKey: cleanRequired(operation.sortKey, 'sortKey', 200), ...structuredClone(operation.value) }) } else if (operation.op === 'rename') active(operation.nodeId).title = cleanRequired(operation.title, 'title', 500); else if (operation.op === 'update') Object.assign(active(operation.nodeId), structuredClone(operation.patch), { nodeId: operation.nodeId }); else if (operation.op === 'move') { const node = active(operation.nodeId); if (operation.parentId) active(operation.parentId); node.parentId = operation.parentId; node.sortKey = cleanRequired(operation.sortKey, 'sortKey', 200) } else if (operation.op === 'delete') { const target = active(operation.nodeId); target.deleted = true; nodes.filter(item => item.parentId === target.nodeId && !item.deleted).forEach(item => { item.parentId = target.parentId }) } else if (operation.op === 'mark_not_applicable') { const target = active(operation.nodeId); target.applicability = 'not_applicable'; target.assumptions = [...target.assumptions, cleanRequired(operation.reason, 'reason', 2_000)] } else if (operation.op === 'reorder') active(operation.nodeId).sortKey = cleanRequired(operation.sortKey, 'sortKey', 200); else if (operation.op === 'split') { const target = active(operation.nodeId); operation.children.forEach(child => nodes.push({ nodeId: `test_point_${randomUUID()}`, parentId: target.parentId, sortKey: child.sortKey, ...structuredClone(child.value) })); target.deleted = true } else if (operation.op === 'merge') { const target = active(operation.targetNodeId); operation.sourceNodeIds.filter(id => id !== target.nodeId).forEach(id => { active(id).deleted = true }); Object.assign(target, structuredClone(operation.value), { nodeId: target.nodeId }) } } validateTreeNodes(nodes); return nodes }
 function approveCurrentTree(run: TestDesignWorkflowRun, actorId: string) { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); const revision = tree.revisions.find(item => item.revision === tree.currentRevision)!; const existing = tree.versions.find(item => item.revision === revision.revision && item.treeSha256 === revision.treeSha256); if (existing) { tree.currentApprovedVersionId = existing.id; return existing } const version = { id: `test_point_tree_version_${randomUUID()}`, version: Math.max(0, ...tree.versions.map(item => item.version)) + 1, revision: revision.revision, treeSha256: revision.treeSha256, approvedBy: actorId, approvedAt: now(), projection: { status: 'pending' as const, files: [] } }; tree.versions.push(version); tree.currentApprovedVersionId = version.id; return version }
-function approvedTreeVersion(run: TestDesignWorkflowRun) { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); return required(tree.versions.find(item => item.id === tree.currentApprovedVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树未批准') }
+function startAutomaticTestPointReview(run: TestDesignWorkflowRun) {
+  const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成')
+  const revision = required(tree.revisions.find(item => item.revision === tree.currentRevision), 'TEST_POINT_TREE_REVISION_NOT_FOUND', '测试点树当前 Revision 不存在')
+  validateTreeReferences(run, revision.nodes)
+  const validatedSha256 = validateTreeNodes(revision.nodes)
+  if (validatedSha256 !== revision.treeSha256) throw new TestDesignError('TEST_POINT_TREE_VALIDATION_FAILED', '测试点树内容 Hash 与当前 Revision 不一致', 409)
+  const review = node(run, 'test_point_review')
+  if (review.status !== 'pending') advanceNodeGeneration(run, review, 'pending')
+  Object.assign(review, { status: 'running', attempt: review.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined, inputSha256: validatedSha256 })
+  const version = approveCurrentTree(run, AUTOMATIC_TEST_POINT_REVIEW_ACTOR)
+  Object.assign(run, { status: 'running', stage: 'test_point_review', progress: 40, finishedAt: undefined, error: undefined, errorCode: undefined })
+  return version
+}
+function completeAutomaticTestPointReview(run: TestDesignWorkflowRun) {
+  const review = node(run, 'test_point_review')
+  if (review.status !== 'running') throw new TestDesignError('TEST_POINT_TREE_VALIDATION_FAILED', '测试点自动校验节点不在运行状态', 409)
+  finishNode(run, 'test_point_review')
+  const caseDesign = node(run, 'test_case_design')
+  if (caseDesign.status === 'pending') queueNode(run, 'test_case_design')
+  else if (caseDesign.status !== 'queued') advanceNodeGeneration(run, caseDesign, 'queued')
+  for (const key of ['coverage_audit', 'test_design_repair'] as const) {
+    const downstream = node(run, key)
+    if (downstream.status !== 'pending') advanceNodeGeneration(run, downstream, 'pending')
+  }
+  run.automaticRepair = initialAutomaticRepairState()
+  Object.assign(run, { status: 'queued', stage: 'test_case_design', progress: 50, finishedAt: undefined, error: undefined, errorCode: undefined })
+}
+function approvedTreeVersion(run: TestDesignWorkflowRun) { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); return required(tree.versions.find(item => item.id === tree.currentApprovedVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树尚未通过自动校验并固化') }
 function approvedPointIds(run: TestDesignWorkflowRun, treeVersionId: string) { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); const version = required(tree.versions.find(item => item.id === treeVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树版本不存在'); const revision = tree.revisions.find(item => item.revision === version.revision)!; return executableTestPointIds(revision.nodes) }
 function applyReviewAction(testCase: TestCase, input: { decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw'; targetRevision: number; comment?: string }, actorId: string) { if (testCase.currentRevision !== input.targetRevision) throw new TestDesignError('TEST_CASE_REVISION_CONFLICT', '审核目标 revision 已变化', 412); const transitions = { draft: { submit: 'in_review' }, in_review: { approve: 'approved', reject: 'rejected', request_revision: 'needs_revision', withdraw: 'draft' }, approved: { request_revision: 'needs_revision' }, rejected: { submit: 'in_review' }, needs_revision: { submit: 'in_review' } } as const; const toState = (transitions[testCase.reviewState] as Record<string, TestCase['reviewState'] | undefined>)[input.decision]; if (!toState) throw new TestDesignError('TEST_CASE_REVIEW_TRANSITION_INVALID', `不能从 ${testCase.reviewState} 执行 ${input.decision}`, 409); testCase.reviewActions.push({ id: `test_case_review_${randomUUID()}`, targetRevision: input.targetRevision, fromState: testCase.reviewState, toState, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), actorId, createdAt: now() }); testCase.reviewState = toState }
 function applyDisposition(target: { state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: Array<{ id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }> }, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string; structuredDecision?: unknown }, actorId: string) { if (target.actions.length !== input.expectedVersion) throw new TestDesignError('TEST_DESIGN_DISPOSITION_VERSION_CONFLICT', '处置版本已变化', 409); const toState = input.decision === 'confirm' ? 'confirmed' : input.decision === 'resolve' ? 'resolved' : input.decision === 'defer' ? 'deferred' : input.decision === 'reject' ? 'rejected' : 'open'; target.actions.push({ id: `test_design_action_${randomUUID()}`, expectedVersion: input.expectedVersion, fromState: target.state, toState, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), ...(input.structuredDecision === undefined ? {} : { structuredDecision: structuredClone(input.structuredDecision) }), actorId, createdAt: now() }); target.state = toState }
@@ -1452,7 +1482,6 @@ function validateCurrentDependencyGraph(run: TestDesignWorkflowRun) { validateCa
 function invalidateAudit(run: TestDesignWorkflowRun) { run.coverageAudits.forEach(item => { item.status = 'stale' }) }
 function assertMethodSubset(run: TestDesignWorkflowRun, caseId: string, methods: Array<'ui' | 'api'>) { if (!methods.length) throw new TestDesignError('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '执行方式子集不能为空', 422); const content = currentCaseRevision(findCase(run, caseId)).content; const available = new Set(content.executionMethods.filter(method => method.executionReadiness === 'ready').map(method => method.method)); if (methods.some(method => !available.has(method))) throw new TestDesignError('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '执行方式不是来源用例 ready 方式的子集', 422) }
 function publishArtifact(run: TestDesignWorkflowRun, key: TestDesignNodeKey, output: { schemaVersion: string; content: unknown }) { const target = node(run, key); const artifactValue: WorkflowArtifact = { id: `workflow_artifact_${randomUUID()}`, nodeKey: key, schemaVersion: output.schemaVersion, generation: target.generation, content: structuredClone(output.content), contentSha256: canonicalSha256(output.content), createdAt: now() }; run.artifacts.push(artifactValue); target.outputArtifactId = artifactValue.id }
-function startTestPointReview(run: TestDesignWorkflowRun) { const review = node(run, 'test_point_review'); Object.assign(review, { status: 'waiting_gate', startedAt: now(), inputSha256: run.testPointTree?.revisions.at(-1)?.treeSha256 }) }
 function finishNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey, execution?: WorkflowNodeRun['execution']) { const target = node(run, key); Object.assign(target, { status: 'succeeded', finishedAt: now(), ...(execution ? { execution } : {}) }) }
 function failNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey, error: unknown) { const target = node(run, key); const message = error instanceof Error ? error.message : String(error); const execution = error && typeof error === 'object' && 'execution' in error ? (error as { execution?: WorkflowNodeRun['execution'] }).execution : undefined; Object.assign(target, { status: 'failed', finishedAt: now(), error: message, errorCode: errorCode(message), ...(execution ? { execution } : {}) }) }
 function queueNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey) { const target = node(run, key); Object.assign(target, { status: 'queued', error: undefined, errorCode: undefined }) }

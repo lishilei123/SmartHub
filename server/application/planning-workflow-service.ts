@@ -103,7 +103,6 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
     undefined,
     undefined,
     ['test_point'],
-    true,
   ),
   stage(
     'test_case_design',
@@ -308,13 +307,13 @@ export class PlanningWorkflowService {
     }, signal)
   }
 
-  queueTestPointsConfirmed(
+  queueTestPointsValidated(
     projectId: string,
     projectVersionId: string,
   ) {
     this.runtime.queueCompactionCheckpoint(
       planningScope(projectId, projectVersionId),
-      'test_points_confirmed',
+      'test_points_validated',
     )
   }
 

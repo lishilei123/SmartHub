@@ -38,7 +38,6 @@ export async function patchTree(projectVersionId: string, designId: string, runI
   return { ...value, etag: response.headers.get('etag') ?? value.etag ?? '' }
 }
 
-export const approveTree = (projectVersionId: string, designId: string, runId: string, etag: string) => request(`${runScope(projectVersionId, designId, runId)}/test-point-tree/approve`, { method: 'POST', headers: { 'if-match': etag } })
 const caseScope = (projectVersionId: string, designId: string, runId: string, caseId: string) => `${runScope(projectVersionId, designId, runId)}/test-cases/${encodeURIComponent(caseId)}`
 
 export const createCase = (projectVersionId: string, designId: string, runId: string, content: TestDesignCase['revisions'][number]['content']) => request<TestDesignCase>(`${runScope(projectVersionId, designId, runId)}/test-cases`, { method: 'POST', body: JSON.stringify({ content }) })

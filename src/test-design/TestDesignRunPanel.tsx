@@ -10,7 +10,7 @@ import type { TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './typ
 
 const flow = [
   { key: 'test_point_design', label: '测试点设计', owner: 'PlanningAgent' },
-  { key: 'test_point_review', label: '测试点审核', owner: '人工门禁' },
+  { key: 'test_point_review', label: '测试点自动校验', owner: '服务端 Validator' },
   { key: 'test_case_design', label: '用例生成', owner: 'PlanningAgent' },
   { key: 'coverage_audit', label: 'Coverage 检查', owner: '服务端' },
   { key: 'test_design_repair', label: '自动修复', owner: 'PlanningAgent · 最多 2 次' },
@@ -94,7 +94,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
 }
 
 function FlowStep({ node, label, owner }: { node?: TestDesignNodeRun; label: string; owner: string }) {
-  const Icon = owner === '服务端' ? Server : owner === '人工门禁' ? LockKeyhole : Bot
+  const Icon = owner.startsWith('服务端') ? Server : Bot
   return <article className={node?.status ?? 'pending'}><span className="td2-flow-marker">{node?.status === 'succeeded' ? <CheckCircle2 /> : <Icon />}</span><div><b>{label}</b><small>{owner}</small><em>{node?.status ?? 'pending'}{node?.attempt ? ` · attempt ${node.attempt}` : ''}</em></div></article>
 }
 

@@ -83,14 +83,8 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
 
   const updateTree = useCallback(async (operations: TestPointTreeOperation[], reason: string) => {
     if (!projectVersionId || !design || !run || !tree) return
-    const next = await guarded('tree-edit', () => api.patchTree(projectVersionId, design.id, run.id, tree.etag, operations, reason), '测试点树已生成新 Revision。')
+    const next = await guarded('tree-edit', () => api.patchTree(projectVersionId, design.id, run.id, tree.etag, operations, reason), '测试点树已生成新 Revision、通过自动校验并进入用例重新生成。')
     setTree(next); await refreshRun()
-  }, [design, guarded, projectVersionId, refreshRun, run, tree])
-
-  const approve = useCallback(async () => {
-    if (!projectVersionId || !design || !run || !tree) return
-    await guarded('tree-approve', () => api.approveTree(projectVersionId, design.id, run.id, tree.etag), 'TestPointTreeVersion 已批准并投影到正式 Workspace 资产。')
-    await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run, tree])
 
   const redesign = useCallback(async () => {
@@ -183,5 +177,5 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const previewLegacyMigration = useCallback(async (legacyTestCaseSetVersionId: string) => { if (!inputs) return; const preview = await guarded('legacy-migration-preview', () => api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId)); if (preview) setLegacyMigrationPreview(preview); return preview }, [guarded, inputs])
   const migrateLegacyCaseSet = useCallback(async (legacyTestCaseSetVersionId: string, confirmUncertain = false) => { if (!inputs) return; const preview = legacyMigrationPreview?.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId ? legacyMigrationPreview : await api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId); await guarded('legacy-migration', () => api.migrateLegacyCaseSet(inputs.projectVersion.projectId, { legacyTestCaseSetVersionId, expectedPreviewSha256: preview.previewSha256, confirmUncertain }), '历史已发布用例集已幂等导入正式用例库。'); setLegacyMigrationPreview(null); await loadCollection() }, [guarded, inputs, legacyMigrationPreview, loadCollection])
 
-  return { inputs, designs, design, run, tree, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, loadCollection, openDesign, closeDesign, create, startRun, refreshRun, updateTree, approve, redesign, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
+  return { inputs, designs, design, run, tree, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, loadCollection, openDesign, closeDesign, create, startRun, refreshRun, updateTree, redesign, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
 }
