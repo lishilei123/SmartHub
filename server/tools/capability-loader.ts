@@ -6,17 +6,19 @@ import { builtInToolBindingToken, mcpPolicyHash, toolBindingToken, toolsetConten
 import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { McpServerResource, ToolResource } from '../domain/types.js'
 import type { ToolExecutionContext, ToolExecutionResult } from '../domain/tool-types.js'
+import type { SkillPackageStore } from '../infrastructure/skill-package-store.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { applicationRoot, codeRoot, deployedModuleCandidates, moduleUrl } from '../infrastructure/runtime-paths.js'
 import { ToolRegistry } from './registry.js'
 import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
+import { SkillCapabilityRuntime } from './skill-capability.js'
 
 const MAX_REMOTE_RESULT_BYTES = 256 * 1024
 const MCP_CONNECT_TIMEOUT_MS = 20_000
-export interface CapabilityLoadResult { warnings: string[]; close(): Promise<void> }
+export interface CapabilityLoadResult { warnings: string[]; skillRuntimeToolIds: string[]; close(): Promise<void> }
 
 export class AgentCapabilityLoader {
-  constructor(private readonly store: StateStore) {}
+  constructor(private readonly store: StateStore, private readonly skillPackages?: SkillPackageStore) {}
 
   async load(definition: AgentDefinitionVersion, registry: ToolRegistry, signal: AbortSignal): Promise<CapabilityLoadResult> {
     const state = await this.store.snapshot()
@@ -29,8 +31,11 @@ export class AgentCapabilityLoader {
     const warnings: string[] = []
     if (toolsetContentHash(tokens) !== definition.toolsetContentSha256) {
       warnings.push('Toolset 目录内容与发布快照不一致；自定义 Tool 已拒绝加载，请重新发布 Agent 配置。')
-      return { warnings, close: async () => undefined }
+      return { warnings, skillRuntimeToolIds: [], close: async () => undefined }
     }
+
+    const skillCapabilities = new SkillCapabilityRuntime(definition, state, this.skillPackages)
+    skillCapabilities.register(registry)
 
     for (const tool of resources.filter(tool => tool.builtIn && definition.toolIds.includes(tool.key) && !tool.enabled)) {
       registry.unregister(tool.key)
@@ -66,7 +71,7 @@ export class AgentCapabilityLoader {
         }
       } catch (error) { warnings.push(`${tool.key}@${tool.version}：${message(error)}`) }
     }
-    return { warnings, close: async () => { await Promise.allSettled(clients.map(client => client.close())) } }
+    return { warnings, skillRuntimeToolIds: skillCapabilities.runtimeToolIds(), close: async () => { await Promise.allSettled(clients.map(client => client.close())) } }
   }
 }
 

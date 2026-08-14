@@ -104,21 +104,50 @@ test('MCP Streamable HTTP 发现白名单工具并通过官方客户端调用', 
   }
 })
 
-test('Skill ZIP 内容按发布 Hash 加载，目录漂移会被拒绝', async () => {
+test('Skill ZIP 的已发布运行权限会自动注册内部脚本能力，目录漂移仍会被拒绝', async () => {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-skill-runtime-'))
   try {
     const packages = new SkillPackageStore(root)
     const zip = new JSZip()
     zip.file('workflow/SKILL.md', '# Review Skill\n\n必须先核对固定证据。')
+    zip.file('workflow/skill-runtime.json', JSON.stringify({ scripts: [{ path: 'scripts/run.ps1', runner: 'powershell', timeoutMs: 10_000 }] }))
+    zip.file('workflow/scripts/run.ps1', "param([string]$Value)\n$ErrorActionPreference = 'Stop'\n[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n[pscustomobject]@{ value = $Value; runId = $env:SMARTHUB_RUN_ID } | ConvertTo-Json -Compress")
     const installed = await packages.install({ key: 'review.skill', version: '1.0.0', fileName: 'review.zip', archive: await zip.generateAsync({ type: 'nodebuffer' }) })
-    const skill: SkillResource = { id: 'skill-review', kind: 'skill', key: 'review.skill', name: '评审 Skill', description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: false, entrypoint: installed.entrypoint, package: installed.package, toolIds: [], tags: ['review'], createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
+    const skill: SkillResource = { id: 'skill-review', kind: 'skill', key: 'review.skill', name: '评审 Skill', description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: false, entrypoint: installed.entrypoint, package: installed.package, runtime: installed.runtime, toolIds: [], tags: ['review'], createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
     const store = await storeWith(skill)
     const binding = { skillKey: skill.key, version: skill.version, enabled: true, configurationHash: skillConfigurationHash(skill) }
     const runtime = new AgentSkillRuntime(store, packages)
     assert.match((await runtime.prepare(definition([], [binding]), 'analysis')).renderPrompt(), /必须先核对固定证据/u)
+    const registry = new ToolRegistry()
+    const loaded = await new AgentCapabilityLoader(store, packages).load(definition([], [binding]), registry, new AbortController().signal)
+    assert.deepEqual(loaded.skillRuntimeToolIds, ['skill.execute_script'])
+    assert.deepEqual((await execute(registry, 'skill.execute_script', { script: 'scripts/run.ps1', args: ['hello'] })).data, { skillKey: skill.key, script: 'scripts/run.ps1', exitCode: 0, parsed: { value: 'hello', runId: 'capability-test-run' } })
+    await loaded.close()
     await store.transaction(state => { const current = state.aiResources.find(item => item.id === skill.id) as SkillResource; current.tags = ['changed'] })
     await assert.rejects(() => runtime.prepare(definition([], [binding]), 'analysis'), /SKILL_BINDING_CHANGED/u)
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('已绑定 Skill 的联网能力只接受已发布清单中的 Origin、方法和非重定向响应', async () => {
+  const server = createServer((request, response) => {
+    if (request.url === '/redirect') { response.writeHead(302, { location: '/status' }); response.end(); return }
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: true }))
+  })
+  const port = await listen(server)
+  try {
+    const origin = `http://127.0.0.1:${port}`
+    const skill = skillResource({ key: 'network.skill', runtime: { scripts: [], network: { allowedOrigins: [origin], allowedMethods: ['GET'], timeoutMs: 5_000 } } })
+    const binding = { skillKey: skill.key, version: skill.version, enabled: true, configurationHash: skillConfigurationHash(skill) }
+    const registry = new ToolRegistry()
+    const loaded = await new AgentCapabilityLoader(await storeWith(skill)).load(definition([], [binding]), registry, new AbortController().signal)
+    assert.deepEqual(loaded.skillRuntimeToolIds, ['skill.http_request'])
+    assert.deepEqual((await execute(registry, 'skill.http_request', { skillKey: skill.key, url: `${origin}/status`, method: 'GET' })).data, { skillKey: skill.key, url: `${origin}/status`, method: 'GET', status: 200, contentType: 'application/json', parsed: { ok: true } })
+    await assert.rejects(() => execute(registry, 'skill.http_request', { skillKey: skill.key, url: 'https://example.com/' }), /NETWORK_TARGET_FORBIDDEN/u)
+    await assert.rejects(() => execute(registry, 'skill.http_request', { skillKey: skill.key, url: `${origin}/status`, method: 'POST' }), /NETWORK_METHOD_FORBIDDEN/u)
+    await assert.rejects(() => execute(registry, 'skill.http_request', { skillKey: skill.key, url: `${origin}/redirect`, method: 'GET' }), /NETWORK_REDIRECT_FORBIDDEN/u)
+    await loaded.close()
+  } finally { await close(server) }
 })
 
 function definition(tools: ToolResource[], skills: AgentDefinitionVersion['skillBindings'] = [], mcps: AgentDefinitionVersion['mcpBindings'] = []) {
@@ -139,6 +168,10 @@ function builtInTool(key: string, risk: ToolResource['risk'], timeoutMs: number)
 
 function mcpServer(endpoint: string): McpServerResource {
   return { id: 'mcp-issues', kind: 'mcp', key: 'issues.mcp', name: 'Issues MCP', description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: false, transport: 'streamable_http', endpoint, authType: 'none', toolIds: ['issues.lookup'], createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }
+}
+
+function skillResource(overrides: Partial<SkillResource> & Pick<SkillResource, 'key'>): SkillResource {
+  return { id: `skill-${overrides.key}`, kind: 'skill', key: overrides.key, name: overrides.key, description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: false, entrypoint: 'server/skills/structured-summary/SKILL.md', toolIds: [], tags: [], createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), ...overrides }
 }
 
 async function storeWith(...resources: Array<ToolResource | SkillResource | McpServerResource>) { const store = new JsonStore(null); await store.load(); await store.transaction(state => { state.aiResources.push(...structuredClone(resources)) }); return store }

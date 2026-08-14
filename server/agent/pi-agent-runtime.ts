@@ -452,10 +452,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       deliveryManifest.toolReads.push(structuredClone(observation))
     }, piDocumentWorkspace, this.knowledge)
     const skillPrompt = skillSession.renderPrompt()
-    const capabilityLoad = await new AgentCapabilityLoader(this.store).load(input.snapshot.agentDefinition, registry, signal)
+    const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
-    const allowedToolIds = runtimeAllowedToolIds(input)
+    const allowedToolIds = runtimeAllowedToolIds(input, capabilityLoad.skillRuntimeToolIds)
     const descriptors = registry.descriptors(allowedToolIds)
     const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))
     const unavailableToolIds = [...allowedToolIds].filter(toolId => !registeredToolIds.has(toolId))
@@ -522,7 +522,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         acceptedPrimaryIds: new Set(),
         callCountByPrimaryId: new Map(),
       }
-      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, controller.signal, requireResultSubmission, submissionBatches))
+      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, allowedToolIds, controller.signal, requireResultSubmission, submissionBatches))
       const primaryToolNames = new Set(descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
@@ -715,6 +715,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     descriptor: ToolDescriptor,
     runtime: GovernedToolRuntime,
     input: AgentExecutionInput,
+    allowedToolIds: ReadonlySet<string>,
     signal: AbortSignal,
     requireResultSubmission: (content?: string) => Promise<void>,
     submissionBatches: SubmissionBatchState,
@@ -740,7 +741,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           return { content: [{ type: 'text', text: JSON.stringify(data) }], details: { toolId: descriptor.id, version: descriptor.version, data }, terminate: accepted }
         }
         const executionArguments = submissionBatches.mergedArgumentsByPrimaryId.get(toolCallId) ?? args
-        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot, allowedToolIds: runtimeAllowedToolIds(input) } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot, allowedToolIds } }, AbortSignal.any([signal, toolSignal ?? signal]))
         if (result.terminate && submissionBatches.mergedArgumentsByPrimaryId.has(toolCallId)) submissionBatches.acceptedPrimaryIds.add(toolCallId)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
@@ -899,9 +900,9 @@ function manifestEntry(batch: RequirementInputBatch, modelCallSequence: number) 
 function sha256(value: string) { return createHash('sha256').update(value).digest('hex') }
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new Error(message); return value }
 
-function runtimeAllowedToolIds(input: AgentExecutionInput) {
+function runtimeAllowedToolIds(input: AgentExecutionInput, skillRuntimeToolIds: readonly string[] = []) {
   const profile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
-  return new Set(profile.allowedToolIds)
+  return new Set([...profile.allowedToolIds, ...skillRuntimeToolIds])
 }
 
 function requireAllowedToolset(toolIds: string[], submitToolId: string, allowedToolIds: string[]) {

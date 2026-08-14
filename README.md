@@ -36,7 +36,7 @@
 - 本地模型添加框提供经过 Transformers.js 模型页核对的推荐模型，可搜索并一键填入，同时保留任意 Hugging Face 模型名称的自由输入；
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
-- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。随应用发布的内置 Tool 和 Skill 始终启用，管理页不允许关闭，服务端也会拒绝停用请求并自动修复历史停用状态；是否授权给具体 Agent 仍由 Agent 配置及必需能力约束决定。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。随应用发布的内置 Skill 位于 `server/skills`；项目外置 Skill/Tool 分别位于 `ai/skills`、`ai/tools`，服务启动和目录读取时扫描，并默认每 1 秒自动重扫。外置 Skill 通过同目录 `skill.json` 登记；外置 Tool 可使用无 JSON 的单文件静态清单、`*.tool.json`、目录 `tool.json`、批量 `tools.json` 或 `package.json` 的 SmartHub 声明。管理页标记为“外置”，只允许启停，编辑或删除应修改文件。Skill ZIP、内置 Skill 或外置 Skill 都会按发布配置 Hash 读取 `SKILL.md`；运行开始时直接加载当前 Agent 发布版本绑定的全部 Skill 正文，不再使用激活、脚本或网络内部 Tool。需要执行或联网的能力必须建模为独立 Tool 或 MCP，并显式绑定到 Agent。自定义 Tool 支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
+- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。随应用发布的内置 Tool 和 Skill 始终启用，管理页不允许关闭，服务端也会拒绝停用请求并自动修复历史停用状态；是否授权给具体 Agent 仍由 Agent 配置及必需能力约束决定。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。随应用发布的内置 Skill 位于 `server/skills`；项目外置 Skill/Tool 分别位于 `ai/skills`、`ai/tools`，服务启动和目录读取时扫描，并默认每 1 秒自动重扫。外置 Skill 通过同目录 `skill.json` 登记；外置 Tool 可使用无 JSON 的单文件静态清单、`*.tool.json`、目录 `tool.json`、批量 `tools.json` 或 `package.json` 的 SmartHub 声明。管理页标记为“外置”，只允许启停，编辑或删除应修改文件。运行开始时直接加载当前 Agent 发布版本绑定的全部 Skill 正文；若 Skill 的同目录 `skill-runtime.json` 声明了 PowerShell 脚本或网络 Origin，Runtime 仅为本次已绑定的 Skill 动态注册内部调用协议，不出现在 Tool 目录，也无需在 Agent 配置中重复选择。脚本路径、网络 Origin/方法、重定向、超时、内容大小、发布配置 Hash 和调用次数仍由服务端强制校验。自定义 Tool 支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
 - “系统管理 → Agent 配置”分别维护 PlanningAgent 与测试执行 Agent 的模型路由、输出上限、超时、重试、Prompt、Tool/MCP/Skill 和运行限制，并拥有不可变发布版本。运行时固定 Toolset、MCP 策略与 Skill 内容 Hash；Workflow 只收窄当前 Stage 可调用的业务 Tool，不再过滤或激活 Skill。
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；各 Agent 通过自身结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
@@ -141,11 +141,11 @@ npm run migrate
 
 进入“系统管理 → 模型管理”后，直接填写来源的 Base URL、可选 API Key 和模型。服务端不会把 URL/API Key 转成环境变量；它们与当前向量模型配置一样，以明文配置值保存在数据库 JSON/JSONB 中。读取和保存响应返回 Base URL、`hasApiKey` 状态和空的 `apiKey`，编辑时 API Key 留空表示保留旧值，填写新值表示覆盖。
 
-Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文件，单文件最多 5 MB、解压后总计最多 50 MB，并且必须且只能包含一个非空 UTF-8 `SKILL.md`。服务端校验 CRC，拒绝绝对路径、路径穿越、Windows 保留名、大小写冲突、符号链接与原生可执行文件，再原子解压到 `data/skills/{skillKey}/{version}`，记录压缩包 Hash、内容 Hash 和文件清单。已上传包的标识、版本、入口和包元数据不可原位覆盖；删除未被 Agent 引用的 Skill 时同步删除对应包目录。`ai/skills/{name}/skill.json` 至少声明 `key`、`name` 和 `version`，可声明 `description`、`entrypoint`（默认 `SKILL.md`）、`toolIds` 和 `tags`；目录内容共同参与 SHA-256。Agent 发布版本的 Skill 配置 Hash 包含内容 Hash，但上传或扫描本身不会执行包内脚本，也不会自动扩大工具权限。
+Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文件，单文件最多 5 MB、解压后总计最多 50 MB，并且必须且只能包含一个非空 UTF-8 `SKILL.md`。服务端校验 CRC，拒绝绝对路径、路径穿越、Windows 保留名、大小写冲突、符号链接与原生可执行文件，再原子解压到 `data/skills/{skillKey}/{version}`，记录压缩包 Hash、内容 Hash 和文件清单。已上传包的标识、版本、入口和包元数据不可原位覆盖；删除未被 Agent 引用的 Skill 时同步删除对应包目录。`ai/skills/{name}/skill.json` 至少声明 `key`、`name` 和 `version`，可声明 `description`、`entrypoint`（默认 `SKILL.md`）、`toolIds` 和 `tags`；同目录可选 `skill-runtime.json`，其中只可声明相对 `.ps1` 脚本、PowerShell 运行器、超时、精确 HTTP/HTTPS Origin 和 GET/HEAD 方法。目录内容与运行权限共同参与 Skill 配置 Hash。上传或扫描本身不会执行包内脚本；只有发布绑定该 Skill 的 Agent 才能按其固定清单调用。
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
-进入“系统管理 → Agent 配置”后只提供 `RequirementAnalysisAgent` 与 `TestDesignAgent`。页面维护模型路由、Prompt、Tool/MCP/Skill 和运行限制；必需能力不可取消，发布时固定 Toolset、Skill 内容 Hash 与 MCP Policy Hash。`TestDesignAgent` 的发布配置包含三个提交工具和四个 Skill，但 Runtime 仍按当前 Stage 只展示规定的 Skill Catalog 和一个提交工具。
+进入“系统管理 → Agent 配置”后维护 `PlanningAgent` 与测试执行 Agent。页面维护模型路由、Prompt、Tool/MCP/Skill 和运行限制；必需能力不可取消，发布时固定 Toolset、Skill 内容与运行权限 Hash 以及 MCP Policy Hash。运行时直接加载全部已绑定 Skill；Workflow Stage 只收窄业务 Tool、提交协议和 Gate，不再筛选或激活 Skill。
 
 ## 生产构建与运行
 
