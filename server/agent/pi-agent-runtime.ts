@@ -16,6 +16,7 @@ import { createWorkspaceAgentToolRegistry } from '../tools/requirement-tools.js'
 import { RequirementDocumentWorkspace } from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
+import { KnowledgeService } from '../application/knowledge-service.js'
 
 const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
@@ -38,7 +39,11 @@ type SubmissionBatchState = {
 }
 
 export class PiAgentRuntimeAdapter implements AgentRuntime {
-  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore, private readonly approvalGate?: ToolApprovalGate) {}
+  private readonly knowledge: KnowledgeService
+
+  constructor(private readonly store: StateStore, private readonly bindings: PiRuntimeBindings = {}, private readonly skillPackages?: SkillPackageStore, private readonly approvalGate?: ToolApprovalGate, knowledge?: KnowledgeService) {
+    this.knowledge = knowledge ?? new KnowledgeService(store)
+  }
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
     let candidate: AgentCandidateResult | Record<string, unknown> | undefined
@@ -70,7 +75,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
       deliveryManifest.toolReads ??= []
       deliveryManifest.toolReads.push(structuredClone(observation))
-    }, piDocumentWorkspace, skillSession)
+    }, piDocumentWorkspace, skillSession, this.knowledge)
     const skillPrompt = skillSession?.renderCatalogPrompt() ?? await skillRuntime.render(input.snapshot.agentDefinition)
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits

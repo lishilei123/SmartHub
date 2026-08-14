@@ -9,6 +9,7 @@ import type { ReviewSubmissionFeedback } from './submission-feedback.js'
 import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
 import type { AgentSkillSession } from '../agent/skill-runtime.js'
 import { registerSkillActivateTool } from './skill-activate.js'
+import { KnowledgeService } from '../application/knowledge-service.js'
 
 export type { ReviewSubmissionFeedback } from './submission-feedback.js'
 
@@ -19,11 +20,12 @@ export function createWorkspaceAgentToolRegistry(
   onRead?: (observation: RequirementDocumentReadObservation) => void,
   documentWorkspace?: RequirementDocumentWorkspace,
   skillSession?: AgentSkillSession,
+  knowledge = new KnowledgeService(store),
 ) {
   const registry = new ToolRegistry()
   if (!documentWorkspace) throw new Error('PI_DOCUMENT_WORKSPACE_REQUIRED')
   registerRequirementDocumentWorkspaceTools(registry, documentWorkspace, onRead)
-  registerKnowledgeSearchTool(registry, store)
+  registerKnowledgeSearchTool(registry, knowledge)
   registerKnowledgeReadChunkTool(registry, store)
   if (skillSession) registerSkillActivateTool(registry, skillSession)
   registry.register(defaultBuiltInToolConfigResolver.toDescriptor(submitToolId), async request => {
@@ -40,11 +42,12 @@ export function createRequirementAnalysisToolRegistry(
   submit: (candidate: CandidateRequirementAnalysisV1) => ReviewSubmissionFeedback | Promise<ReviewSubmissionFeedback>,
   onRead?: (observation: RequirementDocumentReadObservation) => void,
   documentWorkspace?: RequirementDocumentWorkspace,
+  knowledge = new KnowledgeService(store),
 ) {
   const registry = new ToolRegistry()
   if (!documentWorkspace) throw new Error('PI_DOCUMENT_WORKSPACE_REQUIRED')
   registerRequirementDocumentWorkspaceTools(registry, documentWorkspace, onRead)
-  registerKnowledgeSearchTool(registry, store)
+  registerKnowledgeSearchTool(registry, knowledge)
   registerKnowledgeReadChunkTool(registry, store)
   registerRequirementAnalysisSubmitResultTool(registry, submit)
   return registry

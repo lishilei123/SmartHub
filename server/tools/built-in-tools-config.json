@@ -166,12 +166,12 @@
       }
     },
     "knowledge.search": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "knowledge_search",
       "label": "固定索引检索",
       "catalogName": "固定索引检索",
-      "description": "仅在本次运行固定的知识索引版本内检索相关 Chunk；正文已直接投递时只用于定向复查。",
-      "catalogDescription": "仅在运行固定的知识索引中检索相关内容。",
+      "description": "基于本次运行的 snapshot.indexVersionId，在整个知识库固定索引内执行 Hybrid/Vector 检索；正文已直接投递时只用于定向复查。",
+      "catalogDescription": "基于运行固定索引，在整个知识库内执行 Hybrid/Vector 检索。",
       "risk": "read",
       "timeoutMs": 30000,
       "idempotent": true,
@@ -199,12 +199,12 @@
       }
     },
     "knowledge.read_chunk": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "knowledge_read_chunk",
       "label": "读取固定 Chunk",
       "catalogName": "读取固定 Chunk",
-      "description": "仅在需要复核引用时按 Chunk ID 读取本次固定输入中的完整内容与定位。",
-      "catalogDescription": "按 Chunk ID 读取本次固定输入的完整内容与定位。",
+      "description": "仅在需要复核引用时按 Chunk ID 读取本次固定索引中的完整内容与定位。",
+      "catalogDescription": "按 Chunk ID 读取本次固定索引的完整内容与定位。",
       "risk": "read",
       "timeoutMs": 30000,
       "idempotent": true,

@@ -8,6 +8,15 @@ import type { StoredChunkCandidate } from '../infrastructure/store.js'
 import { chunkDocument, cosine, defaultTokenCodec, embedding, sha256, type TokenCodec } from './content.js'
 
 type RetrievalInput = { logicalPath?: string }
+type KnowledgeSearchMode = 'keyword' | 'vector' | 'hybrid'
+type KnowledgeSearchInput = {
+  query: string
+  mode?: KnowledgeSearchMode
+  logicalPath?: string
+  limit?: number
+  excerptLength?: number
+  signal?: AbortSignal
+}
 type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; vectorScore: number; rerankerScore?: number; score: number }
 
 const now = () => new Date().toISOString()
@@ -694,10 +703,9 @@ export class KnowledgeService {
     })
   }
 
-  async search(knowledgeBaseId: string, input: { query: string; mode?: 'keyword' | 'vector' | 'hybrid'; logicalPath?: string }) {
+  async search(knowledgeBaseId: string, input: { query: string; mode?: KnowledgeSearchMode; logicalPath?: string }) {
     const { state } = await this.readKnowledgeState(knowledgeBaseId, { includeIndexes: true }); const kb = required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
-    const query = input.query.trim()
-    if (!query) throw new Error('检索内容不能为空')
+    const query = requiredSearchQuery(input.query)
     if (!state.versions.some(item => item.status === 'ready' && state.assets.some(asset => asset.knowledgeBaseId === knowledgeBaseId && asset.activeVersionId === item.id))) {
       const indexing = state.tasks.some(task => task.knowledgeBaseId === knowledgeBaseId && ['sync', 'rebuild'].includes(task.type) && ['queued', 'running'].includes(task.status))
       return { status: indexing ? 'initial_indexing' : 'no_ready_assets', results: [] }
@@ -707,6 +715,20 @@ export class KnowledgeService {
     const indexConfig = required(state.configs.find(item => item.id === index.configVersionId), '索引配置不存在').config
     const latestConfig = required(state.configs.find(item => item.id === kb.activeConfigVersionId), '当前查询配置不存在').config
     const config = withLatestQueryConfig(indexConfig, latestConfig)
+    return this.searchIndex(index, config, { ...input, query })
+  }
+
+  async searchFixedIndex(knowledgeBaseId: string, indexVersionId: string, input: KnowledgeSearchInput) {
+    const { state } = await this.readKnowledgeState(knowledgeBaseId, { includeIndexes: true })
+    required(state.knowledgeBases.find(item => item.id === knowledgeBaseId), '知识库不存在')
+    const index = required(state.indexes.find(item => item.id === indexVersionId && item.knowledgeBaseId === knowledgeBaseId), '固定索引不存在')
+    if (!['active', 'superseded'].includes(index.status)) throw new Error('固定索引当前不可检索')
+    const config = required(state.configs.find(item => item.id === index.configVersionId), '固定索引配置不存在').config
+    return this.searchIndex(index, config, { ...input, query: requiredSearchQuery(input.query), mode: input.mode ?? 'hybrid' })
+  }
+
+  private async searchIndex(index: DatabaseState['indexes'][number], config: KnowledgeConfig, input: KnowledgeSearchInput) {
+    const query = requiredSearchQuery(input.query)
     const requestedMode = input.mode ?? (config.hybridSearch ? 'hybrid' : 'keyword')
     const hasFilterMatch = this.store.searchChunks ? true : index.indexedChunks?.some(chunk => !input.logicalPath || chunk.assetMetadata?.logicalPath.includes(input.logicalPath)) ?? false
     if (input.logicalPath && !hasFilterMatch) return { status: 'filter_empty', results: [] }
@@ -714,7 +736,7 @@ export class KnowledgeService {
     let queryVector: number[] | undefined
     let degradedReason: string | undefined
     if (mode !== 'keyword') {
-      try { queryVector = (await this.embedTexts(config, [query]))[0] }
+      try { queryVector = (await this.embedTexts(config, [query], config.embeddingModel, input.signal))[0] }
       catch (error) {
         degradedReason = error instanceof Error ? safeErrorMessage(error.message) : 'Embedding Provider 不可用'
         if (mode === 'vector') return { status: 'vector_unavailable', results: [], degradation: { requestedMode, fallbackMode: null, reason: degradedReason } }
@@ -729,17 +751,17 @@ export class KnowledgeService {
     let reranked = merged
     let rerankerDegraded = false
     if (config.rerankerEnabled && merged.length) {
-      try { reranked = await this.rerank(config, query, merged) }
+      try { reranked = await this.rerank(config, query, merged, input.signal) }
       catch (error) { rerankerDegraded = true; degradedReason ??= error instanceof Error ? safeErrorMessage(error.message) : 'Reranker 不可用' }
     }
     const eligible = reranked.filter(item => item.score >= config.relevanceThreshold).sort((a, b) => b.score - a.score)
-    const candidates = eligible.slice(0, config.finalResults).map(item => ({
+    const candidates = eligible.slice(0, input.limit ?? config.finalResults).map(item => ({
       score: item.score,
       retrievalMode: mode,
       asset: item.candidate.asset,
       version: item.candidate.version,
       chunk: item.candidate.chunk,
-      excerpt: item.candidate.content.slice(0, 280),
+      excerpt: item.candidate.content.slice(0, input.excerptLength ?? 280),
       scores: { keyword: item.keywordScore, vector: item.vectorScore, reranker: item.rerankerScore, final: item.score },
     }))
     return {
@@ -933,9 +955,9 @@ export class KnowledgeService {
     }).sort((left, right) => right.score - left.score).slice(0, limit)
   }
 
-  private async rerank(config: KnowledgeConfig, query: string, candidates: RankedCandidate[]) {
+  private async rerank(config: KnowledgeConfig, query: string, candidates: RankedCandidate[], signal?: AbortSignal) {
     const rerankerConfig = modelRouteConfig(config, config.rerankerSourceId, config.rerankerModel)
-    const vectors = await this.embedTexts(rerankerConfig, [query, ...candidates.map(item => item.candidate.content)])
+    const vectors = await this.embedTexts(rerankerConfig, [query, ...candidates.map(item => item.candidate.content)], rerankerConfig.embeddingModel, signal)
     const queryVector = required(vectors[0], 'Reranker 未返回查询向量')
     return candidates.map((item, index) => {
       const semanticScore = (cosine(queryVector, required(vectors[index + 1], 'Reranker 未返回完整候选向量')) + 1) / 2
@@ -1126,6 +1148,12 @@ function withLatestQueryConfig(indexConfig: KnowledgeConfig, latestConfig: Knowl
     rerankerSourceId: latestConfig.rerankerSourceId,
     rerankerModel: latestConfig.rerankerModel,
   }
+}
+
+function requiredSearchQuery(value: string) {
+  const query = value.trim()
+  if (!query) throw new Error('检索内容不能为空')
+  return query
 }
 
 function validateDirectoryName(name: string) { const value = name.trim(); if (!value) throw new Error('目录名称不能为空'); if (/[\\/]/.test(value) || value === '.' || value === '..') throw new Error('目录名称不能包含路径分隔符'); return value }
