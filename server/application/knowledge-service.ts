@@ -1040,7 +1040,7 @@ function reviewRunReferencesAssets(state: DatabaseState, run: DatabaseState['rev
 
 
 function assertNoRunningAssetReviews(state: DatabaseState, assetIds: Set<string>) {
-  if (assetIds.size && state.reviewRuns.some(run => run.status === 'running' && reviewRunReferencesAssets(state, run, assetIds))) throw new Error('原文档仍有关联的需求评审正在运行，请先取消评审再删除')
+  if (assetIds.size && state.reviewRuns.some(run => run.status === 'running' && reviewRunReferencesAssets(state, run, assetIds))) throw new Error('原文档仍有关联的需求分析正在运行，请先取消分析再删除')
 }
 
 function purgeAssetData(state: DatabaseState, assetIds: Set<string>) {

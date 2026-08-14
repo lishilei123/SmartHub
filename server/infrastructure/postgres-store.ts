@@ -313,7 +313,7 @@ export class PostgresStore implements StateStore {
           WHERE id = $1
           RETURNING data
         `, [runId, JSON.stringify(execution)])
-        if (!result.rows[0]) throw new Error('需求评审运行不存在')
+        if (!result.rows[0]) throw new Error('需求分析运行不存在')
         const index = this.state.reviewRuns.findIndex(item => item.id === runId)
         if (index >= 0) this.state.reviewRuns[index] = result.rows[0].data
       } catch (error) { failure = error }
@@ -1236,7 +1236,7 @@ function decodeReviewRunCursor(value: string | undefined) {
     if (Number.isNaN(Date.parse(parsed[0]))) throw new Error('invalid')
     return { createdAt: parsed[0], id: parsed[1] }
   } catch {
-    throw new Error('评审历史游标无效')
+    throw new Error('需求分析历史游标无效')
   }
 }
 

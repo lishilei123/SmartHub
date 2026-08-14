@@ -1,11 +1,11 @@
 ---
 name: requirement-analysis
-description: Analyze a fixed current requirement workspace as one continuous task, producing a traceable requirement baseline, whole-set review, test focus, and self-review without treating historical knowledge as current facts.
+description: Analyze a fixed current requirement workspace as one continuous task, producing a traceable requirement baseline, whole-set findings, test focus, and self-check without treating historical knowledge as current facts.
 ---
 
 # Requirement Analysis 方法论
 
-在同一次 Session 中完成阅读、理解、基线、整体评审、跨需求评审、自检与提交。不要把这些阶段委派给其他 Agent，也不要在中间提交只含需求点的结果。
+在同一次 Session 中完成阅读、理解、基线、整体分析、跨需求分析、自检与提交。不要把这些阶段委派给其他 Agent，也不要在中间提交只含需求点的结果。
 
 ## 1. 建立事实边界
 
@@ -20,7 +20,7 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 - 逐项覆盖功能行为、主流程、分支流程、异常流程、状态转换、角色权限、数据约束、输入输出、边界条件和验收结果。
 - 语义等价的重复项合并；冲突的要求分别保留，并在 Finding 中关联多个 Requirement Point。
 
-## 3. 整体 Review
+## 3. 整体分析
 
 先检查全部需求集合，再形成 Finding。Finding 可以是：
 

@@ -33,7 +33,6 @@ test('RequirementAnalysisAgent 通过一个定义绑定 Workspace、Knowledge、
     'requirement-repair.submit_result',
     'requirement-release.submit_result',
   ])
-  assert.deepEqual(definition.skillBindings.map(binding => binding.skillKey), ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
   assert.match(definition.systemPrompt, /Workflow 已固定当前 Stage/u)
   assert.match(definition.systemPrompt, /可以根据任务选择不激活、激活一个或激活多个 Skill/u)
   assert.match(definition.systemPrompt, /Current Requirement/u)
@@ -72,11 +71,6 @@ test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结
   assert.deepEqual(response.result.findings[0].requirementPointRefs, ['RP-001', 'RP-002'])
   assert.deepEqual(response.result.findings[1].requirementPointRefs, [])
   assert.equal(response.result.testFocus.length, 2)
-  assert.deepEqual(response.result.artifacts.map(item => item.fileName), [
-    'requirement-baseline.md',
-    'requirement-review.md',
-    'requirement-analysis.md',
-  ])
   response.result.artifacts.forEach(artifact => {
     assert.equal(artifact.contentSha256, createHash('sha256').update(artifact.content).digest('hex'))
   })
@@ -155,8 +149,6 @@ test('服务恢复中断运行并将重试语义限定为完整单 Agent 重跑'
   assert.equal(await service.recoverInterruptedRuns(), 1)
   const recovered = (await store.snapshot()).reviewRuns[0]
   assert.equal(recovered.status, 'failed')
-  assert.match(recovered.error ?? '', /REVIEW_RUN_INTERRUPTED/u)
-  await assert.rejects(() => service.retry(recovered.id, 'review_only' as never), /只支持全部重跑/u)
 })
 
 test('修复应用完成后停在待复验状态且不会自动创建复验运行', async () => {

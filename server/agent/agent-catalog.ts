@@ -41,7 +41,7 @@ export const AGENT_CATALOG = {
     ],
     requiredSkillKeys: [
       'requirement.baseline',
-      'requirement.review',
+      'requirement.analysis',
       'requirement.repair',
       'requirement.verification',
       'requirement.release',

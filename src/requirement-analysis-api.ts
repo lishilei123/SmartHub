@@ -1,10 +1,10 @@
 const apiBase = 'http://127.0.0.1:8787/api'
 
-export type ReviewFindingType = 'missing_requirement' | 'ambiguity' | 'conflict' | 'boundary_gap' | 'state_gap' | 'exception_gap' | 'security_risk' | 'testability_gap' | 'dependency_risk' | 'other'
-export type ReviewSeverity = 'blocker' | 'high' | 'medium' | 'low'
+export type AnalysisFindingType = 'missing_requirement' | 'ambiguity' | 'conflict' | 'boundary_gap' | 'state_gap' | 'exception_gap' | 'security_risk' | 'testability_gap' | 'dependency_risk' | 'other'
+export type AnalysisSeverity = 'blocker' | 'high' | 'medium' | 'low'
 export type OverallAssessment = 'pass' | 'pass_with_notes' | 'needs_revision' | 'blocked'
 
-export type ReviewEvidence = {
+export type AnalysisEvidence = {
   clientEvidenceId: string
   sourceType: 'knowledge_chunk'
   sourceRef: { chunkId: string; assetVersionId: string }
@@ -28,10 +28,10 @@ export type RequirementPoint = {
   mergeRationale?: string
 }
 
-export type ReviewFinding = {
+export type AnalysisFinding = {
   clientFindingId: string
-  type: ReviewFindingType
-  severity: ReviewSeverity
+  type: AnalysisFindingType
+  severity: AnalysisSeverity
   confidence: number
   title: string
   description: string
@@ -50,9 +50,9 @@ export type RequirementAnalysisResult = {
     risks: string[]
   }
   requirementPoints: RequirementPoint[]
-  findings: ReviewFinding[]
+  findings: AnalysisFinding[]
   testFocus: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
-  evidence: ReviewEvidence[]
+  evidence: AnalysisEvidence[]
   coverage: {
     assets: Array<{
       assetVersionId: string
@@ -62,7 +62,7 @@ export type RequirementAnalysisResult = {
     limitations: string[]
   }
   analysisDocument?: string
-  artifacts: Array<{ fileName: 'requirement-baseline.md' | 'requirement-review.md' | 'requirement-analysis.md'; mediaType: 'text/markdown'; content: string; contentSha256: string }>
+  artifacts: Array<{ fileName: 'requirement-baseline.md' | 'requirement-analysis-findings.md' | 'requirement-analysis.md'; mediaType: 'text/markdown'; content: string; contentSha256: string }>
 }
 
 export type AgentExecutionEvent = {
@@ -147,7 +147,7 @@ export type AgentExecutions = {
   requirementAnalysis?: AgentExecutionRecord
 }
 
-export type ReviewRunExecutionAttempt = {
+export type RequirementAnalysisRunExecutionAttempt = {
   attempt: number
   maxAttempts: number
   activeAgentKey?: 'requirement-analysis'
@@ -205,9 +205,9 @@ export type RequirementAnalysisResponse = {
   inputDeliveryManifest?: InputDeliveryManifest
 }
 
-export type RequirementReviewRun = {
+export type RequirementAnalysisRun = {
   id: string
-  reviewId: string
+  analysisId: string
   retryOfRunId?: string
   retryMode?: 'full'
   projectVersionId: string
@@ -240,7 +240,7 @@ export type RequirementReviewRun = {
   snapshot?: RequirementAnalysisResponse['snapshot']
   execution?: AgentExecutionRecord
   executions?: AgentExecutions
-  executionAttempts?: ReviewRunExecutionAttempt[]
+  executionAttempts?: RequirementAnalysisRunExecutionAttempt[]
   inputDeliveryManifest?: InputDeliveryManifest
   workflow?: {
     currentStage: 'analysis' | 'repair' | 'verification' | 'release'
@@ -251,8 +251,8 @@ export type RequirementReviewRun = {
   response?: RequirementAnalysisResponse
 }
 
-export type RequirementReviewRunPage = {
-  items: RequirementReviewRun[]
+export type RequirementAnalysisRunPage = {
+  items: RequirementAnalysisRun[]
   nextCursor?: string
 }
 
@@ -268,132 +268,132 @@ export type FindingActionsResponse = {
 export type ToolApproval = { id: string; runId: string; toolId: string; toolVersion: string; risk: 'write_reversible' | 'write_high_risk'; parameterSummary: string; parameterHash: string; status: 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'; requestedAt: string; expiresAt: string; decidedAt?: string; decidedByDisplayName?: string; decisionComment?: string; consumedAt?: string }
 
 export async function startRequirementAnalysis(projectVersionId: string, input: { documentDirectoryPath: string; focusAreas?: string[]; excludedAreas?: string[] }, signal?: AbortSignal) {
-  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-reviews/run`, {
+  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-analysis-runs`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
     signal,
   })
-  const body = await response.json() as RequirementReviewRun | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审运行失败')
-  return body as RequirementReviewRun
+  const body = await response.json() as RequirementAnalysisRun | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析运行失败')
+  return body as RequirementAnalysisRun
 }
 
-export async function loadRequirementReviewRuns(projectVersionId: string, options: { limit?: number; cursor?: string; runningOnly?: boolean } = {}) {
+export async function loadRequirementAnalysisRuns(projectVersionId: string, options: { limit?: number; cursor?: string; runningOnly?: boolean } = {}) {
   const query = new URLSearchParams()
   if (options.limit) query.set('limit', String(options.limit))
   if (options.cursor) query.set('cursor', options.cursor)
   if (options.runningOnly) query.set('runningOnly', 'true')
   const suffix = query.size ? `?${query}` : ''
-  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-review-runs${suffix}`)
-  const body = await response.json() as RequirementReviewRunPage | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审历史读取失败')
-  return body as RequirementReviewRunPage
+  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-analysis-runs${suffix}`)
+  const body = await response.json() as RequirementAnalysisRunPage | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析历史读取失败')
+  return body as RequirementAnalysisRunPage
 }
 
-export async function loadRequirementReviewRun(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}`)
-  const body = await response.json() as RequirementReviewRun | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审运行读取失败')
-  return body as RequirementReviewRun
+export async function loadRequirementAnalysisRun(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}`)
+  const body = await response.json() as RequirementAnalysisRun | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析运行读取失败')
+  return body as RequirementAnalysisRun
 }
 
-export async function cancelRequirementReviewRun(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
-  const body = await response.json() as RequirementReviewRun | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审取消失败')
-  return body as RequirementReviewRun
+export async function cancelRequirementAnalysisRun(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  const body = await response.json() as RequirementAnalysisRun | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析取消失败')
+  return body as RequirementAnalysisRun
 }
 
-export async function retryRequirementReviewRun(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/retry`, {
+export async function retryRequirementAnalysisRun(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/retry`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ mode: 'full' }),
   })
-  const body = await response.json() as RequirementReviewRun | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求评审重跑失败')
-  return body as RequirementReviewRun
+  const body = await response.json() as RequirementAnalysisRun | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析重跑失败')
+  return body as RequirementAnalysisRun
 }
 
 export async function loadFindingActions(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/finding-actions`)
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/finding-actions`)
   const body = await response.json() as FindingActionsResponse | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : 'Finding 处置历史读取失败')
   return body as FindingActionsResponse
 }
 
 export async function createFindingAction(runId: string, findingId: string, input: { action: FindingActionType; comment?: string; expectedVersion: number }) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/findings/${encodeURIComponent(findingId)}/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/findings/${encodeURIComponent(findingId)}/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
   const body = await response.json() as FindingActionsResponse['actions'][number] | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : 'Finding 处置保存失败')
   return body as FindingActionsResponse['actions'][number]
 }
 
 export async function generateRequirementRepairDraft(runId: string, findingIds: string[]) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ findingIds }) })
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ findingIds }) })
   const body = await response.json() as RequirementRepairDraft | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复草稿生成失败')
   return body as RequirementRepairDraft
 }
 
 export async function approveRequirementRepairDraft(runId: string, draftId: string, comment?: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/approve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comment }) })
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/approve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comment }) })
   const body = await response.json() as RequirementRepairDraft | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复草稿审批失败')
   return body as RequirementRepairDraft
 }
 
 export async function applyRequirementRepairDraft(runId: string, draftId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/apply`, { method: 'POST' })
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/apply`, { method: 'POST' })
   const body = await response.json() as RequirementRepairDraft | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复应用失败')
   return body as RequirementRepairDraft
 }
 
 export async function finalizeRequirementRepairDraft(runId: string, draftId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/finalize`, { method: 'POST' })
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/finalize`, { method: 'POST' })
   const body = await response.json() as RequirementRepairDraft | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复新版本确认失败')
   return body as RequirementRepairDraft
 }
 
 export async function verifyRequirementRepairDraft(runId: string, draftId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/verify`, { method: 'POST' })
-  const body = await response.json() as { repairDraft: RequirementRepairDraft; verificationRun: RequirementReviewRun } | { error?: string }
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/verify`, { method: 'POST' })
+  const body = await response.json() as { repairDraft: RequirementRepairDraft; verificationRun: RequirementAnalysisRun } | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复复验启动失败')
-  return body as { repairDraft: RequirementRepairDraft; verificationRun: RequirementReviewRun }
+  return body as { repairDraft: RequirementRepairDraft; verificationRun: RequirementAnalysisRun }
 }
 
 export async function createRequirementReleaseCandidate(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/release-candidate`, { method: 'POST' })
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/release-candidate`, { method: 'POST' })
   const body = await response.json() as RequirementReleasePackage | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求发布候选生成失败')
   return body as RequirementReleasePackage
 }
 
 export async function publishRequirementRelease(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/release/publish`, { method: 'POST' })
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/release/publish`, { method: 'POST' })
   const body = await response.json() as RequirementReleasePackage | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求发布失败')
   return body as RequirementReleasePackage
 }
 
 export function requirementReleaseArtifactUrl(runId: string, fileName: string) {
-  return `${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/release/artifacts/${encodeURIComponent(fileName)}`
+  return `${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/release/artifacts/${encodeURIComponent(fileName)}`
 }
 
-export async function downloadRequirementReviewReport(projectVersionId: string, runId: string) {
-  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-review-runs/${encodeURIComponent(runId)}/report.md`)
+export async function downloadRequirementAnalysisReport(projectVersionId: string, runId: string) {
+  const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-analysis-runs/${encodeURIComponent(runId)}/report.md`)
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { error?: string }
-    throw new Error(body.error || '评审报告导出失败')
+    throw new Error(body.error || '需求分析报告导出失败')
   }
   return response.blob()
 }
 
 export async function loadToolApprovals(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-review-runs/${encodeURIComponent(runId)}/approvals`)
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/approvals`)
   const body = await response.json() as ToolApproval[] | { error?: string }
   if (!response.ok) throw new Error(!Array.isArray(body) && body.error ? body.error : '工具审批记录读取失败')
   return body as ToolApproval[]

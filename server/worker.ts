@@ -221,7 +221,7 @@ async function processReviewOne() {
   try {
     job = await stateStore.claimReviewJob?.(workerId, leaseMs)
   } catch (error) {
-    console.error('需求评审任务领取失败：', error instanceof Error ? error.message : error)
+    console.error('需求分析任务领取失败：', error instanceof Error ? error.message : error)
     return false
   }
   if (!job) return false
@@ -230,8 +230,8 @@ async function processReviewOne() {
   activeControllers.add(controller)
   const heartbeat = setInterval(() => {
     void stateStore.heartbeatReviewJob?.(job.runId, lease, leaseMs)
-      .then(renewed => { if (!renewed) controller.abort(new Error('需求评审 Worker 租约已失效或运行已取消')) })
-      .catch(error => console.error(`需求评审任务 ${job.runId} 心跳失败：`, error instanceof Error ? error.message : error))
+      .then(renewed => { if (!renewed) controller.abort(new Error('需求分析 Worker 租约已失效或运行已取消')) })
+      .catch(error => console.error(`需求分析任务 ${job.runId} 心跳失败：`, error instanceof Error ? error.message : error))
   }, Math.max(1_000, Math.floor(leaseMs / 3)))
   try {
     await requirementAnalysisService.processPreparedRun(job.runId, lease, controller.signal, job.attempts, job.maxAttempts)
@@ -257,13 +257,13 @@ async function retryFailedReviewJob(claimed: { runId: string; attempts: number; 
   await requirementAnalysisService.failPreparedRun(claimed.runId, lease, error, false, retryable, { attempt: claimed.attempts, maxAttempts: claimed.maxAttempts, ...(retryable ? { nextAttemptAt } : {}) }).catch(() => undefined)
   if (!retryable) {
     const finished = await stateStore.finishReviewJob?.(claimed.runId, lease, 'failed', error)
-    if (!finished) console.error(`需求评审任务 ${claimed.runId} 无法标记为最终失败：${error}`)
-    else console.error(`需求评审任务 ${claimed.runId} 已达到最大重试次数：${error}`)
+    if (!finished) console.error(`需求分析任务 ${claimed.runId} 无法标记为最终失败：${error}`)
+    else console.error(`需求分析任务 ${claimed.runId} 已达到最大重试次数：${error}`)
     return
   }
   const released = await stateStore.releaseReviewJob?.(claimed.runId, lease, delay, error)
-  if (!released) console.error(`需求评审任务 ${claimed.runId} 无法重新入队：${error}`)
-  else console.error(`需求评审任务 ${claimed.runId} 将在 ${delay}ms 后重试：${error}`)
+  if (!released) console.error(`需求分析任务 ${claimed.runId} 无法重新入队：${error}`)
+  else console.error(`需求分析任务 ${claimed.runId} 将在 ${delay}ms 后重试：${error}`)
 }
 
 async function retryFailedTask(claimed: { id: string; attempts: number; maxAttempts?: number }, lease: TaskLease, error: string | undefined) {

@@ -25,7 +25,7 @@ const REQUIREMENT_WORKSPACE_TOOL_IDS = [
 export interface RequirementAnalysisRequest {
   projectVersionId: string
   documentDirectoryPath: string
-  reviewId?: string
+  analysisId?: string
   sourceId?: string
   modelId?: string
   focusAreas?: string[]
@@ -36,7 +36,7 @@ export interface RequirementAnalysisRequest {
   verificationOf?: { sourceRunId: string; repairDraftId: string }
 }
 
-export type RequirementReviewRetryMode = 'full'
+export type RequirementAnalysisRetryMode = 'full'
 
 export class RequirementAnalysisService {
   private readonly validator: RequirementAnalysisValidator
@@ -49,7 +49,7 @@ export class RequirementAnalysisService {
   async recoverInterruptedRuns() {
     if (this.store.claimReviewJob) return 0
     const finishedAt = new Date().toISOString()
-    const error = 'REVIEW_RUN_INTERRUPTED: 服务进程在 Agent 执行期间重启，本次运行已终止；请重新发起分析'
+    const error = 'REQUIREMENT_ANALYSIS_RUN_INTERRUPTED: 服务进程在 Agent 执行期间重启，本次运行已终止；请重新发起分析'
     if (this.store.recoverInterruptedReviewRuns) return this.store.recoverInterruptedReviewRuns(finishedAt, error)
     let recovered = 0
     await this.store.transaction(state => {
@@ -89,7 +89,7 @@ export class RequirementAnalysisService {
       const created = await this.analyze(request, new AbortController().signal, undefined, true)
       const runId = 'id' in created ? created.id : created.runId
       const timestamp = new Date().toISOString()
-      await this.store.enqueueReviewJob({ id: `review_job_${randomUUID()}`, runId, projectVersionId: request.projectVersionId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: timestamp, createdAt: timestamp, updatedAt: timestamp })
+      await this.store.enqueueReviewJob({ id: `analysis_job_${randomUUID()}`, runId, projectVersionId: request.projectVersionId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: timestamp, createdAt: timestamp, updatedAt: timestamp })
       return created
     }
     const controller = new AbortController()
@@ -105,7 +105,7 @@ export class RequirementAnalysisService {
     })
   }
 
-  async retry(runId: string, mode: RequirementReviewRetryMode) {
+  async retry(runId: string, mode: RequirementAnalysisRetryMode) {
     if (mode !== 'full') throw new Error('单 Agent 需求分析只支持全部重跑')
     const sourceRun = await this.loadStoredRun(runId)
     if (sourceRun.status === 'running') throw new Error('正在执行的需求分析不能重跑，请先取消运行')
@@ -113,7 +113,7 @@ export class RequirementAnalysisService {
     return this.start({
       projectVersionId: sourceRun.projectVersionId,
       documentDirectoryPath: required(sourceRun.snapshot.documentWorkspace?.logicalPath, 'PI_WORKSPACE_SNAPSHOT_REQUIRED: 运行缺少固定工作区目录'),
-      reviewId: reviewIdFor(sourceRun),
+      analysisId: analysisIdFor(sourceRun),
       focusAreas: sourceRun.snapshot.focusAreas,
       excludedAreas: sourceRun.snapshot.excludedAreas,
       retryOfRunId: sourceRun.id,
@@ -424,10 +424,10 @@ export class RequirementAnalysisService {
       maxOutputTokens: effectiveMaxOutputTokens,
     })
     const now = new Date().toISOString()
-    const reviewId = request.reviewId ?? `review_${randomUUID()}`
+    const analysisId = request.analysisId ?? `analysis_${randomUUID()}`
     const snapshot: ReviewRunSnapshot = {
-      runId: `review_run_${randomUUID()}`,
-      reviewId,
+      runId: `analysis_run_${randomUUID()}`,
+      reviewId: analysisId,
       projectId: project.id,
       projectName: project.name,
       projectVersionId: projectVersion.id,
@@ -452,7 +452,7 @@ export class RequirementAnalysisService {
     }
     const run: ReviewRun = {
       id: snapshot.runId,
-      reviewId,
+      reviewId: analysisId,
       ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId, retryMode: 'full' as const } : {}),
       projectVersionId: projectVersion.id,
       assetId: inputPairs[0].asset.id,
@@ -608,8 +608,8 @@ export class RequirementAnalysisService {
             mode: 'workspace_tools',
             workflowStage: input.run.workflow?.currentStage === 'verification' ? 'verification' : 'analysis',
             allowedSkillKeys: input.run.workflow?.currentStage === 'verification'
-              ? ['requirement.baseline', 'requirement.review', 'requirement.verification']
-              : ['requirement.baseline', 'requirement.review'],
+              ? ['requirement.baseline', 'requirement.analysis', 'requirement.verification']
+              : ['requirement.baseline', 'requirement.analysis'],
             allowedToolIds: [...REQUIREMENT_WORKSPACE_TOOL_IDS, 'requirement-analysis.submit_result'],
             submitToolId: 'requirement-analysis.submit_result',
             schemaVersion: 'requirement-analysis/v1',
@@ -937,7 +937,7 @@ function latestRunningExecutionAttempt(run: ReviewRun) { return [...(run.executi
 
 function presentRunSummary(run: ReviewRun) {
   const assets = snapshotAssets(run)
-  return { id: run.id, reviewId: reviewIdFor(run), runId: run.id, retryOfRunId: run.retryOfRunId, retryMode: run.retryMode, projectVersionId: run.projectVersionId, assetId: run.assetId, assetVersionId: run.assetVersionId, assetIds: assets.map(asset => asset.assetId), assetVersionIds: assets.map(asset => asset.assetVersionId), documents: assets, documentTitle: run.documentTitle, documentVersion: `V${run.documentVersion}`, logicalPath: run.logicalPath, modelLabel: run.modelLabel, status: run.status, step: run.step, progress: run.progress, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error, queue: run.queue, retryEvents: run.retryEvents, modelRouteAttempts: run.modelRouteAttempts, degradations: run.degradations, workflow: presentWorkflowSummary(run.workflow), snapshot: redactSnapshot(run.snapshot) }
+  return { id: run.id, analysisId: analysisIdFor(run), runId: run.id, retryOfRunId: run.retryOfRunId, retryMode: run.retryMode, projectVersionId: run.projectVersionId, assetId: run.assetId, assetVersionId: run.assetVersionId, assetIds: assets.map(asset => asset.assetId), assetVersionIds: assets.map(asset => asset.assetVersionId), documents: assets, documentTitle: run.documentTitle, documentVersion: `V${run.documentVersion}`, logicalPath: run.logicalPath, modelLabel: run.modelLabel, status: run.status, step: run.step, progress: run.progress, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error, queue: run.queue, retryEvents: run.retryEvents, modelRouteAttempts: run.modelRouteAttempts, degradations: run.degradations, workflow: presentWorkflowSummary(run.workflow), snapshot: redactSnapshot(run.snapshot) }
 }
 
 function presentRun(run: ReviewRun) {
@@ -1026,7 +1026,7 @@ function modelConnection(selection: AgentModelSelection, snapshot: ReviewRunSnap
 function configurationRef(configuration: AgentConfigurationVersion) { return { id: configuration.id, version: configuration.version, contentSha256: configuration.contentSha256 } }
 function redactSnapshot(snapshot: ReviewRunSnapshot) { return { ...snapshot, agentDefinition: { ...snapshot.agentDefinition, systemPrompt: undefined, taskTemplate: undefined } } }
 function snapshotAssets(run: ReviewRun) { return run.snapshot.assets.map(item => ({ ...item })) }
-function reviewIdFor(run: ReviewRun) { return run.reviewId ?? run.snapshot.reviewId ?? `review_${run.retryOfRunId ?? run.id}` }
+function analysisIdFor(run: ReviewRun) { return run.reviewId ?? run.snapshot.reviewId ?? `analysis_${run.retryOfRunId ?? run.id}` }
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 function normalizeDocumentDirectoryPath(value: unknown) { const normalized = String(value ?? '').trim().replaceAll('\\', '/').replace(/^\/+|\/+$/gu, ''); const segments = normalized.split('/'); if (!normalized || /^[A-Za-z]:/u.test(normalized) || segments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('Agent 文档工作目录必须是知识库内的有效逻辑目录'); return normalized }
 function isWithinDirectory(logicalPath: string, directoryPath: string) { const normalized = logicalPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, ''); return normalized.startsWith(`${directoryPath}/`) && normalized.length > directoryPath.length + 1 }
@@ -1040,4 +1040,4 @@ function validationError(issues: Array<{ path: string; message: string }>) { ret
 function sanitizeRuntimeError(error: unknown, endpoint: string, credential: string) { let message = error instanceof Error ? error.message : '需求分析 Agent 执行失败'; if (credential) message = message.replaceAll(credential, '[已隐藏凭据]'); if (endpoint) message = message.replaceAll(endpoint, '[模型端点]'); return sanitize(message) }
 function sanitize(message: string) { return message.replace(/https?:\/\/[^\s'"`]+/giu, '[已隐藏地址]').slice(0, 500) }
 function encodeCursor(run: ReviewRun) { return Buffer.from(JSON.stringify([run.createdAt, run.id])).toString('base64url') }
-function decodeCursor(cursor: string | undefined, runs: ReviewRun[]) { if (!cursor) return 0; try { const [createdAt, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[]; if (typeof createdAt !== 'string' || typeof id !== 'string') throw new Error('invalid'); const index = runs.findIndex(run => run.createdAt === createdAt && run.id === id); if (index < 0) throw new Error('invalid'); return index + 1 } catch { throw new Error('评审历史游标无效') } }
+function decodeCursor(cursor: string | undefined, runs: ReviewRun[]) { if (!cursor) return 0; try { const [createdAt, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[]; if (typeof createdAt !== 'string' || typeof id !== 'string') throw new Error('invalid'); const index = runs.findIndex(run => run.createdAt === createdAt && run.id === id); if (index < 0) throw new Error('invalid'); return index + 1 } catch { throw new Error('需求分析历史游标无效') } }

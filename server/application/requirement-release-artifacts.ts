@@ -41,7 +41,7 @@ export function buildRequirementReleaseArtifacts(input: {
     evidence: result.evidence,
     generatedAt,
   })))
-  artifacts.push(artifact('requirement-review-closure.md', 'text/markdown', renderClosure(sourceRun, sourceProjection, verificationRun, verificationProjection)))
+  artifacts.push(artifact('requirement-analysis-closure.md', 'text/markdown', renderClosure(sourceRun, sourceProjection, verificationRun, verificationProjection)))
   artifacts.push(artifact('findings.json', 'application/json', json({
     schemaVersion: 'requirement-findings/v1',
     releaseId,
@@ -98,7 +98,7 @@ function projectFindings(run: ReviewRun, actions: FindingAction[]) {
 
 function renderClosure(sourceRun: ReviewRun | undefined, sourceFindings: ReturnType<typeof projectFindings>, verificationRun: ReviewRun, verificationFindings: ReturnType<typeof projectFindings>) {
   return [
-    '# Requirement Review Closure', '',
+    '# Requirement Analysis Closure', '',
     `- Verification Run：${verificationRun.id}`,
     `- Source Run：${sourceRun?.id ?? '无（首次分析直接通过）'}`, '',
     '## Source Findings', '',

@@ -8,7 +8,7 @@ import type { KnowledgeDocument } from './prototype-data'
 import type { ProjectVersion } from './project-version-api'
 import { requirementWorkspaceDirectory } from './version-document-path'
 import './requirement-input-toolbar.css'
-import './requirement-review-layout.css'
+import './requirement-analysis-layout.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 
@@ -70,7 +70,7 @@ function taskStepLabel(step: string) {
   } as Record<string, string>)[step] ?? '正在处理知识资产'
 }
 
-export function RequirementReviewPage(props: Props) {
+export function RequirementAnalysisPage(props: Props) {
   const { projectVersion, knowledgeBaseId, apiState, refreshKnowledge, notify, addAudit } = props
   const shellRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -173,7 +173,7 @@ export function RequirementReviewPage(props: Props) {
     setWorkspaceFooter(footer)
   }, [])
 
-  return <div className="requirement-review-v2-shell" ref={shellRef}>
+  return <div className="requirement-analysis-shell" ref={shellRef}>
     <RequirementAnalysisPageV2 {...props} onOpenRequirementDocument={document => void openPreview(document)} onDeleteRequirementDocument={document => void removeDocument(document)} canDeleteRequirementDocument={canManage} />
 
     {workspaceFooter && createPortal(<div className="requirement-workspace-upload-actions">

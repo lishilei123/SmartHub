@@ -1,4 +1,4 @@
-.requirement-review-v2-shell {
+.requirement-analysis-shell {
   position: relative;
   flex: 1;
   min-height: 0;
@@ -6,7 +6,7 @@
   display: flex;
 }
 
-.requirement-review-v2-shell .rav2-page {
+.requirement-analysis-shell .rav2-page {
   flex: 1;
   min-height: 0;
 }

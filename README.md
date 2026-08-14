@@ -21,7 +21,7 @@
 - 测试设计：唯一 `TestDesignAgent`、四个内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、测试点树唯一人工门禁、服务端 Coverage Audit、最多两轮 Agent Repair、人工用例集发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
-- 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承评审运行与对话；
+- 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承需求分析运行与对话；
 - 页面启动时由后端解析并复用唯一的 SmartHub 默认知识库，不依赖浏览器 localStorage 决定数据归属，刷新、切换访问域名或开发模式重复挂载不会创建并切换到新空库；
 - UTF-8 Markdown/TXT 支持单文件上传、一次多选批量上传，也可通过 ZIP 批量导入；ZIP 保留子目录结构，并支持 Markdown 以相对路径引用其中的 PNG、JPG、GIF、WebP 和 SVG 图片；
 - 知识库目录创建、重命名、移动和递归删除持久化到 PostgreSQL；选中目录后上传会自动使用对应逻辑路径；
@@ -57,7 +57,7 @@
 
 ## 当前已实现的统一需求分析 Agent 流程
 
-> 需求分析只保留统一的 `RequirementAnalysisAgent`，并且只接受 `/workspace` 文件工作区。Agent 基于 Pi Agent Core 运行，使用只读 `ls / find / grep / read` 与受控 Knowledge 工具自主探索固定资料，在同一 Session 内完成需求基线、审核、自检和结构化提交；旧 `RequirementPointExtractionAgent`、`RequirementReviewAgent` 及其独立提交工具、草稿和配置快照均已删除。
+> 需求分析只保留统一的 `RequirementAnalysisAgent`，并且只接受 `/workspace` 文件工作区。Agent 基于 Pi Agent Core 运行，使用只读 `ls / find / grep / read` 与受控 Knowledge 工具自主探索固定资料，在同一 Session 内完成需求基线、整体与跨需求分析、自检和结构化提交；旧 `RequirementPointExtractionAgent`、`RequirementReviewAgent` 及其独立提交工具、草稿和配置快照均已删除。
 
 统一逻辑目录如下：
 
@@ -80,15 +80,15 @@
 - 运行开始时，服务端将固定 `AssetVersion.content` 物化到 run-scoped 临时目录，预建完整工作区层级，并在结束、失败或取消后清理。Agent 只能传相对路径；绝对路径、盘符、UNC、`..` 和越界 Glob 均被拒绝；不开放 Shell、write、edit 或任意文件系统权限；
 - 首轮 Prompt 只投递工作区根、活动分支、需求输入目录、文件数量和快照 Hash，不投递文件名、Chunk 清单或正文。Agent 使用 `ls` 看目录、`find` 找文件、`grep` 定位文本，再用 `read` 的 `offset / limit` 分段读取大文件；
 - 只有 `read` 实际返回的固定文件行范围会写入 `InputDeliveryManifest.toolReads` 并形成 Evidence 候选。`grep` 和 `find` 只用于定位；资产版本、内部 Chunk、Evidence、需求点 ID、`evidenceRefs`、coverage 和 locator 全部由服务端生成和校验；
-- 已发布 `RequirementAnalysisAgent` 必须包含 Workspace 只读工具、Knowledge 查询工具、`skill.activate` 和当前 Workflow Stage 的服务端提交工具；基线、审核、修复、复验和发布方法由固定 Skill Catalog 按需激活，Skill 不能切换 Stage 或扩大 Tool 白名单；
+- 已发布 `RequirementAnalysisAgent` 必须包含 Workspace 只读工具、Knowledge 查询工具、`skill.activate` 和当前 Workflow Stage 的服务端提交工具；基线、分析、修复、复验和发布方法由固定 Skill Catalog 按需激活，Skill 不能切换 Stage 或扩大 Tool 白名单；
 - Agent 定义、Prompt、Toolset、Skill、MCP、模型路由、执行限制和内容 Hash 独立版本化并写入运行快照。模型只提交语义候选，正式 RP、Evidence、Finding、coverage、Artifact 与发布门禁由服务端生成和校验；
-- ReviewRun 持久化统一 Agent 的公开模型消息、工具参数/返回和语义事件时间线；需求分析右侧“Pi Agent”面板按秒刷新任务、Stage、读取文件路径、函数调用、公开结果和错误，不提供独立评审问答入口；
-- 调用分析接口时先创建 `running` ReviewRun 和持久化 ReviewJob 后立即返回；独立 Worker 通过 lease、heartbeat、run token 和 fencing 执行，只有当前租约持有者可以冻结阶段结果或发布正式结果。Worker 失租约后任务可重新领取，超过次数或取消后进入明确终态，晚到结果不能覆盖。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束 ReviewRun、FindingAction、审批和运行记录。存在 `running` ReviewRun 时必须先取消，`locked/archived` 版本不可物理删除；
-- 失败或取消后的重跑只支持 `full`，会沿用来源运行的需求目录并按当前活动索引重新固定候选文档；任何重跑都创建新的 ReviewRun，不覆盖原运行。
+- 需求分析 Run 持久化统一 Agent 的公开模型消息、工具参数/返回和语义事件时间线；需求分析右侧“Pi Agent”面板按秒刷新任务、Stage、读取文件路径、函数调用、公开结果和错误，不提供独立问答入口；
+- 调用分析接口时先创建 `running` 需求分析 Run 和持久化 Job 后立即返回；独立 Worker 通过 lease、heartbeat、run token 和 fencing 执行，只有当前租约持有者可以冻结阶段结果或发布正式结果。Worker 失租约后任务可重新领取，超过次数或取消后进入明确终态，晚到结果不能覆盖。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束分析 Run、FindingAction、审批和运行记录。存在 `running` 分析 Run 时必须先取消，`locked/archived` 版本不可物理删除；
+- 失败或取消后的重跑只支持 `full`，会沿用来源运行的需求目录并按当前活动索引重新固定候选文档；任何重跑都创建新的需求分析 Run，不覆盖原运行。
 
-当前自动化测试已覆盖首轮上下文不泄露文件清单与正文、完整目录树、当前分支与 `shared/knowledge` 自主读取、路径穿越拒绝、实际 `read` 行范围形成 `toolReads`、未读范围不可用于 Evidence、需求覆盖、需求点规范化和评审引用。
+当前自动化测试已覆盖首轮上下文不泄露文件清单与正文、完整目录树、当前分支与 `shared/knowledge` 自主读取、路径穿越拒绝、实际 `read` 行范围形成 `toolReads`、未读范围不可用于 Evidence、需求覆盖、需求点规范化和 Finding 引用。
 
-运行前需要先创建一个状态为 `open` 的项目版本，把至少一份需求文档上传到当前版本的 `input/requirements` 并等待 ready/活动索引，再到“系统管理 → 模型管理”让生成式模型通过 `model-probe/v2`，随后发布统一需求分析 Agent。启动 API 固定统一工作区快照并立即创建 ReviewRun/ReviewJob，Worker 在单个受治理 Session 中执行当前 Workflow Stage：
+运行前需要先创建一个状态为 `open` 的项目版本，把至少一份需求文档上传到当前版本的 `input/requirements` 并等待 ready/活动索引，再到“系统管理 → 模型管理”让生成式模型通过 `model-probe/v2`，随后发布统一需求分析 Agent。启动 API 固定统一工作区快照并立即创建需求分析 Run/Job，Worker 在单个受治理 Session 中执行当前 Workflow Stage：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -96,7 +96,7 @@ $body = @{
   documentDirectoryPath = 'workspace/branches/V2/input/requirements'
   focusAreas = @('状态与异常', '可测试性')
 } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/project-versions/<projectVersionId>/requirement-reviews/run' -ContentType 'application/json; charset=utf-8' -Body $body
+Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/project-versions/<projectVersionId>/requirement-analysis-runs' -ContentType 'application/json; charset=utf-8' -Body $body
 ```
 
 ## 本地运行
@@ -211,15 +211,14 @@ npm run build
 - `PUT /api/agent-configurations/test-design/draft`
 - `POST /api/agent-configurations/test-design/publish`
 - `GET /api/agent-configuration-versions/:id`
-- `POST /api/project-versions/:id/requirement-reviews/run`
-- `GET /api/project-versions/:id/requirement-review-runs`
-- `GET /api/requirement-review-runs/:id`
-- `POST /api/requirement-review-runs/:id/cancel`
-- `GET /api/requirement-review-runs/:id/finding-actions`
-- `POST /api/requirement-review-runs/:id/findings/:findingId/actions`
-- `GET /api/requirement-review-runs/:id/approvals`
+- `POST|GET /api/project-versions/:id/requirement-analysis-runs`
+- `GET /api/requirement-analysis-runs/:id`
+- `POST /api/requirement-analysis-runs/:id/cancel`
+- `GET /api/requirement-analysis-runs/:id/finding-actions`
+- `POST /api/requirement-analysis-runs/:id/findings/:findingId/actions`
+- `GET /api/requirement-analysis-runs/:id/approvals`
 - `POST /api/tool-approvals/:id/decision`
-- `GET /api/project-versions/:projectVersionId/requirement-review-runs/:runId/report.md`
+- `GET /api/project-versions/:projectVersionId/requirement-analysis-runs/:runId/report.md`
 - `GET /api/project-versions/:projectVersionId/test-designs/inputs`
 - `GET|POST /api/project-versions/:projectVersionId/test-designs`
 - `GET|POST /api/project-versions/:projectVersionId/test-designs/:testDesignId/runs`
@@ -251,6 +250,6 @@ npm run build
 
 当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。报告一期不新增数据库表或持久化报告快照：人工重试追加正式事实后会生成新的报告 Hash，但不会独立保留重试前文档；也不由 Agent 计算正式指标或生成发布建议。测试执行只支持服务端固定编排的三个隔离 Agent 与 OCI Playwright UI/API 自动化。
 
-需求评审采用独立 Worker 后台运行：启动接口创建 `ReviewRun + ReviewJob` 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page + projectVersionId + reviewId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `reviewId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
+需求分析采用独立 Worker 后台运行：启动接口创建分析 Run + Job 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page=requirement-analysis + projectVersionId + analysisId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `analysisId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
 
 需求分析不再提供独立评审问答 Agent、问答 API 或问答历史表；数据库迁移会删除旧问答记录及其 Agent 配置快照。右侧“Pi Agent”仅展示统一需求分析运行轨迹。Finding 处置通过带期望版本的追加式 FindingAction 保存，原始 Finding 不改写；报告由服务端按 `projectVersionId + runId` 从正式结果、固定输入、Evidence、降级和处置投影生成 Markdown，不包含候选输出、明文凭据或未脱敏日志。

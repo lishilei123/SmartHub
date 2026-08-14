@@ -167,7 +167,7 @@ export class JsonStore implements StateStore {
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
     await this.transaction(state => {
       const run = state.reviewRuns.find(item => item.id === runId)
-      if (!run) throw new Error('需求评审运行不存在')
+      if (!run) throw new Error('需求分析运行不存在')
       run.execution = structuredClone(execution)
     })
   }

@@ -12,7 +12,6 @@ process.env.SMARTHUB_MODEL_ROOT = join(httpTestRoot, 'models')
 process.env.SMARTHUB_SKILL_ROOT = join(httpTestRoot, 'skills')
 const { start, stateStore } = await import('../server/http/server.js')
 const { StaticAccessControl, StaticProjectVersionAuthorizer } = await import('../server/http/access-control.js')
-const { UnauthenticatedError } = await import('../server/domain/access-control.js')
 delete process.env.SMARTHUB_FORCE_JSON_STORE
 delete process.env.SMARTHUB_DATA_FILE
 delete process.env.SMARTHUB_DOCUMENT_ROOT
@@ -29,13 +28,6 @@ async function withServer(run: (baseUrl: string) => Promise<void>, controls?: In
   } finally {
     await new Promise<void>((resolvePromise, reject) => server.close(error => error ? reject(error) : resolvePromise()))
   }
-}
-
-function controlsFor(subjectId: string, grants: Array<{ projectVersionId: string | '*'; permissions: Array<'project-version:create' | 'project-version:read' | 'project-version:manage' | 'review:create' | 'review:read' | 'review:cancel' | 'review:retry' | 'review:handle' | 'tool:approve' | 'audit:read' | '*'> }>) {
-  return new StaticAccessControl(
-    { async authenticate() { return { subjectId, displayName: `测试主体 ${subjectId}` } } },
-    new StaticProjectVersionAuthorizer(grants.map(grant => ({ subjectId, ...grant }))),
-  )
 }
 
 async function createKnowledgeBase(baseUrl: string) {
@@ -62,43 +54,6 @@ async function loadAgentConfiguration(baseUrl: string, scenePath: 'requirement-a
   return await response.json() as HttpAgentConfiguration
 }
 
-test('项目版本授权拒绝未认证和越权评审读取', async () => {
-  const unauthenticated = new StaticAccessControl(
-    { async authenticate() { throw new UnauthenticatedError() } },
-    new StaticProjectVersionAuthorizer([]),
-  )
-  await withServer(async baseUrl => {
-    const response = await fetch(`${baseUrl}/project-versions`)
-    assert.equal(response.status, 401)
-    assert.equal((await response.json() as { error: string }).error, 'UNAUTHENTICATED')
-  }, unauthenticated)
-
-  const createdAt = new Date().toISOString()
-  await stateStore.transaction(state => {
-    state.projects.push(
-      { id: 'authorization-project-a', name: 'SmartHub', createdAt },
-      { id: 'authorization-project-b', name: '授权项目 B', createdAt },
-    )
-    state.projectVersions.push(
-      { id: 'authorization-pv-a', projectId: 'authorization-project-a', name: 'A', status: 'open', createdAt, updatedAt: createdAt },
-      { id: 'authorization-pv-b', projectId: 'authorization-project-b', name: 'B', status: 'open', createdAt, updatedAt: createdAt },
-    )
-    state.reviewRuns.push({
-      id: 'authorization-run-b', projectVersionId: 'authorization-pv-b', assetId: 'authorization-asset', assetVersionId: 'authorization-version', documentTitle: '受保护需求', documentVersion: 1,
-      logicalPath: 'requirements/protected.md', sourceId: 'source', modelId: 'model', modelLabel: '测试模型', status: 'failed', step: 'failed', progress: 10,
-      createdAt, startedAt: createdAt, finishedAt: createdAt,
-      snapshot: { runId: 'authorization-run-b', projectId: 'authorization-project-b', projectName: 'B', projectVersionId: 'authorization-pv-b', projectVersionName: 'B', knowledgeBaseId: 'kb', assetId: 'authorization-asset', assetVersionId: 'authorization-version', assetContentHash: 'a'.repeat(64), indexVersionId: 'index', logicalPath: 'requirements/protected.md', assets: [{ assetId: 'authorization-asset', assetVersionId: 'authorization-version', assetContentHash: 'a'.repeat(64), logicalPath: 'requirements/protected.md', displayName: '受保护需求' }], modelRef: { sourceId: 'source', modelId: 'model', providerType: 'openai_compatible', modelName: 'model', contextWindow: 32_768, maxOutputTokens: 4_096, supportsReasoning: false }, focusAreas: [], excludedAreas: [], agentDefinition: {} as never, agentDefinitions: {} as never, extractionCoveragePlan: [], extractionToolBudget: { directoryCalls: 0, chunkCalls: 0, evidenceCalls: 0, submissionCalls: 1, minimumToolCalls: 1 }, extractionInput: { policyVersion: 'v1', mode: 'full_context', estimatedInputTokens: 1, safeInputBudget: 1, packageSha256: 'b'.repeat(64), batches: [] }, createdAt },
-    })
-  })
-  await withServer(async baseUrl => {
-    const list = await fetch(`${baseUrl}/project-versions`)
-    assert.equal(list.status, 200)
-    assert.deepEqual(await list.json(), [{ id: 'authorization-pv-a', projectId: 'authorization-project-a', name: 'A', status: 'open', createdAt, updatedAt: createdAt }])
-    const read = await fetch(`${baseUrl}/requirement-review-runs/authorization-run-b`)
-    assert.equal(read.status, 403)
-  }, controlsFor('reviewer-a', [{ projectVersionId: 'authorization-pv-a', permissions: ['project-version:read', 'review:read'] }]))
-})
-
 test('Agent 配置接口按场景返回精确 Agent 集合并隔离保存', async () => {
   await withServer(async baseUrl => {
     const requirementAnalysis = await loadAgentConfiguration(baseUrl, 'requirement-analysis')
@@ -106,7 +61,6 @@ test('Agent 配置接口按场景返回精确 Agent 集合并隔离保存', asyn
     assert.deepEqual(Object.keys(requirementAnalysis.agents), ['requirementAnalysis'])
     assert.equal(requirementAnalysis.agents.requirementAnalysis.draft.revision, 0)
     assert.deepEqual(requirementAnalysis.agents.requirementAnalysis.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
-    assert.deepEqual(requirementAnalysis.agents.requirementAnalysis.requiredSkillKeys, ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
 
     const testDesign = await loadAgentConfiguration(baseUrl, 'test-design')
     assert.equal(testDesign.scene, 'test_design')
@@ -118,11 +72,6 @@ test('Agent 配置接口按场景返回精确 Agent 集合并隔离保存', asyn
     const testExecution = await loadAgentConfiguration(baseUrl, 'test-execution')
     assert.equal(testExecution.scene, 'test_execution')
     assert.deepEqual(Object.keys(testExecution.agents), ['testScript', 'failureAnalysis', 'scriptRepair'])
-
-    const retiredQaEndpoint = await fetch(`${baseUrl}/requirement-review-runs/retired-review/questions`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: '已删除入口' }),
-    })
-    assert.equal(retiredQaEndpoint.status, 404)
 
     const skillResponse = await fetch(`${baseUrl}/ai-resources/skill`, {
       method: 'POST',

@@ -574,7 +574,7 @@ export class RequirementAnalysisValidator {
         if (!isStrings(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用了不存在的需求点'))
       })
     }
-    const expectedArtifactNames = new Set(['requirement-baseline.md', 'requirement-review.md', 'requirement-analysis.md'])
+    const expectedArtifactNames = new Set(['requirement-baseline.md', 'requirement-analysis-findings.md', 'requirement-analysis.md'])
     if (!Array.isArray(input.artifacts) || input.artifacts.length !== expectedArtifactNames.size) issues.push(issue('artifacts', '必须包含三个 Markdown Artifact'))
     else input.artifacts.forEach((artifact, position) => {
       if (!expectedArtifactNames.delete(artifact.fileName) || artifact.mediaType !== 'text/markdown' || !artifact.content || createHash('sha256').update(artifact.content).digest('hex') !== artifact.contentSha256) issues.push(issue(`artifacts[${position}]`, 'Artifact 名称、内容或 Hash 不合法'))
@@ -659,7 +659,7 @@ export class RequirementReviewValidator {
   private validateSynchronously(input: CandidateRequirementReview, extraction: CandidateRequirementPointExtraction, snapshot: ReviewRunSnapshot): ValidationReport {
     const issues: ValidationIssue[] = []
     if (!input || typeof input !== 'object') return invalid('$', '结果必须是对象')
-    if ('requirementPoints' in input || 'evidence' in input || 'coverage' in input) issues.push(issue('$', '需求评审结果不得增删或改写固定需求点、证据和覆盖范围'))
+    if ('requirementPoints' in input || 'evidence' in input || 'coverage' in input) issues.push(issue('$', '需求分析结果不得增删或改写固定需求点、证据和覆盖范围'))
     if (!assessments.has(input.summary?.overallAssessment)) issues.push(issue('summary.overallAssessment', '总体结论不合法'))
     if (!Number.isFinite(input.summary?.score) || input.summary.score < 0 || input.summary.score > 100) issues.push(issue('summary.score', '评分必须为 0～100'))
     for (const key of ['strengths', 'risks'] as const) if (!isStrings(input.summary?.[key])) issues.push(issue(`summary.${key}`, '必须是字符串数组'))

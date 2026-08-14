@@ -57,7 +57,7 @@ export async function start(port = Number(process.env.PORT ?? 8787), controls: A
       server.off('error', onError)
       try {
         const recovered = await requirementAnalysisService.recoverInterruptedRuns()
-        if (recovered) console.warn(`已将 ${recovered} 个因服务重启中断的需求评审运行标记为失败`)
+        if (recovered) console.warn(`已将 ${recovered} 个因服务重启中断的需求分析运行标记为失败`)
         resolvePromise(server)
       } catch (error) {
         server.close()
@@ -138,52 +138,51 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'GET' && toolSource) return send(response, 200, await aiResourceService.source(toolSource[1]))
   const agentConfigurationVersion = /^\/api\/agent-configuration-versions\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && agentConfigurationVersion) return send(response, 200, await agentConfigurationService.getVersion(agentConfigurationVersion[1]))
-  const projectVersionRun = /^\/api\/project-versions\/([^/]+)\/requirement-reviews\/run$/.exec(url.pathname)
-  if (method === 'POST' && projectVersionRun) {
-    await requireProjectVersion(projectVersionRun[1], 'review:create')
+  const projectVersionAnalysisRuns = /^\/api\/project-versions\/([^/]+)\/requirement-analysis-runs$/.exec(url.pathname)
+  if (method === 'POST' && projectVersionAnalysisRuns) {
+    await requireProjectVersion(projectVersionAnalysisRuns[1], 'requirement-analysis:create')
     const body = await json(request)
-    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionRun[1], documentDirectoryPath: String(body.documentDirectoryPath ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
+    return send(response, 202, await requirementAnalysisService.start({ projectVersionId: projectVersionAnalysisRuns[1], documentDirectoryPath: String(body.documentDirectoryPath ?? ''), focusAreas: stringList(body.focusAreas), excludedAreas: stringList(body.excludedAreas) }))
   }
-  const projectVersionReviewRuns = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs$/.exec(url.pathname)
-  if (method === 'GET' && projectVersionReviewRuns) {
-    await requireProjectVersion(projectVersionReviewRuns[1], 'review:read')
-    return send(response, 200, await requirementAnalysisService.list(projectVersionReviewRuns[1], {
+  if (method === 'GET' && projectVersionAnalysisRuns) {
+    await requireProjectVersion(projectVersionAnalysisRuns[1], 'requirement-analysis:read')
+    return send(response, 200, await requirementAnalysisService.list(projectVersionAnalysisRuns[1], {
       limit: optionalPositiveInteger(url.searchParams.get('limit')),
       cursor: url.searchParams.get('cursor') ?? undefined,
       runningOnly: url.searchParams.get('runningOnly') === 'true',
     }))
   }
-  const requirementReviewRun = /^\/api\/requirement-review-runs\/([^/]+)$/.exec(url.pathname)
-  if (method === 'GET' && requirementReviewRun) { await requireRun(requirementReviewRun[1], 'review:read'); return send(response, 200, await requirementAnalysisService.get(requirementReviewRun[1])) }
-  const repairDrafts = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts$/.exec(url.pathname)
+  const requirementAnalysisRun = /^\/api\/requirement-analysis-runs\/([^/]+)$/.exec(url.pathname)
+  if (method === 'GET' && requirementAnalysisRun) { await requireRun(requirementAnalysisRun[1], 'requirement-analysis:read'); return send(response, 200, await requirementAnalysisService.get(requirementAnalysisRun[1])) }
+  const repairDrafts = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts$/.exec(url.pathname)
   if (method === 'POST' && repairDrafts) {
-    await requireRun(repairDrafts[1], 'review:handle')
+    await requireRun(repairDrafts[1], 'requirement-analysis:handle')
     const body = await json(request)
     return send(response, 201, await requirementAnalysisService.generateRepairDraft(repairDrafts[1], { findingIds: stringList(body.findingIds) ?? [], principal }))
   }
-  const repairApproval = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/approve$/.exec(url.pathname)
-  if (method === 'POST' && repairApproval) { await requireRun(repairApproval[1], 'review:handle'); const body = await json(request); return send(response, 200, await requirementAnalysisService.approveRepairDraft(repairApproval[1], repairApproval[2], { comment: body.comment === undefined ? undefined : String(body.comment), principal })) }
-  const repairApply = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/apply$/.exec(url.pathname)
-  if (method === 'POST' && repairApply) { await requireRun(repairApply[1], 'review:handle'); return send(response, 202, await requirementAnalysisService.applyRepairDraft(repairApply[1], repairApply[2])) }
-  const repairFinalize = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/finalize$/.exec(url.pathname)
-  if (method === 'POST' && repairFinalize) { await requireRun(repairFinalize[1], 'review:handle'); return send(response, 200, await requirementAnalysisService.finalizeRepairApplication(repairFinalize[1], repairFinalize[2])) }
-  const repairVerify = /^\/api\/requirement-review-runs\/([^/]+)\/repair-drafts\/([^/]+)\/verify$/.exec(url.pathname)
-  if (method === 'POST' && repairVerify) { await requireRun(repairVerify[1], 'review:create'); return send(response, 202, await requirementAnalysisService.finalizeRepairAndStartVerification(repairVerify[1], repairVerify[2])) }
-  const releaseCandidate = /^\/api\/requirement-review-runs\/([^/]+)\/release-candidate$/.exec(url.pathname)
-  if (method === 'POST' && releaseCandidate) { await requireRun(releaseCandidate[1], 'review:create'); return send(response, 201, await requirementAnalysisService.createReleaseCandidate(releaseCandidate[1], { principal })) }
-  const releasePublish = /^\/api\/requirement-review-runs\/([^/]+)\/release\/publish$/.exec(url.pathname)
+  const repairApproval = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/approve$/.exec(url.pathname)
+  if (method === 'POST' && repairApproval) { await requireRun(repairApproval[1], 'requirement-analysis:handle'); const body = await json(request); return send(response, 200, await requirementAnalysisService.approveRepairDraft(repairApproval[1], repairApproval[2], { comment: body.comment === undefined ? undefined : String(body.comment), principal })) }
+  const repairApply = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/apply$/.exec(url.pathname)
+  if (method === 'POST' && repairApply) { await requireRun(repairApply[1], 'requirement-analysis:handle'); return send(response, 202, await requirementAnalysisService.applyRepairDraft(repairApply[1], repairApply[2])) }
+  const repairFinalize = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/finalize$/.exec(url.pathname)
+  if (method === 'POST' && repairFinalize) { await requireRun(repairFinalize[1], 'requirement-analysis:handle'); return send(response, 200, await requirementAnalysisService.finalizeRepairApplication(repairFinalize[1], repairFinalize[2])) }
+  const repairVerify = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/verify$/.exec(url.pathname)
+  if (method === 'POST' && repairVerify) { await requireRun(repairVerify[1], 'requirement-analysis:create'); return send(response, 202, await requirementAnalysisService.finalizeRepairAndStartVerification(repairVerify[1], repairVerify[2])) }
+  const releaseCandidate = /^\/api\/requirement-analysis-runs\/([^/]+)\/release-candidate$/.exec(url.pathname)
+  if (method === 'POST' && releaseCandidate) { await requireRun(releaseCandidate[1], 'requirement-analysis:create'); return send(response, 201, await requirementAnalysisService.createReleaseCandidate(releaseCandidate[1], { principal })) }
+  const releasePublish = /^\/api\/requirement-analysis-runs\/([^/]+)\/release\/publish$/.exec(url.pathname)
   if (method === 'POST' && releasePublish) { await requireRun(releasePublish[1], 'project-version:manage'); return send(response, 200, await requirementAnalysisService.publishRelease(releasePublish[1], { principal })) }
-  const releaseArtifact = /^\/api\/requirement-review-runs\/([^/]+)\/release\/artifacts\/([^/]+)$/.exec(url.pathname)
+  const releaseArtifact = /^\/api\/requirement-analysis-runs\/([^/]+)\/release\/artifacts\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && releaseArtifact) {
-    await requireRun(releaseArtifact[1], 'review:read')
+    await requireRun(releaseArtifact[1], 'requirement-analysis:read')
     const artifact = await requirementAnalysisService.releaseArtifact(releaseArtifact[1], decodeURIComponent(releaseArtifact[2]))
     return sendText(response, 200, artifact.content, artifact.mediaType === 'application/json' ? 'application/json; charset=utf-8' : `${artifact.mediaType}; charset=utf-8`, artifact.fileName.split('/').at(-1))
   }
-  const findingActions = /^\/api\/requirement-review-runs\/([^/]+)\/finding-actions$/.exec(url.pathname)
-  if (method === 'GET' && findingActions) { await requireRun(findingActions[1], 'review:read'); return send(response, 200, await reviewGovernanceService.listFindingActions(findingActions[1])) }
-  const findingAction = /^\/api\/requirement-review-runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
+  const findingActions = /^\/api\/requirement-analysis-runs\/([^/]+)\/finding-actions$/.exec(url.pathname)
+  if (method === 'GET' && findingActions) { await requireRun(findingActions[1], 'requirement-analysis:read'); return send(response, 200, await reviewGovernanceService.listFindingActions(findingActions[1])) }
+  const findingAction = /^\/api\/requirement-analysis-runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
   if (method === 'POST' && findingAction) {
-    await requireRun(findingAction[1], 'review:handle')
+    await requireRun(findingAction[1], 'requirement-analysis:handle')
     const body = await json(request)
     return send(response, 201, await reviewGovernanceService.actOnFinding(findingAction[1], findingAction[2], {
       action: String(body.action ?? '') as FindingActionType,
@@ -192,8 +191,8 @@ async function route(request: IncomingMessage, response: ServerResponse, control
       principal,
     }))
   }
-  const runApprovals = /^\/api\/requirement-review-runs\/([^/]+)\/approvals$/.exec(url.pathname)
-  if (method === 'GET' && runApprovals) { await requireRun(runApprovals[1], 'review:read'); return send(response, 200, await reviewGovernanceService.listApprovals(runApprovals[1])) }
+  const runApprovals = /^\/api\/requirement-analysis-runs\/([^/]+)\/approvals$/.exec(url.pathname)
+  if (method === 'GET' && runApprovals) { await requireRun(runApprovals[1], 'requirement-analysis:read'); return send(response, 200, await reviewGovernanceService.listApprovals(runApprovals[1])) }
   const approvalDecision = /^\/api\/tool-approvals\/([^/]+)\/decision$/.exec(url.pathname)
   if (method === 'POST' && approvalDecision) {
     const approval = await loadApproval(approvalDecision[1])
@@ -201,17 +200,17 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     const body = await json(request)
     return send(response, 200, await reviewGovernanceService.decideApproval(approvalDecision[1], { decision: String(body.decision ?? '') as 'approved' | 'rejected', comment: body.comment === undefined ? undefined : String(body.comment), principal }))
   }
-  const reportExport = /^\/api\/project-versions\/([^/]+)\/requirement-review-runs\/([^/]+)\/report\.md$/.exec(url.pathname)
-  if (method === 'GET' && reportExport) { await requireProjectVersion(reportExport[1], 'review:read'); await requireRun(reportExport[2], 'review:read'); return sendText(response, 200, await reviewGovernanceService.exportMarkdown(reportExport[2], reportExport[1]), 'text/markdown; charset=utf-8', `requirement-analysis-${reportExport[2]}.md`) }
-  const requirementReviewRunCancel = /^\/api\/requirement-review-runs\/([^/]+)\/cancel$/.exec(url.pathname)
-  if (method === 'POST' && requirementReviewRunCancel) { await requireRun(requirementReviewRunCancel[1], 'review:cancel'); return send(response, 202, await requirementAnalysisService.cancel(requirementReviewRunCancel[1])) }
-  const requirementReviewRunRetry = /^\/api\/requirement-review-runs\/([^/]+)\/retry$/.exec(url.pathname)
-  if (method === 'POST' && requirementReviewRunRetry) {
-    await requireRun(requirementReviewRunRetry[1], 'review:retry')
+  const reportExport = /^\/api\/project-versions\/([^/]+)\/requirement-analysis-runs\/([^/]+)\/report\.md$/.exec(url.pathname)
+  if (method === 'GET' && reportExport) { await requireProjectVersion(reportExport[1], 'requirement-analysis:read'); await requireRun(reportExport[2], 'requirement-analysis:read'); return sendText(response, 200, await reviewGovernanceService.exportMarkdown(reportExport[2], reportExport[1]), 'text/markdown; charset=utf-8', `requirement-analysis-${reportExport[2]}.md`) }
+  const requirementAnalysisRunCancel = /^\/api\/requirement-analysis-runs\/([^/]+)\/cancel$/.exec(url.pathname)
+  if (method === 'POST' && requirementAnalysisRunCancel) { await requireRun(requirementAnalysisRunCancel[1], 'requirement-analysis:cancel'); return send(response, 202, await requirementAnalysisService.cancel(requirementAnalysisRunCancel[1])) }
+  const requirementAnalysisRunRetry = /^\/api\/requirement-analysis-runs\/([^/]+)\/retry$/.exec(url.pathname)
+  if (method === 'POST' && requirementAnalysisRunRetry) {
+    await requireRun(requirementAnalysisRunRetry[1], 'requirement-analysis:retry')
     const body = await json(request)
     const mode = String(body.mode ?? '')
     if (mode !== 'full') throw new Error('单 Agent 需求分析只支持 full 全部重跑')
-    return send(response, 202, await requirementAnalysisService.retry(requirementReviewRunRetry[1], 'full'))
+    return send(response, 202, await requirementAnalysisService.retry(requirementAnalysisRunRetry[1], 'full'))
   }
   const modelSource = /^\/api\/model-sources\/([^/]+)$/.exec(url.pathname)
   if (method === 'PATCH' && modelSource) return send(response, 200, await modelService.updateSource(modelSource[1], await json(request)))
@@ -375,7 +374,7 @@ async function loadRun(runId: string) {
   const run = stateStore.getReviewRun
     ? await stateStore.getReviewRun(runId)
     : (await stateStore.snapshot()).reviewRuns.find(item => item.id === runId)
-  if (!run) throw new Error('需求评审运行不存在')
+  if (!run) throw new Error('需求分析运行不存在')
   return run
 }
 

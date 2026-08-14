@@ -166,7 +166,7 @@ export interface RequirementTestFocus {
 }
 
 export interface RequirementAnalysisArtifact {
-  fileName: 'requirement-baseline.md' | 'requirement-review.md' | 'requirement-analysis.md'
+  fileName: 'requirement-baseline.md' | 'requirement-analysis-findings.md' | 'requirement-analysis.md'
   mediaType: 'text/markdown'
   content: string
   contentSha256: string

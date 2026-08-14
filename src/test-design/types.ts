@@ -6,7 +6,7 @@ export type ReviewState = 'draft' | 'in_review' | 'approved' | 'rejected' | 'nee
 
 export type TestDesignInputCandidates = {
   projectVersion: { id: string; projectId: string; name: string; status: string }
-  requirementRelease: { id: string; reviewRunId: string; contentSha256: string; publishedAt?: string; label: string } | null
+  requirementRelease: { id: string; analysisRunId: string; contentSha256: string; publishedAt?: string; label: string } | null
   knowledgeAssets: Array<{ assetId: string; assetVersionId: string; displayName: string; logicalPath: string; assetType: string; status: string; selectable: boolean; reason?: string }>
   fixedIndexes: Array<{ id: string; selectable: boolean }>
   historicalCaseSets: Array<{ id: string; name: string; version: number; memberCount: number; contentSha256: string }>

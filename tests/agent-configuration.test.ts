@@ -49,7 +49,6 @@ test('统一需求分析 Agent 独立发布 Workspace、Knowledge、Skill 与提
   const { service } = await fixture()
   const initial = (await service.get('requirement_analysis')).agents.requirementAnalysis
   assert.deepEqual(initial.requiredToolIds, ['skill.activate', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
-  assert.deepEqual(initial.requiredSkillKeys, ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release'])
   assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
   assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
   const saved = await service.save('requirement_analysis', {

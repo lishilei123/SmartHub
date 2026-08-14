@@ -32,7 +32,7 @@ export function TestDesignCreatePanel({ inputs, busy, onCreate, onCancel }: { in
     <header><div><span className="td2-icon"><Play /></span><div><p className="td2-kicker">创建测试设计</p><h2>固定目标与输入边界</h2><p>运行开始时由服务端冻结当前绑定的 Requirement Release、Agent 配置和 Workspace 快照。</p></div></div><button className="td2-button ghost" onClick={onCancel}>取消</button></header>
     <div className="td2-release-lock">
       <LockKeyhole />
-      {inputs.requirementRelease ? <div><b>{inputs.requirementRelease.label}</b><small>releaseId {inputs.requirementRelease.id} · verificationRunId {inputs.requirementRelease.reviewRunId}</small><code>{inputs.requirementRelease.contentSha256}</code></div> : <div><b>未绑定 Requirement Release</b><small>请先在当前 ProjectVersion 发布正式需求包。</small></div>}
+      {inputs.requirementRelease ? <div><b>{inputs.requirementRelease.label}</b><small>releaseId {inputs.requirementRelease.id} · verificationRunId {inputs.requirementRelease.analysisRunId}</small><code>{inputs.requirementRelease.contentSha256}</code></div> : <div><b>未绑定 Requirement Release</b><small>请先在当前 ProjectVersion 发布正式需求包。</small></div>}
       {inputs.requirementRelease ? <CheckCircle2 /> : <XCircle />}
     </div>
     <div className="td2-form-grid">

@@ -25,7 +25,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
 
   async listFindingActions(runId: string) {
     const state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+    const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
     return findingProjection(run, state.findingActions.filter(item => item.runId === runId))
   }
 
@@ -35,9 +35,9 @@ export class ReviewGovernanceService implements ToolApprovalGate {
     if (comment.length > 2_000) throw new Error('处置说明不能超过 2000 个字符')
     if (['dismiss', 'request_follow_up', 'reopen'].includes(input.action) && !comment) throw new Error('驳回、待跟进或重新打开时必须填写处置说明')
     return this.store.transaction(state => {
-      const run = required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
-      if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功发布的评审结果可以处置 Finding')
-      required(run.result.findings.find(item => item.clientFindingId === findingId), 'Finding 不属于指定评审运行')
+      const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
+      if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的需求分析结果可以处置 Finding')
+      required(run.result.findings.find(item => item.clientFindingId === findingId), 'Finding 不属于指定需求分析运行')
       const actions = state.findingActions.filter(item => item.runId === runId && item.findingId === findingId).sort((left, right) => left.version - right.version)
       const version = actions.length
       if (input.expectedVersion !== undefined && input.expectedVersion !== version) throw new Error('FINDING_ACTION_VERSION_CONFLICT: 处置状态已被其他用户更新，请刷新后重试')
@@ -70,7 +70,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
       })
     })
     const state = await this.store.snapshot()
-    required(state.reviewRuns.find(item => item.id === runId), '需求评审运行不存在')
+    required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
     return state.toolApprovals.filter(item => item.runId === runId).sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))
   }
 
@@ -78,7 +78,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
     if (!['approved', 'rejected'].includes(input.decision)) throw new Error('审批结果必须是 approved 或 rejected')
     const outcome = await this.store.transaction(state => {
       const approval = required(state.toolApprovals.find(item => item.id === approvalId), '审批记录不存在')
-      const run = required(state.reviewRuns.find(item => item.id === approval.runId), '需求评审运行不存在')
+      const run = required(state.reviewRuns.find(item => item.id === approval.runId), '需求分析运行不存在')
       if (run.status !== 'running') {
         approval.status = 'cancelled'
         return { error: '运行已结束，审批自动失效' }
@@ -103,7 +103,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
     const expiresAt = new Date(now.getTime() + 10 * 60_000).toISOString()
     let pending!: ToolApproval
     const authorizationError = await this.store.transaction(state => {
-      const run = required(state.reviewRuns.find(item => item.id === input.runId), '需求评审运行不存在')
+      const run = required(state.reviewRuns.find(item => item.id === input.runId), '需求分析运行不存在')
       if (run.status !== 'running') throw new Error('TOOL_APPROVAL_INVALID: 运行已结束')
       state.toolApprovals.forEach(approval => {
         if (approval.runId === input.runId && approval.toolId === input.toolId && approval.status === 'pending' && (approval.toolVersion !== input.toolVersion || approval.parameterHash !== parameterHash || Date.parse(approval.expiresAt) <= now.getTime())) approval.status = Date.parse(approval.expiresAt) <= now.getTime() ? 'expired' : 'cancelled'
@@ -168,8 +168,8 @@ export class ReviewGovernanceService implements ToolApprovalGate {
 
   async exportMarkdown(runId: string, projectVersionId: string) {
     const state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId && item.projectVersionId === projectVersionId), '指定项目版本下不存在该需求评审运行')
-    if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功发布的正式评审结果可以导出')
+    const run = required(state.reviewRuns.find(item => item.id === runId && item.projectVersionId === projectVersionId), '指定项目版本下不存在该需求分析运行')
+    if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的需求分析结果可以导出')
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), '项目版本不存在')
     const projection = findingProjection(run, state.findingActions.filter(item => item.runId === runId))
     const states = new Map(projection.findings.map(item => [item.findingId, item]))
@@ -185,7 +185,7 @@ export class ReviewGovernanceService implements ToolApprovalGate {
       `- 实际模型路由：${run.modelLabel}`,
       `- 运行状态：${run.status}`,
       `- 生成时间：${new Date().toISOString()}`, '',
-      '## 评审摘要', '',
+      '## 分析摘要', '',
       `- 需求概述：${safeMarkdown(run.result.summary.overview)}`,
       ...run.result.summary.businessGoals.map(item => `- 业务目标：${safeMarkdown(item)}`),
       `- 总体结论：${run.result.summary.overallAssessment}`,

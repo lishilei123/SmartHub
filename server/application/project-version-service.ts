@@ -54,7 +54,7 @@ export class ProjectVersionService {
       const dependent = state.projectVersions.find(item => item.sourceProjectVersionId === version.id)
       if (dependent) throw new Error(`版本正在被 ${dependent.name} 作为继承来源，不能删除`)
       const reviewRuns = state.reviewRuns.filter(item => item.projectVersionId === version.id)
-      if (reviewRuns.some(item => item.status === 'running')) throw new Error('项目版本仍有正在执行的需求评审，请先取消运行后再删除')
+      if (reviewRuns.some(item => item.status === 'running')) throw new Error('项目版本仍有正在执行的需求分析，请先取消运行后再删除')
       const testDesignState = state.testDesignState
       const testDesignRuns = testDesignState?.runs.filter(item => item.projectVersionId === version.id) ?? []
       if (testDesignRuns.some(item => ['queued', 'running', 'waiting_gate'].includes(item.status))) throw new Error('项目版本仍有活动测试设计工作流，请先取消运行后再删除')
@@ -74,7 +74,7 @@ export class ProjectVersionService {
         testDesignState.designs = testDesignState.designs.filter(item => !testDesignIds.has(item.id))
       }
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
-      return { id: version.id, name: version.name, deletedBindings, deletedReviewRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseSetVersions: caseSetVersionIds.size }
+      return { id: version.id, name: version.name, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseSetVersions: caseSetVersionIds.size }
     })
   }
 

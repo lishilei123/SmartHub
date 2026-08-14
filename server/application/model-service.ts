@@ -112,11 +112,11 @@ export class ModelService {
         checks.toolCalling = Boolean(submission)
         checks.longContext = submission?.contextMarker === sample.marker
         checks.structuredSubmission = submission?.schemaVersion === 'model-probe/v2' && submission?.finding?.severity === 'blocker' && typeof submission.finding.title === 'string' && submission.finding.title.length > 0
-        if (!checks.toolCalling) throw new Error('模型普通生成可用，但未按要求产生工具调用（质量门禁提交）；不能用于需求评审 Agent')
+        if (!checks.toolCalling) throw new Error('模型普通生成可用，但未按要求产生工具调用（质量门禁提交）；不能用于需求分析 Agent')
         if (!checks.longContext) throw new Error('模型未能从受控长上下文末尾恢复固定标记')
         if (!checks.structuredSubmission) throw new Error('模型提交的结构化质量门禁结果不完整')
       } else {
-        throw new Error('需求评审模型必须声明并通过工具调用质量门禁')
+        throw new Error('需求分析模型必须声明并通过工具调用质量门禁')
       }
     } catch (error) {
       health = 'degraded'
@@ -244,7 +244,7 @@ function modelListUrl(endpoint: string) {
 function chatUrl(endpoint: string) { return /\/chat\/completions$/i.test(endpoint) ? endpoint : `${endpoint}/chat/completions` }
 function anthropicUrl(endpoint: string) { return /\/v1\/messages$/i.test(endpoint) ? endpoint : `${endpoint}/v1/messages` }
 function probeOpenAi(endpoint: string, credential: string, model: string, requireToolCall: boolean, sample: string) {
-  const tool = { type: 'function', function: { name: 'smarthub_requirement_submit_probe', description: 'Submit the controlled requirement review probe.', parameters: probeSubmissionSchema() } }
+  const tool = { type: 'function', function: { name: 'smarthub_requirement_submit_probe', description: 'Submit the controlled requirement analysis probe.', parameters: probeSubmissionSchema() } }
   return fetch(chatUrl(endpoint), {
     method: 'POST',
     headers: { ...(credential ? { authorization: `Bearer ${credential}` } : {}), 'content-type': 'application/json' },
@@ -253,7 +253,7 @@ function probeOpenAi(endpoint: string, credential: string, model: string, requir
   })
 }
 function probeAnthropic(endpoint: string, credential: string, model: string, requireToolCall: boolean, sample: string) {
-  const tool = { name: 'smarthub_requirement_submit_probe', description: 'Submit the controlled requirement review probe.', input_schema: probeSubmissionSchema() }
+  const tool = { name: 'smarthub_requirement_submit_probe', description: 'Submit the controlled requirement analysis probe.', input_schema: probeSubmissionSchema() }
   return fetch(anthropicUrl(endpoint), {
     method: 'POST',
     headers: { 'x-api-key': credential, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },

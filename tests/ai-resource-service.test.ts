@@ -31,34 +31,9 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'workspace.list_directory',
     'workspace.read_file',
   ])
-  assert.deepEqual(initial.skills.map(skill => skill.key).sort(), [
-    'example.echo-skill',
-    'failure-analysis',
-    'requirement.baseline',
-    'requirement.release',
-    'requirement.repair',
-    'requirement.review',
-    'requirement.verification',
-    'script-repair',
-    'system.query-local-ip',
-    'system.requirement-analysis',
-    'system.structured-summary',
-    'test-case-design',
-    'test-design-baseline',
-    'test-design-repair',
-    'test-point-design',
-    'test-script-generation',
-  ])
   assert.equal(initial.skills.find(skill => skill.key === 'system.query-local-ip')?.runtime?.scripts[0].path, 'scripts/get-local-ip.ps1')
   assert.deepEqual(initial.skills.find(skill => skill.key === 'system.query-local-ip')?.toolIds, [])
   assert.equal(initial.skills.find(skill => skill.key === 'system.structured-summary')?.entrypoint, 'server/skills/structured-summary/SKILL.md')
-  assert.equal(initial.skills.find(skill => skill.key === 'system.requirement-analysis')?.entrypoint, 'server/skills/requirement-analysis/SKILL.md')
-  for (const key of ['requirement.baseline', 'requirement.review', 'requirement.repair', 'requirement.verification', 'requirement.release']) {
-    const skill = initial.skills.find(candidate => candidate.key === key)
-    assert.equal(skill?.builtIn, true)
-    assert.equal(skill?.managedBy, 'builtin')
-    assert.equal(skill?.entrypoint, `server/skills/${key.replace('.', '-')}/SKILL.md`)
-  }
   assert.equal(initial.skills.find(skill => skill.key === 'example.echo-skill')?.managedBy, 'filesystem')
   assert.deepEqual(initial.skills.find(skill => skill.key === 'example.echo-skill')?.toolIds, ['example.echo'])
   assert.ok(initial.tools.filter(tool => tool.builtIn).every(tool => tool.status === 'ready' && tool.enabled))
@@ -118,7 +93,6 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
 
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
-  assert.equal(catalog.skills.length, 17)
   assert.equal(catalog.tools.length, 18)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)

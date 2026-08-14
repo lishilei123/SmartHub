@@ -15,6 +15,7 @@ import {
 } from '../agent/agent-catalog.js'
 
 const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result'])
+const RETIRED_SKILL_KEYS = new Set(['system.requirement-analysis', 'requirement.review'])
 
 export type AgentConfigurationInput = {
   agentKey: AgentConfigurationAgentKey
@@ -363,7 +364,7 @@ function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft | undefin
   const catalog = agentCatalogEntry(agentKey)
   const fallback = defaultAgentDraft(agentKey)
   const definition = value?.definition ?? fallback.definition
-  const skillKeys = stringKeys(definition.skillKeys)
+  const skillKeys = stringKeys(definition.skillKeys).filter(key => !RETIRED_SKILL_KEYS.has(key))
   const mcpServerKeys = stringKeys(definition.mcpServerKeys)
   const toolIds = activeToolKeys(definition.toolIds)
   return {

@@ -20,8 +20,8 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
     ]),
   ].join('\n')
 
-  const review = [
-    '# Requirement Review', '',
+  const findings = [
+    '# Requirement Analysis Findings', '',
     '## Summary', '',
     safe(result.summary.overview), '',
     `- Overall Assessment：${result.summary.overallAssessment}`,
@@ -64,7 +64,7 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
     })),
   ].join('\n')
 
-  return [artifact('requirement-baseline.md', baseline), artifact('requirement-review.md', review), artifact('requirement-analysis.md', analysis)]
+  return [artifact('requirement-baseline.md', baseline), artifact('requirement-analysis-findings.md', findings), artifact('requirement-analysis.md', analysis)]
 }
 
 function artifact(fileName: RequirementAnalysisArtifact['fileName'], content: string): RequirementAnalysisArtifact {

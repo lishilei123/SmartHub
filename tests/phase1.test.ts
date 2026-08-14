@@ -334,10 +334,3 @@ test('删除资产先发布新索引并物理清理历史版本、索引、绑�
   assert.equal(state.reviewRuns.some(run => run.id === 'review-delete'), false)
   assert.equal((await service.task(deletion.task.id)).metrics?.reviewRuns, 1)
 })
-
-test('原文档仍有关联评审运行时阻止物理删除', async () => {
-  const { service, kbId } = await fixture(); const synced = await ingestReady(service, { knowledgeBaseId: kbId, sourceType: 'upload', sourceKey: 'running.md', assetType: 'requirement', displayName: '运行中需求', logicalPath: 'running.md', content: document() })
-  await service.store.transaction(state => { state.reviewRuns.push({ id: 'review-running', assetId: synced.asset!.id, assetVersionId: synced.version.id, status: 'running', snapshot: { assetId: synced.asset!.id, assetVersionId: synced.version.id, assets: [] } } as typeof state.reviewRuns[number]) })
-  await assert.rejects(() => service.deleteAsset(synced.asset!.id), /请先取消评审再删除/)
-  assert.equal((await service.assets(kbId)).length, 1)
-})

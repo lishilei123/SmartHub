@@ -21,9 +21,8 @@ const builtInSkills: SkillResource[] = [
     scripts: [{ path: 'scripts/get-local-ip.ps1', runner: 'powershell', timeoutMs: 15_000 }],
   }),
   builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例'], undefined),
-  builtInSkill('system.requirement-analysis', '需求分析方法论', '单 Agent 需求分析的整体理解、基线、跨需求评审、Test Focus 与自检方法论。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['系统', '需求分析', '评审'], undefined),
   builtInSkill('requirement.baseline', '需求基线', '读取固定需求正文并建立完整、原子且可追溯到原文证据的需求基线草稿。', '1.0.0', 'server/skills/requirement-baseline/SKILL.md', [], ['需求分析', '基线', 'baseline'], undefined),
-  builtInSkill('requirement.review', '需求审核', '审核冻结需求基线并生成可追溯、可行动且可闭环的正式 Finding。', '1.0.0', 'server/skills/requirement-review/SKILL.md', [], ['需求分析', '审核', 'finding'], undefined),
+  builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成整体理解、需求基线、跨需求分析、Finding、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'finding', 'traceability'], undefined),
   builtInSkill('requirement.repair', '需求修复', '针对人工确认的 Finding 生成基于固定原文且可安全应用的 Patch 草稿。', '1.0.0', 'server/skills/requirement-repair/SKILL.md', [], ['需求分析', '修复', 'patch'], undefined),
   builtInSkill('requirement.verification', '需求复验', '完整复查修复后的需求版本并判定原 Finding 是否真正完成闭环。', '1.0.0', 'server/skills/requirement-verification/SKILL.md', [], ['需求分析', '复验', 'verification'], undefined),
   builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact'], undefined),
@@ -37,6 +36,7 @@ const builtInSkills: SkillResource[] = [
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
 const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', ...SKILL_RUNTIME_TOOL_IDS])
+const retiredBuiltInSkillKeys = new Set(['system.requirement-analysis', 'requirement.review'])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 
@@ -170,7 +170,10 @@ export class AiResourceService {
 
   private async ensureBuiltIns() {
     await this.transaction(state => {
-      state.aiResources = state.aiResources.filter(item => !(item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key)))
+      state.aiResources = state.aiResources.filter(item => !(
+        item.builtIn
+        && ((item.kind === 'tool' && retiredBuiltInToolKeys.has(item.key)) || (item.kind === 'skill' && retiredBuiltInSkillKeys.has(item.key)))
+      ))
       state.aiResources = state.aiResources.map(item => {
         if (item.builtIn) return item
         if (item.kind === 'mcp') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', ...(item.authType === 'none' || item.credentialEnv ? {} : { credentialEnv: defaultCredentialEnv('MCP', item.key) }) }
@@ -248,6 +251,7 @@ function catalog(resources: AiResource[]): AiResourceCatalog {
 
 function builtInsNeedSync(resources: AiResource[]) {
   if (resources.some(item => item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key))) return true
+  if (resources.some(item => item.kind === 'skill' && item.builtIn && retiredBuiltInSkillKeys.has(item.key))) return true
   return builtInResources.some(expected => {
     const actual = resources.find(item => item.kind === expected.kind && item.key === expected.key)
     if (!actual?.builtIn) return true
