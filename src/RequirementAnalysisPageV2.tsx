@@ -445,7 +445,7 @@ export function RequirementAnalysisPageV2(props: Props) {
           {view === 'conversation' && <AgentConversation run={selectedRun} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
           {view === 'overview' && <Overview result={result} blockerCount={blockerCount} highCount={highCount} pendingCount={pendingCount} onFindings={() => setView('findings')} onArtifacts={() => setView('artifacts')} />}
           {view === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}
-          {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} documents={requirementDocuments} repairDrafts={repairDrafts} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}
+          {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} pendingCount={pendingCount} documents={requirementDocuments} repairDrafts={repairDrafts} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}
           {view === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} busy={releaseBusy} onGenerate={() => void generateRelease()} onPublish={() => void publishRelease()} />}
           {view === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
         </div>
@@ -492,6 +492,7 @@ function Findings(props: {
   findingStateFilter: 'all' | FindingState
   setFindingStateFilter: (value: 'all' | FindingState) => void
   visibleFindings: AnalysisFinding[]
+  pendingCount: number
   documents: KnowledgeDocument[]
   repairDrafts: RequirementRepairDraft[]
   verificationBusyDraftId: string
@@ -505,11 +506,12 @@ function Findings(props: {
   const { result, selectedRun, findingStates, visibleFindings } = props
   if (!result) return <div className="rav2-empty"><AlertTriangle /><h2>暂无需求问题</h2></div>
   return <div className="rav2-findings">
-    <header><div><AlertTriangle /><span><h2>需求问题</h2><p>先由人工采纳或处置问题；AI 只生成可审核的修复 Diff，应用新版本后由人工另行启动复验。</p></span></div><Badge tone="orange">{visibleFindings.length} / {result.findings.length}</Badge></header>
+    <header><div><AlertTriangle /><span><h2>需求问题</h2><p>先由人工采纳或处置问题；AI 只生成可审核的修复 Diff，应用新版本后由人工另行启动复验。</p></span></div><Badge tone={props.pendingCount > 0 ? 'orange' : 'green'}>已闭环 {result.findings.length - props.pendingCount} / {result.findings.length}</Badge></header>
     <div className="rav2-filters">
       <select value={props.findingTypeFilter} onChange={event => props.setFindingTypeFilter(event.target.value as 'all' | AnalysisFindingType)}><option value="all">全部类型</option>{Object.entries(findingTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
       <select value={props.severityFilter} onChange={event => props.setSeverityFilter(event.target.value as 'all' | AnalysisSeverity)}><option value="all">全部严重度</option>{Object.entries(severityLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
       <select value={props.findingStateFilter} onChange={event => props.setFindingStateFilter(event.target.value as 'all' | FindingState)}><option value="all">全部状态</option>{Object.entries(findingStateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
+      <span className="rav2-filter-count">当前显示 {visibleFindings.length} / {result.findings.length}</span>
     </div>
     {visibleFindings.map(finding => {
       const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open' : 'open'

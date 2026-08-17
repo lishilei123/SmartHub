@@ -3,6 +3,14 @@
   justify-content: flex-end;
 }
 
+.rav2-filter-count {
+  margin-left: auto;
+  color: #8c95a3;
+  font-size: 8px;
+  align-self: center;
+  white-space: nowrap;
+}
+
 .rav2-finding footer button.accept {
   border-color: #b8e1d2;
   background: #effaf5;
@@ -128,6 +136,11 @@
 
   .rav2-finding > footer > div {
     justify-content: flex-start;
+  }
+
+  .rav2-filter-count {
+    width: 100%;
+    margin-left: 0;
   }
 
   .rav2-repair-applied > div > article {
