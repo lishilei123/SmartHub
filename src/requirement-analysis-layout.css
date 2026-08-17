@@ -783,6 +783,18 @@
   display: flex;
 }
 
+.rav2-session-body.cases {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  background: #f7f8fa;
+}
+
+.rav2-session-body.cases > .tdw-embedded {
+  flex: 1;
+  min-width: 0;
+}
+
 .rav2-session-body.conversation .rav2-conversation {
   background: #fff;
 }

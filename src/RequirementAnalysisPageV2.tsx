@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, BookOpen, Bot, CheckCircle2, Clock3, Download, FileDiff, FileText,
-  FolderOpen, GitBranch, LoaderCircle, Play, Quote, RefreshCw, ShieldCheck, Sparkles, Trash2, Wrench, XCircle,
+  FolderOpen, GitBranch, LoaderCircle, Play, Quote, RefreshCw, ShieldCheck, Sparkles, TestTube2, Trash2, Wrench, XCircle,
 } from 'lucide-react'
 import type { KnowledgeDocument } from './prototype-data'
 import { loadAssetVersion, waitForTaskResults } from './knowledge-api'
@@ -44,8 +44,10 @@ import type { ProjectVersion } from './project-version-api'
 import './requirement-analysis-v2.css'
 import './requirement-analysis-review-flow.css'
 
+const EmbeddedTestDesignPage = lazy(() => import('./test-design/TestDesignPage').then(module => ({ default: module.TestDesignPage })))
+
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
-type ViewKey = 'conversation' | 'clarifications' | 'overview' | 'details'
+type ViewKey = 'conversation' | 'clarifications' | 'cases' | 'details'
 type DetailViewKey = 'baseline' | 'findings' | 'artifacts' | 'diff'
 type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
 type RunRecord = RequirementAnalysisRun & { content?: string }
@@ -61,7 +63,6 @@ type Props = {
   onManageVersions: () => void
   onOpenKnowledge: () => void
   onOpenActivity: () => void
-  onOpenTestDesign?: () => void
   onOpenInputDocument?: (document: KnowledgeDocument) => void
   onDeleteInputDocument?: (document: KnowledgeDocument) => void
   canDeleteInputDocument?: boolean
@@ -79,7 +80,7 @@ const findingStateLabels: Record<FindingState, string> = { open: '待人工审�
 const viewTabs: Array<{ key: ViewKey; label: string; icon: typeof Sparkles }> = [
   { key: 'conversation', label: 'Agent 协作', icon: Bot },
   { key: 'clarifications', label: '待确认问题', icon: Quote },
-  { key: 'overview', label: '需求理解', icon: Sparkles },
+  { key: 'cases', label: '测试用例', icon: TestTube2 },
   { key: 'details', label: '详细信息', icon: ShieldCheck },
 ]
 const detailTabs: Array<{ key: DetailViewKey; label: string }> = [
@@ -159,8 +160,11 @@ function assetVersionLabel(versionId: string, documents: KnowledgeDocument[]) {
 }
 
 export function RequirementAnalysisPageV2(props: Props) {
-  const { projectVersion, documents, apiState, refreshKnowledge, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenTestDesign, onOpenInputDocument, onDeleteInputDocument, canDeleteInputDocument = false } = props
-  const [view, setView] = useState<ViewKey>('conversation')
+  const { projectVersion, documents, apiState, refreshKnowledge, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenInputDocument, onDeleteInputDocument, canDeleteInputDocument = false } = props
+  const [view, setView] = useState<ViewKey>(() => {
+    const params = new URL(window.location.href).searchParams
+    return params.get('planningTab') === 'test-design' || Boolean(params.get('testDesignEntry')) ? 'cases' : 'conversation'
+  })
   const [detailView, setDetailView] = useState<DetailViewKey>('baseline')
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [selectedRunId, setSelectedRunId] = useState('')
@@ -453,10 +457,10 @@ export function RequirementAnalysisPageV2(props: Props) {
           <div className="rav2-session-actions"><select aria-label="需求分析运行历史" value={selectedRunId} onChange={event => setSelectedRunId(event.target.value)} disabled={loadingRuns}><option value="">{loadingRuns ? '加载中…' : '运行历史'}</option>{runs.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run)}</option>)}</select><button aria-label="刷新运行" onClick={() => void refreshRuns()}><RefreshCw /></button><button aria-label="下载分析报告" onClick={exportReport} disabled={!selectedRun?.response}><Download /></button></div>
         </header>
         <nav className="rav2-session-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'clarifications' && blockingClarifications.length ? <i>{blockingClarifications.length}</i> : null}</button>)}</nav>
-        <div className={`rav2-session-body ${view === 'conversation' ? 'conversation' : 'detail'}`}>
+        <div className={`rav2-session-body ${view === 'conversation' ? 'conversation' : view === 'cases' ? 'cases' : 'detail'}`}>
           {view === 'conversation' && <AgentConversation run={selectedRun} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
           {view === 'clarifications' && <Clarifications items={blockingClarificationHistory} answers={clarificationAnswers} busyId={clarificationBusyId} onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))} onResolve={(item, action) => void resolveClarification(item, action)} />}
-          {view === 'overview' && <Overview result={result} blockingClarificationCount={blockingClarifications.length} understandingSnapshot={understandingSnapshot} onOpenDetails={() => openDetails('baseline')} />}
+          {view === 'cases' && <Suspense fallback={<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>正在加载测试用例</h2><p>正在建立测试设计的正式上下文。</p></div>}><EmbeddedTestDesignPage embedded projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} /></Suspense>}
           {view === 'details' && <section className="rav2-advanced-details"><header><div><ShieldCheck /><span><b>详细信息</b><small>运行配置、分析观察项、Snapshot、版本产物与差异仅用于追溯和排障，不影响当前主流程。</small></span></div><nav>{detailTabs.map(tab => <button className={detailView === tab.key ? 'active' : ''} key={tab.key} onClick={() => setDetailView(tab.key)}>{tab.label}</button>)}</nav></header><div>{detailView === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}{detailView === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} documents={requirementDocuments} repairDrafts={repairDrafts} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}{detailView === 'artifacts' && <Artifacts result={result} release={release} understandingSnapshot={understandingSnapshot} runId={selectedRun?.id} />}{detailView === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}</div></section>}
         </div>
         {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>连续 Planning Session</b><small>Requirement、Human Clarification、TestPoint、TestCase 与 Coverage 共用同一父会话；正式事实始终从 Version / Snapshot / Workspace 重新建立。</small></span></footer>}
@@ -466,11 +470,11 @@ export function RequirementAnalysisPageV2(props: Props) {
         <header><span><b>当前任务 / 正式产物</b><small>{selectedRun?.id ? `Run ${selectedRun.id.replace('analysis_run_', '').slice(0, 10)}` : '尚未创建 Run'}</small></span><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{runLabel(selectedRun)}</Badge></header>
         <div className="rav2-status-scroll">
           <section className="rav2-status-card"><header><i>①</i><b>当前业务阶段</b></header><div className="rav2-stage-list">{stages.map(stage => <article className={stage.state} key={stage.label}><span /><b>{stage.label}</b><small>{stage.detail}</small></article>)}</div></section>
-          <section className="rav2-status-card"><header><i>②</i><b>正式产物</b></header><div className="rav2-formal-list"><button onClick={() => openDetails('artifacts')} disabled={!result}><span><b>需求理解快照</b><small>{understandingSnapshot ? `已由服务端自动冻结 · ${formatTime(understandingSnapshot.createdAt)}` : '等待需求理解达到可测试状态'}</small></span><em className={understandingSnapshot ? 'published' : 'empty'}>{understandingSnapshot ? '已冻结' : '—'}</em></button><button onClick={onOpenTestDesign} disabled={!onOpenTestDesign || automaticTransition?.status !== 'succeeded'}><span><b>测试用例</b><small>{automaticTransition?.status === 'succeeded' ? '查看候选用例与 Coverage' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? 'PlanningAgent 正在自动设计' : '等待需求理解快照'}</small></span><em>{automaticTransition?.status === 'succeeded' ? '可查看' : '—'}</em></button><button onClick={onOpenTestDesign} disabled={!onOpenTestDesign || automaticTransition?.status !== 'succeeded'}><span><b>Execution Handoff</b><small>由正式测试设计发布后生成</small></span><em>—</em></button></div></section>
+          <section className="rav2-status-card"><header><i>②</i><b>正式产物</b></header><div className="rav2-formal-list"><button onClick={() => openDetails('artifacts')} disabled={!result}><span><b>需求理解快照</b><small>{understandingSnapshot ? `已由服务端自动冻结 · ${formatTime(understandingSnapshot.createdAt)}` : '等待需求理解达到可测试状态'}</small></span><em className={understandingSnapshot ? 'published' : 'empty'}>{understandingSnapshot ? '已冻结' : '—'}</em></button><button onClick={() => setView('cases')} disabled={automaticTransition?.status !== 'succeeded'}><span><b>测试用例</b><small>{automaticTransition?.status === 'succeeded' ? '查看候选用例与 Coverage' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? 'PlanningAgent 正在自动设计' : '等待需求理解快照'}</small></span><em>{automaticTransition?.status === 'succeeded' ? '可查看' : '—'}</em></button><button onClick={() => setView('cases')} disabled={automaticTransition?.status !== 'succeeded'}><span><b>Execution Handoff</b><small>由正式测试设计发布后生成</small></span><em>—</em></button></div></section>
           <details className="rav2-status-card rav2-technical-status"><summary><Activity /><span><b>运行记录</b><small>Turn、工具调用、事件与异常</small></span></summary><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></details>
         </div>
         <footer className="rav2-status-action">
-          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : automaticTransition?.status === 'succeeded' ? <button className="primary" onClick={onOpenTestDesign} disabled={!onOpenTestDesign}><Play />审核最终测试用例</button> : <button className="primary" disabled><LoaderCircle className="rotating" />{understandingSnapshot ? 'PlanningAgent 正在设计测试' : '服务端正在冻结需求理解'}</button>}
+          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : automaticTransition?.status === 'succeeded' ? <button className="primary" onClick={() => setView('cases')}><Play />审核最终测试用例</button> : <button className="primary" disabled><LoaderCircle className="rotating" />{understandingSnapshot ? 'PlanningAgent 正在设计测试' : '服务端正在冻结需求理解'}</button>}
         </footer>
       </aside>
     </div>

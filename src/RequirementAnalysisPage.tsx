@@ -21,7 +21,6 @@ type Props = {
   onManageVersions: () => void
   onOpenKnowledge: () => void
   onOpenActivity: () => void
-  onOpenTestDesign?: () => void
   notify: Notify
   addAudit: (entry: string) => void
 }
