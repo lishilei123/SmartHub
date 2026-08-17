@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import test from 'node:test'
-import { approveTree, createRun, loadInputs, patchCase, redesignTestPoints, reviewCase } from '../src/test-design/api.ts'
+import { createRun, loadInputs, patchCase, redesignTestPoints, reviewCase } from '../src/test-design/api.ts'
 import { TestDesignError } from '../server/application/test-design-validation.ts'
 import { routeTestDesign } from '../server/http/test-design-routes.ts'
 
@@ -13,13 +13,13 @@ test('测试设计创建表单读取当前绑定 Requirement Release 和单 Agen
     projectVersion: { id: 'pv-1', projectId: 'project-1', name: 'v1', status: 'open' },
     requirementRelease: { id: 'release-1', reviewRunId: 'verify-1', contentSha256: 'a'.repeat(64), label: '正式需求' },
     knowledgeAssets: [], fixedIndexes: [], historicalCaseSets: [], historicalCaseAssets: [],
-    agentReadiness: { ready: true, agents: [{ agentKey: 'test-design', ready: true }] },
+    agentReadiness: { ready: true, agents: [{ agentKey: 'planning', ready: true }] },
   }) }
   try {
     const result = await loadInputs('pv-1')
     assert.equal(result.requirementRelease?.id, 'release-1')
     assert.equal(result.requirementRelease?.reviewRunId, 'verify-1')
-    assert.equal(result.agentReadiness.agents[0].agentKey, 'test-design')
+    assert.equal(result.agentReadiness.agents[0].agentKey, 'planning')
     assert.deepEqual(paths, ['/api/project-versions/pv-1/test-designs/inputs'])
   } finally { globalThis.fetch = originalFetch }
 })
@@ -38,10 +38,11 @@ test('启动 TestDesign Run 携带服务端要求的幂等键', async () => {
   try { const run = await createRun('pv-1', 'design-1'); assert.equal(run.id, 'run-1'); assert.match(idempotencyKey, /^test-design-design-1-[0-9a-f-]{36}$/u) } finally { globalThis.fetch = originalFetch }
 })
 
-test('测试点批准只使用 If-Match，不存在 Scope Gate API', async () => {
-  const originalFetch = globalThis.fetch; let requestPath = ''; let ifMatch = ''
-  globalThis.fetch = async (input, init) => { requestPath = new URL(String(input)).pathname; ifMatch = new Headers(init?.headers).get('if-match') ?? ''; return Response.json({ id: 'tp-version-1' }) }
-  try { await approveTree('pv-1', 'design-1', 'run-1', '"tree:1:hash"'); assert.equal(requestPath, '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/test-point-tree/approve'); assert.equal(ifMatch, '"tree:1:hash"') } finally { globalThis.fetch = originalFetch }
+test('测试点由服务端自动校验，不再暴露人工批准 API', () => {
+  const client = readFileSync(new URL('../src/test-design/api.ts', import.meta.url), 'utf8')
+  const routes = readFileSync(new URL('../server/http/test-design-routes.ts', import.meta.url), 'utf8')
+  assert.doesNotMatch(client, /approveTree|test-point-tree\/approve/u)
+  assert.doesNotMatch(routes, /test-point-tree\/approve/u)
 })
 
 test('AI 重新设计测试点使用固定动作接口', async () => {

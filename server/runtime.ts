@@ -81,16 +81,11 @@ export const planningWorkflowService = new PlanningWorkflowService(
   testDesignService,
 )
 requirementAnalysisService.onUnderstandingReady(async runId => { await planningWorkflowService.requirementUnderstandingReady(runId) })
-testDesignService.onTestPointsValidated(async projectVersionId => {
-  const projectVersion = stateStore.getProjectVersion
-    ? await stateStore.getProjectVersion(projectVersionId)
-    : (await stateStore.snapshot()).projectVersions.find(
-        item => item.id === projectVersionId,
-      )
-  if (!projectVersion) throw new Error('PROJECT_VERSION_NOT_FOUND')
-  planningWorkflowService.queueTestPointsValidated(
-    projectVersion.projectId,
-    projectVersion.id,
+testDesignService.onTestPointsValidated(async (projectVersionId, runId, treeVersionId) => {
+  await planningWorkflowService.testPointsValidated(
+    projectVersionId,
+    runId,
+    treeVersionId,
   )
 })
 export const projectVersionService = new ProjectVersionService(stateStore)

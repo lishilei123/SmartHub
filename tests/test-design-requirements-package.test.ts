@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { TestDesignService, type TestDesignAgentRuntime } from '../server/application/test-design-service.js'
+import { TestDesignService, type PlanningAgentRuntime } from '../server/application/test-design-service.js'
 import { TestDesignError } from '../server/application/test-design-validation.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
@@ -36,7 +36,7 @@ test('TestDesign 只消费已发布 requirements.json，不从 Review 结果或 
     state.reviewRuns.push({
       id: 'review-run-1', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-fixed', documentTitle: '已发布需求', documentVersion: 1,
       logicalPath: 'workspace/branches/V1/input/requirements', sourceId: 'source-1', modelId: 'model-1', modelLabel: 'model', status: 'succeeded', step: 'completed', progress: 100,
-      createdAt: '2026-08-12T00:00:00.000Z', finishedAt: '2026-08-12T00:01:00.000Z', snapshot: {} as never,
+      createdAt: '2026-08-12T00:00:00.000Z', finishedAt: '2026-08-12T00:01:00.000Z', snapshot: { currentInputRefs: [] } as never,
       result: { requirementPoints: [{ clientRequirementPointId: 'RP-STALE', title: '旧运行结果', description: '不能作为 TestDesign 输入', evidenceRefs: [] }] } as never,
       workflow: { currentStage: 'release', release: {
         id: 'release-1', schemaVersion: 'requirement-release-package/v1', status: 'published', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', sourceAssetVersionIds: ['version-fixed'],
@@ -50,7 +50,7 @@ test('TestDesign 只消费已发布 requirements.json，不从 Review 结果或 
       } },
     } as never)
   })
-  const runtime: TestDesignAgentRuntime = {
+  const runtime: PlanningAgentRuntime = {
     readiness: async () => ({ ready: true, agents: [] }),
     freezeConfiguration: async () => frozenConfiguration(),
     execute: async () => { throw new Error('测试无需执行后续 Agent') },
@@ -83,7 +83,7 @@ test('TestDesign 拒绝 manifest 未固定 requirements.json Hash 的发布包',
     state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', configVersionId: 'config-1', assetVersionIds: [], indexedChunks: [], createdAt: '2026-08-12T00:00:00.000Z' } as never)
     state.reviewRuns.push({ id: 'review-run-1', projectVersionId: 'project-version-1', status: 'succeeded', result: {}, workflow: { release: { id: 'release-1', status: 'published', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', sourceAssetVersionIds: ['version-fixed'], artifacts: [{ fileName: 'requirements.json', mediaType: 'application/json', content: requirementsContent, contentSha256: requirementsHash }, { fileName: 'manifest.json', mediaType: 'application/json', content: manifestContent, contentSha256: sha256(manifestContent) }], contentSha256: sha256(manifestContent) } } } as never)
   })
-  const runtime: TestDesignAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => { throw new Error('不应执行') } }
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => { throw new Error('不应执行') } }
   const service = new TestDesignService(store, runtime)
   const design = await service.createDesign('project-version-1', { name: '订单测试设计', objective: '验证发布需求', knowledgeAugmentation: { mode: 'disabled' } }, principal)
   await assert.rejects(() => service.createRun('project-version-1', design.id, 'invalid-manifest', principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID')

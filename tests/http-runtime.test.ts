@@ -48,26 +48,23 @@ type HttpAgentConfiguration = {
   }>
 }
 
-async function loadAgentConfiguration(baseUrl: string, scenePath: 'requirement-analysis' | 'test-design' | 'test-execution') {
+async function loadAgentConfiguration(baseUrl: string, scenePath: 'planning' | 'test-execution') {
   const response = await fetch(`${baseUrl}/agent-configurations/${scenePath}`)
   assert.equal(response.status, 200)
   return await response.json() as HttpAgentConfiguration
 }
 
-test('Agent 配置接口按场景返回精确 Agent 集合并隔离保存', async () => {
+test('Agent 配置接口返回统一 PlanningAgent 并按场景隔离保存', async () => {
   await withServer(async baseUrl => {
-    const requirementAnalysis = await loadAgentConfiguration(baseUrl, 'requirement-analysis')
-    assert.equal(requirementAnalysis.scene, 'requirement_analysis')
-    assert.deepEqual(Object.keys(requirementAnalysis.agents), ['requirementAnalysis'])
-    assert.equal(requirementAnalysis.agents.requirementAnalysis.draft.revision, 0)
-    assert.deepEqual(requirementAnalysis.agents.requirementAnalysis.requiredToolIds, ['requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result'])
-
-    const testDesign = await loadAgentConfiguration(baseUrl, 'test-design')
-    assert.equal(testDesign.scene, 'test_design')
-    assert.deepEqual(Object.keys(testDesign.agents), ['testDesign'])
-    assert.equal(testDesign.agents.testDesign.draft.revision, 0)
-    assert.deepEqual(testDesign.agents.testDesign.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
-    assert.deepEqual(testDesign.agents.testDesign.requiredSkillKeys, ['test-design-baseline', 'test-point-design', 'test-case-design', 'test-design-repair'])
+    const planning = await loadAgentConfiguration(baseUrl, 'planning')
+    assert.equal(planning.scene, 'planning')
+    assert.deepEqual(Object.keys(planning.agents), ['planning'])
+    assert.equal(planning.agents.planning.draft.revision, 0)
+    assert.ok(planning.agents.planning.requiredToolIds.includes('requirement-analysis.submit_result'))
+    assert.ok(planning.agents.planning.requiredToolIds.includes('test_design_points.submit_result'))
+    assert.ok(planning.agents.planning.requiredToolIds.includes('test_design_cases.submit_result'))
+    assert.ok(planning.agents.planning.draft.definition.skillKeys.includes('requirement.analysis'))
+    assert.ok(planning.agents.planning.draft.definition.skillKeys.includes('test-case-design'))
 
     const testExecution = await loadAgentConfiguration(baseUrl, 'test-execution')
     assert.equal(testExecution.scene, 'test_execution')
@@ -90,19 +87,19 @@ test('Agent 配置接口按场景返回精确 Agent 集合并隔离保存', asyn
       body: JSON.stringify({ key: 'http.agent.tool', name: 'HTTP Agent Tool', version: '1.0.0', enabled: true, source: 'mcp', risk: 'network_read', timeoutMs: 30_000, mcpServerId: mcp.id }),
     })
     assert.equal(toolResponse.status, 201)
-    const draft = testDesign.agents.testDesign.draft
-    const crossSceneSave = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
+    const draft = planning.agents.planning.draft
+    const crossSceneSave = await fetch(`${baseUrl}/agent-configurations/test-execution/draft`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agentKey: 'testDesign', revision: draft.revision, routing: draft.routing, definition: draft.definition }),
+      body: JSON.stringify({ agentKey: 'planning', revision: draft.revision, routing: draft.routing, definition: draft.definition }),
     })
     assert.equal(crossSceneSave.status, 400)
     assert.match((await crossSceneSave.json() as { error: string }).error, /不属于当前配置场景/u)
 
-    const savedResponse = await fetch(`${baseUrl}/agent-configurations/test-design/draft`, {
+    const savedResponse = await fetch(`${baseUrl}/agent-configurations/planning/draft`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agentKey: 'testDesign', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: [...draft.definition.skillKeys, 'http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
+      body: JSON.stringify({ agentKey: 'planning', revision: draft.revision, routing: draft.routing, definition: { ...draft.definition, skillKeys: [...draft.definition.skillKeys, 'http.agent.skill'], mcpServerKeys: ['http.agent.mcp'], toolIds: [...draft.definition.toolIds, 'http.agent.tool'] } }),
     })
     assert.equal(savedResponse.status, 200)
     const saved = await savedResponse.json() as { definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }
@@ -147,20 +144,20 @@ test('Agent 配置发布人使用认证主体而不是请求 body', async () => 
       state.modelSources.push({ ...source, createdAt: now, updatedAt: now } as never)
     })
 
-    const configuration = await loadAgentConfiguration(baseUrl, 'requirement-analysis')
-    const draft = configuration.agents.requirementAnalysis.draft
-    const savedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/draft`, {
+    const configuration = await loadAgentConfiguration(baseUrl, 'planning')
+    const draft = configuration.agents.planning.draft
+    const savedResponse = await fetch(`${baseUrl}/agent-configurations/planning/draft`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agentKey: 'requirementAnalysis', revision: draft.revision, routing: { ...draft.routing, primaryModel: { sourceId: source.id, modelId: source.models[0].id } }, definition: draft.definition }),
+      body: JSON.stringify({ agentKey: 'planning', revision: draft.revision, routing: { ...draft.routing, primaryModel: { sourceId: source.id, modelId: source.models[0].id } }, definition: draft.definition }),
     })
     assert.equal(savedResponse.status, 200)
     const saved = await savedResponse.json() as { revision: number }
 
-    const publishedResponse = await fetch(`${baseUrl}/agent-configurations/requirement-analysis/publish`, {
+    const publishedResponse = await fetch(`${baseUrl}/agent-configurations/planning/publish`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agentKey: 'requirementAnalysis', revision: saved.revision, publishedBy: '伪造发布人' }),
+      body: JSON.stringify({ agentKey: 'planning', revision: saved.revision, publishedBy: '伪造发布人' }),
     })
     const published = await publishedResponse.json() as { publishedBy?: string; error?: string }
     assert.equal(publishedResponse.status, 201, published.error)

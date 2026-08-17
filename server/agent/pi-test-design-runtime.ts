@@ -34,6 +34,19 @@ const ALL_SUBMISSION_TOOLS = Object.values(TEST_DESIGN_STAGE_BINDINGS).map(item 
 export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
   constructor(private readonly store: StateStore, private readonly piRuntime: PiAgentRuntimeAdapter, private readonly configurations: AgentConfigurationService) {}
 
+  async appendTask(input: { projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }) {
+    const state = await this.store.snapshot()
+    const projectVersion = state.projectVersions.find(item => item.id === input.projectVersionId)
+    if (!projectVersion) throw new Error('PROJECT_VERSION_NOT_FOUND')
+    return this.piRuntime.appendPlanningTask({
+      projectId: projectVersion.projectId,
+      projectVersionId: projectVersion.id,
+      taskType: input.taskType,
+      task: input.task,
+      metadata: input.metadata,
+    })
+  }
+
   async readiness(projectVersionId?: string) {
     const agentKey = 'planning'
     const state = await this.store.snapshot()
@@ -148,7 +161,7 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
   return canonicalJson({
     schemaVersion: 'test-design-agent-task/v1',
     agent: 'PlanningAgent',
-    stage,
+    currentBusinessState: stage,
     runId: run.id,
     projectVersionId: run.projectVersionId,
     requirementRelease: { releaseId: run.basisSnapshot.requirementReleaseId, verificationRunId: run.basisSnapshot.verificationRunId, requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256, clarificationCount: run.basisSnapshot.clarifications?.length ?? 0 },
@@ -156,37 +169,41 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     currentInputRefs: run.currentInputRefs.map(item => ({ logicalPath: item.logicalPath.replace(/^workspace\//u, ''), assetVersionId: item.assetVersionId, contentSha256: item.contentSha256 })),
     design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
-    stageContract: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
-    stageObjective: testDesignStageObjective(stage),
+    runtimeBoundary: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
+    task: testDesignTaskMessage(stage),
     ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test-design/test-point-tree.json` } } : {}),
     ...(repairState && repairAudit ? { repair: { attempt: repairState.attempt, maxAttempts: repairState.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
     instructions: testDesignStageInstructions(stage),
   })
 }
 
-function testDesignStageObjective(stage: TestDesignStage) {
-  if (stage === 'test_point_design') return '基于正式 Requirement Release 建立完整、去重、风险导向且可追溯的测试点候选；本阶段不设计测试用例。'
-  if (stage === 'test_case_design') return '基于已固化 TestPointTreeVersion 生成可审核的测试用例、测试数据需求和用例库变更 Proposal；本阶段不得重写测试点。'
-  return '只修复当前 Coverage Audit 中 resolution=agent_repair 的阻断项，最小化修改并保持未受影响候选语义稳定。'
+function testDesignTaskMessage(stage: TestDesignStage) {
+  if (stage === 'test_point_design') {
+    return '需求分析已经完成，Requirement Release 已正式发布。请继续当前测试策划工作，基于当前 ProjectVersion 正式绑定的 Requirement Release 和冻结 Workspace 设计测试点。'
+  }
+  if (stage === 'test_case_design') {
+    return '测试点已经完成并通过服务端校验。请继续当前测试策划工作，基于已批准的 TestPointTreeVersion 编写测试用例。'
+  }
+  return 'Coverage Audit 已识别可由 Agent 修复的候选问题。请继续当前测试策划工作，修复任务中列出的 agent_repair blockers，并保持其他候选语义稳定。'
 }
 
 function testDesignStageInstructions(stage: TestDesignStage) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
   const stageRules = stage === 'test_point_design'
-    ? ['覆盖正式需求、风险、边界、状态与异常，并保留 Requirement → TestPoint 依据；不得生成 TestCase。']
+    ? ['本轮交付测试点候选，并保留 Requirement → TestPoint 的可追溯依据。']
     : stage === 'test_case_design'
-      ? ['必须读取已固化 test-point-tree.json，以适用叶子测试点为覆盖目标；不得修改、补造或绕过已批准测试点。', '用例必须具备明确目标、前置条件、步骤/执行规格、预期结果、清理与追溯；历史用例只在仍符合当前正式需求时复用或提出新 Revision。']
-      : ['只处理任务中列出的 agent_repair blockers；不得修改正式需求、已批准测试点或不相关用例。', '优先做最小修复；保留未受影响的候选引用、依赖、Proposal 与测试数据语义。']
+      ? ['已固化的 test-point-tree.json 是本轮测试点正式基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。']
+      : ['当前 Coverage Audit 中 resolution=agent_repair 的 blockers 是本轮修复范围；正式需求和已批准测试点保持不变。']
   return [
     ...stageRules,
-    'Runtime Stage 合同决定当前 Schema、工具白名单和唯一 Submit Tool；Session 历史中的其他 Stage 指令一律不适用。',
+    'Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 是本轮执行权限边界。',
     'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 从完整 Enabled Skills 中自主选择所需能力。',
     'currentInputRefs 是重点输入，不是读取白名单；先读取重点输入，再按需使用 ls、find、grep、read 浏览完整冻结 Workspace。',
     'requirements/clarifications.json 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
     '若存在 historical-test-cases.json，必须读取并判断复用、修改、新增或废弃；历史资料不能覆盖当前 Requirement Release。',
     '不得编造阈值、时长、兼容矩阵、接口、定位器、账号、环境或 Expected Result。',
-    '只生成语义候选；不得调用 Shell、write、edit，不得生成正式 ID、Revision、Version、Hash 或修改数据库/正式 Workspace。',
-    `完成 Self Review 后，只提交一个完整 ${binding.schemaVersion} 候选；若服务端拒绝，只按错误路径修正后重新提交。`,
+    'PlanningAgent 只生成语义候选；正式 ID、Revision、Version、Hash 和数据库状态由 Service / Validator 管理。',
+    `完成 Self Review 后，通过 ${binding.submitToolId} 提交一个完整 ${binding.schemaVersion} 候选；若服务端拒绝，根据错误路径修正后重新提交。`,
   ]
 }
 

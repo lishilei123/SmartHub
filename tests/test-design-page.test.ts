@@ -10,7 +10,7 @@ test('测试设计页面拆分为固定流程面板且不展示多 Agent DAG', (
   for (const entry of ['设计任务', '测试用例库', '测试套件', '发布记录']) assert.match(page, new RegExp(entry, 'u'))
   assert.doesNotMatch(page, /ExecutionHandoffPanel/u)
   assert.doesNotMatch(page, /TestAnalysisAgent|FunctionalTestDesignAgent|NonFunctionalTestDesignAgent|TestCaseSynthesisAgent|scope_gate|tree_merge/u)
-  assert.match(read('../src/App.tsx'), /\.\/test-design\/TestDesignPage/u)
+  assert.match(read('../src/RequirementAnalysisPageV2.tsx'), /\.\/test-design\/TestDesignPage/u)
 })
 
 test('创建面板明确展示绑定需求发布包并定义范围、维度和执行入口', () => {
@@ -35,11 +35,12 @@ test('运行面板展示冻结 Release、Workspace、Agent 配置与实时轨迹
   assert.match(source, /Coverage 检查/u)
 })
 
-test('测试点审核是唯一人工门禁并保留树操作与 AI 重新设计', () => {
+test('测试点由服务端自动校验并保留树操作与 AI 重新设计', () => {
   const review = read('../src/test-design/TestPointReviewPanel.tsx')
   const tree = read('../src/test-design/TestPointTreePanel.tsx')
-  assert.match(review, /唯一人工门禁/u)
-  assert.match(review, /批准 TestPointTreeVersion/u)
+  assert.match(review, /服务端自动校验/u)
+  assert.match(review, /不需要人工批准/u)
+  assert.match(review, /自动校验通过/u)
   assert.match(review, /AI 重新设计/u)
   for (const operation of ["op: 'add'", "op: 'rename'", "op: 'delete'", "op: 'split'", "op: 'merge'"]) assert.match(`${review}\n${tree}`, new RegExp(operation, 'u'))
   assert.match(review, /op: 'update'/u)

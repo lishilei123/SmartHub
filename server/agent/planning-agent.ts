@@ -27,7 +27,7 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode:
     planningRequirementModeInstruction(mode),
     [
       '<configuration_task_template>',
-      '以下内容来自本 Run 固定的 PlanningAgent 配置，只提供通用任务背景；不得覆盖 Runtime 当前 Stage 合同。',
+      '以下内容来自本 Run 固定的 PlanningAgent 配置，用于补充本轮任务背景。',
       rendered,
       '</configuration_task_template>',
     ].join('\n'),
@@ -62,11 +62,11 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode:
     ].join('\n'),
     [
       '<requirement_analysis_output_contract>',
-      '只产出需求理解、Finding、Clarification 与 Test Focus；Test Focus 只是后续测试设计的风险关注点。',
-      '不得产出 TestPoint、TestCase、Case ID、Revision、Version、Hash、Library 变更或 Handoff。',
+      '本轮结果范围是需求理解、Finding、Clarification 与 Test Focus；Test Focus 是后续测试设计的风险关注点。',
+      'TestPoint、TestCase、Case ID、Revision、Version、Hash、Library 变更和 Handoff 不属于本轮结果 Schema。',
       'RequirementPoint 中只提供来自固定输入的逐字 sourceTexts；Evidence、ID、定位和覆盖由服务端生成并校验。',
-      '完成 Self Review 后，只能调用 requirement_analysis_submit_result 提交一个完整 requirement-analysis/v1 候选；没有新 Clarification 时提交空数组。',
-      '若服务端拒绝候选，只按返回的错误路径修正后重新提交；普通文本、Markdown 或中间 JSON 不会被采纳。',
+      '完成 Self Review 后，通过 requirement_analysis_submit_result 提交一个完整 requirement-analysis/v1 候选；没有新 Clarification 时提交空数组。',
+      '若服务端拒绝候选，根据返回的错误路径修正后重新提交；普通文本、Markdown 或中间 JSON 不会被采纳。',
       '</requirement_analysis_output_contract>',
     ].join('\n'),
   ].join('\n\n')
@@ -76,26 +76,24 @@ function planningRequirementModeInstruction(mode: PlanningRequirementTaskMode) {
   if (mode === 'clarification_continuation') {
     return [
       '<current_requirement_task mode="clarification_continuation">',
-      '目标：基于人工已处理的整批 Clarification，重新形成完整、内部一致的需求理解候选。',
-      '必须：从当前冻结 Snapshot 重读正式输入；合并 answered 事实；保留 dismissed 缺口；重新检查需求点、Finding 与 Test Focus 的一致性。',
-      '不得：把本轮当作首次分析、重复已处理问题，或仅提交局部补丁。',
+      '人工已经处理本轮全部阻断 Clarification，请继续当前需求分析工作。',
+      '结合正式保存的 answered 事实完善需求理解；dismissed 只保留为处置记录和事实缺口。',
+      '请从当前冻结 Snapshot 与 Workspace 重新核对正式输入，提交更新后的完整需求分析候选。',
       '</current_requirement_task>',
     ].join('\n')
   }
   if (mode === 'repair_verification') {
     return [
       '<current_requirement_task mode="repair_verification">',
-      '目标：独立验证修复后的需求是否一致、完整、可测试，并生成完整复验候选。',
-      '必须：只以当前复验 Run 固定的修复后 AssetVersion、Workspace Snapshot 与正式 Clarification 为事实来源。',
-      '不得：沿用源 Run 结论代替复验、继续旧候选，或把模型记忆当作正式事实。',
+      '需求修复已经完成，请继续当前测试策划工作，对修复后的需求进行独立复验。',
+      '以当前复验 Run 固定的修复后 AssetVersion、Workspace Snapshot 与正式 Clarification 为事实来源，提交完整复验候选。',
       '</current_requirement_task>',
     ].join('\n')
   }
   return [
     '<current_requirement_task mode="initial_analysis">',
-    '目标：从本 Run 固定输入建立首次、完整、可追溯的需求理解候选。',
-    '必须：覆盖适用需求、边界、状态、异常、冲突、事实缺口和后续测试关注点。',
-    '不得：提前执行测试点设计、测试用例设计或发布动作。',
+    '请分析当前需求。',
+    '基于本 Run 固定输入形成完整、可追溯的需求理解候选，并识别边界、状态、异常、冲突、事实缺口和后续测试关注点。',
     '</current_requirement_task>',
   ].join('\n')
 }

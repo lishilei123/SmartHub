@@ -20,6 +20,7 @@ const AUTOMATIC_TEST_POINT_REVIEW_ACTOR = 'system:test-point-validator'
 export interface PlanningAgentRuntime {
   readiness?(projectVersionId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
   freezeConfiguration?(projectVersionId: string): Promise<TestDesignRunAgentConfigurationSnapshot>
+  appendTask?(input: { projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }): Promise<unknown>
   execute(input: {
     stage: 'test_point_design' | 'test_case_design' | 'test_design_repair'
     run: TestDesignWorkflowRun
@@ -32,12 +33,14 @@ export class TestDesignService {
   private readonly activeRuns = new Map<string, AbortController>()
   private testPointsValidatedListener?: (
     projectVersionId: string,
+    runId: string,
+    treeVersionId: string,
   ) => void | Promise<void>
 
   constructor(private readonly store: StateStore, private readonly runtime?: PlanningAgentRuntime, private readonly projector?: TestCaseAssetProjector) {}
 
   onTestPointsValidated(
-    listener: (projectVersionId: string) => void | Promise<void>,
+    listener: (projectVersionId: string, runId: string, treeVersionId: string) => void | Promise<void>,
   ) {
     this.testPointsValidatedListener = listener
   }
@@ -193,7 +196,7 @@ export class TestDesignService {
         })
         await this.projectTreeVersion(run.projectVersionId, run.testDesignId, runId, treeVersionId)
         await this.store.transaction(state => { completeAutomaticTestPointReview(findRunById(state, runId)) })
-        await this.testPointsValidatedListener?.(run.projectVersionId)
+        await this.testPointsValidatedListener?.(run.projectVersionId, run.id, treeVersionId)
       }
       const refreshed = await this.loadRun(runId)
       if (!refreshed.testPointTree?.currentApprovedVersionId) return refreshed
@@ -267,7 +270,7 @@ export class TestDesignService {
       if (result.treeVersionId) {
         await this.projectTreeVersion(running.projectVersionId, running.testDesignId, runId, result.treeVersionId)
         await this.fencedNodeTransaction(nodeRunId, lease, state => { completeAutomaticTestPointReview(findRunById(state, runId)) })
-        await this.testPointsValidatedListener?.(running.projectVersionId)
+        await this.testPointsValidatedListener?.(running.projectVersionId, runId, result.treeVersionId)
         await this.schedule(runId)
       } else if (result.repairQueued) await this.schedule(runId)
       return this.loadRun(runId)
@@ -300,7 +303,42 @@ export class TestDesignService {
   }
 
   async resynthesize(projectVersionId: string, designId: string, runId: string) {
-    await this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); approvedTreeVersion(run); advanceNodeGeneration(run, node(run, 'test_case_design'), 'queued'); advanceNodeGeneration(run, node(run, 'coverage_audit'), 'pending'); advanceNodeGeneration(run, node(run, 'test_design_repair'), 'pending'); run.testCases = []; run.caseChangeProposals = []; run.dataSetVersions = []; run.automaticRepair = initialAutomaticRepairState(); invalidateAudit(run); Object.assign(run, { status: 'queued', stage: 'test_case_design', progress: 55, error: undefined, errorCode: undefined, finishedAt: undefined }) }); await this.schedule(runId); return this.getRun(projectVersionId, designId, runId)
+    const state = await this.store.snapshot()
+    assertOpenVersion(state, projectVersionId)
+    const current = findRun(state, projectVersionId, designId, runId)
+    const treeVersion = approvedTreeVersion(current)
+    await this.runtime?.appendTask?.({
+      projectVersionId,
+      taskType: 'test_case_resynthesize',
+      task: [
+        '请重新生成测试用例。',
+        '',
+        `当前已批准 TestPointTreeVersion = ${treeVersion.id}，该正式测试点基线保持不变。`,
+        '',
+        '请继续在当前 Planning Session 中，基于当前 Requirement Release、正式 Clarification、已批准 TestPointTreeVersion 和冻结 Workspace 重新生成完整测试用例候选。',
+      ].join('\n'),
+      metadata: {
+        testDesignRunId: runId,
+        testPointTreeVersionId: treeVersion.id,
+        testPointTreeSha256: treeVersion.treeSha256,
+      },
+    })
+    await this.store.transaction(draft => {
+      assertOpenVersion(draft, projectVersionId)
+      const run = findRun(draft, projectVersionId, designId, runId)
+      if (approvedTreeVersion(run).id !== treeVersion.id) throw new TestDesignError('TEST_POINT_TREE_VERSION_CHANGED', '批准的测试点版本已变化，请重新发起测试用例生成', 409)
+      advanceNodeGeneration(run, node(run, 'test_case_design'), 'queued')
+      advanceNodeGeneration(run, node(run, 'coverage_audit'), 'pending')
+      advanceNodeGeneration(run, node(run, 'test_design_repair'), 'pending')
+      run.testCases = []
+      run.caseChangeProposals = []
+      run.dataSetVersions = []
+      run.automaticRepair = initialAutomaticRepairState()
+      invalidateAudit(run)
+      Object.assign(run, { status: 'queued', stage: 'test_case_design', progress: 55, error: undefined, errorCode: undefined, finishedAt: undefined })
+    })
+    await this.schedule(runId)
+    return this.getRun(projectVersionId, designId, runId)
   }
 
   async getTree(projectVersionId: string, designId: string, runId: string) {
@@ -325,7 +363,7 @@ export class TestDesignService {
     })
     await this.projectTreeVersion(projectVersionId, designId, runId, treeVersionId)
     await this.store.transaction(state => { completeAutomaticTestPointReview(findRun(state, projectVersionId, designId, runId)) })
-    await this.testPointsValidatedListener?.(projectVersionId)
+    await this.testPointsValidatedListener?.(projectVersionId, runId, treeVersionId)
     await this.schedule(runId)
     return this.getTree(projectVersionId, designId, runId)
   }

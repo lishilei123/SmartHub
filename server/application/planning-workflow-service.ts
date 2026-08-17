@@ -223,16 +223,16 @@ export class PlanningWorkflowService {
       projectVersionId: projectVersion.id,
       taskType: 'test_design_after_requirement_release',
       task: [
-        '需求分析已经完成。',
+        '需求分析已经完成，Requirement Release 已正式发布。',
         '',
         `当前正式需求基线：Requirement Release = ${release.id}`,
         `requirements.json SHA-256 = ${projectVersion.requirementReleaseBinding?.requirementsJsonSha256 ?? '未绑定'}`,
         '',
-        '现在开始测试设计。',
+        '接下来继续当前测试策划工作。',
         '',
-        '请以当前 ProjectVersion 绑定的 Requirement Release 为正式需求基线，结合冻结 Project Workspace 中的产品原型、API 文档、shared、公共资料和可参考资料，自主完成测试点设计和测试用例编写。',
-        '请自主选择当前 Agent Configuration 中已启用的测试设计 Skills，并按需使用 workspace.list_directory、workspace.find_files、workspace.grep_files、workspace.read_file、knowledge.search 与 knowledge.read_chunk。',
-        '未实际读取的文件不得假设其内容；缺少阈值、时长、兼容矩阵或其他业务事实时保持 needs_confirmation/blocked。正式 TestCase、Library 与 Handoff 仍由 TestDesignService、Validator 和人工 Gate 控制。',
+        '请基于当前 ProjectVersion 正式绑定的 Requirement Release，以及冻结 Workspace 中相关资料，开始设计测试点。',
+        '',
+        '如需要，可以结合之前的需求分析上下文理解业务，但正式需求事实仍以当前 Requirement Release、正式 Clarification 和 Workspace 为准。',
       ].join('\n'),
       metadata: {
         requirementReleaseId: release.id,
@@ -342,12 +342,52 @@ export class PlanningWorkflowService {
     }, signal)
   }
 
-  queueTestPointsValidated(
-    projectId: string,
+  async testPointsValidated(
     projectVersionId: string,
+    runId: string,
+    treeVersionId: string,
   ) {
+    const state = await this.store.snapshot()
+    const projectVersion = required(
+      state.projectVersions.find(item => item.id === projectVersionId),
+      'PROJECT_VERSION_NOT_FOUND',
+    )
+    const run = required(
+      state.testDesignState?.runs.find(
+        item => item.id === runId && item.projectVersionId === projectVersionId,
+      ),
+      'TEST_DESIGN_RUN_NOT_FOUND',
+    )
+    const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND')
+    const version = required(
+      tree.versions.find(
+        item => item.id === treeVersionId
+          && item.id === tree.currentApprovedVersionId,
+      ),
+      'TEST_POINT_TREE_VERSION_NOT_APPROVED',
+    )
+    await this.runtime.appendPlanningTask({
+      projectId: projectVersion.projectId,
+      projectVersionId,
+      taskType: 'test_case_design_after_test_points_validated',
+      task: [
+        '测试点已经完成并通过服务端校验。',
+        '',
+        `当前批准的 TestPointTreeVersion = ${version.id}`,
+        `test-point-tree SHA-256 = ${version.treeSha256}`,
+        '',
+        '请继续当前测试策划工作，基于已批准的 TestPointTreeVersion 编写测试用例。',
+        '',
+        '可以利用前面需求分析和测试点设计的上下文保持业务连续性，但测试点正式内容必须以当前批准版本为准。',
+      ].join('\n'),
+      metadata: {
+        testDesignRunId: run.id,
+        testPointTreeVersionId: version.id,
+        testPointTreeSha256: version.treeSha256,
+      },
+    })
     this.runtime.queueCompactionCheckpoint(
-      planningScope(projectId, projectVersionId),
+      planningScope(projectVersion.projectId, projectVersionId),
       'test_points_validated',
     )
   }

@@ -17,10 +17,10 @@ import { JsonStore } from '../server/infrastructure/store.js'
 
 const requirementDirectory = 'workspace/branches/V1.0/input/requirements'
 
-test('RequirementAnalysisAgent 通过一个定义绑定 Workspace、Knowledge、Skill 和统一提交协议', () => {
-  const definition = defaultAgentDefinitionResolver.resolve('requirement-analysis')
-  assert.equal(definition.agentType, 'requirement_analysis')
-  assert.equal(definition.resultSchemaVersion, 'requirement-analysis/v1')
+test('PlanningAgent 通过一个长期定义绑定 Workspace、Knowledge、Skills 和各业务提交工具', () => {
+  const definition = defaultAgentDefinitionResolver.resolve('planning')
+  assert.equal(definition.agentType, 'planning')
+  assert.equal(definition.resultSchemaVersion, 'planning/v1')
   assert.deepEqual(definition.toolIds, [
     'workspace.read_file',
     'workspace.grep_files',
@@ -31,35 +31,48 @@ test('RequirementAnalysisAgent 通过一个定义绑定 Workspace、Knowledge、
     'requirement-analysis.submit_result',
     'requirement-repair.submit_result',
     'requirement-release.submit_result',
+    'test_design_points.submit_result',
+    'test_design_cases.submit_result',
+    'test_design_repair.submit_result',
   ])
-  assert.match(definition.systemPrompt, /Workflow 已固定当前 Stage/u)
-  assert.match(definition.systemPrompt, /运行开始时.*加载.*Skill/u)
-  assert.match(definition.systemPrompt, /Current Requirement/u)
-  assert.match(definition.systemPrompt, /Knowledge Reference/u)
-  assert.match(definition.systemPrompt, /Self Review/u)
-  assert.match(definition.taskTemplate, /requirement_analysis_submit_result/u)
+  assert.match(definition.systemPrompt, /同一个 Planning Session 中通过连续对话/u)
+  assert.match(definition.systemPrompt, /根据当前任务自主选择已启用 Skills/u)
+  assert.match(definition.systemPrompt, /Workspace \/ Knowledge 工具/u)
+  assert.match(definition.systemPrompt, /Runtime 当前暴露的工具和 Submit Tool 是执行权限边界/u)
+  assert.doesNotMatch(definition.systemPrompt, /只执行当前 Stage|上一阶段已经失效/u)
 })
 
 test('目录输入包只交付工作区元数据，不把原始需求拼接进 Prompt', async () => {
   const store = await seededStore()
   const state = await store.snapshot()
-  const definition = defaultAgentDefinitionResolver.resolve('requirement-analysis')
+  const definition = defaultAgentDefinitionResolver.resolve('planning')
   const assets = state.assets.map(asset => ({ asset, version: state.versions.find(version => version.id === asset.activeVersionId)! }))
   const plan = buildRequirementDirectoryInputPlan({
     workspacePath: requirementDirectory,
     workspaceRootPath: 'workspace',
     activeBranchPath: 'workspace/branches/V1.0',
-    agentWorkspacePath: 'workspace/agent_workspace/requirement_analysis',
+    agentWorkspacePath: 'workspace/agent_workspace/planning_agent',
     assets,
+    currentInputRefs: assets.map(({ asset, version }) => ({ assetId: asset.id, assetVersionId: version.id, logicalPath: asset.logicalPath, contentSha256: version.contentHash })),
+    workspaceSnapshot: {
+      schemaVersion: 'project-workspace-snapshot/v1',
+      projectId: 'project-1',
+      projectVersionId: 'project-version-1',
+      rootLogicalPath: 'workspace',
+      activeBranchLogicalPath: 'workspace/branches/V1.0',
+      files: assets.map(({ asset, version }) => ({ assetId: asset.id, assetVersionId: version.id, logicalPath: asset.logicalPath, displayName: asset.displayName, contentSha256: version.contentHash, sourceScope: 'current_input' as const })),
+      snapshotSha256: 'a'.repeat(64),
+      createdAt: '2026-08-12T00:00:00.000Z',
+    },
     definition,
     contextWindow: 32_768,
     maxOutputTokens: 4_096,
   })
   assert.equal(plan.mode, 'agent_directory')
   assert.match(plan.batches[0].content, /SMARTHUB_PI_DOCUMENT_WORKSPACE_BEGIN/u)
-  assert.match(plan.batches[0].content, /"fileCount":2/u)
+  assert.match(plan.batches[0].content, /"workspaceFileCount":2/u)
   assert.doesNotMatch(plan.batches[0].content, /用户可以取消待支付订单/u)
-  assert.doesNotMatch(plan.batches[0].content, /payment\.md/u)
+  assert.match(plan.batches[0].content, /payment\.md/u, 'currentInputRefs 路径属于元数据，应突出显示')
 })
 
 test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结果与三份 Artifact', async () => {
@@ -78,16 +91,16 @@ test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结
 
   const run = (await store.snapshot()).reviewRuns[0]
   assert.equal(run.status, 'succeeded')
-  assert.equal(run.snapshot.agentDefinition.agentKey, 'requirement-analysis')
-  assert.equal(run.executions?.requirementAnalysis?.agentKey, 'requirement-analysis')
-  assert.deepEqual(Object.keys(run.executions ?? {}), ['requirementAnalysis'])
-  assert.equal(run.execution?.agentKey, 'requirement-analysis')
+  assert.equal(run.snapshot.agentDefinition.agentKey, 'planning')
+  assert.equal(run.executions?.planning?.agentKey, 'planning')
+  assert.deepEqual(Object.keys(run.executions ?? {}), ['planning'])
+  assert.equal(run.execution?.agentKey, 'planning')
   assert.equal('extractionResult' in run, false)
 })
 
 test('统一 Pi Session 可读取原始需求并主动查询 Knowledge，来源范围保留事实边界', async () => {
   const { response } = await successfulRun()
-  const execution = response.executions.requirementAnalysis
+  const execution = response.executions.planning
   assert.ok(execution)
   const toolEvents = execution.events.filter(event => event.type === 'tool_execution_end')
   assert.ok(toolEvents.some(event => event.toolId === 'read'))
@@ -150,6 +163,47 @@ test('服务恢复中断运行并将重试语义限定为完整单 Agent 重跑'
   assert.equal(recovered.status, 'failed')
 })
 
+test('人工批量处理 Clarification 后向原 Planning Session 追加自然的继续任务', async () => {
+  const { store } = await successfulRun()
+  let runId = ''
+  await store.transaction(state => {
+    const run = state.reviewRuns[0]
+    runId = run.id
+    run.result!.clarifications = [{
+      id: 'planning_clarification_test',
+      question: '订单关闭后的可恢复范围是什么？',
+      reason: '影响异常路径测试正确性。',
+      category: 'business_rule',
+      requirementPointRefs: [run.result!.requirementPoints[0].clientRequirementPointId],
+      blocking: true,
+      status: 'pending',
+      createdAt: '2026-08-12T00:01:00.000Z',
+    }]
+    run.status = 'waiting_clarification'
+    run.step = 'waiting_clarification'
+    run.workflow ??= { currentStage: 'clarification' }
+    run.workflow.currentStage = 'clarification'
+  })
+  const answers: unknown[] = []
+  const tasks: Array<{ projectId: string; projectVersionId: string; task: string; taskType: string; metadata?: Record<string, unknown> }> = []
+  const service = new RequirementAnalysisService(store, {
+    execute: async () => { throw new Error('测试只验证 Clarification Handoff，不继续执行模型') },
+    appendPlanningClarification: async input => { answers.push(structuredClone(input)) },
+    appendPlanningTask: async input => { tasks.push(structuredClone(input)) },
+  })
+  await service.actOnClarifications(runId, {
+    items: [{ clarificationId: 'planning_clarification_test', action: 'answer', answer: '关闭失败时保持待支付，可由用户重试。' }],
+    principal: { subjectId: 'reviewer', displayName: '评审人' },
+  })
+  assert.equal(answers.length, 1)
+  assert.equal(tasks.length, 1)
+  assert.equal(tasks[0].projectId, 'project-1')
+  assert.equal(tasks[0].projectVersionId, 'project-version-1')
+  assert.equal(tasks[0].taskType, 'requirement_analysis_after_clarifications')
+  assert.match(tasks[0].task, /Clarification 已经由人工处理，请继续当前需求分析工作/u)
+  assert.deepEqual(tasks[0].metadata?.clarificationIds, ['planning_clarification_test'])
+})
+
 test('修复应用完成后停在待复验状态且不会自动创建复验运行', async () => {
   const { store } = await successfulRun()
   const repairedContent = '# 取消订单\n\n用户可以取消待支付订单，并统一记录关闭原因。'
@@ -170,7 +224,7 @@ test('修复应用完成后停在待复验状态且不会自动创建复验运�
     run.workflow = { currentStage: 'repair', repairDrafts: [{
       id: 'repair-draft-1', sourceRunId: run.id, status: 'applying',
       candidate: { schemaVersion: 'requirement-repair/v1', summary: '统一关闭原因', patches: [{ assetVersionId: 'version-1', before: '用户可以取消待支付订单。', after: '用户可以取消待支付订单，并统一记录关闭原因。', reason: '消除状态口径歧义', findingRefs: [findingId] }] },
-      generationExecution: { agentKey: 'requirement-analysis', workflowStage: 'repair', turns: 1, toolCalls: 1, events: [] },
+      generationExecution: { agentKey: 'planning', workflowStage: 'repair', turns: 1, toolCalls: 1, events: [] },
       createdAt: '2026-08-12T00:02:30.000Z', createdBy: 'reviewer', approvedAt: '2026-08-12T00:02:45.000Z', approvedBy: 'reviewer',
       application: { items: [{ assetId: 'asset-1', sourceAssetVersionId: 'version-1', targetAssetVersionId: 'version-repaired', logicalPath: `${requirementDirectory}/cancel.md`, contentSha256: repairedHash }], startedAt: '2026-08-12T00:03:00.000Z' },
     }] }
@@ -234,6 +288,7 @@ function analysisCandidate(): CandidateRequirementAnalysisV1 {
       { title: '关闭状态口径需统一', type: 'conflict', severity: 'high', confidence: 0.91, requirementPointRefs: ['RP-001', 'RP-002'], analysis: '人工取消和超时关闭是否进入同一终态未说明。', impact: '状态机实现与统计口径可能不一致。', suggestion: '统一定义关闭原因、终态和后续操作。' },
       { title: '整体异常闭环缺失', type: 'missing', severity: 'medium', confidence: 0.84, requirementPointRefs: [], analysis: '需求整体没有定义关闭操作失败后的恢复与提示。', impact: '失败场景不可验收。', suggestion: '补充失败码、重试和人工恢复策略。' },
     ],
+    clarifications: [],
     testFocus: [
       { title: '取消与超时竞态', description: '验证取消请求和超时任务并发时只有一个终态生效。', requirementPointRefs: ['RP-001', 'RP-002'] },
       { title: '整体异常恢复', description: '验证关闭失败后的提示、重试与状态一致性。', requirementPointRefs: [] },

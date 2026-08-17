@@ -7,16 +7,17 @@ import { AgentConfigurationService } from '../server/application/agent-configura
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
-test('源码配置只保留五个正式 Agent 并移除旧拆分 Agent', async () => {
+test('源码配置只保留一个 PlanningAgent 和三个测试执行 Agent', async () => {
   const agents = JSON.parse(await readFile(new URL('../server/agent/agents-config.json', import.meta.url), 'utf8')) as { agents: Record<string, unknown> }
   const tools = JSON.parse(await readFile(new URL('../server/tools/built-in-tools-config.json', import.meta.url), 'utf8')) as { tools: Record<string, unknown> }
   const runtime = await readFile(new URL('../server/agent/pi-agent-runtime.ts', import.meta.url), 'utf8')
-  assert.equal('requirement-analysis' in agents.agents, true)
+  assert.equal('planning' in agents.agents, true)
+  assert.equal('requirement-analysis' in agents.agents, false)
   assert.equal('requirement-point-extraction' in agents.agents, false)
   assert.equal('requirement-review' in agents.agents, false)
   assert.equal('technical-solution-extraction' in agents.agents, false)
   assert.equal('technical-solution-review' in agents.agents, false)
-  assert.equal('test-design' in agents.agents, true)
+  assert.equal('test-design' in agents.agents, false)
   assert.equal('test-script' in agents.agents, true)
   assert.equal('failure-analysis' in agents.agents, true)
   assert.equal('script-repair' in agents.agents, true)
@@ -79,25 +80,19 @@ test('JSON Store 加载时物理删除已退役 Agent、配置快照和工具资
   }
 })
 
-test('旧 JSON 聚合草稿在首次场景写入时拆分为三个独立 scene', async () => {
+test('当前 JSON Agent 配置只写入 planning 与 test_execution 两个 scene', async () => {
   const store = new JsonStore(null)
   await store.load()
   await new AiResourceService(store).list()
   const service = new AgentConfigurationService(store)
-  const requirement = await service.get('requirement_analysis')
-  const design = await service.get('test_design')
+  const planning = await service.get('planning')
   const execution = await service.get('test_execution')
-  await store.transaction(state => {
-    state.agentConfigurationDrafts = [{
-      scene: 'requirement_analysis',
-      agents: {
-        requirementAnalysis: requirement.agents.requirementAnalysis!.draft,
-        testDesign: design.agents.testDesign!.draft,
-        testScript: execution.agents.testScript!.draft,
-        failureAnalysis: execution.agents.failureAnalysis!.draft,
-        scriptRepair: execution.agents.scriptRepair!.draft,
-      },
-    }]
+  const planningDraft = planning.agents.planning!.draft
+  await service.save('planning', {
+    agentKey: 'planning',
+    revision: planningDraft.revision,
+    routing: planningDraft.routing,
+    definition: planningDraft.definition,
   })
 
   const testScript = execution.agents.testScript!.draft
@@ -110,13 +105,11 @@ test('旧 JSON 聚合草稿在首次场景写入时拆分为三个独立 scene',
 
   const drafts = store.read().agentConfigurationDrafts
   assert.deepEqual(drafts.map(draft => draft.scene), [
-    'requirement_analysis',
-    'test_design',
+    'planning',
     'test_execution',
   ])
-  assert.deepEqual(Object.keys(drafts[0].agents), ['requirementAnalysis'])
-  assert.deepEqual(Object.keys(drafts[1].agents), ['testDesign'])
-  assert.deepEqual(Object.keys(drafts[2].agents), [
+  assert.deepEqual(Object.keys(drafts[0].agents), ['planning'])
+  assert.deepEqual(Object.keys(drafts[1].agents), [
     'testScript',
     'failureAnalysis',
     'scriptRepair',

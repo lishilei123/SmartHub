@@ -42,6 +42,7 @@ export type RequirementAnalysisRetryMode = 'full'
 
 interface PlanningRequirementRuntime extends AgentRuntime {
   appendPlanningClarification?(input: { projectId: string; projectVersionId: string; runId: string; clarificationId: string; question: string; answer: string; status: 'answered' | 'dismissed'; answeredAt: string; answeredBy: string }): Promise<unknown>
+  appendPlanningTask?(input: { projectId: string; projectVersionId: string; task: string; taskType: string; metadata?: Record<string, unknown> }): Promise<unknown>
 }
 
 export class RequirementAnalysisService {
@@ -151,6 +152,23 @@ export class RequirementAnalysisService {
         status: clarification.status as 'answered' | 'dismissed',
         answeredAt,
         answeredBy,
+      })
+    }
+    if (updated.clarifications.length) {
+      await this.runtime.appendPlanningTask?.({
+        projectId: updated.projectId,
+        projectVersionId: updated.projectVersionId,
+        taskType: 'requirement_analysis_after_clarifications',
+        task: [
+          '这些 Clarification 已经由人工处理，请继续当前需求分析工作。',
+          '',
+          '请结合正式保存的回答完善需求理解，并重新核对当前固定 Workspace。',
+          '历史对话可以用于理解问题背景；正式 Clarification 事实仍以当前 ReviewRunSnapshot.formalClarifications 为准。',
+        ].join('\n'),
+        metadata: {
+          requirementRunId: runId,
+          clarificationIds: updated.clarifications.map(item => item.id),
+        },
       })
     }
     return { clarifications: updated.clarifications, run: await this.resumeAfterClarifications(runId) }
