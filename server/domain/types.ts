@@ -137,6 +137,7 @@ export interface AgentRoutingConfiguration {
   fallbackModels: AgentModelReference[]
   intelligentRouting: boolean
   fallbackEnabled: boolean
+  contextWindow: number
   maxOutputTokens: number
   requestTimeoutSeconds: number
   retryCount: number

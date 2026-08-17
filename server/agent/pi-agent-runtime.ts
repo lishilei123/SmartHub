@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from '@earendil-works/pi-agent-core'
-import type { Api, Model } from '@earendil-works/pi-ai'
+import { createAssistantMessageEventStream, type Api, type AssistantMessage, type Model } from '@earendil-works/pi-ai'
 import {
   AgentSession,
   DefaultResourceLoader,
@@ -172,7 +172,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       || !model
       || source.providerType !== persisted.model.providerType
       || model.name !== persisted.model.modelName
-      || model.contextWindow !== persisted.model.contextWindow
+      || model.contextWindow < persisted.model.contextWindow
       || model.capabilities.includes('reasoning') !== persisted.model.supportsReasoning
     ) {
       throw new Error('PI_SESSION_MODEL_BINDING_DRIFT')
@@ -313,21 +313,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       const model = this.bindings.model ?? createModel(input)
       const providerStreamFn =
         this.bindings.streamFn ?? createStreamFn(input)
-      const streamFn: StreamFn = (
-        streamModel,
-        context,
-        options,
-      ) => providerStreamFn(
-        streamModel,
-        context,
-        {
-          ...options,
-          signal: AbortSignal.any([
-            options?.signal ?? controller.signal,
-            controller.signal,
-          ]),
-        },
-      )
+      const streamFn = configuredStreamFn(input.model, providerStreamFn, controller)
       const tools = descriptors.map(descriptor => reviewerTool(
         descriptor,
         runtime,
@@ -343,7 +329,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         sessionId: manager.getSessionId(),
         toolExecution: 'sequential',
       })
-      session = await createPiAgentSession({ agent, manager, model, tools, systemPrompt, input, streamFn, compactionStreamFn: providerStreamFn })
+      session = await createPiAgentSession({ agent, manager, model, tools, systemPrompt, input, streamFn, compactionStreamFn: streamFn })
       unbind = this.sessions.bindActive(scope, session)
       unsubscribe = session.subscribe(event => {
         const contextEvent = this.contexts.sessionEvent(event, session!, scope)
@@ -485,23 +471,22 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const sessionScope = this.sessions.scopeFor(input)
     let forceResultSubmission = false
     let latestModelFailure: ModelFailure | undefined
+    let submitToolCallObserved = false
     let resultSubmissionRequiredRecorded = false
     const resultSubmissionTurn = Math.max(1, limits.maxTurns - RESULT_SUBMISSION_TURN_RESERVE + 1)
     const streamFn: StreamFn = (streamModel, context, options) => {
-      const requestSignal = input.model.requestTimeoutMs
-        ? AbortSignal.any([options?.signal ?? controller.signal, AbortSignal.timeout(input.model.requestTimeoutMs)])
-        : options?.signal
       const configuredOptions = {
         ...options,
         maxTokens: input.model.maxOutputTokens,
-        ...(requestSignal ? { signal: requestSignal } : {}),
+        signal: options?.signal ?? controller.signal,
       }
-      return providerStreamFn(streamModel, context, forceResultSubmission ? {
+      const requestOptions = forceResultSubmission ? {
         ...configuredOptions,
         toolChoice: input.model.providerType === 'anthropic'
           ? { type: 'tool', name: stage.submitPiName }
           : { type: 'function', function: { name: stage.submitPiName } },
-      } as Parameters<StreamFn>[2] : configuredOptions)
+      } as Parameters<StreamFn>[2] : configuredOptions
+      return streamWithIdleTimeout(providerStreamFn, streamModel, context, requestOptions, input.model.requestTimeoutMs)
     }
     let agent: Agent | undefined
     let session: AgentSession | undefined
@@ -568,7 +553,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         systemPrompt,
         input,
         streamFn,
-        compactionStreamFn: providerStreamFn,
+        compactionStreamFn: configuredStreamFn(input.model, providerStreamFn, controller),
       })
       unbindActive = this.sessions.bindActive(sessionScope, session)
       unsubscribeSession = session.subscribe(event => {
@@ -579,6 +564,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         let resultSubmissionRequired = false
         if (event.type === 'message_end' && event.message.role === 'assistant') {
           latestModelFailure = modelFailure(event.message)
+          if (messageRequestsTool(event.message, stage.submitPiName)) submitToolCallObserved = true
         }
         if (event.type === 'turn_start') {
           turns += 1
@@ -621,7 +607,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       await session.prompt(`${renderInitialTask(input)}\n\n${current.content}`)
       await session.waitForIdle()
       if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('AGENT_CANCELLED')
-      if (!candidate && latestModelFailure && !lastSubmissionIssues.length) throw modelProviderError(latestModelFailure)
+      const initialModelFailure = !candidate && !lastSubmissionIssues.length ? latestModelFailure : undefined
+      if (initialModelFailure && !initialModelFailure.retryable) throw modelProviderError(initialModelFailure)
       if (turns > limits.maxTurns) {
         if (lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
         throw new Error('AGENT_TURN_LIMIT_EXCEEDED')
@@ -649,7 +636,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         forceResultSubmission = true
         const submissionPrompt = `现在进入结果提交阶段。不得继续返回普通文本或调用其他工具；请立即通过 ${stage.submitPiName} 提交完整的 ${stage.schemaVersion}。若参数校验失败，请按工具错误修正参数后再次提交。`
         const transientModelRetries = input.model.retryCount ?? TRANSIENT_MODEL_RETRIES
-        for (let attempt = 0; attempt <= transientModelRetries && !candidate; attempt += 1) {
+        const firstSubmissionAttempt = initialModelFailure?.retryable ? 1 : 0
+        for (let attempt = firstSubmissionAttempt; attempt <= transientModelRetries && !candidate; attempt += 1) {
           if (attempt > 0) {
             const retryDelayMs = modelRetryDelay(this.bindings.retryBaseDelayMs ?? MODEL_RETRY_BASE_DELAY_MS, attempt)
             await record({ type: 'model_retry_scheduled', turn: turns, content: `模型服务临时不可用，${retryDelayMs}ms 后执行第 ${attempt}/${transientModelRetries} 次结果提交重试。` })
@@ -672,7 +660,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         throw new Error('AGENT_TURN_LIMIT_EXCEEDED')
       }
       if (!candidate && lastSubmissionIssues.length) throw resultValidationError(lastSubmissionIssues)
-      if (!candidate && latestModelFailure) throw modelProviderError(latestModelFailure)
+      if (!candidate && latestModelFailure) throw modelProviderError(latestModelFailure, input.model.retryCount ?? TRANSIENT_MODEL_RETRIES)
+      if (!candidate && submitToolCallObserved) throw new Error(`MODEL_TOOL_CALL_STREAM_ABORTED: 模型已开始调用 ${stage.submitPiName}，但工具参数未完整接收或请求被中断；请查看运行记录中的脱敏供应商错误后重试`)
       if (!candidate) throw new Error(`MODEL_TOOL_CALL_REQUIRED: 模型未调用 ${stage.submitPiName}，实际工具调用能力不满足 ${stage.agentLabel}；请在模型管理中重新探测并选择通过工具调用检测的模型`)
       if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > limits.maxCandidateBytes) throw new Error('AGENT_RESULT_TOO_LARGE')
       const completedCheckpoint = compactionCheckpoint(workspaceProfile.workflowStage, 'completed')
@@ -954,21 +943,24 @@ function resultValidationError(issues: Array<{ path: string; message: string }>)
   return new Error(`AGENT_RESULT_VALIDATION_FAILED: ${visible}${issues.length > 6 ? `；另有 ${issues.length - 6} 项，请查看结果校验事件` : ''}`)
 }
 
-interface ModelFailure { kind: 'rate_limited' | 'authentication' | 'provider_unavailable' | 'request_failed'; retryable: boolean }
+interface ModelFailure { kind: 'rate_limited' | 'authentication' | 'provider_unavailable' | 'request_timeout' | 'request_failed'; retryable: boolean }
 
 function modelFailure(message: AgentMessage): ModelFailure | undefined {
   const value = message as AgentMessage & { stopReason?: string; errorMessage?: string; content?: unknown }
-  if (value.stopReason !== 'error') return undefined
   const detail = `${value.errorMessage ?? ''}\n${textFromContent(value.content)}`.toLocaleLowerCase()
+  if (value.stopReason === 'aborted') return { kind: 'request_timeout', retryable: true }
+  if (value.stopReason !== 'error') return undefined
   if (/\b429\b|rate[_ -]?limit|too_many_requests|exceeded rate limit/u.test(detail)) return { kind: 'rate_limited', retryable: true }
   if (/\b(?:401|403)\b|unauthori[sz]ed|authentication|invalid api key|api key.*invalid/u.test(detail)) return { kind: 'authentication', retryable: false }
-  if (/\b5\d\d\b|timeout|timed out|econnreset|econnrefused|network|temporar(?:y|ily) unavailable/u.test(detail)) return { kind: 'provider_unavailable', retryable: true }
+  if (/timeout|timed out|request was aborted/u.test(detail)) return { kind: 'request_timeout', retryable: true }
+  if (/\b5\d\d\b|econnreset|econnrefused|network|temporar(?:y|ily) unavailable/u.test(detail)) return { kind: 'provider_unavailable', retryable: true }
   return { kind: 'request_failed', retryable: false }
 }
 
 function modelProviderError(failure: ModelFailure, retries = 0) {
   if (failure.kind === 'rate_limited') return new Error(`MODEL_RATE_LIMITED: 模型服务触发限流（HTTP 429）${retries ? `，已自动重试 ${retries} 次` : ''}；请稍后重新分析或切换可用模型`)
   if (failure.kind === 'authentication') return new Error('MODEL_AUTHENTICATION_FAILED: 模型服务认证失败；请检查模型来源凭据后重新探测')
+  if (failure.kind === 'request_timeout') return new Error(`MODEL_REQUEST_TIMEOUT: 模型请求连续超过配置时长未收到流式数据${retries ? `，已自动重试 ${retries} 次` : ''}；提交工具调用可能尚未完整接收，请降低输出上限、提高流式无响应超时或切换模型`)
   if (failure.kind === 'provider_unavailable') return new Error(`MODEL_PROVIDER_UNAVAILABLE: 模型服务暂时不可用${retries ? `，已自动重试 ${retries} 次` : ''}；请稍后重新分析或切换可用模型`)
   return new Error('MODEL_REQUEST_FAILED: 模型请求失败；请查看运行记录中的脱敏供应商错误后再重试')
 }
@@ -1015,18 +1007,67 @@ function configuredStreamFn(
   controller?: AbortController,
 ): StreamFn {
   return (streamModel, context, options) => {
-    const requestSignal = connection.requestTimeoutMs
-      ? AbortSignal.any([
-          options?.signal ?? controller?.signal ?? new AbortController().signal,
-          AbortSignal.timeout(connection.requestTimeoutMs),
-        ])
-      : options?.signal
-    return providerStreamFn(streamModel, context, {
+    const configuredOptions = {
       ...options,
       maxTokens: connection.maxOutputTokens,
-      ...(requestSignal ? { signal: requestSignal } : {}),
-    })
+      ...(options?.signal || controller?.signal ? { signal: options?.signal ?? controller?.signal } : {}),
+    }
+    return streamWithIdleTimeout(providerStreamFn, streamModel, context, configuredOptions, connection.requestTimeoutMs)
   }
+}
+
+function streamWithIdleTimeout(
+  providerStreamFn: StreamFn,
+  model: Model<Api>,
+  context: Parameters<StreamFn>[1],
+  options: Parameters<StreamFn>[2],
+  idleTimeoutMs?: number,
+) {
+  if (!idleTimeoutMs) return providerStreamFn(model, context, options)
+  const output = createAssistantMessageEventStream()
+  const idleController = new AbortController()
+  const signal = options?.signal ? AbortSignal.any([options.signal, idleController.signal]) : idleController.signal
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let terminal = false
+  const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined }
+  const refreshTimer = () => {
+    clearTimer()
+    timer = setTimeout(() => idleController.abort(new Error('MODEL_STREAM_IDLE_TIMEOUT')), idleTimeoutMs)
+    timer.unref?.()
+  }
+  refreshTimer()
+  void (async () => {
+    try {
+      const source = await providerStreamFn(model, context, { ...options, signal })
+      for await (const event of source) {
+        refreshTimer()
+        if (event.type === 'done' || event.type === 'error') terminal = true
+        output.push(event)
+      }
+      if (!terminal) output.push(streamFailureEvent(model, new Error('MODEL_STREAM_ENDED_WITHOUT_TERMINAL_EVENT'), false))
+    } catch (error) {
+      if (!terminal) output.push(streamFailureEvent(model, error, idleController.signal.aborted && !options?.signal?.aborted))
+    } finally {
+      clearTimer()
+    }
+  })()
+  return output
+}
+
+function streamFailureEvent(model: Model<Api>, error: unknown, idleTimedOut: boolean) {
+  const detail = error instanceof Error ? error.message : String(error)
+  const message: AssistantMessage = {
+    role: 'assistant',
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: idleTimedOut ? 'aborted' : 'error',
+    errorMessage: idleTimedOut ? `MODEL_STREAM_IDLE_TIMEOUT: ${detail}` : detail,
+    timestamp: Date.now(),
+  }
+  return { type: 'error' as const, reason: message.stopReason as 'aborted' | 'error', error: message }
 }
 
 function protectedCompactionExtension(streamFn: StreamFn): InlineExtension {
@@ -1197,6 +1238,13 @@ function messageTrace(message: AgentMessage, includeContent: boolean, endpoint: 
     role: 'assistant', stopReason: value.stopReason, model: value.model, usage,
     ...(includeContent ? { content: redactTraceText(textFromContent(value.content) || value.errorMessage || '', endpoint, credential), ...(toolCalls.length ? { toolCalls } : {}) } : {}),
   }
+}
+
+function messageRequestsTool(message: AgentMessage, toolName: string) {
+  const content = (message as { content?: unknown }).content
+  return Array.isArray(content) && content.some(block => block && typeof block === 'object'
+    && (block as { type?: string }).type === 'toolCall'
+    && (block as { name?: string }).name === toolName)
 }
 
 function asRecord(value: unknown) {

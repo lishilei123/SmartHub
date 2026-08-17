@@ -75,7 +75,7 @@ export function PlanningPage(props: Props) {
       <button className={tab === 'test-design' ? 'active' : ''} onClick={() => selectTab('test-design')}><TestTube2 />测试设计</button>
       <button className={tab === 'workflow' ? 'active' : ''} onClick={() => selectTab('workflow')}><Activity />Planning 运行</button>
     </nav>
-    {tab === 'requirements' && <Suspense fallback={<PlanningLoading label="正在加载需求分析工作台…" />}><RequirementAnalysisPage {...props} /></Suspense>}
+    {tab === 'requirements' && <Suspense fallback={<PlanningLoading label="正在加载需求分析工作台…" />}><RequirementAnalysisPage {...props} onOpenTestDesign={() => selectTab('test-design')} /></Suspense>}
     {tab === 'test-design' && <Suspense fallback={<PlanningLoading label="正在加载测试设计工作台…" />}><TestDesignPage projectVersion={props.projectVersion} onManageVersions={props.onManageVersions} notify={props.notify} /></Suspense>}
     {tab === 'workflow' && <section className="planning-workflow-view">
       <header><span><BrainCircuit /><div><b>PlanningWorkflow</b><small>Workflow 推进业务阶段；测试点由 Validator 自动校验，测试用例与发布仍保留人工门禁。</small></div></span><button disabled={loadingWorkflow} onClick={() => void loadWorkflow()}><RefreshCw className={loadingWorkflow ? 'planning-spin' : ''} />刷新</button></header>

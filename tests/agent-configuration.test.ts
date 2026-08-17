@@ -32,8 +32,8 @@ async function fixture() {
         id: 'model-agent-config',
         name: 'agent-model',
         displayName: 'Agent Model',
-        contextWindow: 65_536,
-        maxOutputTokens: 16_384,
+        contextWindow: 256_000,
+        maxOutputTokens: 128_000,
         capabilities: ['structured_output', 'tool_calling', 'reasoning'],
         enabled: true,
         health: 'healthy',
@@ -355,19 +355,19 @@ test('测试执行 Agent 模型参数漂移会破坏 frozen snapshot 就绪契�
   assert.equal(readiness.agents.find(agent => agent.agentKey === 'failure-analysis')?.ready, false)
 })
 
-test('Agent 最大输出 Token 独立于模型目录中的历史输出值', async () => {
+test('Agent 最大输出 Token 不能超过已选模型的声明上限', async () => {
   const { service } = await fixture()
   const initial = (await service.get('requirement_analysis')).agents.requirementAnalysis.draft
   const saved = await service.save('requirement_analysis', {
     agentKey: 'requirementAnalysis',
     revision: initial.revision,
-    routing: { ...initial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 32_768 },
+    routing: { ...initial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' }, maxOutputTokens: 262_144 },
     definition: initial.definition,
   })
-  const published = await service.publish('requirement_analysis', { agentKey: 'requirementAnalysis', revision: saved.revision })
-
-  assert.equal(published.routing.maxOutputTokens, 32_768)
-  assert.equal('temperature' in published.routing, false)
+  await assert.rejects(
+    () => service.publish('requirement_analysis', { agentKey: 'requirementAnalysis', revision: saved.revision }),
+    /最大输出 Token 262144 不能超过已选模型的最小上限 128000/u,
+  )
 })
 
 function executionRunFixture(agents: ExecutionRun['agents']): ExecutionRun {

@@ -40,7 +40,7 @@
 - “系统管理 → Agent 配置”分别维护 PlanningAgent 与测试执行 Agent 的模型路由、输出上限、超时、重试、Prompt、Tool/MCP/Skill 和运行限制，并拥有不可变发布版本。运行时固定 Toolset、MCP 策略与 Skill 内容 Hash；Workflow 只收窄当前 Stage 可调用的业务 Tool，不再过滤或激活 Skill。
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；各 Agent 通过自身结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
-- 需求分析上传支持 Markdown、TXT 和 ZIP；知识库页面以“知识库”为根节点，直接展示与 Pi Agent 相同的 `/workspace` 文件树，并补齐各项目版本、`shared` 和 `agent_workspace` 的标准空目录；当前版本需求固定上传到 `workspace/branches/{项目版本名}/input/requirements/`。ZIP 保留包内子目录和图片相对路径；启动评审时服务端固定需求输入范围，并把活动索引中整个 `/workspace` 的 ready 文档版本物化为本次运行的只读文件快照，让 Pi Agent 可自主查看当前分支、其他分支和 `shared` 资料；正式 ReviewRun、工作区快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON；
+- 需求分析上传支持 Markdown、TXT 和 ZIP，上传前可选择“需求文档”或“产品原型”；需求文档写入 `workspace/branches/{项目版本名}/input/requirements/`，产品原型写入同版本的 `input/ui/`。知识库页面以“知识库”为根节点，直接展示与 Pi Agent 相同的 `/workspace` 文件树，并补齐各项目版本、`shared` 和 `agent_workspace` 的标准空目录。ZIP 保留包内子目录和图片相对路径；启动分析时服务端固定需求输入范围，并把活动索引中整个 `/workspace` 的 ready 文档版本物化为本次运行的只读文件快照，让 Pi Agent 可自主查看当前分支、其他分支和 `shared` 资料；正式 ReviewRun、工作区快照、成功结果、失败/取消终态和安全执行事件持久化到 PostgreSQL/JSON；
 - AC-001～AC-009 自动化验收场景。
 
 ## 当前已实现的统一 PlanningAgent 测试设计流程
@@ -77,7 +77,7 @@
 ```
 
 - `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 和 `@earendil-works/pi-coding-agent` 的实际版本由 `package-lock.json` 固定；业务层继续只依赖 `AgentRuntime`；
-- 当前项目版本的需求输入目录固定为 `workspace/branches/{projectVersion.name}/input/requirements`。新运行冻结该目录中的需求范围，同时冻结活动索引中整个 `workspace/` 的 ready 文档版本；因此 Agent 能查看 `input/api`、`input/ui`、`input/environment`、`shared/knowledge` 等旁证，但正式需求 coverage 只计算需求输入目录；
+- 当前项目版本的需求输入目录固定为 `workspace/branches/{projectVersion.name}/input/requirements`，产品原型归档到同分支的 `input/ui`。新运行冻结需求目录中的正式 coverage 范围，同时冻结活动索引中整个 `workspace/` 的 ready 文档版本；因此 Agent 能把产品原型与 `input/api`、`input/environment`、`shared/knowledge` 一样作为旁证自主读取，但正式需求 coverage 仍只计算需求输入目录；
 - 运行开始时，服务端将固定 `AssetVersion.content` 物化到 run-scoped 临时目录，预建完整工作区层级，并在结束、失败或取消后清理。Agent 只能传相对路径；绝对路径、盘符、UNC、`..` 和越界 Glob 均被拒绝；不开放 Shell、write、edit 或任意文件系统权限；
 - 首轮 Prompt 只投递工作区根、活动分支、需求输入目录、文件数量和快照 Hash，不投递文件名、Chunk 清单或正文。Agent 使用 `ls` 看目录、`find` 找文件、`grep` 定位文本，再用 `read` 的 `offset / limit` 分段读取大文件；
 - 只有 `read` 实际返回的固定文件行范围会写入 `InputDeliveryManifest.toolReads` 并形成 Evidence 候选。`grep` 和 `find` 只用于定位；资产版本、内部 Chunk、Evidence、需求点 ID、`evidenceRefs`、coverage 和 locator 全部由服务端生成和校验；

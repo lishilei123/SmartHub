@@ -58,6 +58,21 @@
   min-width: 0;
 }
 
+.rav2-document-kind {
+  display: inline-block;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #eef0ff;
+  color: #5965c6;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.rav2-document-kind.product_prototype {
+  background: #edf7ff;
+  color: #3478a8;
+}
+
 .rav2-docs .rav2-document-delete {
   width: 26px;
   height: 26px;
@@ -102,6 +117,36 @@
   color: #98a1ad;
   font-size: 8px;
   text-align: center;
+}
+
+.requirement-upload-type {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  color: #778296;
+  font-size: 8px;
+}
+
+.requirement-upload-type select {
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid #dfe3ea;
+  border-radius: 6px;
+  background: #fff;
+  color: #526072;
+  font-size: 9px;
+}
+
+.requirement-upload-type select:focus-visible {
+  outline: 2px solid #8f99ed;
+  outline-offset: 1px;
+}
+
+.requirement-upload-type select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .rav2-workspace > footer .requirement-workspace-upload-actions button.primary {
@@ -483,4 +528,765 @@
   margin: 3px 0 0;
   font-size: 7px;
   line-height: 1.5;
+}
+
+/* PlanningAgent conversation workbench */
+.requirement-analysis-shell .rav2-session-page {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.rav2-planning-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr) 310px;
+  gap: 12px;
+}
+
+.rav2-planning-layout > .rav2-workspace {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #e1e5ec;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 3px 14px rgba(39, 52, 78, 0.035);
+  display: flex;
+}
+
+.rav2-session-panel,
+.rav2-status-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #e1e5ec;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 3px 14px rgba(39, 52, 78, 0.035);
+}
+
+.rav2-session-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.rav2-session-header {
+  min-height: 58px;
+  padding: 9px 13px;
+  border-bottom: 1px solid #eceef3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rav2-session-identity {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rav2-session-identity > span {
+  width: 29px;
+  height: 29px;
+  border-radius: 8px;
+  background: #eef0ff;
+  color: #5866e8;
+  display: grid;
+  place-items: center;
+}
+
+.rav2-session-identity svg {
+  width: 15px;
+}
+
+.rav2-session-identity b,
+.rav2-session-identity small {
+  display: block;
+  white-space: nowrap;
+}
+
+.rav2-session-identity b {
+  color: #263246;
+  font-size: 11px;
+}
+
+.rav2-session-identity small {
+  margin-top: 2px;
+  color: #8a94a3;
+  font-size: 7px;
+}
+
+.rav2-skill-chips {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.rav2-skill-chips em,
+.rav2-skill-chips span {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border: 1px solid #d8dfff;
+  border-radius: 999px;
+  background: #f7f8ff;
+  color: #5966d8;
+  font-size: 7px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.rav2-skill-chips em {
+  border-color: #cfe8db;
+  background: #effaf4;
+  color: #23815e;
+  font-weight: 700;
+}
+
+.rav2-skill-chips span.empty {
+  border-color: #ead7a7;
+  background: #fff9eb;
+  color: #a5721c;
+}
+
+.rav2-session-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rav2-session-actions button,
+.rav2-session-actions select {
+  height: 30px;
+  border: 1px solid #e0e4ea;
+  border-radius: 7px;
+  background: #fff;
+  color: #667286;
+  font-size: 8px;
+}
+
+.rav2-session-actions button {
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.rav2-session-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.rav2-session-actions button:hover:not(:disabled) {
+  border-color: #cfd5f7;
+  background: #f7f8ff;
+  color: #5260d8;
+}
+
+.rav2-session-actions button svg {
+  width: 13px;
+}
+
+.rav2-session-actions button i {
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: #eef0f4;
+  color: #687486;
+  font-size: 7px;
+  font-style: normal;
+  display: grid;
+  place-items: center;
+}
+
+.rav2-session-actions select {
+  width: 138px;
+  padding: 0 7px;
+}
+
+.rav2-session-tabs {
+  min-height: 40px;
+  padding: 0 9px;
+  border-bottom: 1px solid #eceef3;
+  background: #fbfcfe;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow-x: auto;
+}
+
+.rav2-session-tabs button {
+  height: 30px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #7b8697;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rav2-session-tabs button:hover,
+.rav2-session-tabs button.active {
+  background: #eef0ff;
+  color: #5361dd;
+}
+
+.rav2-session-tabs button.active {
+  font-weight: 700;
+}
+
+.rav2-session-tabs svg {
+  width: 13px;
+}
+
+.rav2-session-tabs i {
+  min-width: 15px;
+  height: 15px;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 7px;
+  font-style: normal;
+  display: grid;
+  place-items: center;
+}
+
+.rav2-session-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.rav2-session-body.detail {
+  overflow: auto;
+  padding: 13px;
+  background: #f8f9fb;
+}
+
+.rav2-session-body.conversation {
+  overflow: hidden;
+  display: flex;
+}
+
+.rav2-session-body.conversation .rav2-conversation {
+  background: #fff;
+}
+
+.rav2-session-body.conversation .rav2-conversation-scroll {
+  padding: 16px 18px 18px;
+}
+
+.rav2-session-body.conversation .rav2-agent-task {
+  width: min(68%, 620px);
+  margin-left: auto;
+  border: 0;
+  border-radius: 10px 10px 3px 10px;
+  background: #eef4ff;
+  box-shadow: 0 2px 8px rgba(69, 95, 148, 0.04);
+}
+
+.rav2-session-body.conversation .rav2-agent-task > span {
+  background: #fff;
+  color: #5274cf;
+}
+
+.rav2-session-body.conversation .rav2-agent-metrics {
+  justify-content: flex-end;
+}
+
+.rav2-session-body.conversation .rav2-run-message,
+.rav2-session-body.conversation .rav2-run-tool {
+  width: min(79%, 720px);
+  margin-right: auto;
+  border: 0;
+  border-radius: 3px 10px 10px 10px;
+  background: #f6f7f9;
+}
+
+.rav2-session-body.conversation .rav2-run-message.user {
+  margin-right: 0;
+  margin-left: auto;
+  border-radius: 10px 10px 3px 10px;
+  background: #eef4ff;
+}
+
+.rav2-session-body.conversation .rav2-run-control {
+  width: min(76%, 680px);
+  margin-right: auto;
+  border: 0;
+  background: #fafbfc;
+}
+
+.rav2-runtime-details {
+  width: min(86%, 760px);
+  margin: 8px 0 2px;
+  border: 1px dashed #dfe3ea;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.rav2-runtime-details > summary {
+  padding: 8px 10px;
+  color: #687486;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.rav2-runtime-details > summary svg {
+  width: 13px;
+  color: #5965e9;
+}
+
+.rav2-runtime-details .planning-context-card,
+.rav2-runtime-details .planning-context-empty {
+  margin: 0 8px 8px;
+}
+
+.rav2-runtime-details .planning-reviewer-button {
+  width: calc(100% - 16px);
+  margin: 0 8px 8px;
+}
+
+.rav2-runtime-details .planning-subagent-runs {
+  margin: 0 8px 8px;
+}
+
+.rav2-session-boundary {
+  min-height: 48px;
+  padding: 8px 13px;
+  border-top: 1px solid #eceef3;
+  background: #fbfcfd;
+  color: #687486;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rav2-session-boundary > svg {
+  width: 17px;
+  color: #2e9670;
+}
+
+.rav2-session-boundary b,
+.rav2-session-boundary small {
+  display: block;
+}
+
+.rav2-session-boundary b {
+  color: #526072;
+  font-size: 8px;
+}
+
+.rav2-session-boundary small {
+  margin-top: 3px;
+  font-size: 7px;
+  line-height: 1.45;
+}
+
+.rav2-status-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.rav2-status-panel > header {
+  min-height: 58px;
+  padding: 9px 12px;
+  border-bottom: 1px solid #eceef3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rav2-status-panel > header b,
+.rav2-status-panel > header small {
+  display: block;
+}
+
+.rav2-status-panel > header b {
+  color: #344054;
+  font-size: 10px;
+}
+
+.rav2-status-panel > header small {
+  margin-top: 3px;
+  color: #929baa;
+  font: 7px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.rav2-status-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  background: #fafbfc;
+}
+
+.rav2-status-card {
+  overflow: hidden;
+  border: 1px solid #edf0f3;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.rav2-status-card + .rav2-status-card {
+  margin-top: 9px;
+}
+
+.rav2-status-card > header {
+  min-height: 35px;
+  padding: 7px 9px;
+  border-bottom: 1px solid #f0f1f4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rav2-status-card > header i {
+  color: #5965e9;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.rav2-status-card > header b {
+  color: #485466;
+  font-size: 9px;
+}
+
+.rav2-stage-list {
+  padding: 5px 9px 8px;
+}
+
+.rav2-stage-list article {
+  min-height: 28px;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.rav2-stage-list article > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #cfd4dc;
+}
+
+.rav2-stage-list article.complete > span {
+  background: #2bb673;
+}
+
+.rav2-stage-list article.current > span {
+  background: #2f6fed;
+  box-shadow: 0 0 0 3px #e9f0ff;
+}
+
+.rav2-stage-list article.blocked > span {
+  background: #d64c5f;
+}
+
+.rav2-stage-list article b {
+  color: #4d596b;
+  font-size: 8px;
+}
+
+.rav2-stage-list article small {
+  color: #919aa7;
+  font-size: 7px;
+  white-space: nowrap;
+}
+
+.rav2-stage-list article.complete small {
+  color: #269468;
+}
+
+.rav2-stage-list article.current small {
+  color: #3e70d0;
+}
+
+.rav2-stage-list article.blocked small {
+  color: #c14859;
+}
+
+.rav2-formal-list {
+  padding: 4px 9px 7px;
+}
+
+.rav2-formal-list button {
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 2px;
+  border: 0;
+  border-bottom: 1px solid #f0f1f4;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+}
+
+.rav2-formal-list button:last-child {
+  border-bottom: 0;
+}
+
+.rav2-formal-list button:not(:disabled) {
+  cursor: pointer;
+}
+
+.rav2-formal-list button:hover:not(:disabled) {
+  color: #5965e9;
+}
+
+.rav2-formal-list b,
+.rav2-formal-list small {
+  display: block;
+}
+
+.rav2-formal-list b {
+  color: #455164;
+  font-size: 8px;
+}
+
+.rav2-formal-list small {
+  margin-top: 3px;
+  color: #929baa;
+  font-size: 7px;
+}
+
+.rav2-formal-list em {
+  color: #a0a7b1;
+  font-size: 7px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.rav2-formal-list em.candidate {
+  color: #c57b20;
+}
+
+.rav2-formal-list em.published {
+  color: #21875f;
+}
+
+.rav2-activity-summary {
+  padding: 9px;
+}
+
+.rav2-activity-state {
+  padding: 7px;
+  border-radius: 7px;
+  background: #f8f9fb;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.rav2-activity-state > span {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 7px;
+  background: #eef0f4;
+  color: #7b8696;
+  display: grid;
+  place-items: center;
+}
+
+.rav2-activity-state > span.running {
+  background: #eef0ff;
+  color: #5965e9;
+}
+
+.rav2-activity-state > span.succeeded {
+  background: #e8f7f0;
+  color: #21875f;
+}
+
+.rav2-activity-state > span.failed,
+.rav2-activity-state > span.cancelled {
+  background: #fff0f2;
+  color: #c14859;
+}
+
+.rav2-activity-state svg {
+  width: 14px;
+}
+
+.rav2-activity-state > div {
+  min-width: 0;
+}
+
+.rav2-activity-state b,
+.rav2-activity-state small {
+  display: block;
+}
+
+.rav2-activity-state b {
+  color: #4d596b;
+  font-size: 8px;
+}
+
+.rav2-activity-state small {
+  margin-top: 3px;
+  overflow: hidden;
+  color: #919aa7;
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rav2-activity-metrics {
+  margin-top: 7px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.rav2-activity-metrics span {
+  min-width: 0;
+  padding: 6px 2px;
+  border: 1px solid #f0f1f4;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.rav2-activity-metrics small,
+.rav2-activity-metrics b {
+  display: block;
+}
+
+.rav2-activity-metrics small {
+  color: #929baa;
+  font-size: 6px;
+}
+
+.rav2-activity-metrics b {
+  margin-top: 3px;
+  color: #425064;
+  font-size: 10px;
+}
+
+.rav2-status-action {
+  padding: 10px;
+  border-top: 1px solid #eceef3;
+  background: #fff;
+}
+
+.rav2-status-action button {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rav2-status-action button.primary {
+  background: #2f67e8;
+}
+
+.rav2-status-action button.danger {
+  background: #cf4b5d;
+}
+
+.rav2-status-action button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.rav2-status-action svg {
+  width: 14px;
+}
+
+@media (max-width: 1050px) {
+  .rav2-planning-layout {
+    grid-template-columns: 200px minmax(0, 1fr) 270px;
+  }
+
+  .rav2-session-header {
+    flex-wrap: wrap;
+  }
+
+  .rav2-skill-chips {
+    order: 3;
+    flex-basis: 100%;
+  }
+}
+
+@media (max-width: 900px) {
+  .requirement-analysis-shell,
+  .requirement-analysis-shell .rav2-session-page {
+    overflow: auto;
+  }
+
+  .rav2-planning-layout {
+    min-height: 1120px;
+    grid-template-columns: 200px minmax(0, 1fr);
+    grid-template-rows: minmax(650px, 1fr) auto;
+  }
+
+  .rav2-status-panel {
+    grid-column: 1 / -1;
+    min-height: 520px;
+  }
+}
+
+@media (max-width: 600px) {
+  .rav2-planning-layout {
+    min-height: 1580px;
+    grid-template-columns: 1fr;
+    grid-template-rows: 430px minmax(620px, 1fr) auto;
+  }
+
+  .rav2-planning-layout > .rav2-workspace {
+    display: flex;
+  }
+
+  .rav2-session-actions {
+    width: 100%;
+  }
+
+  .rav2-session-actions select {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .rav2-session-tabs {
+    justify-content: flex-start;
+  }
+
+  .rav2-session-body.conversation .rav2-agent-task,
+  .rav2-session-body.conversation .rav2-run-message,
+  .rav2-session-body.conversation .rav2-run-tool,
+  .rav2-session-body.conversation .rav2-run-control,
+  .rav2-runtime-details {
+    width: 94%;
+  }
+
 }

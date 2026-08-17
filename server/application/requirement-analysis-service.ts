@@ -411,7 +411,8 @@ export class RequirementAnalysisService {
     const definition = analysisConfiguration?.agentDefinition ?? await this.definitions.resolve('planning')
     requirePiWorkspaceAgentDefinition(definition)
     const coveragePlan = buildAnalysisCoveragePlan(inputPairs.map(item => item.version), request.excludedAreas)
-    const effectiveMaxOutputTokens = analysisConfiguration?.routing.maxOutputTokens ?? model.model.maxOutputTokens
+    const effectiveContextWindow = boundedContextWindow(model, analysisConfiguration)
+    const effectiveMaxOutputTokens = boundedMaxOutputTokens(model, analysisConfiguration)
     const documentWorkspace = requirementDocumentWorkspace(projectVersion, state.projectVersions, documentDirectoryPath)
     const now = new Date().toISOString()
     const currentInputRefs = buildCurrentInputRefs(inputPairs)
@@ -431,7 +432,7 @@ export class RequirementAnalysisService {
       currentInputRefs,
       workspaceSnapshot,
       definition,
-      contextWindow: model.model.contextWindow,
+      contextWindow: effectiveContextWindow,
       maxOutputTokens: effectiveMaxOutputTokens,
     })
     const analysisId = request.analysisId ?? `analysis_${randomUUID()}`
@@ -452,7 +453,7 @@ export class RequirementAnalysisService {
       currentInputRefs,
       workspaceSnapshot,
       documentWorkspace: { ...documentWorkspace, candidateAssetVersionIds: inputPairs.map(item => item.version.id) },
-      modelRef: modelSnapshot(model, effectiveMaxOutputTokens),
+      modelRef: modelSnapshot(model, effectiveContextWindow, effectiveMaxOutputTokens),
       ...(analysisConfiguration ? { agentConfigurationRef: configurationRef(analysisConfiguration) } : {}),
       focusAreas: cleanList(request.focusAreas),
       excludedAreas: cleanList(request.excludedAreas),
@@ -514,8 +515,8 @@ export class RequirementAnalysisService {
       currentInputRefs: run.snapshot.currentInputRefs,
       workspaceSnapshot: run.snapshot.workspaceSnapshot,
       definition: run.snapshot.agentDefinition,
-      contextWindow: models[0].model.contextWindow,
-      maxOutputTokens: configuration?.routing.maxOutputTokens ?? models[0].model.maxOutputTokens,
+      contextWindow: run.snapshot.modelRef.contextWindow,
+      maxOutputTokens: run.snapshot.modelRef.maxOutputTokens,
     })
     if (plan.packageSha256 !== run.snapshot.analysisInput.packageSha256) throw new Error('固定正文输入包 Hash 已漂移')
     await this.reviewTransaction(run.id, lease, draft => {
@@ -557,8 +558,8 @@ export class RequirementAnalysisService {
       currentInputRefs: run.snapshot.currentInputRefs,
       workspaceSnapshot: run.snapshot.workspaceSnapshot,
       definition: run.snapshot.agentDefinition,
-      contextWindow: model.model.contextWindow,
-      maxOutputTokens: configuration?.routing.maxOutputTokens ?? model.model.maxOutputTokens,
+      contextWindow: run.snapshot.modelRef.contextWindow,
+      maxOutputTokens: run.snapshot.modelRef.maxOutputTokens,
     })
     return this.executeOnce({
       runId: run.id,
@@ -604,7 +605,7 @@ export class RequirementAnalysisService {
 
   private async executeAnalysis(input: { run: ReviewRun; snapshot: ReviewRunSnapshot; requirementInputPlan: RequirementInputPlan; models: AgentModelSelection[]; configuration: AgentConfigurationVersion | null; signal: AbortSignal; lease?: TaskLease; retryable?: boolean }) {
     const events: AgentExecutionEvent[] = []
-    const model = input.models.find(selection => supportsInputPlan(selection, input.requirementInputPlan, input.configuration))
+    const model = input.models.find(selection => supportsInputPlan(selection, input.requirementInputPlan, input.snapshot.modelRef.contextWindow, input.snapshot.modelRef.maxOutputTokens))
     if (!model) throw new Error('PlanningAgent 没有满足固定工作区上下文和工具能力的可用模型')
     try {
       const output = await this.executeOnce({
@@ -659,7 +660,7 @@ export class RequirementAnalysisService {
   }
 
   private async executeOnce(input: { runId: string; snapshot: ReviewRunSnapshot; selection: AgentModelSelection; configuration: AgentConfigurationVersion | null; signal: AbortSignal; lease?: TaskLease; createInput: (modelRef: ReviewRunSnapshot['modelRef']) => AgentExecutionInput }) {
-    const modelRef = modelSnapshot(input.selection, input.configuration?.routing.maxOutputTokens ?? input.selection.model.maxOutputTokens)
+    const modelRef = modelSnapshot(input.selection, input.snapshot.modelRef.contextWindow, input.snapshot.modelRef.maxOutputTokens)
     const attemptId = `model_attempt_${randomUUID()}`
     const startedAt = new Date().toISOString()
     await this.reviewTransaction(input.runId, input.lease, state => {
@@ -1025,15 +1026,20 @@ function requirePiWorkspaceAgentDefinition(definition: ReviewRunSnapshot['agentD
   if (definition.agentKey !== 'planning' || definition.resultSchemaVersion !== 'planning/v1' || missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布 PlanningAgent${missing.length ? `；缺少工具 ${missing.join(', ')}` : ''}`)
 }
 
-function supportsInputPlan(selection: AgentModelSelection, plan: RequirementInputPlan, configuration: AgentConfigurationVersion | null) {
+function boundedMaxOutputTokens(selection: AgentModelSelection, configuration: AgentConfigurationVersion | null) {
+  return Math.min(configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens, selection.model.maxOutputTokens)
+}
+function boundedContextWindow(selection: AgentModelSelection, configuration: AgentConfigurationVersion | null) {
+  return Math.min(configuration?.routing.contextWindow ?? selection.model.contextWindow, selection.model.contextWindow)
+}
+function supportsInputPlan(selection: AgentModelSelection, plan: RequirementInputPlan, contextWindow: number, maxOutputTokens: number) {
   if (plan.mode !== 'agent_directory') return false
-  const output = configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens
-  return selection.model.contextWindow >= Math.max(...plan.batches.map(batch => batch.tokenCount), 0) + 4_000 + output
+  return Math.min(selection.model.contextWindow, contextWindow) >= Math.max(...plan.batches.map(batch => batch.tokenCount), 0) + 4_000 + maxOutputTokens
 }
 
 function inputSnapshot(plan: RequirementInputPlan) { return { policyVersion: plan.policyVersion, mode: plan.mode, estimatedInputTokens: plan.estimatedInputTokens, safeInputBudget: plan.safeInputBudget, packageSha256: plan.packageSha256, batches: plan.batches.map(batch => ({ batchId: batch.batchId, ordinal: batch.ordinal, tokenCount: batch.tokenCount, contentSha256: createHash('sha256').update(batch.content).digest('hex'), assetVersionIds: [...batch.assetVersionIds], chunkIds: [...batch.chunkIds] })) } }
-function modelSnapshot(selection: AgentModelSelection, maxOutputTokens: number): ReviewRunSnapshot['modelRef'] { return { sourceId: selection.source.id, modelId: selection.model.id, providerType: selection.source.providerType, modelName: selection.model.name, contextWindow: selection.model.contextWindow, maxOutputTokens, supportsReasoning: selection.model.capabilities.includes('reasoning') } }
-function modelConnection(selection: AgentModelSelection, snapshot: ReviewRunSnapshot['modelRef'], configuration: AgentConfigurationVersion | null) { return { sourceId: selection.source.id, providerType: selection.source.providerType, baseUrl: selection.source.baseUrl, apiKey: selection.source.apiKey, modelId: selection.model.id, modelName: selection.model.name, contextWindow: selection.model.contextWindow, maxOutputTokens: snapshot.maxOutputTokens, supportsReasoning: snapshot.supportsReasoning, requestTimeoutMs: configuration ? configuration.routing.requestTimeoutSeconds * 1_000 : undefined, retryCount: configuration?.routing.retryCount } }
+function modelSnapshot(selection: AgentModelSelection, contextWindow: number, maxOutputTokens: number): ReviewRunSnapshot['modelRef'] { return { sourceId: selection.source.id, modelId: selection.model.id, providerType: selection.source.providerType, modelName: selection.model.name, contextWindow, maxOutputTokens, supportsReasoning: selection.model.capabilities.includes('reasoning') } }
+function modelConnection(selection: AgentModelSelection, snapshot: ReviewRunSnapshot['modelRef'], configuration: AgentConfigurationVersion | null) { return { sourceId: selection.source.id, providerType: selection.source.providerType, baseUrl: selection.source.baseUrl, apiKey: selection.source.apiKey, modelId: selection.model.id, modelName: selection.model.name, contextWindow: snapshot.contextWindow, maxOutputTokens: snapshot.maxOutputTokens, supportsReasoning: snapshot.supportsReasoning, requestTimeoutMs: configuration ? configuration.routing.requestTimeoutSeconds * 1_000 : undefined, retryCount: configuration?.routing.retryCount } }
 function configurationRef(configuration: AgentConfigurationVersion) { return { id: configuration.id, version: configuration.version, contentSha256: configuration.contentSha256 } }
 function redactSnapshot(snapshot: ReviewRunSnapshot) { return { ...snapshot, agentDefinition: { ...snapshot.agentDefinition, systemPrompt: undefined, taskTemplate: undefined } } }
 function snapshotAssets(run: ReviewRun) { return run.snapshot.assets.map(item => ({ ...item })) }

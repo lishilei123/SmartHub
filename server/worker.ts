@@ -251,7 +251,7 @@ async function processReviewOne() {
 }
 
 async function retryFailedReviewJob(claimed: { runId: string; attempts: number; maxAttempts: number }, lease: TaskLease, error: string) {
-  const retryable = claimed.attempts < claimed.maxAttempts
+  const retryable = claimed.attempts < claimed.maxAttempts && isRetryableReviewJobError(error)
   const delay = Math.min(60_000, 1_000 * 2 ** Math.max(0, claimed.attempts - 1))
   const nextAttemptAt = new Date(Date.now() + delay).toISOString()
   await requirementAnalysisService.failPreparedRun(claimed.runId, lease, error, false, retryable, { attempt: claimed.attempts, maxAttempts: claimed.maxAttempts, ...(retryable ? { nextAttemptAt } : {}) }).catch(() => undefined)
@@ -264,6 +264,10 @@ async function retryFailedReviewJob(claimed: { runId: string; attempts: number; 
   const released = await stateStore.releaseReviewJob?.(claimed.runId, lease, delay, error)
   if (!released) console.error(`需求分析任务 ${claimed.runId} 无法重新入队：${error}`)
   else console.error(`需求分析任务 ${claimed.runId} 将在 ${delay}ms 后重试：${error}`)
+}
+
+function isRetryableReviewJobError(error: string) {
+  return /^(?:MODEL_RATE_LIMITED|MODEL_PROVIDER_UNAVAILABLE|MODEL_REQUEST_TIMEOUT):/u.test(error)
 }
 
 async function retryFailedTask(claimed: { id: string; attempts: number; maxAttempts?: number }, lease: TaskLease, error: string | undefined) {

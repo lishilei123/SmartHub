@@ -162,22 +162,24 @@ function defaultDraft(scene: AgentConfigurationScene): AgentConfigurationDraft {
 }
 
 function defaultAgentDraft(agentKey: AgentConfigurationAgentKey): AgentConfigurationAgentDraft {
+  const definition = defaultDefinition(agentKey)
   return {
     revision: 0,
-    routing: defaultRouting(),
-    definition: definitionDraft(defaultDefinition(agentKey)),
+    routing: defaultRouting(definition.limits.reservedOutputTokens),
+    definition: definitionDraft(definition),
     updatedAt: new Date(0).toISOString(),
   }
 }
 
-function defaultRouting(): AgentRoutingConfiguration {
+function defaultRouting(reservedOutputTokens?: number): AgentRoutingConfiguration {
   return {
     primaryModel: null,
     fallbackModels: [],
     intelligentRouting: true,
     fallbackEnabled: true,
-    maxOutputTokens: 8_192,
-    requestTimeoutSeconds: 120,
+    contextWindow: 256_000,
+    maxOutputTokens: reservedOutputTokens ?? 32_000,
+    requestTimeoutSeconds: 300,
     retryCount: 2,
     structuredOutput: true,
   }
@@ -198,8 +200,10 @@ function normalizeAgentDraft(agentKey: AgentConfigurationAgentKey, input: AgentC
 
 function normalizeRouting(value: AgentRoutingConfiguration): AgentRoutingConfiguration {
   if (!value || typeof value !== 'object') throw new Error('模型与路由配置不能为空')
+  const contextWindow = integer(value.contextWindow ?? 256_000, '上下文窗口', 16_384, 4_000_000)
   const maxOutputTokens = integer(value.maxOutputTokens, '最大输出 Token', 1_024, 262_144)
-  const requestTimeoutSeconds = integer(value.requestTimeoutSeconds, '请求超时', 10, 3_600)
+  if (maxOutputTokens > contextWindow) throw new Error('最大输出 Token 不能超过上下文窗口')
+  const requestTimeoutSeconds = integer(value.requestTimeoutSeconds, '流式无响应超时', 10, 3_600)
   const retryCount = integer(value.retryCount, '失败重试次数', 0, 5)
   const primaryModel = modelReference(value.primaryModel)
   const fallbackModels = uniqueModelReferences(Array.isArray(value.fallbackModels) ? value.fallbackModels.map(modelReference).filter((item): item is AgentModelReference => Boolean(item)) : [])
@@ -209,6 +213,7 @@ function normalizeRouting(value: AgentRoutingConfiguration): AgentRoutingConfigu
     fallbackModels,
     intelligentRouting: value.intelligentRouting === true,
     fallbackEnabled: value.fallbackEnabled === true,
+    contextWindow,
     maxOutputTokens,
     requestTimeoutSeconds,
     retryCount,
@@ -285,7 +290,7 @@ function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentC
   validateCatalogCapabilities(catalog.label, toolIds, skillKeys, mcpServerKeys, catalog.requiredToolIds, catalog.requiredSkillKeys, catalog.requiredMcpServerKeys, catalog.exactCapabilities)
   const primary = required(draft.routing.primaryModel, `发布${catalog.label}前必须选择默认模型`)
   const references = [primary, ...(draft.routing.fallbackEnabled ? draft.routing.fallbackModels : [])]
-  references.forEach((reference, index) => {
+  const selectedModels = references.map((reference, index) => {
     const source = required(state.modelSources.find(item => item.id === reference.sourceId), `${agentLabel(agentKey)}${index ? '回退' : '默认'}模型来源不存在`)
     const model = required(source.models.find(item => item.id === reference.modelId), `${agentLabel(agentKey)}${index ? '回退' : '默认'}模型不存在`)
     if (!source.enabled || !model.enabled) throw new Error(`${source.name} · ${model.displayName} 未启用`)
@@ -293,7 +298,12 @@ function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentC
     if (!model.qualityGate?.passed || model.qualityGate.version !== 'model-probe/v2') throw new Error(`${source.name} · ${model.displayName} 尚未通过 model-probe/v2 质量门禁`)
     if (!model.capabilities.includes('tool_calling')) throw new Error(`${source.name} · ${model.displayName} 不支持工具调用`)
     if (draft.routing.structuredOutput && !model.capabilities.includes('structured_output')) throw new Error(`${source.name} · ${model.displayName} 不支持结构化输出`)
+    return { source, model }
   })
+  const outputLimit = Math.min(...selectedModels.map(item => item.model.maxOutputTokens))
+  if (draft.routing.maxOutputTokens > outputLimit) throw new Error(`${catalog.label}最大输出 Token ${draft.routing.maxOutputTokens} 不能超过已选模型的最小上限 ${outputLimit}`)
+  const contextLimit = Math.min(...selectedModels.map(item => item.model.contextWindow))
+  if (draft.routing.contextWindow > contextLimit) throw new Error(`${catalog.label}上下文窗口 ${draft.routing.contextWindow} 不能超过已选模型的最小上限 ${contextLimit}`)
 }
 
 function publishedDefinition(agentKey: AgentConfigurationAgentKey, value: AgentDefinitionDraft, configurationVersion: number, state: DatabaseState) {

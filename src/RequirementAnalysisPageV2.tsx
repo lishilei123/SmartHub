@@ -37,16 +37,17 @@ import {
   type AnalysisSeverity,
   type RequirementAnalysisRun,
 } from './requirement-analysis-api'
-import { requirementWorkspaceDirectory } from './version-document-path'
+import { requirementAnalysisInputTypeForDocument, requirementWorkspaceDirectory } from './version-document-path'
 import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
 import type { ProjectVersion } from './project-version-api'
 import './requirement-analysis-v2.css'
 import './requirement-analysis-review-flow.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
-type ViewKey = 'overview' | 'baseline' | 'findings' | 'artifacts' | 'diff'
+type ViewKey = 'conversation' | 'overview' | 'baseline' | 'findings' | 'artifacts' | 'diff'
 type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
 type RunRecord = RequirementAnalysisRun & { content?: string }
+type RequirementStageState = 'complete' | 'current' | 'waiting' | 'blocked'
 
 type Props = {
   projectVersion: ProjectVersion | null
@@ -57,9 +58,10 @@ type Props = {
   onManageVersions: () => void
   onOpenKnowledge: () => void
   onOpenActivity: () => void
-  onOpenRequirementDocument?: (document: KnowledgeDocument) => void
-  onDeleteRequirementDocument?: (document: KnowledgeDocument) => void
-  canDeleteRequirementDocument?: boolean
+  onOpenTestDesign?: () => void
+  onOpenInputDocument?: (document: KnowledgeDocument) => void
+  onDeleteInputDocument?: (document: KnowledgeDocument) => void
+  canDeleteInputDocument?: boolean
   notify: Notify
   addAudit: (entry: string) => void
 }
@@ -72,6 +74,7 @@ const findingTypeLabels: Record<AnalysisFindingType, string> = {
 const severityLabels: Record<AnalysisSeverity, string> = { blocker: '阻断', high: '高', medium: '中', low: '低' }
 const findingStateLabels: Record<FindingState, string> = { open: '待人工审核', confirmed: '已采纳', dismissed: '不采纳', resolved: '已解决', needs_follow_up: '暂缓 / 待复验' }
 const viewTabs: Array<{ key: ViewKey; label: string; icon: typeof Sparkles }> = [
+  { key: 'conversation', label: 'Agent 协作', icon: Bot },
   { key: 'overview', label: '分析概览', icon: Sparkles },
   { key: 'baseline', label: '需求基线', icon: GitBranch },
   { key: 'findings', label: '需求问题', icon: AlertTriangle },
@@ -113,6 +116,40 @@ function fixedAssets(run: RunRecord) {
   return run.snapshot?.assets ?? run.documents ?? []
 }
 
+type PlanningExecutionGroup = {
+  id: string
+  label: string
+  status?: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  execution: AgentExecutionRecord
+}
+
+function sameExecution(left: AgentExecutionRecord, right: AgentExecutionRecord) {
+  const leftLast = left.events.at(-1)
+  const rightLast = right.events.at(-1)
+  return left.events.length === right.events.length
+    && leftLast?.sequence === rightLast?.sequence
+    && leftLast?.occurredAt === rightLast?.occurredAt
+}
+
+function planningExecutionGroups(run?: RunRecord): PlanningExecutionGroup[] {
+  const attempts = (run?.executionAttempts ?? []).flatMap(attempt => {
+    const execution = attempt.executions?.planning
+    return execution ? [{ id: `attempt-${attempt.attempt}`, label: `Worker Attempt ${attempt.attempt}/${attempt.maxAttempts}`, status: attempt.status, execution }] : []
+  })
+  const current = [run?.response?.executions?.planning, run?.executions?.planning, run?.execution?.agentKey === 'planning' ? run.execution : undefined]
+    .filter((item): item is AgentExecutionRecord => Boolean(item))
+    .sort((left, right) => left.events.length - right.events.length)
+    .at(-1)
+  if (!current || attempts.some(attempt => sameExecution(attempt.execution, current))) return attempts
+  return [...attempts, { id: 'current', label: attempts.length ? '当前执行记录' : '执行记录', status: run?.status, execution: current }]
+}
+
+function replaceRunDetail(current: RunRecord[], detail: RequirementAnalysisRun) {
+  return current.map(item => item.id === detail.id
+    ? { ...detail, ...(item.content === undefined ? {} : { content: item.content }) }
+    : item)
+}
+
 function repairDraftForFinding(drafts: RequirementRepairDraft[], findingId: string) {
   return [...drafts].reverse().find(draft => draft.candidate?.patches.some(patch => patch.findingRefs.includes(findingId)))
 }
@@ -123,8 +160,8 @@ function assetVersionLabel(versionId: string, documents: KnowledgeDocument[]) {
 }
 
 export function RequirementAnalysisPageV2(props: Props) {
-  const { projectVersion, documents, apiState, refreshKnowledge, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenRequirementDocument, onDeleteRequirementDocument, canDeleteRequirementDocument = false } = props
-  const [view, setView] = useState<ViewKey>('overview')
+  const { projectVersion, documents, apiState, refreshKnowledge, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenTestDesign, onOpenInputDocument, onDeleteInputDocument, canDeleteInputDocument = false } = props
+  const [view, setView] = useState<ViewKey>('conversation')
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [selectedRunId, setSelectedRunId] = useState('')
   const [loadingRuns, setLoadingRuns] = useState(false)
@@ -149,18 +186,20 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [diffLoading, setDiffLoading] = useState(false)
   const requestedRepairDiff = useRef<{ assetId: string; versionIds: [string, string] } | null>(null)
 
-  const workspaceDirectoryPath = projectVersion ? requirementWorkspaceDirectory(projectVersion.name) : ''
-  const requirementDocuments = useMemo(() => documents.filter(document => {
-    const logicalPath = document.logicalPath?.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '') ?? ''
-    return document.status === 'ready' && Boolean(document.assetVersionId) && Boolean(workspaceDirectoryPath) && logicalPath.startsWith(`${workspaceDirectoryPath}/`)
-  }), [documents, workspaceDirectoryPath])
+  const projectVersionName = projectVersion?.name ?? ''
+  const workspaceDirectoryPath = projectVersionName ? requirementWorkspaceDirectory(projectVersionName) : ''
+  const analysisInputDocuments = useMemo(() => documents.filter(document => document.status === 'ready'
+    && Boolean(document.assetVersionId)
+    && Boolean(projectVersionName)
+    && Boolean(requirementAnalysisInputTypeForDocument(projectVersionName, document.logicalPath ?? '', document.assetType))), [documents, projectVersionName])
+  const requirementDocuments = useMemo(() => analysisInputDocuments.filter(document => requirementAnalysisInputTypeForDocument(projectVersionName, document.logicalPath ?? '', document.assetType)?.value === 'requirement'), [analysisInputDocuments, projectVersionName])
   const selectedRun = runs.find(run => run.id === selectedRunId)
   const result = selectedRun?.response?.result
   const readVersions = readAssetVersionIds(selectedRun)
   const workspaceSnapshot = selectedRun?.snapshot?.workspaceSnapshot
   const currentInputRefs = selectedRun?.snapshot?.currentInputRefs ?? []
   const observedReads = (selectedRun?.response?.inputDeliveryManifest ?? selectedRun?.inputDeliveryManifest)?.toolReads ?? []
-  const selectedDocument = requirementDocuments.find(item => item.id === selectedDocumentId) ?? requirementDocuments[0]
+  const selectedDocument = analysisInputDocuments.find(item => item.id === selectedDocumentId) ?? analysisInputDocuments[0]
   const analysisAgentReady = Boolean(agentConfiguration?.agents.planning.activeVersion)
   const canRun = Boolean(projectVersion && projectVersion.status === 'open' && requirementDocuments.length && analysisAgentReady && apiState === 'ready' && !starting)
 
@@ -177,7 +216,7 @@ export function RequirementAnalysisPageV2(props: Props) {
 
   useEffect(() => { void refreshRuns(true) }, [projectVersion?.id])
   useEffect(() => { loadAgentConfiguration().then(setAgentConfiguration).catch(() => undefined) }, [])
-  useEffect(() => { if (!selectedDocumentId || !requirementDocuments.some(item => item.id === selectedDocumentId)) setSelectedDocumentId(requirementDocuments[0]?.id ?? '') }, [requirementDocuments, selectedDocumentId])
+  useEffect(() => { if (!selectedDocumentId || !analysisInputDocuments.some(item => item.id === selectedDocumentId)) setSelectedDocumentId(analysisInputDocuments[0]?.id ?? '') }, [analysisInputDocuments, selectedDocumentId])
   useEffect(() => {
     if (!selectedRun || selectedRun.id.startsWith('pending-')) return
     let cancelled = false; let timer: ReturnType<typeof setTimeout> | undefined
@@ -185,7 +224,7 @@ export function RequirementAnalysisPageV2(props: Props) {
       try {
         const detail = await loadRequirementAnalysisRun(selectedRun.id)
         if (cancelled) return
-        setRuns(current => current.map(item => item.id === detail.id ? { ...item, ...detail } : item))
+        setRuns(current => replaceRunDetail(current, detail))
         if (detail.status === 'running') timer = setTimeout(() => void poll(), 1_000)
       } catch { if (!cancelled && selectedRun.status === 'running') timer = setTimeout(() => void poll(), 2_000) }
     }
@@ -230,7 +269,7 @@ export function RequirementAnalysisPageV2(props: Props) {
     setStarting(true)
     try {
       const started = await startRequirementAnalysis(projectVersion.id, { documentDirectoryPath: workspaceDirectoryPath, focusAreas: ['功能完整性', '业务闭环', '异常流程', '边界条件', '跨需求一致性', '可测试性'] })
-      setRuns(current => [started, ...current.filter(item => item.id !== started.id)]); setSelectedRunId(started.id); setView('overview')
+      setRuns(current => [started, ...current.filter(item => item.id !== started.id)]); setSelectedRunId(started.id); setView('conversation')
       addAudit(`启动 PlanningAgent 需求分析：${started.id}`); notify('需求分析已在当前 Planning Session 启动。')
     } catch (error) { notify(error instanceof Error ? error.message : '需求分析启动失败', 'error') } finally { setStarting(false) }
   }
@@ -242,7 +281,7 @@ export function RequirementAnalysisPageV2(props: Props) {
   const retryAnalysis = async () => {
     if (!selectedRun || selectedRun.status === 'running') return
     setStarting(true)
-    try { const started = await retryRequirementAnalysisRun(selectedRun.id); setRuns(current => [started, ...current.filter(item => item.id !== started.id)]); setSelectedRunId(started.id); setView('overview'); notify('已创建新的完整需求分析运行。') }
+    try { const started = await retryRequirementAnalysisRun(selectedRun.id); setRuns(current => [started, ...current.filter(item => item.id !== started.id)]); setSelectedRunId(started.id); setView('conversation'); notify('已创建新的完整需求分析运行。') }
     catch (error) { notify(error instanceof Error ? error.message : '重跑失败', 'error') } finally { setStarting(false) }
   }
   const exportReport = async () => {
@@ -287,7 +326,7 @@ export function RequirementAnalysisPageV2(props: Props) {
     const applied = await finalizeRequirementRepairDraft(selectedRun.id, draft.id)
     await refreshKnowledge()
     const [detail, actions] = await Promise.all([loadRequirementAnalysisRun(selectedRun.id), loadFindingActions(selectedRun.id)])
-    setRuns(current => current.map(item => item.id === detail.id ? { ...item, ...detail } : item))
+    setRuns(current => replaceRunDetail(current, detail))
     setFindingStates(current => ({ ...current, ...Object.fromEntries(actions.findings.map(item => [`${selectedRun.id}:${item.findingId}`, item.state])) }))
     setFindingVersions(current => ({ ...current, ...Object.fromEntries(actions.findings.map(item => [`${selectedRun.id}:${item.findingId}`, item.version])) }))
     addAudit(`采纳并应用 AI 修复方案 ${draft.id}：${finding.clientFindingId} → ${applied.application?.items.map(item => item.targetAssetVersionId).join('、')}`)
@@ -316,7 +355,7 @@ export function RequirementAnalysisPageV2(props: Props) {
       const verification = await verifyRequirementRepairDraft(selectedRun.id, draft.id)
       setRuns(current => [verification.verificationRun, ...current.map(item => item.id === selectedRun.id && item.workflow ? { ...item, workflow: { ...item.workflow, repairDrafts: item.workflow.repairDrafts?.map(candidate => candidate.id === draft.id ? verification.repairDraft : candidate) } } : item).filter(item => item.id !== verification.verificationRun.id)])
       setSelectedRunId(verification.verificationRun.id)
-      setView('overview')
+      setView('conversation')
       addAudit(`人工启动 AI 复验：${draft.id} → ${verification.verificationRun.id}`)
       notify('AI 复验已启动，将对新 AssetVersion 执行完整需求分析。')
     } catch (error) { notify(error instanceof Error ? error.message : 'AI 复验启动失败', 'error') } finally { setVerificationBusyDraftId('') }
@@ -368,34 +407,64 @@ export function RequirementAnalysisPageV2(props: Props) {
   const versionHistory = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
   const leftLines = (diffContents[diffVersionIds[0]] ?? '').split(/\r?\n/).filter(Boolean); const rightLines = (diffContents[diffVersionIds[1]] ?? '').split(/\r?\n/).filter(Boolean)
   const removedLines = leftLines.filter(line => !rightLines.includes(line)); const addedLines = rightLines.filter(line => !leftLines.includes(line))
+  const enabledSkills = agentConfiguration?.agents.planning.activeVersion?.agentDefinition.enabledSkills ?? []
+  const repairDrafts = selectedRun?.workflow?.repairDrafts ?? []
+  const failedRepair = repairDrafts.some(draft => draft.status === 'failed')
+  const activeRepair = repairDrafts.some(draft => ['generated', 'approved', 'applying', 'applied', 'verification_running'].includes(draft.status))
+  const verifiedRepairs = repairDrafts.filter(draft => draft.status === 'verified').length
+  const stages: Array<{ label: string; detail: string; state: RequirementStageState }> = [
+    { label: '资料输入', detail: analysisInputDocuments.length ? `${analysisInputDocuments.length} 份已就绪` : '待上传', state: analysisInputDocuments.length ? 'complete' : 'current' },
+    { label: '需求分析', detail: !selectedRun ? '未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : selectedRun.status === 'succeeded' ? '已完成' : selectedRun.status === 'failed' ? '执行失败' : '已取消', state: !selectedRun || selectedRun.status === 'cancelled' ? 'waiting' : selectedRun.status === 'running' ? 'current' : selectedRun.status === 'succeeded' ? 'complete' : 'blocked' },
+    { label: '问题处置', detail: !result ? '等待分析' : `${result.findings.length - pendingCount}/${result.findings.length} 已闭环`, state: !result ? 'waiting' : pendingCount ? 'current' : 'complete' },
+    { label: '修复与复验', detail: !result ? '未开始' : failedRepair ? '存在失败任务' : activeRepair ? '进行中' : repairDrafts.length ? `${verifiedRepairs}/${repairDrafts.length} 已验证` : pendingCount ? '等待问题处置' : '无需修复', state: !result || (!repairDrafts.length && pendingCount > 0) ? 'waiting' : failedRepair ? 'blocked' : activeRepair ? 'current' : 'complete' },
+    { label: 'Requirement Release', detail: release?.status === 'published' ? '已发布' : release?.status === 'candidate' ? '待人工发布' : result ? '待生成' : '未开始', state: release?.status === 'published' ? 'complete' : release?.status === 'candidate' ? 'current' : 'waiting' },
+  ]
+  const activityExecution = planningExecutionGroups(selectedRun).at(-1)?.execution
+  const activityEvents = activityExecution?.events ?? []
+  const latestActivity = activityEvents.at(-1)
 
   if (!projectVersion) return <section className="card rav2-gate"><GitBranch /><h1>新建项目版本后才能进行需求分析</h1><button className="btn primary" onClick={onManageVersions}>新建项目版本</button></section>
 
-  return <section className="card rav2-page">
-    <header className="rav2-header">
-      <div className="rav2-title"><span><Sparkles /></span><div><h1>需求分析 · {projectVersion.name}</h1><p>AI 分析 → 人工采纳问题 → AI 修复建议 → 人工采纳修复 → 新版本 → 人工启动复验 → AI 复验 → 人工发布。</p></div></div>
-      <div className="rav2-run-info"><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{runLabel(selectedRun)}</Badge><span><small>Run</small><b>{selectedRun?.id?.replace('analysis_run_', '').slice(0, 10) ?? '-'}</b></span><span><small>重点输入 / Workspace</small><b>{currentInputRefs.length || requirementDocuments.length} / {workspaceSnapshot?.files.length ?? '-'}</b></span></div>
-      <div className="rav2-actions"><select value={selectedRunId} onChange={event => setSelectedRunId(event.target.value)} disabled={loadingRuns}><option value="">{loadingRuns ? '加载中…' : '运行历史'}</option>{runs.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run)}</option>)}</select><button className="btn ghost" onClick={() => void refreshRuns()}><RefreshCw />刷新</button><button className="btn ghost" onClick={exportReport} disabled={!selectedRun?.response}><Download />分析报告</button>{selectedRun?.status === 'running' ? <button className="btn danger" onClick={cancelAnalysis}><XCircle />取消</button> : selectedRun && ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="btn primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />完整重跑</button> : <button className="btn primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : selectedRun ? '重新分析' : '开始分析'}</button>}</div>
-    </header>
-    <div className="rav2-layout">
+  return <section className="card rav2-page rav2-session-page">
+    <div className="rav2-planning-layout">
       <aside className="rav2-workspace">
-        <header><span><FolderOpen /><b>Project Workspace</b></span><Badge tone="blue">{workspaceSnapshot?.files.length ?? requirementDocuments.length}</Badge></header>
-        <div className="rav2-workspace-observability">
-          <div><span><small>本次重点输入</small><b>{currentInputRefs.length || requirementDocuments.length}</b></span><span><small>Workspace Snapshot</small><b>{workspaceSnapshot?.files.length ?? '—'}</b></span><span><small>AI 已读取</small><b>{observedReads.length}</b></span></div>
-          {observedReads.length > 0 && <details open><summary>实际读取文件</summary>{observedReads.map(read => <article key={read.toolCallId}><code>[{workspaceScopeLabel(read.sourceScope)}]</code><span>{read.relativePath}</span></article>)}</details>}
-        </div>
-        <div className="rav2-docs">{requirementDocuments.map(document => { const read = Boolean(document.assetVersionId && readVersions.has(document.assetVersionId)); const active = selectedDocument?.id === document.id; return <div className={`rav2-document-row ${active ? 'active' : ''}`} key={document.id}><button className="rav2-document-open" onClick={() => { setSelectedDocumentId(document.id); onOpenRequirementDocument?.(document) }}><span className={read ? 'read' : ''}>{read ? <CheckCircle2 /> : <Clock3 />}</span><div><b>{document.title}</b><small>{read ? 'Agent 已读取' : selectedRun ? 'Agent 未读取' : '本次重点输入'} · {document.version}</small><em>{document.logicalPath}</em></div></button>{onDeleteRequirementDocument && <button className="rav2-document-delete" aria-label={`删除需求文档 ${document.title || document.name}`} title="删除需求文档" disabled={!canDeleteRequirementDocument} onClick={() => onDeleteRequirementDocument(document)}><Trash2 /></button>}</div>})}</div>
+        <header><span><FolderOpen /><b>Project Workspace</b></span><Badge tone="blue">{workspaceSnapshot?.files.length ?? analysisInputDocuments.length}</Badge></header>
+        <div className="rav2-workspace-observability"><div><span><small>本次重点输入</small><b>{currentInputRefs.length || requirementDocuments.length}</b></span><span><small>Workspace Snapshot</small><b>{workspaceSnapshot?.files.length ?? '—'}</b></span><span><small>AI 已读取</small><b>{observedReads.length}</b></span></div>{observedReads.length > 0 && <details><summary>实际读取文件</summary>{observedReads.map(read => <article key={read.toolCallId}><code>[{workspaceScopeLabel(read.sourceScope)}]</code><span>{read.relativePath}</span></article>)}</details>}</div>
+        <div className="rav2-docs">{analysisInputDocuments.map(document => { const inputType = requirementAnalysisInputTypeForDocument(projectVersion.name, document.logicalPath ?? '', document.assetType)!; const read = Boolean(document.assetVersionId && readVersions.has(document.assetVersionId)); const active = selectedDocument?.id === document.id; const inputStatus = read ? 'Agent 已读取' : selectedRun ? 'Agent 未读取' : inputType.value === 'requirement' ? '本次重点输入' : '分析参考输入'; return <div className={`rav2-document-row ${active ? 'active' : ''}`} key={document.id}><button className="rav2-document-open" onClick={() => { setSelectedDocumentId(document.id); onOpenInputDocument?.(document) }}><span className={read ? 'read' : ''}>{read ? <CheckCircle2 /> : <Clock3 />}</span><div><b>{document.title}</b><small><i className={`rav2-document-kind ${inputType.value}`}>{inputType.label}</i> · {inputStatus} · {document.version}</small><em>{document.logicalPath}</em></div></button>{onDeleteInputDocument && <button className="rav2-document-delete" aria-label={`删除${inputType.label} ${document.title || document.name}`} title={`删除${inputType.label}`} disabled={!canDeleteInputDocument} onClick={() => onDeleteInputDocument(document)}><Trash2 /></button>}</div>})}</div>
         <footer><button className="rav2-workspace-action rav2-workspace-action-knowledge" onClick={onOpenKnowledge}><BookOpen /><span>知识库</span></button><button className="rav2-workspace-action rav2-workspace-action-versions" onClick={onManageVersions}><GitBranch /><span>版本管理</span></button><button className="rav2-workspace-action rav2-workspace-action-activity" onClick={onOpenActivity}><Clock3 /><span>操作记录</span></button></footer>
       </aside>
-      <main className="rav2-main"><nav className="rav2-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'findings' && result ? <i>{result.findings.length}</i> : null}</button>)}</nav>{selectedRun?.status === 'running' && <div className="rav2-running"><LoaderCircle className="rotating" /><span><b>PlanningAgent 正在分析并自检</b><small>同一 Planning Session 自主读取 Workspace、查询 Knowledge 并按需选择 Enabled Skills。</small></span></div>}<div className="rav2-content">
-        {view === 'overview' && <Overview result={result} blockerCount={blockerCount} highCount={highCount} pendingCount={pendingCount} onFindings={() => setView('findings')} onArtifacts={() => setView('artifacts')} />}
-        {view === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}
-        {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} documents={requirementDocuments} repairDrafts={selectedRun?.workflow?.repairDrafts ?? []} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}
-        {view === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} busy={releaseBusy} onGenerate={() => void generateRelease()} onPublish={() => void publishRelease()} />}
-        {view === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
-      </div></main>
-      <aside className="rav2-agent"><header><span><Bot /><b>Pi Agent</b></span><Badge tone={selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'succeeded' ? 'green' : 'gray'}>{selectedRun?.status === 'running' ? '运行中' : selectedRun?.status === 'succeeded' ? '已完成' : '待运行'}</Badge></header><AgentConversation run={selectedRun} onReviewed={detail => setRuns(current => current.map(item => item.id === detail.id ? { ...item, ...detail } : item))} notify={notify} /></aside>
+
+      <main className="rav2-session-panel">
+        <header className="rav2-session-header">
+          <div className="rav2-session-identity"><span><Sparkles /></span><div><b>PlanningAgent</b><small>{projectVersion.name} · 需求分析</small></div></div>
+          <div className="rav2-skill-chips"><em>已启用 Skills</em>{enabledSkills.length ? enabledSkills.slice(0, 3).map(skill => <span key={skill}>{skill}</span>) : <span className="empty">未发布配置</span>}{enabledSkills.length > 3 && <span>+{enabledSkills.length - 3}</span>}</div>
+          <div className="rav2-session-actions"><select aria-label="需求分析运行历史" value={selectedRunId} onChange={event => setSelectedRunId(event.target.value)} disabled={loadingRuns}><option value="">{loadingRuns ? '加载中…' : '运行历史'}</option>{runs.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run)}</option>)}</select><button aria-label="刷新运行" onClick={() => void refreshRuns()}><RefreshCw /></button><button aria-label="下载分析报告" onClick={exportReport} disabled={!selectedRun?.response}><Download /></button></div>
+        </header>
+        <nav className="rav2-session-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'findings' && result ? <i>{result.findings.length}</i> : null}</button>)}</nav>
+        <div className={`rav2-session-body ${view === 'conversation' ? 'conversation' : 'detail'}`}>
+          {view === 'conversation' && <AgentConversation run={selectedRun} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
+          {view === 'overview' && <Overview result={result} blockerCount={blockerCount} highCount={highCount} pendingCount={pendingCount} onFindings={() => setView('findings')} onArtifacts={() => setView('artifacts')} />}
+          {view === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}
+          {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} documents={requirementDocuments} repairDrafts={repairDrafts} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}
+          {view === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} busy={releaseBusy} onGenerate={() => void generateRelease()} onPublish={() => void publishRelease()} />}
+          {view === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
+        </div>
+        {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>受控 Planning Session</b><small>运行轨迹只读；问题处置、修复、复验与发布通过结构化门禁操作，不伪造自由对话能力。</small></span></footer>}
+      </main>
+
+      <aside className="rav2-status-panel">
+        <header><span><b>当前任务 / 正式产物</b><small>{selectedRun?.id ? `Run ${selectedRun.id.replace('analysis_run_', '').slice(0, 10)}` : '尚未创建 Run'}</small></span><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{runLabel(selectedRun)}</Badge></header>
+        <div className="rav2-status-scroll">
+          <section className="rav2-status-card"><header><i>①</i><b>当前业务阶段</b></header><div className="rav2-stage-list">{stages.map(stage => <article className={stage.state} key={stage.label}><span /><b>{stage.label}</b><small>{stage.detail}</small></article>)}</div></section>
+          <section className="rav2-status-card"><header><i>②</i><b>正式产物</b></header><div className="rav2-formal-list"><button onClick={() => setView('artifacts')} disabled={!result}><span><b>Requirement Release</b><small>{release?.status === 'published' ? '已发布' : release?.status === 'candidate' ? '待人工发布' : '未生成'}</small></span><em className={release?.status ?? 'empty'}>{release?.status === 'published' ? '正式' : release?.status === 'candidate' ? '候选' : '—'}</em></button><button onClick={onOpenTestDesign} disabled={!onOpenTestDesign || release?.status !== 'published'}><span><b>Test Cases</b><small>{release?.status === 'published' ? '前往测试设计查看' : '等待 Requirement Release'}</small></span><em>{release?.status === 'published' ? '可进入' : '—'}</em></button><button onClick={onOpenTestDesign} disabled={!onOpenTestDesign || release?.status !== 'published'}><span><b>Execution Handoff</b><small>由正式测试设计发布后生成</small></span><em>—</em></button></div></section>
+          <section className="rav2-status-card"><header><i>③</i><b>Agent Activity</b></header><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></section>
+        </div>
+        <footer className="rav2-status-action">
+          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始需求分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />完整重跑</button> : release?.status === 'candidate' ? <button className="primary" onClick={() => void publishRelease()} disabled={releaseBusy}><ShieldCheck />{releaseBusy ? '发布中…' : '确认并发布 Requirement Release'}</button> : release?.status === 'published' ? <button className="primary" onClick={onOpenTestDesign} disabled={!onOpenTestDesign}><Play />进入测试设计</button> : pendingCount > 0 ? <button className="primary" onClick={() => setView('findings')}><AlertTriangle />处理 {pendingCount} 个待闭环问题</button> : <button className="primary" onClick={() => void generateRelease()} disabled={releaseBusy}><FileText />{releaseBusy ? '生成中…' : '生成 Requirement Release 候选'}</button>}
+        </footer>
+      </aside>
     </div>
+
     {sourceEvidence && <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setSourceEvidence(null) }}><section className="rav2-source-modal"><header><span><ShieldCheck /><b>固定原文证据</b></span><button onClick={() => setSourceEvidence(null)}><XCircle /></button></header><div className="rav2-evidence"><b>{sourceEvidence.clientEvidenceId} · {sourceEvidence.locator.heading}</b><p>“{sourceEvidence.quote}”</p></div><div className="rav2-source-body">{sourceLoading ? <LoaderCircle className="rotating" /> : <MarkdownDocument source={sourceContent} format="markdown" />}</div></section></div>}
     {fixFinding && <FixModal finding={fixFinding} draft={fixDraft} busy={fixBusy} assets={fixedAssets(selectedRun!)} onClose={() => { if (!fixBusy) { setFixFinding(null); setFixDraft(null) } }} onRegenerate={() => void draftFindingFix(fixFinding)} onApprove={() => void approveRepair()} />}
   </section>
@@ -499,13 +568,13 @@ function FixModal({ finding, draft, busy, assets, onClose, onRegenerate, onAppro
 function AgentConversation({ run, onReviewed, notify }: { run?: RunRecord; onReviewed: (run: RequirementAnalysisRun) => void; notify: Notify }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [reviewing, setReviewing] = useState(false)
-  const executions = [run?.response?.executions?.planning, run?.executions?.planning, run?.execution?.agentKey === 'planning' ? run.execution : undefined].filter((item): item is AgentExecutionRecord => Boolean(item))
-  const execution = executions.sort((left, right) => left.events.length - right.events.length).at(-1)
-  const events = execution?.events ?? []
-  const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
-  const completedCalls = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
-  const visibleEvents = events.filter(event => event.type !== 'tool_execution_start' || !completedCalls.has(event.toolCallId))
-  useEffect(() => { const root = scrollRef.current; if (root) root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' }) }, [events.length])
+  const executionGroups = planningExecutionGroups(run)
+  const latestExecution = executionGroups.at(-1)?.execution
+  const eventCount = executionGroups.reduce((total, group) => total + group.execution.events.length, 0)
+  const turnCount = executionGroups.reduce((total, group) => total + group.execution.turns, 0)
+  const toolCallCount = executionGroups.reduce((total, group) => total + group.execution.toolCalls, 0)
+  const toolErrorCount = executionGroups.reduce((total, group) => total + (group.execution.toolErrors ?? 0), 0)
+  useEffect(() => { const root = scrollRef.current; if (root) root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' }) }, [eventCount])
   const review = async () => {
     if (!run || reviewing) return
     setReviewing(true)
@@ -520,13 +589,17 @@ function AgentConversation({ run, onReviewed, notify }: { run?: RunRecord; onRev
   return <div className="rav2-conversation">
     <div className="rav2-conversation-scroll" ref={scrollRef}>
       {!run ? <div className="rav2-agent-empty"><span className="rav2-agent-empty-icon"><Bot /></span><div><b>等待启动 Pi Agent</b><p>开始需求分析后，这里会同步展示任务输入、Agent 消息、工具调用与运行状态。</p></div><ul className="rav2-agent-empty-preview"><li><FileText />任务输入与分析进度</li><li><Wrench />工具调用与执行结果</li><li><Sparkles />关键状态与最终产物</li></ul></div> : <>
-        <article className="rav2-agent-task"><span><Bot /></span><div><b>PlanningAgent</b><p>当前重点输入：{run.snapshot?.currentInputRefs.length ?? run.assetVersionIds.length} 个；完整 Workspace Snapshot：{run.snapshot?.workspaceSnapshot.files.length ?? '—'} 个文件</p><small>{run.id}</small></div></article>
-        <div className="rav2-agent-metrics"><span>{execution?.turns ?? 0} Turn</span><span>{execution?.toolCalls ?? 0} 次工具</span><span>{events.length} 条事件</span>{execution?.toolErrors ? <span className="failed">{execution.toolErrors} 次异常</span> : null}</div>
-        <PlanningContextMetrics context={execution?.context} />
-        <button className="planning-reviewer-button" disabled={reviewing || run.status === 'running'} onClick={() => void review()}><ShieldCheck />{reviewing ? 'RequirementReviewer 审阅中…' : '运行只读 RequirementReviewer'}</button>
-        <PlanningSubAgentRuns runs={run.planningSubAgentRuns} />
-        {visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={event.sequence} />)}
-        {!events.length && <div className="rav2-agent-waiting"><LoaderCircle className={run.status === 'running' ? 'rotating' : ''} /><span><b>{run.status === 'running' ? '等待首个 Agent 事件' : '没有可展示的运行记录'}</b><small>{run.status === 'running' ? '消息和工具调用写入服务端后会自动同步。' : '旧运行可能只保留了结果摘要。'}</small></span></div>}
+        <article className="rav2-agent-task"><span><FileText /></span><div><b>需求分析任务</b><p>已提交 {run.snapshot?.currentInputRefs.length ?? run.assetVersionIds.length} 个重点输入，Workspace Snapshot 固定 {run.snapshot?.workspaceSnapshot.files.length ?? '—'} 个文件。</p><small>{run.id}</small></div></article>
+        <div className="rav2-agent-metrics"><span>{turnCount} Turn</span><span>{toolCallCount} 次工具</span><span>{eventCount} 条事件</span>{toolErrorCount ? <span className="failed">{toolErrorCount} 次异常</span> : null}</div>
+        <details className="rav2-runtime-details"><summary><ShieldCheck />运行上下文与只读 Reviewer</summary><PlanningContextMetrics context={latestExecution?.context} /><button className="planning-reviewer-button" disabled={reviewing || run.status === 'running'} onClick={() => void review()}><ShieldCheck />{reviewing ? 'RequirementReviewer 审阅中…' : '运行只读 RequirementReviewer'}</button><PlanningSubAgentRuns runs={run.planningSubAgentRuns} /></details>
+        {executionGroups.map(group => {
+          const events = group.execution.events
+          const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
+          const completedCalls = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
+          const visibleEvents = events.filter(event => event.type !== 'tool_execution_start' || !completedCalls.has(event.toolCallId))
+          return <div key={group.id} className="rav2-execution-attempt"><article className={`rav2-run-control ${group.status === 'failed' || group.status === 'cancelled' ? 'failed' : ''}`}><Activity /><span><b>{group.label}</b><small>{group.status === 'running' ? '执行中' : group.status === 'succeeded' ? '已完成' : group.status === 'failed' ? '失败，已保留运行记录' : group.status === 'cancelled' ? '已取消，已保留运行记录' : '已保存运行记录'} · {events.length} 条事件</small></span></article>{visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={`${group.id}:${event.sequence}`} />)}</div>
+        })}
+        {!eventCount && <div className="rav2-agent-waiting"><LoaderCircle className={run.status === 'running' ? 'rotating' : ''} /><span><b>{run.status === 'running' ? '等待首个 Agent 事件' : '没有可展示的运行记录'}</b><small>{run.status === 'running' ? '消息和工具调用写入服务端后会自动同步。' : '旧运行可能只保留了结果摘要。'}</small></span></div>}
       </>}
     </div>
   </div>
