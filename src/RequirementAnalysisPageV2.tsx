@@ -111,6 +111,10 @@ const agentEventLabels: Record<string, string> = {
 }
 function eventTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
 function formatTraceValue(value: unknown) { if (value === undefined) return ''; try { return JSON.stringify(value, null, 2) } catch { return String(value) } }
+function skillReadSummary(event: AgentExecutionEvent) {
+  if (!event.skillKey) return ''
+  return ` · ${event.type === 'skill_read_replayed' ? '本轮缓存' : 'Skill'}：${event.skillKey}${event.version ? ` · v${event.version}` : ''}`
+}
 function evidenceForFinding(finding: AnalysisFinding, result?: RequirementAnalysisResponse['result']) {
   if (!result) return [] as AnalysisEvidence[]
   const points = new Map(result.requirementPoints.map(item => [item.clientRequirementPointId, item]))
@@ -719,5 +723,5 @@ function AgentRunEvent({ event, start }: { event: AgentExecutionEvent; start?: A
     const tool = event.toolId ?? start?.toolId ?? '未知工具'; const completed = event.type === 'tool_execution_end'
     return <article className={`rav2-run-tool ${event.isError ? 'failed' : ''}`}><header><span><Wrench /><b>{tool}</b></span><Badge tone={!completed ? 'orange' : event.isError ? 'red' : 'green'}>{!completed ? '执行中' : event.isError ? '失败' : '完成'}</Badge></header><small>#{start?.sequence ? `${start.sequence} → ` : ''}{event.sequence} · Turn {event.turn ?? start?.turn ?? 0} · {eventTime(event.occurredAt)}</small><details><summary>调用参数</summary><pre>{formatTraceValue(start?.toolArguments ?? event.toolArguments) || '该记录未保存参数'}</pre></details>{completed && <details><summary>工具返回</summary><pre>{formatTraceValue(event.toolResult) || '该记录未保存返回内容'}</pre></details>}<footer>{event.toolCallId ?? '无 Tool Call ID'}</footer></article>
   }
-  return <article className={`rav2-run-control ${event.isError ? 'failed' : ''}`}><Sparkles /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}{event.stopReason ? ` · ${event.stopReason}` : ''}</small></span></article>
+  return <article className={`rav2-run-control ${event.isError ? 'failed' : ''}`}><Sparkles /><span><b>{agentEventLabels[event.type] ?? event.type}</b><small>#{event.sequence} · Turn {event.turn ?? 0} · {eventTime(event.occurredAt)}{skillReadSummary(event)}{event.stopReason ? ` · ${event.stopReason}` : ''}</small></span></article>
 }

@@ -6,7 +6,7 @@ import {
   type PlanningReviewerType,
   type TestDesignReviewerSourceSelection,
 } from '../planning-api'
-import type { TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './types'
+import type { AgentEvent, TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './types'
 
 const flow = [
   { key: 'test_point_design', label: '测试点设计', owner: 'PlanningAgent' },
@@ -87,7 +87,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
       <PlanningSubAgentRuns runs={run.planningSubAgentRuns} />
       {run.error && <div className="td2-error"><b>{run.errorCode ?? '运行失败'}</b><span>{run.error}</span></div>}
     </div>
-    <aside className="td2-card td2-trace"><header><div><Activity /><span><b>Pi Agent 实时轨迹</b><small>{executions.length} 次 Stage 执行 · {events.length} 条最近事件</small></span></div></header><div className="td2-trace-list">{events.length ? events.map(event => <article key={`${event.stage}-${event.sequence}-${event.toolCallId ?? ''}`} className={event.isError ? 'error' : ''}><i>{event.toolId ? <Wrench /> : event.type.includes('model') ? <Bot /> : <Circle />}</i><div><b>{event.toolId ?? event.type}</b><small>{stageLabel(event.stage)} · Turn {event.turn ?? '—'} · {formatTime(event.occurredAt)}</small>{event.content && <p>{truncate(event.content, 220)}</p>}</div></article>) : <div className="td2-empty-compact"><Clock3 /><span>等待 PlanningAgent 运行事件</span></div>}</div></aside>
+    <aside className="td2-card td2-trace"><header><div><Activity /><span><b>Pi Agent 实时轨迹</b><small>{executions.length} 次 Stage 执行 · {events.length} 条最近事件</small></span></div></header><div className="td2-trace-list">{events.length ? events.map(event => <article key={`${event.stage}-${event.sequence}-${event.toolCallId ?? ''}`} className={event.isError ? 'error' : ''}><i>{event.toolId ? <Wrench /> : event.type.includes('model') ? <Bot /> : <Circle />}</i><div><b>{skillReadLabel(event) ?? event.toolId ?? event.type}</b><small>{stageLabel(event.stage)} · Turn {event.turn ?? '—'} · {formatTime(event.occurredAt)}</small>{event.content && !event.skillKey && <p>{truncate(event.content, 220)}</p>}</div></article>) : <div className="td2-empty-compact"><Clock3 /><span>等待 PlanningAgent 运行事件</span></div>}</div></aside>
   </section>
 }
 
@@ -98,5 +98,9 @@ function FlowStep({ node, label, owner }: { node?: TestDesignNodeRun; label: str
 
 function Snapshot({ icon, title, primary, secondary, hash }: { icon: React.ReactNode; title: string; primary: string; secondary: string; hash: string }) { return <article><i>{icon}</i><div><small>{title}</small><b>{primary}</b><span>{secondary}</span><code>{hash}</code></div></article> }
 function stageLabel(value: string) { return flow.find(item => item.key === value)?.label ?? value }
+function skillReadLabel(event: AgentEvent) {
+  if (!event.skillKey) return undefined
+  return `${event.type === 'skill_read_replayed' ? 'Skill 缓存重放' : 'Skill 已读取'}：${event.skillKey}${event.version ? ` · v${event.version}` : ''}`
+}
 function formatTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }
 function truncate(value: string, length: number) { return value.length > length ? `${value.slice(0, length)}…` : value }

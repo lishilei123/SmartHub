@@ -32,6 +32,8 @@ test('运行面板展示冻结 Release、Workspace、Agent 配置与实时轨迹
   assert.match(source, /Workspace Snapshot/u)
   assert.match(source, /Agent 配置快照/u)
   assert.match(source, /Pi Agent 实时轨迹/u)
+  assert.match(source, /Skill 已读取/u)
+  assert.match(source, /skillKey/u)
   assert.match(source, /Coverage 检查/u)
 })
 
