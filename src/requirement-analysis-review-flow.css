@@ -22,6 +22,131 @@
   border-color: #7982e8;
 }
 
+.rav2-clarification-batch-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid #d9def8;
+  border-radius: 9px;
+  color: #5361d3;
+  background: #f7f8ff;
+}
+
+.rav2-clarification-batch-note svg { flex: 0 0 auto; width: 16px; }
+.rav2-clarification-batch-note b,
+.rav2-clarification-batch-note small { display: block; }
+.rav2-clarification-batch-note b { font-size: 9px; }
+.rav2-clarification-batch-note small { margin-top: 3px; color: #7782a8; font-size: 8px; line-height: 1.55; }
+
+.rav2-clarification-answer-hint {
+  display: block;
+  margin: 0 12px 10px;
+  color: #8a94a4;
+  font-size: 8px;
+}
+
+.rav2-clarification-disposition {
+  display: grid;
+  gap: 7px;
+  margin: 0 12px 10px;
+  padding: 10px;
+  border: 1px solid #e2e5ec;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.rav2-clarification-disposition > b { color: #596579; font-size: 8px; }
+.rav2-clarification-disposition > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.rav2-clarification-disposition button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #d9dee7;
+  border-radius: 7px;
+  padding: 0 10px;
+  color: #687486;
+  background: #fff;
+  font-size: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.rav2-clarification-disposition button svg { width: 13px; }
+.rav2-clarification-disposition button.answer.active { border-color: #9ed5c1; color: #23775e; background: #effaf5; box-shadow: 0 0 0 2px rgba(35, 119, 94, 0.08); }
+.rav2-clarification-disposition button.dismiss.active { border-color: #cbd2de; color: #566274; background: #f1f3f6; box-shadow: 0 0 0 2px rgba(86, 98, 116, 0.08); }
+.rav2-clarification-disposition button:disabled { cursor: not-allowed; opacity: 0.6; }
+.rav2-clarification-disposition > small { color: #7d8797; font-size: 8px; line-height: 1.55; }
+
+.rav2-finding > textarea:disabled {
+  cursor: not-allowed;
+  color: #9aa3b1;
+  background: #f3f5f7;
+}
+
+.rav2-clarification-batch-action {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #d8def8;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 -5px 16px rgba(54, 65, 116, 0.06);
+  color: #7b8696;
+  font-size: 8px;
+}
+
+.rav2-clarification-batch-action button.accept {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #5965e9;
+  border-radius: 7px;
+  padding: 0 10px;
+  color: #fff;
+  background: #5965e9;
+  font-size: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rav2-clarification-batch-action button:disabled { cursor: not-allowed; opacity: 0.6; }
+.rav2-clarification-batch-action button svg { width: 13px; }
+
+.rav2-human-clarification {
+  border-color: #cfd5fb;
+  background: linear-gradient(135deg, #f6f7ff, #fbfcff);
+}
+
+.rav2-human-clarification > div {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.rav2-human-clarification > div > section {
+  padding: 8px;
+  border: 1px solid #e0e4fb;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.rav2-human-clarification section > small,
+.rav2-human-clarification section > b,
+.rav2-human-clarification section > em { display: block; }
+.rav2-human-clarification section > small { color: #8992aa; font-size: 7px; }
+.rav2-human-clarification section > b { margin-top: 4px; color: #48536c; font-size: 8px; line-height: 1.55; }
+.rav2-human-clarification section > p { margin-top: 5px; color: #39465b; }
+.rav2-human-clarification section > em { margin-top: 5px; color: #5965d5; font-size: 7px; font-style: normal; }
+
 .rav2-filter-count {
   margin-left: auto;
   color: #8c95a3;
@@ -148,6 +273,16 @@
 }
 
 @media (max-width: 700px) {
+  .rav2-clarification-disposition > div { align-items: stretch; flex-direction: column; }
+  .rav2-clarification-disposition button { justify-content: center; }
+
+  .rav2-clarification-batch-action {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rav2-clarification-batch-action button.accept { justify-content: center; }
+
   .rav2-finding > footer {
     align-items: flex-start;
     flex-direction: column;

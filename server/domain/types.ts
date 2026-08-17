@@ -327,8 +327,6 @@ export interface ReviewRun {
   reviewId?: string
   retryOfRunId?: string
   retryMode?: 'full'
-  continuedFromRunId?: string
-  continuedByRunId?: string
   projectVersionId: string
   assetId: string
   assetVersionId: string

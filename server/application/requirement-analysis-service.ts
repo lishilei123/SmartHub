@@ -35,7 +35,6 @@ export interface RequirementAnalysisRequest {
   retryMode?: 'full'
   workflowStage?: 'analysis' | 'verification'
   verificationOf?: { sourceRunId: string; repairDraftId: string }
-  continuedFromRunId?: string
   formalClarifications?: PlanningClarification[]
 }
 
@@ -80,10 +79,10 @@ export class RequirementAnalysisService {
     required(projectVersion, '项目版本不存在')
     if (this.store.listReviewRuns) {
       const page = await this.store.listReviewRuns(projectVersionId, { limit, cursor: options.cursor, runningOnly: options.runningOnly })
-      return { items: page.items.map(presentRunSummary), nextCursor: page.nextCursor }
+      return { items: page.items.filter(run => !isLegacyClarificationContinuation(run)).map(presentRunSummary), nextCursor: page.nextCursor }
     }
     const runs = (await this.store.snapshot()).reviewRuns
-      .filter(item => item.projectVersionId === projectVersionId && (!options.runningOnly || item.status === 'running'))
+      .filter(item => item.projectVersionId === projectVersionId && !isLegacyClarificationContinuation(item) && (!options.runningOnly || item.status === 'running'))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
     const offset = decodeCursor(options.cursor, runs)
     const items = runs.slice(offset, offset + limit)
@@ -96,9 +95,7 @@ export class RequirementAnalysisService {
     return presentRun(required(run, '需求分析运行不存在'))
   }
 
-  async actOnClarification(runId: string, clarificationId: string, input: { action: 'answer' | 'dismiss'; answer: string; principal?: Principal }) {
-    const answer = String(input.answer ?? '').trim()
-    if (!answer) throw new Error(input.action === 'dismiss' ? '忽略 Clarification 必须说明理由' : 'Clarification Answer 不能为空')
+  async actOnClarifications(runId: string, input: { items: Array<{ clarificationId: string; action: 'answer' | 'dismiss'; answer: string }>; principal?: Principal }) {
     const answeredAt = new Date().toISOString()
     const answeredBy = principalId(input.principal)
     const updated = await this.store.transaction(state => {
@@ -106,57 +103,57 @@ export class RequirementAnalysisService {
       requireOpenProjectVersion(state, run.projectVersionId)
       if (!run.result || !run.execution) throw new Error('Clarification 只能处理已完成一轮分析的正式候选')
       if (run.workflow?.understandingSnapshot || run.workflow?.release?.status === 'published') throw new Error('REQUIREMENT_UNDERSTANDING_ALREADY_FROZEN: 当前需求理解已冻结，不能回写 Clarification')
-      const clarification = required(run.result.clarifications.find(item => item.id === clarificationId), 'Clarification 不属于本次运行')
-      if (clarification.status !== 'pending') throw new Error('CLARIFICATION_ALREADY_DISPOSED: 该问题已经处理')
-      clarification.status = input.action === 'answer' ? 'answered' : 'dismissed'
-      clarification.answer = answer.slice(0, 20_000)
-      clarification.answeredAt = answeredAt
-      clarification.answeredBy = answeredBy
+      const pendingBlocking = run.result.clarifications.filter(item => item.blocking && item.status === 'pending')
+      if (!pendingBlocking.length) {
+        if (input.items.length || run.status !== 'waiting_clarification' || run.step !== 'continuing_after_clarification') throw new Error('CLARIFICATION_BATCH_NOT_REQUIRED: 当前没有待回答的阻断问题')
+        return { clarifications: [] as PlanningClarification[], projectId: run.snapshot.projectId, projectVersionId: run.projectVersionId }
+      }
+      const submitted = new Map<string, { action: 'answer' | 'dismiss'; answer: string }>()
+      for (const item of input.items) {
+        const clarificationId = String(item?.clarificationId ?? '')
+        const action = item?.action
+        const answer = String(item?.answer ?? '').trim()
+        if (!clarificationId || submitted.has(clarificationId)) throw new Error('CLARIFICATION_BATCH_INVALID: 问题 ID 为空或重复')
+        if (action !== 'answer' && action !== 'dismiss') throw new Error('CLARIFICATION_BATCH_INVALID: 处置动作不合法')
+        if (!answer) throw new Error(action === 'dismiss' ? 'CLARIFICATION_BATCH_INVALID: 忽略问题必须说明理由' : 'CLARIFICATION_BATCH_INVALID: 每个阻断问题都必须填写明确业务事实')
+        submitted.set(clarificationId, { action, answer })
+      }
+      if (submitted.size !== pendingBlocking.length || pendingBlocking.some(item => !submitted.has(item.id))) throw new Error('CLARIFICATION_BATCH_INCOMPLETE: 必须一次性回答当前全部阻断问题')
+      const resolved = pendingBlocking.map(clarification => {
+        const item = required(submitted.get(clarification.id), 'Clarification 回答不存在')
+        clarification.status = item.action === 'answer' ? 'answered' : 'dismissed'
+        clarification.answer = item.answer.slice(0, 20_000)
+        clarification.answeredAt = answeredAt
+        clarification.answeredBy = answeredBy
+        return structuredClone(clarification)
+      })
       refreshAnalysisArtifacts(run.result)
-      run.snapshot.formalClarifications = structuredClone(run.result.clarifications)
+      run.snapshot.formalClarifications = mergeFormalClarifications(run.snapshot.formalClarifications, run.result.clarifications)
       run.workflow ??= { currentStage: 'clarification' }
       run.workflow.currentStage = 'clarification'
-      const pendingBlocking = run.result.clarifications.filter(item => item.blocking && item.status === 'pending')
       run.status = 'waiting_clarification'
-      run.step = pendingBlocking.length ? 'waiting_clarification' : 'continuing_after_clarification'
-      run.progress = pendingBlocking.length ? 55 : 60
+      run.step = 'continuing_after_clarification'
+      run.progress = 60
       return {
-        clarification: structuredClone(clarification),
-        pendingBlocking: pendingBlocking.length,
+        clarifications: resolved,
         projectId: run.snapshot.projectId,
         projectVersionId: run.projectVersionId,
-        documentDirectoryPath: required(run.snapshot.documentWorkspace?.logicalPath, '固定需求工作目录不存在'),
-        focusAreas: [...run.snapshot.focusAreas],
-        excludedAreas: [...run.snapshot.excludedAreas],
-        formalClarifications: structuredClone(run.result.clarifications),
       }
     })
-    await this.runtime.appendPlanningClarification?.({
-      projectId: updated.projectId,
-      projectVersionId: updated.projectVersionId,
-      runId,
-      clarificationId,
-      question: updated.clarification.question,
-      answer: updated.clarification.answer!,
-      status: updated.clarification.status as 'answered' | 'dismissed',
-      answeredAt,
-      answeredBy,
-    })
-    if (updated.pendingBlocking) return { clarification: updated.clarification, sourceRun: await this.get(runId) }
-    const continuation = await this.start({
-      projectVersionId: updated.projectVersionId,
-      documentDirectoryPath: updated.documentDirectoryPath,
-      focusAreas: updated.focusAreas,
-      excludedAreas: updated.excludedAreas,
-      continuedFromRunId: runId,
-      formalClarifications: updated.formalClarifications,
-    })
-    const continuationRunId = 'id' in continuation ? continuation.id : continuation.runId
-    await this.store.transaction(state => {
-      const source = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-      source.continuedByRunId = continuationRunId
-    })
-    return { clarification: updated.clarification, sourceRun: await this.get(runId), continuationRun: continuation }
+    for (const clarification of updated.clarifications) {
+      await this.runtime.appendPlanningClarification?.({
+        projectId: updated.projectId,
+        projectVersionId: updated.projectVersionId,
+        runId,
+        clarificationId: clarification.id,
+        question: clarification.question,
+        answer: clarification.answer!,
+        status: clarification.status as 'answered' | 'dismissed',
+        answeredAt,
+        answeredBy,
+      })
+    }
+    return { clarifications: updated.clarifications, run: await this.resumeAfterClarifications(runId) }
   }
 
   async freezeUnderstanding(runId: string) {
@@ -175,7 +172,7 @@ export class RequirementAnalysisService {
         item.answeredBy = 'system:requirement-understanding-freezer'
       }
       refreshAnalysisArtifacts(result)
-      run.snapshot.formalClarifications = structuredClone(result.clarifications)
+      run.snapshot.formalClarifications = mergeFormalClarifications(run.snapshot.formalClarifications, result.clarifications)
       run.workflow ??= { currentStage: 'understanding' }
       if (run.workflow.understandingSnapshot && run.workflow.release?.status === 'published') return { snapshot: structuredClone(run.workflow.understandingSnapshot), release: structuredClone(run.workflow.release) }
       assertRequirementInputsStable(state, run)
@@ -268,6 +265,7 @@ export class RequirementAnalysisService {
       retryMode: 'full',
       workflowStage: sourceRun.workflow?.currentStage === 'verification' ? 'verification' : 'analysis',
       verificationOf: sourceRun.workflow?.verificationOf,
+      formalClarifications: structuredClone(sourceRun.snapshot.formalClarifications ?? []),
     })
   }
 
@@ -532,10 +530,6 @@ export class RequirementAnalysisService {
     const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求分析')
     const project = required(state.projects.find(item => item.id === projectVersion.projectId), '项目不存在')
-    if (request.continuedFromRunId) {
-      const source = required(state.reviewRuns.find(item => item.id === request.continuedFromRunId && item.projectVersionId === projectVersion.id), 'Clarification 来源运行不存在')
-      if (source.status !== 'waiting_clarification' || source.result?.clarifications.some(item => item.blocking && item.status === 'pending')) throw new Error('CLARIFICATION_CONTINUATION_NOT_READY: 仍有阻断问题未处理')
-    }
     const knowledgeBase = required(state.knowledgeBases.find(item => item.projectId === project.id), '知识库不存在')
     const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), '知识库没有活动索引')
     if (request.documentDirectoryPath === undefined) throw new Error('PI_WORKSPACE_DIRECTORY_REQUIRED: 需求分析必须指定 /workspace 下的输入目录')
@@ -605,6 +599,7 @@ export class RequirementAnalysisService {
       assets: inputPairs.map(({ asset, version }) => ({ assetId: asset.id, assetVersionId: version.id, assetContentHash: version.contentHash, logicalPath: asset.logicalPath, displayName: asset.displayName, assetType: asset.assetType })),
       currentInputRefs,
       workspaceSnapshot,
+      formalClarifications: structuredClone(request.formalClarifications ?? []),
       documentWorkspace: { ...documentWorkspace, candidateAssetVersionIds: inputPairs.map(item => item.version.id) },
       modelRef: modelSnapshot(model, effectiveContextWindow, effectiveMaxOutputTokens),
       ...(analysisConfiguration ? { agentConfigurationRef: configurationRef(analysisConfiguration) } : {}),
@@ -620,7 +615,6 @@ export class RequirementAnalysisService {
       id: snapshot.runId,
       reviewId: analysisId,
       ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId, retryMode: 'full' as const } : {}),
-      ...(request.continuedFromRunId ? { continuedFromRunId: request.continuedFromRunId } : {}),
       projectVersionId: projectVersion.id,
       assetId: inputPairs[0].asset.id,
       assetVersionId: inputPairs[0].version.id,
@@ -652,6 +646,50 @@ export class RequirementAnalysisService {
     const configurationRef = run.snapshot.agentConfigurationRef
     const configuration = configurationRef ? required(state.agentConfigurationVersions.find(item => item.id === configurationRef.id), 'PlanningAgent 固定配置版本不存在') : null
     const models = selectAgentModels(state, configuration, { sourceId: run.snapshot.modelRef.sourceId, modelId: run.snapshot.modelRef.modelId }, 'PlanningAgent')
+    const plan = this.buildFixedRequirementInputPlan(state, run)
+    if (plan.packageSha256 !== run.snapshot.analysisInput.packageSha256) throw new Error('固定正文输入包 Hash 已漂移')
+    await this.reviewTransaction(run.id, lease, draft => {
+      const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在')
+      current.step = 'analyzing_requirements'
+      current.progress = 10
+    })
+    return this.executeAnalysis({ run, snapshot: run.snapshot, requirementInputPlan: plan, models, configuration, signal, lease, retryable: infrastructureAttempt < maxInfrastructureAttempts })
+  }
+
+  private async resumeAfterClarifications(runId: string) {
+    const prepared = await this.store.transaction(state => {
+      const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
+      requireOpenProjectVersion(state, run.projectVersionId)
+      if (run.status !== 'waiting_clarification' || run.result?.clarifications.some(item => item.blocking && item.status === 'pending')) throw new Error('CLARIFICATION_CONTINUATION_NOT_READY: 仍有阻断问题未处理')
+      const plan = this.buildFixedRequirementInputPlan(state, run)
+      run.snapshot.analysisInput = inputSnapshot(plan)
+      run.workflow ??= { currentStage: 'analysis' }
+      run.workflow.currentStage = 'analysis'
+      Object.assign(run, {
+        status: 'running',
+        step: this.store.enqueueReviewJob ? 'waiting_worker' : 'analyzing_requirements',
+        progress: 60,
+        finishedAt: undefined,
+        error: undefined,
+        inputDeliveryManifest: undefined,
+      } satisfies Partial<ReviewRun>)
+      const lastAttempt = Math.max(0, ...(run.executionAttempts ?? []).map(item => item.attempt))
+      return { projectVersionId: run.projectVersionId, nextAttempt: lastAttempt + 1 }
+    })
+    if (this.store.enqueueReviewJob) {
+      const timestamp = new Date().toISOString()
+      await this.store.enqueueReviewJob({ id: `analysis_job_${randomUUID()}`, runId, projectVersionId: prepared.projectVersionId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: timestamp, createdAt: timestamp, updatedAt: timestamp })
+      return this.get(runId)
+    }
+    const controller = new AbortController()
+    this.activeRuns.set(runId, controller)
+    void this.processPreparedRun(runId, undefined, controller.signal, prepared.nextAttempt, prepared.nextAttempt + 2)
+      .catch(error => this.failPreparedRun(runId, undefined, error))
+      .finally(() => { if (this.activeRuns.get(runId) === controller) this.activeRuns.delete(runId) })
+    return this.get(runId)
+  }
+
+  private buildFixedRequirementInputPlan(state: DatabaseState, run: ReviewRun) {
     const fixedPairs = run.snapshot.assets.map(item => {
       const version = required(state.versions.find(candidate => candidate.id === item.assetVersionId && candidate.status === 'ready'), '固定需求资产版本不可用')
       if (version.contentHash !== item.assetContentHash) throw new Error('固定需求资产内容 Hash 已漂移')
@@ -660,7 +698,7 @@ export class RequirementAnalysisService {
     })
     requirePiWorkspaceAgentDefinition(run.snapshot.agentDefinition)
     if (run.snapshot.analysisInput?.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_SNAPSHOT_REQUIRED: 需求分析输入必须是 agent_directory')
-    const plan = buildRequirementDirectoryInputPlan({
+    return buildRequirementDirectoryInputPlan({
       workspacePath: required(run.snapshot.documentWorkspace?.logicalPath, '固定 Agent 文档工作目录不存在'),
       workspaceRootPath: run.snapshot.documentWorkspace?.rootLogicalPath,
       activeBranchPath: run.snapshot.documentWorkspace?.activeBranchLogicalPath,
@@ -673,13 +711,6 @@ export class RequirementAnalysisService {
       contextWindow: run.snapshot.modelRef.contextWindow,
       maxOutputTokens: run.snapshot.modelRef.maxOutputTokens,
     })
-    if (plan.packageSha256 !== run.snapshot.analysisInput.packageSha256) throw new Error('固定正文输入包 Hash 已漂移')
-    await this.reviewTransaction(run.id, lease, draft => {
-      const current = required(draft.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在')
-      current.step = 'analyzing_requirements'
-      current.progress = 10
-    })
-    return this.executeAnalysis({ run, snapshot: run.snapshot, requirementInputPlan: plan, models, configuration, signal, lease, retryable: infrastructureAttempt < maxInfrastructureAttempts })
   }
 
   private async executeWorkspaceStage(
@@ -815,7 +846,7 @@ export class RequirementAnalysisService {
           executions: { planning: execution },
           error: undefined,
         } satisfies Partial<ReviewRun>)
-        current.snapshot.formalClarifications = structuredClone(result.clarifications)
+        current.snapshot.formalClarifications = mergeFormalClarifications(current.snapshot.formalClarifications, result.clarifications)
         current.workflow ??= { currentStage: 'analysis' }
         if (verificationOf) completeVerificationClosure(draft, current)
         current.workflow.currentStage = pendingBlockingClarifications.length ? 'clarification' : 'understanding'
@@ -1154,7 +1185,7 @@ function latestRunningExecutionAttempt(run: ReviewRun) { return [...(run.executi
 
 function presentRunSummary(run: ReviewRun) {
   const assets = snapshotAssets(run)
-  return { id: run.id, analysisId: analysisIdFor(run), runId: run.id, retryOfRunId: run.retryOfRunId, retryMode: run.retryMode, continuedFromRunId: run.continuedFromRunId, continuedByRunId: run.continuedByRunId, projectVersionId: run.projectVersionId, assetId: run.assetId, assetVersionId: run.assetVersionId, assetIds: assets.map(asset => asset.assetId), assetVersionIds: assets.map(asset => asset.assetVersionId), documents: assets, documentTitle: run.documentTitle, documentVersion: `V${run.documentVersion}`, logicalPath: run.logicalPath, modelLabel: run.modelLabel, status: run.status, step: run.step, progress: run.progress, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error, queue: run.queue, retryEvents: run.retryEvents, planningSubAgentRuns: structuredClone(run.planningSubAgentRuns ?? []), modelRouteAttempts: run.modelRouteAttempts, degradations: run.degradations, workflow: presentWorkflowSummary(run.workflow), snapshot: redactSnapshot(run.snapshot) }
+  return { id: run.id, analysisId: analysisIdFor(run), runId: run.id, retryOfRunId: run.retryOfRunId, retryMode: run.retryMode, projectVersionId: run.projectVersionId, assetId: run.assetId, assetVersionId: run.assetVersionId, assetIds: assets.map(asset => asset.assetId), assetVersionIds: assets.map(asset => asset.assetVersionId), documents: assets, documentTitle: run.documentTitle, documentVersion: `V${run.documentVersion}`, logicalPath: run.logicalPath, modelLabel: run.modelLabel, status: run.status, step: run.step, progress: run.progress, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, error: run.error, queue: run.queue, retryEvents: run.retryEvents, planningSubAgentRuns: structuredClone(run.planningSubAgentRuns ?? []), modelRouteAttempts: run.modelRouteAttempts, degradations: run.degradations, workflow: presentWorkflowSummary(run.workflow), snapshot: redactSnapshot(run.snapshot) }
 }
 
 function presentRun(run: ReviewRun) {
@@ -1244,6 +1275,16 @@ function supportsInputPlan(selection: AgentModelSelection, plan: RequirementInpu
   return Math.min(selection.model.contextWindow, contextWindow) >= Math.max(...plan.batches.map(batch => batch.tokenCount), 0) + 4_000 + maxOutputTokens
 }
 
+function mergeFormalClarifications(existing: PlanningClarification[] | undefined, current: PlanningClarification[]) {
+  const merged = new Map<string, PlanningClarification>()
+  for (const item of existing ?? []) merged.set(item.id, structuredClone(item))
+  for (const item of current) {
+    const prior = merged.get(item.id)
+    merged.set(item.id, prior && prior.status !== 'pending' ? prior : structuredClone(item))
+  }
+  return [...merged.values()]
+}
+
 function inputSnapshot(plan: RequirementInputPlan) { return { policyVersion: plan.policyVersion, mode: plan.mode, estimatedInputTokens: plan.estimatedInputTokens, safeInputBudget: plan.safeInputBudget, packageSha256: plan.packageSha256, batches: plan.batches.map(batch => ({ batchId: batch.batchId, ordinal: batch.ordinal, tokenCount: batch.tokenCount, contentSha256: createHash('sha256').update(batch.content).digest('hex'), assetVersionIds: [...batch.assetVersionIds], chunkIds: [...batch.chunkIds] })) } }
 function modelSnapshot(selection: AgentModelSelection, contextWindow: number, maxOutputTokens: number): ReviewRunSnapshot['modelRef'] { return { sourceId: selection.source.id, modelId: selection.model.id, providerType: selection.source.providerType, modelName: selection.model.name, contextWindow, maxOutputTokens, supportsReasoning: selection.model.capabilities.includes('reasoning') } }
 function modelConnection(selection: AgentModelSelection, snapshot: ReviewRunSnapshot['modelRef'], configuration: AgentConfigurationVersion | null) { return { sourceId: selection.source.id, providerType: selection.source.providerType, baseUrl: selection.source.baseUrl, apiKey: selection.source.apiKey, modelId: selection.model.id, modelName: selection.model.name, contextWindow: snapshot.contextWindow, maxOutputTokens: snapshot.maxOutputTokens, supportsReasoning: snapshot.supportsReasoning, requestTimeoutMs: configuration ? configuration.routing.requestTimeoutSeconds * 1_000 : undefined, retryCount: configuration?.routing.retryCount } }
@@ -1251,6 +1292,7 @@ function configurationRef(configuration: AgentConfigurationVersion) { return { i
 function redactSnapshot(snapshot: ReviewRunSnapshot) { return { ...snapshot, agentDefinition: { ...snapshot.agentDefinition, systemPrompt: undefined, taskTemplate: undefined } } }
 function snapshotAssets(run: ReviewRun) { return run.snapshot.assets.map(item => ({ ...item })) }
 function analysisIdFor(run: ReviewRun) { return run.reviewId ?? run.snapshot.reviewId ?? `analysis_${run.retryOfRunId ?? run.id}` }
+function isLegacyClarificationContinuation(run: ReviewRun) { return Boolean((run as ReviewRun & { continuedFromRunId?: string }).continuedFromRunId) }
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 function normalizeDocumentDirectoryPath(value: unknown) { const normalized = String(value ?? '').trim().replaceAll('\\', '/').replace(/^\/+|\/+$/gu, ''); const segments = normalized.split('/'); if (!normalized || /^[A-Za-z]:/u.test(normalized) || segments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('Agent 文档工作目录必须是知识库内的有效逻辑目录'); return normalized }
 function isWithinDirectory(logicalPath: string, directoryPath: string) { const normalized = logicalPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, ''); return normalized.startsWith(`${directoryPath}/`) && normalized.length > directoryPath.length + 1 }

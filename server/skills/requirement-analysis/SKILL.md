@@ -65,7 +65,9 @@ Test Focus 不是完整测试用例。为高风险规则、关键状态、边界
 - 不得假设次数、时长、阈值、权限、状态规则、期望结果、依赖契约、范围或环境配置。此类缺失应提出具体问题并说明原因。
 - 普通 low/medium Finding、改进建议或不影响测试正确性的资料缺口，不得机械转换为 blocking Clarification。
 - `blocking=true` 只用于不回答就无法形成正确测试设计的事实；其他可选确认使用 `blocking=false`。
-- Human Answer 是服务端保存的正式事实。继续分析时从固定 `formalClarifications` 重新读取，不依赖 Context Summary 或模型记忆，并将答案吸收到更新后的 Requirement Understanding 中。
+- 一次分析提交必须汇总当前已识别的全部 blocking Clarification，不得拆成逐题追问或预留下一轮才提问。人工会先完整回答这一批问题，Service 再一次性恢复 Planning 流程。
+- `status=answered` 的 Human Answer 是服务端保存的正式业务事实。继续分析时从固定 `formalClarifications` 重新读取，不依赖 Context Summary 或模型记忆，并将答案吸收到更新后的 Requirement Understanding 中。
+- `status=dismissed` 表示人工决定问题不适用或接受当前需求缺口；其 answer 只是可追溯的处置理由，不得作为业务规则、权限、边界、Expected Result 或测试断言依据。保留缺口并只在当前正式需求可验证范围内继续。
 
 ## 7. Self Review
 
@@ -81,4 +83,4 @@ Test Focus 不是完整测试用例。为高风险规则、关键状态、边界
 - Summary、Finding、Test Focus 与分析文档是否相互一致。
 - Clarification 是否只包含无法从正式输入确定的事实，blocking 是否确实影响测试设计正确性。
 
-完成自检后只提交一次完整 `requirement-analysis/v1`，包括 `clarifications`（没有问题时提交空数组）。
+完成自检后只提交一次完整 `requirement-analysis/v1`。`clarifications` 只包含本轮新识别且仍待人工处理的问题；固定 Snapshot 中已有的 answered/dismissed 历史由服务端合并，不得重复提交；没有新问题时提交空数组。

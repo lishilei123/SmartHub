@@ -197,13 +197,19 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   }
   const requirementAnalysisRun = /^\/api\/requirement-analysis-runs\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && requirementAnalysisRun) { await requireRun(requirementAnalysisRun[1], 'requirement-analysis:read'); return send(response, 200, await requirementAnalysisService.get(requirementAnalysisRun[1])) }
-  const clarificationAction = /^\/api\/requirement-analysis-runs\/([^/]+)\/clarifications\/([^/]+)\/actions$/.exec(url.pathname)
-  if (method === 'POST' && clarificationAction) {
-    await requireRun(clarificationAction[1], 'requirement-analysis:handle')
+  const clarificationBatch = /^\/api\/requirement-analysis-runs\/([^/]+)\/clarifications\/actions$/.exec(url.pathname)
+  if (method === 'POST' && clarificationBatch) {
+    await requireRun(clarificationBatch[1], 'requirement-analysis:handle')
     const body = await json(request)
-    const action = String(body.action ?? '')
-    if (action !== 'answer' && action !== 'dismiss') throw new Error('CLARIFICATION_ACTION_INVALID')
-    return send(response, 202, await requirementAnalysisService.actOnClarification(clarificationAction[1], clarificationAction[2], { action, answer: String(body.answer ?? ''), principal }))
+    if (!Array.isArray(body.items)) throw new Error('CLARIFICATION_BATCH_INVALID: items 必须是数组')
+    const items = body.items.map(item => {
+      const value = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+      const rawAction = String(value.action ?? '')
+      if (rawAction !== 'answer' && rawAction !== 'dismiss') throw new Error('CLARIFICATION_BATCH_INVALID: action 不合法')
+      const action: 'answer' | 'dismiss' = rawAction
+      return { clarificationId: String(value.clarificationId ?? ''), action, answer: String(value.answer ?? '') }
+    })
+    return send(response, 202, await requirementAnalysisService.actOnClarifications(clarificationBatch[1], { items, principal }))
   }
   const repairDrafts = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts$/.exec(url.pathname)
   if (method === 'POST' && repairDrafts) {

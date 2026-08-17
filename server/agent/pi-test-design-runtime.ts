@@ -3,7 +3,7 @@ import type { AgentConfigurationService } from '../application/agent-configurati
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
 import type { PlanningAgentRuntime } from '../application/test-design-service.js'
-import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate } from '../application/test-design-validation.js'
+import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
 import type { TestDesign, TestDesignRunAgentConfigurationSnapshot, TestDesignWorkflowRun, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
@@ -142,7 +142,9 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
 export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: TestDesign, stage: TestDesignStage, workspace: TestDesignWorkspaceSnapshot) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
   const treeVersion = run.testPointTree?.versions.find(item => item.id === run.testPointTree?.currentApprovedVersionId)
-  const repairAudit = stage === 'test_design_repair' ? run.coverageAudits.find(item => item.id === run.automaticRepair?.triggerAuditId) : undefined
+  const repairState = stage === 'test_design_repair' ? run.automaticRepair : undefined
+  const repairAudit = repairState?.triggerAuditId ? run.coverageAudits.find(item => item.id === repairState.triggerAuditId) : undefined
+  if (stage === 'test_design_repair' && (!repairState || !repairAudit)) throw new TestDesignError('TEST_DESIGN_REPAIR_CONTEXT_INVALID', '自动修复任务缺少固定的修复状态或 Coverage Audit', 409)
   return canonicalJson({
     schemaVersion: 'test-design-agent-task/v1',
     agent: 'PlanningAgent',
@@ -156,8 +158,8 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     stageContract: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
     ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test-design/test-point-tree.json` } } : {}),
-    ...(repairAudit ? { repair: { attempt: run.automaticRepair?.attempt, maxAttempts: run.automaticRepair?.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
-    instructions: ['Workflow 已固定业务任务与提交协议，但不调度 Skill；PlanningAgent 从 Enabled Skills 自主选择需要的能力。', 'currentInputRefs 是本次上传资料重点，不是读取白名单；先读取重点输入，再从完整 ProjectWorkspaceSnapshot 自主查找相关资料。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', 'requirements/clarifications.json 中已回答的 Clarification 是正式业务事实，必须纳入测试设计并保留 Requirement → TestPoint → TestCase 追溯。', '如存在 /workspace/agent_workspace/planning_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须根据正式资料的适用性判断；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
+    ...(repairState && repairAudit ? { repair: { attempt: repairState.attempt, maxAttempts: repairState.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
+    instructions: ['Workflow 已固定业务任务与提交协议，但不调度 Skill；PlanningAgent 从 Enabled Skills 自主选择需要的能力。', 'currentInputRefs 是本次上传资料重点，不是读取白名单；先读取重点输入，再从完整 ProjectWorkspaceSnapshot 自主查找相关资料。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', 'requirements/clarifications.json 中 status=answered 的 answer 是正式业务事实，必须纳入测试设计并保留 Requirement → TestPoint → TestCase 追溯。', 'requirements/clarifications.json 中 status=dismissed 的 answer 只是人工处置理由，不是业务规则或 Expected Result；不得据此生成测试断言，应保留缺口并只覆盖当前正式需求可验证范围。', '如存在 /workspace/agent_workspace/planning_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须根据正式资料的适用性判断；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
   })
 }
 
@@ -171,8 +173,23 @@ function stageWorkspace(run: TestDesignWorkflowRun, stage: TestDesignStage): Tes
     byPath.set(file.logicalPath, file)
   }
   const files = [...byPath.values()].sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'zh-CN'))
-  const base = { ...run.workspaceSnapshot, files }
-  return { ...base, snapshotSha256: canonicalSha256({ ...base, snapshotSha256: undefined }) }
+  const base = {
+    schemaVersion: run.workspaceSnapshot.schemaVersion,
+    projectId: run.workspaceSnapshot.projectId,
+    projectVersionId: run.workspaceSnapshot.projectVersionId,
+    rootLogicalPath: run.workspaceSnapshot.rootLogicalPath,
+    activeBranchLogicalPath: run.workspaceSnapshot.activeBranchLogicalPath,
+    agentLogicalPath: run.workspaceSnapshot.agentLogicalPath,
+    projectVersionName: run.workspaceSnapshot.projectVersionName,
+    knowledgeBaseId: run.workspaceSnapshot.knowledgeBaseId,
+    indexVersionId: run.workspaceSnapshot.indexVersionId,
+    requirementReleaseId: run.workspaceSnapshot.requirementReleaseId,
+    verificationRunId: run.workspaceSnapshot.verificationRunId,
+    requirementsJsonSha256: run.workspaceSnapshot.requirementsJsonSha256,
+    files,
+    createdAt: run.workspaceSnapshot.createdAt,
+  } satisfies Omit<TestDesignWorkspaceSnapshot, 'snapshotSha256'>
+  return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
 function repairCandidateContent(run: TestDesignWorkflowRun) {
@@ -183,11 +200,34 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
     schemaVersion: 'test-design-repair-input/v1',
     cases: activeCases.map(testCase => {
       const revision = testCase.revisions.find(item => item.revision === testCase.currentRevision)!
-      return { ref: refById.get(testCase.id), content: { ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] } }
+      return { ref: requiredRepairCaseRef(refById, testCase.id), content: { ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] } }
     }),
-    dataRequirements: (dataSet?.requirements ?? []).map((item, index) => ({ ...item, ref: `data-${index + 1}`, caseRefs: item.caseIds.map(id => refById.get(id) ?? id), id: undefined, caseIds: undefined })),
-    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: refById.get(item.candidateCaseId) } : {}), requirementRefs: item.requirementRefs, testPointIds: item.testPointIds, reason: item.reason, confidence: item.confidence })),
+    dataRequirements: (dataSet?.requirements ?? []).map((item, index): TestDataRequirementCandidate => ({
+      ref: `data-${index + 1}`,
+      name: item.name,
+      entityType: item.entityType,
+      featureTags: [...item.featureTags],
+      testPointIds: [...item.testPointIds],
+      caseRefs: item.caseIds.map(id => refById.get(id) ?? id),
+      fieldConstraints: structuredClone(item.fieldConstraints),
+      relationships: [...item.relationships],
+      quantity: item.quantity,
+      initialState: item.initialState,
+      preparationHint: item.preparationHint,
+      sensitivity: item.sensitivity,
+      isolation: item.isolation,
+      resetAndCleanup: item.resetAndCleanup,
+      readiness: item.readiness,
+      ...(item.readinessReason ? { readinessReason: item.readinessReason } : {}),
+    })),
+    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: requiredRepairCaseRef(refById, item.candidateCaseId) } : {}), requirementRefs: item.requirementRefs, testPointIds: item.testPointIds, reason: item.reason, confidence: item.confidence })),
   }
+}
+
+function requiredRepairCaseRef(refById: Map<string, string>, caseId: string) {
+  const ref = refById.get(caseId)
+  if (!ref) throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REFERENCE_INVALID', `自动修复候选引用的用例不存在或已删除：${caseId}`, 409)
+  return ref
 }
 
 function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, workspace: TestDesignWorkspaceSnapshot, configuration: AgentConfigurationVersion, task: string): PlanningTestDesignSnapshot {

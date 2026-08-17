@@ -511,7 +511,26 @@ export class PostgresStore implements StateStore {
     await this.pool.query(`
       INSERT INTO smarthub.review_jobs (id, run_id, project_version_id, status, attempt_count, max_attempts, available_at, created_at, updated_at, data)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
-      ON CONFLICT (run_id) DO NOTHING
+      ON CONFLICT (run_id) DO UPDATE SET
+        id=EXCLUDED.id,
+        status='queued',
+        max_attempts=smarthub.review_jobs.attempt_count + EXCLUDED.max_attempts,
+        available_at=EXCLUDED.available_at,
+        updated_at=EXCLUDED.updated_at,
+        lease_owner=NULL,
+        run_token=NULL,
+        lease_expires_at=NULL,
+        heartbeat_at=NULL,
+        cancel_requested_at=NULL,
+        started_at=NULL,
+        finished_at=NULL,
+        error=NULL,
+        data=jsonb_set(
+          jsonb_set(EXCLUDED.data, '{attempts}', to_jsonb(smarthub.review_jobs.attempt_count)),
+          '{maxAttempts}',
+          to_jsonb(smarthub.review_jobs.attempt_count + EXCLUDED.max_attempts)
+        )
+      WHERE smarthub.review_jobs.status IN ('succeeded','failed','cancelled')
     `, [job.id, job.runId, job.projectVersionId, job.status, job.attempts, job.maxAttempts, job.availableAt, job.createdAt, job.updatedAt, JSON.stringify(job)])
     await this.notifyTask()
   }

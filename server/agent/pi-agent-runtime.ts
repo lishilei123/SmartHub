@@ -242,6 +242,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
   }
 
   async appendPlanningClarification(input: { projectId: string; projectVersionId: string; runId: string; clarificationId: string; question: string; answer: string; status: 'answered' | 'dismissed'; answeredAt: string; answeredBy: string }) {
+    const isBusinessFact = input.status === 'answered'
     const scope: PiSessionScope = {
       role: 'planning_parent',
       key: `planning:${input.projectId}:${input.projectVersionId}`,
@@ -251,15 +252,17 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       lease.manager.appendCustomMessageEntry(
         'planning_clarification_answer',
         [
-          '[Human Clarification；该内容已由 Service 保存为正式、可追溯输入]',
+          `[Human Clarification；该内容已由 Service 保存为${isBusinessFact ? '正式业务事实' : '正式、可追溯的人工处置记录'}]`,
           `Source Run：${input.runId}`,
           `Clarification：${input.clarificationId}`,
           `Question：${input.question}`,
-          `Human Answer：${input.answer}`,
+          `${isBusinessFact ? 'Human Answer' : 'Disposition Reason'}：${input.answer}`,
           `Disposition：${input.status}`,
           `Answered By：${input.answeredBy}`,
           `Answered At：${input.answeredAt}`,
-          '继续分析时必须从 ReviewRunSnapshot.formalClarifications 与冻结 Workspace 重新建立正式事实，不得只依赖本消息或 Context Summary。',
+          isBusinessFact
+            ? '继续分析时必须从 ReviewRunSnapshot.formalClarifications 与冻结 Workspace 重新建立正式事实，不得只依赖本消息或 Context Summary。'
+            : '该理由只表示人工决定不适用或接受当前需求缺口，不是业务规则、权限、边界或 Expected Result；继续分析时不得据此补造事实。',
         ].join('\n'),
         false,
         {
@@ -268,7 +271,8 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           projectVersionId: input.projectVersionId,
           sourceRunId: input.runId,
           clarificationId: input.clarificationId,
-          formalBusinessFact: true,
+          clarificationDisposition: input.status,
+          formalBusinessFact: isBusinessFact,
         },
       )
       return { parentSessionId: lease.manager.getSessionId(), scopeKey: scope.key }

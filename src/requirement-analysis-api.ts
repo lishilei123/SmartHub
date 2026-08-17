@@ -244,8 +244,6 @@ export type RequirementAnalysisRun = {
   analysisId: string
   retryOfRunId?: string
   retryMode?: 'full'
-  continuedFromRunId?: string
-  continuedByRunId?: string
   projectVersionId: string
   assetId: string
   assetVersionId: string
@@ -337,11 +335,11 @@ export async function loadRequirementAnalysisRun(runId: string) {
   return body as RequirementAnalysisRun
 }
 
-export async function actOnPlanningClarification(runId: string, clarificationId: string, input: { action: 'answer' | 'dismiss'; answer: string }) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/clarifications/${encodeURIComponent(clarificationId)}/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
-  const body = await response.json() as { clarification: PlanningClarification; sourceRun: RequirementAnalysisRun; continuationRun?: RequirementAnalysisRun } | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '待确认问题保存失败')
-  return body as { clarification: PlanningClarification; sourceRun: RequirementAnalysisRun; continuationRun?: RequirementAnalysisRun }
+export async function actOnPlanningClarifications(runId: string, input: { items: Array<{ clarificationId: string; action: 'answer' | 'dismiss'; answer: string }> }) {
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/clarifications/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
+  const body = await response.json() as { clarifications: PlanningClarification[]; run: RequirementAnalysisRun } | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '待确认问题批量保存失败')
+  return body as { clarifications: PlanningClarification[]; run: RequirementAnalysisRun }
 }
 
 export async function cancelRequirementAnalysisRun(runId: string) {

@@ -10,7 +10,7 @@ import { PlanningContextMetrics, PlanningSubAgentRuns } from './PlanningObservab
 import { runRequirementReviewer } from './planning-api'
 import {
   cancelRequirementAnalysisRun,
-  actOnPlanningClarification,
+  actOnPlanningClarifications,
   createFindingAction,
   generateRequirementRepairDraft,
   approveRequirementRepairDraft,
@@ -50,6 +50,7 @@ type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 type ViewKey = 'conversation' | 'clarifications' | 'cases' | 'details'
 type DetailViewKey = 'baseline' | 'findings' | 'artifacts' | 'diff'
 type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
+type ClarificationAction = 'answer' | 'dismiss'
 type RunRecord = RequirementAnalysisRun & { content?: string }
 type RequirementUnderstandingSnapshot = NonNullable<RequirementAnalysisRun['workflow']>['understandingSnapshot']
 type RequirementStageState = 'complete' | 'current' | 'waiting' | 'blocked'
@@ -94,7 +95,12 @@ function Badge({ children, tone = 'gray' }: { children: React.ReactNode; tone?: 
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
 function severityTone(value: AnalysisSeverity) { return value === 'blocker' ? 'red' : value === 'high' ? 'orange' : value === 'medium' ? 'gold' : 'blue' }
 function assessmentLabel(value?: string) { return value === 'blocked' ? '存在阻断问题' : value === 'needs_revision' ? '建议修改后确认' : value === 'pass_with_notes' ? '附带关注项通过' : value === 'pass' ? '可以进入下一阶段' : '等待分析' }
-function runLabel(run?: RunRecord) { return run?.status === 'running' ? '分析中' : run?.status === 'waiting_clarification' ? '等待业务确认' : run?.status === 'succeeded' ? '需求理解已冻结' : run?.status === 'failed' ? '失败' : run?.status === 'cancelled' ? '已取消' : '未运行' }
+function runLabel(run?: RunRecord) {
+  if (run?.status === 'running') return '分析中'
+  if (run?.status === 'waiting_clarification') return run.step === 'continuing_after_clarification' ? '业务事实已确认' : '等待业务确认'
+  if (run?.status === 'succeeded') return run.workflow?.understandingSnapshot ? '需求理解已冻结' : '正在冻结需求理解'
+  return run?.status === 'failed' ? '失败' : run?.status === 'cancelled' ? '已取消' : '未运行'
+}
 const agentEventLabels: Record<string, string> = {
   runtime_initialized: 'Runtime 已初始化', agent_start: 'Agent 已启动', agent_end: 'Agent 已结束', turn_start: 'Turn 开始', turn_end: 'Turn 结束',
   message_start: '消息开始', message_end: '消息完成', tool_execution_start: '工具调用开始', tool_execution_end: '工具调用结束',
@@ -121,6 +127,14 @@ type PlanningExecutionGroup = {
   label: string
   status?: 'running' | 'waiting_clarification' | 'succeeded' | 'failed' | 'cancelled'
   execution: AgentExecutionRecord
+  startedAt?: string
+}
+
+type HumanClarificationBatch = {
+  id: string
+  answeredAt: string
+  answeredBy: string
+  items: PlanningClarification[]
 }
 
 function sameExecution(left: AgentExecutionRecord, right: AgentExecutionRecord) {
@@ -134,14 +148,27 @@ function sameExecution(left: AgentExecutionRecord, right: AgentExecutionRecord) 
 function planningExecutionGroups(run?: RunRecord): PlanningExecutionGroup[] {
   const attempts = (run?.executionAttempts ?? []).flatMap(attempt => {
     const execution = attempt.executions?.planning
-    return execution ? [{ id: `attempt-${attempt.attempt}`, label: `Worker Attempt ${attempt.attempt}/${attempt.maxAttempts}`, status: attempt.status, execution }] : []
+    return execution ? [{ id: `attempt-${attempt.attempt}`, label: `Worker Attempt ${attempt.attempt}/${attempt.maxAttempts}`, status: attempt.status, execution, startedAt: attempt.startedAt }] : []
   })
   const current = [run?.response?.executions?.planning, run?.executions?.planning, run?.execution?.agentKey === 'planning' ? run.execution : undefined]
     .filter((item): item is AgentExecutionRecord => Boolean(item))
     .sort((left, right) => left.events.length - right.events.length)
     .at(-1)
   if (!current || attempts.some(attempt => sameExecution(attempt.execution, current))) return attempts
-  return [...attempts, { id: 'current', label: attempts.length ? '当前执行记录' : '执行记录', status: run?.status, execution: current }]
+  return [...attempts, { id: 'current', label: attempts.length ? '当前执行记录' : '执行记录', status: run?.status, execution: current, startedAt: current.events[0]?.occurredAt }]
+}
+
+function humanClarificationBatches(run?: RunRecord): HumanClarificationBatch[] {
+  const batches = new Map<string, HumanClarificationBatch>()
+  for (const item of run?.snapshot?.formalClarifications ?? []) {
+    if (item.status === 'pending' || !item.answer?.trim() || !item.answeredAt) continue
+    const answeredBy = item.answeredBy?.trim() || '未知提交人'
+    const key = `${item.answeredAt}:${answeredBy}`
+    const batch = batches.get(key) ?? { id: key, answeredAt: item.answeredAt, answeredBy, items: [] }
+    batch.items.push(item)
+    batches.set(key, batch)
+  }
+  return [...batches.values()].sort((left, right) => left.answeredAt.localeCompare(right.answeredAt))
 }
 
 function replaceRunDetail(current: RunRecord[], detail: RequirementAnalysisRun) {
@@ -186,7 +213,8 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [verificationBusyDraftId, setVerificationBusyDraftId] = useState('')
   const [releaseBusy, setReleaseBusy] = useState(false)
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
-  const [clarificationBusyId, setClarificationBusyId] = useState('')
+  const [clarificationActions, setClarificationActions] = useState<Record<string, ClarificationAction>>({})
+  const [clarificationBusy, setClarificationBusy] = useState(false)
   const [diffVersionIds, setDiffVersionIds] = useState<[string, string]>(['', ''])
   const [diffContents, setDiffContents] = useState<Record<string, string>>({})
   const [diffLoading, setDiffLoading] = useState(false)
@@ -230,7 +258,8 @@ export function RequirementAnalysisPageV2(props: Props) {
         const detail = await loadRequirementAnalysisRun(selectedRun.id)
         if (cancelled) return
         setRuns(current => replaceRunDetail(current, detail))
-        if (detail.status === 'running') timer = setTimeout(() => void poll(), 1_000)
+        const automaticTransitionActive = detail.workflow?.automaticTransition?.status === 'pending' || detail.workflow?.automaticTransition?.status === 'running'
+        if (detail.status === 'running' || automaticTransitionActive) timer = setTimeout(() => void poll(), 1_000)
       } catch { if (!cancelled && selectedRun.status === 'running') timer = setTimeout(() => void poll(), 2_000) }
     }
     void poll(); return () => { cancelled = true; if (timer) clearTimeout(timer) }
@@ -279,25 +308,32 @@ export function RequirementAnalysisPageV2(props: Props) {
     } catch (error) { notify(error instanceof Error ? error.message : '需求分析启动失败', 'error') } finally { setStarting(false) }
   }
 
-  const resolveClarification = async (clarification: PlanningClarification, action: 'answer' | 'dismiss') => {
-    if (!selectedRun || clarificationBusyId) return
-    const answer = (clarificationAnswers[clarification.id] ?? '').trim()
-    if (!answer) { notify(action === 'answer' ? '请先填写明确的业务事实。' : '请说明为什么该问题不适用于当前需求。', 'warning'); return }
-    setClarificationBusyId(clarification.id)
+  const resolveClarifications = async () => {
+    if (!selectedRun || clarificationBusy) return
+    const pending = (selectedRun.response?.result.clarifications ?? []).filter(item => item.blocking && item.status === 'pending')
+    if (!pending.length) return
+    const missingActions = pending.filter(item => !clarificationActions[item.id])
+    if (missingActions.length) { notify(`请先为全部 ${pending.length} 个阻断问题选择“提供业务事实”或“人工处置”；仍缺少 ${missingActions.length} 项。`, 'warning'); return }
+    const missingAnswers = pending.filter(item => !(clarificationAnswers[item.id] ?? '').trim())
+    if (missingAnswers.length) { notify(`请填写全部 ${pending.length} 项的业务事实或处置理由；仍缺少 ${missingAnswers.length} 项。`, 'warning'); return }
+    setClarificationBusy(true)
     try {
-      const resolved = await actOnPlanningClarification(selectedRun.id, clarification.id, { action, answer })
-      const next = resolved.continuationRun
-      setRuns(current => [
-        ...(next ? [next] : []),
-        resolved.sourceRun,
-        ...current.filter(item => item.id !== resolved.sourceRun.id && item.id !== next?.id),
-      ])
-      setClarificationAnswers(current => ({ ...current, [clarification.id]: '' }))
-      if (next) { setSelectedRunId(next.id); setView('conversation'); notify('回答已作为正式输入写回同一个 Planning Session，Agent 正在继续分析。') }
-      else notify('回答已保存；仍有阻断问题需要确认。')
-      addAudit(`处理 Planning Clarification：${clarification.id} · ${action}`)
-    } catch (error) { notify(error instanceof Error ? error.message : '待确认问题保存失败', 'error') }
-    finally { setClarificationBusyId('') }
+      const items = pending.map(item => ({ clarificationId: item.id, action: clarificationActions[item.id], answer: clarificationAnswers[item.id].trim() }))
+      const resolved = await actOnPlanningClarifications(selectedRun.id, { items })
+      setRuns(current => replaceRunDetail(current, resolved.run))
+      setClarificationAnswers(current => ({ ...current, ...Object.fromEntries(pending.map(item => [item.id, ''])) }))
+      setClarificationActions(current => {
+        const next = { ...current }
+        pending.forEach(item => delete next[item.id])
+        return next
+      })
+      setView('conversation')
+      const answeredCount = items.filter(item => item.action === 'answer').length
+      const dismissedCount = items.length - answeredCount
+      notify(`已在当前 Run 保存 ${answeredCount} 个业务事实、${dismissedCount} 个人工处置；PlanningAgent 正在继续分析。`)
+      addAudit(`批量处理 Planning Clarification：${items.map(item => `${item.clarificationId} · ${item.action}`).join('、')}`)
+    } catch (error) { notify(error instanceof Error ? error.message : '待确认问题批量保存失败', 'error') }
+    finally { setClarificationBusy(false) }
   }
   const cancelAnalysis = async () => {
     if (!selectedRun || selectedRun.status !== 'running') return
@@ -421,7 +457,17 @@ export function RequirementAnalysisPageV2(props: Props) {
     } catch (error) { notify(error instanceof Error ? error.message : '自动测试设计重试失败', 'error') }
     finally { setReleaseBusy(false) }
   }
-
+  const resumeClarifiedAnalysis = async () => {
+    if (!selectedRun || clarificationBusy) return
+    setClarificationBusy(true)
+    try {
+      const resumed = await actOnPlanningClarifications(selectedRun.id, { items: [] })
+      setRuns(current => replaceRunDetail(current, resumed.run))
+      setView('conversation')
+      notify('已在当前 Run 恢复 PlanningAgent 分析。')
+    } catch (error) { notify(error instanceof Error ? error.message : '当前需求分析恢复失败', 'error') }
+    finally { setClarificationBusy(false) }
+  }
   const versionHistory = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
   const leftLines = (diffContents[diffVersionIds[0]] ?? '').split(/\r?\n/).filter(Boolean); const rightLines = (diffContents[diffVersionIds[1]] ?? '').split(/\r?\n/).filter(Boolean)
   const removedLines = leftLines.filter(line => !rightLines.includes(line)); const addedLines = rightLines.filter(line => !leftLines.includes(line))
@@ -429,9 +475,10 @@ export function RequirementAnalysisPageV2(props: Props) {
   const repairDrafts = selectedRun?.workflow?.repairDrafts ?? []
   const understandingSnapshot = selectedRun?.workflow?.understandingSnapshot
   const automaticTransition = selectedRun?.workflow?.automaticTransition
+  const awaitingClarificationResume = selectedRun?.status === 'waiting_clarification' && !blockingClarifications.length && selectedRun.step === 'continuing_after_clarification'
   const stages: Array<{ label: string; detail: string; state: RequirementStageState }> = [
     { label: '资料输入', detail: analysisInputDocuments.length ? `${analysisInputDocuments.length} 份已就绪` : '待上传', state: analysisInputDocuments.length ? 'complete' : 'current' },
-    { label: '需求理解', detail: !selectedRun ? '未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : blockingClarifications.length ? `等待 ${blockingClarifications.length} 个业务事实` : understandingSnapshot ? '已由服务端自动冻结' : selectedRun.status === 'failed' ? '执行失败' : '正在冻结', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' || blockingClarifications.length ? 'current' : understandingSnapshot ? 'complete' : selectedRun.status === 'failed' ? 'blocked' : 'waiting' },
+    { label: '需求理解', detail: !selectedRun ? '未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : blockingClarifications.length ? `等待 ${blockingClarifications.length} 个业务事实` : awaitingClarificationResume ? '业务事实已确认，等待当前 Run 继续' : understandingSnapshot ? '已由服务端自动冻结' : selectedRun.status === 'failed' ? '执行失败' : '正在冻结', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' || blockingClarifications.length || awaitingClarificationResume ? 'current' : understandingSnapshot ? 'complete' : selectedRun.status === 'failed' ? 'blocked' : 'waiting' },
     { label: 'Agent 自动设计测试', detail: automaticTransition?.status === 'succeeded' ? '测试设计已创建，请查看候选用例' : automaticTransition?.status === 'failed' ? '自动衔接失败' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在生成测试点与用例' : understandingSnapshot ? '等待自动衔接' : '等待需求理解', state: automaticTransition?.status === 'succeeded' ? 'complete' : automaticTransition?.status === 'failed' ? 'blocked' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' || understandingSnapshot ? 'current' : 'waiting' },
     { label: '最终用例审核与发布', detail: automaticTransition?.status === 'succeeded' ? '前往测试设计审核 TestCase / Proposal' : '等待 Agent 完成', state: automaticTransition?.status === 'succeeded' ? 'current' : 'waiting' },
   ]
@@ -459,7 +506,7 @@ export function RequirementAnalysisPageV2(props: Props) {
         <nav className="rav2-session-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'clarifications' && blockingClarifications.length ? <i>{blockingClarifications.length}</i> : null}</button>)}</nav>
         <div className={`rav2-session-body ${view === 'conversation' ? 'conversation' : view === 'cases' ? 'cases' : 'detail'}`}>
           {view === 'conversation' && <AgentConversation run={selectedRun} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
-          {view === 'clarifications' && <Clarifications items={blockingClarificationHistory} answers={clarificationAnswers} busyId={clarificationBusyId} onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))} onResolve={(item, action) => void resolveClarification(item, action)} />}
+          {view === 'clarifications' && <Clarifications items={blockingClarificationHistory} answers={clarificationAnswers} actions={clarificationActions} busy={clarificationBusy} onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))} onActionChange={(id, action) => setClarificationActions(current => ({ ...current, [id]: action }))} onSubmit={() => void resolveClarifications()} />}
           {view === 'cases' && <Suspense fallback={<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>正在加载测试用例</h2><p>正在建立测试设计的正式上下文。</p></div>}><EmbeddedTestDesignPage embedded projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} /></Suspense>}
           {view === 'details' && <section className="rav2-advanced-details"><header><div><ShieldCheck /><span><b>详细信息</b><small>运行配置、分析观察项、Snapshot、版本产物与差异仅用于追溯和排障，不影响当前主流程。</small></span></div><nav>{detailTabs.map(tab => <button className={detailView === tab.key ? 'active' : ''} key={tab.key} onClick={() => setDetailView(tab.key)}>{tab.label}</button>)}</nav></header><div>{detailView === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}{detailView === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} documents={requirementDocuments} repairDrafts={repairDrafts} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}{detailView === 'artifacts' && <Artifacts result={result} release={release} understandingSnapshot={understandingSnapshot} runId={selectedRun?.id} />}{detailView === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}</div></section>}
         </div>
@@ -474,7 +521,7 @@ export function RequirementAnalysisPageV2(props: Props) {
           <details className="rav2-status-card rav2-technical-status"><summary><Activity /><span><b>运行记录</b><small>Turn、工具调用、事件与异常</small></span></summary><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></details>
         </div>
         <footer className="rav2-status-action">
-          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : automaticTransition?.status === 'succeeded' ? <button className="primary" onClick={() => setView('cases')}><Play />审核最终测试用例</button> : <button className="primary" disabled><LoaderCircle className="rotating" />{understandingSnapshot ? 'PlanningAgent 正在设计测试' : '服务端正在冻结需求理解'}</button>}
+          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : awaitingClarificationResume ? <button className="primary" onClick={() => void resumeClarifiedAnalysis()} disabled={clarificationBusy}><RefreshCw />{clarificationBusy ? '正在继续…' : '继续当前分析'}</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : automaticTransition?.status === 'succeeded' ? <button className="primary" onClick={() => setView('cases')}><Play />审核最终测试用例</button> : <button className="primary" disabled><LoaderCircle className="rotating" />{understandingSnapshot ? 'PlanningAgent 正在设计测试' : '服务端正在冻结需求理解'}</button>}
         </footer>
       </aside>
     </div>
@@ -484,9 +531,27 @@ export function RequirementAnalysisPageV2(props: Props) {
   </section>
 }
 
-function Clarifications({ items, answers, busyId, onAnswerChange, onResolve }: { items: PlanningClarification[]; answers: Record<string, string>; busyId: string; onAnswerChange: (id: string, value: string) => void; onResolve: (item: PlanningClarification, action: 'answer' | 'dismiss') => void }) {
+function Clarifications({ items, answers, actions, busy, onAnswerChange, onActionChange, onSubmit }: { items: PlanningClarification[]; answers: Record<string, string>; actions: Record<string, ClarificationAction>; busy: boolean; onAnswerChange: (id: string, value: string) => void; onActionChange: (id: string, action: ClarificationAction) => void; onSubmit: () => void }) {
+  const pending = items.filter(item => item.status === 'pending')
   if (!items.length) return <div className="rav2-empty"><CheckCircle2 /><h2>没有需要人工确认的业务事实</h2><p>PlanningAgent 将继续冻结需求理解并自动进入测试设计。</p></div>
-  return <div className="rav2-findings"><header><div><Quote /><span><h2>待确认问题</h2><p>只回答资料无法确定、且会影响测试用例正确性的业务事实。回答会作为正式输入写回同一个 Planning Session。</p></span></div><Badge tone={items.some(item => item.status === 'pending' && item.blocking) ? 'orange' : 'green'}>{items.filter(item => item.status === 'pending').length} 个待处理</Badge></header>{items.map(item => <article className="rav2-finding" key={item.id}><header><div><Badge tone={item.blocking ? 'red' : 'blue'}>{item.blocking ? '阻断测试设计' : '非阻断'}</Badge><span><small>{item.category} · {item.id}</small><h3>Agent：{item.question}</h3></span></div><Badge tone={item.status === 'answered' ? 'green' : item.status === 'dismissed' ? 'gray' : 'orange'}>{item.status === 'answered' ? '已回答' : item.status === 'dismissed' ? '不适用' : '待回答'}</Badge></header><p>{item.reason}</p><div className="rav2-refs">{item.requirementPointRefs.map(reference => <span key={reference}>{reference}</span>)}</div>{item.status === 'pending' ? <><textarea value={answers[item.id] ?? ''} onChange={event => onAnswerChange(item.id, event.target.value)} rows={4} placeholder="请输入明确的业务规则、边界、预期结果或环境事实…" /><footer><span>回答人和时间由服务端记录</span><div><button onClick={() => onResolve(item, 'dismiss')} disabled={busyId === item.id}>不适用于当前需求</button><button className="accept" onClick={() => onResolve(item, 'answer')} disabled={busyId === item.id}>{busyId === item.id ? <LoaderCircle className="rotating" /> : <CheckCircle2 />}提交并让 Agent 继续</button></div></footer></> : <dl><div><dt>Human Answer</dt><dd>{item.answer}</dd></div><div><dt>来源</dt><dd>{item.answeredBy} · {item.answeredAt ? formatTime(item.answeredAt) : '—'}</dd></div></dl>}</article>)}</div>
+  return <div className="rav2-findings">
+    <header><div><Quote /><span><h2>待确认问题</h2><p>PlanningAgent 会一次性列出当前全部阻断问题。请逐项选择提供业务事实或人工处置，完成整批后统一提交到同一个 Planning Session。</p></span></div><Badge tone={pending.length ? 'orange' : 'green'}>{pending.length} 个待确认</Badge></header>
+    {pending.length ? <section className="rav2-clarification-batch-note"><CheckCircle2 /><span><b>本批问题需一次性确认</b><small>“提供业务事实”会进入正式需求理解；“人工处置”仅保存不适用或接受当前缺口的理由，不会被当成业务规则。</small></span></section> : null}
+    {items.map(item => {
+      const action = actions[item.id]
+      return <article className="rav2-finding" key={item.id}>
+        <header><div><Badge tone="red">阻断测试设计</Badge><span><small>{item.category} · {item.id}</small><h3>Agent：{item.question}</h3></span></div><Badge tone={item.status === 'answered' ? 'green' : item.status === 'dismissed' ? 'gray' : 'orange'}>{item.status === 'answered' ? '已回答' : item.status === 'dismissed' ? '已处置' : '待回答'}</Badge></header>
+        <p>{item.reason}</p>
+        <div className="rav2-refs">{item.requirementPointRefs.map(reference => <span key={reference}>{reference}</span>)}</div>
+        {item.status === 'pending' ? <>
+          <div className="rav2-clarification-disposition"><b>处理方式</b><div><button type="button" className={action === 'answer' ? 'answer active' : 'answer'} aria-pressed={action === 'answer'} onClick={() => onActionChange(item.id, 'answer')} disabled={busy}><CheckCircle2 />提供业务事实</button><button type="button" className={action === 'dismiss' ? 'dismiss active' : 'dismiss'} aria-pressed={action === 'dismiss'} onClick={() => onActionChange(item.id, 'dismiss')} disabled={busy}><XCircle />不适用 / 接受缺口</button></div><small>{action === 'answer' ? '内容会作为正式业务事实，进入更新后的 Requirement Understanding。' : action === 'dismiss' ? '只记录人工处置理由；PlanningAgent 不得据此推导业务规则或预期结果。' : '必须先选择处理方式，不能用“跳过”等文字代替状态。'}</small></div>
+          <textarea value={answers[item.id] ?? ''} onChange={event => onAnswerChange(item.id, event.target.value)} rows={4} disabled={busy || !action} placeholder={action === 'answer' ? '请输入明确的业务规则、边界、预期结果或环境事实…' : action === 'dismiss' ? '请说明为什么该问题不适用于当前需求，或为什么接受该需求缺口…' : '请先选择处理方式…'} />
+          <small className="rav2-clarification-answer-hint">请填写后继续处理本批其余问题。</small>
+        </> : <dl><div><dt>{item.status === 'dismissed' ? '处置理由' : 'Human Answer'}</dt><dd>{item.answer}</dd></div><div><dt>来源</dt><dd>{item.answeredBy} · {item.answeredAt ? formatTime(item.answeredAt) : '—'}</dd></div></dl>}
+      </article>
+    })}
+    {pending.length ? <footer className="rav2-clarification-batch-action"><span>本批共 {pending.length} 个阻断问题，事实与处置状态由服务端分别保存。</span><button className="accept" onClick={onSubmit} disabled={busy}>{busy ? <LoaderCircle className="rotating" /> : <CheckCircle2 />}{busy ? '正在保存并继续…' : `确认全部 ${pending.length} 项并继续`}</button></footer> : null}
+  </div>
 }
 
 function Overview({ result, blockingClarificationCount, understandingSnapshot, onOpenDetails }: { result?: RequirementAnalysisResponse['result']; blockingClarificationCount: number; understandingSnapshot?: RequirementUnderstandingSnapshot; onOpenDetails: () => void }) {
@@ -590,12 +655,18 @@ function AgentConversation({ run, onReviewed, notify }: { run?: RunRecord; onRev
   const scrollRef = useRef<HTMLDivElement>(null)
   const [reviewing, setReviewing] = useState(false)
   const executionGroups = planningExecutionGroups(run)
+  const clarificationBatches = humanClarificationBatches(run)
+  const timeline = [
+    ...executionGroups.map(group => ({ kind: 'execution' as const, id: group.id, occurredAt: group.startedAt ?? group.execution.events[0]?.occurredAt ?? '', group })),
+    ...clarificationBatches.map(batch => ({ kind: 'clarification' as const, id: batch.id, occurredAt: batch.answeredAt, batch })),
+  ].sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.kind.localeCompare(right.kind))
   const latestExecution = executionGroups.at(-1)?.execution
   const eventCount = executionGroups.reduce((total, group) => total + group.execution.events.length, 0)
   const turnCount = executionGroups.reduce((total, group) => total + group.execution.turns, 0)
   const toolCallCount = executionGroups.reduce((total, group) => total + group.execution.toolCalls, 0)
   const toolErrorCount = executionGroups.reduce((total, group) => total + (group.execution.toolErrors ?? 0), 0)
-  useEffect(() => { const root = scrollRef.current; if (root) root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' }) }, [eventCount])
+  const latestClarificationAt = clarificationBatches.at(-1)?.answeredAt
+  useEffect(() => { const root = scrollRef.current; if (root) root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' }) }, [eventCount, latestClarificationAt])
   const review = async () => {
     if (!run || reviewing) return
     setReviewing(true)
@@ -613,17 +684,23 @@ function AgentConversation({ run, onReviewed, notify }: { run?: RunRecord; onRev
         <article className="rav2-agent-task"><span><FileText /></span><div><b>需求分析任务</b><p>已提交 {run.snapshot?.currentInputRefs.length ?? run.assetVersionIds.length} 个重点输入，Workspace Snapshot 固定 {run.snapshot?.workspaceSnapshot.files.length ?? '—'} 个文件。</p><small>{run.id}</small></div></article>
         <div className="rav2-agent-metrics"><span>{turnCount} Turn</span><span>{toolCallCount} 次工具</span><span>{eventCount} 条事件</span>{toolErrorCount ? <span className="failed">{toolErrorCount} 次异常</span> : null}</div>
         <details className="rav2-runtime-details"><summary><ShieldCheck />运行上下文与只读 Reviewer</summary><PlanningContextMetrics context={latestExecution?.context} /><button className="planning-reviewer-button" disabled={reviewing || run.status === 'running'} onClick={() => void review()}><ShieldCheck />{reviewing ? 'RequirementReviewer 审阅中…' : '运行只读 RequirementReviewer'}</button><PlanningSubAgentRuns runs={run.planningSubAgentRuns} /></details>
-        {executionGroups.map(group => {
+        {timeline.map(item => {
+          if (item.kind === 'clarification') return <HumanClarificationEntry batch={item.batch} key={`clarification:${item.id}`} />
+          const group = item.group
           const events = group.execution.events
           const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
           const completedCalls = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
           const visibleEvents = events.filter(event => event.type !== 'tool_execution_start' || !completedCalls.has(event.toolCallId))
-          return <div key={group.id} className="rav2-execution-attempt"><article className={`rav2-run-control ${group.status === 'failed' || group.status === 'cancelled' ? 'failed' : ''}`}><Activity /><span><b>{group.label}</b><small>{group.status === 'running' ? '执行中' : group.status === 'succeeded' ? '已完成' : group.status === 'failed' ? '失败，已保留运行记录' : group.status === 'cancelled' ? '已取消，已保留运行记录' : '已保存运行记录'} · {events.length} 条事件</small></span></article>{visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={`${group.id}:${event.sequence}`} />)}</div>
+          return <div key={`execution:${item.id}`} className="rav2-execution-attempt"><article className={`rav2-run-control ${group.status === 'failed' || group.status === 'cancelled' ? 'failed' : ''}`}><Activity /><span><b>{group.label}</b><small>{group.status === 'running' ? '执行中' : group.status === 'succeeded' ? '已完成' : group.status === 'failed' ? '失败，已保留运行记录' : group.status === 'cancelled' ? '已取消，已保留运行记录' : '已保存运行记录'} · {events.length} 条事件</small></span></article>{visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={`${group.id}:${event.sequence}`} />)}</div>
         })}
         {!eventCount && <div className="rav2-agent-waiting"><LoaderCircle className={run.status === 'running' ? 'rotating' : ''} /><span><b>{run.status === 'running' ? '等待首个 Agent 事件' : '没有可展示的运行记录'}</b><small>{run.status === 'running' ? '消息和工具调用写入服务端后会自动同步。' : '旧运行可能只保留了结果摘要。'}</small></span></div>}
       </>}
     </div>
   </div>
+}
+
+function HumanClarificationEntry({ batch }: { batch: HumanClarificationBatch }) {
+  return <article className="rav2-run-message user rav2-human-clarification"><header><span><Quote />Human Clarification 已提交</span><small>{batch.answeredBy} · {eventTime(batch.answeredAt)}</small></header><div>{batch.items.map(item => <section key={item.id}><small>{item.category} · {item.id}</small><b>{item.question}</b><p>{item.answer}</p><em>{item.status === 'dismissed' ? '已人工处置；理由不作为业务事实' : '已作为正式业务事实提交'}</em></section>)}</div><footer>本批 {batch.items.length} 项 · 已写回当前 Run 与 Planning Session</footer></article>
 }
 
 function AgentRunEvent({ event, start }: { event: AgentExecutionEvent; start?: AgentExecutionEvent }) {

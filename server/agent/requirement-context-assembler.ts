@@ -48,7 +48,7 @@ export function buildRequirementDirectoryInputPlan(input: {
       workspaceSourceScopes: Object.fromEntries([...new Set(input.workspaceSnapshot.files.map(item => item.sourceScope))].map(scope => [scope, input.workspaceSnapshot.files.filter(item => item.sourceScope === scope).length])),
       workspaceSnapshotSha256: input.workspaceSnapshot.snapshotSha256,
       formalClarifications: input.formalClarifications ?? [],
-      clarificationInstruction: '已回答或已处置的 Clarification 是带来源的正式业务输入；必须采用其明确事实，不得重复提问。pending blocking Clarification 仍须等待人工，不得猜测。',
+      clarificationInstruction: 'status=answered 的 answer 是带来源的正式业务事实，必须采用；status=dismissed 是可追溯的人工处置，answer 仅为不适用或接受缺口的理由，不得据此推导业务规则或 Expected Result。两类记录都不得重复提问；pending blocking Clarification 仍须等待人工，不得猜测。',
       instructions: 'currentInputRefs 是本次重点，不是读取白名单。服务端已冻结正式输入范围和覆盖计划；先基于已投递内容建立理解，再按需使用 ls、find、grep 或 read 浏览 branches/shared/formal-output 中的相关固定资料。Evidence、ID、定位与覆盖由服务端根据 sourceTexts 生成和校验；不要为了提交协议重复读取无关正文，也不得越过工作目录。',
     }),
     '<<<SMARTHUB_PI_DOCUMENT_WORKSPACE_END>>>',
