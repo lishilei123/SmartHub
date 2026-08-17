@@ -117,7 +117,12 @@ test('Skill ZIP 的已发布运行权限会自动注册内部脚本能力，目�
     const store = await storeWith(skill)
     const binding = { skillKey: skill.key, version: skill.version, enabled: true, configurationHash: skillConfigurationHash(skill) }
     const runtime = new AgentSkillRuntime(store, packages)
-    assert.match((await runtime.prepare(definition([], [binding]), 'analysis')).renderPrompt(), /必须先核对固定证据/u)
+    const skillSession = await runtime.prepare(definition([], [binding]), 'analysis')
+    assert.match(skillSession.renderPrompt(), /review\.skill/u)
+    assert.doesNotMatch(skillSession.renderPrompt(), /必须先核对固定证据/u)
+    const skillRegistry = new ToolRegistry()
+    skillSession.register(skillRegistry)
+    assert.match(String(((await execute(skillRegistry, 'skill.read', { skillKey: skill.key })).data as { content: string }).content), /必须先核对固定证据/u)
     const registry = new ToolRegistry()
     const loaded = await new AgentCapabilityLoader(store, packages).load(definition([], [binding]), registry, new AbortController().signal)
     assert.deepEqual(loaded.skillRuntimeToolIds, ['skill.execute_script'])

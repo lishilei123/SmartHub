@@ -3,8 +3,9 @@ import type { SkillRuntimePolicy } from '../domain/types.js'
 
 export const SKILL_EXECUTE_SCRIPT_TOOL_ID = 'skill.execute_script'
 export const SKILL_HTTP_REQUEST_TOOL_ID = 'skill.http_request'
+export const SKILL_READ_TOOL_ID = 'skill.read'
 export const SKILL_RUNTIME_MANIFEST = 'skill-runtime.json'
-export const SKILL_RUNTIME_TOOL_IDS = new Set<string>([SKILL_EXECUTE_SCRIPT_TOOL_ID, SKILL_HTTP_REQUEST_TOOL_ID])
+export const SKILL_RUNTIME_TOOL_IDS = new Set<string>([SKILL_EXECUTE_SCRIPT_TOOL_ID, SKILL_HTTP_REQUEST_TOOL_ID, SKILL_READ_TOOL_ID])
 
 const MAX_SCRIPTS = 20
 const MAX_NETWORK_ORIGINS = 20

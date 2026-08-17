@@ -211,6 +211,8 @@ export interface AgentExecutionEvent {
   toolCalls?: Array<{ id: string; name: string }>
   toolArguments?: unknown
   toolResult?: unknown
+  skillKey?: string
+  version?: string
   stopReason?: string
   model?: string
   usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }

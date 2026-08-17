@@ -25,6 +25,7 @@ import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { createWorkspaceAgentToolRegistry } from '../tools/requirement-tools.js'
 import { RequirementDocumentWorkspace } from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
+import { SKILL_READ_TOOL_ID } from '../tools/skill-read.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
 import { KnowledgeService } from '../application/knowledge-service.js'
 import { ContextManager, protectedCompactionInstructions, type PlanningCompactionCheckpoint } from './context-manager.js'
@@ -476,11 +477,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       deliveryManifest.toolReads ??= []
       deliveryManifest.toolReads.push(structuredClone(observation))
     }, piDocumentWorkspace, this.knowledge)
+    skillSession.register(registry)
     const skillPrompt = skillSession.renderPrompt()
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
-    const allowedToolIds = runtimeAllowedToolIds(input, capabilityLoad.skillRuntimeToolIds)
+    const allowedToolIds = runtimeAllowedToolIds(input, [...skillSession.runtimeToolIds(), ...capabilityLoad.skillRuntimeToolIds])
     const descriptors = registry.descriptors(allowedToolIds)
     const registeredToolIds = new Set(descriptors.map(descriptor => descriptor.id))
     const unavailableToolIds = [...allowedToolIds].filter(toolId => !registeredToolIds.has(toolId))
@@ -499,7 +501,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
     for (const warning of capabilityLoad.warnings) await record({ type: 'capability_binding_unavailable', content: warning })
     if (unavailableToolIds.length) await record({ type: 'tool_bindings_unavailable', content: `以下目录绑定尚未注册到当前 Agent 运行时，因此不会暴露给模型：${unavailableToolIds.join('、')}` })
-    await record({ type: 'skill_bindings_loaded', content: JSON.stringify({ workflowStage: skillSession.workflowStage, enabledSkills: skillSession.catalog().map(skill => ({ key: skill.key, version: skill.version })) }) })
+    await record({ type: 'skill_catalog_loaded', content: JSON.stringify({ workflowStage: skillSession.workflowStage, enabledSkills: skillSession.catalog() }) })
     const controller = new AbortController()
     const deadline = setTimeout(() => controller.abort(new Error('AGENT_DEADLINE_EXCEEDED')), limits.deadlineMs)
     const abort = () => controller.abort(signal.reason ?? new Error('AGENT_CANCELLED'))
@@ -546,7 +548,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         acceptedPrimaryIds: new Set(),
         callCountByPrimaryId: new Map(),
       }
-      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, allowedToolIds, controller.signal, requireResultSubmission, submissionBatches))
+      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, allowedToolIds, controller.signal, requireResultSubmission, submissionBatches, record))
       const primaryToolNames = new Set(descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
@@ -747,6 +749,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     signal: AbortSignal,
     requireResultSubmission: (content?: string) => Promise<void>,
     submissionBatches: SubmissionBatchState,
+    record: (event: Omit<AgentExecutionEvent, 'sequence' | 'occurredAt'>) => Promise<void>,
   ): AgentTool {
     const stage = stageConfiguration(input)
     return {
@@ -770,6 +773,17 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         }
         const executionArguments = submissionBatches.mergedArgumentsByPrimaryId.get(toolCallId) ?? args
         const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot, allowedToolIds } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        if (descriptor.id === SKILL_READ_TOOL_ID) {
+          const data = asRecord(result.data)
+          if (typeof data.skillKey === 'string' && typeof data.version === 'string') {
+            await record({
+              type: result.replayed ? 'skill_read_replayed' : 'skill_read',
+              skillKey: data.skillKey,
+              version: data.version,
+              content: JSON.stringify({ skillKey: data.skillKey, version: data.version }),
+            })
+          }
+        }
         if (result.terminate && submissionBatches.mergedArgumentsByPrimaryId.has(toolCallId)) submissionBatches.acceptedPrimaryIds.add(toolCallId)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
@@ -810,7 +824,7 @@ function planningWorkflowTaskContext(task: string, taskType: string) {
     '这是 Workflow 发送给 PlanningAgent 的最新业务任务。请结合前文自然继续，不要机械重复已经完成的工作。',
     '消息中的业务进度用于说明下一步；正式事实仍需从 Service 固定状态、Workspace Snapshot、Release 或批准版本重新读取。',
     '本轮可执行动作以 Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 为准。',
-    '继续使用当前 PlanningAgent、Planning Session、Agent Configuration 和完整 Enabled Skills；由 Agent 根据任务自主选择 Skill。',
+    '继续使用当前 PlanningAgent、Planning Session 和 Agent Configuration；由 Agent 根据任务查看 Enabled Skill Catalog，并按需通过 skill.read 读取方法正文。',
     '</planning_workflow_message>',
   ].join('\n')
 }

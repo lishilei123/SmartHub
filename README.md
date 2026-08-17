@@ -36,7 +36,7 @@
 - 本地模型添加框提供经过 Transformers.js 模型页核对的推荐模型，可搜索并一键填入，同时保留任意 Hugging Face 模型名称的自由输入；
 - 资产/版本浏览及关键词、向量、混合检索；PostgreSQL 使用 pgvector 和 HNSW 执行向量召回、pg_trgm 执行关键词召回，再按配置的两路召回数量融合并执行二阶段语义重排；向量服务故障时混合检索降级到关键词，纯向量返回明确不可用状态；
 - Reranker 可独立选择模型来源和模型；重排阶段按所选来源使用对应的本地运行实例或当前知识库保存的远程路由，不要求与知识库 Embedding 模型相同；
-- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。随应用发布的内置 Tool 和 Skill 始终启用，管理页不允许关闭，服务端也会拒绝停用请求并自动修复历史停用状态；是否授权给具体 Agent 仍由 Agent 配置及必需能力约束决定。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。随应用发布的内置 Skill 位于 `server/skills`；项目外置 Skill/Tool 分别位于 `ai/skills`、`ai/tools`，服务启动和目录读取时扫描，并默认每 1 秒自动重扫。外置 Skill 通过同目录 `skill.json` 登记；外置 Tool 可使用无 JSON 的单文件静态清单、`*.tool.json`、目录 `tool.json`、批量 `tools.json` 或 `package.json` 的 SmartHub 声明。管理页标记为“外置”，只允许启停，编辑或删除应修改文件。运行开始时直接加载当前 Agent 发布版本绑定的全部 Skill 正文；若 Skill 的同目录 `skill-runtime.json` 声明了 PowerShell 脚本或网络 Origin，Runtime 仅为本次已绑定的 Skill 动态注册内部调用协议，不出现在 Tool 目录，也无需在 Agent 配置中重复选择。脚本路径、网络 Origin/方法、重定向、超时、内容大小、发布配置 Hash 和调用次数仍由服务端强制校验。自定义 Tool 支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
+- “系统管理 → 模型管理”已接入服务端 AI 资源目录：模型页维护 Base URL、API Key、模型、能力、启停与优先级，添加、编辑、启停和删除均即时保存；MCP、Skill、工具页同样可维护真实运行资源。随应用发布的内置 Tool 和 Skill 始终启用，管理页不允许关闭，服务端也会拒绝停用请求并自动修复历史停用状态；是否授权给具体 Agent 仍由 Agent 配置及必需能力约束决定。MCP Runtime 使用官方 TypeScript Client，通过 Streamable HTTP 或兼容 SSE 执行 `tools/list` 与 `tools/call`，并同时校验 Agent 发布快照、MCP 策略 Hash、服务白名单和 Tool 白名单；Bearer/OAuth Access Token 只按配置的环境变量名称从部署环境读取，不写入数据库。随应用发布的内置 Skill 位于 `server/skills`；项目外置 Skill/Tool 分别位于 `ai/skills`、`ai/tools`，服务启动和目录读取时扫描，并默认每 1 秒自动重扫。外置 Skill 通过同目录 `skill.json` 登记；外置 Tool 可使用无 JSON 的单文件静态清单、`*.tool.json`、目录 `tool.json`、批量 `tools.json` 或 `package.json` 的 SmartHub 声明。管理页标记为“外置”，只允许启停，编辑或删除应修改文件。运行开始时只把当前 Agent 发布版本绑定的 Skill Catalog 注入 Prompt；Agent 根据最新任务自主调用内部只读 `skill.read` 获取所需固定正文，同一执行轮重复读取由 Runtime 缓存并重放。若 Skill 的同目录 `skill-runtime.json` 声明了 PowerShell 脚本或网络 Origin，Runtime 仅为本次已绑定的 Skill 动态注册内部调用协议，不出现在 Tool 目录，也无需在 Agent 配置中重复选择。Skill 正文不能改变这些权限；脚本路径、网络 Origin/方法、重定向、超时、内容大小、发布配置 Hash 和调用次数仍由服务端强制校验。自定义 Tool 支持 `ai/tools`/`server/tools` 本地模块、HTTP JSON API 和 MCP；所有能力继续经过 Agent Tool 白名单、风险、调用次数与重复调用策略治理；
 - “系统管理 → Agent 配置”分别维护 PlanningAgent 与测试执行 Agent 的模型路由、输出上限、超时、重试、Prompt、Tool/MCP/Skill 和运行限制，并拥有不可变发布版本。运行时固定 Toolset、MCP 策略与 Skill 内容 Hash；Workflow 只收窄当前 Stage 可调用的业务 Tool，不再过滤或激活 Skill。
 - 声明 `tool_calling` 的生成式模型必须在健康探测中真实完成一次受控函数调用，普通文本响应不能冒充工具能力；各 Agent 通过自身结果提交工具提交协议结果，最终结果仍由应用服务复验；
 - 检索支持逻辑路径筛选；结果绑定固定索引成员元数据、资产版本、标题路径、Chunk 和原文行号，页面按结果的 `assetVersionId` 打开只读证据版本；
@@ -45,7 +45,7 @@
 
 ## 当前已实现的统一 PlanningAgent 测试设计流程
 
-- `PlanningAgent` 发布配置决定启用哪些 Skill；运行开始时一次性加载全部已启用 Skill，Agent 自主判断何时使用。Workflow 只推进业务 Stage、收窄 Tool/提交协议和执行 Gate，不调度或激活 Skill。
+- `PlanningAgent` 发布配置决定启用哪些 Skill；运行开始时只加载 Enabled Skill Catalog，Agent 自主判断何时通过 `skill.read` 读取正文。Workflow 只推进业务 Stage、收窄 Tool/提交协议和执行 Gate，不调度或激活 Skill。
 - `test_point_design` 阶段从冻结的 `currentInputRefs` 识别本次任务重点，同时可在完整 Project Workspace Snapshot 内自主读取正式需求发布包和旁证资料，直接生成 Test Point Tree Candidate，不存在 CoverageUnit 中间层。
 - Service/Validator 自动校验测试点树的结构、引用与内容 Hash，创建不可变 `TestPointTreeVersion` 并投影 Workspace，然后立即进入 `test_case_design`。人工仍可增加、编辑、删除、拆分、合并或要求 AI 重新设计测试点，但测试点不再是强制人工 Gate；每次修改后都会重新自动校验并生成用例。
 - `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；用例生成后必须经过人工用例审核，发布仍由 Service 门禁控制。
@@ -81,7 +81,7 @@
 - 运行开始时，服务端将固定 `AssetVersion.content` 物化到 run-scoped 临时目录，预建完整工作区层级，并在结束、失败或取消后清理。Agent 只能传相对路径；绝对路径、盘符、UNC、`..` 和越界 Glob 均被拒绝；不开放 Shell、write、edit 或任意文件系统权限；
 - 首轮 Prompt 只投递工作区根、活动分支、需求输入目录、文件数量和快照 Hash，不投递文件名、Chunk 清单或正文。Agent 使用 `ls` 看目录、`find` 找文件、`grep` 定位文本，再用 `read` 的 `offset / limit` 分段读取大文件；
 - 只有 `read` 实际返回的固定文件行范围会写入 `InputDeliveryManifest.toolReads` 并形成 Evidence 候选。`grep` 和 `find` 只用于定位；资产版本、内部 Chunk、Evidence、需求点 ID、`evidenceRefs`、coverage 和 locator 全部由服务端生成和校验；
-- 已发布 `PlanningAgent` 必须包含 Workspace 只读工具、Knowledge 查询工具和各阶段的服务端提交工具；运行开始时按发布版本与内容 Hash 一次性加载全部已绑定 Skill，不再使用 `skill.activate` 或 Stage Skill Catalog，Skill 仍不能切换 Stage 或扩大 Tool 白名单；
+- 已发布 `PlanningAgent` 必须包含 Workspace 只读工具、Knowledge 查询工具和各阶段的服务端提交工具；运行开始时仅加载已绑定 Skill 的 `skillKey/name/description/version/tags` Catalog，不再把全部正文注入 System Prompt。PlanningAgent 根据最新任务自主调用 `skill.read`，Runtime 再校验 enabled binding、发布版本、configurationHash（含内容 Hash）并返回 `TRUSTED_SKILL` 正文；不使用 Stage → Skill 映射，Skill 仍不能切换 Stage 或扩大 Tool 白名单；
 - Agent 定义、Prompt、Toolset、Skill、MCP、模型路由、执行限制和内容 Hash 独立版本化并写入运行快照。模型只提交语义候选，正式 RP、Evidence、Finding、coverage、Artifact 与发布门禁由服务端生成和校验；
 - 需求分析 Run 持久化统一 Agent 的公开模型消息、工具参数/返回和语义事件时间线；需求分析右侧“Pi Agent”面板按秒刷新任务、Stage、读取文件路径、函数调用、公开结果和错误，不提供独立问答入口；
 - 调用分析接口时先创建 `running` 需求分析 Run 和持久化 Job 后立即返回；独立 Worker 通过 lease、heartbeat、run token 和 fencing 执行，只有当前租约持有者可以冻结阶段结果或发布正式结果。Worker 失租约后任务可重新领取，超过次数或取消后进入明确终态，晚到结果不能覆盖。只有 `open` 项目版本允许物理删除；删除时级联移除该版本的需求绑定、已结束分析 Run、FindingAction、审批和运行记录。存在 `running` 分析 Run 时必须先取消，`locked/archived` 版本不可物理删除；
@@ -146,7 +146,7 @@ Skill 新建默认使用受控 ZIP 上传：压缩包最多 20 MB、200 个文�
 
 保存来源后，点击模型名称会发起最小生成请求并持久化真实健康状态；“获取当前配置模型”对 OpenAI/OpenAI-compatible 来源请求服务端 `/models`。Anthropic 没有统一的标准模型列表接口，因此需手动注册模型，但可执行真实 `/v1/messages` 连通性探测。
 
-进入“系统管理 → Agent 配置”后维护 `PlanningAgent` 与测试执行 Agent。页面维护模型路由、Prompt、Tool/MCP/Skill 和运行限制；必需能力不可取消，发布时固定 Toolset、Skill 内容与运行权限 Hash 以及 MCP Policy Hash。运行时直接加载全部已绑定 Skill；Workflow Stage 只收窄业务 Tool、提交协议和 Gate，不再筛选或激活 Skill。
+进入“系统管理 → Agent 配置”后维护 `PlanningAgent` 与测试执行 Agent。页面维护模型路由、Prompt、Tool/MCP/Skill 和运行限制；必需能力不可取消，发布时固定 Toolset、Skill 内容与运行权限 Hash 以及 MCP Policy Hash。运行时只加载已绑定 Skill Catalog，正文由 Agent 通过 `skill.read` 按需读取；Workflow Stage 只收窄业务 Tool、提交协议和 Gate，不筛选或指定 Skill。
 
 ## 生产构建与运行
 

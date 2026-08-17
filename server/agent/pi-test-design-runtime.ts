@@ -197,7 +197,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   return [
     ...stageRules,
     'Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 是本轮执行权限边界。',
-    'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 从完整 Enabled Skills 中自主选择所需能力。',
+    'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 查看 Enabled Skill Catalog，并按当前任务自主决定是否通过 skill.read 读取所需方法正文。',
     'currentInputRefs 是重点输入，不是读取白名单；先读取重点输入，再按需使用 ls、find、grep、read 浏览完整冻结 Workspace。',
     'requirements/clarifications.json 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
     '若存在 historical-test-cases.json，必须读取并判断复用、修改、新增或废弃；历史资料不能覆盖当前 Requirement Release。',

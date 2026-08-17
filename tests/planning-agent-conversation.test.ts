@@ -7,6 +7,7 @@ import type { StreamFn } from '@earendil-works/pi-agent-core'
 import { defaultAgentDefinitionConfigDictionary } from '../server/agent/agent-definition-config.js'
 import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
 import { createAgentDefinitionVersion } from '../server/agent/planning-agent.js'
+import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { PlanningWorkflowService } from '../server/application/planning-workflow-service.js'
 import type { AgentExecutionInput, AgentModelConnection, PlanningTestDesignSnapshot, RequirementInputPlan } from '../server/domain/agent-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
@@ -23,6 +24,7 @@ const workspaceToolIds = [
 const requirementSubmit = 'requirement_analysis_submit_result'
 const pointSubmit = 'test_design_points_submit_result'
 const caseSubmit = 'test_design_cases_submit_result'
+const skillRead = 'skill_read'
 
 test('PlanningAgent System Prompt 只保留长期身份、事实与治理边界', () => {
   const prompt = defaultAgentDefinitionConfigDictionary.planning.systemPrompt
@@ -98,20 +100,27 @@ test('PlanningWorkflow 按正式 Gate 分两轮发送测试点与测试用例任
 test('同一 Planning Session 通过连续任务推进需求、测试点、测试用例与 resynthesize，并逐轮收窄 Submit Tool', async () => {
   const store = new JsonStore(null)
   await store.load()
+  await new AiResourceService(store, undefined, { reloadIntervalMs: 0 }).initialize()
   const provider = fauxProvider()
   provider.setResponses([
+    fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'requirement.analysis' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(requirementSubmit, requirementCandidate('首次分析')), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'requirement.analysis' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(requirementSubmit, requirementCandidate('Clarification 后续')), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'test-point-design' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(pointSubmit, pointCandidate()), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'test-case-design' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(caseSubmit, caseCandidate('首次用例')), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'test-case-design' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(caseSubmit, caseCandidate('重新生成用例')), { stopReason: 'toolUse' }),
   ])
-  const requests: Array<{ tools: string[]; messages: string }> = []
+  const requests: Array<{ tools: string[]; messages: string; systemPrompt: string }> = []
   const providerStream = provider.provider.streamSimple.bind(provider.provider) as StreamFn
   const streamFn: StreamFn = (model, context, options) => {
     requests.push({
       tools: (context.tools ?? []).map(tool => tool.name),
       messages: JSON.stringify(context.messages),
+      systemPrompt: context.systemPrompt ?? '',
     })
     return providerStream(model, context, options)
   }
@@ -121,9 +130,9 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
   })
   const definition = planningDefinition()
   const model = planningModel()
-  const sessionIds: string[] = []
+  const roundOutputs = []
 
-  sessionIds.push(await executeRound(runtime, definition, model, 'analysis', 'requirement-analysis.submit_result', 'requirement-analysis/v1', '分析当前需求'))
+  roundOutputs.push(await executeRound(runtime, definition, model, 'analysis', 'requirement-analysis.submit_result', 'requirement-analysis/v1', '分析当前需求'))
 
   await runtime.appendPlanningTask({
     projectId: 'project-1',
@@ -131,7 +140,7 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
     taskType: 'requirement_analysis_after_clarifications',
     task: '这些 Clarification 已经由人工处理，请继续当前需求分析工作。',
   })
-  sessionIds.push(await executeRound(runtime, definition, model, 'analysis', 'requirement-analysis.submit_result', 'requirement-analysis/v1', '结合正式 Clarification 回答继续完善需求理解'))
+  roundOutputs.push(await executeRound(runtime, definition, model, 'analysis', 'requirement-analysis.submit_result', 'requirement-analysis/v1', '结合正式 Clarification 回答继续完善需求理解'))
 
   await runtime.appendPlanningTask({
     projectId: 'project-1',
@@ -139,7 +148,7 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
     taskType: 'test_design_after_requirement_release',
     task: '需求分析已经完成，Requirement Release 已正式发布。请继续当前测试策划工作，开始设计测试点。',
   })
-  sessionIds.push(await executeRound(runtime, definition, model, 'test_point_design', 'test_design_points.submit_result', 'test-point-design/v1', '基于正式 Requirement Release 和冻结 Workspace 设计测试点'))
+  roundOutputs.push(await executeRound(runtime, definition, model, 'test_point_design', 'test_design_points.submit_result', 'test-point-design/v1', '基于正式 Requirement Release 和冻结 Workspace 设计测试点'))
 
   await runtime.appendPlanningTask({
     projectId: 'project-1',
@@ -147,7 +156,7 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
     taskType: 'test_case_design_after_test_points_validated',
     task: '测试点已经完成并通过服务端校验。请继续当前测试策划工作，基于已批准的 TestPointTreeVersion 编写测试用例。',
   })
-  sessionIds.push(await executeRound(runtime, definition, model, 'test_case_design', 'test_design_cases.submit_result', 'test-case-design/v1', '基于已批准 TestPointTreeVersion 编写测试用例'))
+  roundOutputs.push(await executeRound(runtime, definition, model, 'test_case_design', 'test_design_cases.submit_result', 'test-case-design/v1', '基于已批准 TestPointTreeVersion 编写测试用例'))
 
   await runtime.appendPlanningTask({
     projectId: 'project-1',
@@ -155,23 +164,40 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
     taskType: 'test_case_resynthesize',
     task: '当前已批准 TestPointTreeVersion 保持不变，请重新生成测试用例。',
   })
-  sessionIds.push(await executeRound(runtime, definition, model, 'test_case_design', 'test_design_cases.submit_result', 'test-case-design/v1', '重新生成完整测试用例候选'))
+  roundOutputs.push(await executeRound(runtime, definition, model, 'test_case_design', 'test_design_cases.submit_result', 'test-case-design/v1', '重新生成完整测试用例候选'))
 
+  const sessionIds = roundOutputs.map(output => output.context!.sessionId)
   assert.equal(new Set(sessionIds).size, 1, '所有任务必须复用同一个 Planning Session ID')
-  assert.equal(requests.length, 5)
-  assert.deepEqual(requests.map(request => submitTools(request.tools)), [
+  assert.equal(requests.length, 10)
+  assert.deepEqual(requests.filter((_, index) => index % 2 === 0).map(request => submitTools(request.tools)), [
     [requirementSubmit],
     [requirementSubmit],
     [pointSubmit],
     [caseSubmit],
     [caseSubmit],
   ])
-  assert.match(requests[1].messages, /Clarification 已经由人工处理/u)
-  assert.match(requests[2].messages, /Requirement Release 已正式发布/u)
-  assert.match(requests[3].messages, /TestPointTreeVersion 编写测试用例/u)
-  assert.match(requests[4].messages, /TestPointTreeVersion 保持不变，请重新生成测试用例/u)
-  assert.ok(!requests[3].tools.includes(requirementSubmit) && !requests[3].tools.includes(pointSubmit))
-  assert.ok(!requests[4].tools.includes(requirementSubmit) && !requests[4].tools.includes(pointSubmit))
+  assert.ok(requests.every(request => request.tools.includes(skillRead)))
+  assert.match(requests[2].messages, /Clarification 已经由人工处理/u)
+  assert.match(requests[4].messages, /Requirement Release 已正式发布/u)
+  assert.match(requests[6].messages, /TestPointTreeVersion 编写测试用例/u)
+  assert.match(requests[8].messages, /TestPointTreeVersion 保持不变，请重新生成测试用例/u)
+  assert.ok(!requests[6].tools.includes(requirementSubmit) && !requests[6].tools.includes(pointSubmit))
+  assert.ok(!requests[8].tools.includes(requirementSubmit) && !requests[8].tools.includes(pointSubmit))
+
+  for (const request of requests) {
+    assert.match(request.systemPrompt, /当前 Agent 可用 Skills（发布配置目录；不包含 Skill 正文）/u)
+    assert.match(request.systemPrompt, /skill\.read/u)
+    assert.doesNotMatch(request.systemPrompt, /<<<TRUSTED_SKILL|# Requirement Analysis 方法论|# Test case design/u)
+  }
+  assert.doesNotMatch(requests[0].messages, /# Requirement Analysis 方法论/u)
+  assert.match(requests[1].messages, /# Requirement Analysis 方法论/u)
+  assert.match(requests[7].messages, /# Test case design/u)
+  assert.deepEqual(roundOutputs.map(output => {
+    const event = output.events.find(item => item.type === 'skill_read')
+    assert.ok(event)
+    assert.ok(output.events.some(item => item.type === 'skill_catalog_loaded'))
+    return event.skillKey
+  }), ['requirement.analysis', 'requirement.analysis', 'test-point-design', 'test-case-design', 'test-case-design'])
 })
 
 async function executeRound(
@@ -201,7 +227,7 @@ async function executeRound(
   assert.ok(output.context?.sessionId)
   const submitted = output.events.filter(event => event.type === 'tool_execution_end' && event.toolId?.endsWith('_submit_result'))
   assert.equal(submitted.length, 1)
-  return output.context.sessionId
+  return output
 }
 
 function planningDefinition() {
@@ -215,6 +241,7 @@ function planningDefinition() {
     systemPrompt: config.systemPrompt,
     taskTemplate: config.taskTemplate,
     promptKey: config.promptKey,
+    skills: config.skills,
     tools: [
       ...workspaceToolIds.map(toolId => `${toolId}@1.0.0`),
       'requirement-analysis.submit_result@1.0.0',
