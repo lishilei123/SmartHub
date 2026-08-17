@@ -14,6 +14,9 @@ export function auditTestDesignCoverage(input: { runId: string; basis: TestDesig
   const caseSetSha256 = canonicalSha256(current.map(item => ({ caseId: item.testCase.id, revision: item.revision.revision, contentSha256: item.revision.contentSha256 })).sort((left, right) => left.caseId.localeCompare(right.caseId)))
   const blockers: Array<Omit<CoverageAudit['blockers'][number], 'resolution'>> = []
   const relations: CoverageAudit['relations'] = []
+  for (const clarification of input.basis.clarifications ?? []) {
+    if (clarification.blocking && clarification.status === 'pending') blockers.push({ code: 'PLANNING_CLARIFICATION_UNRESOLVED', message: `阻断问题 ${clarification.question} 尚未获得正式回答`, subjectId: clarification.id })
+  }
   const allowedRefs = new Set([...input.basis.items.map(item => item.id), ...input.retrieval.hits.map(item => item.id)])
   const allowedHistoricalRefs = new Set(input.historical.items.map(item => item.id))
   for (const point of points) {
@@ -43,14 +46,23 @@ export function auditTestDesignCoverage(input: { runId: string; basis: TestDesig
     const pointDimensions = new Set(points.filter(point => item.revision.content.testPointIds.includes(point.nodeId)).map(point => point.dimension))
     if (pointDimensions.size > 1 || [...pointDimensions].some(dimension => dimension !== item.revision.content.dimension)) blockers.push({ code: 'TEST_CASE_POINT_DIMENSION_MISMATCH', message: `用例 ${item.revision.content.title} 的测试维度与所关联叶子测试点不一致`, subjectId: item.testCase.id })
     if (item.revision.content.executionMethods.some(method => method.executionReadiness === 'needs_confirmation') || item.revision.content.executionSpec?.executionReadiness === 'needs_confirmation') blockers.push({ code: 'TEST_CASE_NOT_READY', message: `用例 ${item.revision.content.title} 执行配置仍待确认；如本版本不能执行，请明确标记为 blocked`, subjectId: item.testCase.id })
+    const spec = item.revision.content.executionSpec
+    const expectedResults = [
+      ...item.revision.content.executionMethods.flatMap(method => [...method.steps.map(step => step.expected), ...method.verificationChecks.map(check => check.description)]),
+      ...item.revision.content.sharedVerificationChecks.map(check => check.description),
+      ...(spec?.kind === 'performance' ? spec.thresholds.map(item => item.target) : []),
+      ...(spec?.kind === 'stability' ? spec.observations : []),
+      ...(spec?.kind === 'compatibility' ? [spec.expectedConsistency] : []),
+    ]
+    if (!expectedResults.length || expectedResults.some(value => /(?:TBD|TODO|待确认|未确定|自行判断|按实际情况)/iu.test(value))) blockers.push({ code: 'TEST_CASE_EXPECTED_RESULT_UNCLEAR', message: `用例 ${item.revision.content.title} 缺少明确且可判定的 Expected Result`, subjectId: item.testCase.id })
     const missingData = item.revision.content.dataRequirementIds.filter(id => !input.dataSet.requirements.some(requirement => requirement.id === id && requirement.readiness === 'ready'))
     if (missingData.length) blockers.push({ code: 'TEST_CASE_NOT_READY', message: `用例 ${item.revision.content.title} 的数据需求未就绪`, subjectId: item.testCase.id })
   }
   const duplicateGroups = new Map<string, string[]>()
   for (const item of current) duplicateGroups.set(item.revision.semanticSha256, [...(duplicateGroups.get(item.revision.semanticSha256) ?? []), item.testCase.id])
   for (const caseIds of duplicateGroups.values()) if (caseIds.length > 1) blockers.push({ code: 'TEST_CASE_DUPLICATE', message: `存在 ${caseIds.length} 条语义完全相同的测试用例`, subjectId: caseIds[0] })
-  for (const finding of input.findings) if (finding.state === 'open') blockers.push({ code: 'TEST_DESIGN_FINDING_UNRESOLVED', message: `Finding ${finding.title} 尚未处置`, subjectId: finding.id })
-  for (const item of input.confirmationItems) if (item.state === 'open') blockers.push({ code: 'TEST_DESIGN_CONFIRMATION_UNRESOLVED', message: `待确认项 ${item.title} 尚未处置`, subjectId: item.id })
+  for (const finding of input.findings) if (finding.state === 'open' && finding.severity === 'blocker') blockers.push({ code: 'TEST_DESIGN_FINDING_UNRESOLVED', message: `阻断 Finding ${finding.title} 尚未处置`, subjectId: finding.id })
+  for (const item of input.confirmationItems) if (item.state === 'open' && item.blocker) blockers.push({ code: 'TEST_DESIGN_CONFIRMATION_UNRESOLVED', message: `阻断待确认项 ${item.title} 尚未处置`, subjectId: item.id })
   const basisRefs = new Set(input.basis.items.filter(item => item.locator?.coverageTarget !== false).map(item => item.id))
   const referencedBasis = new Set(points.flatMap(point => point.basisRefs))
   for (const basisRef of basisRefs) if (!referencedBasis.has(basisRef)) blockers.push({ code: 'COVERAGE_BASIS_UNCOVERED', message: `固定依据 ${basisRef} 未映射测试点`, subjectId: basisRef })
@@ -65,6 +77,6 @@ export function auditTestDesignCoverage(input: { runId: string; basis: TestDesig
 function blockerResolution(code: string): CoverageAudit['blockers'][number]['resolution'] {
   if (code === 'COVERAGE_TEST_POINT_UNCOVERED' || code === 'TEST_CASE_DUPLICATE' || code === 'TEST_CASE_OVER_AGGREGATED' || code === 'TEST_CASE_POINT_DIMENSION_MISMATCH' || code === 'TEST_CASE_NON_EXECUTABLE_POINT_REFERENCE') return 'agent_repair'
   if (code === 'TEST_CASE_REVIEW_REQUIRED') return 'human_review'
-  if (code === 'TEST_DESIGN_FINDING_UNRESOLVED' || code === 'TEST_DESIGN_CONFIRMATION_UNRESOLVED' || code === 'COVERAGE_BASIS_UNCOVERED' || code === 'TEST_CASE_NOT_READY') return 'human_decision'
+  if (code === 'TEST_DESIGN_FINDING_UNRESOLVED' || code === 'TEST_DESIGN_CONFIRMATION_UNRESOLVED' || code === 'PLANNING_CLARIFICATION_UNRESOLVED' || code === 'COVERAGE_BASIS_UNCOVERED' || code === 'TEST_CASE_NOT_READY' || code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR') return 'human_decision'
   return 'manual_edit'
 }

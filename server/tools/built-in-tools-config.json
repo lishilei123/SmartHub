@@ -352,11 +352,11 @@
       }
     },
     "requirement-analysis.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "requirement_analysis_submit_result",
       "label": "提交统一需求分析结果",
       "catalogName": "提交需求分析",
-      "description": "提交 requirement-analysis/v1。一次提交同时包含需求基线、整体与跨需求 Finding、Test Focus、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
+      "description": "提交 requirement-analysis/v1。一次提交同时包含需求基线、整体与跨需求 Finding、结构化 Clarification、Test Focus、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
       "catalogDescription": "提交单 Agent 需求分析结果，由服务端统一校验和生成 Artifact。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -504,6 +504,57 @@
               "additionalProperties": false
             }
           },
+          "clarifications": {
+            "type": "array",
+            "maxItems": 500,
+            "description": "只有资料、Workspace 与 Knowledge Reference 都无法确定且会影响测试正确性的业务事实才提问；普通 Finding 不应机械转成问题。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+        "category": {
+          "enum": [
+                    "business_rule",
+                    "boundary",
+                    "expected_result",
+                    "dependency",
+                    "test_scope",
+                    "environment",
+                    "other"
+                  ]
+                },
+                "requirementPointRefs": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 32
+                  }
+                },
+                "blocking": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "question",
+                "reason",
+                "category",
+                "requirementPointRefs",
+                "blocking"
+              ],
+              "additionalProperties": false
+            }
+          },
           "testFocus": {
             "type": "array",
             "maxItems": 300,
@@ -547,6 +598,7 @@
           "summary",
           "requirementPoints",
           "findings",
+          "clarifications",
           "testFocus"
         ],
         "additionalProperties": false

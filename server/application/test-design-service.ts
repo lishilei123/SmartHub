@@ -14,7 +14,7 @@ import { auditTestDesignCoverage } from './test-design-coverage-auditor.js'
 import { assertEtag, etag, executableTestPointIds, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, validateTreeNodes, type TestCaseDesignCandidate, type TestPointDesignCandidate } from './test-design-validation.js'
 import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
-const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 2
+const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
 const AUTOMATIC_TEST_POINT_REVIEW_ACTOR = 'system:test-point-validator'
 
 export interface PlanningAgentRuntime {
@@ -69,10 +69,56 @@ export class TestDesignService {
       const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
       if (projectVersion.status !== 'open') throw new TestDesignError('PROJECT_VERSION_READ_ONLY', '当前项目版本只读', 409)
       validateDesignSources(state, projectVersion.projectId, input)
-      const design: TestDesign = { id: `test_design_${randomUUID()}`, projectVersionId, projectId: projectVersion.projectId, name: input.name, objective: input.objective, input, logicalInputSha256: canonicalSha256(input), createdBy: principal.subjectId, createdAt: now() }
+      const design: TestDesign = { id: `test_design_${randomUUID()}`, projectVersionId, projectId: projectVersion.projectId, name: input.name, objective: input.objective, input, logicalInputSha256: canonicalSha256(input), createdBy: principal.subjectId, createdAt: now(), creationMode: 'manual' }
       designState(state).designs.push(design)
       return structuredClone(design)
     })
+  }
+
+  async createAutomaticDesignAndRun(projectVersionId: string, analysisRunId: string) {
+    const created = await this.store.transaction(state => {
+      const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
+      if (projectVersion.status !== 'open') throw new TestDesignError('PROJECT_VERSION_READ_ONLY', '当前项目版本只读', 409)
+      const analysisRun = required(state.reviewRuns.find(item => item.id === analysisRunId && item.projectVersionId === projectVersionId), 'REQUIREMENT_RUN_NOT_FOUND', '需求理解运行不存在')
+      const release = required(analysisRun.workflow?.release, 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '需求理解尚未冻结正式基线')
+      if (analysisRun.status !== 'succeeded' || release.status !== 'published' || projectVersion.requirementReleaseBinding?.releaseId !== release.id) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '需求理解基线尚未正式绑定', 409)
+      const aggregate = designState(state)
+      const existing = aggregate.designs.find(item => item.projectVersionId === projectVersionId && item.creationMode === 'automatic' && item.sourceRequirementReleaseId === release.id)
+      if (existing) return { design: structuredClone(existing), created: false }
+      const result = required(analysisRun.result, 'REQUIREMENT_RESULT_NOT_FOUND', '需求理解结果不存在')
+      const activeIndex = state.indexes.find(item => item.id === analysisRun.snapshot.indexVersionId && item.status === 'active')
+      const rawInput: CreateTestDesignInput = {
+        name: `${projectVersion.name} · 自动测试设计`,
+        objective: result.summary.overview.trim() || '依据已冻结的需求理解生成可追溯测试点与测试用例。',
+        includedScopes: [],
+        excludedScopes: [],
+        focusDimensions: [],
+        executionMethods: [],
+        userCoverageObjectives: result.testFocus.map(item => `${item.title}：${item.description}`),
+        knowledgeAugmentation: activeIndex ? { mode: 'fixed_index', indexVersionId: activeIndex.id } : { mode: 'disabled' },
+        historicalCaseSelections: [],
+        historicalLibrarySelection: { mode: 'latest_library' },
+      }
+      const input = validateCreateTestDesignInput(rawInput)
+      validateDesignSources(state, projectVersion.projectId, input)
+      const design: TestDesign = {
+        id: `test_design_${randomUUID()}`,
+        projectVersionId,
+        projectId: projectVersion.projectId,
+        name: input.name,
+        objective: input.objective,
+        input,
+        logicalInputSha256: canonicalSha256(input),
+        createdBy: 'system:planning-workflow',
+        createdAt: now(),
+        creationMode: 'automatic',
+        sourceRequirementReleaseId: release.id,
+      }
+      aggregate.designs.push(design)
+      return { design: structuredClone(design), created: true }
+    })
+    const run = await this.createRun(projectVersionId, created.design.id, `automatic:${created.design.sourceRequirementReleaseId}`, { subjectId: 'system:planning-workflow', displayName: 'Planning Workflow' })
+    return { design: created.design, run }
   }
 
   async listDesigns(projectVersionId: string) {
@@ -748,7 +794,7 @@ function materializeDesignIssues(run: TestDesignWorkflowRun, raw: unknown) {
 }
 
 function buildBasisSnapshot(design: TestDesign, requirement: BoundRequirementRelease, machine: ReturnType<typeof publishedRequirements>, createdAt: string): TestDesignBasisSnapshot {
-  const items = machine.requirements.map((point, index) => ({
+  const requirementItems = machine.requirements.map((point, index) => ({
     id: `basis_requirement_${requirement.analysisRun.id}_${point.clientRequirementPointId}`,
     kind: 'requirement_release' as const,
     sourceId: `${requirement.analysisRun.id}:${point.clientRequirementPointId}`,
@@ -756,7 +802,16 @@ function buildBasisSnapshot(design: TestDesign, requirement: BoundRequirementRel
     content: structuredClone(point),
     locator: { coverageTarget: true, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementPointId: point.clientRequirementPointId, ordinal: index, evidenceRefs: point.evidenceRefs },
   }))
-  const base = { schemaVersion: 'test-design-basis-snapshot/v2' as const, projectVersionId: design.projectVersionId, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementsJsonSha256: machine.artifact.contentSha256, items, createdAt }
+  const clarifications = structuredClone(requirement.analysisRun.result?.clarifications ?? [])
+  const clarificationItems = clarifications.map(item => ({
+    id: `basis_clarification_${item.id}`,
+    kind: 'human_clarification' as const,
+    sourceId: item.id,
+    contentSha256: canonicalSha256(item),
+    content: structuredClone(item),
+    locator: { coverageTarget: false, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, clarificationId: item.id, requirementPointRefs: item.requirementPointRefs, answeredAt: item.answeredAt, answeredBy: item.answeredBy },
+  }))
+  const base = { schemaVersion: 'test-design-basis-snapshot/v2' as const, projectVersionId: design.projectVersionId, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementsJsonSha256: machine.artifact.contentSha256, items: [...requirementItems, ...clarificationItems], clarifications, createdAt }
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 

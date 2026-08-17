@@ -1,6 +1,29 @@
 import type { AgentExecutionRecord } from './types.js'
+import type { PlanningClarification } from './review-types.js'
 
-export type RequirementWorkflowStage = 'analysis' | 'repair' | 'verification' | 'release'
+export type RequirementWorkflowStage = 'analysis' | 'clarification' | 'understanding' | 'repair' | 'verification' | 'release'
+
+export interface RequirementUnderstandingSnapshot {
+  id: string
+  schemaVersion: 'requirement-understanding-snapshot/v1'
+  projectVersionId: string
+  analysisRunId: string
+  sourceAssetVersionIds: string[]
+  requirementPointIds: string[]
+  clarifications: PlanningClarification[]
+  requirementResultSha256: string
+  createdAt: string
+  contentSha256: string
+}
+
+export interface RequirementAutomaticTransitionState {
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  testDesignId?: string
+  testDesignRunId?: string
+  startedAt?: string
+  finishedAt?: string
+  error?: string
+}
 
 export interface RequirementRepairCandidate {
   schemaVersion: 'requirement-repair/v1'
@@ -75,6 +98,8 @@ export interface RequirementReleasePackage {
 
 export interface RequirementWorkflowState {
   currentStage: RequirementWorkflowStage
+  understandingSnapshot?: RequirementUnderstandingSnapshot
+  automaticTransition?: RequirementAutomaticTransitionState
   repairDrafts?: RequirementRepairDraft[]
   verificationOf?: { sourceRunId: string; repairDraftId: string }
   release?: RequirementReleasePackage

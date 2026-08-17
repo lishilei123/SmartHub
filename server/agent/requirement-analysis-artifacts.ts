@@ -36,6 +36,14 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
       `- Impact：${safe(finding.impact)}`,
       `- Suggestion：${safe(finding.recommendation)}`, '',
     ]) : ['未发现需要处理的 Finding。', '']),
+    '## Clarifications', '',
+    ...(result.clarifications.length ? result.clarifications.flatMap(item => [
+      `### ${safe(item.id)} · ${item.blocking ? 'Blocking' : 'Advisory'} · ${item.status}`, '',
+      `- Question：${safe(item.question)}`,
+      `- Reason：${safe(item.reason)}`,
+      `- Requirement Points：${item.requirementPointRefs.join('、') || '整体'}`,
+      ...(item.answer ? [`- Human Answer：${safe(item.answer)}`, `- Answered By：${safe(item.answeredBy ?? 'unknown')} · ${item.answeredAt ?? ''}`] : []), '',
+    ]) : ['没有需要人工确认的问题。', '']),
     '## Test Focus', '',
     ...result.testFocus.map(item => `- ${safe(item.id)} · ${safe(item.title)}：${safe(item.description)}（${item.requirementPointRefs.join('、') || '整体'}）`),
   ].join('\n')
@@ -55,6 +63,8 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
     ...(result.findings.length ? [] : ['- 未发现需要处理的问题。']), '',
     '## 7. 风险与待确认事项', '',
     ...(result.summary.risks.length ? result.summary.risks.map(item => `- ${safe(item)}`) : ['- 无。']), '',
+    ...result.clarifications.flatMap(item => [`- [${item.status}/${item.blocking ? 'blocking' : 'advisory'}] ${safe(item.question)}${item.answer ? ` → ${safe(item.answer)}` : ''}`]),
+    ...(result.clarifications.length ? [] : ['- 无待确认问题。']), '',
     '## 8. Test Focus', '',
     ...result.testFocus.map(item => `- ${item.id} · ${safe(item.title)}：${safe(item.description)}`), '',
     '## 9. Traceability', '',

@@ -245,7 +245,7 @@ export interface IndexAssetMetadata { assetId: string; displayName: string; asse
 export interface IndexChunk extends Chunk { assetMetadata: IndexAssetMetadata }
 export interface IndexVersion { id: string; knowledgeBaseId: string; number: number; status: 'candidate' | 'active' | 'superseded' | 'failed'; assetVersionIds: string[]; configVersionId: string; indexedChunks?: IndexChunk[]; createdAt: string; activatedAt?: string }
 export interface SyncTask { id: string; knowledgeBaseId: string; type: 'sync' | 'rebuild' | 'delete'; trigger: 'upload' | 'manual' | 'retry'; status: TaskStatus; step: string; progress: number; attempts: number; input: Record<string, unknown>; configVersionId: string; createdAt: string; updatedAt?: string; availableAt?: string; maxAttempts?: number; dedupeKey?: string; scope?: TaskScope; targetId?: string; leaseOwner?: string; runToken?: string; leaseExpiresAt?: string; heartbeatAt?: string; cancelRequestedAt?: string; startedAt?: string; finishedAt?: string; error?: string; metrics?: Record<string, number> }
-export type ReviewRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type ReviewRunStatus = 'running' | 'waiting_clarification' | 'succeeded' | 'failed' | 'cancelled'
 export type ReviewRunQueueStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export interface ReviewRunQueueState {
   status: ReviewRunQueueStatus
@@ -327,6 +327,8 @@ export interface ReviewRun {
   reviewId?: string
   retryOfRunId?: string
   retryMode?: 'full'
+  continuedFromRunId?: string
+  continuedByRunId?: string
   projectVersionId: string
   assetId: string
   assetVersionId: string

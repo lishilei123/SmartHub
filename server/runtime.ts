@@ -80,6 +80,7 @@ export const planningWorkflowService = new PlanningWorkflowService(
   requirementAnalysisService,
   testDesignService,
 )
+requirementAnalysisService.onUnderstandingReady(async runId => { await planningWorkflowService.requirementUnderstandingReady(runId) })
 testDesignService.onTestPointsValidated(async projectVersionId => {
   const projectVersion = stateStore.getProjectVersion
     ? await stateStore.getProjectVersion(projectVersionId)

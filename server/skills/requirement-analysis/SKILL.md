@@ -5,7 +5,7 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 
 # Requirement Analysis 方法论
 
-在同一次 Session 中完成阅读、理解、基线、整体分析、跨需求分析、自检与提交。不要把这些阶段委派给其他 Agent，也不要在中间提交只含需求点的结果。
+在同一次 Planning Session 中完成阅读、理解、基线、整体分析、跨需求分析、必要的 Clarification、自检与提交。不要把这些阶段委派给其他 Agent，也不要在中间提交只含需求点的结果。
 
 ## 1. 建立事实边界
 
@@ -59,7 +59,15 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 
 Test Focus 不是完整测试用例。为高风险规则、关键状态、边界、异常、权限、并发、兼容性和待确认决策给出可行动的测试关注点，并关联适用的 Requirement Point；整体关注点可以使用空引用数组。
 
-## 6. Self Review
+## 6. Clarification
+
+- 只有 Current Requirement、完整 Workspace 与 Knowledge Reference 都无法确定，且会影响测试用例正确性的业务事实才生成 Clarification。
+- 不得假设次数、时长、阈值、权限、状态规则、期望结果、依赖契约、范围或环境配置。此类缺失应提出具体问题并说明原因。
+- 普通 low/medium Finding、改进建议或不影响测试正确性的资料缺口，不得机械转换为 blocking Clarification。
+- `blocking=true` 只用于不回答就无法形成正确测试设计的事实；其他可选确认使用 `blocking=false`。
+- Human Answer 是服务端保存的正式事实。继续分析时从固定 `formalClarifications` 重新读取，不依赖 Context Summary 或模型记忆，并将答案吸收到更新后的 Requirement Understanding 中。
+
+## 7. Self Review
 
 最终提交前在同一 Session 内检查：
 
@@ -71,5 +79,6 @@ Test Focus 不是完整测试用例。为高风险规则、关键状态、边界
 - Requirement Point 是否有逐字 `sourceTexts`；
 - 关键结论是否能够通过相关 Requirement Point 的 Evidence 或清楚的“缺失事实”追溯；
 - Summary、Finding、Test Focus 与分析文档是否相互一致。
+- Clarification 是否只包含无法从正式输入确定的事实，blocking 是否确实影响测试设计正确性。
 
-完成自检后只提交一次完整 `requirement-analysis/v1`。
+完成自检后只提交一次完整 `requirement-analysis/v1`，包括 `clarifications`（没有问题时提交空数组）。

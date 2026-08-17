@@ -11,4 +11,4 @@ description: Repair complete test-case candidates only for deterministic Coverag
 4. Do not resolve `human_decision`, `manual_edit`, or business-policy gaps. Missing thresholds, stability duration, browser/OS/viewport/version matrices, permissions, timeout rules, or business decisions must remain Findings or Confirmation Items for people. Never change a Proposal operation or frozen source merely to make Coverage Audit pass.
 5. Recheck coverage, references, dimensions, UI/API readiness, data readiness, dependency cycles, duplicates, and aggregation before submitting.
 
-The server controls the two-attempt limit, Audit execution, formal IDs, revisions, versions, hashes, publication, and Workspace projection. This Skill cannot change Stage or permissions.
+The server permits at most one controlled automatic repair, and controls Audit execution, formal IDs, revisions, versions, hashes, publication, and Workspace projection. This Skill cannot change Stage or permissions.

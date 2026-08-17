@@ -241,6 +241,42 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }
   }
 
+  async appendPlanningClarification(input: { projectId: string; projectVersionId: string; runId: string; clarificationId: string; question: string; answer: string; status: 'answered' | 'dismissed'; answeredAt: string; answeredBy: string }) {
+    const scope: PiSessionScope = {
+      role: 'planning_parent',
+      key: `planning:${input.projectId}:${input.projectVersionId}`,
+    }
+    const lease = await this.sessions.acquire(scope)
+    try {
+      lease.manager.appendCustomMessageEntry(
+        'planning_clarification_answer',
+        [
+          '[Human Clarification；该内容已由 Service 保存为正式、可追溯输入]',
+          `Source Run：${input.runId}`,
+          `Clarification：${input.clarificationId}`,
+          `Question：${input.question}`,
+          `Human Answer：${input.answer}`,
+          `Disposition：${input.status}`,
+          `Answered By：${input.answeredBy}`,
+          `Answered At：${input.answeredAt}`,
+          '继续分析时必须从 ReviewRunSnapshot.formalClarifications 与冻结 Workspace 重新建立正式事实，不得只依赖本消息或 Context Summary。',
+        ].join('\n'),
+        false,
+        {
+          taskType: 'planning_clarification_answer',
+          projectId: input.projectId,
+          projectVersionId: input.projectVersionId,
+          sourceRunId: input.runId,
+          clarificationId: input.clarificationId,
+          formalBusinessFact: true,
+        },
+      )
+      return { parentSessionId: lease.manager.getSessionId(), scopeKey: scope.key }
+    } finally {
+      lease.release()
+    }
+  }
+
   async review(input: ReviewerExecutionInput, signal: AbortSignal): Promise<ReviewerExecutionOutput> {
     const parentScope = this.sessions.scopeFor(input)
     const scope = this.sessions.reviewerScope(parentScope, input.reviewerType, input.runId)

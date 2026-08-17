@@ -1,4 +1,4 @@
-import type { AgentCandidateResult } from './review-types.js'
+import type { AgentCandidateResult, PlanningClarification } from './review-types.js'
 
 export type AgentReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type RequirementInputMode = 'full_context' | 'segmented_context' | 'agent_directory'
@@ -92,6 +92,7 @@ export interface ReviewRunSnapshot {
   assets: Array<{ assetId: string; assetVersionId: string; assetContentHash: string; logicalPath: string; displayName: string; assetType?: string }>
   currentInputRefs: CurrentInputRef[]
   workspaceSnapshot: ProjectWorkspaceSnapshot
+  formalClarifications?: PlanningClarification[]
   documentWorkspace?: {
     mode: 'agent_directory'
     logicalPath: string
@@ -377,6 +378,8 @@ export interface PlanningSubAgentRunRecord {
 
 export type PlanningWorkflowStage =
   | 'requirement_analysis'
+  | 'requirement_clarification'
+  | 'requirement_understanding'
   | 'requirement_repair'
   | 'requirement_verification'
   | 'requirement_release'

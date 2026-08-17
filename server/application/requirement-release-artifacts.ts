@@ -24,6 +24,8 @@ export function buildRequirementReleaseArtifacts(input: {
   const evidenceById = new Map(result.evidence.map(item => [item.clientEvidenceId, item]))
   const testFocusByRequirement = new Map<string, string[]>()
   result.testFocus.forEach(item => item.requirementPointRefs.forEach(reference => testFocusByRequirement.set(reference, [...(testFocusByRequirement.get(reference) ?? []), item.id])))
+  const clarificationByRequirement = new Map<string, string[]>()
+  result.clarifications.forEach(item => item.requirementPointRefs.forEach(reference => clarificationByRequirement.set(reference, [...(clarificationByRequirement.get(reference) ?? []), item.id])))
 
   const artifacts: RequirementReleaseArtifact[] = []
   for (const item of sourceAssets) {
@@ -50,6 +52,13 @@ export function buildRequirementReleaseArtifacts(input: {
     generatedAt,
   })))
   artifacts.push(artifact('requirement-analysis-report.md', 'text/markdown', artifactContent(result.artifacts, 'requirement-analysis.md')))
+  artifacts.push(artifact('clarifications.json', 'application/json', json({
+    schemaVersion: 'planning-clarifications/v1',
+    releaseId,
+    verificationRunId: verificationRun.id,
+    clarifications: result.clarifications,
+    generatedAt,
+  })))
   artifacts.push(artifact('test-focus.md', 'text/markdown', renderTestFocus(result.testFocus)))
   artifacts.push(artifact('test-focus.json', 'application/json', json({ schemaVersion: 'requirement-test-focus/v1', releaseId, verificationRunId: verificationRun.id, testFocus: result.testFocus, generatedAt })))
   artifacts.push(artifact('traceability.json', 'application/json', json({
@@ -61,6 +70,7 @@ export function buildRequirementReleaseArtifacts(input: {
       evidenceIds: point.evidenceRefs,
       sourceAssetVersionIds: [...new Set(point.evidenceRefs.map(id => evidenceById.get(id)?.sourceRef.assetVersionId).filter((id): id is string => Boolean(id)))],
       findingIds: result.findings.filter(finding => finding.requirementPointRefs.includes(point.clientRequirementPointId)).map(finding => finding.clientFindingId),
+      clarificationIds: clarificationByRequirement.get(point.clientRequirementPointId) ?? [],
       testFocusIds: testFocusByRequirement.get(point.clientRequirementPointId) ?? [],
     })),
     generatedAt,
@@ -78,6 +88,7 @@ export function buildRequirementReleaseArtifacts(input: {
     machineReadableEntryPoints: {
       requirements: 'requirements.json',
       findings: 'findings.json',
+      clarifications: 'clarifications.json',
       testFocus: 'test-focus.json',
       traceability: 'traceability.json',
     },

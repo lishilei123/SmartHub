@@ -2,6 +2,34 @@ export type ReviewFindingType = 'missing_requirement' | 'ambiguity' | 'conflict'
 export type ReviewSeverity = 'blocker' | 'high' | 'medium' | 'low'
 export type OverallAssessment = 'pass' | 'pass_with_notes' | 'needs_revision' | 'blocked'
 
+export type PlanningClarificationCategory =
+  | 'business_rule'
+  | 'boundary'
+  | 'expected_result'
+  | 'dependency'
+  | 'test_scope'
+  | 'environment'
+  | 'other'
+
+export type PlanningClarificationStatus = 'pending' | 'answered' | 'dismissed'
+
+export interface CandidatePlanningClarification {
+  question: string
+  reason: string
+  category: PlanningClarificationCategory
+  requirementPointRefs: string[]
+  blocking: boolean
+}
+
+export interface PlanningClarification extends CandidatePlanningClarification {
+  id: string
+  status: PlanningClarificationStatus
+  answer?: string
+  createdAt: string
+  answeredAt?: string
+  answeredBy?: string
+}
+
 export interface CandidateEvidence {
   clientEvidenceId: string
   sourceType: 'knowledge_chunk'
@@ -150,6 +178,7 @@ export interface CandidateRequirementAnalysisV1 {
     impact?: string
     suggestion?: string
   }>
+  clarifications: CandidatePlanningClarification[]
   testFocus: Array<{
     title: string
     description: string
@@ -177,6 +206,7 @@ export interface RequirementAnalysisResult extends CandidateRequirementPointExtr
     overview: string
     businessGoals: string[]
   }
+  clarifications: PlanningClarification[]
   testFocus: RequirementTestFocus[]
   analysisDocument?: string
   artifacts: RequirementAnalysisArtifact[]

@@ -8,6 +8,7 @@ import type {
   TestExecutionAgentSnapshot,
 } from '../domain/agent-types.js'
 import type { TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
+import type { PlanningClarification } from '../domain/review-types.js'
 import type { Asset, AssetVersion } from '../domain/types.js'
 
 const TOOL_SCHEMA_RESERVE_TOKENS = 2_000
@@ -26,6 +27,7 @@ export function buildRequirementDirectoryInputPlan(input: {
   assets: RequirementContextAsset[]
   currentInputRefs: CurrentInputRef[]
   workspaceSnapshot: ProjectWorkspaceSnapshot
+  formalClarifications?: PlanningClarification[]
   definition: AgentDefinitionVersion
   contextWindow: number
   maxOutputTokens: number
@@ -45,6 +47,8 @@ export function buildRequirementDirectoryInputPlan(input: {
       workspaceFileCount: input.workspaceSnapshot.files.length,
       workspaceSourceScopes: Object.fromEntries([...new Set(input.workspaceSnapshot.files.map(item => item.sourceScope))].map(scope => [scope, input.workspaceSnapshot.files.filter(item => item.sourceScope === scope).length])),
       workspaceSnapshotSha256: input.workspaceSnapshot.snapshotSha256,
+      formalClarifications: input.formalClarifications ?? [],
+      clarificationInstruction: '已回答或已处置的 Clarification 是带来源的正式业务输入；必须采用其明确事实，不得重复提问。pending blocking Clarification 仍须等待人工，不得猜测。',
       instructions: 'currentInputRefs 是本次重点，不是读取白名单。优先读取重点输入，再从工作区根目录使用 ls 查看 branches/shared/formal-output，使用 find 和 grep 定位其他相关资料，并用 read 阅读正文。不要假设未读取内容，不得越过工作目录。',
     }),
     '<<<SMARTHUB_PI_DOCUMENT_WORKSPACE_END>>>',

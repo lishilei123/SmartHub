@@ -65,6 +65,21 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
     ['requirement'],
   ),
   stage(
+    'requirement_clarification',
+    [],
+    undefined,
+    undefined,
+    [],
+    true,
+  ),
+  stage(
+    'requirement_understanding',
+    [],
+    undefined,
+    undefined,
+    [],
+  ),
+  stage(
     'requirement_repair',
     [...PLANNING_WORKSPACE_TOOLS, 'requirement-repair.submit_result'],
     'requirement-repair.submit_result',
@@ -203,7 +218,7 @@ export class PlanningWorkflowService {
     if (release.status !== 'published') throw new Error('REQUIREMENT_RELEASE_NOT_PUBLISHED')
     const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), 'PROJECT_VERSION_NOT_FOUND')
     const project = required(state.projects.find(item => item.id === projectVersion.projectId), 'PROJECT_NOT_FOUND')
-    return this.runtime.appendPlanningTask({
+    await this.runtime.appendPlanningTask({
       projectId: project.id,
       projectVersionId: projectVersion.id,
       taskType: 'test_design_after_requirement_release',
@@ -225,6 +240,26 @@ export class PlanningWorkflowService {
         releaseContentSha256: release.contentSha256,
       },
     })
+    const automatic = await this.testDesign.createAutomaticDesignAndRun(projectVersion.id, run.id)
+    const finishedAt = new Date().toISOString()
+    await this.store.transaction(draft => {
+      const current = required(draft.reviewRuns.find(item => item.id === run.id), 'REQUIREMENT_RUN_NOT_FOUND')
+      current.workflow ??= { currentStage: 'understanding' }
+      current.workflow.automaticTransition = {
+        ...(current.workflow.automaticTransition ?? { status: 'succeeded' }),
+        status: 'succeeded',
+        finishedAt,
+        testDesignId: automatic.design.id,
+        testDesignRunId: automatic.run.id,
+        error: undefined,
+      }
+    })
+    return automatic
+  }
+
+  async requirementUnderstandingReady(runId: string) {
+    await this.requirements.freezeUnderstanding(runId)
+    return this.requirementReleasePublished(runId)
   }
 
   async reviewRequirement(

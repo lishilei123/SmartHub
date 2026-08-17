@@ -10,6 +10,7 @@ import { PlanningContextMetrics, PlanningSubAgentRuns } from './PlanningObservab
 import { runRequirementReviewer } from './planning-api'
 import {
   cancelRequirementAnalysisRun,
+  actOnPlanningClarification,
   createRequirementReleaseCandidate,
   createFindingAction,
   generateRequirementRepairDraft,
@@ -21,6 +22,7 @@ import {
   loadRequirementAnalysisRun,
   loadRequirementAnalysisRuns,
   retryRequirementAnalysisRun,
+  retryAutomaticTestDesign,
   publishRequirementRelease,
   requirementReleaseArtifactUrl,
   startRequirementAnalysis,
@@ -36,6 +38,7 @@ import {
   type AnalysisFindingType,
   type AnalysisSeverity,
   type RequirementAnalysisRun,
+  type PlanningClarification,
 } from './requirement-analysis-api'
 import { requirementAnalysisInputTypeForDocument, requirementWorkspaceDirectory } from './version-document-path'
 import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
@@ -44,7 +47,7 @@ import './requirement-analysis-v2.css'
 import './requirement-analysis-review-flow.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
-type ViewKey = 'conversation' | 'overview' | 'baseline' | 'findings' | 'artifacts' | 'diff'
+type ViewKey = 'conversation' | 'clarifications' | 'overview' | 'baseline' | 'findings' | 'artifacts' | 'diff'
 type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
 type RunRecord = RequirementAnalysisRun & { content?: string }
 type RequirementStageState = 'complete' | 'current' | 'waiting' | 'blocked'
@@ -75,18 +78,19 @@ const severityLabels: Record<AnalysisSeverity, string> = { blocker: '阻断', hi
 const findingStateLabels: Record<FindingState, string> = { open: '待人工审核', confirmed: '已采纳', dismissed: '不采纳', resolved: '已解决', needs_follow_up: '暂缓 / 待复验' }
 const viewTabs: Array<{ key: ViewKey; label: string; icon: typeof Sparkles }> = [
   { key: 'conversation', label: 'Agent 协作', icon: Bot },
+  { key: 'clarifications', label: '待确认问题', icon: Quote },
   { key: 'overview', label: '分析概览', icon: Sparkles },
   { key: 'baseline', label: '需求基线', icon: GitBranch },
-  { key: 'findings', label: '需求问题', icon: AlertTriangle },
-  { key: 'artifacts', label: '最终产物', icon: FileText },
-  { key: 'diff', label: '版本差异', icon: FileDiff },
+  { key: 'findings', label: '详细 · Findings', icon: AlertTriangle },
+  { key: 'artifacts', label: '详细 · 版本产物', icon: FileText },
+  { key: 'diff', label: '详细 · 版本差异', icon: FileDiff },
 ]
 
 function Badge({ children, tone = 'gray' }: { children: React.ReactNode; tone?: string }) { return <span className={`rav2-badge ${tone}`}>{children}</span> }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
 function severityTone(value: AnalysisSeverity) { return value === 'blocker' ? 'red' : value === 'high' ? 'orange' : value === 'medium' ? 'gold' : 'blue' }
 function assessmentLabel(value?: string) { return value === 'blocked' ? '存在阻断问题' : value === 'needs_revision' ? '建议修改后确认' : value === 'pass_with_notes' ? '附带关注项通过' : value === 'pass' ? '可以进入下一阶段' : '等待分析' }
-function runLabel(run?: RunRecord) { return run?.status === 'running' ? '分析中' : run?.status === 'succeeded' ? '已完成' : run?.status === 'failed' ? '失败' : run?.status === 'cancelled' ? '已取消' : '未运行' }
+function runLabel(run?: RunRecord) { return run?.status === 'running' ? '分析中' : run?.status === 'waiting_clarification' ? '等待业务确认' : run?.status === 'succeeded' ? '需求理解已冻结' : run?.status === 'failed' ? '失败' : run?.status === 'cancelled' ? '已取消' : '未运行' }
 const agentEventLabels: Record<string, string> = {
   runtime_initialized: 'Runtime 已初始化', agent_start: 'Agent 已启动', agent_end: 'Agent 已结束', turn_start: 'Turn 开始', turn_end: 'Turn 结束',
   message_start: '消息开始', message_end: '消息完成', tool_execution_start: '工具调用开始', tool_execution_end: '工具调用结束',
@@ -119,7 +123,7 @@ function fixedAssets(run: RunRecord) {
 type PlanningExecutionGroup = {
   id: string
   label: string
-  status?: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  status?: 'running' | 'waiting_clarification' | 'succeeded' | 'failed' | 'cancelled'
   execution: AgentExecutionRecord
 }
 
@@ -181,6 +185,8 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [fixBusy, setFixBusy] = useState(false)
   const [verificationBusyDraftId, setVerificationBusyDraftId] = useState('')
   const [releaseBusy, setReleaseBusy] = useState(false)
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
+  const [clarificationBusyId, setClarificationBusyId] = useState('')
   const [diffVersionIds, setDiffVersionIds] = useState<[string, string]>(['', ''])
   const [diffContents, setDiffContents] = useState<Record<string, string>>({})
   const [diffLoading, setDiffLoading] = useState(false)
@@ -272,6 +278,27 @@ export function RequirementAnalysisPageV2(props: Props) {
       setRuns(current => [started, ...current.filter(item => item.id !== started.id)]); setSelectedRunId(started.id); setView('conversation')
       addAudit(`启动 PlanningAgent 需求分析：${started.id}`); notify('需求分析已在当前 Planning Session 启动。')
     } catch (error) { notify(error instanceof Error ? error.message : '需求分析启动失败', 'error') } finally { setStarting(false) }
+  }
+
+  const resolveClarification = async (clarification: PlanningClarification, action: 'answer' | 'dismiss') => {
+    if (!selectedRun || clarificationBusyId) return
+    const answer = (clarificationAnswers[clarification.id] ?? '').trim()
+    if (!answer) { notify(action === 'answer' ? '请先填写明确的业务事实。' : '请说明为什么该问题不适用于当前需求。', 'warning'); return }
+    setClarificationBusyId(clarification.id)
+    try {
+      const resolved = await actOnPlanningClarification(selectedRun.id, clarification.id, { action, answer })
+      const next = resolved.continuationRun
+      setRuns(current => [
+        ...(next ? [next] : []),
+        resolved.sourceRun,
+        ...current.filter(item => item.id !== resolved.sourceRun.id && item.id !== next?.id),
+      ])
+      setClarificationAnswers(current => ({ ...current, [clarification.id]: '' }))
+      if (next) { setSelectedRunId(next.id); setView('conversation'); notify('回答已作为正式输入写回同一个 Planning Session，Agent 正在继续分析。') }
+      else notify('回答已保存；仍有阻断问题需要确认。')
+      addAudit(`处理 Planning Clarification：${clarification.id} · ${action}`)
+    } catch (error) { notify(error instanceof Error ? error.message : '待确认问题保存失败', 'error') }
+    finally { setClarificationBusyId('') }
   }
   const cancelAnalysis = async () => {
     if (!selectedRun || selectedRun.status !== 'running') return
@@ -379,6 +406,9 @@ export function RequirementAnalysisPageV2(props: Props) {
     const state = selectedRun ? findingStates[`${selectedRun.id}:${finding.clientFindingId}`] ?? 'open' : 'open'
     return (findingTypeFilter === 'all' || finding.type === findingTypeFilter) && (severityFilter === 'all' || finding.severity === severityFilter) && (findingStateFilter === 'all' || state === findingStateFilter)
   })
+  const clarifications = result?.clarifications ?? []
+  const pendingClarifications = clarifications.filter(item => item.status === 'pending')
+  const blockingClarifications = pendingClarifications.filter(item => item.blocking)
   const blockerCount = result?.findings.filter(item => item.severity === 'blocker').length ?? 0
   const highCount = result?.findings.filter(item => item.severity === 'high').length ?? 0
   const pendingCount = result?.findings.filter(item => {
@@ -403,21 +433,29 @@ export function RequirementAnalysisPageV2(props: Props) {
       addAudit(`正式发布需求包：${published.id} · ${published.contentSha256}`); notify('需求发布包已正式发布且不可变；同一个 PlanningAgent Session 已收到测试设计任务。')
     } catch (error) { notify(error instanceof Error ? error.message : '需求发布失败', 'error') } finally { setReleaseBusy(false) }
   }
+  const retryAutomaticTransition = async () => {
+    if (!selectedRun) return
+    setReleaseBusy(true)
+    try {
+      await retryAutomaticTestDesign(selectedRun.id)
+      const detail = await loadRequirementAnalysisRun(selectedRun.id)
+      setRuns(current => replaceRunDetail(current, detail))
+      notify('已重新启动自动测试设计。')
+    } catch (error) { notify(error instanceof Error ? error.message : '自动测试设计重试失败', 'error') }
+    finally { setReleaseBusy(false) }
+  }
 
   const versionHistory = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
   const leftLines = (diffContents[diffVersionIds[0]] ?? '').split(/\r?\n/).filter(Boolean); const rightLines = (diffContents[diffVersionIds[1]] ?? '').split(/\r?\n/).filter(Boolean)
   const removedLines = leftLines.filter(line => !rightLines.includes(line)); const addedLines = rightLines.filter(line => !leftLines.includes(line))
   const enabledSkills = agentConfiguration?.agents.planning.activeVersion?.agentDefinition.enabledSkills ?? []
   const repairDrafts = selectedRun?.workflow?.repairDrafts ?? []
-  const failedRepair = repairDrafts.some(draft => draft.status === 'failed')
-  const activeRepair = repairDrafts.some(draft => ['generated', 'approved', 'applying', 'applied', 'verification_running'].includes(draft.status))
-  const verifiedRepairs = repairDrafts.filter(draft => draft.status === 'verified').length
+  const automaticTransition = selectedRun?.workflow?.automaticTransition
   const stages: Array<{ label: string; detail: string; state: RequirementStageState }> = [
     { label: '资料输入', detail: analysisInputDocuments.length ? `${analysisInputDocuments.length} 份已就绪` : '待上传', state: analysisInputDocuments.length ? 'complete' : 'current' },
-    { label: '需求分析', detail: !selectedRun ? '未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : selectedRun.status === 'succeeded' ? '已完成' : selectedRun.status === 'failed' ? '执行失败' : '已取消', state: !selectedRun || selectedRun.status === 'cancelled' ? 'waiting' : selectedRun.status === 'running' ? 'current' : selectedRun.status === 'succeeded' ? 'complete' : 'blocked' },
-    { label: '问题处置', detail: !result ? '等待分析' : `${result.findings.length - pendingCount}/${result.findings.length} 已闭环`, state: !result ? 'waiting' : pendingCount ? 'current' : 'complete' },
-    { label: '修复与复验', detail: !result ? '未开始' : failedRepair ? '存在失败任务' : activeRepair ? '进行中' : repairDrafts.length ? `${verifiedRepairs}/${repairDrafts.length} 已验证` : pendingCount ? '等待问题处置' : '无需修复', state: !result || (!repairDrafts.length && pendingCount > 0) ? 'waiting' : failedRepair ? 'blocked' : activeRepair ? 'current' : 'complete' },
-    { label: 'Requirement Release', detail: release?.status === 'published' ? '已发布' : release?.status === 'candidate' ? '待人工发布' : result ? '待生成' : '未开始', state: release?.status === 'published' ? 'complete' : release?.status === 'candidate' ? 'current' : 'waiting' },
+    { label: '需求理解', detail: !selectedRun ? '未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : selectedRun.status === 'waiting_clarification' ? `等待 ${blockingClarifications.length} 个业务事实` : selectedRun.workflow?.understandingSnapshot ? '已自动冻结' : selectedRun.status === 'failed' ? '执行失败' : '等待冻结', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' ? 'current' : selectedRun.status === 'waiting_clarification' ? 'current' : selectedRun.workflow?.understandingSnapshot ? 'complete' : selectedRun.status === 'failed' ? 'blocked' : 'waiting' },
+    { label: 'Agent 自动设计测试', detail: automaticTransition?.status === 'succeeded' ? '测试用例候选已生成或正在运行' : automaticTransition?.status === 'failed' ? '自动衔接失败' : release?.status === 'published' ? '正在生成测试点与用例' : '等待需求理解', state: automaticTransition?.status === 'succeeded' ? 'complete' : automaticTransition?.status === 'failed' ? 'blocked' : release?.status === 'published' ? 'current' : 'waiting' },
+    { label: '最终用例审核与发布', detail: automaticTransition?.status === 'succeeded' ? '前往测试设计审核 TestCase / Proposal' : '等待 Agent 完成', state: automaticTransition?.status === 'succeeded' ? 'current' : 'waiting' },
   ]
   const activityExecution = planningExecutionGroups(selectedRun).at(-1)?.execution
   const activityEvents = activityExecution?.events ?? []
@@ -440,16 +478,17 @@ export function RequirementAnalysisPageV2(props: Props) {
           <div className="rav2-skill-chips"><em>已启用 Skills</em>{enabledSkills.length ? enabledSkills.slice(0, 3).map(skill => <span key={skill}>{skill}</span>) : <span className="empty">未发布配置</span>}{enabledSkills.length > 3 && <span>+{enabledSkills.length - 3}</span>}</div>
           <div className="rav2-session-actions"><select aria-label="需求分析运行历史" value={selectedRunId} onChange={event => setSelectedRunId(event.target.value)} disabled={loadingRuns}><option value="">{loadingRuns ? '加载中…' : '运行历史'}</option>{runs.map(run => <option value={run.id} key={run.id}>{formatTime(run.createdAt)} · {runLabel(run)}</option>)}</select><button aria-label="刷新运行" onClick={() => void refreshRuns()}><RefreshCw /></button><button aria-label="下载分析报告" onClick={exportReport} disabled={!selectedRun?.response}><Download /></button></div>
         </header>
-        <nav className="rav2-session-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'findings' && result ? <i>{result.findings.length}</i> : null}</button>)}</nav>
+        <nav className="rav2-session-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'clarifications' && clarifications.length ? <i>{pendingClarifications.length}</i> : tab.key === 'findings' && result ? <i>{result.findings.length}</i> : null}</button>)}</nav>
         <div className={`rav2-session-body ${view === 'conversation' ? 'conversation' : 'detail'}`}>
           {view === 'conversation' && <AgentConversation run={selectedRun} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
+          {view === 'clarifications' && <Clarifications items={clarifications} answers={clarificationAnswers} busyId={clarificationBusyId} onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))} onResolve={(item, action) => void resolveClarification(item, action)} />}
           {view === 'overview' && <Overview result={result} blockerCount={blockerCount} highCount={highCount} pendingCount={pendingCount} onFindings={() => setView('findings')} onArtifacts={() => setView('artifacts')} />}
           {view === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}
           {view === 'findings' && <Findings result={result} selectedRun={selectedRun} findingStates={findingStates} findingTypeFilter={findingTypeFilter} setFindingTypeFilter={setFindingTypeFilter} severityFilter={severityFilter} setSeverityFilter={setSeverityFilter} findingStateFilter={findingStateFilter} setFindingStateFilter={setFindingStateFilter} visibleFindings={visibleFindings} pendingCount={pendingCount} documents={requirementDocuments} repairDrafts={repairDrafts} verificationBusyDraftId={verificationBusyDraftId} onEvidence={openEvidence} onState={updateFindingState} onAiFix={draftFindingFix} onStartVerification={startVerification} onViewRepairDiff={openRepairDiff} canAiFix={projectVersion.status === 'open'} />}
           {view === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} busy={releaseBusy} onGenerate={() => void generateRelease()} onPublish={() => void publishRelease()} />}
           {view === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}
         </div>
-        {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>受控 Planning Session</b><small>运行轨迹只读；问题处置、修复、复验与发布通过结构化门禁操作，不伪造自由对话能力。</small></span></footer>}
+        {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>连续 Planning Session</b><small>Requirement、Human Clarification、TestPoint、TestCase 与 Coverage 共用同一父会话；正式事实始终从 Version / Snapshot / Workspace 重新建立。</small></span></footer>}
       </main>
 
       <aside className="rav2-status-panel">
@@ -460,7 +499,7 @@ export function RequirementAnalysisPageV2(props: Props) {
           <section className="rav2-status-card"><header><i>③</i><b>Agent Activity</b></header><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></section>
         </div>
         <footer className="rav2-status-action">
-          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始需求分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />完整重跑</button> : release?.status === 'candidate' ? <button className="primary" onClick={() => void publishRelease()} disabled={releaseBusy}><ShieldCheck />{releaseBusy ? '发布中…' : '确认并发布 Requirement Release'}</button> : release?.status === 'published' ? <button className="primary" onClick={onOpenTestDesign} disabled={!onOpenTestDesign}><Play />进入测试设计</button> : pendingCount > 0 ? <button className="primary" onClick={() => setView('findings')}><AlertTriangle />处理 {pendingCount} 个待闭环问题</button> : <button className="primary" onClick={() => void generateRelease()} disabled={releaseBusy}><FileText />{releaseBusy ? '生成中…' : '生成 Requirement Release 候选'}</button>}
+          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : selectedRun.status === 'waiting_clarification' ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : automaticTransition?.status === 'succeeded' ? <button className="primary" onClick={onOpenTestDesign} disabled={!onOpenTestDesign}><Play />审核最终测试用例</button> : <button className="primary" disabled><LoaderCircle className="rotating" />Agent 正在进入测试设计</button>}
         </footer>
       </aside>
     </div>
@@ -468,6 +507,11 @@ export function RequirementAnalysisPageV2(props: Props) {
     {sourceEvidence && <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setSourceEvidence(null) }}><section className="rav2-source-modal"><header><span><ShieldCheck /><b>固定原文证据</b></span><button onClick={() => setSourceEvidence(null)}><XCircle /></button></header><div className="rav2-evidence"><b>{sourceEvidence.clientEvidenceId} · {sourceEvidence.locator.heading}</b><p>“{sourceEvidence.quote}”</p></div><div className="rav2-source-body">{sourceLoading ? <LoaderCircle className="rotating" /> : <MarkdownDocument source={sourceContent} format="markdown" />}</div></section></div>}
     {fixFinding && <FixModal finding={fixFinding} draft={fixDraft} busy={fixBusy} assets={fixedAssets(selectedRun!)} onClose={() => { if (!fixBusy) { setFixFinding(null); setFixDraft(null) } }} onRegenerate={() => void draftFindingFix(fixFinding)} onApprove={() => void approveRepair()} />}
   </section>
+}
+
+function Clarifications({ items, answers, busyId, onAnswerChange, onResolve }: { items: PlanningClarification[]; answers: Record<string, string>; busyId: string; onAnswerChange: (id: string, value: string) => void; onResolve: (item: PlanningClarification, action: 'answer' | 'dismiss') => void }) {
+  if (!items.length) return <div className="rav2-empty"><CheckCircle2 /><h2>没有需要人工确认的业务事实</h2><p>PlanningAgent 将继续冻结需求理解并自动进入测试设计。</p></div>
+  return <div className="rav2-findings"><header><div><Quote /><span><h2>待确认问题</h2><p>只回答资料无法确定、且会影响测试用例正确性的业务事实。回答会作为正式输入写回同一个 Planning Session。</p></span></div><Badge tone={items.some(item => item.status === 'pending' && item.blocking) ? 'orange' : 'green'}>{items.filter(item => item.status === 'pending').length} 个待处理</Badge></header>{items.map(item => <article className="rav2-finding" key={item.id}><header><div><Badge tone={item.blocking ? 'red' : 'blue'}>{item.blocking ? '阻断测试设计' : '非阻断'}</Badge><span><small>{item.category} · {item.id}</small><h3>Agent：{item.question}</h3></span></div><Badge tone={item.status === 'answered' ? 'green' : item.status === 'dismissed' ? 'gray' : 'orange'}>{item.status === 'answered' ? '已回答' : item.status === 'dismissed' ? '不适用' : '待回答'}</Badge></header><p>{item.reason}</p><div className="rav2-refs">{item.requirementPointRefs.map(reference => <span key={reference}>{reference}</span>)}</div>{item.status === 'pending' ? <><textarea value={answers[item.id] ?? ''} onChange={event => onAnswerChange(item.id, event.target.value)} rows={4} placeholder="请输入明确的业务规则、边界、预期结果或环境事实…" /><footer><span>回答人和时间由服务端记录</span><div><button onClick={() => onResolve(item, 'dismiss')} disabled={busyId === item.id}>不适用于当前需求</button><button className="accept" onClick={() => onResolve(item, 'answer')} disabled={busyId === item.id}>{busyId === item.id ? <LoaderCircle className="rotating" /> : <CheckCircle2 />}提交并让 Agent 继续</button></div></footer></> : <dl><div><dt>Human Answer</dt><dd>{item.answer}</dd></div><div><dt>来源</dt><dd>{item.answeredBy} · {item.answeredAt ? formatTime(item.answeredAt) : '—'}</dd></div></dl>}</article>)}</div>
 }
 
 function Overview({ result, blockerCount, highCount, pendingCount, onFindings, onArtifacts }: { result?: RequirementAnalysisResponse['result']; blockerCount: number; highCount: number; pendingCount: number; onFindings: () => void; onArtifacts: () => void }) {

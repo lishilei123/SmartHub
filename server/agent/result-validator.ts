@@ -9,6 +9,7 @@ import { renderRequirementAnalysisArtifacts } from './requirement-analysis-artif
 const assessments = new Set(['pass', 'pass_with_notes', 'needs_revision', 'blocked'])
 const findingTypes = new Set(['missing_requirement', 'ambiguity', 'conflict', 'boundary_gap', 'state_gap', 'exception_gap', 'security_risk', 'testability_gap', 'dependency_risk', 'other'])
 const severities = new Set(['blocker', 'high', 'medium', 'low'])
+const clarificationCategories = new Set(['business_rule', 'boundary', 'expected_result', 'dependency', 'test_scope', 'environment', 'other'])
 const DIRECTORY_NOT_READ_REASON = 'Pi Agent 未通过 read 读取此固定原文范围'
 
 export class RequirementPointExtractionValidator {
@@ -433,10 +434,11 @@ export class RequirementAnalysisValidator {
     const issues: ValidationIssue[] = []
     if (!input || typeof input !== 'object') return { report: invalid('$', '结果必须是对象') }
     const raw = input as unknown as Record<string, unknown>
-    const allowedRoot = new Set(['summary', 'requirementPoints', 'findings', 'testFocus', 'analysisDocument'])
+    const allowedRoot = new Set(['summary', 'requirementPoints', 'findings', 'clarifications', 'testFocus', 'analysisDocument'])
     for (const key of Object.keys(raw)) if (!allowedRoot.has(key)) issues.push(issue(key, '不属于 requirement-analysis/v1 提交协议'))
     if (!Array.isArray(input.requirementPoints)) issues.push(issue('requirementPoints', '必须是数组'))
     if (!Array.isArray(input.findings)) issues.push(issue('findings', '必须是数组'))
+    if (!Array.isArray(input.clarifications)) issues.push(issue('clarifications', '必须是数组'))
     if (!Array.isArray(input.testFocus)) issues.push(issue('testFocus', '必须是数组'))
     if (issues.length) return { report: { valid: false, issues } }
 
@@ -497,6 +499,42 @@ export class RequirementAnalysisValidator {
       })
     })
 
+    const priorClarifications = structuredClone(snapshot.formalClarifications ?? [])
+    const clarificationByKey = new Map(priorClarifications.map(item => [clarificationKey(item), item]))
+    input.clarifications.forEach((candidate, position) => {
+      const path = `clarifications[${position}]`
+      if (!candidate || typeof candidate !== 'object') { issues.push(issue(path, 'Clarification 必须是对象')); return }
+      const rawCandidate = candidate as unknown as Record<string, unknown>
+      for (const key of Object.keys(rawCandidate)) if (!['question', 'reason', 'category', 'requirementPointRefs', 'blocking'].includes(key)) issues.push(issue(`${path}.${key}`, '模型只能提交问题、原因、分类、需求点引用和 blocking'))
+      const question = typeof candidate.question === 'string' ? candidate.question.trim() : ''
+      const reason = typeof candidate.reason === 'string' ? candidate.reason.trim() : ''
+      if (!question) issues.push(issue(`${path}.question`, '问题不能为空'))
+      if (!reason) issues.push(issue(`${path}.reason`, '提问原因不能为空'))
+      if (!clarificationCategories.has(String(candidate.category))) issues.push(issue(`${path}.category`, '分类不合法'))
+      if (typeof candidate.blocking !== 'boolean') issues.push(issue(`${path}.blocking`, 'blocking 必须是布尔值'))
+      if (!Array.isArray(candidate.requirementPointRefs) || candidate.requirementPointRefs.some(reference => typeof reference !== 'string')) { issues.push(issue(`${path}.requirementPointRefs`, '必须是字符串数组')); return }
+      const refs = [...new Set(candidate.requirementPointRefs.map(reference => reference.trim()).filter(Boolean))]
+      const invalidRefs = refs.filter(reference => !referenceMap.has(reference))
+      if (invalidRefs.length) issues.push(issue(`${path}.requirementPointRefs`, `引用了不存在的需求点：${invalidRefs.join('、')}`))
+      if (!question || !reason || invalidRefs.length || !clarificationCategories.has(String(candidate.category)) || typeof candidate.blocking !== 'boolean') return
+      const normalized = {
+        question: question.slice(0, 8_000),
+        reason: reason.slice(0, 8_000),
+        category: candidate.category,
+        requirementPointRefs: refs.map(reference => referenceMap.get(reference)!),
+        blocking: candidate.blocking,
+      }
+      const key = clarificationKey(normalized)
+      if (clarificationByKey.has(key)) return
+      clarificationByKey.set(key, {
+        id: `planning_clarification_${createHash('sha256').update(`${snapshot.runId}:${key}`).digest('hex').slice(0, 24)}`,
+        ...normalized,
+        status: 'pending',
+        createdAt: snapshot.createdAt,
+      })
+    })
+    const clarifications = [...clarificationByKey.values()]
+
     const testFocus: RequirementAnalysisResult['testFocus'] = []
     const testFocusKeys = new Set<string>()
     input.testFocus.forEach((item, position) => {
@@ -522,7 +560,9 @@ export class RequirementAnalysisValidator {
     if (issues.length) return { report: { valid: false, issues } }
 
     const modelSummary = input.summary
-    const overallAssessment = assessments.has(String(modelSummary?.overallAssessment)) ? modelSummary!.overallAssessment! : findings.length ? 'needs_revision' : 'pass'
+    const blockingClarifications = clarifications.filter(item => item.blocking && item.status === 'pending')
+    const proposedAssessment = assessments.has(String(modelSummary?.overallAssessment)) ? modelSummary!.overallAssessment! : findings.length ? 'pass_with_notes' : 'pass'
+    const overallAssessment = blockingClarifications.length ? 'blocked' : proposedAssessment === 'blocked' ? findings.length ? 'pass_with_notes' : 'pass' : proposedAssessment
     if (!findings.length && (overallAssessment === 'needs_revision' || overallAssessment === 'blocked')) return { report: invalid('findings', `总体结论为 ${overallAssessment} 时必须提交至少一条 Finding；整体性问题使用空 requirementPointRefs`) }
     const fallbackScore = findings.length ? Math.max(40, 100 - findings.length * 8) : 100
     const core = {
@@ -536,6 +576,7 @@ export class RequirementAnalysisValidator {
         risks: cleanStrings(modelSummary?.risks),
       },
       findings,
+      clarifications,
       testFocus,
       ...(typeof input.analysisDocument === 'string' && input.analysisDocument.trim() ? { analysisDocument: input.analysisDocument.trim() } : {}),
     } satisfies Omit<RequirementAnalysisResult, 'artifacts'>
@@ -565,6 +606,19 @@ export class RequirementAnalysisValidator {
       for (const key of ['title', 'description', 'impact', 'recommendation'] as const) if (!finding[key]?.trim()) issues.push(issue(`${path}.${key}`, '字段不能为空'))
       if (!isStrings(finding.requirementPointRefs) || finding.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用必须全部指向当前结果内的需求点；整体性问题可以为空'))
     })
+    if (!Array.isArray(input.clarifications) || input.clarifications.length > 500) issues.push(issue('clarifications', 'Clarification 结构或数量不合法'))
+    else {
+      const ids = new Set<string>()
+      input.clarifications.forEach((item, position) => {
+        const path = `clarifications[${position}]`
+        if (!item.id || ids.has(item.id)) issues.push(issue(`${path}.id`, 'Clarification ID 为空或重复'))
+        ids.add(item.id)
+        if (!item.question?.trim() || !item.reason?.trim() || !clarificationCategories.has(item.category)) issues.push(issue(path, '问题、原因或分类不合法'))
+        if (!isStrings(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用了不存在的需求点'))
+        if (!['pending', 'answered', 'dismissed'].includes(item.status)) issues.push(issue(`${path}.status`, '状态不合法'))
+        if (item.status !== 'pending' && (!item.answer?.trim() || !item.answeredAt || !item.answeredBy)) issues.push(issue(path, '已回答或已忽略的问题必须保留正式答复、时间和人员来源'))
+      })
+    }
     if (!Array.isArray(input.testFocus)) issues.push(issue('testFocus', '必须是数组'))
     else {
       const ids = new Set<string>()
@@ -738,6 +792,9 @@ function formatFixedAssetVersionIds(assetVersionIds: Set<string>) {
   return `${visible}${values.length > 10 ? ` 等 ${values.length} 个` : ''}`
 }
 function sameStrings(left: string[], right: string[]) { return left.length === right.length && left.every((value, index) => value === right[index]) }
+function clarificationKey(value: { question: string; category: string; requirementPointRefs: string[] }) {
+  return `${value.category}:${[...value.requirementPointRefs].sort().join(',')}:${value.question.trim().toLocaleLowerCase().replace(/\s+/gu, ' ')}`
+}
 function invalid(path: string, message: string): ValidationReport { return { valid: false, issues: [issue(path, message)] } }
 function issue(path: string, message: string): ValidationIssue { return { path, message } }
 function isStrings(value: unknown): value is string[] { return Array.isArray(value) && value.every(item => typeof item === 'string') }

@@ -197,6 +197,14 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   }
   const requirementAnalysisRun = /^\/api\/requirement-analysis-runs\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && requirementAnalysisRun) { await requireRun(requirementAnalysisRun[1], 'requirement-analysis:read'); return send(response, 200, await requirementAnalysisService.get(requirementAnalysisRun[1])) }
+  const clarificationAction = /^\/api\/requirement-analysis-runs\/([^/]+)\/clarifications\/([^/]+)\/actions$/.exec(url.pathname)
+  if (method === 'POST' && clarificationAction) {
+    await requireRun(clarificationAction[1], 'requirement-analysis:handle')
+    const body = await json(request)
+    const action = String(body.action ?? '')
+    if (action !== 'answer' && action !== 'dismiss') throw new Error('CLARIFICATION_ACTION_INVALID')
+    return send(response, 202, await requirementAnalysisService.actOnClarification(clarificationAction[1], clarificationAction[2], { action, answer: String(body.answer ?? ''), principal }))
+  }
   const repairDrafts = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts$/.exec(url.pathname)
   if (method === 'POST' && repairDrafts) {
     await requireRun(repairDrafts[1], 'requirement-analysis:handle')
@@ -219,6 +227,11 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     const release = await requirementAnalysisService.publishRelease(releasePublish[1], { principal })
     await planningWorkflowService.requirementReleasePublished(releasePublish[1])
     return send(response, 200, release)
+  }
+  const automaticTestDesignRetry = /^\/api\/requirement-analysis-runs\/([^/]+)\/automatic-test-design\/retry$/.exec(url.pathname)
+  if (method === 'POST' && automaticTestDesignRetry) {
+    await requireRun(automaticTestDesignRetry[1], 'project-version:manage')
+    return send(response, 202, await planningWorkflowService.requirementReleasePublished(automaticTestDesignRetry[1]))
   }
   const releaseArtifact = /^\/api\/requirement-analysis-runs\/([^/]+)\/release\/artifacts\/([^/]+)$/.exec(url.pathname)
   if (method === 'GET' && releaseArtifact) {

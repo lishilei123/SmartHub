@@ -3,6 +3,25 @@
   justify-content: flex-end;
 }
 
+.rav2-finding > textarea {
+  width: calc(100% - 24px);
+  margin: 0 12px 10px;
+  padding: 10px;
+  resize: vertical;
+  border: 1px solid #dfe3ea;
+  border-radius: 8px;
+  background: #fbfcfd;
+  color: #455164;
+  font: inherit;
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+
+.rav2-finding > textarea:focus {
+  outline: 2px solid rgba(89, 101, 233, 0.16);
+  border-color: #7982e8;
+}
+
 .rav2-filter-count {
   margin-left: auto;
   color: #8c95a3;

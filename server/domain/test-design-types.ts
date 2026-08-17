@@ -1,6 +1,7 @@
 import type { AgentDefinitionVersion, AgentExecutionEvent, CurrentInputRef, InputDeliveryManifest, PlanningSubAgentRunRecord, ProjectWorkspaceSnapshot, ProjectWorkspaceSnapshotFile } from './agent-types.js'
 import type { AgentExecutionRecord } from './types.js'
 import type { AgentRoutingConfiguration } from './types.js'
+import type { PlanningClarification } from './review-types.js'
 
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
 export type TestExecutionMethod = 'ui' | 'api' | 'performance_tool' | 'long_running' | 'environment_matrix'
@@ -54,11 +55,13 @@ export interface TestDesign {
   logicalInputSha256: string
   createdBy: string
   createdAt: string
+  creationMode?: 'automatic' | 'manual'
+  sourceRequirementReleaseId?: string
 }
 
 export interface FrozenContentRef {
   id: string
-  kind: 'requirement_release' | 'knowledge_asset' | 'historical_case_set' | 'historical_case_asset' | 'test_case_library' | 'historical_test_suite'
+  kind: 'requirement_release' | 'human_clarification' | 'knowledge_asset' | 'historical_case_set' | 'historical_case_asset' | 'test_case_library' | 'historical_test_suite'
   sourceId: string
   contentSha256: string
   content: unknown
@@ -72,6 +75,7 @@ export interface TestDesignBasisSnapshot {
   verificationRunId: string
   requirementsJsonSha256: string
   items: FrozenContentRef[]
+  clarifications: PlanningClarification[]
   createdAt: string
   snapshotSha256: string
 }

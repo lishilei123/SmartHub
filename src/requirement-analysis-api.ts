@@ -45,6 +45,20 @@ export type AnalysisFinding = {
   requirementPointRefs: string[]
 }
 
+export type PlanningClarification = {
+  id: string
+  question: string
+  reason: string
+  category: 'business_rule' | 'boundary' | 'expected_result' | 'dependency' | 'test_scope' | 'environment' | 'other'
+  requirementPointRefs: string[]
+  blocking: boolean
+  status: 'pending' | 'answered' | 'dismissed'
+  answer?: string
+  createdAt: string
+  answeredAt?: string
+  answeredBy?: string
+}
+
 export type RequirementAnalysisResult = {
   summary: {
     overview: string
@@ -56,6 +70,7 @@ export type RequirementAnalysisResult = {
   }
   requirementPoints: RequirementPoint[]
   findings: AnalysisFinding[]
+  clarifications: PlanningClarification[]
   testFocus: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
   evidence: AnalysisEvidence[]
   coverage: {
@@ -216,6 +231,7 @@ export type RequirementAnalysisResponse = {
     }
     createdAt: string
     agentDefinition: AgentDefinitionSnapshot
+    formalClarifications?: PlanningClarification[]
   }
   result: RequirementAnalysisResult
   execution?: AgentExecutionRecord
@@ -228,6 +244,8 @@ export type RequirementAnalysisRun = {
   analysisId: string
   retryOfRunId?: string
   retryMode?: 'full'
+  continuedFromRunId?: string
+  continuedByRunId?: string
   projectVersionId: string
   assetId: string
   assetVersionId: string
@@ -238,7 +256,7 @@ export type RequirementAnalysisRun = {
   documentVersion: string
   logicalPath: string
   modelLabel: string
-  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  status: 'running' | 'waiting_clarification' | 'succeeded' | 'failed' | 'cancelled'
   step: string
   progress: number
   queue?: {
@@ -262,10 +280,12 @@ export type RequirementAnalysisRun = {
   inputDeliveryManifest?: InputDeliveryManifest
   planningSubAgentRuns?: PlanningSubAgentRunRecord[]
   workflow?: {
-    currentStage: 'analysis' | 'repair' | 'verification' | 'release'
+    currentStage: 'analysis' | 'clarification' | 'understanding' | 'repair' | 'verification' | 'release'
     repairDrafts?: RequirementRepairDraft[]
     verificationOf?: { sourceRunId: string; repairDraftId: string }
     release?: RequirementReleasePackage
+    understandingSnapshot?: { id: string; schemaVersion: 'requirement-understanding-snapshot/v1'; projectVersionId: string; analysisRunId: string; sourceAssetVersionIds: string[]; requirementPointIds: string[]; clarifications: PlanningClarification[]; requirementResultSha256: string; createdAt: string; contentSha256: string }
+    automaticTransition?: { status: 'pending' | 'running' | 'succeeded' | 'failed'; testDesignId?: string; testDesignRunId?: string; startedAt?: string; finishedAt?: string; error?: string }
   }
   response?: RequirementAnalysisResponse
 }
@@ -315,6 +335,13 @@ export async function loadRequirementAnalysisRun(runId: string) {
   const body = await response.json() as RequirementAnalysisRun | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析运行读取失败')
   return body as RequirementAnalysisRun
+}
+
+export async function actOnPlanningClarification(runId: string, clarificationId: string, input: { action: 'answer' | 'dismiss'; answer: string }) {
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/clarifications/${encodeURIComponent(clarificationId)}/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
+  const body = await response.json() as { clarification: PlanningClarification; sourceRun: RequirementAnalysisRun; continuationRun?: RequirementAnalysisRun } | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '待确认问题保存失败')
+  return body as { clarification: PlanningClarification; sourceRun: RequirementAnalysisRun; continuationRun?: RequirementAnalysisRun }
 }
 
 export async function cancelRequirementAnalysisRun(runId: string) {
@@ -396,6 +423,13 @@ export async function publishRequirementRelease(runId: string) {
   const body = await response.json() as RequirementReleasePackage | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求发布失败')
   return body as RequirementReleasePackage
+}
+
+export async function retryAutomaticTestDesign(runId: string) {
+  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/automatic-test-design/retry`, { method: 'POST' })
+  const body = await response.json() as { design: { id: string }; run: { id: string } } | { error?: string }
+  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '自动测试设计重试失败')
+  return body as { design: { id: string }; run: { id: string } }
 }
 
 export function requirementReleaseArtifactUrl(runId: string, fileName: string) {
