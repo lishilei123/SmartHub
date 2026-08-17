@@ -657,12 +657,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         if (evidenceRepairRequired) {
           agent.state.tools = tools
           activeToolNames = new Set(tools.map(tool => tool.name))
-          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: '原文定位未能建立 Evidence；继续使用 grep 定位并用 read 核对固定工作区文件，然后修正 sourceTexts。' })
+          await record({ type: 'evidence_repair_tools_enabled', turn: turns, content: '原文定位未能建立 Evidence；可按需使用 grep 或 read 核对固定工作区资料，然后修正 sourceTexts。' })
         }
         const repairGuidance = stage.isGovernedCandidate
           ? '请严格按当前 Stage 的提交工具 Schema 和错误路径修正完整候选；不得修改服务端冻结的任务、证据范围或受保护业务语义。'
           : evidenceRepairRequired
-          ? '工作区文件版本、内部证据范围、需求点 ID、Evidence ID、定位和引用均由服务端负责；请只修正需求点内部的 sourceTexts，必要时用 grep 定位后通过 read 核对原文。'
+          ? '工作区文件版本、内部证据范围、需求点 ID、Evidence ID、定位和引用均由服务端负责；请只修正需求点内部的 sourceTexts，必要时使用 grep 或 read 核对原文。'
           : '正文投递覆盖、需求点 ID、Evidence ID 和 evidenceRefs 均由服务端负责；请按错误路径直接修正需求点内容，不要进行无关的 Evidence 补读。'
         await session.prompt(`服务端拒绝了刚才的结果提交。以下问题必须先修复：\n${formatValidationIssues(lastSubmissionIssues)}\n${repairGuidance}\n然后通过 ${stage.submitPiName} 重新提交完整结果。`)
         await session.waitForIdle()

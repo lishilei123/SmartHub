@@ -178,3 +178,159 @@
     justify-content: center;
   }
 }
+
+/* 主流程只呈现需求理解与需要人工确认的业务事实；治理信息按需展开。 */
+.rav2-session-header .rav2-skill-chips {
+  flex: 1 1 auto;
+  overflow: visible;
+  position: relative;
+  display: block;
+}
+
+.rav2-skill-chips > summary {
+  width: max-content;
+  margin-left: auto;
+  padding: 4px 7px;
+  border: 1px solid #dfe3ea;
+  border-radius: 999px;
+  background: #fbfcfd;
+  color: #6f7c8e;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 7px;
+  list-style: none;
+}
+
+.rav2-skill-chips > summary::-webkit-details-marker { display: none; }
+.rav2-skill-chips > summary svg { width: 11px; color: #6472d8; }
+
+.rav2-skill-chips > div {
+  width: min(320px, calc(100vw - 48px));
+  margin-top: 5px;
+  padding: 8px;
+  border: 1px solid #dfe3ea;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 22px rgba(42, 54, 78, .12);
+  position: absolute;
+  z-index: 4;
+  right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rav2-skill-chips:not([open]) > div { display: none; }
+
+.rav2-advanced-details > header {
+  margin-bottom: 10px;
+  padding: 10px 11px;
+  border: 1px solid #e5e8ee;
+  border-radius: 9px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rav2-advanced-details > header > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rav2-advanced-details > header > div > svg { width: 16px; color: #6877dc; }
+.rav2-advanced-details > header b,
+.rav2-advanced-details > header small { display: block; }
+.rav2-advanced-details > header b { color: #495568; font-size: 10px; }
+.rav2-advanced-details > header small { margin-top: 3px; color: #8d97a5; font-size: 8px; line-height: 1.45; }
+
+.rav2-advanced-details > header > nav {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rav2-advanced-details > header button {
+  min-height: 26px;
+  padding: 0 7px;
+  border: 1px solid #e0e4ea;
+  border-radius: 6px;
+  background: #fff;
+  color: #718094;
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.rav2-advanced-details > header button.active {
+  border-color: #d9ddff;
+  background: #f0f1ff;
+  color: #5563d8;
+  font-weight: 700;
+}
+
+.rav2-technical-status > summary {
+  min-height: 35px;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #485466;
+  cursor: pointer;
+  list-style: none;
+}
+
+.rav2-technical-status > summary::-webkit-details-marker { display: none; }
+.rav2-technical-status > summary > svg { width: 13px; color: #6472d8; }
+.rav2-technical-status > summary b,
+.rav2-technical-status > summary small { display: block; }
+.rav2-technical-status > summary b { font-size: 9px; }
+.rav2-technical-status > summary small { margin-top: 2px; color: #919aa7; font-size: 7px; }
+
+.rav2-understanding-state {
+  width: 88px;
+  min-height: 80px;
+  flex: 0 0 88px;
+  border: 1px solid #dfe2fa;
+  border-radius: 12px;
+  background: #fff;
+  display: grid;
+  place-content: center;
+  text-align: center;
+}
+
+.rav2-understanding-state svg { width: 18px; margin: 0 auto 5px; color: #2b9a70; }
+.rav2-understanding-state strong,
+.rav2-understanding-state span { display: block; }
+.rav2-understanding-state strong { color: #455266; font-size: 11px; }
+.rav2-understanding-state span { margin-top: 3px; color: #929baa; font-size: 7px; }
+
+.rav2-snapshot-facts {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #dbece4;
+  border-radius: 9px;
+  background: #f6fcf8;
+  display: grid;
+  grid-template-columns: 1.6fr 1.3fr repeat(2, .7fr);
+  gap: 8px;
+}
+
+.rav2-snapshot-facts small,
+.rav2-snapshot-facts b { display: block; }
+.rav2-snapshot-facts small { color: #71877d; font-size: 7px; }
+.rav2-snapshot-facts b { margin-top: 3px; overflow: hidden; color: #38634f; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+
+.rav2-workspace-observability > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+@media (max-width: 780px) {
+  .rav2-advanced-details > header { align-items: flex-start; flex-direction: column; }
+  .rav2-advanced-details > header > nav { justify-content: flex-start; }
+  .rav2-snapshot-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -9,7 +9,7 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 
 ## 1. 建立事实边界
 
-- 先从 `/workspace` 根目录浏览，定位活动分支的当前需求目录并逐份读到末尾；`ls`、`find` 和 `grep` 只帮助发现，`read` 返回的固定正文才可作为当前需求 Evidence。
+- Current Requirement 的正式范围由服务端冻结的 Workspace 与输入覆盖计划确定，不由某一种工具调用决定。先使用已投递的重点输入建立理解；需要补充定位或核对时，可按需使用 `ls`、`find`、`grep` 或 `read` 浏览固定工作区，避免为了提交而重复读取无关正文。Requirement Point 只提交逐字 `sourceTexts`，Evidence、ID、定位与覆盖由服务端在固定输入中生成和校验。
 - 当前需求目录中的内容是 Current Requirement。其他分支、`shared`、历史设计和 Knowledge 工具返回是 Knowledge Reference，只能用于发现差异、历史规则和待确认事项，不能自动升级为当前需求事实。
 - 当知识资料与当前需求存在差异时，写成“历史资料说明什么、当前需求没有说明或与其不同、需要确认什么”，不得替业务做决定。
 

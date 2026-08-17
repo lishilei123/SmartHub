@@ -48,7 +48,7 @@
       "piName": "grep",
       "label": "搜索工作区正文",
       "catalogName": "工作区正文搜索",
-      "description": "使用 grep 语义在只读 /workspace 内搜索文本，返回相对文件路径和行号。grep 只用于定位，引用前必须通过 read 读取文件。",
+      "description": "使用 grep 语义在只读 /workspace 内搜索文本，返回相对文件路径和行号。需求分析的 Evidence、定位与覆盖由服务端根据固定输入和 sourceTexts 生成；需要时可再用 read 核对完整上下文。",
       "catalogDescription": "固定工作区中按文本和文件模式搜索。",
       "risk": "read",
       "timeoutMs": 30000,
