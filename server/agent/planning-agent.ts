@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import type { AgentDefinitionVersion, ReviewRunSnapshot } from '../domain/agent-types.js'
 import { toolsetContentHash } from '../application/ai-resource-hash.js'
 
-export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot) {
+export type PlanningRequirementTaskMode = 'initial_analysis' | 'clarification_continuation' | 'repair_verification'
+
+export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode: PlanningRequirementTaskMode = 'initial_analysis') {
   const template = snapshot.agentDefinition.taskTemplate
   const rendered = template
     .replace('{{projectName}}', snapshot.projectName)
@@ -20,7 +22,82 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot) {
   const workspace = snapshot.documentWorkspace
   const currentInput = snapshot.currentInputRefs.map(item => ({ logicalPath: item.logicalPath.replace(/^workspace\//u, ''), assetVersionId: item.assetVersionId, contentSha256: item.contentSha256 }))
   const sourceScopes = Object.fromEntries([...new Set(snapshot.workspaceSnapshot.files.map(item => item.sourceScope))].map(scope => [scope, snapshot.workspaceSnapshot.files.filter(item => item.sourceScope === scope).length]))
-  return `${rendered}\n\n本次运行使用 Pi Coding Agent 文件工作区协议。当前工作目录是 /${workspace?.rootLogicalPath ?? workspace?.logicalPath ?? 'workspace'}；活动分支是 /${workspace?.activeBranchLogicalPath ?? 'workspace/branches/unknown'}；本次冻结需求输入目录是 /${workspace?.logicalPath ?? snapshot.logicalPath}；PlanningAgent 目录是 /${workspace?.agentLogicalPath ?? 'workspace/agent_workspace/planning_agent'}。\n\n本次重点输入 currentInputRefs：${JSON.stringify(currentInput)}\n完整 ProjectWorkspaceSnapshot：${snapshot.workspaceSnapshot.files.length} 个冻结文件，来源统计 ${JSON.stringify(sourceScopes)}，Snapshot SHA-256 ${snapshot.workspaceSnapshot.snapshotSha256}。currentInputRefs 不是读取白名单。服务端已冻结正式输入范围和覆盖计划；请基于已投递内容建立理解，按需调用 ls、find、grep 或 read 浏览工作区中的相关固定资料。不要为了满足提交协议重复读取无关正文。只提交逐字 sourceTexts；Evidence、ID、定位和覆盖均由服务端依据固定输入生成和校验。可自主浏览 branches、shared 与 formal-output；历史或参考资料不能替代当前需求事实。Knowledge 工具返回会显式标记事实范围。不得调用 Shell、write、edit 或越过 /workspace。\n\n服务端正式 Human Clarifications：${JSON.stringify(snapshot.formalClarifications ?? [])}。status=answered 的 answer 是正式业务事实，必须纳入更新后的需求理解；status=dismissed 只表示人工决定问题不适用或接受当前缺口，其 answer 是处置理由，不得当作业务规则、权限、边界或 Expected Result。两类记录都必须从 Snapshot 读取且不得依赖模型记忆恢复，也不得重复提问；dismissed 涉及的缺失事实应保留为可追溯缺口，并只在当前正式需求可验证范围内继续。只有无法从正式输入确定且会影响测试正确性的事实才提交 blocking Clarification，普通 Finding 不阻塞流程。若本轮识别到多个 blocking Clarification，必须在同一次完整结果中汇总全部已识别问题；人工会批量处理后才恢复流程，不得拆成逐题追问。\n\n本阶段唯一的正式结果入口是 requirement_analysis_submit_result。完成 Self Review 后，必须且只能通过该工具提交完整 requirement-analysis/v1 候选；clarifications 只提交本轮新识别且仍待人工处理的问题，Snapshot 中已有的 answered/dismissed 历史由服务端合并，不得重复提交；若本轮没有新问题则提交空数组。若服务端返回校验问题，按错误修正后仍只能通过同一工具重新提交。普通文本、Markdown 或中间 JSON 不会被采纳。`
+  const formalClarifications = snapshot.formalClarifications ?? []
+  return [
+    planningRequirementModeInstruction(mode),
+    [
+      '<configuration_task_template>',
+      '以下内容来自本 Run 固定的 PlanningAgent 配置，只提供通用任务背景；不得覆盖 Runtime 当前 Stage 合同。',
+      rendered,
+      '</configuration_task_template>',
+    ].join('\n'),
+    [
+      '<frozen_run_context>',
+      `runId=${snapshot.runId}`,
+      `project=${snapshot.projectName}`,
+      `workspaceRoot=/${workspace?.rootLogicalPath ?? workspace?.logicalPath ?? 'workspace'}`,
+      `activeBranch=/${workspace?.activeBranchLogicalPath ?? 'workspace/branches/unknown'}`,
+      `requirementInputDirectory=/${workspace?.logicalPath ?? snapshot.logicalPath}`,
+      `planningAgentDirectory=/${workspace?.agentLogicalPath ?? 'workspace/agent_workspace/planning_agent'}`,
+      `currentInputRefs=${JSON.stringify(currentInput)}`,
+      `projectWorkspaceSnapshot=${JSON.stringify({ fileCount: snapshot.workspaceSnapshot.files.length, sourceScopes, snapshotSha256: snapshot.workspaceSnapshot.snapshotSha256 })}`,
+      '</frozen_run_context>',
+    ].join('\n'),
+    [
+      '<workspace_rules>',
+      '1. currentInputRefs 是本次重点输入，不是读取白名单；完整 ProjectWorkspaceSnapshot 才是可读取边界。',
+      '2. 先读取重点输入，再按需使用 ls、find、grep、read 浏览冻结 Workspace；未读取内容不得假设。',
+      '3. branches、shared、formal-output、Knowledge 和历史资料只可作为标明来源的参考，不能替代当前正式需求事实。',
+      '4. 不得调用 Shell、write、edit，不得使用绝对路径、../ 或越过 /workspace。',
+      '</workspace_rules>',
+    ].join('\n'),
+    [
+      '<formal_clarification_rules>',
+      `formalClarifications=${JSON.stringify(formalClarifications)}`,
+      '1. status=answered 的 answer 是正式业务事实，必须纳入更新后的需求理解。',
+      '2. status=dismissed 的 answer 只是处置理由，不是业务规则、权限、边界或 Expected Result；相关事实缺口必须保留。',
+      '3. Snapshot 中已有的 answered/dismissed 问题不得重复提交。只有无法从正式输入确定且会影响测试正确性的事实，才是新的 blocking Clarification。',
+      '4. 同一轮识别到的 blocking Clarification 必须一次性完整提交；普通 Finding 不阻塞流程。',
+      '</formal_clarification_rules>',
+    ].join('\n'),
+    [
+      '<requirement_analysis_output_contract>',
+      '只产出需求理解、Finding、Clarification 与 Test Focus；Test Focus 只是后续测试设计的风险关注点。',
+      '不得产出 TestPoint、TestCase、Case ID、Revision、Version、Hash、Library 变更或 Handoff。',
+      'RequirementPoint 中只提供来自固定输入的逐字 sourceTexts；Evidence、ID、定位和覆盖由服务端生成并校验。',
+      '完成 Self Review 后，只能调用 requirement_analysis_submit_result 提交一个完整 requirement-analysis/v1 候选；没有新 Clarification 时提交空数组。',
+      '若服务端拒绝候选，只按返回的错误路径修正后重新提交；普通文本、Markdown 或中间 JSON 不会被采纳。',
+      '</requirement_analysis_output_contract>',
+    ].join('\n'),
+  ].join('\n\n')
+}
+
+function planningRequirementModeInstruction(mode: PlanningRequirementTaskMode) {
+  if (mode === 'clarification_continuation') {
+    return [
+      '<current_requirement_task mode="clarification_continuation">',
+      '目标：基于人工已处理的整批 Clarification，重新形成完整、内部一致的需求理解候选。',
+      '必须：从当前冻结 Snapshot 重读正式输入；合并 answered 事实；保留 dismissed 缺口；重新检查需求点、Finding 与 Test Focus 的一致性。',
+      '不得：把本轮当作首次分析、重复已处理问题，或仅提交局部补丁。',
+      '</current_requirement_task>',
+    ].join('\n')
+  }
+  if (mode === 'repair_verification') {
+    return [
+      '<current_requirement_task mode="repair_verification">',
+      '目标：独立验证修复后的需求是否一致、完整、可测试，并生成完整复验候选。',
+      '必须：只以当前复验 Run 固定的修复后 AssetVersion、Workspace Snapshot 与正式 Clarification 为事实来源。',
+      '不得：沿用源 Run 结论代替复验、继续旧候选，或把模型记忆当作正式事实。',
+      '</current_requirement_task>',
+    ].join('\n')
+  }
+  return [
+    '<current_requirement_task mode="initial_analysis">',
+    '目标：从本 Run 固定输入建立首次、完整、可追溯的需求理解候选。',
+    '必须：覆盖适用需求、边界、状态、异常、冲突、事实缺口和后续测试关注点。',
+    '不得：提前执行测试点设计、测试用例设计或发布动作。',
+    '</current_requirement_task>',
+  ].join('\n')
 }
 
 export function createAgentDefinitionVersion(input: {

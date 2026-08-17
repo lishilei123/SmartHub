@@ -484,7 +484,7 @@ function resolveModel(
     apiKey: source.apiKey,
     modelId: model.id,
     modelName: model.name,
-    contextWindow: Math.min(configuration.routing.contextWindow, model.contextWindow),
+    contextWindow: configuration.routing.contextWindow,
     maxOutputTokens: configuration.routing.maxOutputTokens,
     supportsReasoning: model.capabilities.includes('reasoning'),
     requestTimeoutMs: configuration.routing.requestTimeoutSeconds * 1_000,

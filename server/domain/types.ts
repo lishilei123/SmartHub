@@ -13,8 +13,6 @@ export interface GenerativeModel {
   id: string
   name: string
   displayName: string
-  contextWindow: number
-  maxOutputTokens: number
   capabilities: GenerativeCapability[]
   enabled: boolean
   health: ModelHealth

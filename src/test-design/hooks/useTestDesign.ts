@@ -65,6 +65,22 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (next.testPointTree) setTree(await api.loadTree(projectVersionId, selected.id, next.id))
   }, [guarded, projectVersionId])
 
+  const openLinkedRun = useCallback(async (designId: string, runId: string) => {
+    if (!projectVersionId) return
+    setDesign(null); setRun(null); setTree(null); setHandoffs([])
+    const linked = await guarded('load-linked-run', async () => {
+      const [nextDesign, nextRun] = await Promise.all([
+        api.loadDesign(projectVersionId, designId),
+        api.loadRun(projectVersionId, designId, runId),
+      ])
+      const nextTree = nextRun.testPointTree
+        ? await api.loadTree(projectVersionId, designId, runId)
+        : null
+      return { design: nextDesign, run: nextRun, tree: nextTree }
+    })
+    setDesign(linked.design); setRun(linked.run); setTree(linked.tree)
+  }, [guarded, projectVersionId])
+
   const closeDesign = useCallback(() => { setDesign(null); setRun(null); setTree(null); setHandoffs([]) }, [])
 
   const create = useCallback(async (input: CreateTestDesignInput) => {
@@ -177,5 +193,5 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const previewLegacyMigration = useCallback(async (legacyTestCaseSetVersionId: string) => { if (!inputs) return; const preview = await guarded('legacy-migration-preview', () => api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId)); if (preview) setLegacyMigrationPreview(preview); return preview }, [guarded, inputs])
   const migrateLegacyCaseSet = useCallback(async (legacyTestCaseSetVersionId: string, confirmUncertain = false) => { if (!inputs) return; const preview = legacyMigrationPreview?.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId ? legacyMigrationPreview : await api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId); await guarded('legacy-migration', () => api.migrateLegacyCaseSet(inputs.projectVersion.projectId, { legacyTestCaseSetVersionId, expectedPreviewSha256: preview.previewSha256, confirmUncertain }), '历史已发布用例集已幂等导入正式用例库。'); setLegacyMigrationPreview(null); await loadCollection() }, [guarded, inputs, legacyMigrationPreview, loadCollection])
 
-  return { inputs, designs, design, run, tree, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, loadCollection, openDesign, closeDesign, create, startRun, refreshRun, updateTree, redesign, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
+  return { inputs, designs, design, run, tree, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, loadCollection, openDesign, openLinkedRun, closeDesign, create, startRun, refreshRun, updateTree, redesign, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
 }

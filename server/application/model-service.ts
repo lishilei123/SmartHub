@@ -195,7 +195,22 @@ export class ModelService {
   }
 
   private publicSource(source: GenerativeModelSource): GenerativeModelSource {
-    return { ...structuredClone(source), apiKey: '', hasApiKey: Boolean(source.apiKey) }
+    return {
+      ...structuredClone(source),
+      apiKey: '',
+      hasApiKey: Boolean(source.apiKey),
+      models: source.models.map(model => ({
+        id: model.id,
+        name: model.name,
+        displayName: model.displayName,
+        capabilities: [...model.capabilities],
+        enabled: model.enabled,
+        health: model.health,
+        ...(model.lastCheckedAt ? { lastCheckedAt: model.lastCheckedAt } : {}),
+        ...(model.healthMessage ? { healthMessage: model.healthMessage } : {}),
+        ...(model.qualityGate ? { qualityGate: structuredClone(model.qualityGate) } : {}),
+      })),
+    }
   }
 }
 
@@ -205,17 +220,12 @@ function normalizeModel(input: unknown, previous: GenerativeModel[] | undefined)
   const existing = previous?.find(model => model.id === id)
   const name = required(value.name, '模型标识')
   const displayName = required(value.displayName, '模型展示名称')
-  const contextWindow = positiveInteger(value.contextWindow, `模型“${displayName}”上下文长度`)
-  const maxOutputTokens = positiveInteger(value.maxOutputTokens, `模型“${displayName}”最大输出 Token`)
-  if (maxOutputTokens > contextWindow) throw new Error(`模型“${displayName}”最大输出 Token 不能超过上下文长度`)
   const rawCapabilities = Array.isArray(value.capabilities) ? value.capabilities.map(String) : []
   if (rawCapabilities.some(item => !capabilities.has(item as GenerativeCapability))) throw new Error(`模型“${displayName}”包含不支持的能力声明`)
   const unchanged = existing?.name === name
-    && existing.contextWindow === contextWindow
-    && existing.maxOutputTokens === maxOutputTokens
     && JSON.stringify([...existing.capabilities].sort()) === JSON.stringify([...new Set(rawCapabilities)].sort())
   return {
-    id, name, displayName, contextWindow, maxOutputTokens,
+    id, name, displayName,
     capabilities: [...new Set(rawCapabilities)] as GenerativeCapability[],
     enabled: value.enabled !== false,
     health: unchanged ? existing?.health ?? 'unknown' : 'unknown',
@@ -229,7 +239,6 @@ function object(value: unknown): Record<string, unknown> {
 }
 function cleanId(value: unknown) { const id = String(value ?? '').trim(); return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id) ? id : '' }
 function required(value: unknown, label: string) { const text = String(value ?? '').trim(); if (!text) throw new Error(`${label}不能为空`); if (text.length > 200) throw new Error(`${label}过长`); return text }
-function positiveInteger(value: unknown, label: string) { const number = Number(value); if (!Number.isInteger(number) || number <= 0) throw new Error(`${label}必须是正整数`); return number }
 function validBaseUrl(value: string) {
   let parsed: URL
   try { parsed = new URL(value) } catch { throw new Error('Base URL 不是有效 URL') }

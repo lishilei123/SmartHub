@@ -20,10 +20,18 @@ type DesignTab = 'cases' | 'proposals' | 'audit' | 'publish' | 'details'
 const entries: Array<{ key: Entry; label: string; icon: typeof ClipboardList }> = [{ key: 'designs', label: '设计任务', icon: ClipboardList }, { key: 'library', label: '测试用例库', icon: Library }, { key: 'suites', label: '测试套件', icon: Workflow }, { key: 'releases', label: '发布记录', icon: Rocket }]
 const designTabs: Array<{ key: DesignTab; label: string; icon: typeof ClipboardList }> = [{ key: 'cases', label: '测试用例', icon: TestTube2 }, { key: 'audit', label: 'Coverage 状态', icon: Activity }, { key: 'proposals', label: '用例库变更', icon: FileDiff }, { key: 'publish', label: '审核并发布', icon: Rocket }, { key: 'details', label: '详细信息', icon: Settings2 }]
 
-export function TestDesignPage({ projectVersion, onManageVersions, notify, embedded = false }: { projectVersion: ProjectVersion | null; onManageVersions: () => void; notify: Notify; embedded?: boolean }) {
+export function TestDesignPage({ projectVersion, onManageVersions, notify, embedded = false, linkedDesignId, linkedRunId }: { projectVersion: ProjectVersion | null; onManageVersions: () => void; notify: Notify; embedded?: boolean; linkedDesignId?: string; linkedRunId?: string }) {
   const routedEntry = new URL(window.location.href).searchParams.get('testDesignEntry')
-  const model = useTestDesign(projectVersion?.id, notify); const [entry, setEntry] = useState<Entry>(routedEntry === 'library' ? 'library' : 'designs'); const [tab, setTab] = useState<DesignTab>('cases'); const [creating, setCreating] = useState(false); const autoOpeningId = useRef('')
-  useEffect(() => { const candidate = model.designs[0]; if (!candidate || model.design || creating || autoOpeningId.current === candidate.id) return; autoOpeningId.current = candidate.id; void model.openDesign(candidate).finally(() => { autoOpeningId.current = '' }) }, [creating, model.design, model.designs[0]?.id])
+  const model = useTestDesign(projectVersion?.id, notify); const [entry, setEntry] = useState<Entry>(routedEntry === 'library' ? 'library' : 'designs'); const [tab, setTab] = useState<DesignTab>('cases'); const [creating, setCreating] = useState(false); const autoOpeningId = useRef(''); const linkedOpeningId = useRef('')
+  const linkedTargetId = linkedDesignId && linkedRunId ? `${linkedDesignId}:${linkedRunId}` : ''
+  useEffect(() => {
+    if (!linkedDesignId || !linkedRunId || (model.design?.id === linkedDesignId && model.run?.id === linkedRunId) || linkedOpeningId.current === linkedTargetId) return
+    linkedOpeningId.current = linkedTargetId
+    void model.openLinkedRun(linkedDesignId, linkedRunId)
+      .catch(() => undefined)
+      .finally(() => { linkedOpeningId.current = '' })
+  }, [linkedDesignId, linkedRunId, linkedTargetId, model.design?.id, model.run?.id, model.openLinkedRun])
+  useEffect(() => { const candidate = model.designs[0]; if (embedded || linkedTargetId || !candidate || model.design || creating || autoOpeningId.current === candidate.id) return; autoOpeningId.current = candidate.id; void model.openDesign(candidate).finally(() => { autoOpeningId.current = '' }) }, [creating, embedded, linkedTargetId, model.design, model.designs[0]?.id])
   useEffect(() => { if (model.run?.stage === 'test_case_design' || model.run?.stage === 'completed') setTab('cases') }, [model.run?.stage])
   if (!projectVersion) return <main className="td2-shell"><section className="td2-card td2-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>测试设计的 Requirement Release、Workspace 与正式产物都按项目版本隔离。</p><button className="td2-button primary" onClick={onManageVersions}>管理项目版本</button></section></main>
   if (!model.inputs) return <main className="td2-shell"><section className="td2-card td2-empty"><RefreshCw className="spin" /><h2>正在读取测试设计上下文</h2><p>检查 Requirement Release 绑定、正式用例库、测试套件与 PlanningAgent 配置。</p>{model.error && <div className="td2-error">{model.error}</div>}</section></main>

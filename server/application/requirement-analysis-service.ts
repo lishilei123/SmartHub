@@ -8,7 +8,7 @@ import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RequirementAnalysisValidator } from '../agent/result-validator.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import { buildRequirementDirectoryInputPlan } from '../agent/requirement-context-assembler.js'
-import { renderPlanningRequirementTask } from '../agent/planning-agent.js'
+import { renderPlanningRequirementTask, type PlanningRequirementTaskMode } from '../agent/planning-agent.js'
 import type { KnowledgeService } from './knowledge-service.js'
 import { buildRequirementReleaseArtifacts } from './requirement-release-artifacts.js'
 import { buildCurrentInputRefs, buildProjectWorkspaceSnapshot } from './project-workspace-snapshot.js'
@@ -557,8 +557,8 @@ export class RequirementAnalysisService {
     const definition = analysisConfiguration?.agentDefinition ?? await this.definitions.resolve('planning')
     requirePiWorkspaceAgentDefinition(definition)
     const coveragePlan = buildAnalysisCoveragePlan(inputPairs.map(item => item.version), request.excludedAreas)
-    const effectiveContextWindow = boundedContextWindow(model, analysisConfiguration)
-    const effectiveMaxOutputTokens = boundedMaxOutputTokens(model, analysisConfiguration)
+    const effectiveContextWindow = configuredContextWindow(analysisConfiguration)
+    const effectiveMaxOutputTokens = configuredMaxOutputTokens(analysisConfiguration)
     const documentWorkspace = requirementDocumentWorkspace(projectVersion, state.projectVersions, documentDirectoryPath)
     const now = new Date().toISOString()
     const currentInputRefs = buildCurrentInputRefs(inputPairs)
@@ -791,7 +791,7 @@ export class RequirementAnalysisService {
 
   private async executeAnalysis(input: { run: ReviewRun; snapshot: ReviewRunSnapshot; requirementInputPlan: RequirementInputPlan; models: AgentModelSelection[]; configuration: AgentConfigurationVersion | null; signal: AbortSignal; lease?: TaskLease; retryable?: boolean }) {
     const events: AgentExecutionEvent[] = []
-    const model = input.models.find(selection => supportsInputPlan(selection, input.requirementInputPlan, input.snapshot.modelRef.contextWindow, input.snapshot.modelRef.maxOutputTokens))
+    const model = supportsInputPlan(input.requirementInputPlan, input.snapshot.modelRef.contextWindow, input.snapshot.modelRef.maxOutputTokens) ? input.models[0] : undefined
     if (!model) throw new Error('PlanningAgent 没有满足固定工作区上下文和工具能力的可用模型')
     try {
       const output = await this.executeOnce({
@@ -812,7 +812,7 @@ export class RequirementAnalysisService {
             submitToolId: 'requirement-analysis.submit_result',
             schemaVersion: 'requirement-analysis/v1',
             agentLabel: 'PlanningAgent',
-            initialTask: renderPlanningRequirementTask(input.snapshot),
+            initialTask: renderPlanningRequirementTask(input.snapshot, planningRequirementTaskMode(input.run)),
             validateCandidate: async (candidate, manifest) => {
               const normalized = await this.validator.normalize(candidate as unknown as CandidateRequirementAnalysisV1, input.snapshot, manifest)
               return { valid: normalized.report.valid, result: normalized.result, issues: normalized.report.issues }
@@ -1176,6 +1176,13 @@ function assertReleasePackageIntegrity(release: RequirementReleasePackage) {
   }
 }
 
+function planningRequirementTaskMode(run: ReviewRun): PlanningRequirementTaskMode {
+  if (run.workflow?.currentStage === 'verification') return 'repair_verification'
+  const continuingAfterClarification = Boolean(run.result)
+    && (run.snapshot.formalClarifications ?? []).some(item => item.status === 'answered' || item.status === 'dismissed')
+  return continuingAfterClarification ? 'clarification_continuation' : 'initial_analysis'
+}
+
 function executionRecordForStage(output: AgentExecutionOutput, workflowStage: RequirementWorkflowStage): AgentExecutionRecord {
   return { agentKey: 'planning', workflowStage, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events }
 }
@@ -1264,15 +1271,15 @@ function requirePiWorkspaceAgentDefinition(definition: ReviewRunSnapshot['agentD
   if (definition.agentKey !== 'planning' || definition.resultSchemaVersion !== 'planning/v1' || missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布 PlanningAgent${missing.length ? `；缺少工具 ${missing.join(', ')}` : ''}`)
 }
 
-function boundedMaxOutputTokens(selection: AgentModelSelection, configuration: AgentConfigurationVersion | null) {
-  return Math.min(configuration?.routing.maxOutputTokens ?? selection.model.maxOutputTokens, selection.model.maxOutputTokens)
+function configuredMaxOutputTokens(configuration: AgentConfigurationVersion | null) {
+  return configuration?.routing.maxOutputTokens ?? 32_000
 }
-function boundedContextWindow(selection: AgentModelSelection, configuration: AgentConfigurationVersion | null) {
-  return Math.min(configuration?.routing.contextWindow ?? selection.model.contextWindow, selection.model.contextWindow)
+function configuredContextWindow(configuration: AgentConfigurationVersion | null) {
+  return configuration?.routing.contextWindow ?? 256_000
 }
-function supportsInputPlan(selection: AgentModelSelection, plan: RequirementInputPlan, contextWindow: number, maxOutputTokens: number) {
+function supportsInputPlan(plan: RequirementInputPlan, contextWindow: number, maxOutputTokens: number) {
   if (plan.mode !== 'agent_directory') return false
-  return Math.min(selection.model.contextWindow, contextWindow) >= Math.max(...plan.batches.map(batch => batch.tokenCount), 0) + 4_000 + maxOutputTokens
+  return contextWindow >= Math.max(...plan.batches.map(batch => batch.tokenCount), 0) + 4_000 + maxOutputTokens
 }
 
 function mergeFormalClarifications(existing: PlanningClarification[] | undefined, current: PlanningClarification[]) {

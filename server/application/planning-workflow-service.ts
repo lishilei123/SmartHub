@@ -519,7 +519,10 @@ function requirementModel(
   if (
     source.providerType !== reference.providerType
     || model.name !== reference.modelName
-    || model.contextWindow < reference.contextWindow
+    || configuration && (
+      configuration.routing.contextWindow !== reference.contextWindow
+      || configuration.routing.maxOutputTokens !== reference.maxOutputTokens
+    )
   ) {
     throw new Error('REQUIREMENT_REVIEWER_MODEL_DRIFT')
   }
@@ -589,7 +592,6 @@ function testDesignModel(
   if (
     source.providerType !== reference.providerType
     || model.name !== reference.modelName
-    || model.contextWindow < reference.contextWindow
     || configuration.routing.contextWindow !== reference.contextWindow
     || configuration.routing.maxOutputTokens !== reference.maxOutputTokens
     || model.capabilities.includes('reasoning') !== reference.supportsReasoning

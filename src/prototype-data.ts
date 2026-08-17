@@ -68,8 +68,6 @@ export type GenerativeModelDraft = {
   id: string
   name: string
   displayName: string
-  contextWindow: number
-  maxOutputTokens: number
   capabilities: ('structured_output' | 'tool_calling' | 'vision' | 'reasoning')[]
   enabled: boolean
   health: 'healthy' | 'degraded' | 'unknown'
@@ -92,7 +90,6 @@ export type SettingsDraft = {
   mainModel: string
   intelligentRouting: boolean
   fallbackEnabled: boolean
-  maxOutputTokens: number
   requestTimeoutSeconds: number
   retryCount: number
   structuredOutput: boolean
@@ -131,7 +128,6 @@ export const initialSettings: SettingsDraft = {
   mainModel: '',
   intelligentRouting: true,
   fallbackEnabled: true,
-  maxOutputTokens: 32_000,
   requestTimeoutSeconds: 300,
   retryCount: 2,
   structuredOutput: true,

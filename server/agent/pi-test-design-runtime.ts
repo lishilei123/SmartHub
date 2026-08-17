@@ -157,10 +157,37 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     stageContract: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
+    stageObjective: testDesignStageObjective(stage),
     ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test-design/test-point-tree.json` } } : {}),
     ...(repairState && repairAudit ? { repair: { attempt: repairState.attempt, maxAttempts: repairState.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
-    instructions: ['Workflow 已固定业务任务与提交协议，但不调度 Skill；PlanningAgent 从 Enabled Skills 自主选择需要的能力。', 'currentInputRefs 是本次上传资料重点，不是读取白名单；先读取重点输入，再从完整 ProjectWorkspaceSnapshot 自主查找相关资料。', '从 /workspace 使用 ls、find、grep、read 自主读取资料；不得假设未读取的事实。', 'requirements/clarifications.json 中 status=answered 的 answer 是正式业务事实，必须纳入测试设计并保留 Requirement → TestPoint → TestCase 追溯。', 'requirements/clarifications.json 中 status=dismissed 的 answer 只是人工处置理由，不是业务规则或 Expected Result；不得据此生成测试断言，应保留缺口并只覆盖当前正式需求可验证范围。', '如存在 /workspace/agent_workspace/planning_agent/historical-test-cases.json，必须读取并建立需求变化到稳定 Case ID/Revision 的映射。', '测试范围、维度和执行方式必须根据正式资料的适用性判断；不得编造阈值、时长、兼容矩阵、接口、定位器、账号或环境。', '不得调用 Shell、write、edit，不得生成正式 TP/TestCase ID、Revision、Version 或 Hash，也不得修改数据库或正式 Workspace。', `完成后仅调用 ${binding.submitToolId} 提交一次完整候选。`],
+    instructions: testDesignStageInstructions(stage),
   })
+}
+
+function testDesignStageObjective(stage: TestDesignStage) {
+  if (stage === 'test_point_design') return '基于正式 Requirement Release 建立完整、去重、风险导向且可追溯的测试点候选；本阶段不设计测试用例。'
+  if (stage === 'test_case_design') return '基于已固化 TestPointTreeVersion 生成可审核的测试用例、测试数据需求和用例库变更 Proposal；本阶段不得重写测试点。'
+  return '只修复当前 Coverage Audit 中 resolution=agent_repair 的阻断项，最小化修改并保持未受影响候选语义稳定。'
+}
+
+function testDesignStageInstructions(stage: TestDesignStage) {
+  const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
+  const stageRules = stage === 'test_point_design'
+    ? ['覆盖正式需求、风险、边界、状态与异常，并保留 Requirement → TestPoint 依据；不得生成 TestCase。']
+    : stage === 'test_case_design'
+      ? ['必须读取已固化 test-point-tree.json，以适用叶子测试点为覆盖目标；不得修改、补造或绕过已批准测试点。', '用例必须具备明确目标、前置条件、步骤/执行规格、预期结果、清理与追溯；历史用例只在仍符合当前正式需求时复用或提出新 Revision。']
+      : ['只处理任务中列出的 agent_repair blockers；不得修改正式需求、已批准测试点或不相关用例。', '优先做最小修复；保留未受影响的候选引用、依赖、Proposal 与测试数据语义。']
+  return [
+    ...stageRules,
+    'Runtime Stage 合同决定当前 Schema、工具白名单和唯一 Submit Tool；Session 历史中的其他 Stage 指令一律不适用。',
+    'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 从完整 Enabled Skills 中自主选择所需能力。',
+    'currentInputRefs 是重点输入，不是读取白名单；先读取重点输入，再按需使用 ls、find、grep、read 浏览完整冻结 Workspace。',
+    'requirements/clarifications.json 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
+    '若存在 historical-test-cases.json，必须读取并判断复用、修改、新增或废弃；历史资料不能覆盖当前 Requirement Release。',
+    '不得编造阈值、时长、兼容矩阵、接口、定位器、账号、环境或 Expected Result。',
+    '只生成语义候选；不得调用 Shell、write、edit，不得生成正式 ID、Revision、Version、Hash 或修改数据库/正式 Workspace。',
+    `完成 Self Review 后，只提交一个完整 ${binding.schemaVersion} 候选；若服务端拒绝，只按错误路径修正后重新提交。`,
+  ]
 }
 
 function stageWorkspace(run: TestDesignWorkflowRun, stage: TestDesignStage): TestDesignWorkspaceSnapshot {
@@ -306,7 +333,7 @@ function resolveModel(state: DatabaseState, configuration: AgentConfigurationVer
   if (!reference) throw new Error('PlanningAgent 未选择默认模型')
   const { source, model } = modelByReference(state, reference)
   if (!source.enabled || !model.enabled || model.health !== 'healthy' || !model.qualityGate?.passed || !model.capabilities.includes('tool_calling')) throw new Error(`${source.name} / ${model.displayName} 未通过模型门禁`)
-  return { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: Math.min(configuration.routing.contextWindow, model.contextWindow), maxOutputTokens: configuration.routing.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning'), requestTimeoutMs: configuration.routing.requestTimeoutSeconds * 1_000, retryCount: configuration.routing.retryCount }
+  return { sourceId: source.id, providerType: source.providerType, baseUrl: source.baseUrl, apiKey: source.apiKey, modelId: model.id, modelName: model.name, contextWindow: configuration.routing.contextWindow, maxOutputTokens: configuration.routing.maxOutputTokens, supportsReasoning: model.capabilities.includes('reasoning'), requestTimeoutMs: configuration.routing.requestTimeoutSeconds * 1_000, retryCount: configuration.routing.retryCount }
 }
 
 function modelByReference(state: DatabaseState, reference: AgentModelReference): { source: GenerativeModelSource; model: GenerativeModel } {
