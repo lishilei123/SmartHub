@@ -12,6 +12,8 @@ test('System Prompt 只包含 Enabled Skill Catalog，不包含任何 Skill 正�
   const { session } = await prepareSkills(['requirement.analysis', 'test-point-design', 'test-case-design'])
   const prompt = session.renderPrompt()
 
+  assert.match(prompt, /runtime_skill_catalog_contract authority="highest"/u)
+  assert.match(prompt, /优先于 Agent Configuration、Session 历史或旧 Context Summary/u)
   assert.match(prompt, /当前 Agent 可用 Skills（发布配置目录；不包含 Skill 正文）/u)
   assert.match(prompt, /- requirement\.analysis[\s\S]*description:[\s\S]*version: 1\.0\.0[\s\S]*tags:/u)
   assert.match(prompt, /- test-point-design[\s\S]*version: 1\.1\.0/u)

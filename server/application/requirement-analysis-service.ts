@@ -547,6 +547,9 @@ export class RequirementAnalysisService {
     const state = await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求分析')
+    if ((request.workflowStage ?? 'analysis') === 'analysis' && projectVersion.requirementReleaseBinding) {
+      throw new Error(`REQUIREMENT_ANALYSIS_ALREADY_RELEASED: 当前 ProjectVersion 已绑定 Requirement Release ${projectVersion.requirementReleaseBinding.releaseId}；不得重新创建初始需求分析 Run。新建测试分析请使用测试设计入口；只有分析新需求时才需创建新的 ProjectVersion。`)
+    }
     const project = required(state.projects.find(item => item.id === projectVersion.projectId), '项目不存在')
     const knowledgeBase = required(state.knowledgeBases.find(item => item.projectId === project.id), '知识库不存在')
     const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), '知识库没有活动索引')
@@ -650,7 +653,13 @@ export class RequirementAnalysisService {
       snapshot,
       workflow: { currentStage: request.workflowStage ?? 'analysis', ...(request.verificationOf ? { verificationOf: request.verificationOf } : {}) },
     }
-    await this.store.transaction(draft => { draft.reviewRuns.push(run) })
+    await this.store.transaction(draft => {
+      const currentProjectVersion = required(draft.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
+      if ((request.workflowStage ?? 'analysis') === 'analysis' && currentProjectVersion.requirementReleaseBinding) {
+        throw new Error(`REQUIREMENT_ANALYSIS_ALREADY_RELEASED: 当前 ProjectVersion 已绑定 Requirement Release ${currentProjectVersion.requirementReleaseBinding.releaseId}；不得重新创建初始需求分析 Run。新建测试分析请使用测试设计入口；只有分析新需求时才需创建新的 ProjectVersion。`)
+      }
+      draft.reviewRuns.push(run)
+    })
     onCreated?.(presentRun(run))
     if (deferExecution) return presentRun(run)
     return this.executeAnalysis({ run, snapshot, requirementInputPlan, models, configuration: analysisConfiguration, signal })

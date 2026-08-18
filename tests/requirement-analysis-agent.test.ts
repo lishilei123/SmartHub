@@ -42,6 +42,26 @@ test('PlanningAgent 通过一个长期定义绑定 Workspace、Knowledge、Skill
   assert.doesNotMatch(definition.systemPrompt, /只执行当前 Stage|上一阶段已经失效/u)
 })
 
+test('Requirement Release 已绑定后拒绝在同一 ProjectVersion 重新创建初始需求分析 Run', async () => {
+  const store = await seededStore()
+  await store.transaction(state => {
+    const projectVersion = state.projectVersions.find(item => item.id === 'project-version-1')!
+    projectVersion.requirementReleaseBinding = {
+      releaseId: 'release-1',
+      verificationRunId: 'analysis-run-1',
+      requirementsJsonSha256: 'a'.repeat(64),
+      boundAt: '2026-08-17T00:00:00.000Z',
+    }
+  })
+  const service = new RequirementAnalysisService(store, { execute: async () => { throw new Error('不应执行 Agent') } })
+
+  await assert.rejects(
+    () => service.analyze({ projectVersionId: 'project-version-1', documentDirectoryPath: requirementDirectory }),
+    /REQUIREMENT_ANALYSIS_ALREADY_RELEASED/u,
+  )
+  assert.equal((await store.snapshot()).reviewRuns.length, 0)
+})
+
 test('目录输入包只交付工作区元数据，不把原始需求拼接进 Prompt', async () => {
   const store = await seededStore()
   const state = await store.snapshot()

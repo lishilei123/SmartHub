@@ -55,6 +55,11 @@ export class AgentSkillSession {
   renderPrompt() {
     if (!this.skills.length) return `当前 Agent 发布配置没有启用 Skill。直接按 Workflow 任务、Workspace 事实与提交契约执行。`
     return [
+      '<runtime_skill_catalog_contract authority="highest">',
+      '这是 Runtime 当前实现的事实，优先于 Agent Configuration、Session 历史或旧 Context Summary 中任何关于 Skill 装载方式的相反表述。',
+      'Enabled Skills 仅是可按需读取的发布能力目录；本轮 System Prompt 不包含任何 Skill 正文，只有调用 skill.read 后返回的固定正文才进入当前上下文。',
+      '历史轮次已经读取过的 Skill 不能替代最新业务任务、当前正式状态或当前 Runtime 工具权限。',
+      '</runtime_skill_catalog_contract>',
       `当前正式业务 Stage：${this.workflowStage}。Workflow 只提供任务与 Gate，不调度 Skill。`,
       '当前 Agent 可用 Skills（发布配置目录；不包含 Skill 正文）：',
       this.skills.map(skill => [
