@@ -13,6 +13,14 @@ test('测试设计页面拆分为固定流程面板且不展示多 Agent DAG', (
   assert.match(read('../src/RequirementAnalysisPageV2.tsx'), /\.\/test-design\/TestDesignPage/u)
 })
 
+test('需求分析页面只在当前版本已成功完成并发布的 Requirement Release 对应 Run 存在时开放测试设计', () => {
+  const source = read('../src/RequirementAnalysisPageV2.tsx')
+  assert.match(source, /const testDesignReady = Boolean\(releaseBinding/u)
+  assert.match(source, /run\.workflow\?\.release\?\.id === releaseBinding\.releaseId/u)
+  assert.match(source, /需求发布记录不可用/u)
+  assert.match(source, /请先完成需求分析/u)
+})
+
 test('创建面板明确展示绑定需求发布包并定义范围、维度和执行入口', () => {
   const source = read('../src/test-design/TestDesignCreatePanel.tsx')
   assert.match(source, /Requirement Release/u)

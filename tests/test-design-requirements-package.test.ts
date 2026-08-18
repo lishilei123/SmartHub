@@ -85,8 +85,10 @@ test('TestDesign 拒绝 manifest 未固定 requirements.json Hash 的发布包',
   })
   const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => { throw new Error('不应执行') } }
   const service = new TestDesignService(store, runtime)
-  const design = await service.createDesign('project-version-1', { name: '订单测试设计', objective: '验证发布需求', knowledgeAugmentation: { mode: 'disabled' } }, principal)
-  await assert.rejects(() => service.createRun('project-version-1', design.id, 'invalid-manifest', principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID')
+  await assert.rejects(
+    () => service.createDesign('project-version-1', { name: '订单测试设计', objective: '验证发布需求', knowledgeAugmentation: { mode: 'disabled' } }, principal),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID',
+  )
 })
 
 function json(value: unknown) { return `${JSON.stringify(value, null, 2)}\n` }

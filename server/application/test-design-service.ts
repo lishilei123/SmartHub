@@ -71,6 +71,7 @@ export class TestDesignService {
     return this.store.transaction(state => {
       const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
       if (projectVersion.status !== 'open') throw new TestDesignError('PROJECT_VERSION_READ_ONLY', '当前项目版本只读', 409)
+      if (!boundRequirementRelease(state, projectVersionId)) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '当前 ProjectVersion 尚未完成需求分析并绑定 Requirement Release', 409)
       validateDesignSources(state, projectVersion.projectId, input)
       const design: TestDesign = { id: `test_design_${randomUUID()}`, projectVersionId, projectId: projectVersion.projectId, name: input.name, objective: input.objective, input, logicalInputSha256: canonicalSha256(input), createdBy: principal.subjectId, createdAt: now(), creationMode: 'manual' }
       designState(state).designs.push(design)

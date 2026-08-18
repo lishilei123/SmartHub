@@ -61,6 +61,20 @@ test('运行冻结当前绑定 Requirement Release 与 Workspace，后续发布�
   assert.equal(second.basisSnapshot.requirementReleaseId, 'release-2')
 })
 
+test('未完成需求分析并绑定 Requirement Release 时拒绝创建测试设计', async () => {
+  const { store, service } = await fixture(new FakeRuntime())
+  await store.transaction(state => {
+    delete state.projectVersions.find(item => item.id === 'pv-1')!.requirementReleaseBinding
+    state.reviewRuns = []
+  })
+
+  await assert.rejects(
+    () => service.createDesign('pv-1', createInput(), principal),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND',
+  )
+  assert.equal((await store.snapshot()).testDesignState?.designs.length ?? 0, 0)
+})
+
 test('单 PlanningAgent 自动固化测试点、连续生成及重新生成用例，并完成正式资产投影', async () => {
   const runtime = new FakeRuntime()
   const projected: string[] = []
