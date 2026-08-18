@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { AgentDefinitionVersion, ReviewRunSnapshot } from '../domain/agent-types.js'
 import { toolsetContentHash } from '../application/ai-resource-hash.js'
 
-export type PlanningRequirementTaskMode = 'initial_analysis' | 'clarification_continuation' | 'repair_verification'
+export type PlanningRequirementTaskMode = 'initial_analysis' | 'repair_verification'
 
 export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode: PlanningRequirementTaskMode = 'initial_analysis') {
   const template = snapshot.agentDefinition.taskTemplate
@@ -73,15 +73,6 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode:
 }
 
 function planningRequirementModeInstruction(mode: PlanningRequirementTaskMode) {
-  if (mode === 'clarification_continuation') {
-    return [
-      '<current_requirement_task mode="clarification_continuation">',
-      '人工已经处理本轮全部阻断 Clarification，请继续当前需求分析工作。',
-      '结合正式保存的 answered 事实完善需求理解；dismissed 只保留为处置记录和事实缺口。',
-      '请从当前冻结 Snapshot 与 Workspace 重新核对正式输入，提交更新后的完整需求分析候选。',
-      '</current_requirement_task>',
-    ].join('\n')
-  }
   if (mode === 'repair_verification') {
     return [
       '<current_requirement_task mode="repair_verification">',

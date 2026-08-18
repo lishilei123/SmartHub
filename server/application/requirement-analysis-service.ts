@@ -42,7 +42,6 @@ export type RequirementAnalysisRetryMode = 'full'
 
 interface PlanningRequirementRuntime extends AgentRuntime {
   appendPlanningClarification?(input: { projectId: string; projectVersionId: string; runId: string; clarificationId: string; question: string; answer: string; status: 'answered' | 'dismissed'; answeredAt: string; answeredBy: string }): Promise<unknown>
-  appendPlanningTask?(input: { projectId: string; projectVersionId: string; task: string; taskType: string; metadata?: Record<string, unknown> }): Promise<unknown>
 }
 
 export class RequirementAnalysisService {
@@ -80,10 +79,10 @@ export class RequirementAnalysisService {
     required(projectVersion, '项目版本不存在')
     if (this.store.listReviewRuns) {
       const page = await this.store.listReviewRuns(projectVersionId, { limit, cursor: options.cursor, runningOnly: options.runningOnly })
-      return { items: page.items.filter(run => !isLegacyClarificationContinuation(run)).map(presentRunSummary), nextCursor: page.nextCursor }
+      return { items: page.items.map(presentRunSummary), nextCursor: page.nextCursor }
     }
     const runs = (await this.store.snapshot()).reviewRuns
-      .filter(item => item.projectVersionId === projectVersionId && !isLegacyClarificationContinuation(item) && (!options.runningOnly || item.status === 'running'))
+      .filter(item => item.projectVersionId === projectVersionId && (!options.runningOnly || item.status === 'running'))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
     const offset = decodeCursor(options.cursor, runs)
     const items = runs.slice(offset, offset + limit)
@@ -106,8 +105,7 @@ export class RequirementAnalysisService {
       if (run.workflow?.understandingSnapshot || run.workflow?.release?.status === 'published') throw new Error('REQUIREMENT_UNDERSTANDING_ALREADY_FROZEN: 当前需求理解已冻结，不能回写 Clarification')
       const pendingBlocking = run.result.clarifications.filter(item => item.blocking && item.status === 'pending')
       if (!pendingBlocking.length) {
-        if (input.items.length || run.status !== 'waiting_clarification' || run.step !== 'continuing_after_clarification') throw new Error('CLARIFICATION_BATCH_NOT_REQUIRED: 当前没有待回答的阻断问题')
-        return { clarifications: [] as PlanningClarification[], projectId: run.snapshot.projectId, projectVersionId: run.projectVersionId }
+        throw new Error('CLARIFICATION_BATCH_NOT_REQUIRED: 当前没有待回答的阻断问题')
       }
       const submitted = new Map<string, { action: 'answer' | 'dismiss'; answer: string }>()
       for (const item of input.items) {
@@ -130,11 +128,16 @@ export class RequirementAnalysisService {
       })
       refreshAnalysisArtifacts(run.result)
       run.snapshot.formalClarifications = mergeFormalClarifications(run.snapshot.formalClarifications, run.result.clarifications)
-      run.workflow ??= { currentStage: 'clarification' }
-      run.workflow.currentStage = 'clarification'
-      run.status = 'waiting_clarification'
-      run.step = 'continuing_after_clarification'
-      run.progress = 60
+      run.workflow ??= { currentStage: 'understanding' }
+      run.workflow.currentStage = 'understanding'
+      run.workflow.automaticTransition = { status: 'pending' }
+      Object.assign(run, {
+        status: 'succeeded',
+        step: 'requirement_understanding_ready',
+        progress: 100,
+        finishedAt: answeredAt,
+        error: undefined,
+      } satisfies Partial<ReviewRun>)
       return {
         clarifications: resolved,
         projectId: run.snapshot.projectId,
@@ -154,24 +157,8 @@ export class RequirementAnalysisService {
         answeredBy,
       })
     }
-    if (updated.clarifications.length) {
-      await this.runtime.appendPlanningTask?.({
-        projectId: updated.projectId,
-        projectVersionId: updated.projectVersionId,
-        taskType: 'requirement_analysis_after_clarifications',
-        task: [
-          '这些 Clarification 已经由人工处理，请继续当前需求分析工作。',
-          '',
-          '请结合正式保存的回答完善需求理解，并重新核对当前固定 Workspace。',
-          '历史对话可以用于理解问题背景；正式 Clarification 事实仍以当前 ReviewRunSnapshot.formalClarifications 为准。',
-        ].join('\n'),
-        metadata: {
-          requirementRunId: runId,
-          clarificationIds: updated.clarifications.map(item => item.id),
-        },
-      })
-    }
-    return { clarifications: updated.clarifications, run: await this.resumeAfterClarifications(runId) }
+    await this.notifyUnderstandingReady(runId)
+    return { clarifications: updated.clarifications, run: await this.get(runId) }
   }
 
   async freezeUnderstanding(runId: string) {
@@ -683,39 +670,6 @@ export class RequirementAnalysisService {
     return this.executeAnalysis({ run, snapshot: run.snapshot, requirementInputPlan: plan, models, configuration, signal, lease, retryable: infrastructureAttempt < maxInfrastructureAttempts })
   }
 
-  private async resumeAfterClarifications(runId: string) {
-    const prepared = await this.store.transaction(state => {
-      const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-      requireOpenProjectVersion(state, run.projectVersionId)
-      if (run.status !== 'waiting_clarification' || run.result?.clarifications.some(item => item.blocking && item.status === 'pending')) throw new Error('CLARIFICATION_CONTINUATION_NOT_READY: 仍有阻断问题未处理')
-      const plan = this.buildFixedRequirementInputPlan(state, run)
-      run.snapshot.analysisInput = inputSnapshot(plan)
-      run.workflow ??= { currentStage: 'analysis' }
-      run.workflow.currentStage = 'analysis'
-      Object.assign(run, {
-        status: 'running',
-        step: this.store.enqueueReviewJob ? 'waiting_worker' : 'analyzing_requirements',
-        progress: 60,
-        finishedAt: undefined,
-        error: undefined,
-        inputDeliveryManifest: undefined,
-      } satisfies Partial<ReviewRun>)
-      const lastAttempt = Math.max(0, ...(run.executionAttempts ?? []).map(item => item.attempt))
-      return { projectVersionId: run.projectVersionId, nextAttempt: lastAttempt + 1 }
-    })
-    if (this.store.enqueueReviewJob) {
-      const timestamp = new Date().toISOString()
-      await this.store.enqueueReviewJob({ id: `analysis_job_${randomUUID()}`, runId, projectVersionId: prepared.projectVersionId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: timestamp, createdAt: timestamp, updatedAt: timestamp })
-      return this.get(runId)
-    }
-    const controller = new AbortController()
-    this.activeRuns.set(runId, controller)
-    void this.processPreparedRun(runId, undefined, controller.signal, prepared.nextAttempt, prepared.nextAttempt + 2)
-      .catch(error => this.failPreparedRun(runId, undefined, error))
-      .finally(() => { if (this.activeRuns.get(runId) === controller) this.activeRuns.delete(runId) })
-    return this.get(runId)
-  }
-
   private buildFixedRequirementInputPlan(state: DatabaseState, run: ReviewRun) {
     const fixedPairs = run.snapshot.assets.map(item => {
       const version = required(state.versions.find(candidate => candidate.id === item.assetVersionId && candidate.status === 'ready'), '固定需求资产版本不可用')
@@ -881,22 +835,25 @@ export class RequirementAnalysisService {
         const attempt = latestRunningExecutionAttempt(current)
         if (attempt) { attempt.activeAgentKey = 'planning'; attempt.status = 'succeeded'; attempt.finishedAt = finishedAt; attempt.modelLabel = current.modelLabel; attempt.executions = { planning: structuredClone(execution) } }
       })
-      if (!pendingBlockingClarifications.length && this.understandingReadyListener) {
-        try {
-          await this.understandingReadyListener(input.run.id)
-        } catch (error) {
-          const message = sanitize(String(error instanceof Error ? error.message : error))
-          await this.store.transaction(state => {
-            const current = state.reviewRuns.find(item => item.id === input.run.id)
-            if (!current?.workflow) return
-            current.workflow.automaticTransition = { ...(current.workflow.automaticTransition ?? { status: 'failed' }), status: 'failed', finishedAt: new Date().toISOString(), error: message }
-          })
-        }
-      }
+      if (!pendingBlockingClarifications.length) await this.notifyUnderstandingReady(input.run.id)
       return required((await this.get(input.run.id)).response, '需求分析结果不存在')
     } catch (error) {
       const message = await this.failRun(input.run.id, error, input.signal, model, events, input.lease, input.retryable ?? false)
       throw new Error(message)
+    }
+  }
+
+  private async notifyUnderstandingReady(runId: string) {
+    if (!this.understandingReadyListener) return
+    try {
+      await this.understandingReadyListener(runId)
+    } catch (error) {
+      const message = sanitize(String(error instanceof Error ? error.message : error))
+      await this.store.transaction(state => {
+        const current = state.reviewRuns.find(item => item.id === runId)
+        if (!current?.workflow) return
+        current.workflow.automaticTransition = { ...(current.workflow.automaticTransition ?? { status: 'failed' }), status: 'failed', finishedAt: new Date().toISOString(), error: message }
+      })
     }
   }
 
@@ -1205,9 +1162,7 @@ function assertReleasePackageIntegrity(release: RequirementReleasePackage) {
 
 function planningRequirementTaskMode(run: ReviewRun): PlanningRequirementTaskMode {
   if (run.workflow?.currentStage === 'verification') return 'repair_verification'
-  const continuingAfterClarification = Boolean(run.result)
-    && (run.snapshot.formalClarifications ?? []).some(item => item.status === 'answered' || item.status === 'dismissed')
-  return continuingAfterClarification ? 'clarification_continuation' : 'initial_analysis'
+  return 'initial_analysis'
 }
 
 function executionRecordForStage(output: AgentExecutionOutput, workflowStage: RequirementWorkflowStage): AgentExecutionRecord {
@@ -1326,7 +1281,6 @@ function configurationRef(configuration: AgentConfigurationVersion) { return { i
 function redactSnapshot(snapshot: ReviewRunSnapshot) { return { ...snapshot, agentDefinition: { ...snapshot.agentDefinition, systemPrompt: undefined, taskTemplate: undefined } } }
 function snapshotAssets(run: ReviewRun) { return run.snapshot.assets.map(item => ({ ...item })) }
 function analysisIdFor(run: ReviewRun) { return run.reviewId ?? run.snapshot.reviewId ?? `analysis_${run.retryOfRunId ?? run.id}` }
-function isLegacyClarificationContinuation(run: ReviewRun) { return Boolean((run as ReviewRun & { continuedFromRunId?: string }).continuedFromRunId) }
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 function normalizeDocumentDirectoryPath(value: unknown) { const normalized = String(value ?? '').trim().replaceAll('\\', '/').replace(/^\/+|\/+$/gu, ''); const segments = normalized.split('/'); if (!normalized || /^[A-Za-z]:/u.test(normalized) || segments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('Agent 文档工作目录必须是知识库内的有效逻辑目录'); return normalized }
 function isWithinDirectory(logicalPath: string, directoryPath: string) { const normalized = logicalPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, ''); return normalized.startsWith(`${directoryPath}/`) && normalized.length > directoryPath.length + 1 }

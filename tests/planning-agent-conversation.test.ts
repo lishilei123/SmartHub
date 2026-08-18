@@ -105,8 +105,6 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
   provider.setResponses([
     fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'requirement.analysis' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(requirementSubmit, requirementCandidate('首次分析')), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'requirement.analysis' }), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall(requirementSubmit, requirementCandidate('Clarification 后续')), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'test-point-design' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(pointSubmit, pointCandidate()), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall(skillRead, { skillKey: 'test-case-design' }), { stopReason: 'toolUse' }),
@@ -137,14 +135,6 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
   await runtime.appendPlanningTask({
     projectId: 'project-1',
     projectVersionId: 'project-version-1',
-    taskType: 'requirement_analysis_after_clarifications',
-    task: '这些 Clarification 已经由人工处理，请继续当前需求分析工作。',
-  })
-  roundOutputs.push(await executeRound(runtime, definition, model, 'analysis', 'requirement-analysis.submit_result', 'requirement-analysis/v1', '结合正式 Clarification 回答继续完善需求理解'))
-
-  await runtime.appendPlanningTask({
-    projectId: 'project-1',
-    projectVersionId: 'project-version-1',
     taskType: 'test_design_after_requirement_release',
     task: '需求分析已经完成，Requirement Release 已正式发布。请继续当前测试策划工作，开始设计测试点。',
   })
@@ -168,21 +158,19 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
 
   const sessionIds = roundOutputs.map(output => output.context!.sessionId)
   assert.equal(new Set(sessionIds).size, 1, '所有任务必须复用同一个 Planning Session ID')
-  assert.equal(requests.length, 10)
+  assert.equal(requests.length, 8)
   assert.deepEqual(requests.filter((_, index) => index % 2 === 0).map(request => submitTools(request.tools)), [
-    [requirementSubmit],
     [requirementSubmit],
     [pointSubmit],
     [caseSubmit],
     [caseSubmit],
   ])
   assert.ok(requests.every(request => request.tools.includes(skillRead)))
-  assert.match(requests[2].messages, /Clarification 已经由人工处理/u)
-  assert.match(requests[4].messages, /Requirement Release 已正式发布/u)
-  assert.match(requests[6].messages, /TestPointTreeVersion 编写测试用例/u)
-  assert.match(requests[8].messages, /TestPointTreeVersion 保持不变，请重新生成测试用例/u)
+  assert.match(requests[2].messages, /Requirement Release 已正式发布/u)
+  assert.match(requests[4].messages, /TestPointTreeVersion 编写测试用例/u)
+  assert.match(requests[6].messages, /TestPointTreeVersion 保持不变，请重新生成测试用例/u)
+  assert.ok(!requests[4].tools.includes(requirementSubmit) && !requests[4].tools.includes(pointSubmit))
   assert.ok(!requests[6].tools.includes(requirementSubmit) && !requests[6].tools.includes(pointSubmit))
-  assert.ok(!requests[8].tools.includes(requirementSubmit) && !requests[8].tools.includes(pointSubmit))
 
   for (const request of requests) {
     assert.match(request.systemPrompt, /当前 Agent 可用 Skills（发布配置目录；不包含 Skill 正文）/u)
@@ -197,7 +185,7 @@ test('同一 Planning Session 通过连续任务推进需求、测试点、测�
     assert.ok(event)
     assert.ok(output.events.some(item => item.type === 'skill_catalog_loaded'))
     return event.skillKey
-  }), ['requirement.analysis', 'requirement.analysis', 'test-point-design', 'test-case-design', 'test-case-design'])
+  }), ['requirement.analysis', 'test-point-design', 'test-case-design', 'test-case-design'])
 })
 
 async function executeRound(

@@ -10,6 +10,7 @@ import { defaultAgentDefinitionResolver } from '../server/agent/dynamic-agent-de
 import { RequirementAnalysisValidator } from '../server/agent/result-validator.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
+import { PlanningWorkflowService } from '../server/application/planning-workflow-service.js'
 import type { AgentRuntime, InputDeliveryManifest, ReviewRunSnapshot } from '../server/domain/agent-types.js'
 import type { CandidateRequirementAnalysisV1 } from '../server/domain/review-types.js'
 import { defaultConfig } from '../server/domain/types.js'
@@ -111,6 +112,9 @@ test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结
 
   const run = (await store.snapshot()).reviewRuns[0]
   assert.equal(run.status, 'succeeded')
+  assert.equal(run.step, 'requirement_understanding_ready')
+  assert.equal(run.workflow?.currentStage, 'understanding')
+  assert.equal(run.workflow?.automaticTransition?.status, 'pending')
   assert.equal(run.snapshot.agentDefinition.agentKey, 'planning')
   assert.equal(run.executions?.planning?.agentKey, 'planning')
   assert.deepEqual(Object.keys(run.executions ?? {}), ['planning'])
@@ -183,45 +187,128 @@ test('服务恢复中断运行并将重试语义限定为完整单 Agent 重跑'
   assert.equal(recovered.status, 'failed')
 })
 
-test('人工批量处理 Clarification 后向原 Planning Session 追加自然的继续任务', async () => {
-  const { store } = await successfulRun()
-  let runId = ''
-  await store.transaction(state => {
-    const run = state.reviewRuns[0]
-    runId = run.id
-    run.result!.clarifications = [{
-      id: 'planning_clarification_test',
-      question: '订单关闭后的可恢复范围是什么？',
-      reason: '影响异常路径测试正确性。',
-      category: 'business_rule',
-      requirementPointRefs: [run.result!.requirementPoints[0].clientRequirementPointId],
-      blocking: true,
-      status: 'pending',
-      createdAt: '2026-08-12T00:01:00.000Z',
-    }]
-    run.status = 'waiting_clarification'
-    run.step = 'waiting_clarification'
-    run.workflow ??= { currentStage: 'clarification' }
-    run.workflow.currentStage = 'clarification'
-  })
+test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人工回答后不重跑分析并直接冻结发布', async () => {
+  const { store, runtimeCalls } = await successfulRun(blockingClarificationCandidate())
+  const runId = (await store.snapshot()).reviewRuns[0].id
+  const initial = (await store.snapshot()).reviewRuns[0]
+  const clarificationId = initial.result!.clarifications[0].id
+  assert.equal(initial.status, 'waiting_clarification')
+  assert.equal(initial.step, 'waiting_clarification')
+  assert.equal(initial.progress, 55)
+  assert.equal(initial.workflow?.currentStage, 'clarification')
+  assert.equal(runtimeCalls(), 1)
+
   const answers: unknown[] = []
-  const tasks: Array<{ projectId: string; projectVersionId: string; task: string; taskType: string; metadata?: Record<string, unknown> }> = []
+  const tasks: Array<{ projectId: string; projectVersionId: string; task: string; taskType: string }> = []
+  let unexpectedExecuteCalls = 0
   const service = new RequirementAnalysisService(store, {
-    execute: async () => { throw new Error('测试只验证 Clarification Handoff，不继续执行模型') },
+    execute: async () => { unexpectedExecuteCalls += 1; throw new Error('Clarification 完成后不应再次执行需求分析 Agent') },
     appendPlanningClarification: async input => { answers.push(structuredClone(input)) },
     appendPlanningTask: async input => { tasks.push(structuredClone(input)) },
   })
-  await service.actOnClarifications(runId, {
-    items: [{ clarificationId: 'planning_clarification_test', action: 'answer', answer: '关闭失败时保持待支付，可由用户重试。' }],
+  const automaticDesignCalls: string[] = []
+  const workflow = new PlanningWorkflowService(store, {} as never, {
+    appendPlanningTask: async input => { tasks.push(structuredClone(input)) },
+  } as never, service, {
+    createAutomaticDesignAndRun: async (_projectVersionId: string, sourceRunId: string) => {
+      automaticDesignCalls.push(sourceRunId)
+      return { design: { id: 'test-design-1' }, run: { id: 'test-design-run-1' } }
+    },
+  } as never)
+  const listenerStates: Array<{ status: string; step: string; stage?: string; transition?: string }> = []
+  service.onUnderstandingReady(async id => {
+    const current = (await store.snapshot()).reviewRuns.find(run => run.id === id)!
+    listenerStates.push({ status: current.status, step: current.step, stage: current.workflow?.currentStage, transition: current.workflow?.automaticTransition?.status })
+    await workflow.requirementUnderstandingReady(id)
+  })
+
+  const resolved = await service.actOnClarifications(runId, {
+    items: [{ clarificationId, action: 'answer', answer: '关闭失败时保持待支付，可由用户重试。' }],
     principal: { subjectId: 'reviewer', displayName: '评审人' },
   })
+
   assert.equal(answers.length, 1)
+  assert.equal(unexpectedExecuteCalls, 0)
+  assert.equal(runtimeCalls(), 1)
   assert.equal(tasks.length, 1)
-  assert.equal(tasks[0].projectId, 'project-1')
-  assert.equal(tasks[0].projectVersionId, 'project-version-1')
-  assert.equal(tasks[0].taskType, 'requirement_analysis_after_clarifications')
-  assert.match(tasks[0].task, /Clarification 已经由人工处理，请继续当前需求分析工作/u)
-  assert.deepEqual(tasks[0].metadata?.clarificationIds, ['planning_clarification_test'])
+  assert.equal(tasks[0].taskType, 'test_design_after_requirement_release')
+  assert.doesNotMatch(tasks[0].task, /Clarification 已经由人工处理/u)
+  assert.deepEqual(listenerStates, [{ status: 'succeeded', step: 'requirement_understanding_ready', stage: 'understanding', transition: 'pending' }])
+  assert.deepEqual(automaticDesignCalls, [runId])
+  assert.equal(resolved.run.status, 'succeeded')
+  assert.equal(resolved.run.workflow?.understandingSnapshot?.clarifications[0].status, 'answered')
+  assert.equal(resolved.run.workflow?.automaticTransition?.status, 'succeeded')
+  assert.equal(resolved.run.workflow?.automaticTransition?.testDesignRunId, 'test-design-run-1')
+
+  const release = resolved.run.workflow?.release
+  assert.equal(release?.status, 'published')
+  const requirements = JSON.parse(release!.artifacts.find(item => item.fileName === 'requirements.json')!.content) as { formalClarifications: Array<{ answer: string }>; clarificationDispositionRecords: unknown[] }
+  assert.deepEqual(requirements.formalClarifications.map(item => item.answer), ['关闭失败时保持待支付，可由用户重试。'])
+  assert.deepEqual(requirements.clarificationDispositionRecords, [])
+  assert.match(release!.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content, /Formal Business Fact/u)
+  assert.match(release!.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content, /关闭失败时保持待支付/u)
+  assert.match(resolved.run.response!.result.artifacts.find(item => item.fileName === 'requirement-analysis-findings.md')!.content, /Formal Business Fact/u)
+
+  await assert.rejects(
+    () => service.actOnClarifications(runId, { items: [{ clarificationId, action: 'answer', answer: '重复提交' }] }),
+    /REQUIREMENT_UNDERSTANDING_ALREADY_FROZEN/u,
+  )
+})
+
+test('dismissed Clarification 保留处置记录和事实缺口，但不作为正式业务事实', async () => {
+  const { store, runtimeCalls } = await successfulRun(blockingClarificationCandidate())
+  const runId = (await store.snapshot()).reviewRuns[0].id
+  const clarificationId = (await store.snapshot()).reviewRuns[0].result!.clarifications[0].id
+  let unexpectedExecuteCalls = 0
+  const service = new RequirementAnalysisService(store, {
+    execute: async () => { unexpectedExecuteCalls += 1; throw new Error('dismiss 后不应再次执行需求分析 Agent') },
+    appendPlanningClarification: async () => undefined,
+  })
+  service.onUnderstandingReady(async id => { await service.freezeUnderstanding(id) })
+
+  const resolved = await service.actOnClarifications(runId, {
+    items: [{ clarificationId, action: 'dismiss', answer: '当前版本暂不定义关闭失败后的恢复范围，由人工记录风险。' }],
+    principal: { subjectId: 'reviewer', displayName: '评审人' },
+  })
+
+  assert.equal(runtimeCalls(), 1)
+  assert.equal(unexpectedExecuteCalls, 0)
+  assert.equal(resolved.run.workflow?.understandingSnapshot?.clarifications[0].status, 'dismissed')
+  const release = resolved.run.workflow?.release!
+  const requirements = JSON.parse(release.artifacts.find(item => item.fileName === 'requirements.json')!.content) as { formalClarifications: unknown[]; clarificationDispositionRecords: Array<{ answer: string }> }
+  assert.deepEqual(requirements.formalClarifications, [])
+  assert.deepEqual(requirements.clarificationDispositionRecords.map(item => item.answer), ['当前版本暂不定义关闭失败后的恢复范围，由人工记录风险。'])
+  const baseline = release.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content
+  assert.match(baseline, /Human Disposition Only/u)
+  assert.match(baseline, /不构成业务规则/u)
+  assert.doesNotMatch(baseline, /Formal Business Fact[\s\S]*当前版本暂不定义关闭失败后的恢复范围/u)
+})
+
+test('未处理完全部 Blocking Clarification 时不进入 Understanding，也不执行新的 Agent 运行', async () => {
+  const candidate = blockingClarificationCandidate()
+  candidate.clarifications.push({ question: '关闭状态是否通知下游系统？', reason: '影响集成测试范围。', category: 'expected_result', requirementPointRefs: ['RP-002'], blocking: true })
+  const { store, runtimeCalls } = await successfulRun(candidate)
+  const runId = (await store.snapshot()).reviewRuns[0].id
+  const clarificationId = (await store.snapshot()).reviewRuns[0].result!.clarifications[0].id
+  let unexpectedExecuteCalls = 0
+  const service = new RequirementAnalysisService(store, {
+    execute: async () => { unexpectedExecuteCalls += 1; throw new Error('不完整回答不应执行 Agent') },
+  })
+  let listenerCalls = 0
+  service.onUnderstandingReady(async () => { listenerCalls += 1 })
+
+  await assert.rejects(
+    () => service.actOnClarifications(runId, {
+      items: [{ clarificationId, action: 'answer', answer: '关闭失败时保持待支付。' }],
+    }),
+    /CLARIFICATION_BATCH_INCOMPLETE/u,
+  )
+  const run = (await store.snapshot()).reviewRuns.find(item => item.id === runId)!
+  assert.equal(run.status, 'waiting_clarification')
+  assert.equal(run.workflow?.currentStage, 'clarification')
+  assert.equal(runtimeCalls(), 1)
+  assert.equal(unexpectedExecuteCalls, 0)
+  assert.equal(listenerCalls, 0)
 })
 
 test('修复应用完成后停在待复验状态且不会自动创建复验运行', async () => {
@@ -262,7 +349,66 @@ test('修复应用完成后停在待复验状态且不会自动创建复验运�
   assert.equal(state.reviewRuns.some(run => run.workflow?.verificationOf), false)
 })
 
-async function successfulRun() {
+test('Requirement Repair 的 Verification 仍会对修复后的固定版本独立执行一次 Agent 复验', async () => {
+  const { store, faux, runtime, runtimeCalls } = await successfulRun()
+  const repairedContent = '# 取消订单\n\n用户可以取消待支付订单。\n关闭操作必须记录关闭原因。'
+  const repairedHash = createHash('sha256').update(repairedContent).digest('hex')
+  const repairedChunk = { id: 'chunk-repaired', chunkKey: 'cancel-repaired', assetVersionId: 'version-repaired', ordinal: 0, headingPath: ['取消订单'], content: '用户可以取消待支付订单。', contentHash: 'cancel-repaired-chunk-hash', tokenCount: 10, startLine: 3, endLine: 3, startChar: 8, endChar: 20, embedding: [], reused: false }
+  let sourceRunId = ''
+  let findingId = ''
+  await store.transaction(state => {
+    const run = state.reviewRuns[0]
+    sourceRunId = run.id
+    findingId = run.result!.findings[0].clientFindingId
+    state.findingActions.push({
+      id: 'finding-action-confirm', projectVersionId: run.projectVersionId, runId: run.id, findingId,
+      action: 'confirm', fromState: 'open', toState: 'confirmed', actorId: 'reviewer', actorDisplayName: '评审人', version: 1, createdAt: '2026-08-12T00:02:00.000Z',
+    })
+    state.versions.push({ id: 'version-repaired', assetId: 'asset-1', number: 2, content: repairedContent, contentHash: repairedHash, status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:03:00.000Z', readyAt: '2026-08-12T00:03:01.000Z', chunks: [repairedChunk] })
+    state.assets.find(asset => asset.id === 'asset-1')!.activeVersionId = 'version-repaired'
+    const index = state.indexes.find(item => item.id === 'index-1')!
+    index.assetVersionIds.push('version-repaired')
+    index.indexedChunks!.push({ ...repairedChunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${requirementDirectory}/cancel.md` } })
+    run.workflow = { currentStage: 'repair', repairDrafts: [{
+      id: 'repair-draft-1', sourceRunId: run.id, status: 'applying',
+      candidate: { schemaVersion: 'requirement-repair/v1', summary: '补齐关闭原因', patches: [{ assetVersionId: 'version-1', before: '用户可以取消待支付订单。', after: '用户可以取消待支付订单。\n关闭操作必须记录关闭原因。', reason: '补齐关闭原因', findingRefs: [findingId] }] },
+      generationExecution: { agentKey: 'planning', workflowStage: 'repair', turns: 1, toolCalls: 1, events: [] },
+      createdAt: '2026-08-12T00:02:30.000Z', createdBy: 'reviewer', approvedAt: '2026-08-12T00:02:45.000Z', approvedBy: 'reviewer',
+      application: { items: [{ assetId: 'asset-1', sourceAssetVersionId: 'version-1', targetAssetVersionId: 'version-repaired', logicalPath: `${requirementDirectory}/cancel.md`, contentSha256: repairedHash }], startedAt: '2026-08-12T00:03:00.000Z' },
+    }] }
+  })
+
+  const service = new RequirementAnalysisService(store, runtime)
+  await service.finalizeRepairApplication(sourceRunId, 'repair-draft-1')
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/cancel.md' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/payment.md' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_search', { query: '取消' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('requirement_analysis_submit_result', verificationCandidate()), { stopReason: 'toolUse' }),
+  ])
+
+  const verification = await service.analyze({
+    projectVersionId: 'project-version-1',
+    documentDirectoryPath: requirementDirectory,
+    sourceId: 'source-1',
+    modelId: 'model-1',
+    workflowStage: 'verification',
+    verificationOf: { sourceRunId, repairDraftId: 'repair-draft-1' },
+  })
+
+  assert.equal(runtimeCalls(), 2)
+  assert.equal(verification.status, 'candidate_validated')
+  const persistedVerification = await service.get(verification.runId)
+  assert.equal(persistedVerification.status, 'succeeded')
+  assert.equal(persistedVerification.response?.execution.workflowStage, 'verification')
+  assert.deepEqual(persistedVerification.workflow?.verificationOf, { sourceRunId, repairDraftId: 'repair-draft-1' })
+  const state = await store.snapshot()
+  assert.equal(state.reviewRuns.find(run => run.id === sourceRunId)?.workflow?.repairDrafts?.[0].status, 'verified')
+  assert.equal(state.findingActions.filter(action => action.findingId === findingId).at(-1)?.toState, 'resolved')
+})
+
+async function successfulRun(candidate = analysisCandidate()) {
   const store = await seededStore()
   const resources = new AiResourceService(store, undefined, { reloadIntervalMs: 0 })
   await resources.initialize()
@@ -272,7 +418,7 @@ async function successfulRun() {
     fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/payment.md' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('knowledge_search', { query: '取消' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall('requirement_analysis_submit_result', analysisCandidate()), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('requirement_analysis_submit_result', candidate), { stopReason: 'toolUse' }),
   ])
   const pi = new PiAgentRuntimeAdapter(store, {
     model: faux.getModel() as Model<Api>,
@@ -287,7 +433,7 @@ async function successfulRun() {
   }
   const service = new RequirementAnalysisService(store, runtime)
   const response = await service.analyze({ projectVersionId: 'project-version-1', documentDirectoryPath: requirementDirectory, sourceId: 'source-1', modelId: 'model-1' })
-  return { response, store, runtimeCalls: () => calls }
+  return { response, store, faux, runtime, runtimeCalls: () => calls }
 }
 
 function analysisCandidate(): CandidateRequirementAnalysisV1 {
@@ -315,6 +461,26 @@ function analysisCandidate(): CandidateRequirementAnalysisV1 {
     ],
     analysisDocument: '订单以待支付为起点，可由用户取消或超时任务关闭；两个关闭路径的终态、竞态与失败恢复需要统一定义。',
   }
+}
+
+function blockingClarificationCandidate(): CandidateRequirementAnalysisV1 {
+  const candidate = analysisCandidate()
+  candidate.clarifications = [{
+    question: '订单关闭后的可恢复范围是什么？',
+    reason: '影响异常路径测试正确性。',
+    category: 'business_rule',
+    requirementPointRefs: ['RP-001'],
+    blocking: true,
+  }]
+  return candidate
+}
+
+function verificationCandidate(): CandidateRequirementAnalysisV1 {
+  const candidate = analysisCandidate()
+  candidate.summary = { ...candidate.summary, overallAssessment: 'pass', score: 100, risks: [] }
+  candidate.findings = []
+  candidate.testFocus = []
+  return candidate
 }
 
 async function seededStore() {

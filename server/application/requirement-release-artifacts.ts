@@ -41,6 +41,8 @@ export function buildRequirementReleaseArtifacts(input: {
     sourceAssetVersions: sourceAssets.map(item => ({ assetId: item.reference.assetId, assetVersionId: item.reference.assetVersionId, contentSha256: item.reference.assetContentHash, logicalPath: item.reference.logicalPath, displayName: item.reference.displayName })),
     requirements: result.requirementPoints,
     evidence: result.evidence,
+    formalClarifications: result.clarifications.filter(item => item.status === 'answered'),
+    clarificationDispositionRecords: result.clarifications.filter(item => item.status === 'dismissed'),
     generatedAt,
   })))
   artifacts.push(artifact('requirement-analysis-closure.md', 'text/markdown', renderClosure(sourceRun, sourceProjection, verificationRun, verificationProjection)))

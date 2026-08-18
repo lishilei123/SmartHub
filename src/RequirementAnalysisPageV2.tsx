@@ -97,7 +97,7 @@ function severityTone(value: AnalysisSeverity) { return value === 'blocker' ? 'r
 function assessmentLabel(value?: string) { return value === 'blocked' ? '存在阻断问题' : value === 'needs_revision' ? '建议修改后确认' : value === 'pass_with_notes' ? '附带关注项通过' : value === 'pass' ? '可以进入下一阶段' : '等待分析' }
 function runLabel(run?: RunRecord) {
   if (run?.status === 'running') return '分析中'
-  if (run?.status === 'waiting_clarification') return run.step === 'continuing_after_clarification' ? '业务事实已确认' : '等待业务确认'
+  if (run?.status === 'waiting_clarification') return '等待业务确认'
   if (run?.status === 'succeeded') return run.workflow?.understandingSnapshot ? '需求理解已冻结' : '正在冻结需求理解'
   return run?.status === 'failed' ? '失败' : run?.status === 'cancelled' ? '已取消' : '未运行'
 }
@@ -340,7 +340,7 @@ export function RequirementAnalysisPageV2(props: Props) {
       setView('conversation')
       const answeredCount = items.filter(item => item.action === 'answer').length
       const dismissedCount = items.length - answeredCount
-      notify(`已在当前 Run 保存 ${answeredCount} 个业务事实、${dismissedCount} 个人工处置；PlanningAgent 正在继续分析。`)
+      notify(`已在当前 Run 保存 ${answeredCount} 个业务事实、${dismissedCount} 个人工处置；服务端正在冻结需求理解并自动进入测试设计。`)
       addAudit(`批量处理 Planning Clarification：${items.map(item => `${item.clarificationId} · ${item.action}`).join('、')}`)
     } catch (error) { notify(error instanceof Error ? error.message : '待确认问题批量保存失败', 'error') }
     finally { setClarificationBusy(false) }
@@ -467,17 +467,6 @@ export function RequirementAnalysisPageV2(props: Props) {
     } catch (error) { notify(error instanceof Error ? error.message : '自动测试设计重试失败', 'error') }
     finally { setReleaseBusy(false) }
   }
-  const resumeClarifiedAnalysis = async () => {
-    if (!selectedRun || clarificationBusy) return
-    setClarificationBusy(true)
-    try {
-      const resumed = await actOnPlanningClarifications(selectedRun.id, { items: [] })
-      setRuns(current => replaceRunDetail(current, resumed.run))
-      setView('conversation')
-      notify('已在当前 Run 恢复 PlanningAgent 分析。')
-    } catch (error) { notify(error instanceof Error ? error.message : '当前需求分析恢复失败', 'error') }
-    finally { setClarificationBusy(false) }
-  }
   const versionHistory = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
   const leftLines = (diffContents[diffVersionIds[0]] ?? '').split(/\r?\n/).filter(Boolean); const rightLines = (diffContents[diffVersionIds[1]] ?? '').split(/\r?\n/).filter(Boolean)
   const removedLines = leftLines.filter(line => !rightLines.includes(line)); const addedLines = rightLines.filter(line => !leftLines.includes(line))
@@ -488,10 +477,9 @@ export function RequirementAnalysisPageV2(props: Props) {
   const linkedTestDesign = automaticTransition?.testDesignId && automaticTransition.testDesignRunId
     ? { designId: automaticTransition.testDesignId, runId: automaticTransition.testDesignRunId }
     : undefined
-  const awaitingClarificationResume = selectedRun?.status === 'waiting_clarification' && !blockingClarifications.length && selectedRun.step === 'continuing_after_clarification'
   const stages: Array<{ label: string; detail: string; state: RequirementStageState }> = [
     { label: '资料输入', detail: analysisInputDocuments.length ? `${analysisInputDocuments.length} 份已就绪` : '待上传', state: analysisInputDocuments.length ? 'complete' : 'current' },
-    { label: '需求理解', detail: !selectedRun ? '未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : blockingClarifications.length ? `等待 ${blockingClarifications.length} 个业务事实` : awaitingClarificationResume ? '业务事实已确认，等待当前 Run 继续' : understandingSnapshot ? '已由服务端自动冻结' : selectedRun.status === 'failed' ? '执行失败' : '正在冻结', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' || blockingClarifications.length || awaitingClarificationResume ? 'current' : understandingSnapshot ? 'complete' : selectedRun.status === 'failed' ? 'blocked' : 'waiting' },
+    { label: '需求理解', detail: !selectedRun ? '未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : blockingClarifications.length ? `等待 ${blockingClarifications.length} 个业务事实` : understandingSnapshot ? '已由服务端自动冻结' : selectedRun.status === 'failed' ? '执行失败' : '正在冻结', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' || blockingClarifications.length ? 'current' : understandingSnapshot ? 'complete' : selectedRun.status === 'failed' ? 'blocked' : 'waiting' },
     { label: 'Agent 自动设计测试', detail: automaticTransition?.status === 'succeeded' ? '测试设计运行已创建，请查看实时进度' : automaticTransition?.status === 'failed' ? '自动衔接失败' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : understandingSnapshot ? '等待自动衔接' : '等待需求理解', state: automaticTransition?.status === 'succeeded' ? 'complete' : automaticTransition?.status === 'failed' ? 'blocked' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' || understandingSnapshot ? 'current' : 'waiting' },
     { label: '最终用例审核与发布', detail: automaticTransition?.status === 'succeeded' ? '在测试设计运行完成后审核 TestCase / Proposal' : '等待 Agent 完成', state: automaticTransition?.status === 'succeeded' ? 'current' : 'waiting' },
   ]
@@ -534,7 +522,7 @@ export function RequirementAnalysisPageV2(props: Props) {
           <details className="rav2-status-card rav2-technical-status"><summary><Activity /><span><b>运行记录</b><small>Turn、工具调用、事件与异常</small></span></summary><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></details>
         </div>
         <footer className="rav2-status-action">
-          {!selectedRun ? projectVersion.requirementReleaseBinding ? <button className="primary" onClick={() => setView('cases')}><Play />新建测试设计</button> : <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : awaitingClarificationResume ? <button className="primary" onClick={() => void resumeClarifiedAnalysis()} disabled={clarificationBusy}><RefreshCw />{clarificationBusy ? '正在继续…' : '继续当前分析'}</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : linkedTestDesign ? <button className="primary" onClick={() => setView('cases')}><Play />查看测试设计运行</button> : <button className="primary" disabled><LoaderCircle className="rotating" />{understandingSnapshot ? '正在创建测试设计运行' : '服务端正在冻结需求理解'}</button>}
+          {!selectedRun ? projectVersion.requirementReleaseBinding ? <button className="primary" onClick={() => setView('cases')}><Play />新建测试设计</button> : <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : linkedTestDesign ? <button className="primary" onClick={() => setView('cases')}><Play />查看测试设计运行</button> : <button className="primary" disabled><LoaderCircle className="rotating" />{understandingSnapshot ? '正在创建测试设计运行' : '服务端正在冻结需求理解'}</button>}
         </footer>
       </aside>
     </div>
