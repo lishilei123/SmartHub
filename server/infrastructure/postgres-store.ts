@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, ReviewRunQueueState, SyncTask } from '../domain/types.js'
+import { normalizeRequirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import { normalizeReviewSeverities, normalizeTestDesignState, type ChunkSearchInput, type ConfigurationTransactionScope, type DefaultKnowledgeBase, type KnowledgeReadState, type RequirementBindingMetadata, type ReviewJob, type ReviewRunPage, type StateStore, type StoredChunkCandidate, type TaskLease, type TestDesignJob } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
@@ -78,7 +79,7 @@ export class PostgresStore implements StateStore {
     const project = matching[0] ?? (projects.rows.length === 1 ? projects.rows[0] : null)
     if (!project) return []
     const versions = await this.pool.query<{ data: ProjectVersion }>('SELECT data FROM smarthub.project_versions WHERE project_id=$1 ORDER BY created_at DESC, id DESC', [project.id])
-    return versions.rows.map(row => row.data)
+    return versions.rows.map(row => { const version = row.data; normalizeRequirementReleaseBindings(version); return version })
   }
 
   async getKnowledgeReadState(knowledgeBaseId: string, options: { includeVersionContent?: boolean; includeIndexes?: boolean } = {}): Promise<KnowledgeReadState | null> {
@@ -184,7 +185,9 @@ export class PostgresStore implements StateStore {
 
   async getProjectVersion(projectVersionId: string): Promise<ProjectVersion | null> {
     const result = await this.pool.query<{ data: ProjectVersion }>('SELECT data FROM smarthub.project_versions WHERE id=$1', [projectVersionId])
-    return result.rows[0]?.data ?? null
+    const version = result.rows[0]?.data ?? null
+    if (version) normalizeRequirementReleaseBindings(version)
+    return version
   }
 
   async listRequirementBindings(projectVersionId: string): Promise<RequirementBindingMetadata[]> {
@@ -963,6 +966,7 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
     legacyMigrations: (normalizedLegacyMigrations.rowCount ?? 0) > 0 ? normalizedLegacyMigrations.rows.map(row => row.data) : legacyDesignState?.legacyMigrations ?? [],
   } : undefined
   const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data), testDesignState }
+  state.projectVersions.forEach(normalizeRequirementReleaseBindings)
   normalizeTestDesignState(state)
   normalizeReviewSeverities(state)
   return state

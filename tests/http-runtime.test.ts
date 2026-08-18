@@ -132,7 +132,7 @@ test('Agent 配置发布人使用认证主体而不是请求 body', async () => 
         displayName: 'Agent Model',
         contextWindow: 256_000,
         maxOutputTokens: 128_000,
-        capabilities: ['structured_output', 'tool_calling', 'reasoning'],
+        capabilities: ['tool_calling', 'reasoning'],
         enabled: true,
         health: 'healthy',
         qualityGate: { version: 'model-probe/v2', checkedAt: '2026-08-13T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } },
@@ -209,7 +209,7 @@ test('生成式模型管理 API 持久化来源、掩码密钥并返回真实探
       enabled: true,
       health: 'unknown',
       priority: 1,
-      models: [{ id: 'http-model', name: 'review-model', displayName: 'Review Model', contextWindow: 32768, maxOutputTokens: 4096, capabilities: ['structured_output'], enabled: true, health: 'unknown' }],
+      models: [{ id: 'http-model', name: 'review-model', displayName: 'Review Model', contextWindow: 32768, maxOutputTokens: 4096, capabilities: ['tool_calling'], enabled: true, health: 'unknown' }],
     }
     const saved = await fetch(`${baseUrl}/model-sources`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify([source]) })
     assert.equal(saved.status, 200)

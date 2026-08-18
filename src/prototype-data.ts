@@ -68,7 +68,7 @@ export type GenerativeModelDraft = {
   id: string
   name: string
   displayName: string
-  capabilities: ('structured_output' | 'tool_calling' | 'vision' | 'reasoning')[]
+  capabilities: ('tool_calling' | 'vision' | 'reasoning')[]
   enabled: boolean
   health: 'healthy' | 'degraded' | 'unknown'
 }
@@ -92,7 +92,6 @@ export type SettingsDraft = {
   fallbackEnabled: boolean
   requestTimeoutSeconds: number
   retryCount: number
-  structuredOutput: boolean
   generativeSources: GenerativeSourceDraft[]
   fallbackModelIds: string[]
   chunkSize: string
@@ -130,7 +129,6 @@ export const initialSettings: SettingsDraft = {
   fallbackEnabled: true,
   requestTimeoutSeconds: 300,
   retryCount: 2,
-  structuredOutput: true,
   generativeSources: [],
   fallbackModelIds: [],
   chunkSize: '400 tokens',

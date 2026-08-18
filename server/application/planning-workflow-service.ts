@@ -20,6 +20,7 @@ import type {
   DatabaseState,
   ReviewRun,
 } from '../domain/types.js'
+import { activeRequirementReleaseBinding } from '../domain/requirement-release-bindings.js'
 import type { StateStore } from '../infrastructure/store.js'
 import {
   TEST_DESIGN_STAGE_BINDINGS,
@@ -218,6 +219,9 @@ export class PlanningWorkflowService {
     if (release.status !== 'published') throw new Error('REQUIREMENT_RELEASE_NOT_PUBLISHED')
     const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), 'PROJECT_VERSION_NOT_FOUND')
     const project = required(state.projects.find(item => item.id === projectVersion.projectId), 'PROJECT_NOT_FOUND')
+    const requirementsSha256 = release.artifacts?.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json')?.contentSha256
+      ?? activeRequirementReleaseBinding(projectVersion)?.requirementsJsonSha256
+      ?? '未提供'
     await this.runtime.appendPlanningTask({
       projectId: project.id,
       projectVersionId: projectVersion.id,
@@ -226,7 +230,7 @@ export class PlanningWorkflowService {
         '需求分析已经完成，Requirement Release 已正式发布。',
         '',
         `当前正式需求基线：Requirement Release = ${release.id}`,
-        `requirements.json SHA-256 = ${projectVersion.requirementReleaseBinding?.requirementsJsonSha256 ?? '未绑定'}`,
+        `requirements.json SHA-256 = ${requirementsSha256}`,
         '',
         '接下来继续当前测试策划工作。',
         '',

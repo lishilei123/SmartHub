@@ -474,8 +474,6 @@ function resolveModel(
     || model.qualityGate?.version !== 'model-probe/v2'
     || !model.qualityGate.passed
     || !model.capabilities.includes('tool_calling')
-    || configuration.routing.structuredOutput
-      && !model.capabilities.includes('structured_output')
   ) throw new Error(`${source.name} / ${model.displayName} 未通过模型门禁`)
   return {
     sourceId: source.id,

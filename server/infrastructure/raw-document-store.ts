@@ -14,7 +14,7 @@ export class RawDocumentStore {
     const normalized = logicalPath.replaceAll('\\', '/').replace(/^\/+/, '')
     if (!normalized || isAbsolute(logicalPath) || normalized.split('/').some(part => part === '..' || !part)) throw new Error('逻辑路径不合法')
     const extension = extname(normalized).toLowerCase()
-    if (!['.md', '.txt'].includes(extension)) throw new Error('仅支持 .md 与 .txt 文件')
+    if (!['.md', '.txt', '.json'].includes(extension)) throw new Error('仅支持 .md、.txt 与 .json 文件')
     const knowledgeRoot = resolve(this.root, knowledgeBaseId)
     const activePath = resolve(knowledgeRoot, 'files', ...normalized.split('/'))
     const snapshotPath = resolve(knowledgeRoot, 'versions', assetVersionId, `source${extension}`)

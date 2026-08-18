@@ -18,9 +18,12 @@ type KnowledgeSearchInput = {
   signal?: AbortSignal
 }
 type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; vectorScore: number; rerankerScore?: number; score: number }
+type IngestInput = { knowledgeBaseId: string; sourceType: SourceType; sourceKey: string; assetType: AssetType; displayName: string; logicalPath: string; content: string; simulateFailureAt?: string; taskTrigger?: 'upload' | 'retry'; attempts?: number }
 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
+const userUploadExtensions = ['.md', '.txt']
+const workspaceArtifactExtensions = [...userUploadExtensions, '.json']
 const compatibilityFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ parserVersion: config.parserVersion, preprocessVersion: config.preprocessVersion, chunkTargetSize: config.chunkTargetSize, chunkMaxSize: config.chunkMaxSize, chunkOverlap: config.chunkOverlap, headingDepth: config.headingDepth, embeddingSourceId: config.embeddingSourceId, embeddingMode: config.embeddingMode, embeddingBaseUrl: config.embeddingBaseUrl, embeddingModel: config.embeddingModel, embeddingDimensions: config.embeddingDimensions }))
 const queryFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ keywordRecall: config.keywordRecall, vectorRecall: config.vectorRecall, finalResults: config.finalResults, relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId, rerankerModel: config.rerankerModel, rerankerSource: config.embeddingSources.find(source => source.id === config.rerankerSourceId) }))
 
@@ -315,11 +318,20 @@ export class KnowledgeService {
     })
   }
 
-  async ingest(input: { knowledgeBaseId: string; sourceType: SourceType; sourceKey: string; assetType: AssetType; displayName: string; logicalPath: string; content: string; simulateFailureAt?: string; taskTrigger?: 'upload' | 'retry'; attempts?: number }) {
+  async ingest(input: IngestInput) {
+    return this.ingestAllowedFile(input, userUploadExtensions, '仅支持 .md 与 .txt 文件')
+  }
+
+  /** Server-owned formal Workspace artifacts may be canonical JSON; public uploads remain Markdown/text only. */
+  async ingestWorkspaceArtifact(input: IngestInput) {
+    return this.ingestAllowedFile(input, workspaceArtifactExtensions, '正式 Workspace 工件仅支持 .md、.txt 与 .json 文件')
+  }
+
+  private async ingestAllowedFile(input: IngestInput, allowedExtensions: string[], unsupportedMessage: string) {
     if (!input.assetType.trim()) throw new Error('资料类型不能为空')
     const normalizedPath = input.logicalPath.replaceAll('\\', '/').replace(/^\/+/, '')
     if (!normalizedPath || isAbsolute(input.logicalPath) || normalizedPath.split('/').some(part => !part || part === '..' || part === '.')) throw new Error('逻辑路径不合法')
-    if (!['.md', '.txt'].includes(extname(input.logicalPath).toLowerCase())) throw new Error('仅支持 .md 与 .txt 文件')
+    if (!allowedExtensions.includes(extname(input.logicalPath).toLowerCase())) throw new Error(unsupportedMessage)
     if (Buffer.byteLength(input.content, 'utf8') > 10 * 1024 * 1024) throw new Error('文件超过 10MB 限制')
     const contentHash = sha256(input.content)
     return this.store.transaction(async state => {

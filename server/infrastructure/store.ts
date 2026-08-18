@@ -2,6 +2,7 @@ import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
+import { normalizeRequirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 
 export interface TaskLease { workerId: string; runToken: string }
 export interface ReviewJob {
@@ -146,6 +147,7 @@ export class JsonStore implements StateStore {
       const loaded = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[]; technicalSolutionReviews?: unknown[]; technicalSolutionRuns?: unknown[]; technicalSolutionFindingActions?: unknown[] }
       this.state = loaded
       this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []
+      this.state.projectVersions.forEach(normalizeRequirementReleaseBindings)
       const retiredDataRemoved = removeRetiredAgentData(loaded)
       normalizeTestDesignState(this.state)
       normalizeReviewSeverities(this.state)

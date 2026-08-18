@@ -46,7 +46,25 @@ test('候选协议直接生成测试点和用例，不存在 coverageUnits 中�
   assert.equal(cases.dataRequirements.length, 0)
 })
 
-test('运行冻结当前绑定 Requirement Release 与 Workspace，后续发布不影响既有 Run', async () => {
+test('测试点候选的发布 Requirement Point ID 由 Service 解析为当前冻结 basis ID', async () => {
+  const projector: TestCaseAssetProjector = { ingest: async input => ({ version: { id: `asset-${sha256(input.logicalPath).slice(0, 8)}` }, task: null }) }
+  const { service } = await fixture(new FakeRuntime({ pointBasisRefMode: 'published_requirement_id' }), projector)
+  const design = await service.createDesign('pv-1', createInput(), principal)
+  const created = await service.createRun('pv-1', design.id, 'published-requirement-id', principal)
+  const completed = await waitFor(service, design.id, created.id, run => run.status === 'succeeded' && Boolean(run.testPointTree?.currentApprovedVersionId))
+  const nodes = completed.testPointTree!.revisions.find(item => item.revision === completed.testPointTree!.currentRevision)!.nodes
+  assert.deepEqual(nodes.map(node => node.basisRefs), [['basis_requirement_review-1_REQ-1']])
+})
+
+test('测试点候选的未知 Requirement Point ID 仍被拒绝', async () => {
+  const { service } = await fixture(new FakeRuntime({ pointBasisRefMode: 'outside' }))
+  const design = await service.createDesign('pv-1', createInput(), principal)
+  const created = await service.createRun('pv-1', design.id, 'outside-requirement-id', principal)
+  const failed = await waitFor(service, design.id, created.id, run => run.status === 'failed')
+  assert.equal(failed.errorCode, 'TEST_POINT_BASIS_REFERENCE_INVALID')
+})
+
+test('同一 ProjectVersion 保留多个 Requirement Release，测试设计冻结明确选择的 Release', async () => {
   const { store, service } = await fixture(new FakeRuntime())
   const design = await service.createDesign('pv-1', createInput(), principal)
   const first = await service.createRun('pv-1', design.id, 'freeze-release-1', principal)
@@ -57,7 +75,12 @@ test('运行冻结当前绑定 Requirement Release 与 Workspace，后续发布�
   const persisted = await service.getRun('pv-1', design.id, first.id)
   assert.equal(persisted.basisSnapshot.requirementReleaseId, 'release-1')
   assert.equal(persisted.workspaceSnapshot.requirementReleaseId, 'release-1')
-  const second = await service.createRun('pv-1', design.id, 'freeze-release-2', principal)
+  const bindings = (await store.snapshot()).projectVersions.find(item => item.id === 'pv-1')!.requirementReleaseBindings!
+  assert.deepEqual(bindings.map(item => item.releaseId), ['release-1', 'release-2'])
+  const preservedDesignRun = await service.createRun('pv-1', design.id, 'freeze-release-1-again', principal)
+  assert.equal(preservedDesignRun.basisSnapshot.requirementReleaseId, 'release-1')
+  const secondDesign = await service.createDesign('pv-1', { ...createInput(), requirementReleaseId: 'release-2' }, principal)
+  const second = await service.createRun('pv-1', secondDesign.id, 'freeze-release-2', principal)
   assert.equal(second.basisSnapshot.requirementReleaseId, 'release-2')
 })
 
@@ -373,7 +396,7 @@ test('无对应 Proposal 的基线成员被并发废弃时阻止发布且不静�
 class FakeRuntime implements PlanningAgentRuntime {
   stages: string[] = []
   tasks: Array<{ projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }> = []
-  constructor(private readonly behavior: { uncoveredPoint?: boolean; keepUncoveredDuringRepair?: boolean; proposalOperation?: 'reuse' | 'update'; dimensionMatrix?: boolean } = {}) {}
+  constructor(private readonly behavior: { uncoveredPoint?: boolean; keepUncoveredDuringRepair?: boolean; proposalOperation?: 'reuse' | 'update'; dimensionMatrix?: boolean; pointBasisRefMode?: 'published_requirement_id' | 'outside' } = {}) {}
   readiness = async () => ({ ready: true, agents: [{ agentKey: 'planning', ready: true }] })
   freezeConfiguration = async () => ({ configurationId: 'agent-config-1', configurationVersion: 1, configurationSha256: 'c'.repeat(64), agentDefinition: {} as never, routing: {} as never, primaryModel: { sourceId: 'source-1', modelId: 'model-1', modelName: '测试模型' }, createdAt: '2026-08-12T00:00:00.000Z', snapshotSha256: 'd'.repeat(64) })
   appendTask = async (input: { projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }) => { this.tasks.push(structuredClone(input)) }
@@ -381,8 +404,13 @@ class FakeRuntime implements PlanningAgentRuntime {
     this.stages.push(input.stage)
     if (input.stage === 'test_point_design') {
       const refs = input.run.basisSnapshot.items.map(item => item.id)
+      const pointRefs = this.behavior.pointBasisRefMode === 'published_requirement_id'
+        ? input.run.basisSnapshot.items.map(item => typeof item.locator?.requirementPointId === 'string' ? item.locator.requirementPointId : item.id)
+        : this.behavior.pointBasisRefMode === 'outside'
+          ? refs.map(() => 'RP-OUTSIDE')
+          : refs
       const dimensions = this.behavior.dimensionMatrix ? ['functional', 'performance', 'stability', 'compatibility'] : refs.map(() => 'functional')
-      const nodes = dimensions.map((dimension, index) => ({ ref: `point-${index + 1}`, title: `${dimension} 测试点`, objective: `验证 ${dimension}`, dimension, priority: 'P0', applicability: 'applicable', designTechniques: ['主流程'], entryMethods: ['ui'], oracle: '结果符合需求', dataConditions: [], risks: [], assumptions: [], basisRefs: [refs[index % refs.length]], historicalRefs: [] }))
+      const nodes = dimensions.map((dimension, index) => ({ ref: `point-${index + 1}`, title: `${dimension} 测试点`, objective: `验证 ${dimension}`, dimension, priority: 'P0', applicability: 'applicable', designTechniques: ['主流程'], entryMethods: ['ui'], oracle: '结果符合需求', dataConditions: [], risks: [], assumptions: [], basisRefs: [pointRefs[index % pointRefs.length]], historicalRefs: [] }))
       if (this.behavior.uncoveredPoint) nodes.push({ ...nodes[0], ref: 'point-extra', title: '额外风险测试点' })
       return { schemaVersion: 'test-point-design/v1', content: { schemaVersion: 'test-point-design/v1', nodes, findings: [], confirmationItems: [] } }
     }
@@ -415,7 +443,14 @@ async function fixture(runtime: PlanningAgentRuntime, projector?: TestCaseAssetP
 
 async function bindSecondRelease(store: JsonStore) {
   const release = releasePackage('release-2', 'review-2', ['REQ-2'])
-  await store.transaction(state => { state.reviewRuns.push(release.review as never); const version = state.projectVersions.find(item => item.id === 'pv-1')!; version.requirementReleaseBinding = { releaseId: release.id, verificationRunId: 'review-2', requirementsJsonSha256: release.requirementsHash, boundAt: '2026-08-12T01:00:00.000Z' } })
+  await store.transaction(state => {
+    state.reviewRuns.push(release.review as never)
+    const version = state.projectVersions.find(item => item.id === 'pv-1')!
+    const binding = { releaseId: release.id, verificationRunId: 'review-2', requirementsJsonSha256: release.requirementsHash, boundAt: '2026-08-12T01:00:00.000Z' }
+    version.requirementReleaseBindings = [version.requirementReleaseBinding!, binding]
+    version.activeRequirementReleaseId = binding.releaseId
+    version.requirementReleaseBinding = binding
+  })
 }
 
 function releasePackage(releaseId: string, reviewId: string, requirementIds: string[]) {

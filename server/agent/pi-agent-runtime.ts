@@ -39,7 +39,10 @@ const require = createRequire(import.meta.url)
 export const piVersion = (require('@earendil-works/pi-agent-core/package.json') as { version: string }).version
 export const piCodingAgentVersion = '0.84.1'
 const RESULT_SUBMISSION_TURN_RESERVE = 3
-const RESULT_SUBMISSION_TOOL_RESERVE = 3
+// A complete candidate can first be rejected for required reads and then need
+// multiple schema-level repairs. Keep enough submissions for a real repair
+// loop instead of consuming the final slot before the corrected candidate.
+const RESULT_SUBMISSION_TOOL_RESERVE = 6
 const TRANSIENT_MODEL_RETRIES = 2
 const MODEL_RETRY_BASE_DELAY_MS = 1_000
 
@@ -548,7 +551,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         acceptedPrimaryIds: new Set(),
         callCountByPrimaryId: new Map(),
       }
-      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, allowedToolIds, controller.signal, requireResultSubmission, submissionBatches, record))
+      const tools = descriptors.map(descriptor => this.piTool(descriptor, toolRuntime, input, allowedToolIds, controller.signal, requireResultSubmission, submissionBatches, record, error => controller.abort(error)))
       const primaryToolNames = new Set(descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
@@ -750,6 +753,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     requireResultSubmission: (content?: string) => Promise<void>,
     submissionBatches: SubmissionBatchState,
     record: (event: Omit<AgentExecutionEvent, 'sequence' | 'occurredAt'>) => Promise<void>,
+    abortOnSubmissionLimit: (error: Error) => void,
   ): AgentTool {
     const stage = stageConfiguration(input)
     return {
@@ -772,7 +776,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           return { content: [{ type: 'text', text: JSON.stringify(data) }], details: { toolId: descriptor.id, version: descriptor.version, data }, terminate: accepted }
         }
         const executionArguments = submissionBatches.mergedArgumentsByPrimaryId.get(toolCallId) ?? args
-        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot, allowedToolIds } }, AbortSignal.any([signal, toolSignal ?? signal]))
+        const result = await runtime.execute({ toolId: descriptor.id, toolCallId, arguments: executionArguments, context: { snapshot: input.snapshot, allowedToolIds } }, AbortSignal.any([signal, toolSignal ?? signal])).catch(error => {
+          if (error instanceof Error && error.message === 'AGENT_RESULT_SUBMISSION_LIMIT_EXCEEDED') abortOnSubmissionLimit(error)
+          throw error
+        })
         if (descriptor.id === SKILL_READ_TOOL_ID) {
           const data = asRecord(result.data)
           if (typeof data.skillKey === 'string' && typeof data.version === 'string') {

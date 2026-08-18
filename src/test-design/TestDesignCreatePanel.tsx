@@ -17,10 +17,13 @@ export function TestDesignCreatePanel({ inputs, busy, onCreate, onCancel }: { in
   const [knowledgeAssets, setKnowledgeAssets] = useState<string[]>([])
   const [historyMode, setHistoryMode] = useState<'latest_library' | 'library_version' | 'suite_version' | 'none'>('latest_library')
   const [historyVersionId, setHistoryVersionId] = useState('')
-  const blockers = useMemo(() => [!inputs.requirementRelease ? '当前 ProjectVersion 未绑定正式 Requirement Release' : '', !inputs.agentReadiness.ready ? 'PlanningAgent 尚未就绪' : '', !name.trim() ? '填写任务名称' : '', !objective.trim() ? '填写测试目标' : '', !selectedDimensions.length ? '至少选择一个测试维度' : '', !methods.length ? '至少选择一个执行入口' : ''].filter(Boolean), [inputs, methods, name, objective, selectedDimensions])
+  const releases = inputs.requirementReleases.length ? inputs.requirementReleases : inputs.requirementRelease ? [{ ...inputs.requirementRelease, active: true }] : []
+  const [requirementReleaseId, setRequirementReleaseId] = useState(() => inputs.requirementRelease?.id ?? '')
+  const selectedRelease = releases.find(item => item.id === requirementReleaseId) ?? releases.find(item => item.active) ?? releases[0]
+  const blockers = useMemo(() => [!selectedRelease ? '当前 ProjectVersion 未绑定正式 Requirement Release' : '', !inputs.agentReadiness.ready ? 'PlanningAgent 尚未就绪' : '', !name.trim() ? '填写任务名称' : '', !objective.trim() ? '填写测试目标' : '', !selectedDimensions.length ? '至少选择一个测试维度' : '', !methods.length ? '至少选择一个执行入口' : ''].filter(Boolean), [inputs.agentReadiness.ready, methods, name, objective, selectedDimensions, selectedRelease])
   const toggle = <T extends string>(value: T, values: T[], setter: (next: T[]) => void) => setter(values.includes(value) ? values.filter(item => item !== value) : [...values, value])
   const submit = () => onCreate({
-    name: name.trim(), objective: objective.trim(),
+    name: name.trim(), objective: objective.trim(), requirementReleaseId: selectedRelease?.id,
     includedScopes: lines(included).map(value => ({ kind: 'scope', value })),
     excludedScopes: lines(excluded).map(value => ({ kind: 'scope', value })),
     focusDimensions: selectedDimensions, executionMethods: methods, userCoverageObjectives: lines(coverage),
@@ -29,11 +32,11 @@ export function TestDesignCreatePanel({ inputs, busy, onCreate, onCancel }: { in
   })
 
   return <section className="td2-create td2-card">
-    <header><div><span className="td2-icon"><Play /></span><div><p className="td2-kicker">创建测试设计</p><h2>固定目标与输入边界</h2><p>运行开始时由服务端冻结当前绑定的 Requirement Release、Agent 配置和 Workspace 快照。</p></div></div><button className="td2-button ghost" onClick={onCancel}>取消</button></header>
+    <header><div><span className="td2-icon"><Play /></span><div><p className="td2-kicker">创建测试设计</p><h2>固定目标与输入边界</h2><p>运行开始时由服务端冻结所选 Requirement Release、Agent 配置和 Workspace 快照。</p></div></div><button className="td2-button ghost" onClick={onCancel}>取消</button></header>
     <div className="td2-release-lock">
       <LockKeyhole />
-      {inputs.requirementRelease ? <div><b>{inputs.requirementRelease.label}</b><small>releaseId {inputs.requirementRelease.id} · verificationRunId {inputs.requirementRelease.analysisRunId}</small><code>{inputs.requirementRelease.contentSha256}</code></div> : <div><b>未绑定 Requirement Release</b><small>请先在当前 ProjectVersion 发布正式需求包。</small></div>}
-      {inputs.requirementRelease ? <CheckCircle2 /> : <XCircle />}
+      {selectedRelease ? <div><b>{selectedRelease.label}</b>{releases.length > 1 && <select aria-label="测试设计 Requirement Release" value={selectedRelease.id} onChange={event => setRequirementReleaseId(event.target.value)}>{releases.map(item => <option key={item.id} value={item.id}>{item.active ? '当前默认 · ' : ''}{item.label}</option>)}</select>}<small>releaseId {selectedRelease.id} · verificationRunId {selectedRelease.analysisRunId}</small><code>{selectedRelease.contentSha256}</code></div> : <div><b>未绑定 Requirement Release</b><small>请先在当前 ProjectVersion 发布正式需求包。</small></div>}
+      {selectedRelease ? <CheckCircle2 /> : <XCircle />}
     </div>
     <div className="td2-form-grid">
       <label><span>任务名称</span><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：订单结算测试设计" /></label>

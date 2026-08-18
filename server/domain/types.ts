@@ -7,7 +7,7 @@ export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancel
 export type TaskScope = 'asset' | 'directory_recursive' | 'knowledge_base'
 export type ModelHealth = 'healthy' | 'degraded' | 'unknown'
 export type GenerativeProviderType = 'openai' | 'anthropic' | 'openai_compatible'
-export type GenerativeCapability = 'structured_output' | 'tool_calling' | 'vision' | 'reasoning'
+export type GenerativeCapability = 'tool_calling' | 'vision' | 'reasoning'
 
 export interface GenerativeModel {
   id: string
@@ -139,7 +139,6 @@ export interface AgentRoutingConfiguration {
   maxOutputTokens: number
   requestTimeoutSeconds: number
   retryCount: number
-  structuredOutput: boolean
 }
 export interface AgentDefinitionDraft {
   systemPrompt: string
@@ -216,6 +215,12 @@ export interface KnowledgeConfig {
 
 export interface Project { id: string; name: string; createdAt: string }
 export type ProjectVersionStatus = 'open' | 'locked' | 'archived'
+export interface RequirementReleaseBinding {
+  releaseId: string
+  verificationRunId: string
+  requirementsJsonSha256: string
+  boundAt: string
+}
 export interface ProjectVersion {
   id: string
   projectId: string
@@ -223,12 +228,12 @@ export interface ProjectVersion {
   description?: string
   status: ProjectVersionStatus
   sourceProjectVersionId?: string
-  requirementReleaseBinding?: {
-    releaseId: string
-    verificationRunId: string
-    requirementsJsonSha256: string
-    boundAt: string
-  }
+  /** 当前默认的 Requirement Release；保留以兼容已有数据和调用方。 */
+  requirementReleaseBinding?: RequirementReleaseBinding
+  /** 当前 ProjectVersion 的全部已发布 Requirement Release 绑定，按 boundAt 保留历史。 */
+  requirementReleaseBindings?: RequirementReleaseBinding[]
+  /** requirementReleaseBindings 中当前默认使用的 Release ID。 */
+  activeRequirementReleaseId?: string
   createdAt: string
   updatedAt: string
 }

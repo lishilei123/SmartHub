@@ -18,7 +18,7 @@ const source = {
     displayName: 'Review Model',
     contextWindow: 32_768,
     maxOutputTokens: 4_096,
-    capabilities: ['structured_output', 'tool_calling'] as const,
+    capabilities: ['tool_calling'] as const,
     enabled: true,
     health: 'unknown' as const,
   }],

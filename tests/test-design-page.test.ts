@@ -13,17 +13,27 @@ test('测试设计页面拆分为固定流程面板且不展示多 Agent DAG', (
   assert.match(read('../src/RequirementAnalysisPageV2.tsx'), /\.\/test-design\/TestDesignPage/u)
 })
 
-test('需求分析页面只在当前版本已成功完成并发布的 Requirement Release 对应 Run 存在时开放测试设计', () => {
+test('需求分析页面只在当前选择的成功 Requirement Release Run 上开放测试设计，新建对话仍须先分析', () => {
   const source = read('../src/RequirementAnalysisPageV2.tsx')
-  assert.match(source, /const testDesignReady = Boolean\(releaseBinding/u)
-  assert.match(source, /run\.workflow\?\.release\?\.id === releaseBinding\.releaseId/u)
-  assert.match(source, /需求发布记录不可用/u)
+  assert.match(source, /const releaseBindings = projectVersion\?\.requirementReleaseBindings/u)
+  assert.match(source, /const selectedReleaseBinding = selectedRun \? releaseBindings\.find/u)
+  assert.match(source, /const testDesignReady = Boolean\(selectedRun && selectedReleaseBinding/u)
+  assert.match(source, /const selectedRun = runs\.find\(run => run\.id === selectedRunId\)/u)
+  assert.match(source, /<option value="">新建对话<\/option>/u)
+  assert.match(source, /新建对话（未创建 Run）/u)
+  assert.match(source, /本次需求分析尚未发布/u)
   assert.match(source, /请先完成需求分析/u)
+  assert.match(source, /loadRun as loadTestDesignRun/u)
+  assert.match(source, /<TestDesignConversationEntry linkage=\{linkedTestDesign\}/u)
+  assert.match(source, /测试点设计/u)
+  assert.match(source, /测试设计已停止/u)
 })
 
 test('创建面板明确展示绑定需求发布包并定义范围、维度和执行入口', () => {
   const source = read('../src/test-design/TestDesignCreatePanel.tsx')
   assert.match(source, /Requirement Release/u)
+  assert.match(source, /requirementReleases/u)
+  assert.match(source, /requirementReleaseId/u)
   assert.match(source, /releaseId/u)
   assert.match(source, /纳入范围/u)
   assert.match(source, /排除范围/u)

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, RequirementInputPlan, ReviewRunSnapshot } from '../domain/agent-types.js'
 import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, ReviewRun } from '../domain/types.js'
+import { activateRequirementReleaseBinding } from '../domain/requirement-release-bindings.js'
 import type { CandidateRequirementAnalysisV1, PlanningClarification, RequirementAnalysisResult } from '../domain/review-types.js'
 import type { Principal } from '../domain/access-control.js'
 import type { RequirementReleaseCandidate, RequirementReleasePackage, RequirementRepairCandidate, RequirementRepairDraft, RequirementUnderstandingSnapshot, RequirementWorkflowStage, RequirementWorkflowState } from '../domain/requirement-workflow-types.js'
@@ -228,7 +229,7 @@ export class RequirementAnalysisService {
       run.workflow.release = release
       run.workflow.automaticTransition = { status: 'running', startedAt: timestamp }
       const requirementsArtifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), '需求理解快照缺少 requirements.json')
-      projectVersion.requirementReleaseBinding = { releaseId: release.id, verificationRunId: run.id, requirementsJsonSha256: requirementsArtifact.contentSha256, boundAt: timestamp }
+      activateRequirementReleaseBinding(projectVersion, { releaseId: release.id, verificationRunId: run.id, requirementsJsonSha256: requirementsArtifact.contentSha256, boundAt: timestamp })
       projectVersion.updatedAt = timestamp
       return { snapshot: structuredClone(understanding), release: structuredClone(release) }
     })
@@ -512,12 +513,12 @@ export class RequirementAnalysisService {
       release.publishedBy = principalId(input.principal)
       const requirementsArtifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), '需求发布包缺少 requirements.json')
       const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), '项目版本不存在')
-      projectVersion.requirementReleaseBinding = {
+      activateRequirementReleaseBinding(projectVersion, {
         releaseId: release.id,
         verificationRunId: run.id,
         requirementsJsonSha256: requirementsArtifact.contentSha256,
         boundAt: release.publishedAt,
-      }
+      })
       projectVersion.updatedAt = release.publishedAt
       return structuredClone(release)
     })
@@ -534,9 +535,6 @@ export class RequirementAnalysisService {
     const state = await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
     if (projectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求分析')
-    if ((request.workflowStage ?? 'analysis') === 'analysis' && projectVersion.requirementReleaseBinding) {
-      throw new Error(`REQUIREMENT_ANALYSIS_ALREADY_RELEASED: 当前 ProjectVersion 已绑定 Requirement Release ${projectVersion.requirementReleaseBinding.releaseId}；不得重新创建初始需求分析 Run。新建测试分析请使用测试设计入口；只有分析新需求时才需创建新的 ProjectVersion。`)
-    }
     const project = required(state.projects.find(item => item.id === projectVersion.projectId), '项目不存在')
     const knowledgeBase = required(state.knowledgeBases.find(item => item.projectId === project.id), '知识库不存在')
     const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), '知识库没有活动索引')
@@ -641,10 +639,7 @@ export class RequirementAnalysisService {
       workflow: { currentStage: request.workflowStage ?? 'analysis', ...(request.verificationOf ? { verificationOf: request.verificationOf } : {}) },
     }
     await this.store.transaction(draft => {
-      const currentProjectVersion = required(draft.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
-      if ((request.workflowStage ?? 'analysis') === 'analysis' && currentProjectVersion.requirementReleaseBinding) {
-        throw new Error(`REQUIREMENT_ANALYSIS_ALREADY_RELEASED: 当前 ProjectVersion 已绑定 Requirement Release ${currentProjectVersion.requirementReleaseBinding.releaseId}；不得重新创建初始需求分析 Run。新建测试分析请使用测试设计入口；只有分析新需求时才需创建新的 ProjectVersion。`)
-      }
+      required(draft.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
       draft.reviewRuns.push(run)
     })
     onCreated?.(presentRun(run))

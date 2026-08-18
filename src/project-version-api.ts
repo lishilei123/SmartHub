@@ -1,6 +1,12 @@
 const apiBase = 'http://127.0.0.1:8787/api'
 
 export type ProjectVersionStatus = 'open' | 'locked' | 'archived'
+export type RequirementReleaseBinding = {
+  releaseId: string
+  verificationRunId: string
+  requirementsJsonSha256: string
+  boundAt: string
+}
 export type ProjectVersion = {
   id: string
   projectId: string
@@ -8,12 +14,9 @@ export type ProjectVersion = {
   description?: string
   status: ProjectVersionStatus
   sourceProjectVersionId?: string
-  requirementReleaseBinding?: {
-    releaseId: string
-    verificationRunId: string
-    requirementsJsonSha256: string
-    boundAt: string
-  }
+  requirementReleaseBinding?: RequirementReleaseBinding
+  requirementReleaseBindings?: RequirementReleaseBinding[]
+  activeRequirementReleaseId?: string
   createdAt: string
   updatedAt: string
 }

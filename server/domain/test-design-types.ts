@@ -33,6 +33,8 @@ export type KnowledgeAugmentation =
 export interface CreateTestDesignCommon {
   name: string
   objective: string
+  /** 明确选择的已发布 Requirement Release；省略时使用当前默认绑定。 */
+  requirementReleaseId?: string
   includedScopes?: ScopeRule[]
   excludedScopes?: ScopeRule[]
   focusDimensions?: TestDimension[]

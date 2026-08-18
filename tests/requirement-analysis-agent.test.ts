@@ -43,7 +43,7 @@ test('PlanningAgent 通过一个长期定义绑定 Workspace、Knowledge、Skill
   assert.doesNotMatch(definition.systemPrompt, /只执行当前 Stage|上一阶段已经失效/u)
 })
 
-test('Requirement Release 已绑定后拒绝在同一 ProjectVersion 重新创建初始需求分析 Run', async () => {
+test('Requirement Release 已绑定后仍可在同一 ProjectVersion 创建新的需求分析 Run，失败不会覆盖既有绑定', async () => {
   const store = await seededStore()
   await store.transaction(state => {
     const projectVersion = state.projectVersions.find(item => item.id === 'project-version-1')!
@@ -56,11 +56,11 @@ test('Requirement Release 已绑定后拒绝在同一 ProjectVersion 重新创�
   })
   const service = new RequirementAnalysisService(store, { execute: async () => { throw new Error('不应执行 Agent') } })
 
-  await assert.rejects(
-    () => service.analyze({ projectVersionId: 'project-version-1', documentDirectoryPath: requirementDirectory }),
-    /REQUIREMENT_ANALYSIS_ALREADY_RELEASED/u,
-  )
-  assert.equal((await store.snapshot()).reviewRuns.length, 0)
+  const created = await service.analyze({ projectVersionId: 'project-version-1', documentDirectoryPath: requirementDirectory, sourceId: 'source-1', modelId: 'model-1' }, new AbortController().signal, undefined, true)
+  assert.equal('id' in created, true)
+  const state = await store.snapshot()
+  assert.equal(state.reviewRuns.length, 1)
+  assert.equal(state.projectVersions.find(item => item.id === 'project-version-1')!.requirementReleaseBinding?.releaseId, 'release-1')
 })
 
 test('目录输入包只交付工作区元数据，不把原始需求拼接进 Prompt', async () => {
@@ -511,7 +511,7 @@ async function seededStore() {
       { ...cancelChunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${requirementDirectory}/cancel.md` } },
       { ...paymentChunk, assetMetadata: { assetId: 'asset-2', displayName: '支付超时需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${requirementDirectory}/payment.md` } },
     ], createdAt: '2026-08-12T00:00:00.000Z', activatedAt: '2026-08-12T00:00:01.000Z' })
-    state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'analysis-model', displayName: 'Analysis Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling', 'structured_output'], enabled: true, health: 'healthy', qualityGate: { version: 'model-probe/v2', checkedAt: '2026-08-12T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } } }], createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' })
+    state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'analysis-model', displayName: 'Analysis Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling'], enabled: true, health: 'healthy', qualityGate: { version: 'model-probe/v2', checkedAt: '2026-08-12T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } } }], createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' })
   })
   return store
 }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import JSZip from 'jszip'
 import type { Principal } from '../domain/access-control.js'
 import type { DatabaseState, ReviewRun } from '../domain/types.js'
+import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type {
   CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, CoverageAudit, HistoricalCaseSnapshot, ImpactedRegressionReference, LegacyTestCaseMigrationRecord, LibraryTestCase, LibraryTestCaseRevision, RetrievalSnapshot, SmokeCandidateRelation, TestCase,
   TestCaseContent, TestCaseLibraryVersion, TestCaseLibraryVersionDetail, TestCaseSetVersion, TestDataRequirement, TestDataRequirementSetVersion, TestDesign, TestDesignBasisSnapshot, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot,
@@ -18,8 +19,8 @@ const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
 const AUTOMATIC_TEST_POINT_REVIEW_ACTOR = 'system:test-point-validator'
 
 export interface PlanningAgentRuntime {
-  readiness?(projectVersionId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
-  freezeConfiguration?(projectVersionId: string): Promise<TestDesignRunAgentConfigurationSnapshot>
+  readiness?(projectVersionId?: string, requirementReleaseId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
+  freezeConfiguration?(projectVersionId: string, requirementReleaseId?: string): Promise<TestDesignRunAgentConfigurationSnapshot>
   appendTask?(input: { projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }): Promise<unknown>
   execute(input: {
     stage: 'test_point_design' | 'test_case_design' | 'test_design_repair'
@@ -27,7 +28,11 @@ export interface PlanningAgentRuntime {
     upstream: unknown
   }, signal: AbortSignal): Promise<{ schemaVersion: string; content: unknown; execution?: WorkflowNodeRun['execution'] }>
 }
-export interface TestCaseAssetProjector { ingest(input: { knowledgeBaseId: string; sourceType: 'upload'; sourceKey: string; assetType: string; displayName: string; logicalPath: string; content: string; taskTrigger?: 'upload' | 'retry' }): Promise<{ version: { id: string }; task: unknown }> }
+type WorkspaceArtifactIngestInput = { knowledgeBaseId: string; sourceType: 'upload'; sourceKey: string; assetType: string; displayName: string; logicalPath: string; content: string; taskTrigger?: 'upload' | 'retry' }
+export interface TestCaseAssetProjector {
+  ingest(input: WorkspaceArtifactIngestInput): Promise<{ version: { id: string }; task: unknown }>
+  ingestWorkspaceArtifact?(input: WorkspaceArtifactIngestInput): Promise<{ version: { id: string }; task: unknown }>
+}
 
 export class TestDesignService {
   private readonly activeRuns = new Map<string, AbortController>()
@@ -50,12 +55,14 @@ export class TestDesignService {
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
     const projectBases = state.knowledgeBases.filter(item => item.projectId === projectVersion.projectId)
     const requirementRelease = boundRequirementRelease(state, projectVersionId)
+    const requirementReleases = requirementReleaseBindings(projectVersion).map(binding => required(boundRequirementRelease(state, projectVersionId, binding.releaseId), 'TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 的 Requirement Release 绑定无效'))
     const knowledgeAssets = projectBases.flatMap(base => state.assets.filter(asset => asset.knowledgeBaseId === base.id).flatMap(asset => state.versions.filter(version => version.assetId === asset.id).map(version => ({ assetId: asset.id, assetVersionId: version.id, version: version.number, contentHash: version.contentHash, displayName: asset.displayName, logicalPath: asset.logicalPath, assetType: asset.assetType, status: version.status, selectable: version.status === 'ready', reason: version.status === 'ready' ? undefined : '资产版本未就绪' }))))
     const designState = readDesignState(state)
     const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId) : { ready: Boolean(this.runtime), agents: [{ agentKey: 'planning', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'PlanningAgent Runtime 未配置' }] }
     return {
       projectVersion: { id: projectVersion.id, projectId: projectVersion.projectId, name: projectVersion.name, status: projectVersion.status },
-      requirementRelease: requirementRelease ? { id: requirementRelease.release.id, analysisRunId: requirementRelease.analysisRun.id, contentSha256: requirementRelease.release.contentSha256, publishedAt: requirementRelease.release.publishedAt, label: `${requirementRelease.analysisRun.documentTitle ?? '正式需求'} / ${requirementRelease.release.id.slice(-8)}` } : null,
+      requirementRelease: requirementRelease ? presentRequirementRelease(requirementRelease, true) : null,
+      requirementReleases: requirementReleases.map(item => presentRequirementRelease(item, item.binding.releaseId === requirementRelease?.binding.releaseId)),
       knowledgeAssets,
       fixedIndexes: projectBases.flatMap(base => state.indexes.filter(index => index.knowledgeBaseId === base.id && index.status === 'active').map(index => ({ id: index.id, selectable: true }))),
       historicalCaseSets: designState.caseSetVersions.filter(item => item.projectId === projectVersion.projectId).map(item => ({ id: item.id, name: item.name, version: item.version, memberCount: item.members.length, contentSha256: item.contentSha256 })),
@@ -71,9 +78,9 @@ export class TestDesignService {
     return this.store.transaction(state => {
       const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
       if (projectVersion.status !== 'open') throw new TestDesignError('PROJECT_VERSION_READ_ONLY', '当前项目版本只读', 409)
-      if (!boundRequirementRelease(state, projectVersionId)) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '当前 ProjectVersion 尚未完成需求分析并绑定 Requirement Release', 409)
+      const requirement = required(boundRequirementRelease(state, projectVersionId, input.requirementReleaseId), 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '当前 ProjectVersion 尚未完成需求分析并绑定 Requirement Release')
       validateDesignSources(state, projectVersion.projectId, input)
-      const design: TestDesign = { id: `test_design_${randomUUID()}`, projectVersionId, projectId: projectVersion.projectId, name: input.name, objective: input.objective, input, logicalInputSha256: canonicalSha256(input), createdBy: principal.subjectId, createdAt: now(), creationMode: 'manual' }
+      const design: TestDesign = { id: `test_design_${randomUUID()}`, projectVersionId, projectId: projectVersion.projectId, name: input.name, objective: input.objective, input, logicalInputSha256: canonicalSha256(input), createdBy: principal.subjectId, createdAt: now(), creationMode: 'manual', sourceRequirementReleaseId: requirement.release.id }
       designState(state).designs.push(design)
       return structuredClone(design)
     })
@@ -85,7 +92,7 @@ export class TestDesignService {
       if (projectVersion.status !== 'open') throw new TestDesignError('PROJECT_VERSION_READ_ONLY', '当前项目版本只读', 409)
       const analysisRun = required(state.reviewRuns.find(item => item.id === analysisRunId && item.projectVersionId === projectVersionId), 'REQUIREMENT_RUN_NOT_FOUND', '需求理解运行不存在')
       const release = required(analysisRun.workflow?.release, 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '需求理解尚未冻结正式基线')
-      if (analysisRun.status !== 'succeeded' || release.status !== 'published' || projectVersion.requirementReleaseBinding?.releaseId !== release.id) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '需求理解基线尚未正式绑定', 409)
+      if (analysisRun.status !== 'succeeded' || release.status !== 'published' || !boundRequirementRelease(state, projectVersionId, release.id)) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '需求理解基线尚未正式绑定', 409)
       const aggregate = designState(state)
       const existing = aggregate.designs.find(item => item.projectVersionId === projectVersionId && item.creationMode === 'automatic' && item.sourceRequirementReleaseId === release.id)
       if (existing) return { design: structuredClone(existing), created: false }
@@ -136,9 +143,11 @@ export class TestDesignService {
 
   async createRun(projectVersionId: string, designId: string, idempotencyKey: string, principal: Principal) {
     if (!idempotencyKey?.trim()) throw new TestDesignError('IDEMPOTENCY_KEY_REQUIRED', '创建运行必须提供 Idempotency-Key', 400)
-    const readiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId) : { ready: Boolean(this.runtime) }
+    const preflight = await this.store.snapshot()
+    const sourceReleaseId = findDesign(preflight, projectVersionId, designId).sourceRequirementReleaseId
+    const readiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId, sourceReleaseId) : { ready: Boolean(this.runtime) }
     if (!readiness.ready) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent 尚未发布或未通过模型门禁', 409, readiness)
-    const agentConfigurationSnapshot = this.runtime?.freezeConfiguration ? await this.runtime.freezeConfiguration(projectVersionId) : undefined
+    const agentConfigurationSnapshot = this.runtime?.freezeConfiguration ? await this.runtime.freezeConfiguration(projectVersionId, sourceReleaseId) : undefined
     if (!agentConfigurationSnapshot) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent Runtime 无法冻结配置版本', 409)
     const created = await this.store.transaction(async state => {
       const design = findDesign(state, projectVersionId, designId)
@@ -148,9 +157,9 @@ export class TestDesignService {
       const existing = aggregate.runs.find(run => run.testDesignId === designId && run.idempotencyKey === idempotencyKey)
       if (existing) return { run: structuredClone(existing), created: false }
       if (!this.runtime) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent 尚未完成运行时配置', 409)
-      const requirement = required(boundRequirementRelease(state, projectVersionId), 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '当前 ProjectVersion 尚未绑定 Requirement Release')
+      const requirement = required(boundRequirementRelease(state, projectVersionId, design.sourceRequirementReleaseId), 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '测试设计未绑定有效的 Requirement Release')
       const requirements = publishedRequirements(requirement.analysisRun)
-      if (requirements.artifact.contentSha256 !== projectVersion.requirementReleaseBinding?.requirementsJsonSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 绑定的 requirements.json Hash 与发布包不一致', 409)
+      if (requirements.artifact.contentSha256 !== requirement.binding.requirementsJsonSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 绑定的 requirements.json Hash 与发布包不一致', 409)
       const runId = `test_design_run_${randomUUID()}`
       const createdAt = now()
       const basisSnapshot = buildBasisSnapshot(design, requirement, requirements, createdAt)
@@ -791,7 +800,9 @@ export class TestDesignService {
 
   private async projectWorkspaceFiles(knowledgeBaseId: string, sourcePrefix: string, assetType: string, files: TestDesignWorkspaceFile[], trigger: 'upload' | 'retry') {
     return Promise.all(files.map(async file => {
-      const result = await this.projector!.ingest({ knowledgeBaseId, sourceType: 'upload', sourceKey: `${sourcePrefix}:${file.logicalPath}:${file.contentSha256}`, assetType, displayName: file.displayName, logicalPath: file.logicalPath, content: file.content, taskTrigger: trigger })
+      const input: WorkspaceArtifactIngestInput = { knowledgeBaseId, sourceType: 'upload', sourceKey: `${sourcePrefix}:${file.logicalPath}:${file.contentSha256}`, assetType, displayName: file.displayName, logicalPath: file.logicalPath, content: file.content, taskTrigger: trigger }
+      const ingest = this.projector!.ingestWorkspaceArtifact ?? this.projector!.ingest
+      const result = await ingest.call(this.projector, input)
       return { file, assetVersionId: result.version.id, pending: Boolean(result.task) }
     }))
   }
@@ -1012,19 +1023,33 @@ function publishedRequirements(analysisRun: ReviewRun) {
 
 function canonicalSha256Text(value: string) { return createHash('sha256').update(value).digest('hex') }
 type BoundRequirementRelease = {
+  binding: NonNullable<ReturnType<typeof activeRequirementReleaseBinding>>
   analysisRun: ReviewRun
   release: NonNullable<NonNullable<ReviewRun['workflow']>['release']>
 }
 
-function boundRequirementRelease(state: DatabaseState, projectVersionId: string): BoundRequirementRelease | undefined {
+function presentRequirementRelease(requirement: BoundRequirementRelease, active: boolean) {
+  return {
+    id: requirement.release.id,
+    analysisRunId: requirement.analysisRun.id,
+    contentSha256: requirement.release.contentSha256,
+    publishedAt: requirement.release.publishedAt,
+    label: `${requirement.analysisRun.documentTitle ?? '正式需求'} / ${requirement.release.id.slice(-8)}`,
+    active,
+  }
+}
+
+function boundRequirementRelease(state: DatabaseState, projectVersionId: string, releaseId?: string): BoundRequirementRelease | undefined {
   const projectVersion = state.projectVersions.find(item => item.id === projectVersionId)
-  const binding = projectVersion?.requirementReleaseBinding
+  const binding = releaseId
+    ? projectVersion && requirementReleaseBindings(projectVersion).find(item => item.releaseId === releaseId)
+    : projectVersion && activeRequirementReleaseBinding(projectVersion)
   if (!projectVersion || !binding) return undefined
   const analysisRun = state.reviewRuns.find(item => item.id === binding.verificationRunId && item.projectVersionId === projectVersionId && item.status === 'succeeded' && item.workflow?.release?.id === binding.releaseId)
   if (!analysisRun?.workflow?.release) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 绑定的 Requirement Release 不存在', 409)
   const machine = publishedRequirements(analysisRun)
   if (machine.release.verificationRunId !== binding.verificationRunId || machine.artifact.contentSha256 !== binding.requirementsJsonSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 的 Requirement Release 绑定与发布包不一致', 409)
-  return { analysisRun, release: machine.release }
+  return { binding, analysisRun, release: machine.release }
 }
 
 function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requirement: BoundRequirementRelease, machine: ReturnType<typeof publishedRequirements>, historical: HistoricalCaseSnapshot, createdAt: string): TestDesignWorkspaceSnapshot {
@@ -1081,7 +1106,34 @@ function materializeTestPointDesign(run: TestDesignWorkflowRun, raw: unknown, ac
   run.testPointTree = { id: `test_point_tree_${randomUUID()}`, runId: run.id, currentRevision: 0, revisions: [{ revision: 0, parentRevision: null, nodes, operations: [], reason: 'PlanningAgent 测试点候选', actorId, treeSha256, createdAt: now() }], versions: [] }
 }
 
-function validateTreeReferences(run: TestDesignWorkflowRun, nodes: TestPointNodeRevision[]) { const allowedBasis = new Set([...run.basisSnapshot.items.map(item => item.id), ...run.retrievalSnapshot.hits.map(item => item.id)]); const allowedHistorical = new Set(run.historicalSnapshot.items.map(item => item.id)); for (const node of nodes.filter(item => !item.deleted)) { const invalidBasis = node.basisRefs.filter(reference => !allowedBasis.has(reference)); if (invalidBasis.length) throw new TestDesignError('TEST_POINT_BASIS_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定输入之外的依据`, 422, { nodeId: node.nodeId, invalidRefs: invalidBasis }); const invalidHistorical = node.historicalRefs.filter(reference => !allowedHistorical.has(reference)); if (invalidHistorical.length) throw new TestDesignError('TEST_POINT_HISTORICAL_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定快照之外的历史用例`, 422, { nodeId: node.nodeId, invalidRefs: invalidHistorical }) } }
+function normalizeTreeBasisReferences(run: TestDesignWorkflowRun, nodes: TestPointNodeRevision[]) {
+  const canonicalByRequirementPointId = new Map<string, string | null>()
+  for (const item of run.basisSnapshot.items) {
+    if (item.kind !== 'requirement_release') continue
+    const requirementPointId = item.locator?.requirementPointId
+    if (typeof requirementPointId !== 'string' || !requirementPointId) continue
+    const existing = canonicalByRequirementPointId.get(requirementPointId)
+    canonicalByRequirementPointId.set(requirementPointId, existing === undefined || existing === item.id ? item.id : null)
+  }
+  for (const node of nodes) {
+    node.basisRefs = node.basisRefs.map(reference => {
+      const canonical = canonicalByRequirementPointId.get(reference)
+      return typeof canonical === 'string' ? canonical : reference
+    })
+  }
+}
+
+function validateTreeReferences(run: TestDesignWorkflowRun, nodes: TestPointNodeRevision[]) {
+  normalizeTreeBasisReferences(run, nodes)
+  const allowedBasis = new Set([...run.basisSnapshot.items.map(item => item.id), ...run.retrievalSnapshot.hits.map(item => item.id)])
+  const allowedHistorical = new Set(run.historicalSnapshot.items.map(item => item.id))
+  for (const node of nodes.filter(item => !item.deleted)) {
+    const invalidBasis = node.basisRefs.filter(reference => !allowedBasis.has(reference))
+    if (invalidBasis.length) throw new TestDesignError('TEST_POINT_BASIS_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定输入之外的依据`, 422, { nodeId: node.nodeId, invalidRefs: invalidBasis })
+    const invalidHistorical = node.historicalRefs.filter(reference => !allowedHistorical.has(reference))
+    if (invalidHistorical.length) throw new TestDesignError('TEST_POINT_HISTORICAL_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定快照之外的历史用例`, 422, { nodeId: node.nodeId, invalidRefs: invalidHistorical })
+  }
+}
 function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean) {
   const treeVersion = approvedTreeVersion(run)
   const value = validateTestCaseDesignCandidate(raw, approvedPointIds(run, treeVersion.id), repair)

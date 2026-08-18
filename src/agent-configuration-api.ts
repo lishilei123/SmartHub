@@ -31,7 +31,6 @@ export type AgentRoutingConfiguration = {
   maxOutputTokens: number
   requestTimeoutSeconds: number
   retryCount: number
-  structuredOutput: boolean
 }
 export type AgentConfigurationAgentDraft = {
   revision: number

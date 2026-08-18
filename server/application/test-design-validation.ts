@@ -10,10 +10,11 @@ export class TestDesignError extends Error {
 
 export function validateCreateTestDesignInput(value: unknown): CreateTestDesignInput {
   const input = object(value, 'TEST_DESIGN_INPUT_INVALID', '创建参数必须是对象')
-  rejectUnknown(input, ['name', 'objective', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation', 'historicalCaseSelections', 'historicalLibrarySelection'], 'TEST_DESIGN_INPUT_INVALID')
+  rejectUnknown(input, ['name', 'objective', 'requirementReleaseId', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation', 'historicalCaseSelections', 'historicalLibrarySelection'], 'TEST_DESIGN_INPUT_INVALID')
   return {
     name: requiredText(input.name, 'name', 200),
     objective: requiredText(input.objective, 'objective', 4_000),
+    ...(input.requirementReleaseId === undefined ? {} : { requirementReleaseId: requiredText(input.requirementReleaseId, 'requirementReleaseId', 200) }),
     includedScopes: optionalScopeRules(input.includedScopes),
     excludedScopes: optionalScopeRules(input.excludedScopes),
     focusDimensions: optionalDimensions(input.focusDimensions),

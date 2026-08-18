@@ -3,7 +3,8 @@ import type { GenerativeCapability, GenerativeModel, GenerativeModelSource, Gene
 import type { StateStore } from '../infrastructure/store.js'
 
 const providerTypes = new Set<GenerativeProviderType>(['openai', 'anthropic', 'openai_compatible'])
-const capabilities = new Set<GenerativeCapability>(['structured_output', 'tool_calling', 'vision', 'reasoning'])
+const capabilities = new Set<GenerativeCapability>(['tool_calling', 'vision', 'reasoning'])
+const retiredCapabilities = new Set(['structured_output'])
 
 export class ModelService {
   constructor(private readonly store: StateStore) {}
@@ -203,7 +204,7 @@ export class ModelService {
         id: model.id,
         name: model.name,
         displayName: model.displayName,
-        capabilities: [...model.capabilities],
+        capabilities: model.capabilities.filter(capability => !retiredCapabilities.has(capability)),
         enabled: model.enabled,
         health: model.health,
         ...(model.lastCheckedAt ? { lastCheckedAt: model.lastCheckedAt } : {}),
@@ -220,7 +221,7 @@ function normalizeModel(input: unknown, previous: GenerativeModel[] | undefined)
   const existing = previous?.find(model => model.id === id)
   const name = required(value.name, '模型标识')
   const displayName = required(value.displayName, '模型展示名称')
-  const rawCapabilities = Array.isArray(value.capabilities) ? value.capabilities.map(String) : []
+  const rawCapabilities = (Array.isArray(value.capabilities) ? value.capabilities.map(String) : []).filter(item => !retiredCapabilities.has(item))
   if (rawCapabilities.some(item => !capabilities.has(item as GenerativeCapability))) throw new Error(`模型“${displayName}”包含不支持的能力声明`)
   const unchanged = existing?.name === name
     && JSON.stringify([...existing.capabilities].sort()) === JSON.stringify([...new Set(rawCapabilities)].sort())

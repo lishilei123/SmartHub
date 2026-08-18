@@ -1,15 +1,18 @@
 import { createHash } from 'node:crypto'
 import type { AgentConfigurationService } from '../application/agent-configuration-service.js'
+import { builtInToolBindingToken, toolBindingToken, toolsetContentHash } from '../application/ai-resource-hash.js'
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
 import type { PlanningAgentRuntime } from '../application/test-design-service.js'
 import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
+import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
 import type { TestDesign, TestDesignRunAgentConfigurationSnapshot, TestDesignWorkflowRun, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { safeWorkspaceSegment } from '../application/project-workspace-snapshot.js'
 import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
+import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 
 const WORKSPACE_TOOL_IDS = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk'] as const
 
@@ -47,12 +50,15 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
     })
   }
 
-  async readiness(projectVersionId?: string) {
+  async readiness(projectVersionId?: string, requirementReleaseId?: string) {
     const agentKey = 'planning'
     const state = await this.store.snapshot()
     const projectVersion = projectVersionId ? state.projectVersions.find(item => item.id === projectVersionId) : undefined
-    const verificationRun = projectVersion?.requirementReleaseBinding
-      ? state.reviewRuns.find(item => item.id === projectVersion.requirementReleaseBinding?.verificationRunId)
+    const binding = projectVersion
+      ? requirementReleaseId ? requirementReleaseBindings(projectVersion).find(item => item.releaseId === requirementReleaseId) : activeRequirementReleaseBinding(projectVersion)
+      : undefined
+    const verificationRun = binding
+      ? state.reviewRuns.find(item => item.id === binding.verificationRunId)
       : undefined
     const configurationId = verificationRun?.snapshot.agentConfigurationRef?.id
     const configuration = configurationId
@@ -67,10 +73,13 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
     }
   }
 
-  async freezeConfiguration(projectVersionId: string): Promise<TestDesignRunAgentConfigurationSnapshot> {
+  async freezeConfiguration(projectVersionId: string, requirementReleaseId?: string): Promise<TestDesignRunAgentConfigurationSnapshot> {
     const state = await this.store.snapshot()
     const projectVersion = state.projectVersions.find(item => item.id === projectVersionId)
-    const verificationRun = state.reviewRuns.find(item => item.id === projectVersion?.requirementReleaseBinding?.verificationRunId)
+    const binding = projectVersion
+      ? requirementReleaseId ? requirementReleaseBindings(projectVersion).find(item => item.releaseId === requirementReleaseId) : activeRequirementReleaseBinding(projectVersion)
+      : undefined
+    const verificationRun = state.reviewRuns.find(item => item.id === binding?.verificationRunId)
     const configurationId = verificationRun?.snapshot.agentConfigurationRef?.id
     if (!configurationId) throw new Error('TEST_DESIGN_AGENT_NOT_READY: Requirement Release 未绑定固定 PlanningAgent 配置')
     const configuration = await this.configurations.resolveVersion(configurationId)
@@ -335,6 +344,16 @@ function executionRecord(stage: TestDesignStage, agentVersion: string, modelLabe
 function validateConfiguration(configuration: AgentConfigurationVersion, state: DatabaseState) {
   const definition = configuration.agentDefinition
   if (definition.agentKey !== 'planning' || definition.agentType !== 'planning' || definition.modelScene !== 'planning' || definition.resultSchemaVersion !== 'planning/v1') throw new Error('PlanningAgent 配置类型不兼容')
+  const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
+  const toolTokens = definition.toolIds.map(toolId => {
+    const resource = tools.find(tool => tool.key === toolId)
+    return resource
+      ? toolBindingToken(resource)
+      : defaultBuiltInToolConfigResolver.has(toolId) ? builtInToolBindingToken(toolId) : `${toolId}@missing`
+  })
+  if (toolsetContentHash(toolTokens) !== definition.toolsetContentSha256) {
+    throw new Error('PlanningAgent Toolset 目录内容与固定 Agent 配置不一致；此 Requirement Release 仍引用历史配置，请重新发布 PlanningAgent、重新发布 Requirement Release 后再新建测试设计')
+  }
   const allowedTools = new Set<string>([...WORKSPACE_TOOL_IDS, ...ALL_SUBMISSION_TOOLS])
   const missingTools = [...allowedTools].filter(toolId => !definition.toolIds.includes(toolId))
   if (missingTools.length) throw new Error(`PlanningAgent 工具白名单不兼容；缺少 ${missingTools.join(', ')}`)

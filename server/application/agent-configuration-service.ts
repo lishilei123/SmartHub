@@ -181,7 +181,6 @@ function defaultRouting(reservedOutputTokens?: number): AgentRoutingConfiguratio
     maxOutputTokens: reservedOutputTokens ?? 32_000,
     requestTimeoutSeconds: 300,
     retryCount: 2,
-    structuredOutput: true,
   }
 }
 
@@ -217,7 +216,6 @@ function normalizeRouting(value: AgentRoutingConfiguration): AgentRoutingConfigu
     maxOutputTokens,
     requestTimeoutSeconds,
     retryCount,
-    structuredOutput: value.structuredOutput !== false,
   }
 }
 
@@ -297,7 +295,6 @@ function validatePublishable(agentKey: AgentConfigurationAgentKey, draft: AgentC
     if (model.health !== 'healthy') throw new Error(`${source.name} · ${model.displayName} 尚未通过健康探测`)
     if (!model.qualityGate?.passed || model.qualityGate.version !== 'model-probe/v2') throw new Error(`${source.name} · ${model.displayName} 尚未通过 model-probe/v2 质量门禁`)
     if (!model.capabilities.includes('tool_calling')) throw new Error(`${source.name} · ${model.displayName} 不支持工具调用`)
-    if (draft.routing.structuredOutput && !model.capabilities.includes('structured_output')) throw new Error(`${source.name} · ${model.displayName} 不支持结构化输出`)
   })
 }
 
