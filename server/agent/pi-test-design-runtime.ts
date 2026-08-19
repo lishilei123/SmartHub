@@ -201,10 +201,16 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const stageRules = stage === 'test_point_design'
     ? ['本轮交付测试点候选，并保留 Requirement → TestPoint 的可追溯依据。']
     : stage === 'test_case_design'
-      ? ['已固化的 test-point-tree.json 是本轮测试点正式基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。']
+      ? [
+          '已固化的 test-point-tree.json 是本轮测试点正式基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。',
+          '功能和安全用例的执行步骤、检查点、就绪状态及自动化提示只在 executionMethods 的对应 UI/API 方式中完整填写。executionSpec 对此类用例只提交 kind=functional 与同一 method；服务端会从 executionMethods 和用例根字段投影正式 executionSpec。不要提交第二份重复步骤。',
+          '非功能 executionSpec 必须使用精确字段：performance 为 kind=performance、method=performance_tool、target、scenario、virtualUsers、duration、rampUp、thresholds、dataStrategy、environmentRequirements、executionReadiness；stability 为 kind=stability、method=long_running、workload、duration、interval、observations、recoveryPolicy、checkpointPolicy、environmentRequirements、executionReadiness；compatibility 为 kind=compatibility、method=environment_matrix、baseMethod、baseCaseRefs、browserMatrix、operatingSystemMatrix、viewportMatrix、versionMatrix、expectedConsistency、executionReadiness。cases[] 根对象和 executionSpec 都不得添加这些列表之外的自定义字段。',
+          '性能 thresholds 必须是数组；每一项严格且仅为 { metric, target, sourceRef }，三者都是非空字符串。把比较符、数值、单位和适用范围合并写进 target；不得使用 operator、value、unit，也不得提交缺少其中任一字段的半成品阈值。若没有正式阈值，提交 thresholds: []、executionReadiness: needs_confirmation，并建立 blocker Confirmation Item。',
+        ]
       : ['当前 Coverage Audit 中 resolution=agent_repair 的 blockers 是本轮修复范围；正式需求和已批准测试点保持不变。']
   return [
     ...stageRules,
+    ...(stage === 'test_point_design' ? [] : ['提交 cases[] 时，每一项必须是扁平的 test-case/v2 对象：ref、schemaVersion、title、executionMethods、executionSpec 等字段同级。禁止使用 { ref, content: {...} } 包装。']),
     'Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 是本轮执行权限边界。',
     'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 查看 Enabled Skill Catalog，并按当前任务自主决定是否通过 skill.read 读取所需方法正文。',
     'currentInputRefs 是重点输入，不是读取白名单；先读取重点输入，再按需使用 ls、find、grep、read 浏览完整冻结 Workspace。',
@@ -253,7 +259,7 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
     schemaVersion: 'test-design-repair-input/v1',
     cases: activeCases.map(testCase => {
       const revision = testCase.revisions.find(item => item.revision === testCase.currentRevision)!
-      return { ref: requiredRepairCaseRef(refById, testCase.id), content: { ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] } }
+      return { ref: requiredRepairCaseRef(refById, testCase.id), ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] }
     }),
     dataRequirements: (dataSet?.requirements ?? []).map((item, index): TestDataRequirementCandidate => ({
       ref: `data-${index + 1}`,
@@ -323,8 +329,15 @@ async function validateStageCandidate(stage: TestDesignStage, candidate: Record<
     return { valid: true, result, issues: [] }
   } catch (error) {
     const details = error instanceof TestDesignError && error.details && typeof error.details === 'object' ? error.details as { path?: unknown } : undefined
-    return { valid: false, issues: [{ path: typeof details?.path === 'string' ? details.path : '/', message: error instanceof Error ? error.message : String(error) }] }
+    const message = error instanceof Error ? error.message : String(error)
+    const recoveryHint = stage === 'test_case_design' || stage === 'test_design_repair' ? testCaseCandidateRecoveryHint(message) : ''
+    return { valid: false, issues: [{ path: typeof details?.path === 'string' ? details.path : '/', message: `${message}${recoveryHint}` }] }
   }
+}
+
+function testCaseCandidateRecoveryHint(message: string) {
+  if (!message.includes('thresholds') && !['operator', 'value', 'unit'].some(field => message.includes(field))) return ''
+  return '。性能 executionSpec.thresholds 是数组；每项只能包含 metric、target、sourceRef 三个非空字符串。比较符、数值和单位都写入 target 这个完整字符串，不能传 operator/value/unit，也不能删掉 metric、target 或 sourceRef 中的任一字段。没有正式阈值时提交空数组并标记 needs_confirmation，同时建立阻断 Confirmation Item。'
 }
 
 function approvedPointIds(run: TestDesignWorkflowRun) {

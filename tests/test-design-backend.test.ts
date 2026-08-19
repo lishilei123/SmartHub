@@ -44,6 +44,18 @@ test('候选协议直接生成测试点和用例，不存在 coverageUnits 中�
   const cases = validateTestCaseDesignCandidate(caseCandidate('test-case-design/v1', ['tp-1']), new Set(['tp-1']))
   assert.equal(cases.cases[0].content.testPointIds[0], 'tp-1')
   assert.equal(cases.dataRequirements.length, 0)
+  const flatCandidate = caseCandidate('test-case-design/v1', ['tp-1'])
+  const wrappedCandidate = {
+    ...flatCandidate,
+    cases: flatCandidate.cases.map(({ ref, ...content }) => ({ ref, content })),
+  }
+  assert.throws(
+    () => validateTestCaseDesignCandidate(wrappedCandidate, new Set(['tp-1'])),
+    (error: unknown) => error instanceof TestDesignError
+      && /\/cases\/0/u.test(error.message)
+      && /content/u.test(error.message)
+      && /直接展开/u.test(error.message),
+  )
 })
 
 test('测试点候选的发布 Requirement Point ID 由 Service 解析为当前冻结 basis ID', async () => {

@@ -482,7 +482,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     }, piDocumentWorkspace, this.knowledge)
     skillSession.register(registry)
     const skillPrompt = skillSession.renderPrompt()
-    const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(input.snapshot.agentDefinition, registry, signal)
+    const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(
+      input.snapshot.agentDefinition,
+      registry,
+      signal,
+      { activeToolIds: stage.allowedToolIds },
+    )
     const limits = input.snapshot.agentDefinition.limits
     const toolRuntime = new GovernedToolRuntime(registry, limits, { toolIds: new Set([stage.submitToolId]), calls: RESULT_SUBMISSION_TOOL_RESERVE }, this.approvalGate)
     const allowedToolIds = runtimeAllowedToolIds(input, [...skillSession.runtimeToolIds(), ...capabilityLoad.skillRuntimeToolIds])
@@ -949,7 +954,7 @@ function compactionCheckpoint(
 ): PlanningCompactionCheckpoint | undefined {
   if (timing === 'before_prompt' && stage === 'test_case_design') return 'before_test_case_design'
   if (timing !== 'completed') return undefined
-  if (stage === 'analysis' || stage === 'verification') return 'requirement_analysis_completed'
+  if (stage === 'analysis') return 'requirement_analysis_completed'
   if (stage === 'release') return 'requirement_release_completed'
   if (stage === 'test_design_repair') return 'coverage_repair_completed'
   return undefined

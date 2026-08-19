@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { AgentConfigurationScene, AiResourceKind, AssetType, FindingActionType, KnowledgeConfig } from '../domain/types.js'
+import type { AgentConfigurationScene, AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
 import type { TestDesignReviewerSourceSelection } from '../application/planning-workflow-service.js'
@@ -211,20 +211,6 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     })
     return send(response, 202, await requirementAnalysisService.actOnClarifications(clarificationBatch[1], { items, principal }))
   }
-  const repairDrafts = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts$/.exec(url.pathname)
-  if (method === 'POST' && repairDrafts) {
-    await requireRun(repairDrafts[1], 'requirement-analysis:handle')
-    const body = await json(request)
-    return send(response, 201, await requirementAnalysisService.generateRepairDraft(repairDrafts[1], { findingIds: stringList(body.findingIds) ?? [], principal }))
-  }
-  const repairApproval = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/approve$/.exec(url.pathname)
-  if (method === 'POST' && repairApproval) { await requireRun(repairApproval[1], 'requirement-analysis:handle'); const body = await json(request); return send(response, 200, await requirementAnalysisService.approveRepairDraft(repairApproval[1], repairApproval[2], { comment: body.comment === undefined ? undefined : String(body.comment), principal })) }
-  const repairApply = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/apply$/.exec(url.pathname)
-  if (method === 'POST' && repairApply) { await requireRun(repairApply[1], 'requirement-analysis:handle'); return send(response, 202, await requirementAnalysisService.applyRepairDraft(repairApply[1], repairApply[2])) }
-  const repairFinalize = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/finalize$/.exec(url.pathname)
-  if (method === 'POST' && repairFinalize) { await requireRun(repairFinalize[1], 'requirement-analysis:handle'); return send(response, 200, await requirementAnalysisService.finalizeRepairApplication(repairFinalize[1], repairFinalize[2])) }
-  const repairVerify = /^\/api\/requirement-analysis-runs\/([^/]+)\/repair-drafts\/([^/]+)\/verify$/.exec(url.pathname)
-  if (method === 'POST' && repairVerify) { await requireRun(repairVerify[1], 'requirement-analysis:create'); return send(response, 202, await requirementAnalysisService.finalizeRepairAndStartVerification(repairVerify[1], repairVerify[2])) }
   const releaseCandidate = /^\/api\/requirement-analysis-runs\/([^/]+)\/release-candidate$/.exec(url.pathname)
   if (method === 'POST' && releaseCandidate) { await requireRun(releaseCandidate[1], 'requirement-analysis:create'); return send(response, 201, await requirementAnalysisService.createReleaseCandidate(releaseCandidate[1], { principal })) }
   const releasePublish = /^\/api\/requirement-analysis-runs\/([^/]+)\/release\/publish$/.exec(url.pathname)
@@ -244,19 +230,6 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     await requireRun(releaseArtifact[1], 'requirement-analysis:read')
     const artifact = await requirementAnalysisService.releaseArtifact(releaseArtifact[1], decodeURIComponent(releaseArtifact[2]))
     return sendText(response, 200, artifact.content, artifact.mediaType === 'application/json' ? 'application/json; charset=utf-8' : `${artifact.mediaType}; charset=utf-8`, artifact.fileName.split('/').at(-1))
-  }
-  const findingActions = /^\/api\/requirement-analysis-runs\/([^/]+)\/finding-actions$/.exec(url.pathname)
-  if (method === 'GET' && findingActions) { await requireRun(findingActions[1], 'requirement-analysis:read'); return send(response, 200, await reviewGovernanceService.listFindingActions(findingActions[1])) }
-  const findingAction = /^\/api\/requirement-analysis-runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
-  if (method === 'POST' && findingAction) {
-    await requireRun(findingAction[1], 'requirement-analysis:handle')
-    const body = await json(request)
-    return send(response, 201, await reviewGovernanceService.actOnFinding(findingAction[1], findingAction[2], {
-      action: String(body.action ?? '') as FindingActionType,
-      comment: body.comment === undefined ? undefined : String(body.comment),
-      expectedVersion: body.expectedVersion === undefined ? undefined : Number(body.expectedVersion),
-      principal,
-    }))
   }
   const runApprovals = /^\/api\/requirement-analysis-runs\/([^/]+)\/approvals$/.exec(url.pathname)
   if (method === 'GET' && runApprovals) { await requireRun(runApprovals[1], 'requirement-analysis:read'); return send(response, 200, await reviewGovernanceService.listApprovals(runApprovals[1])) }

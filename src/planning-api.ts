@@ -16,8 +16,6 @@ export type TestDesignReviewerSourceSelection = {
 }
 export type PlanningWorkflowStage =
   | 'requirement_analysis'
-  | 'requirement_repair'
-  | 'requirement_verification'
   | 'requirement_release'
   | 'test_point_design'
   | 'test_point_review'

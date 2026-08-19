@@ -168,16 +168,6 @@ export interface CandidateRequirementAnalysisV1 {
     description: string
     sourceTexts: string[]
   }>
-  findings: Array<{
-    title?: string
-    type?: ReviewFindingType
-    severity?: ReviewSeverity
-    confidence?: number
-    requirementPointRefs: string[]
-    analysis: string
-    impact?: string
-    suggestion?: string
-  }>
   clarifications: CandidatePlanningClarification[]
   testFocus: Array<{
     title: string
@@ -195,13 +185,13 @@ export interface RequirementTestFocus {
 }
 
 export interface RequirementAnalysisArtifact {
-  fileName: 'requirement-baseline.md' | 'requirement-analysis-findings.md' | 'requirement-analysis.md'
+  fileName: 'requirement-baseline.md' | 'requirement-analysis.md'
   mediaType: 'text/markdown'
   content: string
   contentSha256: string
 }
 
-export interface RequirementAnalysisResult extends CandidateRequirementPointExtraction, CandidateRequirementReview {
+export interface RequirementAnalysisResult extends CandidateRequirementPointExtraction {
   summary: CandidateRequirementReview['summary'] & {
     overview: string
     businessGoals: string[]

@@ -323,7 +323,6 @@ function requirementCandidate(label: string) {
   return {
     summary: { overview: `${label}形成完整需求理解。`, businessGoals: [], overallAssessment: 'pass', score: 100, strengths: [], risks: [] },
     requirementPoints: [{ id: 'RP-001', title: '核心需求', description: '用户可以完成核心业务操作。', sourceTexts: ['用户可以完成核心业务操作。'] }],
-    findings: [],
     clarifications: [],
     testFocus: [{ title: '核心流程', description: '验证核心业务流程。', requirementPointRefs: ['RP-001'] }],
     analysisDocument: `${label}需求分析。`,

@@ -304,7 +304,7 @@ export interface AgentExecutionInput {
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
-    workflowStage: 'analysis' | 'repair' | 'verification' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
+    workflowStage: 'analysis' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
     allowedToolIds: string[]
     submitToolId: string
     schemaVersion: string
@@ -382,8 +382,6 @@ export type PlanningWorkflowStage =
   | 'requirement_analysis'
   | 'requirement_clarification'
   | 'requirement_understanding'
-  | 'requirement_repair'
-  | 'requirement_verification'
   | 'requirement_release'
   | 'test_point_design'
   | 'test_point_review'

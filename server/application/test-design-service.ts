@@ -256,7 +256,10 @@ export class TestDesignService {
       await this.fencedNodeTransaction(nodeRunId, lease, state => {
         const run = findRunById(state, runId)
         const target = required(run.nodeRuns.find(item => item.id === nodeRunId && item.nodeKey === key), 'WORKFLOW_NODE_NOT_FOUND', '节点已被新 generation 替换')
-        if (target.status !== 'queued' && target.status !== 'failed') throw new TestDesignError('WORKFLOW_NODE_NOT_RETRYABLE', `节点当前状态 ${target.status} 不可执行`, 409)
+        // A reclaimed PostgreSQL Job can retain the previous worker's running
+        // node state. The lease transaction below fences that worker out, so
+        // the current Job owner may safely take over the interrupted attempt.
+        if (!['queued', 'failed', 'running'].includes(target.status)) throw new TestDesignError('WORKFLOW_NODE_NOT_RETRYABLE', `节点当前状态 ${target.status} 不可执行`, 409)
         Object.assign(target, { status: 'running', attempt: target.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined, execution: undefined })
         Object.assign(run, { status: 'running', stage: key, startedAt: run.startedAt ?? now(), finishedAt: undefined, error: undefined, errorCode: undefined })
         if (key === 'test_design_repair' && run.automaticRepair?.status === 'queued') Object.assign(run.automaticRepair, { status: 'running', startedAt: now(), finishedAt: undefined })

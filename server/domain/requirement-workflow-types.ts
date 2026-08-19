@@ -1,7 +1,7 @@
 import type { AgentExecutionRecord } from './types.js'
 import type { PlanningClarification } from './review-types.js'
 
-export type RequirementWorkflowStage = 'analysis' | 'clarification' | 'understanding' | 'repair' | 'verification' | 'release'
+export type RequirementWorkflowStage = 'analysis' | 'clarification' | 'understanding' | 'release'
 
 export interface RequirementUnderstandingSnapshot {
   id: string
@@ -25,45 +25,6 @@ export interface RequirementAutomaticTransitionState {
   error?: string
 }
 
-export interface RequirementRepairCandidate {
-  schemaVersion: 'requirement-repair/v1'
-  summary: string
-  patches: Array<{
-    assetVersionId: string
-    before: string
-    after: string
-    reason: string
-    findingRefs: string[]
-  }>
-}
-
-export interface RequirementRepairDraft {
-  id: string
-  sourceRunId: string
-  status: 'generated' | 'approved' | 'applying' | 'applied' | 'verification_running' | 'verified' | 'failed'
-  candidate: RequirementRepairCandidate
-  generationExecution: AgentExecutionRecord
-  createdAt: string
-  createdBy: string
-  approvedAt?: string
-  approvedBy?: string
-  approvalComment?: string
-  application?: {
-    items: Array<{
-      assetId: string
-      sourceAssetVersionId: string
-      targetAssetVersionId: string
-      taskId?: string
-      logicalPath: string
-      contentSha256: string
-    }>
-    startedAt: string
-    appliedAt?: string
-    verificationRunId?: string
-  }
-  error?: string
-}
-
 export interface RequirementReleaseCandidate {
   schemaVersion: 'requirement-release-candidate/v1'
   sourceAssetVersionIds: string[]
@@ -83,8 +44,6 @@ export interface RequirementReleasePackage {
   status: 'candidate' | 'published'
   projectVersionId: string
   verificationRunId: string
-  sourceRunId?: string
-  repairDraftId?: string
   sourceAssetVersionIds: string[]
   candidate: RequirementReleaseCandidate
   generationExecution: AgentExecutionRecord
@@ -100,7 +59,5 @@ export interface RequirementWorkflowState {
   currentStage: RequirementWorkflowStage
   understandingSnapshot?: RequirementUnderstandingSnapshot
   automaticTransition?: RequirementAutomaticTransitionState
-  repairDrafts?: RequirementRepairDraft[]
-  verificationOf?: { sourceRunId: string; repairDraftId: string }
   release?: RequirementReleasePackage
 }

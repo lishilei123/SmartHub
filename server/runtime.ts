@@ -70,7 +70,7 @@ export const piAgentRuntime = new PiAgentRuntimeAdapter(
   piSessionRuntime,
   contextManager,
 )
-export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService, service)
+export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignRuntime = new PiTestDesignRuntimeAdapter(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignService = new TestDesignService(stateStore, testDesignRuntime, service)
 export const planningWorkflowService = new PlanningWorkflowService(

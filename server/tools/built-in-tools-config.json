@@ -140,7 +140,7 @@
       "piName": "ls",
       "label": "列出工作区目录",
       "catalogName": "工作区目录查看",
-      "description": "使用 ls 语义列出只读 /workspace 中的目录内容。只接受工作区内相对路径。",
+      "description": "使用 ls 语义列出只读 /workspace 中的目录内容。省略 path、传空字符串或传 . 均表示 /workspace 根目录；非空 path 只接受工作区内相对路径。",
       "catalogDescription": "浏览固定工作区目录树。",
       "risk": "read",
       "timeoutMs": 30000,
@@ -153,7 +153,7 @@
         "properties": {
           "path": {
             "type": "string",
-            "minLength": 1,
+            "minLength": 0,
             "maxLength": 2000
           },
           "limit": {
@@ -227,87 +227,6 @@
         "additionalProperties": false
       }
     },
-    "requirement-repair.submit_result": {
-      "version": "1.0.0",
-      "piName": "requirement_repair_submit_result",
-      "label": "提交需求修复草稿",
-      "catalogName": "提交需求修复草稿",
-      "description": "提交 requirement-repair/v1 Patch 候选；服务端重新校验 Finding 状态、固定 AssetVersion、before 唯一性和 Patch 非重叠性。",
-      "catalogDescription": "提交当前 repair Stage 的需求 Patch 候选。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/requirement-workflow-submit.ts",
-      "handlerKey": "requirement-repair.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "schemaVersion": {
-            "const": "requirement-repair/v1"
-          },
-          "summary": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 12000
-          },
-          "patches": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 100,
-            "items": {
-              "type": "object",
-              "properties": {
-                "assetVersionId": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 200
-                },
-                "before": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 50000
-                },
-                "after": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 50000
-                },
-                "reason": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 8000
-                },
-                "findingRefs": {
-                  "type": "array",
-                  "minItems": 1,
-                  "maxItems": 50,
-                  "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 200
-                  }
-                }
-              },
-              "required": [
-                "assetVersionId",
-                "before",
-                "after",
-                "reason",
-                "findingRefs"
-              ],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": [
-          "schemaVersion",
-          "summary",
-          "patches"
-        ],
-        "additionalProperties": false
-      }
-    },
     "requirement-release.submit_result": {
       "version": "1.0.0",
       "piName": "requirement_release_submit_result",
@@ -352,11 +271,11 @@
       }
     },
     "requirement-analysis.submit_result": {
-      "version": "1.1.0",
+      "version": "1.2.0",
       "piName": "requirement_analysis_submit_result",
       "label": "提交统一需求分析结果",
       "catalogName": "提交需求分析",
-      "description": "提交 requirement-analysis/v1。一次提交同时包含需求基线、整体与跨需求 Finding、结构化 Clarification、Test Focus、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
+      "description": "提交 requirement-analysis/v1。一次提交同时包含需求基线、结构化 Clarification、Test Focus、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
       "catalogDescription": "提交单 Agent 需求分析结果，由服务端统一校验和生成 Artifact。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -452,62 +371,10 @@
               "additionalProperties": false
             }
           },
-          "findings": {
-            "type": "array",
-            "maxItems": 200,
-            "items": {
-              "type": "object",
-              "properties": {
-                "title": {
-                  "type": "string",
-                  "maxLength": 300
-                },
-                "type": {
-                  "type": "string",
-                  "maxLength": 100
-                },
-                "severity": {
-                  "type": "string",
-                  "maxLength": 100
-                },
-                "confidence": {
-                  "type": "number"
-                },
-                "requirementPointRefs": {
-                  "type": "array",
-                  "maxItems": 50,
-                  "items": {
-                    "type": "string",
-                    "minLength": 6,
-                    "maxLength": 32
-                  },
-                  "description": "单需求或跨需求问题填写一个或多个临时 RP ID；整体问题填写空数组。"
-                },
-                "analysis": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 8000
-                },
-                "impact": {
-                  "type": "string",
-                  "maxLength": 4000
-                },
-                "suggestion": {
-                  "type": "string",
-                  "maxLength": 4000
-                }
-              },
-              "required": [
-                "requirementPointRefs",
-                "analysis"
-              ],
-              "additionalProperties": false
-            }
-          },
           "clarifications": {
             "type": "array",
             "maxItems": 500,
-            "description": "只有资料、Workspace 与 Knowledge Reference 都无法确定且会影响测试正确性的业务事实才提问；普通 Finding 不应机械转成问题。",
+            "description": "只有资料、Workspace 与 Knowledge Reference 都无法确定且会影响测试正确性的业务事实才提问。",
             "items": {
               "type": "object",
               "properties": {
@@ -597,7 +464,6 @@
         "required": [
           "summary",
           "requirementPoints",
-          "findings",
           "clarifications",
           "testFocus"
         ],

@@ -30,7 +30,6 @@ test('PlanningAgent 通过一个长期定义绑定 Workspace、Knowledge、Skill
     'knowledge.search',
     'knowledge.read_chunk',
     'requirement-analysis.submit_result',
-    'requirement-repair.submit_result',
     'requirement-release.submit_result',
     'test_design_points.submit_result',
     'test_design_cases.submit_result',
@@ -96,19 +95,17 @@ test('目录输入包只交付工作区元数据，不把原始需求拼接进 P
   assert.match(plan.batches[0].content, /payment\.md/u, 'currentInputRefs 路径属于元数据，应突出显示')
 })
 
-test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结果与三份 Artifact', async () => {
+test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结果与两份 Artifact', async () => {
   const { response, store, runtimeCalls } = await successfulRun()
   assert.equal(runtimeCalls(), 1)
   assert.equal(response.result.requirementPoints.length, 2)
-  assert.equal(response.result.findings.length, 2)
-  assert.deepEqual(response.result.findings[0].requirementPointRefs, ['RP-001', 'RP-002'])
-  assert.deepEqual(response.result.findings[1].requirementPointRefs, [])
   assert.equal(response.result.testFocus.length, 2)
   response.result.artifacts.forEach(artifact => {
     assert.equal(artifact.contentSha256, createHash('sha256').update(artifact.content).digest('hex'))
   })
-  assert.match(response.result.artifacts[2].content, /# 需求分析报告/u)
-  assert.match(response.result.artifacts[2].content, /## 8\. Test Focus/u)
+  assert.equal(response.result.artifacts.length, 2)
+  assert.match(response.result.artifacts[1].content, /# 需求分析报告/u)
+  assert.match(response.result.artifacts[1].content, /## 7\. Test Focus/u)
 
   const run = (await store.snapshot()).reviewRuns[0]
   assert.equal(run.status, 'succeeded')
@@ -136,16 +133,16 @@ test('统一 Pi Session 可读取原始需求并主动查询 Knowledge，来源�
   assert.ok(response.inputDeliveryManifest.toolReads?.some(read => read.toolId === 'workspace.read_file'))
 })
 
-test('RequirementAnalysisValidator 支持跨需求与整体 Finding，并拒绝失效引用和重复临时 ID', async () => {
+test('RequirementAnalysisValidator 拒绝已删除的 Finding 字段和重复临时 ID', async () => {
   const { store } = await successfulRun()
   const run = (await store.snapshot()).reviewRuns[0]
   const validator = new RequirementAnalysisValidator(store)
-  const invalidReference = await validator.normalize({
+  const retiredFindingField = await validator.normalize({
     ...analysisCandidate(),
     findings: [{ analysis: '引用不存在。', requirementPointRefs: ['RP-999'] }],
-  }, run.snapshot, run.inputDeliveryManifest!)
-  assert.equal(invalidReference.report.valid, false)
-  assert.ok(invalidReference.report.issues.some(issue => issue.path === 'findings[0].requirementPointRefs'))
+  } as unknown as CandidateRequirementAnalysisV1, run.snapshot, run.inputDeliveryManifest!)
+  assert.equal(retiredFindingField.report.valid, false)
+  assert.ok(retiredFindingField.report.issues.some(issue => issue.path === 'findings'))
 
   const duplicateId = await validator.normalize({
     ...analysisCandidate(),
@@ -155,19 +152,18 @@ test('RequirementAnalysisValidator 支持跨需求与整体 Finding，并拒绝�
   assert.ok(duplicateId.report.issues.some(issue => issue.path === 'requirementPoints[1].id'))
 })
 
-test('Validator 只做结构、引用、Evidence 与 Artifact 安全校验，不要求每个需求点产生 Finding', async () => {
+test('Validator 只做结构、引用、Evidence 与 Artifact 安全校验，不要求额外观察项', async () => {
   const { store } = await successfulRun()
   const run = (await store.snapshot()).reviewRuns[0]
   const validator = new RequirementAnalysisValidator(store)
   const candidate: CandidateRequirementAnalysisV1 = {
     ...analysisCandidate(),
     summary: { overview: '需求基线清晰。', overallAssessment: 'pass', score: 100, strengths: [], risks: [], businessGoals: [] },
-    findings: [],
     testFocus: [],
   }
   const normalized = await validator.normalize(candidate, run.snapshot, run.inputDeliveryManifest!)
   assert.equal(normalized.report.valid, true)
-  assert.deepEqual(normalized.result?.findings, [])
+  assert.equal('findings' in (normalized.result ?? {}), false)
   assert.equal(normalized.result?.requirementPoints.length, 2)
 })
 
@@ -247,7 +243,7 @@ test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人�
   assert.deepEqual(requirements.clarificationDispositionRecords, [])
   assert.match(release!.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content, /Formal Business Fact/u)
   assert.match(release!.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content, /关闭失败时保持待支付/u)
-  assert.match(resolved.run.response!.result.artifacts.find(item => item.fileName === 'requirement-analysis-findings.md')!.content, /Formal Business Fact/u)
+  assert.match(resolved.run.response!.result.artifacts.find(item => item.fileName === 'requirement-analysis.md')!.content, /formal_business_fact/u)
 
   await assert.rejects(
     () => service.actOnClarifications(runId, { items: [{ clarificationId, action: 'answer', answer: '重复提交' }] }),
@@ -311,103 +307,6 @@ test('未处理完全部 Blocking Clarification 时不进入 Understanding，也
   assert.equal(listenerCalls, 0)
 })
 
-test('修复应用完成后停在待复验状态且不会自动创建复验运行', async () => {
-  const { store } = await successfulRun()
-  const repairedContent = '# 取消订单\n\n用户可以取消待支付订单，并统一记录关闭原因。'
-  const repairedHash = createHash('sha256').update(repairedContent).digest('hex')
-  let sourceRunId = ''
-  let findingId = ''
-  await store.transaction(state => {
-    const run = state.reviewRuns[0]
-    sourceRunId = run.id
-    findingId = run.result!.findings[0].clientFindingId
-    state.findingActions.push({
-      id: 'finding-action-confirm', projectVersionId: run.projectVersionId, runId: run.id, findingId,
-      action: 'confirm', fromState: 'open', toState: 'confirmed', actorId: 'reviewer', actorDisplayName: '评审人', version: 1, createdAt: '2026-08-12T00:02:00.000Z',
-    })
-    state.versions.push({ id: 'version-repaired', assetId: 'asset-1', number: 2, content: repairedContent, contentHash: repairedHash, status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:03:00.000Z', readyAt: '2026-08-12T00:03:01.000Z', chunks: [] })
-    state.assets.find(asset => asset.id === 'asset-1')!.activeVersionId = 'version-repaired'
-    state.indexes.find(index => index.id === 'index-1')!.assetVersionIds.push('version-repaired')
-    run.workflow = { currentStage: 'repair', repairDrafts: [{
-      id: 'repair-draft-1', sourceRunId: run.id, status: 'applying',
-      candidate: { schemaVersion: 'requirement-repair/v1', summary: '统一关闭原因', patches: [{ assetVersionId: 'version-1', before: '用户可以取消待支付订单。', after: '用户可以取消待支付订单，并统一记录关闭原因。', reason: '消除状态口径歧义', findingRefs: [findingId] }] },
-      generationExecution: { agentKey: 'planning', workflowStage: 'repair', turns: 1, toolCalls: 1, events: [] },
-      createdAt: '2026-08-12T00:02:30.000Z', createdBy: 'reviewer', approvedAt: '2026-08-12T00:02:45.000Z', approvedBy: 'reviewer',
-      application: { items: [{ assetId: 'asset-1', sourceAssetVersionId: 'version-1', targetAssetVersionId: 'version-repaired', logicalPath: `${requirementDirectory}/cancel.md`, contentSha256: repairedHash }], startedAt: '2026-08-12T00:03:00.000Z' },
-    }] }
-  })
-  const service = new RequirementAnalysisService(store, { execute: async () => { throw new Error('完成应用时不应执行 Agent') } })
-  await assert.rejects(() => service.finalizeRepairAndStartVerification(sourceRunId, 'repair-draft-1'), /前置门禁/u)
-  const applied = await service.finalizeRepairApplication(sourceRunId, 'repair-draft-1')
-  const state = await store.snapshot()
-
-  assert.equal(applied.status, 'applied')
-  assert.ok(applied.application?.appliedAt)
-  assert.equal(state.projectVersionRequirementBindings.find(binding => binding.assetId === 'asset-1')?.assetVersionId, 'version-repaired')
-  assert.equal(state.findingActions.filter(action => action.findingId === findingId).at(-1)?.toState, 'needs_follow_up')
-  assert.equal(state.reviewRuns.length, 1)
-  assert.equal(state.reviewRuns.some(run => run.workflow?.verificationOf), false)
-})
-
-test('Requirement Repair 的 Verification 仍会对修复后的固定版本独立执行一次 Agent 复验', async () => {
-  const { store, faux, runtime, runtimeCalls } = await successfulRun()
-  const repairedContent = '# 取消订单\n\n用户可以取消待支付订单。\n关闭操作必须记录关闭原因。'
-  const repairedHash = createHash('sha256').update(repairedContent).digest('hex')
-  const repairedChunk = { id: 'chunk-repaired', chunkKey: 'cancel-repaired', assetVersionId: 'version-repaired', ordinal: 0, headingPath: ['取消订单'], content: '用户可以取消待支付订单。', contentHash: 'cancel-repaired-chunk-hash', tokenCount: 10, startLine: 3, endLine: 3, startChar: 8, endChar: 20, embedding: [], reused: false }
-  let sourceRunId = ''
-  let findingId = ''
-  await store.transaction(state => {
-    const run = state.reviewRuns[0]
-    sourceRunId = run.id
-    findingId = run.result!.findings[0].clientFindingId
-    state.findingActions.push({
-      id: 'finding-action-confirm', projectVersionId: run.projectVersionId, runId: run.id, findingId,
-      action: 'confirm', fromState: 'open', toState: 'confirmed', actorId: 'reviewer', actorDisplayName: '评审人', version: 1, createdAt: '2026-08-12T00:02:00.000Z',
-    })
-    state.versions.push({ id: 'version-repaired', assetId: 'asset-1', number: 2, content: repairedContent, contentHash: repairedHash, status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:03:00.000Z', readyAt: '2026-08-12T00:03:01.000Z', chunks: [repairedChunk] })
-    state.assets.find(asset => asset.id === 'asset-1')!.activeVersionId = 'version-repaired'
-    const index = state.indexes.find(item => item.id === 'index-1')!
-    index.assetVersionIds.push('version-repaired')
-    index.indexedChunks!.push({ ...repairedChunk, assetMetadata: { assetId: 'asset-1', displayName: '取消订单需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${requirementDirectory}/cancel.md` } })
-    run.workflow = { currentStage: 'repair', repairDrafts: [{
-      id: 'repair-draft-1', sourceRunId: run.id, status: 'applying',
-      candidate: { schemaVersion: 'requirement-repair/v1', summary: '补齐关闭原因', patches: [{ assetVersionId: 'version-1', before: '用户可以取消待支付订单。', after: '用户可以取消待支付订单。\n关闭操作必须记录关闭原因。', reason: '补齐关闭原因', findingRefs: [findingId] }] },
-      generationExecution: { agentKey: 'planning', workflowStage: 'repair', turns: 1, toolCalls: 1, events: [] },
-      createdAt: '2026-08-12T00:02:30.000Z', createdBy: 'reviewer', approvedAt: '2026-08-12T00:02:45.000Z', approvedBy: 'reviewer',
-      application: { items: [{ assetId: 'asset-1', sourceAssetVersionId: 'version-1', targetAssetVersionId: 'version-repaired', logicalPath: `${requirementDirectory}/cancel.md`, contentSha256: repairedHash }], startedAt: '2026-08-12T00:03:00.000Z' },
-    }] }
-  })
-
-  const service = new RequirementAnalysisService(store, runtime)
-  await service.finalizeRepairApplication(sourceRunId, 'repair-draft-1')
-  faux.setResponses([
-    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/cancel.md' }), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/payment.md' }), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall('knowledge_search', { query: '取消' }), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall('requirement_analysis_submit_result', verificationCandidate()), { stopReason: 'toolUse' }),
-  ])
-
-  const verification = await service.analyze({
-    projectVersionId: 'project-version-1',
-    documentDirectoryPath: requirementDirectory,
-    sourceId: 'source-1',
-    modelId: 'model-1',
-    workflowStage: 'verification',
-    verificationOf: { sourceRunId, repairDraftId: 'repair-draft-1' },
-  })
-
-  assert.equal(runtimeCalls(), 2)
-  assert.equal(verification.status, 'candidate_validated')
-  const persistedVerification = await service.get(verification.runId)
-  assert.equal(persistedVerification.status, 'succeeded')
-  assert.equal(persistedVerification.response?.execution.workflowStage, 'verification')
-  assert.deepEqual(persistedVerification.workflow?.verificationOf, { sourceRunId, repairDraftId: 'repair-draft-1' })
-  const state = await store.snapshot()
-  assert.equal(state.reviewRuns.find(run => run.id === sourceRunId)?.workflow?.repairDrafts?.[0].status, 'verified')
-  assert.equal(state.findingActions.filter(action => action.findingId === findingId).at(-1)?.toState, 'resolved')
-})
-
 async function successfulRun(candidate = analysisCandidate()) {
   const store = await seededStore()
   const resources = new AiResourceService(store, undefined, { reloadIntervalMs: 0 })
@@ -450,10 +349,6 @@ function analysisCandidate(): CandidateRequirementAnalysisV1 {
       { id: 'RP-001', title: '取消待支付订单', description: '用户可以取消处于待支付状态的订单。', sourceTexts: ['用户可以取消待支付订单。'] },
       { id: 'RP-002', title: '超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', sourceTexts: ['订单超过十五分钟未支付时自动关闭。'] },
     ],
-    findings: [
-      { title: '关闭状态口径需统一', type: 'conflict', severity: 'high', confidence: 0.91, requirementPointRefs: ['RP-001', 'RP-002'], analysis: '人工取消和超时关闭是否进入同一终态未说明。', impact: '状态机实现与统计口径可能不一致。', suggestion: '统一定义关闭原因、终态和后续操作。' },
-      { title: '整体异常闭环缺失', type: 'missing', severity: 'medium', confidence: 0.84, requirementPointRefs: [], analysis: '需求整体没有定义关闭操作失败后的恢复与提示。', impact: '失败场景不可验收。', suggestion: '补充失败码、重试和人工恢复策略。' },
-    ],
     clarifications: [],
     testFocus: [
       { title: '取消与超时竞态', description: '验证取消请求和超时任务并发时只有一个终态生效。', requirementPointRefs: ['RP-001', 'RP-002'] },
@@ -472,14 +367,6 @@ function blockingClarificationCandidate(): CandidateRequirementAnalysisV1 {
     requirementPointRefs: ['RP-001'],
     blocking: true,
   }]
-  return candidate
-}
-
-function verificationCandidate(): CandidateRequirementAnalysisV1 {
-  const candidate = analysisCandidate()
-  candidate.summary = { ...candidate.summary, overallAssessment: 'pass', score: 100, risks: [] }
-  candidate.findings = []
-  candidate.testFocus = []
   return candidate
 }
 

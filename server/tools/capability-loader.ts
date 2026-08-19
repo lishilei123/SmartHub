@@ -17,10 +17,19 @@ const MAX_REMOTE_RESULT_BYTES = 256 * 1024
 const MCP_CONNECT_TIMEOUT_MS = 20_000
 export interface CapabilityLoadResult { warnings: string[]; skillRuntimeToolIds: string[]; close(): Promise<void> }
 
+export interface CapabilityLoadOptions {
+  /**
+   * The current Workflow stage may intentionally expose only a subset of an
+   * Agent's published Tool catalog. Keep the full catalog hash validation,
+   * while loading and reporting only bindings that can run in this stage.
+   */
+  activeToolIds?: readonly string[]
+}
+
 export class AgentCapabilityLoader {
   constructor(private readonly store: StateStore, private readonly skillPackages?: SkillPackageStore) {}
 
-  async load(definition: AgentDefinitionVersion, registry: ToolRegistry, signal: AbortSignal): Promise<CapabilityLoadResult> {
+  async load(definition: AgentDefinitionVersion, registry: ToolRegistry, signal: AbortSignal, options: CapabilityLoadOptions = {}): Promise<CapabilityLoadResult> {
     const state = await this.store.snapshot()
     const resources = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
     const tokens = definition.toolIds.map(toolId => {
@@ -28,6 +37,9 @@ export class AgentCapabilityLoader {
       if (resource) return toolBindingToken(resource)
       return defaultBuiltInToolConfigResolver.has(toolId) ? builtInToolBindingToken(toolId) : `${toolId}@missing`
     })
+    const activeToolIds = options.activeToolIds
+      ? definition.toolIds.filter(toolId => options.activeToolIds!.includes(toolId))
+      : definition.toolIds
     const warnings: string[] = []
     if (toolsetContentHash(tokens) !== definition.toolsetContentSha256) {
       warnings.push('Toolset 目录内容与发布快照不一致；自定义 Tool 已拒绝加载，请重新发布 Agent 配置。')
@@ -37,15 +49,15 @@ export class AgentCapabilityLoader {
     const skillCapabilities = new SkillCapabilityRuntime(definition, state, this.skillPackages)
     skillCapabilities.register(registry)
 
-    for (const tool of resources.filter(tool => tool.builtIn && definition.toolIds.includes(tool.key) && !tool.enabled)) {
+    for (const tool of resources.filter(tool => tool.builtIn && activeToolIds.includes(tool.key) && !tool.enabled)) {
       registry.unregister(tool.key)
       warnings.push(`${tool.key}@${tool.version} 已停用。`)
     }
-    for (const key of definition.toolIds.filter(key => defaultBuiltInToolConfigResolver.has(key) && !registry.get(key) && !warnings.some(warning => warning.startsWith(`${key}@`)))) {
+    for (const key of activeToolIds.filter(key => defaultBuiltInToolConfigResolver.has(key) && !registry.get(key) && !warnings.some(warning => warning.startsWith(`${key}@`)))) {
       warnings.push(`${key} 已在内置配置中声明，但当前 Agent 阶段未注册受控实现。`)
     }
 
-    const selected = resources.filter(tool => definition.toolIds.includes(tool.key) && !tool.builtIn)
+    const selected = resources.filter(tool => activeToolIds.includes(tool.key) && !tool.builtIn)
     const mcpServers = state.aiResources.filter((item): item is McpServerResource => item.kind === 'mcp')
     const clients: Client[] = []
     const mcpSessions = new Map<string, { client: Client; tools: McpTool[] }>()

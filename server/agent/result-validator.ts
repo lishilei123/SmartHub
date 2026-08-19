@@ -382,10 +382,9 @@ export class RequirementAnalysisValidator {
     const issues: ValidationIssue[] = []
     if (!input || typeof input !== 'object') return { report: invalid('$', '结果必须是对象') }
     const raw = input as unknown as Record<string, unknown>
-    const allowedRoot = new Set(['summary', 'requirementPoints', 'findings', 'clarifications', 'testFocus', 'analysisDocument'])
+    const allowedRoot = new Set(['summary', 'requirementPoints', 'clarifications', 'testFocus', 'analysisDocument'])
     for (const key of Object.keys(raw)) if (!allowedRoot.has(key)) issues.push(issue(key, '不属于 requirement-analysis/v1 提交协议'))
     if (!Array.isArray(input.requirementPoints)) issues.push(issue('requirementPoints', '必须是数组'))
-    if (!Array.isArray(input.findings)) issues.push(issue('findings', '必须是数组'))
     if (!Array.isArray(input.clarifications)) issues.push(issue('clarifications', '必须是数组'))
     if (!Array.isArray(input.testFocus)) issues.push(issue('testFocus', '必须是数组'))
     if (issues.length) return { report: { valid: false, issues } }
@@ -413,39 +412,6 @@ export class RequirementAnalysisValidator {
     if (!normalizedPoints.report.valid || !normalizedPoints.result) return { report: normalizedPoints.report }
     if (normalizedPoints.result.requirementPoints.length !== input.requirementPoints.length) return { report: invalid('requirementPoints', '需求点规范化数量变化，请移除重复项后重新提交') }
     const referenceMap = new Map(input.requirementPoints.map((point, index) => [point.id.trim(), normalizedPoints.result!.requirementPoints[index].clientRequirementPointId]))
-
-    const findings: CandidateRequirementReview['findings'] = []
-    const findingKeys = new Set<string>()
-    input.findings.forEach((finding, position) => {
-      const path = `findings[${position}]`
-      if (!finding || typeof finding !== 'object') { issues.push(issue(path, 'Finding 必须是对象')); return }
-      const rawFinding = finding as unknown as Record<string, unknown>
-      for (const key of Object.keys(rawFinding)) if (!['title', 'type', 'severity', 'confidence', 'requirementPointRefs', 'analysis', 'impact', 'suggestion'].includes(key)) issues.push(issue(`${path}.${key}`, '不属于最小 Finding 协议'))
-      if (!Array.isArray(finding.requirementPointRefs) || finding.requirementPointRefs.some(reference => typeof reference !== 'string')) { issues.push(issue(`${path}.requirementPointRefs`, '必须是字符串数组；整体性问题使用空数组')); return }
-      const refs = [...new Set(finding.requirementPointRefs.map(reference => reference.trim()).filter(Boolean))]
-      const invalidRefs = refs.filter(reference => !referenceMap.has(reference))
-      if (invalidRefs.length) issues.push(issue(`${path}.requirementPointRefs`, `引用了不存在的需求点：${invalidRefs.join('、')}`))
-      const analysis = typeof finding.analysis === 'string' ? finding.analysis.trim() : ''
-      if (!analysis) issues.push(issue(`${path}.analysis`, '分析内容不能为空'))
-      if (!analysis || invalidRefs.length) return
-      const formalRefs = refs.map(reference => referenceMap.get(reference)!)
-      const key = `${formalRefs.slice().sort().join(',')}:${analysis.toLocaleLowerCase().replace(/\s+/gu, ' ')}`
-      if (findingKeys.has(key)) return
-      findingKeys.add(key)
-      const impact = typeof finding.impact === 'string' ? finding.impact.trim() : ''
-      const suggestion = typeof finding.suggestion === 'string' ? finding.suggestion.trim() : ''
-      findings.push({
-        clientFindingId: `F-${String(findings.length + 1).padStart(3, '0')}`,
-        type: findingTypes.has(String(finding.type)) ? finding.type! : inferFindingType(analysis),
-        severity: severities.has(String(finding.severity)) ? finding.severity! : inferFindingSeverity(analysis),
-        confidence: Number.isFinite(finding.confidence) ? Math.min(1, Math.max(0, Number(finding.confidence))) : 0.75,
-        title: typeof finding.title === 'string' && finding.title.trim() ? finding.title.trim().slice(0, 300) : generatedFindingTitle(analysis),
-        description: analysis,
-        impact: impact || '可能影响相关需求的实现、测试或验收一致性。',
-        recommendation: suggestion || '请补充或确认相关业务规则和判定标准。',
-        requirementPointRefs: formalRefs,
-      })
-    })
 
     const priorClarifications = structuredClone(snapshot.formalClarifications ?? [])
     const clarificationByKey = new Map(priorClarifications.map(item => [clarificationKey(item), item]))
@@ -509,21 +475,18 @@ export class RequirementAnalysisValidator {
 
     const modelSummary = input.summary
     const blockingClarifications = clarifications.filter(item => item.blocking && item.status === 'pending')
-    const proposedAssessment = assessments.has(String(modelSummary?.overallAssessment)) ? modelSummary!.overallAssessment! : findings.length ? 'pass_with_notes' : 'pass'
-    const overallAssessment = blockingClarifications.length ? 'blocked' : proposedAssessment === 'blocked' ? findings.length ? 'pass_with_notes' : 'pass' : proposedAssessment
-    if (!findings.length && (overallAssessment === 'needs_revision' || overallAssessment === 'blocked')) return { report: invalid('findings', `总体结论为 ${overallAssessment} 时必须提交至少一条 Finding；整体性问题使用空 requirementPointRefs`) }
-    const fallbackScore = findings.length ? Math.max(40, 100 - findings.length * 8) : 100
+    const overallAssessment = blockingClarifications.length ? 'blocked' : 'pass'
+    const fallbackScore = 100
     const core = {
       ...normalizedPoints.result,
       summary: {
-        overview: typeof modelSummary?.overview === 'string' && modelSummary.overview.trim() ? modelSummary.overview.trim() : `本次分析形成 ${normalizedPoints.result.requirementPoints.length} 个需求点、${findings.length} 个 Finding 和 ${testFocus.length} 个 Test Focus。`,
+        overview: typeof modelSummary?.overview === 'string' && modelSummary.overview.trim() ? modelSummary.overview.trim() : `本次分析形成 ${normalizedPoints.result.requirementPoints.length} 个需求点和 ${testFocus.length} 个 Test Focus。`,
         businessGoals: cleanStrings(modelSummary?.businessGoals),
         overallAssessment,
         score: Number.isFinite(modelSummary?.score) ? Math.min(100, Math.max(0, Number(modelSummary?.score))) : fallbackScore,
         strengths: cleanStrings(modelSummary?.strengths),
         risks: cleanStrings(modelSummary?.risks),
       },
-      findings,
       clarifications,
       testFocus,
       ...(typeof input.analysisDocument === 'string' && input.analysisDocument.trim() ? { analysisDocument: input.analysisDocument.trim() } : {}),
@@ -542,18 +505,6 @@ export class RequirementAnalysisValidator {
     if (!Number.isFinite(input.summary?.score) || input.summary.score < 0 || input.summary.score > 100) issues.push(issue('summary.score', '评分必须为 0～100'))
     if (typeof input.summary?.overview !== 'string' || !isStrings(input.summary?.businessGoals) || !isStrings(input.summary?.strengths) || !isStrings(input.summary?.risks)) issues.push(issue('summary', '摘要字段结构不合法'))
     const pointIds = new Set(input.requirementPoints.map(point => point.clientRequirementPointId))
-    const findingIds = new Set<string>()
-    const maxFindings = snapshot.agentDefinition.limits.maxFindings
-    if (!Array.isArray(input.findings) || input.findings.length > maxFindings) issues.push(issue('findings', 'Finding 结构或数量不合法'))
-    else input.findings.forEach((finding, position) => {
-      const path = `findings[${position}]`
-      if (!finding.clientFindingId || findingIds.has(finding.clientFindingId)) issues.push(issue(`${path}.clientFindingId`, 'Finding ID 为空或重复'))
-      findingIds.add(finding.clientFindingId)
-      if (!findingTypes.has(finding.type) || !severities.has(finding.severity)) issues.push(issue(path, 'Finding 类型或严重度不合法'))
-      if (!Number.isFinite(finding.confidence) || finding.confidence < 0 || finding.confidence > 1) issues.push(issue(`${path}.confidence`, '置信度必须为 0～1'))
-      for (const key of ['title', 'description', 'impact', 'recommendation'] as const) if (!finding[key]?.trim()) issues.push(issue(`${path}.${key}`, '字段不能为空'))
-      if (!isStrings(finding.requirementPointRefs) || finding.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用必须全部指向当前结果内的需求点；整体性问题可以为空'))
-    })
     if (!Array.isArray(input.clarifications) || input.clarifications.length > 500) issues.push(issue('clarifications', 'Clarification 结构或数量不合法'))
     else {
       const ids = new Set<string>()
@@ -578,8 +529,8 @@ export class RequirementAnalysisValidator {
         if (!isStrings(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用了不存在的需求点'))
       })
     }
-    const expectedArtifactNames = new Set(['requirement-baseline.md', 'requirement-analysis-findings.md', 'requirement-analysis.md'])
-    if (!Array.isArray(input.artifacts) || input.artifacts.length !== expectedArtifactNames.size) issues.push(issue('artifacts', '必须包含三个 Markdown Artifact'))
+    const expectedArtifactNames = new Set(['requirement-baseline.md', 'requirement-analysis.md'])
+    if (!Array.isArray(input.artifacts) || input.artifacts.length !== expectedArtifactNames.size) issues.push(issue('artifacts', '必须包含两个 Markdown Artifact'))
     else input.artifacts.forEach((artifact, position) => {
       if (!expectedArtifactNames.delete(artifact.fileName) || artifact.mediaType !== 'text/markdown' || !artifact.content || createHash('sha256').update(artifact.content).digest('hex') !== artifact.contentSha256) issues.push(issue(`artifacts[${position}]`, 'Artifact 名称、内容或 Hash 不合法'))
     })

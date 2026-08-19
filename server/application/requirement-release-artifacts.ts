@@ -1,17 +1,15 @@
 import { createHash } from 'node:crypto'
 import type { RequirementReleaseArtifact, RequirementReleaseCandidate } from '../domain/requirement-workflow-types.js'
-import type { DatabaseState, FindingAction, FindingState, ReviewRun } from '../domain/types.js'
+import type { DatabaseState, ReviewRun } from '../domain/types.js'
 
 export function buildRequirementReleaseArtifacts(input: {
   state: DatabaseState
   releaseId: string
   verificationRun: ReviewRun
-  sourceRun?: ReviewRun
-  repairDraftId?: string
   candidate: RequirementReleaseCandidate
   generatedAt: string
 }): { artifacts: RequirementReleaseArtifact[]; contentSha256: string } {
-  const { state, releaseId, verificationRun, sourceRun, repairDraftId, candidate, generatedAt } = input
+  const { state, releaseId, verificationRun, candidate, generatedAt } = input
   const result = required(verificationRun.result, '复验结果不存在')
   const sourceAssets = verificationRun.snapshot.assets.map(reference => {
     const version = required(state.versions.find(item => item.id === reference.assetVersionId), `固定需求版本不存在：${reference.assetVersionId}`)
@@ -19,8 +17,6 @@ export function buildRequirementReleaseArtifacts(input: {
     if (version.contentHash !== reference.assetContentHash) throw new Error(`固定需求版本 Hash 漂移：${reference.assetVersionId}`)
     return { reference, version, asset }
   })
-  const verificationProjection = projectFindings(verificationRun, state.findingActions)
-  const sourceProjection = sourceRun ? projectFindings(sourceRun, state.findingActions) : []
   const evidenceById = new Map(result.evidence.map(item => [item.clientEvidenceId, item]))
   const testFocusByRequirement = new Map<string, string[]>()
   result.testFocus.forEach(item => item.requirementPointRefs.forEach(reference => testFocusByRequirement.set(reference, [...(testFocusByRequirement.get(reference) ?? []), item.id])))
@@ -45,14 +41,7 @@ export function buildRequirementReleaseArtifacts(input: {
     clarificationDispositionRecords: result.clarifications.filter(item => item.status === 'dismissed'),
     generatedAt,
   })))
-  artifacts.push(artifact('requirement-analysis-closure.md', 'text/markdown', renderClosure(sourceRun, sourceProjection, verificationRun, verificationProjection)))
-  artifacts.push(artifact('findings.json', 'application/json', json({
-    schemaVersion: 'requirement-findings/v1',
-    releaseId,
-    sourceRun: sourceRun ? { runId: sourceRun.id, findings: sourceProjection } : null,
-    verificationRun: { runId: verificationRun.id, findings: verificationProjection },
-    generatedAt,
-  })))
+  artifacts.push(artifact('requirement-analysis-closure.md', 'text/markdown', renderClosure(verificationRun)))
   artifacts.push(artifact('requirement-analysis-report.md', 'text/markdown', artifactContent(result.artifacts, 'requirement-analysis.md')))
   artifacts.push(artifact('clarifications.json', 'application/json', json({
     schemaVersion: 'planning-clarifications/v1',
@@ -71,7 +60,6 @@ export function buildRequirementReleaseArtifacts(input: {
       requirementId: point.clientRequirementPointId,
       evidenceIds: point.evidenceRefs,
       sourceAssetVersionIds: [...new Set(point.evidenceRefs.map(id => evidenceById.get(id)?.sourceRef.assetVersionId).filter((id): id is string => Boolean(id)))],
-      findingIds: result.findings.filter(finding => finding.requirementPointRefs.includes(point.clientRequirementPointId)).map(finding => finding.clientFindingId),
       clarificationIds: clarificationByRequirement.get(point.clientRequirementPointId) ?? [],
       testFocusIds: testFocusByRequirement.get(point.clientRequirementPointId) ?? [],
     })),
@@ -83,13 +71,10 @@ export function buildRequirementReleaseArtifacts(input: {
     releaseId,
     projectVersionId: verificationRun.projectVersionId,
     verificationRunId: verificationRun.id,
-    sourceRunId: sourceRun?.id ?? null,
-    repairDraftId: repairDraftId ?? null,
     sourceAssetVersions: sourceAssets.map(item => ({ assetId: item.reference.assetId, assetVersionId: item.reference.assetVersionId, contentSha256: item.reference.assetContentHash, logicalPath: item.reference.logicalPath })),
     artifacts: artifacts.map(item => ({ fileName: item.fileName, mediaType: item.mediaType, contentSha256: item.contentSha256, bytes: Buffer.byteLength(item.content, 'utf8') })),
     machineReadableEntryPoints: {
       requirements: 'requirements.json',
-      findings: 'findings.json',
       clarifications: 'clarifications.json',
       testFocus: 'test-focus.json',
       traceability: 'traceability.json',
@@ -101,23 +86,10 @@ export function buildRequirementReleaseArtifacts(input: {
   return { artifacts, contentSha256: sha256(manifestContent) }
 }
 
-function projectFindings(run: ReviewRun, actions: FindingAction[]) {
-  const result = required(run.result, '需求分析结果不存在')
-  return result.findings.map(finding => {
-    const history = actions.filter(item => item.runId === run.id && item.findingId === finding.clientFindingId).sort((left, right) => left.version - right.version)
-    return { ...finding, state: history.at(-1)?.toState ?? 'open' as FindingState, version: history.at(-1)?.version ?? 0, actions: history }
-  })
-}
-
-function renderClosure(sourceRun: ReviewRun | undefined, sourceFindings: ReturnType<typeof projectFindings>, verificationRun: ReviewRun, verificationFindings: ReturnType<typeof projectFindings>) {
+function renderClosure(verificationRun: ReviewRun) {
   return [
     '# Requirement Analysis Closure', '',
     `- Verification Run：${verificationRun.id}`,
-    `- Source Run：${sourceRun?.id ?? '无（首次分析直接通过）'}`, '',
-    '## Source Findings', '',
-    ...(sourceFindings.length ? sourceFindings.map(item => `- ${item.clientFindingId} · ${safe(item.title)}：${item.state}（v${item.version}）`) : ['- 无。']), '',
-    '## Verification Findings', '',
-    ...(verificationFindings.length ? verificationFindings.map(item => `- ${item.clientFindingId} · ${safe(item.title)}：${item.state}（v${item.version}）`) : ['- 复验未发现新的 Finding。']), '',
     `- Overall Assessment：${verificationRun.result?.summary.overallAssessment ?? 'unknown'}`,
   ].join('\n')
 }

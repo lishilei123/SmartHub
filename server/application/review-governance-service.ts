@@ -1,66 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { ToolApprovalGate } from '../domain/tool-types.js'
 import type { Principal } from '../domain/access-control.js'
-import type { FindingAction, FindingActionType, FindingState, ReviewRun, ToolApproval } from '../domain/types.js'
+import type { ToolApproval } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
-
-const findingTransitions: Record<FindingActionType, FindingState> = {
-  confirm: 'confirmed',
-  dismiss: 'dismissed',
-  resolve: 'resolved',
-  request_follow_up: 'needs_follow_up',
-  reopen: 'open',
-}
-
-const allowedTransitions: Record<FindingState, FindingActionType[]> = {
-  open: ['confirm', 'dismiss', 'resolve', 'request_follow_up'],
-  confirmed: ['dismiss', 'resolve', 'request_follow_up', 'reopen'],
-  dismissed: ['reopen'],
-  resolved: ['request_follow_up', 'reopen'],
-  needs_follow_up: ['confirm', 'dismiss', 'resolve', 'reopen'],
-}
 
 export class ReviewGovernanceService implements ToolApprovalGate {
   constructor(private readonly store: StateStore) {}
-
-  async listFindingActions(runId: string) {
-    const state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-    return findingProjection(run, state.findingActions.filter(item => item.runId === runId))
-  }
-
-  async actOnFinding(runId: string, findingId: string, input: { action: FindingActionType; comment?: string; expectedVersion?: number; principal?: Principal }) {
-    if (!(input.action in findingTransitions)) throw new Error('Finding 处置动作无效')
-    const comment = String(input.comment ?? '').trim()
-    if (comment.length > 2_000) throw new Error('处置说明不能超过 2000 个字符')
-    if (['dismiss', 'request_follow_up', 'reopen'].includes(input.action) && !comment) throw new Error('驳回、待跟进或重新打开时必须填写处置说明')
-    return this.store.transaction(state => {
-      const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-      if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的需求分析结果可以处置 Finding')
-      required(run.result.findings.find(item => item.clientFindingId === findingId), 'Finding 不属于指定需求分析运行')
-      const actions = state.findingActions.filter(item => item.runId === runId && item.findingId === findingId).sort((left, right) => left.version - right.version)
-      const version = actions.length
-      if (input.expectedVersion !== undefined && input.expectedVersion !== version) throw new Error('FINDING_ACTION_VERSION_CONFLICT: 处置状态已被其他用户更新，请刷新后重试')
-      const fromState = actions.at(-1)?.toState ?? 'open'
-      if (!allowedTransitions[fromState].includes(input.action)) throw new Error(`Finding 当前为 ${fromState}，不能执行 ${input.action}`)
-      const action: FindingAction = {
-        id: `finding_action_${randomUUID()}`,
-        projectVersionId: run.projectVersionId,
-        runId,
-        findingId,
-        action: input.action,
-        fromState,
-        toState: findingTransitions[input.action],
-        ...(comment ? { comment } : {}),
-        actorId: principalId(input.principal),
-        actorDisplayName: principalName(input.principal),
-        version: version + 1,
-        createdAt: new Date().toISOString(),
-      }
-      state.findingActions.push(action)
-      return structuredClone(action)
-    })
-  }
 
   async listApprovals(runId: string) {
     const now = Date.now()
@@ -171,10 +116,6 @@ export class ReviewGovernanceService implements ToolApprovalGate {
     const run = required(state.reviewRuns.find(item => item.id === runId && item.projectVersionId === projectVersionId), '指定项目版本下不存在该需求分析运行')
     if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的需求分析结果可以导出')
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), '项目版本不存在')
-    const projection = findingProjection(run, state.findingActions.filter(item => item.runId === runId))
-    const states = new Map(projection.findings.map(item => [item.findingId, item]))
-    const evidence = new Map(run.result.evidence.map(item => [item.clientEvidenceId, item]))
-    const points = new Map(run.result.requirementPoints.map(item => [item.clientRequirementPointId, item]))
     const lines = [
       `# ${projectVersion.name} · 需求分析报告`, '',
       `- 运行 ID：${run.id}`,
@@ -193,12 +134,6 @@ export class ReviewGovernanceService implements ToolApprovalGate {
       ...run.result.summary.risks.map(item => `- 风险：${safeMarkdown(item)}`), '',
       '## 需求点', '',
       ...run.result.requirementPoints.flatMap(point => [`### ${safeMarkdown(point.clientRequirementPointId)} · ${safeMarkdown(point.title)}`, '', safeMarkdown(point.description), '', `- Evidence：${point.evidenceRefs.join('、')}`, '']),
-      '## Findings', '',
-      ...run.result.findings.flatMap((finding, index) => {
-        const current = states.get(finding.clientFindingId)!
-        const evidenceItems = finding.requirementPointRefs.flatMap(reference => points.get(reference)?.evidenceRefs ?? []).map(reference => evidence.get(reference)).filter(Boolean)
-        return [`### ${index + 1}. ${safeMarkdown(finding.title)}`, '', `- ID：${finding.clientFindingId}`, `- 类型：${finding.type}`, `- 严重度：${finding.severity}`, `- 处置状态：${current.state}`, `- 处置版本：${current.version}`, `- 关联需求点：${finding.requirementPointRefs.join('、')}`, `- 问题：${safeMarkdown(finding.description)}`, `- 影响：${safeMarkdown(finding.impact)}`, `- 建议确认：${safeMarkdown(finding.recommendation)}`, ...evidenceItems.map(item => `- Evidence：${item!.sourceRef.assetVersionId} / ${safeMarkdown(item!.locator.heading)} — ${safeMarkdown(item!.quote)}`), '']
-      }),
       '## Test Focus', '',
       ...(run.result.testFocus.length ? run.result.testFocus.flatMap(item => [`### ${safeMarkdown(item.id)} · ${safeMarkdown(item.title)}`, '', safeMarkdown(item.description), '', `- 关联需求点：${item.requirementPointRefs.join('、') || '整体关注项'}`, '']) : ['本次没有单独的测试关注项。', '']),
       '## 降级与执行摘要', '',
@@ -207,20 +142,6 @@ export class ReviewGovernanceService implements ToolApprovalGate {
       ...Object.values(run.executions ?? {}).filter(Boolean).map(execution => `- ${execution!.agentKey}：${execution!.turns} Turn，${execution!.toolCalls} 次工具调用，${execution!.toolErrors ?? 0} 次工具错误`),
     ]
     return lines.join('\n')
-  }
-}
-
-function findingProjection(run: ReviewRun, actions: FindingAction[]) {
-  if (!run.result) return { runId: run.id, findings: [], actions: [] }
-  const ordered = [...actions].sort((left, right) => left.version - right.version)
-  return {
-    runId: run.id,
-    projectVersionId: run.projectVersionId,
-    findings: run.result.findings.map(finding => {
-      const history = ordered.filter(item => item.findingId === finding.clientFindingId)
-      return { findingId: finding.clientFindingId, state: history.at(-1)?.toState ?? 'open' as FindingState, version: history.at(-1)?.version ?? 0, lastActionAt: history.at(-1)?.createdAt }
-    }),
-    actions: ordered,
   }
 }
 

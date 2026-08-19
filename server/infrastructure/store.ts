@@ -271,7 +271,8 @@ export function normalizeReviewSeverities(state: DatabaseState) {
       run.reviewId = root.reviewId ?? `review_${root.id}`
     }
     run.snapshot.reviewId ??= run.reviewId
-    run.result?.findings.forEach(finding => {
+    const legacyFindings = (run.result as unknown as { findings?: Array<{ severity?: string }> } | undefined)?.findings ?? []
+    legacyFindings.forEach(finding => {
       const legacy = String(finding.severity)
       if (legacy === 'critical') finding.severity = 'blocker'
       else if (legacy === 'info') finding.severity = 'low'

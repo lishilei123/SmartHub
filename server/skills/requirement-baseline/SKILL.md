@@ -1,6 +1,6 @@
 ---
 name: requirement-baseline
-description: Read the fixed current requirement workspace and establish a complete, atomic, evidence-traceable requirement baseline. Use during the baseline stage of SmartHub's single Pi Coding Agent requirement workflow, including initial analysis and post-repair verification.
+description: Read the fixed current requirement workspace and establish a complete, atomic, evidence-traceable requirement baseline for SmartHub's single Pi Coding Agent requirement workflow.
 ---
 
 # 建立需求基线
@@ -10,7 +10,7 @@ description: Read the fixed current requirement workspace and establish a comple
 3. 先形成业务目标、角色、对象、主流程、状态与依赖的整体理解，再拆分需求点。
 4. 需求点以可独立实现、测试或验收为最小粒度，同时保留条件、边界和结果。
 5. `sourceTexts` 只能复制本次 `read` 返回的连续逐字原文。不得把 Knowledge 或其他分支内容写成当前需求事实。
-6. 语义等价项可以合并；互相冲突的当前要求分别保留，交给审核阶段形成 Finding。
+6. 语义等价项可以合并；互相冲突的当前要求分别保留，必要时由需求分析形成 Clarification。
 7. 在进入审核前检查文件覆盖、需求遗漏、重复点、临时 ID 和原文追溯。
 
-本 Skill 只指导建立基线，不修改需求、不关闭 Finding、不发布产物。其他已绑定 Skill 同样由 Runtime 在运行开始时加载，Agent 根据当前任务自行组合使用。
+本 Skill 只指导建立基线，不修改需求、不发布产物。其他已绑定 Skill 同样由 Runtime 在运行开始时加载，Agent 根据当前任务自行组合使用。

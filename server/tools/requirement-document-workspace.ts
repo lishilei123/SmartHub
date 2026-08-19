@@ -234,9 +234,16 @@ function normalizeToolArguments(toolId: RequirementWorkspaceToolId, value: unkno
     ...(input.limit === undefined ? {} : { limit: positiveInteger(input.limit, 'limit') }),
   }
   return {
-    path: relativeInput(input.path ?? '.', true),
+    path: workspaceDirectoryInput(input.path),
     ...(input.limit === undefined ? {} : { limit: positiveInteger(input.limit, 'limit') }),
   }
+}
+
+function workspaceDirectoryInput(value: unknown) {
+  // Models commonly represent an omitted `ls` path as "". Keep that spelling
+  // equivalent to an omitted path, while normalizing it to the sandboxed root.
+  if (typeof value === 'string' && !value.trim()) return '.'
+  return relativeInput(value ?? '.', true)
 }
 
 function relativeInput(value: unknown, allowDirectory: boolean) {

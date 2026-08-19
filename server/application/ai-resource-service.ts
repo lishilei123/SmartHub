@@ -19,9 +19,7 @@ const builtInTools: ToolResource[] = defaultBuiltInToolConfigResolver.keys({ cat
 const builtInSkills: SkillResource[] = [
   builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例']),
   builtInSkill('requirement.baseline', '需求基线', '读取固定需求正文并建立完整、原子且可追溯到原文证据的需求基线草稿。', '1.0.0', 'server/skills/requirement-baseline/SKILL.md', [], ['需求分析', '基线', 'baseline']),
-  builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成整体理解、需求基线、跨需求分析、Finding、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'finding', 'traceability']),
-  builtInSkill('requirement.repair', '需求修复', '针对人工确认的 Finding 生成基于固定原文且可安全应用的 Patch 草稿。', '1.0.0', 'server/skills/requirement-repair/SKILL.md', [], ['需求分析', '修复', 'patch']),
-  builtInSkill('requirement.verification', '需求复验', '完整复查修复后的需求版本并判定原 Finding 是否真正完成闭环。', '1.0.0', 'server/skills/requirement-verification/SKILL.md', [], ['需求分析', '复验', 'verification']),
+  builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成需求理解、Clarification、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'clarification', 'traceability']),
   builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact']),
   builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release、正式用例库或套件建立测试设计事实和变化基线。', '1.2.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace']),
   builtInSkill('test-point-design', '测试点设计', '基于冻结需求和历史映射直接设计完整且可审核的 Test Point Tree 候选。', '1.1.0', 'server/skills/test-point-design/SKILL.md', [], ['测试设计', '测试点', 'tree']),
@@ -32,8 +30,8 @@ const builtInSkills: SkillResource[] = [
   builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下修复 Playwright 实现候选。', '1.0.0', 'server/skills/script-repair/SKILL.md', [], ['测试执行', 'Playwright', '脚本修复']),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
-const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', 'skill.activate', 'skill.execute_script', 'skill.http_request'])
-const retiredBuiltInSkillKeys = new Set(['system.requirement-analysis', 'requirement.review', 'system.query-local-ip'])
+const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', 'requirement-repair.submit_result', 'skill.activate', 'skill.execute_script', 'skill.http_request'])
+const retiredBuiltInSkillKeys = new Set(['system.requirement-analysis', 'requirement.review', 'requirement.repair', 'requirement.verification', 'system.query-local-ip'])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 

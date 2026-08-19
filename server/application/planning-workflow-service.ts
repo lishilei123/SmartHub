@@ -81,21 +81,6 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
     [],
   ),
   stage(
-    'requirement_repair',
-    [...PLANNING_WORKSPACE_TOOLS, 'requirement-repair.submit_result'],
-    'requirement-repair.submit_result',
-    'requirement-repair/v1',
-    ['requirement'],
-    true,
-  ),
-  stage(
-    'requirement_verification',
-    [...PLANNING_WORKSPACE_TOOLS, 'requirement-analysis.submit_result'],
-    'requirement-analysis.submit_result',
-    'requirement-analysis/v1',
-    ['requirement'],
-  ),
-  stage(
     'requirement_release',
     [...PLANNING_WORKSPACE_TOOLS, 'requirement-release.submit_result'],
     'requirement-release.submit_result',
@@ -690,7 +675,6 @@ function requirementReviewerTask(run: ReviewRun) {
     `Source Run：${run.id}`,
     `ProjectVersion：${run.projectVersionId}`,
     `固定 AssetVersion/Hash：${JSON.stringify(run.snapshot.assets.map(item => ({ assetVersionId: item.assetVersionId, contentSha256: item.assetContentHash })))}`,
-    `固定 Finding：${JSON.stringify(run.result?.findings ?? [])}`,
     '重点检查需求完整性、一致性、歧义、可验证性、Evidence 与 Test Focus。',
   ].join('\n')
 }

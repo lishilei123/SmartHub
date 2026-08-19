@@ -109,6 +109,17 @@ export interface TestPointDesignCandidate extends Record<string, unknown> {
   confirmationItems: Record<string, unknown>[]
 }
 
+/** The wire shape accepted by the test-case submit tools. */
+export interface TestCaseDesignCandidateSubmission extends Record<string, unknown> {
+  schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1'
+  cases: Array<{ ref: string } & TestCaseContent>
+  dataRequirements: TestDataRequirementCandidate[]
+  findings: Record<string, unknown>[]
+  confirmationItems: Record<string, unknown>[]
+  proposals: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; testPointIds: string[]; reason: string; confidence: number }>
+}
+
+/** Normalized internal form returned after a flat submission is validated. */
 export interface TestCaseDesignCandidate extends Record<string, unknown> {
   schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1'
   cases: Array<{ ref: string; content: TestCaseContent }>
@@ -135,6 +146,7 @@ const legacySynthesisFieldGuidance: Record<string, string> = {
   entryPoints: 'UI 入口写入 uiSpec.entry，API 入口写入 apiSpec.path',
   dataRequirements: '移到提交根对象 dataRequirements[]',
   testData: '移到提交根对象 dataRequirements[]',
+  content: '将 content 内的用例字段直接展开到 cases[] 每一项；禁止 { ref, content: {...} } 包装',
 }
 
 export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: Set<string>, repair = false): TestCaseDesignCandidate {
@@ -370,7 +382,7 @@ function executionMethods(value: unknown, allowEmpty = false): ExecutionMethodSp
     if (input.method !== 'ui' && input.method !== 'api') fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '执行方式只允许 ui 或 api', 422)
     if (seen.has(input.method)) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '执行方式不能重复', 422)
     seen.add(input.method)
-    const common = { steps: steps(input.steps, index), verificationChecks: checks(input.verificationChecks, `executionMethods[${index}].verificationChecks`), executionReadiness: readiness(input.executionReadiness), automationHint: text(input.automationHint, `executionMethods[${index}].automationHint`, 2_000) }
+    const common = { steps: steps(input.steps, `executionMethods[${index}].steps`), verificationChecks: checks(input.verificationChecks, `executionMethods[${index}].verificationChecks`), executionReadiness: readiness(input.executionReadiness), automationHint: text(input.automationHint, `executionMethods[${index}].automationHint`, 2_000) }
     if (input.method === 'ui') {
       rejectUnknown(input, ['method', 'uiSpec', 'steps', 'verificationChecks', 'executionReadiness', 'automationHint'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID')
       const spec = object(input.uiSpec, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'uiSpec 必填')
@@ -387,7 +399,7 @@ function executionMethods(value: unknown, allowEmpty = false): ExecutionMethodSp
 function validateExecutionSpec(value: unknown, testDimension: TestDimension, methods: ExecutionMethodSpec[], preconditions: string[], dataRequirementIds: string[]): TestCaseExecutionSpec {
   if (value === undefined) {
     const primary = methods[0]
-    if (testDimension === 'functional' || testDimension === 'security') return { kind: 'functional', method: primary.method, steps: primary.steps, verificationChecks: primary.verificationChecks, preconditions, testDataRequirements: dataRequirementIds, executionReadiness: primary.executionReadiness, automationHint: primary.automationHint }
+    if (testDimension === 'functional' || testDimension === 'security') return functionalExecutionSpec(primary, preconditions, dataRequirementIds)
     if (testDimension === 'performance') return { kind: 'performance', method: 'performance_tool', target: '待需求或人工确认', scenario: '待需求或人工确认', virtualUsers: null, duration: null, rampUp: null, thresholds: [], dataStrategy: '待确认', environmentRequirements: [], executionReadiness: 'needs_confirmation' }
     if (testDimension === 'stability') return { kind: 'stability', method: 'long_running', workload: '待需求或人工确认', duration: null, interval: null, observations: [], recoveryPolicy: null, checkpointPolicy: null, environmentRequirements: [], executionReadiness: 'needs_confirmation' }
     return { kind: 'compatibility', method: 'environment_matrix', baseMethod: primary.method, baseCaseRefs: [], browserMatrix: [], operatingSystemMatrix: [], viewportMatrix: [], versionMatrix: [], expectedConsistency: '待需求、项目配置或人工确认', executionReadiness: 'needs_confirmation' }
@@ -396,8 +408,23 @@ function validateExecutionSpec(value: unknown, testDimension: TestDimension, met
   if (testDimension === 'functional' || testDimension === 'security') {
     rejectUnknown(input, ['kind', 'method', 'steps', 'verificationChecks', 'preconditions', 'testDataRequirements', 'executionReadiness', 'automationHint'], 'TEST_CASE_EXECUTION_SPEC_INVALID')
     if (input.kind !== 'functional' || (input.method !== 'ui' && input.method !== 'api')) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能执行配置 kind/method 无效', 422)
-    if (!methods.some(method => method.method === input.method)) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能执行配置 method 必须存在于 executionMethods', 422)
-    return { kind: 'functional', method: input.method, steps: steps(input.steps, 0), verificationChecks: checks(input.verificationChecks, 'executionSpec.verificationChecks'), preconditions: texts(input.preconditions, 'executionSpec.preconditions', 100, 2_000), testDataRequirements: texts(input.testDataRequirements, 'executionSpec.testDataRequirements', 100, 2_000), executionReadiness: readiness(input.executionReadiness), automationHint: text(input.automationHint, 'executionSpec.automationHint', 2_000) }
+    const method = methods.find(candidate => candidate.method === input.method)
+    if (!method) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能执行配置 method 必须存在于 executionMethods', 422)
+    const projected = functionalExecutionSpec(method, preconditions, dataRequirementIds)
+    const hasRepeatedDetails = ['steps', 'verificationChecks', 'preconditions', 'testDataRequirements', 'executionReadiness', 'automationHint'].some(field => Object.hasOwn(input, field))
+    if (!hasRepeatedDetails) return projected
+    const supplied = {
+      kind: 'functional' as const,
+      method: input.method,
+      steps: steps(input.steps, 'executionSpec.steps'),
+      verificationChecks: checks(input.verificationChecks, 'executionSpec.verificationChecks'),
+      preconditions: texts(input.preconditions, 'executionSpec.preconditions', 100, 2_000),
+      testDataRequirements: texts(input.testDataRequirements, 'executionSpec.testDataRequirements', 100, 2_000),
+      executionReadiness: readiness(input.executionReadiness),
+      automationHint: text(input.automationHint, 'executionSpec.automationHint', 2_000),
+    }
+    if (canonicalSha256(supplied) !== canonicalSha256(projected)) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能 executionSpec 的重复字段必须与 executionMethods 和用例根字段一致；可仅提交 kind 与 method', 422)
+    return projected
   }
   if (testDimension === 'performance') {
     rejectUnknown(input, ['kind', 'method', 'target', 'scenario', 'virtualUsers', 'duration', 'rampUp', 'thresholds', 'dataStrategy', 'environmentRequirements', 'executionReadiness'], 'TEST_CASE_EXECUTION_SPEC_INVALID')
@@ -423,13 +450,26 @@ function validateExecutionSpec(value: unknown, testDimension: TestDimension, met
   return { kind: 'compatibility', method: 'environment_matrix', baseMethod: input.baseMethod, baseCaseRefs: uniqueIds(input.baseCaseRefs, 'executionSpec.baseCaseRefs'), browserMatrix, operatingSystemMatrix, viewportMatrix, versionMatrix, expectedConsistency: requiredText(input.expectedConsistency, 'executionSpec.expectedConsistency', 4_000), executionReadiness: hasMatrix ? readiness(input.executionReadiness) : 'needs_confirmation' }
 }
 
+function functionalExecutionSpec(method: ExecutionMethodSpec, preconditions: string[], dataRequirementIds: string[]) {
+  return {
+    kind: 'functional' as const,
+    method: method.method,
+    steps: method.steps,
+    verificationChecks: method.verificationChecks,
+    preconditions,
+    testDataRequirements: dataRequirementIds,
+    executionReadiness: method.executionReadiness,
+    automationHint: method.automationHint,
+  }
+}
+
 function nullableText(value: unknown, field: string, max: number) { return value == null || value === '' ? null : text(value, field, max).trim() || null }
 function nullablePositiveInteger(value: unknown, field: string) { if (value == null) return null; if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 1_000_000) fail('TEST_CASE_EXECUTION_SPEC_INVALID', `${field} 必须为正整数或 null`, 422); return Number(value) }
 
-function steps(value: unknown, methodIndex: number) {
-  if (!Array.isArray(value) || !value.length || value.length > 200) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', `executionMethods[${methodIndex}].steps 不能为空`, 422)
+function steps(value: unknown, field: string) {
+  if (!Array.isArray(value) || !value.length || value.length > 200) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', `${field} 不能为空`, 422)
   const keys = new Set<string>()
-  return value.map((candidate, index) => { const input = object(candidate, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'step 必须是对象'); rejectUnknown(input, ['key', 'action', 'expected'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID'); const key = id(input.key, `steps[${index}].key`); if (keys.has(key)) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '步骤 key 不能重复', 422); keys.add(key); return { key, action: requiredText(input.action, 'step.action', 4_000), expected: requiredText(input.expected, 'step.expected', 4_000) } })
+  return value.map((candidate, index) => { const input = object(candidate, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'step 必须是对象'); rejectUnknown(input, ['key', 'action', 'expected'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID'); const key = id(input.key, `${field}[${index}].key`); if (keys.has(key)) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '步骤 key 不能重复', 422); keys.add(key); return { key, action: requiredText(input.action, `${field}[${index}].action`, 4_000), expected: requiredText(input.expected, `${field}[${index}].expected`, 4_000) } })
 }
 
 function checks(value: unknown, field: string) { if (!Array.isArray(value) || value.length > 200) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', `${field} 必须是数组`, 422); return value.map((candidate, index) => { const input = object(candidate, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '检查点必须是对象'); rejectUnknown(input, ['key', 'description'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID'); return { key: id(input.key, `${field}[${index}].key`), description: requiredText(input.description, `${field}[${index}].description`, 4_000) } }) }

@@ -13,8 +13,8 @@ import {
   agentCatalogEntryByDefinition,
 } from '../agent/agent-catalog.js'
 
-const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', 'skill.activate', 'skill.execute_script', 'skill.http_request'])
-const RETIRED_SKILL_KEYS = new Set(['system.requirement-analysis', 'requirement.review', 'system.query-local-ip'])
+const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', 'requirement-repair.submit_result', 'skill.activate', 'skill.execute_script', 'skill.http_request'])
+const RETIRED_SKILL_KEYS = new Set(['system.requirement-analysis', 'requirement.review', 'requirement.repair', 'requirement.verification', 'system.query-local-ip'])
 
 export type AgentConfigurationInput = {
   agentKey: AgentConfigurationAgentKey

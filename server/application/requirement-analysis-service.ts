@@ -4,13 +4,12 @@ import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, Re
 import { activateRequirementReleaseBinding } from '../domain/requirement-release-bindings.js'
 import type { CandidateRequirementAnalysisV1, PlanningClarification, RequirementAnalysisResult } from '../domain/review-types.js'
 import type { Principal } from '../domain/access-control.js'
-import type { RequirementReleaseCandidate, RequirementReleasePackage, RequirementRepairCandidate, RequirementRepairDraft, RequirementUnderstandingSnapshot, RequirementWorkflowStage, RequirementWorkflowState } from '../domain/requirement-workflow-types.js'
+import type { RequirementReleaseCandidate, RequirementReleasePackage, RequirementUnderstandingSnapshot, RequirementWorkflowStage, RequirementWorkflowState } from '../domain/requirement-workflow-types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RequirementAnalysisValidator } from '../agent/result-validator.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import { buildRequirementDirectoryInputPlan } from '../agent/requirement-context-assembler.js'
-import { renderPlanningRequirementTask, type PlanningRequirementTaskMode } from '../agent/planning-agent.js'
-import type { KnowledgeService } from './knowledge-service.js'
+import { renderPlanningRequirementTask } from '../agent/planning-agent.js'
 import { buildRequirementReleaseArtifacts } from './requirement-release-artifacts.js'
 import { buildCurrentInputRefs, buildProjectWorkspaceSnapshot } from './project-workspace-snapshot.js'
 import { renderRequirementAnalysisArtifacts } from '../agent/requirement-analysis-artifacts.js'
@@ -34,8 +33,6 @@ export interface RequirementAnalysisRequest {
   excludedAreas?: string[]
   retryOfRunId?: string
   retryMode?: 'full'
-  workflowStage?: 'analysis' | 'verification'
-  verificationOf?: { sourceRunId: string; repairDraftId: string }
   formalClarifications?: PlanningClarification[]
 }
 
@@ -50,7 +47,7 @@ export class RequirementAnalysisService {
   private readonly activeRuns = new Map<string, AbortController>()
   private understandingReadyListener?: (runId: string) => void | Promise<void>
 
-  constructor(private readonly store: StateStore, private readonly runtime: PlanningRequirementRuntime, private readonly definitions: AgentDefinitionResolver = defaultAgentDefinitionResolver, private readonly knowledge?: KnowledgeService) {
+  constructor(private readonly store: StateStore, private readonly runtime: PlanningRequirementRuntime, private readonly definitions: AgentDefinitionResolver = defaultAgentDefinitionResolver) {
     this.validator = new RequirementAnalysisValidator(store)
   }
 
@@ -185,7 +182,6 @@ export class RequirementAnalysisService {
       const requirementResultSha256 = sha256Text(JSON.stringify({
         requirementPoints: result.requirementPoints,
         evidence: result.evidence,
-        findings: result.findings,
         clarifications: result.clarifications,
         testFocus: result.testFocus,
       }))
@@ -269,8 +265,6 @@ export class RequirementAnalysisService {
       excludedAreas: sourceRun.snapshot.excludedAreas,
       retryOfRunId: sourceRun.id,
       retryMode: 'full',
-      workflowStage: sourceRun.workflow?.currentStage === 'verification' ? 'verification' : 'analysis',
-      verificationOf: sourceRun.workflow?.verificationOf,
       formalClarifications: structuredClone(sourceRun.snapshot.formalClarifications ?? []),
     })
   }
@@ -287,180 +281,6 @@ export class RequirementAnalysisService {
     return this.get(runId)
   }
 
-  async generateRepairDraft(runId: string, input: { findingIds: string[]; principal?: Principal }, signal = new AbortController().signal) {
-    const state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-    requireSucceededRun(run)
-    requireOpenProjectVersion(state, run.projectVersionId)
-    const findingIds = [...new Set(input.findingIds.map(item => String(item).trim()).filter(Boolean))]
-    if (!findingIds.length) throw new Error('至少选择一个已确认 Finding 才能生成修复草稿')
-    const result = required(run.result, '需求分析结果不存在')
-    findingIds.forEach(findingId => required(result.findings.find(item => item.clientFindingId === findingId), `Finding 不属于本次运行：${findingId}`))
-    const states = findingStateMap(run, state.findingActions)
-    const unconfirmed = findingIds.filter(findingId => states.get(findingId) !== 'confirmed')
-    if (unconfirmed.length) throw new Error(`REPAIR_FINDING_NOT_CONFIRMED: 只有人工确认的 Finding 可进入修复：${unconfirmed.join('、')}`)
-    const task = renderRepairTask(run, findingIds)
-    const output = await this.executeWorkspaceStage(run, 'repair', 'requirement-repair.submit_result', 'requirement-repair/v1', 'PlanningAgent', task, async candidate => normalizeRepairCandidate(candidate, run, state, findingIds), signal)
-    const draft: RequirementRepairDraft = {
-      id: `requirement_repair_${randomUUID()}`,
-      sourceRunId: run.id,
-      status: 'generated',
-      candidate: output.candidate as unknown as RequirementRepairCandidate,
-      generationExecution: executionRecordForStage(output, 'repair'),
-      createdAt: new Date().toISOString(),
-      createdBy: principalId(input.principal),
-    }
-    await this.store.transaction(current => {
-      const stored = required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在')
-      stored.workflow ??= { currentStage: 'analysis' }
-      stored.workflow.currentStage = 'repair'
-      stored.workflow.repairDrafts ??= []
-      stored.workflow.repairDrafts.push(draft)
-    })
-    return structuredClone(draft)
-  }
-
-  async approveRepairDraft(runId: string, draftId: string, input: { comment?: string; principal?: Principal }) {
-    return this.store.transaction(state => {
-      const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-      requireSucceededRun(run)
-      requireOpenProjectVersion(state, run.projectVersionId)
-      const draft = repairDraft(run, draftId)
-      if (draft.status !== 'generated') throw new Error('只有待审批的修复草稿可以批准')
-      draft.status = 'approved'
-      draft.approvedAt = new Date().toISOString()
-      draft.approvedBy = principalId(input.principal)
-      const comment = String(input.comment ?? '').trim()
-      if (comment) draft.approvalComment = comment.slice(0, 2_000)
-      return structuredClone(draft)
-    })
-  }
-
-  async applyRepairDraft(runId: string, draftId: string) {
-    if (!this.knowledge) throw new Error('REQUIREMENT_REPAIR_KNOWLEDGE_SERVICE_REQUIRED: 修复应用服务未配置')
-    let state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-    requireSucceededRun(run)
-    requireOpenProjectVersion(state, run.projectVersionId)
-    const draft = repairDraft(run, draftId)
-    if (!['approved', 'applying'].includes(draft.status)) throw new Error('修复草稿必须先由人工批准')
-    const prepared = preparePatchedAssets(run, draft.candidate, state)
-    if (draft.status === 'approved') {
-      await this.store.transaction(current => {
-        const stored = repairDraft(required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在'), draft.id)
-        stored.status = 'applying'
-        stored.application = { items: [], startedAt: new Date().toISOString() }
-      })
-      state = await this.store.snapshot()
-    }
-    const application = structuredClone(required(repairDraft(required(state.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在'), draft.id).application, '修复应用进度不存在'))
-    try {
-      for (const item of prepared) {
-        if (application.items.some(current => current.assetId === item.asset.id && current.sourceAssetVersionId === item.version.id)) continue
-        const ingested = await this.knowledge.ingest({
-          knowledgeBaseId: run.snapshot.knowledgeBaseId,
-          sourceType: item.asset.sourceType,
-          sourceKey: item.asset.sourceKey,
-          assetType: 'requirement',
-          displayName: item.asset.displayName,
-          logicalPath: item.asset.logicalPath,
-          content: item.content,
-        })
-        if (required(ingested.asset, '修复后的需求资产不存在').id !== item.asset.id) throw new Error('修复后的需求版本未落到原需求资产')
-        const appliedItem = { assetId: item.asset.id, sourceAssetVersionId: item.version.id, targetAssetVersionId: ingested.version.id, ...(ingested.task ? { taskId: ingested.task.id } : {}), logicalPath: item.asset.logicalPath, contentSha256: ingested.version.contentHash }
-        application.items.push(appliedItem)
-        await this.store.transaction(current => {
-          const stored = repairDraft(required(current.reviewRuns.find(candidate => candidate.id === run.id), '需求分析运行不存在'), draft.id)
-          if (stored.status !== 'applying') throw new Error('REPAIR_APPLICATION_STATE_CHANGED')
-          stored.application = structuredClone(application)
-        })
-      }
-      if (application.items.some(item => item.taskId)) await this.store.notifyTask?.()
-      return await this.store.transaction(current => {
-        const stored = repairDraft(required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在'), draft.id)
-        stored.application = application
-        return structuredClone(stored)
-      })
-    } catch (error) {
-      await this.store.transaction(current => {
-        const stored = repairDraft(required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在'), draft.id)
-        stored.status = 'failed'; stored.application = application; stored.error = sanitize(String(error instanceof Error ? error.message : error))
-      })
-      throw error
-    }
-  }
-
-  async finalizeRepairApplication(runId: string, draftId: string) {
-    const state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-    requireSucceededRun(run)
-    requireOpenProjectVersion(state, run.projectVersionId)
-    const draft = repairDraft(run, draftId)
-    if (!['applying', 'applied', 'verification_running'].includes(draft.status) || !draft.application?.items.length) throw new Error('修复草稿尚未进入可确认的应用阶段')
-    if (draft.status === 'applying') {
-      const unfinished = draft.application.items.filter(item => state.versions.find(version => version.id === item.targetAssetVersionId)?.status !== 'ready')
-      if (unfinished.length) throw new Error(`REPAIR_ASSET_VERSION_NOT_READY: ${unfinished.map(item => item.targetAssetVersionId).join('、')}`)
-      const activeIndex = required(state.indexes.find(item => item.id === state.knowledgeBases.find(kb => kb.id === run.snapshot.knowledgeBaseId)?.activeIndexVersionId && item.status === 'active'), '知识库活动索引不存在')
-      const unindexed = draft.application.items.filter(item => !activeIndex.assetVersionIds.includes(item.targetAssetVersionId))
-      if (unindexed.length) throw new Error(`REPAIR_ASSET_VERSION_NOT_INDEXED: ${unindexed.map(item => item.targetAssetVersionId).join('、')}`)
-      return this.store.transaction(current => {
-        const source = required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在')
-        requireOpenProjectVersion(current, source.projectVersionId)
-        const stored = repairDraft(source, draft.id)
-        if (['applied', 'verification_running', 'verified'].includes(stored.status)) return structuredClone(stored)
-        if (stored.status !== 'applying') throw new Error('REPAIR_APPLICATION_STATE_CHANGED')
-        for (const item of stored.application!.items) {
-          const version = required(current.versions.find(candidate => candidate.id === item.targetAssetVersionId && candidate.status === 'ready'), '修复后的需求版本未就绪')
-          if (version.contentHash !== item.contentSha256) throw new Error('修复后的需求版本 Hash 漂移')
-          const binding = current.projectVersionRequirementBindings.find(candidate => candidate.projectVersionId === source.projectVersionId && candidate.assetId === item.assetId)
-          if (binding) {
-            if (binding.assetVersionId !== item.sourceAssetVersionId) throw new Error('REQUIREMENT_BINDING_CHANGED: 修复期间项目版本需求绑定已变化')
-            binding.assetVersionId = item.targetAssetVersionId
-          } else current.projectVersionRequirementBindings.push({ id: `pvrb_${randomUUID()}`, projectVersionId: source.projectVersionId, assetId: item.assetId, assetVersionId: item.targetAssetVersionId, createdAt: new Date().toISOString() })
-        }
-        markFindingsNeedsFollowUp(current, source, stored)
-        stored.status = 'applied'
-        stored.application!.appliedAt = new Date().toISOString()
-        return structuredClone(stored)
-      })
-    }
-    return structuredClone(draft)
-  }
-
-  async finalizeRepairAndStartVerification(runId: string, draftId: string) {
-    const state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
-    requireSucceededRun(run)
-    requireOpenProjectVersion(state, run.projectVersionId)
-    const draft = repairDraft(run, draftId)
-    if (!['applied', 'verification_running'].includes(draft.status) || !draft.application?.items.length) throw new Error('修复应用尚未完成人工复验前置门禁')
-    const existingVerification = state.reviewRuns.find(item => item.workflow?.verificationOf?.sourceRunId === run.id && item.workflow.verificationOf.repairDraftId === draft.id)
-    if (existingVerification) {
-      await this.store.transaction(current => {
-        const stored = repairDraft(required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在'), draft.id)
-        stored.status = 'verification_running'
-        stored.application!.verificationRunId = existingVerification.id
-      })
-      return { repairDraft: repairDraft(required((await this.store.snapshot()).reviewRuns.find(item => item.id === run.id), '需求分析运行不存在'), draft.id), verificationRun: await this.get(existingVerification.id) }
-    }
-    const verificationStarted = await this.start({
-      projectVersionId: run.projectVersionId,
-      documentDirectoryPath: required(run.snapshot.documentWorkspace?.logicalPath, '固定需求工作目录不存在'),
-      focusAreas: run.snapshot.focusAreas,
-      excludedAreas: run.snapshot.excludedAreas,
-      workflowStage: 'verification',
-      verificationOf: { sourceRunId: run.id, repairDraftId: draft.id },
-    })
-    const verificationRunId = 'id' in verificationStarted ? verificationStarted.id : verificationStarted.runId
-    await this.store.transaction(current => {
-      const source = required(current.reviewRuns.find(item => item.id === run.id), '需求分析运行不存在')
-      const stored = repairDraft(source, draft.id)
-      stored.status = 'verification_running'
-      stored.application!.verificationRunId = verificationRunId
-    })
-    return { repairDraft: repairDraft(required((await this.store.snapshot()).reviewRuns.find(item => item.id === run.id), '需求分析运行不存在'), draft.id), verificationRun: await this.get(verificationRunId) }
-  }
-
   async createReleaseCandidate(runId: string, input: { principal?: Principal }, signal = new AbortController().signal) {
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '复验运行不存在')
@@ -472,17 +292,13 @@ export class RequirementAnalysisService {
     const candidate = output.candidate as unknown as RequirementReleaseCandidate
     const releaseId = `requirement_release_${randomUUID()}`
     const generatedAt = new Date().toISOString()
-    const sourceRunId = run.workflow?.verificationOf?.sourceRunId
-    const sourceRun = sourceRunId ? state.reviewRuns.find(item => item.id === sourceRunId) : undefined
-    const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, sourceRun, repairDraftId: run.workflow?.verificationOf?.repairDraftId, candidate, generatedAt })
+    const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, candidate, generatedAt })
     const release = {
       id: releaseId,
       schemaVersion: 'requirement-release-package/v1' as const,
       status: 'candidate' as const,
       projectVersionId: run.projectVersionId,
       verificationRunId: run.id,
-      ...(sourceRun ? { sourceRunId: sourceRun.id } : {}),
-      ...(run.workflow?.verificationOf?.repairDraftId ? { repairDraftId: run.workflow.verificationOf.repairDraftId } : {}),
       sourceAssetVersionIds: expectedAssetVersionIds,
       candidate,
       generationExecution: executionRecordForStage(output, 'release'),
@@ -494,7 +310,7 @@ export class RequirementAnalysisService {
     await this.store.transaction(current => {
       const stored = required(current.reviewRuns.find(item => item.id === run.id), '复验运行不存在')
       assertReleaseGate(current, stored)
-      stored.workflow ??= { currentStage: 'verification' }
+      stored.workflow ??= { currentStage: 'release' }
       stored.workflow.currentStage = 'release'
       stored.workflow.release = release
     })
@@ -636,7 +452,7 @@ export class RequirementAnalysisService {
       createdAt: now,
       startedAt: now,
       snapshot,
-      workflow: { currentStage: request.workflowStage ?? 'analysis', ...(request.verificationOf ? { verificationOf: request.verificationOf } : {}) },
+      workflow: { currentStage: 'analysis' },
     }
     await this.store.transaction(draft => {
       required(draft.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
@@ -691,7 +507,7 @@ export class RequirementAnalysisService {
 
   private async executeWorkspaceStage(
     run: ReviewRun,
-    workflowStage: 'repair' | 'release',
+    workflowStage: 'release',
     submitToolId: string,
     schemaVersion: string,
     agentLabel: string,
@@ -783,12 +599,12 @@ export class RequirementAnalysisService {
           requirementInputPlan: input.requirementInputPlan,
           executionProfile: {
             mode: 'workspace_tools',
-            workflowStage: input.run.workflow?.currentStage === 'verification' ? 'verification' : 'analysis',
+            workflowStage: 'analysis',
             allowedToolIds: [...REQUIREMENT_WORKSPACE_TOOL_IDS, 'requirement-analysis.submit_result'],
             submitToolId: 'requirement-analysis.submit_result',
             schemaVersion: 'requirement-analysis/v1',
             agentLabel: 'PlanningAgent',
-            initialTask: renderPlanningRequirementTask(input.snapshot, planningRequirementTaskMode(input.run)),
+            initialTask: renderPlanningRequirementTask(input.snapshot),
             validateCandidate: async (candidate, manifest) => {
               const normalized = await this.validator.normalize(candidate as unknown as CandidateRequirementAnalysisV1, input.snapshot, manifest)
               return { valid: normalized.report.valid, result: normalized.result, issues: normalized.report.issues }
@@ -805,12 +621,11 @@ export class RequirementAnalysisService {
       const manifest = required(output.inputDeliveryManifest, '输入投递证明不存在')
       const validation = await this.validator.validate(result, input.snapshot, manifest)
       if (!validation.valid) throw validationError(validation.issues)
-      const execution = { ...executionRecord(output), workflowStage: input.run.workflow?.currentStage === 'verification' ? 'verification' as const : 'analysis' as const }
+      const execution = { ...executionRecord(output), workflowStage: 'analysis' as const }
       const finishedAt = new Date().toISOString()
       const pendingBlockingClarifications = result.clarifications.filter(item => item.blocking && item.status === 'pending')
       await this.reviewTransaction(input.run.id, input.lease, draft => {
         const current = required(draft.reviewRuns.find(item => item.id === input.run.id), '需求分析运行不存在')
-        const verificationOf = current.workflow?.currentStage === 'verification' ? current.workflow.verificationOf : undefined
         Object.assign(current, {
           status: pendingBlockingClarifications.length ? 'waiting_clarification' : 'succeeded',
           step: pendingBlockingClarifications.length ? 'waiting_clarification' : 'requirement_understanding_ready',
@@ -824,7 +639,6 @@ export class RequirementAnalysisService {
         } satisfies Partial<ReviewRun>)
         current.snapshot.formalClarifications = mergeFormalClarifications(current.snapshot.formalClarifications, result.clarifications)
         current.workflow ??= { currentStage: 'analysis' }
-        if (verificationOf) completeVerificationClosure(draft, current)
         current.workflow.currentStage = pendingBlockingClarifications.length ? 'clarification' : 'understanding'
         if (!pendingBlockingClarifications.length) current.workflow.automaticTransition = { status: 'pending' }
         const attempt = latestRunningExecutionAttempt(current)
@@ -945,44 +759,6 @@ export class RequirementAnalysisService {
   }
 }
 
-function normalizeRepairCandidate(candidate: Record<string, unknown>, run: ReviewRun, state: DatabaseState, findingIds: string[]) {
-  const issues: Array<{ path: string; message: string }> = []
-  const result = candidate as unknown as RequirementRepairCandidate
-  if (result.schemaVersion !== 'requirement-repair/v1') issues.push({ path: '/schemaVersion', message: '必须为 requirement-repair/v1' })
-  if (!String(result.summary ?? '').trim()) issues.push({ path: '/summary', message: '修复说明不能为空' })
-  if (!Array.isArray(result.patches) || !result.patches.length) issues.push({ path: '/patches', message: '至少提交一个 Patch' })
-  const allowedAssets = new Map(run.snapshot.assets.map(item => [item.assetVersionId, item]))
-  const selectedFindings = new Set(findingIds)
-  const covered = new Set<string>()
-  const rangesByAsset = new Map<string, Array<{ start: number; end: number; position: number }>>()
-  if (Array.isArray(result.patches)) result.patches.forEach((patch, position) => {
-    const path = `/patches/${position}`
-    const reference = allowedAssets.get(String(patch?.assetVersionId ?? ''))
-    if (!reference) { issues.push({ path: `${path}/assetVersionId`, message: '目标必须属于当前固定需求输入' }); return }
-    const version = state.versions.find(item => item.id === reference.assetVersionId && item.status === 'ready')
-    if (!version || version.contentHash !== reference.assetContentHash) { issues.push({ path: `${path}/assetVersionId`, message: '固定需求版本不存在或 Hash 已漂移' }); return }
-    const before = String(patch.before ?? '')
-    const after = String(patch.after ?? '')
-    if (!before) issues.push({ path: `${path}/before`, message: 'before 不能为空' })
-    if (!after) issues.push({ path: `${path}/after`, message: 'after 不能为空' })
-    if (before === after) issues.push({ path: `${path}/after`, message: 'after 必须产生实际修改' })
-    const start = before ? version.content.indexOf(before) : -1
-    if (start < 0 || start !== version.content.lastIndexOf(before)) issues.push({ path: `${path}/before`, message: 'before 必须在固定版本中逐字且唯一出现' })
-    const refs = Array.isArray(patch.findingRefs) ? [...new Set(patch.findingRefs.map(item => String(item).trim()).filter(Boolean))] : []
-    if (!refs.length) issues.push({ path: `${path}/findingRefs`, message: '必须关联至少一个已选择 Finding' })
-    const invalidRefs = refs.filter(item => !selectedFindings.has(item))
-    if (invalidRefs.length) issues.push({ path: `${path}/findingRefs`, message: `包含未选择或未确认 Finding：${invalidRefs.join('、')}` })
-    refs.forEach(item => covered.add(item))
-    if (start >= 0) rangesByAsset.set(reference.assetVersionId, [...(rangesByAsset.get(reference.assetVersionId) ?? []), { start, end: start + before.length, position }])
-  })
-  for (const findingId of findingIds) if (!covered.has(findingId)) issues.push({ path: '/patches', message: `已选择 Finding 未被任何 Patch 覆盖：${findingId}` })
-  for (const ranges of rangesByAsset.values()) {
-    const ordered = ranges.sort((left, right) => left.start - right.start)
-    ordered.forEach((range, index) => { if (index && range.start < ordered[index - 1].end) issues.push({ path: `/patches/${range.position}/before`, message: 'Patch 与同一资产中的其他 Patch 重叠' }) })
-  }
-  return Promise.resolve({ valid: issues.length === 0, ...(issues.length ? {} : { result: structuredClone(result) as unknown as Record<string, unknown> }), issues })
-}
-
 function normalizeReleaseCandidate(candidate: Record<string, unknown>, expectedAssetVersionIds: string[]) {
   const issues: Array<{ path: string; message: string }> = []
   const result = candidate as unknown as RequirementReleaseCandidate
@@ -996,47 +772,15 @@ function normalizeReleaseCandidate(candidate: Record<string, unknown>, expectedA
   return Promise.resolve({ valid: issues.length === 0, ...(issues.length ? {} : { result: normalized as unknown as Record<string, unknown> }), issues })
 }
 
-function preparePatchedAssets(run: ReviewRun, candidate: RequirementRepairCandidate, state: DatabaseState) {
-  const grouped = new Map<string, RequirementRepairCandidate['patches']>()
-  candidate.patches.forEach(patch => grouped.set(patch.assetVersionId, [...(grouped.get(patch.assetVersionId) ?? []), patch]))
-  return [...grouped].map(([assetVersionId, patches]) => {
-    const reference = required(run.snapshot.assets.find(item => item.assetVersionId === assetVersionId), '修复目标不属于固定输入')
-    const version = required(state.versions.find(item => item.id === assetVersionId && item.status === 'ready'), '修复目标版本不可用')
-    if (version.contentHash !== reference.assetContentHash) throw new Error('修复目标版本 Hash 已漂移')
-    const asset = required(state.assets.find(item => item.id === reference.assetId && item.id === version.assetId), '修复目标资产不存在')
-    const replacements = patches.map(patch => {
-      const start = version.content.indexOf(patch.before)
-      if (start < 0 || start !== version.content.lastIndexOf(patch.before)) throw new Error('REPAIR_PATCH_BEFORE_NOT_UNIQUE: Patch before 已不再唯一匹配固定原文')
-      return { start, end: start + patch.before.length, after: patch.after }
-    }).sort((left, right) => left.start - right.start)
-    replacements.forEach((item, index) => { if (index && item.start < replacements[index - 1].end) throw new Error('REPAIR_PATCH_OVERLAP: Patch 发生重叠') })
-    let content = version.content
-    for (const replacement of [...replacements].reverse()) content = `${content.slice(0, replacement.start)}${replacement.after}${content.slice(replacement.end)}`
-    return { asset, version, content }
-  })
-}
-
-function renderRepairTask(run: ReviewRun, findingIds: string[]) {
-  const findings = required(run.result, '需求分析结果不存在').findings.filter(item => findingIds.includes(item.clientFindingId))
-  return [
-    'Workflow Stage 固定为 repair。只为下面人工确认的 Finding 生成可审核 Patch；不得应用修改、切换 Stage、关闭 Finding 或发布产物。',
-    `Source Run：${run.id}`,
-    `固定资产：${JSON.stringify(run.snapshot.assets.map(item => ({ assetVersionId: item.assetVersionId, logicalPath: item.logicalPath, contentSha256: item.assetContentHash })))}`,
-    `已确认 Findings：${JSON.stringify(findings)}`,
-    'requirement.repair Skill 已由 Runtime 按发布绑定直接加载。通过 requirement_repair_submit_result 提交 requirement-repair/v1。',
-  ].join('\n')
-}
-
 function renderReleaseTask(run: ReviewRun) {
   return [
-    'Workflow Stage 固定为 release。服务端已通过版本、复验和 Finding 门禁。只生成 refinedRequirementsMarkdown 候选；requirements.json、findings.json、test-focus.json、traceability.json 与 manifest.json 由服务端生成。',
-    `Verification Run：${run.id}`,
+    'Workflow Stage 固定为 release。服务端已通过版本和需求基线门禁。只生成 refinedRequirementsMarkdown 候选；requirements.json、test-focus.json、traceability.json 与 manifest.json 由服务端生成。',
+    `Analysis Run：${run.id}`,
     `固定 AssetVersion：${JSON.stringify(run.snapshot.assets.map(item => ({ assetVersionId: item.assetVersionId, logicalPath: item.logicalPath, contentSha256: item.assetContentHash })))}`,
     'requirement.release Skill 已由 Runtime 按发布绑定直接加载。通过 requirement_release_submit_result 提交 requirement-release-candidate/v1；不得自行发布。',
   ].join('\n')
 }
 
-function repairDraft(run: ReviewRun, draftId: string) { return required(run.workflow?.repairDrafts?.find(item => item.id === draftId), '需求修复草稿不存在') }
 function requireSucceededRun(run: ReviewRun) { if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的需求分析运行可以进入后续 Workflow Stage') }
 function requireOpenProjectVersion(state: DatabaseState, projectVersionId: string) { const version = required(state.projectVersions.find(item => item.id === projectVersionId), '项目版本不存在'); if (version.status !== 'open') throw new Error('当前项目版本为只读状态，不能推进需求工作流'); return version }
 
@@ -1062,53 +806,6 @@ function assertRequirementInputsStable(state: DatabaseState, run: ReviewRun) {
 
 function sha256Text(value: string) { return createHash('sha256').update(value, 'utf8').digest('hex') }
 
-function findingStateMap(run: ReviewRun, actions: DatabaseState['findingActions']) {
-  const result = required(run.result, '需求分析结果不存在')
-  return new Map(result.findings.map(finding => {
-    const history = actions.filter(item => item.runId === run.id && item.findingId === finding.clientFindingId).sort((left, right) => left.version - right.version)
-    return [finding.clientFindingId, history.at(-1)?.toState ?? 'open'] as const
-  }))
-}
-
-function markFindingsNeedsFollowUp(state: DatabaseState, run: ReviewRun, draft: RequirementRepairDraft) {
-  const findingIds = [...new Set(draft.candidate.patches.flatMap(item => item.findingRefs))]
-  const states = findingStateMap(run, state.findingActions)
-  for (const findingId of findingIds) {
-    const current = states.get(findingId)
-    if (current === 'needs_follow_up') continue
-    if (current !== 'confirmed') throw new Error(`REPAIR_FINDING_STATE_CHANGED: ${findingId} 当前为 ${current ?? 'unknown'}`)
-    appendWorkflowFindingAction(state, run, findingId, 'request_follow_up', 'needs_follow_up', `已应用批准的修复草稿 ${draft.id}，等待新 AssetVersion 的完整复验。`)
-  }
-}
-
-function completeVerificationClosure(state: DatabaseState, verificationRun: ReviewRun) {
-  const link = required(verificationRun.workflow?.verificationOf, '复验来源不存在')
-  const sourceRun = required(state.reviewRuns.find(item => item.id === link.sourceRunId), '修复来源运行不存在')
-  const draft = repairDraft(sourceRun, link.repairDraftId)
-  const passed = ['pass', 'pass_with_notes'].includes(verificationRun.result?.summary.overallAssessment ?? '') && (verificationRun.result?.findings.length ?? 0) === 0
-  if (!passed) {
-    draft.status = 'failed'
-    draft.error = 'VERIFICATION_NOT_PASSED: 复验仍有 Finding 或总体结论未通过，不能关闭原 Finding 或进入发布。'
-    return
-  }
-  const findingIds = [...new Set(draft.candidate.patches.flatMap(item => item.findingRefs))]
-  const states = findingStateMap(sourceRun, state.findingActions)
-  for (const findingId of findingIds) {
-    const current = states.get(findingId)
-    if (current === 'resolved') continue
-    if (!['confirmed', 'needs_follow_up'].includes(current ?? '')) throw new Error(`VERIFICATION_FINDING_STATE_CHANGED: ${findingId} 当前为 ${current ?? 'unknown'}`)
-    appendWorkflowFindingAction(state, sourceRun, findingId, 'resolve', 'resolved', `复验运行 ${verificationRun.id} 使用修复后的固定 AssetVersion 完整重审通过。`)
-  }
-  draft.status = 'verified'
-  draft.error = undefined
-}
-
-function appendWorkflowFindingAction(state: DatabaseState, run: ReviewRun, findingId: string, action: 'request_follow_up' | 'resolve', toState: 'needs_follow_up' | 'resolved', comment: string) {
-  const history = state.findingActions.filter(item => item.runId === run.id && item.findingId === findingId).sort((left, right) => left.version - right.version)
-  const fromState = history.at(-1)?.toState ?? 'open'
-  state.findingActions.push({ id: `finding_action_${randomUUID()}`, projectVersionId: run.projectVersionId, runId: run.id, findingId, action, fromState, toState, comment, actorId: 'requirement-workflow', actorDisplayName: '需求工作流', version: history.length + 1, createdAt: new Date().toISOString() })
-}
-
 function assertReleaseGate(state: DatabaseState, run: ReviewRun) {
   requireSucceededRun(run)
   requireOpenProjectVersion(state, run.projectVersionId)
@@ -1120,13 +817,6 @@ function assertReleaseGate(state: DatabaseState, run: ReviewRun) {
   for (const reference of run.snapshot.assets) {
     const version = required(state.versions.find(item => item.id === reference.assetVersionId && item.status === 'ready'), '发布依赖的需求版本不可用')
     if (version.contentHash !== reference.assetContentHash) throw new Error('RELEASE_GATE_ASSET_HASH_CHANGED: 发布依赖的需求版本 Hash 漂移')
-  }
-  const states = findingStateMap(run, state.findingActions)
-  const unresolved = result.findings.filter(item => !['resolved', 'dismissed'].includes(states.get(item.clientFindingId) ?? 'open'))
-  if (unresolved.length) throw new Error(`RELEASE_GATE_FINDINGS_OPEN: ${unresolved.map(item => item.clientFindingId).join('、')}`)
-  if (run.workflow?.verificationOf) {
-    const source = required(state.reviewRuns.find(item => item.id === run.workflow!.verificationOf!.sourceRunId), '修复来源运行不存在')
-    if (repairDraft(source, run.workflow.verificationOf.repairDraftId).status !== 'verified') throw new Error('RELEASE_GATE_REPAIR_NOT_VERIFIED: 修复草稿尚未通过完整复验')
   }
 }
 
@@ -1142,7 +832,7 @@ function assertReleasePackageIntegrity(release: RequirementReleasePackage) {
   const entryPoints = manifest.machineReadableEntryPoints && typeof manifest.machineReadableEntryPoints === 'object' && !Array.isArray(manifest.machineReadableEntryPoints)
     ? manifest.machineReadableEntryPoints as Record<string, unknown>
     : {}
-  const expectedEntryPoints = { requirements: 'requirements.json', findings: 'findings.json', clarifications: 'clarifications.json', testFocus: 'test-focus.json', traceability: 'traceability.json' }
+  const expectedEntryPoints = { requirements: 'requirements.json', clarifications: 'clarifications.json', testFocus: 'test-focus.json', traceability: 'traceability.json' }
   if (manifest.schemaVersion !== 'requirement-release-manifest/v1' || manifest.releaseId !== release.id || manifest.projectVersionId !== release.projectVersionId || manifest.verificationRunId !== release.verificationRunId || Object.entries(expectedEntryPoints).some(([key, fileName]) => entryPoints[key] !== fileName)) throw new Error('RELEASE_MANIFEST_INVALID: 发布来源或机器可读入口不一致')
   const manifestSourceIds = Array.isArray(manifest.sourceAssetVersions) ? manifest.sourceAssetVersions.map(item => item && typeof item === 'object' && !Array.isArray(item) ? String((item as { assetVersionId?: unknown }).assetVersionId ?? '') : '') : []
   if (JSON.stringify(manifestSourceIds) !== JSON.stringify(release.sourceAssetVersionIds)) throw new Error('RELEASE_MANIFEST_INVALID: 固定需求版本不一致')
@@ -1153,11 +843,6 @@ function assertReleasePackageIntegrity(release: RequirementReleasePackage) {
     const entry = manifestArtifacts.find(item => item && typeof item === 'object' && !Array.isArray(item) && (item as { fileName?: unknown }).fileName === artifact.fileName) as { mediaType?: unknown; contentSha256?: unknown; bytes?: unknown } | undefined
     if (!entry || entry.mediaType !== artifact.mediaType || entry.contentSha256 !== artifact.contentSha256 || entry.bytes !== Buffer.byteLength(artifact.content, 'utf8')) throw new Error(`RELEASE_MANIFEST_INVALID: 产物清单不一致 ${artifact.fileName}`)
   }
-}
-
-function planningRequirementTaskMode(run: ReviewRun): PlanningRequirementTaskMode {
-  if (run.workflow?.currentStage === 'verification') return 'repair_verification'
-  return 'initial_analysis'
 }
 
 function executionRecordForStage(output: AgentExecutionOutput, workflowStage: RequirementWorkflowStage): AgentExecutionRecord {
@@ -1181,25 +866,6 @@ function presentWorkflowSummary(workflow: RequirementWorkflowState | undefined) 
   if (!workflow) return undefined
   return {
     currentStage: workflow.currentStage,
-    ...(workflow.verificationOf ? { verificationOf: structuredClone(workflow.verificationOf) } : {}),
-    ...(workflow.repairDrafts ? {
-      repairDrafts: workflow.repairDrafts.map(draft => ({
-        id: draft.id,
-        sourceRunId: draft.sourceRunId,
-        status: draft.status,
-        createdAt: draft.createdAt,
-        createdBy: draft.createdBy,
-        approvedAt: draft.approvedAt,
-        approvedBy: draft.approvedBy,
-        application: draft.application ? {
-          items: draft.application.items.map(item => ({ assetId: item.assetId, sourceAssetVersionId: item.sourceAssetVersionId, targetAssetVersionId: item.targetAssetVersionId, taskId: item.taskId, logicalPath: item.logicalPath, contentSha256: item.contentSha256 })),
-          startedAt: draft.application.startedAt,
-          appliedAt: draft.application.appliedAt,
-          verificationRunId: draft.application.verificationRunId,
-        } : undefined,
-        error: draft.error,
-      })),
-    } : {}),
     ...(workflow.release ? {
       release: {
         id: workflow.release.id,
@@ -1207,8 +873,6 @@ function presentWorkflowSummary(workflow: RequirementWorkflowState | undefined) 
         status: workflow.release.status,
         projectVersionId: workflow.release.projectVersionId,
         verificationRunId: workflow.release.verificationRunId,
-        sourceRunId: workflow.release.sourceRunId,
-        repairDraftId: workflow.release.repairDraftId,
         sourceAssetVersionIds: [...workflow.release.sourceAssetVersionIds],
         contentSha256: workflow.release.contentSha256,
         createdAt: workflow.release.createdAt,
@@ -1243,7 +907,7 @@ function selectAgentModels(state: DatabaseState, configuration: AgentConfigurati
 }
 
 function requirePiWorkspaceAgentDefinition(definition: ReviewRunSnapshot['agentDefinition']) {
-  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'requirement-repair.submit_result', 'requirement-release.submit_result']
+  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'requirement-release.submit_result']
   const missing = requiredTools.filter(toolId => !definition.toolIds.includes(toolId))
   if (definition.agentKey !== 'planning' || definition.resultSchemaVersion !== 'planning/v1' || missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布 PlanningAgent${missing.length ? `；缺少工具 ${missing.join(', ')}` : ''}`)
 }

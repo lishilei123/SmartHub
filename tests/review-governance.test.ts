@@ -21,22 +21,6 @@ async function governedStore(status: ReviewRun['status'] = 'succeeded') {
   return store
 }
 
-test('FindingAction 追加写、状态投影和并发版本校验形成持久化闭环', async () => {
-  const store = await governedStore()
-  const service = new ReviewGovernanceService(store)
-  const confirmed = await service.actOnFinding('run-1', 'F-001', { action: 'confirm', expectedVersion: 0, principal: { subjectId: 'reviewer-1', displayName: '审核员' } })
-  assert.equal(confirmed.toState, 'confirmed')
-  await assert.rejects(() => service.actOnFinding('run-1', 'F-001', { action: 'resolve', expectedVersion: 0 }), /VERSION_CONFLICT/u)
-  const resolved = await service.actOnFinding('run-1', 'F-001', { action: 'resolve', expectedVersion: 1 })
-  assert.equal(resolved.version, 2)
-  const projection = await service.listFindingActions('run-1')
-  assert.equal(projection.findings[0].state, 'resolved')
-  assert.equal(projection.actions.length, 2)
-  const report = await service.exportMarkdown('run-1', 'pv-1')
-  assert.match(report, /处置状态：resolved/u)
-  assert.match(report, /严重度：blocker/u)
-})
-
 test('高风险工具审批绑定参数 Hash，批准后放行且参数变化重新审批', async () => {
   const store = await governedStore('running')
   const service = new ReviewGovernanceService(store)

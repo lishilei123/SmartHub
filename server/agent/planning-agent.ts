@@ -2,9 +2,7 @@ import { createHash } from 'node:crypto'
 import type { AgentDefinitionVersion, ReviewRunSnapshot } from '../domain/agent-types.js'
 import { toolsetContentHash } from '../application/ai-resource-hash.js'
 
-export type PlanningRequirementTaskMode = 'initial_analysis' | 'repair_verification'
-
-export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode: PlanningRequirementTaskMode = 'initial_analysis') {
+export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot) {
   const template = snapshot.agentDefinition.taskTemplate
   const rendered = template
     .replace('{{projectName}}', snapshot.projectName)
@@ -24,7 +22,7 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode:
   const sourceScopes = Object.fromEntries([...new Set(snapshot.workspaceSnapshot.files.map(item => item.sourceScope))].map(scope => [scope, snapshot.workspaceSnapshot.files.filter(item => item.sourceScope === scope).length]))
   const formalClarifications = snapshot.formalClarifications ?? []
   return [
-    planningRequirementModeInstruction(mode),
+    planningRequirementModeInstruction(),
     [
       '<configuration_task_template>',
       '以下内容来自本 Run 固定的 PlanningAgent 配置，用于补充本轮任务背景。',
@@ -57,12 +55,12 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode:
       '1. status=answered 的 answer 是正式业务事实，必须纳入更新后的需求理解。',
       '2. status=dismissed 的 answer 只是处置理由，不是业务规则、权限、边界或 Expected Result；相关事实缺口必须保留。',
       '3. Snapshot 中已有的 answered/dismissed 问题不得重复提交。只有无法从正式输入确定且会影响测试正确性的事实，才是新的 blocking Clarification。',
-      '4. 同一轮识别到的 blocking Clarification 必须一次性完整提交；普通 Finding 不阻塞流程。',
+      '4. 同一轮识别到的 blocking Clarification 必须一次性完整提交。',
       '</formal_clarification_rules>',
     ].join('\n'),
     [
       '<requirement_analysis_output_contract>',
-      '本轮结果范围是需求理解、Finding、Clarification 与 Test Focus；Test Focus 是后续测试设计的风险关注点。',
+      '本轮结果范围是需求理解、Clarification 与 Test Focus；Test Focus 是后续测试设计的风险关注点。',
       'TestPoint、TestCase、Case ID、Revision、Version、Hash、Library 变更和 Handoff 不属于本轮结果 Schema。',
       'RequirementPoint 中只提供来自固定输入的逐字 sourceTexts；Evidence、ID、定位和覆盖由服务端生成并校验。',
       '完成 Self Review 后，通过 requirement_analysis_submit_result 提交一个完整 requirement-analysis/v1 候选；没有新 Clarification 时提交空数组。',
@@ -72,15 +70,7 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot, mode:
   ].join('\n\n')
 }
 
-function planningRequirementModeInstruction(mode: PlanningRequirementTaskMode) {
-  if (mode === 'repair_verification') {
-    return [
-      '<current_requirement_task mode="repair_verification">',
-      '需求修复已经完成，请继续当前测试策划工作，对修复后的需求进行独立复验。',
-      '以当前复验 Run 固定的修复后 AssetVersion、Workspace Snapshot 与正式 Clarification 为事实来源，提交完整复验候选。',
-      '</current_requirement_task>',
-    ].join('\n')
-  }
+function planningRequirementModeInstruction() {
   return [
     '<current_requirement_task mode="initial_analysis">',
     '请分析当前需求。',

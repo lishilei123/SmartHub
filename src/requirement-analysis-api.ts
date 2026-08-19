@@ -5,8 +5,6 @@ export type ProjectWorkspaceSourceScope = 'current_input' | 'current_branch' | '
 
 const apiBase = 'http://127.0.0.1:8787/api'
 
-export type AnalysisFindingType = 'missing_requirement' | 'ambiguity' | 'conflict' | 'boundary_gap' | 'state_gap' | 'exception_gap' | 'security_risk' | 'testability_gap' | 'dependency_risk' | 'other'
-export type AnalysisSeverity = 'blocker' | 'high' | 'medium' | 'low'
 export type OverallAssessment = 'pass' | 'pass_with_notes' | 'needs_revision' | 'blocked'
 
 export type AnalysisEvidence = {
@@ -33,18 +31,6 @@ export type RequirementPoint = {
   mergeRationale?: string
 }
 
-export type AnalysisFinding = {
-  clientFindingId: string
-  type: AnalysisFindingType
-  severity: AnalysisSeverity
-  confidence: number
-  title: string
-  description: string
-  impact: string
-  recommendation: string
-  requirementPointRefs: string[]
-}
-
 export type PlanningClarification = {
   id: string
   question: string
@@ -69,7 +55,6 @@ export type RequirementAnalysisResult = {
     risks: string[]
   }
   requirementPoints: RequirementPoint[]
-  findings: AnalysisFinding[]
   clarifications: PlanningClarification[]
   testFocus: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
   evidence: AnalysisEvidence[]
@@ -82,7 +67,7 @@ export type RequirementAnalysisResult = {
     limitations: string[]
   }
   analysisDocument?: string
-  artifacts: Array<{ fileName: 'requirement-baseline.md' | 'requirement-analysis-findings.md' | 'requirement-analysis.md'; mediaType: 'text/markdown'; content: string; contentSha256: string }>
+  artifacts: Array<{ fileName: 'requirement-baseline.md' | 'requirement-analysis.md'; mediaType: 'text/markdown'; content: string; contentSha256: string }>
 }
 
 export type AgentExecutionEvent = {
@@ -112,28 +97,9 @@ export type AgentExecutionRecord = {
   toolCalls: number
   toolErrors?: number
   framework?: { name: string; version: string }
-  workflowStage?: 'analysis' | 'repair' | 'verification' | 'release'
+  workflowStage?: 'analysis' | 'release'
   context?: AgentExecutionContext
   events: AgentExecutionEvent[]
-}
-
-export type RequirementRepairDraft = {
-  id: string
-  sourceRunId: string
-  status: 'generated' | 'approved' | 'applying' | 'applied' | 'verification_running' | 'verified' | 'failed'
-  candidate: {
-    schemaVersion: 'requirement-repair/v1'
-    summary: string
-    patches: Array<{ assetVersionId: string; before: string; after: string; reason: string; findingRefs: string[] }>
-  }
-  generationExecution: AgentExecutionRecord
-  createdAt: string
-  createdBy: string
-  approvedAt?: string
-  approvedBy?: string
-  approvalComment?: string
-  application?: { items: Array<{ assetId: string; sourceAssetVersionId: string; targetAssetVersionId: string; taskId?: string; logicalPath: string; contentSha256: string }>; startedAt: string; appliedAt?: string; verificationRunId?: string }
-  error?: string
 }
 
 export type RequirementReleasePackage = {
@@ -142,8 +108,6 @@ export type RequirementReleasePackage = {
   status: 'candidate' | 'published'
   projectVersionId: string
   verificationRunId: string
-  sourceRunId?: string
-  repairDraftId?: string
   sourceAssetVersionIds: string[]
   candidate: { schemaVersion: 'requirement-release-candidate/v1'; sourceAssetVersionIds: string[]; refinedRequirementsMarkdown: string }
   generationExecution: AgentExecutionRecord
@@ -280,9 +244,7 @@ export type RequirementAnalysisRun = {
   inputDeliveryManifest?: InputDeliveryManifest
   planningSubAgentRuns?: PlanningSubAgentRunRecord[]
   workflow?: {
-    currentStage: 'analysis' | 'clarification' | 'understanding' | 'repair' | 'verification' | 'release'
-    repairDrafts?: RequirementRepairDraft[]
-    verificationOf?: { sourceRunId: string; repairDraftId: string }
+    currentStage: 'analysis' | 'clarification' | 'understanding' | 'release'
     release?: RequirementReleasePackage
     understandingSnapshot?: { id: string; schemaVersion: 'requirement-understanding-snapshot/v1'; projectVersionId: string; analysisRunId: string; sourceAssetVersionIds: string[]; requirementPointIds: string[]; clarifications: PlanningClarification[]; requirementResultSha256: string; createdAt: string; contentSha256: string }
     automaticTransition?: { status: 'pending' | 'running' | 'succeeded' | 'failed'; testDesignId?: string; testDesignRunId?: string; startedAt?: string; finishedAt?: string; error?: string }
@@ -293,15 +255,6 @@ export type RequirementAnalysisRun = {
 export type RequirementAnalysisRunPage = {
   items: RequirementAnalysisRun[]
   nextCursor?: string
-}
-
-export type FindingState = 'open' | 'confirmed' | 'dismissed' | 'resolved' | 'needs_follow_up'
-export type FindingActionType = 'confirm' | 'dismiss' | 'resolve' | 'request_follow_up' | 'reopen'
-export type FindingActionsResponse = {
-  runId: string
-  projectVersionId: string
-  findings: Array<{ findingId: string; state: FindingState; version: number; lastActionAt?: string }>
-  actions: Array<{ id: string; findingId: string; action: FindingActionType; fromState: FindingState; toState: FindingState; comment?: string; actorDisplayName: string; version: number; createdAt: string }>
 }
 
 export type ToolApproval = { id: string; runId: string; toolId: string; toolVersion: string; risk: 'write_reversible' | 'write_high_risk'; parameterSummary: string; parameterHash: string; status: 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'; requestedAt: string; expiresAt: string; decidedAt?: string; decidedByDisplayName?: string; decisionComment?: string; consumedAt?: string }
@@ -360,55 +313,6 @@ export async function retryRequirementAnalysisRun(runId: string) {
   const body = await response.json() as RequirementAnalysisRun | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析重跑失败')
   return body as RequirementAnalysisRun
-}
-
-export async function loadFindingActions(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/finding-actions`)
-  const body = await response.json() as FindingActionsResponse | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : 'Finding 处置历史读取失败')
-  return body as FindingActionsResponse
-}
-
-export async function createFindingAction(runId: string, findingId: string, input: { action: FindingActionType; comment?: string; expectedVersion: number }) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/findings/${encodeURIComponent(findingId)}/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
-  const body = await response.json() as FindingActionsResponse['actions'][number] | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : 'Finding 处置保存失败')
-  return body as FindingActionsResponse['actions'][number]
-}
-
-export async function generateRequirementRepairDraft(runId: string, findingIds: string[]) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ findingIds }) })
-  const body = await response.json() as RequirementRepairDraft | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复草稿生成失败')
-  return body as RequirementRepairDraft
-}
-
-export async function approveRequirementRepairDraft(runId: string, draftId: string, comment?: string) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/approve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comment }) })
-  const body = await response.json() as RequirementRepairDraft | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复草稿审批失败')
-  return body as RequirementRepairDraft
-}
-
-export async function applyRequirementRepairDraft(runId: string, draftId: string) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/apply`, { method: 'POST' })
-  const body = await response.json() as RequirementRepairDraft | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复应用失败')
-  return body as RequirementRepairDraft
-}
-
-export async function finalizeRequirementRepairDraft(runId: string, draftId: string) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/finalize`, { method: 'POST' })
-  const body = await response.json() as RequirementRepairDraft | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复新版本确认失败')
-  return body as RequirementRepairDraft
-}
-
-export async function verifyRequirementRepairDraft(runId: string, draftId: string) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/repair-drafts/${encodeURIComponent(draftId)}/verify`, { method: 'POST' })
-  const body = await response.json() as { repairDraft: RequirementRepairDraft; verificationRun: RequirementAnalysisRun } | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求修复复验启动失败')
-  return body as { repairDraft: RequirementRepairDraft; verificationRun: RequirementAnalysisRun }
 }
 
 export async function createRequirementReleaseCandidate(runId: string) {

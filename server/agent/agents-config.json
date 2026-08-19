@@ -16,8 +16,7 @@
         "workspace.list_directory@1.0.0",
         "knowledge.search@1.1.0",
         "knowledge.read_chunk@1.1.0",
-        "requirement-analysis.submit_result@1.0.0",
-        "requirement-repair.submit_result@1.0.0",
+        "requirement-analysis.submit_result@1.2.0",
         "requirement-release.submit_result@1.0.0",
         "test_design_points.submit_result@1.0.0",
         "test_design_cases.submit_result@1.1.0",
@@ -46,19 +45,7 @@
           "skillKey": "requirement.analysis",
           "version": "1.0.0",
           "enabled": true,
-          "configurationHash": "f2f891c208f6adb1ed3094618349c9e6c3cf1e65093443e978864c630e05c7fc"
-        },
-        {
-          "skillKey": "requirement.repair",
-          "version": "1.0.0",
-          "enabled": true,
-          "configurationHash": "937479370ce1e80480ae852b26879a3092fbbc43ada7426ffe18b5d500d1ae02"
-        },
-        {
-          "skillKey": "requirement.verification",
-          "version": "1.0.0",
-          "enabled": true,
-          "configurationHash": "508accc389628d3a395ef1b725b4ff64478848e5b52628de23f4f403867f5c99"
+          "configurationHash": "21ff2151afb49a1f3ccde6e9a99b2f96aa294f33a43647043d64ef0dd5a60df7"
         },
         {
           "skillKey": "requirement.release",
