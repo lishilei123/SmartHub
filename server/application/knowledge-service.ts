@@ -6,6 +6,7 @@ import type { LocalModelRuntime } from '../infrastructure/local-model-runtime.js
 import { RemoteEmbeddingClient, type ResolvedEmbeddingRoute } from '../infrastructure/remote-embedding-client.js'
 import type { StoredChunkCandidate } from '../infrastructure/store.js'
 import { chunkDocument, cosine, defaultTokenCodec, embedding, sha256, type TokenCodec } from './content.js'
+import { safeWorkspaceSegment } from './project-workspace-snapshot.js'
 
 type RetrievalInput = { logicalPath?: string }
 type KnowledgeSearchMode = 'keyword' | 'vector' | 'hybrid'
@@ -19,6 +20,12 @@ type KnowledgeSearchInput = {
 }
 type RankedCandidate = { candidate: StoredChunkCandidate; keywordScore: number; vectorScore: number; rerankerScore?: number; score: number }
 type IngestInput = { knowledgeBaseId: string; sourceType: SourceType; sourceKey: string; assetType: AssetType; displayName: string; logicalPath: string; content: string; simulateFailureAt?: string; taskTrigger?: 'upload' | 'retry'; attempts?: number }
+
+export type ProjectVersionWorkspaceCleanup = {
+  taskIds: string[]
+  directories: number
+  assets: number
+}
 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
@@ -105,6 +112,30 @@ export class KnowledgeService {
       }
       return purgeAssetData(state, assetIds)
     })
+  }
+
+  /**
+   * The `workspace/branches` namespace is owned by ProjectVersion. Queue the
+   * existing recursive directory cleanup so its asset versions, index entries,
+   * and raw files are removed through the normal governed deletion path.
+   */
+  async queueProjectVersionWorkspaceCleanup(projectId: string, projectVersionName: string): Promise<ProjectVersionWorkspaceCleanup> {
+    const branchPath = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}`
+    const state = await this.store.snapshot()
+    const knowledgeBaseIds = new Set(state.knowledgeBases.filter(item => item.projectId === projectId).map(item => item.id))
+    const roots = state.directories.filter(item => knowledgeBaseIds.has(item.knowledgeBaseId) && directoryPath(state, item.id) === branchPath)
+    if (!roots.length) return { taskIds: [], directories: 0, assets: 0 }
+
+    const queued = await Promise.all(roots.map(async root => {
+      const result = await this.deleteDirectory(root.id, 'recursive')
+      if (!('task' in result) || !result.task || !result.scopeSummary) throw new Error('PROJECT_VERSION_WORKSPACE_DELETE_TASK_MISSING')
+      return { taskId: result.task.id, directories: result.scopeSummary.directories, assets: result.scopeSummary.assets }
+    }))
+    return {
+      taskIds: queued.map(item => item.taskId),
+      directories: queued.reduce((total, item) => total + item.directories, 0),
+      assets: queued.reduce((total, item) => total + item.assets, 0),
+    }
   }
 
   async createProject(name: string) {

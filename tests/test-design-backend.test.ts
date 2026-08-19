@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { defaultAgentDefinitionConfigDictionary } from '../server/agent/agent-definition-config.js'
-import { TEST_DESIGN_STAGE_BINDINGS } from '../server/agent/pi-test-design-runtime.js'
+import { projectTestCaseCandidateSubmission, TEST_DESIGN_STAGE_BINDINGS } from '../server/agent/pi-test-design-runtime.js'
 import { TestDesignService, type PlanningAgentRuntime, type TestCaseAssetProjector } from '../server/application/test-design-service.js'
 import { TestDesignError, validateCreateTestDesignInput, validateTestCaseDesignCandidate, validateTestPointDesignCandidate } from '../server/application/test-design-validation.js'
 import type { TestCaseContent, TestDesignWorkflowRun } from '../server/domain/test-design-types.js'
@@ -45,6 +45,13 @@ test('候选协议直接生成测试点和用例，不存在 coverageUnits 中�
   assert.equal(cases.cases[0].content.testPointIds[0], 'tp-1')
   assert.equal(cases.dataRequirements.length, 0)
   const flatCandidate = caseCandidate('test-case-design/v1', ['tp-1'])
+  const projectedCandidate = projectTestCaseCandidateSubmission(cases)
+  assert.deepEqual(
+    projectedCandidate.cases,
+    cases.cases.map(({ ref, content }) => ({ ref, ...content })),
+  )
+  assert.equal('content' in projectedCandidate.cases[0], false)
+  assert.doesNotThrow(() => validateTestCaseDesignCandidate(projectedCandidate, new Set(['tp-1'])))
   const wrappedCandidate = {
     ...flatCandidate,
     cases: flatCandidate.cases.map(({ ref, ...content }) => ({ ref, content })),
@@ -142,6 +149,18 @@ test('单 PlanningAgent 自动固化测试点、连续生成及重新生成用�
   assert.ok(projected.includes('workspace/branches/V1/test-cases/test-cases.md'))
   assert.ok(projected.includes('workspace/branches/V1/test-cases/test-data.json'))
   assert.ok(projected.includes('workspace/branches/V1/test-cases/manifest.json'))
+})
+
+test('首次生成的数据需求复用其 caseRef 预分配的正式用例 ID', async () => {
+  const { service } = await fixture(new FakeRuntime({ withDataRequirement: true }), { ingest: async () => ({ version: { id: 'asset-data-requirement' }, task: null }) })
+  const design = await service.createDesign('pv-1', createInput(), principal)
+  const created = await service.createRun('pv-1', design.id, 'data-requirement-case-reference', principal)
+  const run = await waitFor(service, design.id, created.id, value => value.status === 'failed' || (value.status === 'succeeded' && value.dataSetVersions.length > 0))
+
+  assert.notEqual(run.status, 'failed', run.error)
+  const requirement = run.dataSetVersions.at(-1)!.requirements[0]
+  assert.deepEqual(requirement.caseIds, [run.testCases[0].id])
+  assert.deepEqual(run.testCases[0].revisions.at(-1)!.content.dataRequirementIds, [requirement.id])
 })
 
 test('Coverage Audit 仅将 agent_repair 问题送回同一 PlanningAgent，自动修复受次数上限控制', async () => {
@@ -408,7 +427,7 @@ test('无对应 Proposal 的基线成员被并发废弃时阻止发布且不静�
 class FakeRuntime implements PlanningAgentRuntime {
   stages: string[] = []
   tasks: Array<{ projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }> = []
-  constructor(private readonly behavior: { uncoveredPoint?: boolean; keepUncoveredDuringRepair?: boolean; proposalOperation?: 'reuse' | 'update'; dimensionMatrix?: boolean; pointBasisRefMode?: 'published_requirement_id' | 'outside' } = {}) {}
+  constructor(private readonly behavior: { uncoveredPoint?: boolean; keepUncoveredDuringRepair?: boolean; proposalOperation?: 'reuse' | 'update'; dimensionMatrix?: boolean; pointBasisRefMode?: 'published_requirement_id' | 'outside'; withDataRequirement?: boolean } = {}) {}
   readiness = async () => ({ ready: true, agents: [{ agentKey: 'planning', ready: true }] })
   freezeConfiguration = async () => ({ configurationId: 'agent-config-1', configurationVersion: 1, configurationSha256: 'c'.repeat(64), agentDefinition: {} as never, routing: {} as never, primaryModel: { sourceId: 'source-1', modelId: 'model-1', modelName: '测试模型' }, createdAt: '2026-08-12T00:00:00.000Z', snapshotSha256: 'd'.repeat(64) })
   appendTask = async (input: { projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }) => { this.tasks.push(structuredClone(input)) }
@@ -431,6 +450,9 @@ class FakeRuntime implements PlanningAgentRuntime {
     const schemaVersion = input.stage === 'test_design_repair' ? 'test-design-repair/v1' : 'test-case-design/v1'
     if (this.behavior.dimensionMatrix) return { schemaVersion, content: dimensionCaseCandidate(schemaVersion, covered) }
     const content = caseCandidate(schemaVersion, covered)
+    if (this.behavior.withDataRequirement) {
+      content.dataRequirements = [{ ref: 'data-1', name: '登录测试账号', entityType: 'user', featureTags: ['认证'], testPointIds: [covered[0]], caseRefs: ['case-1'], fieldConstraints: { role: 'registered' }, relationships: [], quantity: 1, initialState: '已注册且未登录', preparationHint: '使用隔离的测试账号', sensitivity: 'internal', isolation: '每次执行使用独立账号', resetAndCleanup: '清理会话并回收账号', readiness: 'ready' }]
+    }
     if (this.behavior.proposalOperation && input.stage === 'test_case_design') {
       const source = input.run.historicalSnapshot.items[0]; const locator = source.locator as { caseId: string; revision: number }
       content.proposals = [{ operation: this.behavior.proposalOperation, sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: 'case-1', requirementRefs: input.run.basisSnapshot.items.map(item => item.id), testPointIds: covered, reason: this.behavior.proposalOperation === 'reuse' ? '需求语义未变化，直接复用' : '需求变化影响步骤，保留 Case ID 创建新 Revision', confidence: 0.96 }]

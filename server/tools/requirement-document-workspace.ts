@@ -22,6 +22,7 @@ export const REQUIREMENT_WORKSPACE_TOOL_IDS = [
 export type RequirementWorkspaceToolId = typeof REQUIREMENT_WORKSPACE_TOOL_IDS[number]
 
 export type RequirementDocumentReadObservation = NonNullable<InputDeliveryManifest['toolReads']>[number]
+export type RequirementDocumentContentAccessObservation = NonNullable<InputDeliveryManifest['workspaceContentAccesses']>[number]
 
 type WorkspaceFile = {
   relativePath: string
@@ -59,13 +60,27 @@ export class RequirementDocumentWorkspace {
 
   constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot | PlanningTestDesignSnapshot | TestExecutionAgentSnapshot | PlanningReviewerSnapshot) {}
 
-  async execute(toolId: RequirementWorkspaceToolId, request: ToolExecutionRequest, signal: AbortSignal, onRead?: (observation: RequirementDocumentReadObservation) => void): Promise<ToolExecutionResult> {
+  async execute(
+    toolId: RequirementWorkspaceToolId,
+    request: ToolExecutionRequest,
+    signal: AbortSignal,
+    onRead?: (observation: RequirementDocumentReadObservation) => void,
+    onContentAccess?: (observation: RequirementDocumentContentAccessObservation) => void,
+  ): Promise<ToolExecutionResult> {
     const workspace = await this.ensureMaterialized()
     const tool = required(workspace.toolsById.get(toolId), `PI_WORKSPACE_TOOL_NOT_FOUND: ${toolId}`)
     const args = normalizeToolArguments(toolId, request.arguments)
     try {
       const result = await tool.execute(request.toolCallId, args, signal)
       const output = textOutput(result)
+      if (toolId === 'workspace.grep_files') {
+        // A directory-wide grep can only prove that a query was executed. For
+        // a required business artifact, retain an auditable proof only when
+        // the tool was targeted at that exact frozen file.
+        const file = workspace.filesByPath.get(pathKey(String(args.path)))
+        if (file) onContentAccess?.({ toolCallId: request.toolCallId, toolId, relativePath: file.relativePath })
+        return { data: { tool: tool.name, output, ...(result.details === undefined ? {} : { details: result.details }) } }
+      }
       if (toolId !== 'workspace.read_file') return { data: { tool: tool.name, output, ...(result.details === undefined ? {} : { details: result.details }) } }
 
       const file = required(workspace.filesByPath.get(pathKey(String(args.path))), `PI_WORKSPACE_FILE_NOT_FOUND: ${String(args.path)}`)
@@ -85,6 +100,7 @@ export class RequirementDocumentWorkspace {
         ...(file.sourceScope ? { sourceScope: file.sourceScope } : {}),
         ...range,
       })
+      onContentAccess?.({ toolCallId: request.toolCallId, toolId, relativePath: file.relativePath })
       return {
         data: {
           tool: tool.name,
@@ -206,9 +222,14 @@ export class RequirementDocumentWorkspace {
   }
 }
 
-export function registerRequirementDocumentWorkspaceTools(registry: ToolRegistry, workspace: RequirementDocumentWorkspace, onRead?: (observation: RequirementDocumentReadObservation) => void) {
+export function registerRequirementDocumentWorkspaceTools(
+  registry: ToolRegistry,
+  workspace: RequirementDocumentWorkspace,
+  onRead?: (observation: RequirementDocumentReadObservation) => void,
+  onContentAccess?: (observation: RequirementDocumentContentAccessObservation) => void,
+) {
   for (const toolId of REQUIREMENT_WORKSPACE_TOOL_IDS) {
-    registry.register(defaultBuiltInToolConfigResolver.toDescriptor(toolId), (request, signal) => workspace.execute(toolId, request, signal, onRead))
+    registry.register(defaultBuiltInToolConfigResolver.toDescriptor(toolId), (request, signal) => workspace.execute(toolId, request, signal, onRead, onContentAccess))
   }
 }
 

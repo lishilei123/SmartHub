@@ -1,12 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectVersionStatus } from '../domain/types.js'
 import type { RequirementBindingMetadata, StateStore } from '../infrastructure/store.js'
+import type { ProjectVersionWorkspaceCleanup } from './knowledge-service.js'
 
 const now = () => new Date().toISOString()
 const id = (prefix: string) => `${prefix}_${randomUUID()}`
 
+export interface ProjectVersionWorkspaceCleaner {
+  queueProjectVersionWorkspaceCleanup(projectId: string, projectVersionName: string): Promise<ProjectVersionWorkspaceCleanup>
+}
+
 export class ProjectVersionService {
-  constructor(private readonly store: StateStore) {}
+  constructor(private readonly store: StateStore, private readonly workspaceCleaner?: ProjectVersionWorkspaceCleaner) {}
 
   async list() {
     if (this.store.listProjectVersions) return this.store.listProjectVersions()
@@ -47,7 +52,7 @@ export class ProjectVersionService {
   }
 
   async delete(projectVersionId: string) {
-    return this.store.transaction(state => {
+    const deleted = await this.store.transaction(state => {
       const project = platformProject(state)
       const version = required(state.projectVersions.find(item => item.id === projectVersionId && item.projectId === project.id), '项目版本不存在')
       if (version.status !== 'open') throw new Error('只有可编辑状态的项目版本可以物理删除')
@@ -74,8 +79,13 @@ export class ProjectVersionService {
         testDesignState.designs = testDesignState.designs.filter(item => !testDesignIds.has(item.id))
       }
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
-      return { id: version.id, name: version.name, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseSetVersions: caseSetVersionIds.size }
+      return { id: version.id, name: version.name, projectId: version.projectId, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseSetVersions: caseSetVersionIds.size }
     })
+    const workspaceCleanup = this.workspaceCleaner
+      ? await this.workspaceCleaner.queueProjectVersionWorkspaceCleanup(deleted.projectId, deleted.name)
+      : { taskIds: [], directories: 0, assets: 0 }
+    const { projectId: _projectId, ...result } = deleted
+    return { ...result, workspaceCleanupTaskIds: workspaceCleanup.taskIds, deletedWorkspaceDirectories: workspaceCleanup.directories, deletedWorkspaceAssets: workspaceCleanup.assets }
   }
 
   async bindings(projectVersionId: string) {

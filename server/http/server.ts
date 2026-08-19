@@ -266,7 +266,7 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   const projectVersionStatus = /^\/api\/project-versions\/([^/]+)\/status$/.exec(url.pathname)
   if (method === 'PATCH' && projectVersionStatus) { await requireProjectVersion(projectVersionStatus[1], 'project-version:manage'); const body = await json(request); return send(response, 200, await projectVersionService.updateStatus(projectVersionStatus[1], String(body.status ?? '') as 'open' | 'locked' | 'archived')) }
   const projectVersion = /^\/api\/project-versions\/([^/]+)$/.exec(url.pathname)
-  if (method === 'DELETE' && projectVersion) { await requireProjectVersion(projectVersion[1], 'project-version:manage'); return send(response, 200, await projectVersionService.delete(projectVersion[1])) }
+  if (method === 'DELETE' && projectVersion) { await requireProjectVersion(projectVersion[1], 'project-version:manage'); const deleted = await projectVersionService.delete(projectVersion[1]); await Promise.all(deleted.workspaceCleanupTaskIds.map(notifyTask)); return send(response, 200, deleted) }
   const requirementBindings = /^\/api\/project-versions\/([^/]+)\/requirement-bindings$/.exec(url.pathname)
   if (method === 'GET' && requirementBindings) { await requireProjectVersion(requirementBindings[1], 'project-version:read'); return send(response, 200, await projectVersionService.bindings(requirementBindings[1])) }
   if (method === 'POST' && requirementBindings) { await requireProjectVersion(requirementBindings[1], 'project-version:manage'); const body = await json(request); return send(response, 201, await projectVersionService.bindRequirement(requirementBindings[1], String(body.assetVersionId ?? ''))) }

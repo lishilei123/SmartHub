@@ -88,7 +88,7 @@ testDesignService.onTestPointsValidated(async (projectVersionId, runId, treeVers
     treeVersionId,
   )
 })
-export const projectVersionService = new ProjectVersionService(stateStore)
+export const projectVersionService = new ProjectVersionService(stateStore, service)
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore
 

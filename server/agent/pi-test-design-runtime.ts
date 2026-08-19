@@ -4,7 +4,7 @@ import { builtInToolBindingToken, toolBindingToken, toolsetContentHash } from '.
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
 import type { PlanningAgentRuntime } from '../application/test-design-service.js'
-import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
+import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
@@ -150,7 +150,9 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
       }, signal)
       return {
         schemaVersion: binding.schemaVersion,
-        content: structuredClone(output.candidate),
+        content: stage === 'test_point_design'
+          ? structuredClone(output.candidate)
+          : projectTestCaseCandidateSubmission(output.candidate as TestCaseDesignCandidate),
         execution: executionRecord(stage, configuration.agentDefinition.version, model.modelName, output.events, output.turns, output.toolCalls, output.toolErrors, output.framework, output.context, output.inputDeliveryManifest),
       }
     } catch (error) {
@@ -179,6 +181,10 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     runtimeBoundary: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
+    requiredContentAccesses: requiredTestDesignWorkspaceContentPaths(run, stage).map(path => ({
+      path: `/workspace/${path}`,
+      allowedTools: ['read', 'grep'],
+    })),
     task: testDesignTaskMessage(stage),
     ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test-design/test-point-tree.json` } } : {}),
     ...(repairState && repairAudit ? { repair: { attempt: repairState.attempt, maxAttempts: repairState.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
@@ -214,6 +220,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
     'Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 是本轮执行权限边界。',
     'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 查看 Enabled Skill Catalog，并按当前任务自主决定是否通过 skill.read 读取所需方法正文。',
     'currentInputRefs 是重点输入，不是读取白名单；先读取重点输入，再按需使用 ls、find、grep、read 浏览完整冻结 Workspace。',
+    'requiredContentAccesses 中的每个文件都必须在提交前实际核对：可使用 read，或对该文件路径使用 grep。find 和 ls 只证明路径/目录，不构成内容核对。',
     'requirements/clarifications.json 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
     '若存在 historical-test-cases.json，必须读取并判断复用、修改、新增或废弃；历史资料不能覆盖当前 Requirement Release。',
     '不得编造阈值、时长、兼容矩阵、接口、定位器、账号、环境或 Expected Result。',
@@ -313,17 +320,10 @@ function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, wo
 }
 
 async function validateStageCandidate(stage: TestDesignStage, candidate: Record<string, unknown>, run: TestDesignWorkflowRun, manifest: InputDeliveryManifest) {
-  const readPaths = new Set((manifest.toolReads ?? []).map(item => item.relativePath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')))
-  const branchRelative = run.workspaceSnapshot.activeBranchLogicalPath.replace(/^workspace\//u, '')
-  const requiredPaths = stage === 'test_point_design'
-    ? [`${branchRelative}/requirements/requirements.json`]
-    : stage === 'test_case_design'
-    ? [`${branchRelative}/requirements/requirements.json`, `${branchRelative}/test-design/test-point-tree.json`]
-    : ['agent_workspace/planning_agent/current-test-cases.json', `${branchRelative}/test-design/test-point-tree.json`]
-  if ((run.basisSnapshot.clarifications?.length ?? 0) > 0 && stage !== 'test_design_repair') requiredPaths.push(`${branchRelative}/requirements/clarifications.json`)
-  if (run.historicalSnapshot.items.length && stage !== 'test_design_repair') requiredPaths.push('agent_workspace/planning_agent/historical-test-cases.json')
-  const missingReads = requiredPaths.filter(path => !readPaths.has(path))
-  if (missingReads.length) return { valid: false, issues: missingReads.map(path => ({ path: '/workspaceReads', message: `提交前必须用 read 读取 /workspace/${path}` })) }
+  const accessedPaths = observedWorkspaceContentPaths(manifest)
+  const requiredPaths = requiredTestDesignWorkspaceContentPaths(run, stage)
+  const missingReads = requiredPaths.filter(path => !accessedPaths.has(path))
+  if (missingReads.length) return { valid: false, issues: missingReads.map(path => ({ path: '/workspaceReads', message: `提交前必须实际核对 /workspace/${path}；可使用 read，或对该文件路径使用 grep。find 和 ls 不构成内容核对。` })) }
   try {
     const result = stage === 'test_point_design' ? validateTestPointDesignCandidate(candidate) : validateTestCaseDesignCandidate(candidate, approvedPointIds(run), stage === 'test_design_repair')
     return { valid: true, result, issues: [] }
@@ -332,6 +332,48 @@ async function validateStageCandidate(stage: TestDesignStage, candidate: Record<
     const message = error instanceof Error ? error.message : String(error)
     const recoveryHint = stage === 'test_case_design' || stage === 'test_design_repair' ? testCaseCandidateRecoveryHint(message) : ''
     return { valid: false, issues: [{ path: typeof details?.path === 'string' ? details.path : '/', message: `${message}${recoveryHint}` }] }
+  }
+}
+
+export function requiredTestDesignWorkspaceContentPaths(run: TestDesignWorkflowRun, stage: TestDesignStage) {
+  const branchRelative = run.workspaceSnapshot.activeBranchLogicalPath.replace(/^workspace\//u, '')
+  const requiredPaths = stage === 'test_point_design'
+    ? [`${branchRelative}/requirements/requirements.json`]
+    : stage === 'test_case_design'
+    ? [`${branchRelative}/requirements/requirements.json`, `${branchRelative}/test-design/test-point-tree.json`]
+    : ['agent_workspace/planning_agent/current-test-cases.json', `${branchRelative}/test-design/test-point-tree.json`]
+  if ((run.basisSnapshot.clarifications?.length ?? 0) > 0 && stage !== 'test_design_repair') requiredPaths.push(`${branchRelative}/requirements/clarifications.json`)
+  if (run.historicalSnapshot.items.length && stage !== 'test_design_repair') requiredPaths.push('agent_workspace/planning_agent/historical-test-cases.json')
+  return requiredPaths
+}
+
+export function observedWorkspaceContentPaths(manifest: InputDeliveryManifest) {
+  const normalize = (path: string) => path.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  return new Set([
+    ...(manifest.toolReads ?? []).map(item => normalize(item.relativePath)),
+    ...(manifest.workspaceContentAccesses ?? []).map(item => normalize(item.relativePath)),
+  ])
+}
+
+/**
+ * The submit tools accept flat cases, while validation returns an internal
+ * `{ ref, content }` representation. Service materialization revalidates the
+ * persisted candidate against the submit contract, so the boundary must return
+ * to the flat wire shape without ever accepting wrapped model input.
+ */
+export function projectTestCaseCandidateSubmission(
+  candidate: TestCaseDesignCandidate,
+): TestCaseDesignCandidateSubmission {
+  return {
+    schemaVersion: candidate.schemaVersion,
+    cases: candidate.cases.map(({ ref, content }) => ({
+      ref,
+      ...structuredClone(content),
+    })),
+    dataRequirements: structuredClone(candidate.dataRequirements),
+    findings: structuredClone(candidate.findings),
+    confirmationItems: structuredClone(candidate.confirmationItems),
+    proposals: structuredClone(candidate.proposals),
   }
 }
 

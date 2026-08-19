@@ -154,7 +154,8 @@
           "path": {
             "type": "string",
             "minLength": 0,
-            "maxLength": 2000
+            "maxLength": 2000,
+            "description": "省略、空字符串或 . 均表示 /workspace 根目录；非空 path 只接受工作区内相对路径。"
           },
           "limit": {
             "type": "integer",

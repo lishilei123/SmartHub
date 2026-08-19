@@ -455,7 +455,11 @@ function AgentConversation({ run, projectVersionId, linkedTestDesign, onReviewed
         setTestDesignLoadError('')
         if (!['succeeded', 'failed', 'cancelled'].includes(detail.status)) timer = setTimeout(() => void poll(), 1_000)
       } catch (error) {
-        if (!cancelled) setTestDesignLoadError(error instanceof Error ? error.message : '测试设计运行读取失败')
+        if (cancelled) return
+        const message = error instanceof Error ? error.message : '测试设计运行读取失败'
+        const transientNetworkFailure = error instanceof TypeError || /failed to fetch|networkerror|network request failed/iu.test(message)
+        setTestDesignLoadError(transientNetworkFailure ? '测试设计服务暂时不可用，正在自动重试。' : message)
+        if (transientNetworkFailure) timer = setTimeout(() => void poll(), 1_500)
       }
     }
     void poll()
