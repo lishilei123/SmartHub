@@ -479,12 +479,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
       deliveryManifest.toolReads ??= []
       deliveryManifest.toolReads.push(structuredClone(observation))
-    }, piDocumentWorkspace, this.knowledge, observation => {
-      if (deliveryManifest.mode !== 'agent_directory') return
-      if (deliveryManifest.workspaceContentAccesses?.some(item => item.toolCallId === observation.toolCallId)) return
-      deliveryManifest.workspaceContentAccesses ??= []
-      deliveryManifest.workspaceContentAccesses.push(structuredClone(observation))
-    })
+    }, piDocumentWorkspace, this.knowledge)
     skillSession.register(registry)
     const skillPrompt = skillSession.renderPrompt()
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(

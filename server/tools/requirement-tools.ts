@@ -2,7 +2,7 @@ import type { CandidateRequirementAnalysisV1 } from '../domain/review-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { ToolRegistry } from './registry.js'
 import { registerRequirementAnalysisSubmitResultTool } from './requirement-analysis-submit-result.js'
-import { registerRequirementDocumentWorkspaceTools, type RequirementDocumentContentAccessObservation, type RequirementDocumentReadObservation, type RequirementDocumentWorkspace } from './requirement-document-workspace.js'
+import { registerRequirementDocumentWorkspaceTools, type RequirementDocumentReadObservation, type RequirementDocumentWorkspace } from './requirement-document-workspace.js'
 import { registerKnowledgeSearchTool } from './knowledge-search.js'
 import { registerKnowledgeReadChunkTool } from './knowledge-read-chunk.js'
 import type { ReviewSubmissionFeedback } from './submission-feedback.js'
@@ -18,11 +18,10 @@ export function createWorkspaceAgentToolRegistry(
   onRead?: (observation: RequirementDocumentReadObservation) => void,
   documentWorkspace?: RequirementDocumentWorkspace,
   knowledge = new KnowledgeService(store),
-  onContentAccess?: (observation: RequirementDocumentContentAccessObservation) => void,
 ) {
   const registry = new ToolRegistry()
   if (!documentWorkspace) throw new Error('PI_DOCUMENT_WORKSPACE_REQUIRED')
-  registerRequirementDocumentWorkspaceTools(registry, documentWorkspace, onRead, onContentAccess)
+  registerRequirementDocumentWorkspaceTools(registry, documentWorkspace, onRead)
   registerKnowledgeSearchTool(registry, knowledge)
   registerKnowledgeReadChunkTool(registry, store)
   registry.register(defaultBuiltInToolConfigResolver.toDescriptor(submitToolId), async request => {

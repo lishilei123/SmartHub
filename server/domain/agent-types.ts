@@ -167,16 +167,6 @@ export interface InputDeliveryManifest {
     endLine: number
     sourceScope?: ProjectWorkspaceSourceScope
   }>
-  /**
-   * Audit trail for tools that expose a frozen file's content. Unlike
-   * `toolReads`, these entries are not Evidence/line-range proofs and must not
-   * be used to satisfy RequirementAnalysis input-delivery validation.
-   */
-  workspaceContentAccesses?: Array<{
-    toolCallId: string
-    toolId: 'workspace.read_file' | 'workspace.grep_files'
-    relativePath: string
-  }>
   finalMergeCompleted: boolean
 }
 
