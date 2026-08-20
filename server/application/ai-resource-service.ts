@@ -19,10 +19,10 @@ const builtInTools: ToolResource[] = defaultBuiltInToolConfigResolver.keys({ cat
 const builtInSkills: SkillResource[] = [
   builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例']),
   builtInSkill('requirement.baseline', '需求基线', '读取固定需求正文并建立完整、原子且可追溯到原文证据的需求基线草稿。', '1.0.0', 'server/skills/requirement-baseline/SKILL.md', [], ['需求分析', '基线', 'baseline']),
-  builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成需求理解、仅针对核心业务事实的 Clarification、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'clarification', 'traceability']),
+  builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成需求理解、coverageTarget 语义标记、仅针对核心业务事实的 Clarification、Test Focus 与自检。', '1.1.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'clarification', 'traceability']),
   builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release、正式用例库或套件建立测试设计事实和变化基线。', '1.2.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace']),
-  builtInSkill('test-case-design', '测试用例设计', '生成 Atomic Test Intent、ScenarioClaim、按维度区分的 executionSpec、测试数据和正式用例库变更 Proposal。', '1.3.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'atomicity', 'ScenarioClaim', 'Proposal']),
-  builtInSkill('test-design-repair', '测试设计修复', '根据 ScenarioClaim 与 Coverage Audit 拆分过度合并用例，并保留 Proposal 与 executionSpec。', '1.3.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage', 'atomicity']),
+  builtInSkill('test-case-design', '测试用例设计', '生成 Atomic Test Intent、结构化状态边 ScenarioClaim、按维度区分的 executionSpec、测试数据和正式用例库变更 Proposal。', '1.4.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'atomicity', 'ScenarioClaim', 'Proposal']),
+  builtInSkill('test-design-repair', '测试设计修复', '根据结构化 ScenarioClaim 与 Coverage Audit 拆分过度合并用例，并保留 Proposal 与 executionSpec。', '1.4.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage', 'atomicity']),
   builtInSkill('test-script-generation', '测试脚本生成', '从冻结执行任务生成单文件 Playwright UI 或 API 脚本候选。', '1.0.0', 'server/skills/test-script-generation/SKILL.md', [], ['测试执行', 'Playwright', '脚本生成']),
   builtInSkill('failure-analysis', '执行失败分析', '根据同脚本终态 Attempt 与不可变证据生成失败诊断候选。', '1.0.0', 'server/skills/failure-analysis/SKILL.md', [], ['测试执行', '诊断', '失败分析']),
   builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下修复 Playwright 实现候选。', '1.0.0', 'server/skills/script-repair/SKILL.md', [], ['测试执行', 'Playwright', '脚本修复']),

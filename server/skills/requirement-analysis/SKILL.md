@@ -15,8 +15,8 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 
 ## 2. 整体理解与 Requirement Baseline
 
-- 先形成业务目标、参与角色、核心对象、主流程、状态与上下游的整体理解，再拆 Requirement Point。
-- Requirement Point 以可独立实现、测试或验收为最小粒度，同时保留条件、边界和结果等必要上下文。
+- 先形成业务目标、参与角色、核心对象、主流程、状态与上下游的整体理解，再拆 Requirement Point。项目级业务目标优先放入 `summary.businessGoals`，不应强行拆成 Requirement Point；若为追溯保留 Context Requirement Point，必须使用 `coverageTarget=false`。
+- Requirement Point 以可独立实现、测试或验收为最小粒度，同时保留条件、边界和结果等必要上下文。每个提交点必须明确 `coverageTarget`：只有项目背景、项目目标、解释性上下文、文档说明等不产生独立业务行为或验收结果的 Context 才能为 `false`；CRUD、状态、输入约束、权限、枚举、查询、统计、异常、Expected Result、数据副作用和业务规则必须为 `true`。这不是按标题关键词判断，更不能为了通过 Coverage Audit 把难测 Requirement 标为 `false`。可选 `coverageRationale` 说明 Context 原因。
 - 逐项覆盖功能行为、主流程、分支流程、异常流程、状态转换、角色权限、数据约束、输入输出、边界条件和验收结果。
 - 语义等价的重复项合并；冲突的当前要求分别保留。若无法依据正式输入确定正确业务事实且会影响测试正确性，形成 Clarification。
 

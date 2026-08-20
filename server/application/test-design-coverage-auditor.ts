@@ -26,6 +26,13 @@ export function auditTestDesignCoverage(input: {
   const cases = input.cases.filter(item => !item.tombstonedAt)
   const current = cases.map(testCase => ({ testCase, revision: testCase.revisions.find(item => item.revision === testCase.currentRevision)! }))
   validateCaseDependencyGraph(current.map(item => ({ id: item.testCase.id, content: item.revision.content })))
+  const caseIdByCandidateRef = new Map(current.flatMap(item => item.testCase.candidateRef ? [[item.testCase.candidateRef, item.testCase.id] as const] : []))
+  const claimsByCaseId = new Map<string, ScenarioClaim[]>()
+  for (const claim of input.scenarioClaims) {
+    const caseId = caseIdByCandidateRef.get(claim.caseRef)
+    if (!caseId) continue
+    claimsByCaseId.set(caseId, [...(claimsByCaseId.get(caseId) ?? []), claim])
+  }
   const caseSetSha256 = canonicalSha256(current.map(item => ({ caseId: item.testCase.id, revision: item.revision.revision, contentSha256: item.revision.contentSha256 })).sort((left, right) => left.caseId.localeCompare(right.caseId)))
   const blockers: Array<Omit<CoverageAudit['blockers'][number], 'resolution'>> = []
   const relations: CoverageAudit['relations'] = []
@@ -53,8 +60,13 @@ export function auditTestDesignCoverage(input: {
     if (item.testCase.reviewState !== 'approved') blockers.push({ code: 'TEST_CASE_REVIEW_REQUIRED', message: `用例 ${content.title} 当前 revision 未批准`, subjectId: item.testCase.id })
     if (content.executionMethods.some(method => method.steps.length === 0) && content.dimension === 'functional') blockers.push({ code: 'TEST_CASE_EXECUTION_METHOD_INCOMPLETE', message: `用例 ${content.title} 缺少可执行步骤`, subjectId: item.testCase.id })
     if (content.executionMethods.some(method => method.executionReadiness === 'needs_confirmation') || content.executionSpec?.executionReadiness === 'needs_confirmation') blockers.push({ code: 'TEST_CASE_NOT_READY', message: `用例 ${content.title} 执行配置仍待确认`, subjectId: item.testCase.id })
-    const expectedResults = [...content.executionMethods.flatMap(method => [...method.steps.map(step => step.expected), ...method.verificationChecks.map(check => check.description)]), ...content.sharedVerificationChecks.map(check => check.description), ...(content.executionSpec?.kind === 'performance' ? content.executionSpec.thresholds.map(item => item.target) : []), ...(content.executionSpec?.kind === 'stability' ? content.executionSpec.observations : []), ...(content.executionSpec?.kind === 'compatibility' ? [content.executionSpec.expectedConsistency] : [])]
-    if (!expectedResults.length || expectedResults.some(value => /(?:TBD|TODO|待确认|未确定|自行判断|按实际情况)/iu.test(value))) blockers.push({ code: 'TEST_CASE_EXPECTED_RESULT_UNCLEAR', message: `用例 ${content.title} 缺少明确且可判定的 Expected Result`, subjectId: item.testCase.id })
+    const claims = claimsByCaseId.get(item.testCase.id) ?? []
+    if (content.dimension === 'functional' || content.dimension === 'security') {
+      if (!claims.length || claims.some(claim => semanticOracleUnclear(claim.oracle))) blockers.push({ code: 'TEST_CASE_EXPECTED_RESULT_UNCLEAR', message: `用例 ${content.title} 缺少明确且可判定的 ScenarioClaim.oracle`, subjectId: item.testCase.id })
+    } else {
+      const expectedResults = [...content.executionMethods.flatMap(method => [...method.steps.map(step => step.expected), ...method.verificationChecks.map(check => check.description)]), ...content.sharedVerificationChecks.map(check => check.description), ...(content.executionSpec?.kind === 'performance' ? content.executionSpec.thresholds.map(item => item.target) : []), ...(content.executionSpec?.kind === 'stability' ? content.executionSpec.observations : []), ...(content.executionSpec?.kind === 'compatibility' ? [content.executionSpec.expectedConsistency] : [])]
+      if (!expectedResults.length || expectedResults.some(semanticOracleUnclear)) blockers.push({ code: 'TEST_CASE_EXPECTED_RESULT_UNCLEAR', message: `用例 ${content.title} 缺少明确且可判定的 Expected Result`, subjectId: item.testCase.id })
+    }
     const missingData = content.dataRequirementIds.filter(id => !input.dataSet.requirements.some(requirement => requirement.id === id && requirement.readiness === 'ready'))
     if (missingData.length) blockers.push({ code: 'TEST_CASE_NOT_READY', message: `用例 ${content.title} 的数据需求未就绪`, subjectId: item.testCase.id })
   }
@@ -78,13 +90,6 @@ export function auditTestDesignCoverage(input: {
     if (cues >= 2 && linked.length === 1 && linked[0].revision.content.objective.length < 80) blockers.push({ code: 'TEST_CASE_COVERAGE_TOO_SHALLOW', message: `Requirement ${requirementId} 同时包含多个测试维度，但只有一条过于宽泛的用例`, subjectId: linked[0].testCase.id })
   }
 
-  const caseIdByCandidateRef = new Map(current.flatMap(item => item.testCase.candidateRef ? [[item.testCase.candidateRef, item.testCase.id] as const] : []))
-  const claimsByCaseId = new Map<string, ScenarioClaim[]>()
-  for (const claim of input.scenarioClaims) {
-    const caseId = caseIdByCandidateRef.get(claim.caseRef)
-    if (!caseId) continue
-    claimsByCaseId.set(caseId, [...(claimsByCaseId.get(caseId) ?? []), claim])
-  }
   for (const item of current) {
     const claims = claimsByCaseId.get(item.testCase.id) ?? []
     const atomicity = atomicityBlocker(item.testCase.id, item.revision.content.title, claims)
@@ -102,14 +107,13 @@ export function auditTestDesignCoverage(input: {
 }
 
 function atomicityBlocker(caseId: string, title: string, claims: ScenarioClaim[]): Omit<CoverageAudit['blockers'][number], 'resolution'> | undefined {
-  if (claims.length < 2) return undefined
   const sameEnumSubject = claims.every(claim => claim.kind === 'enum' && claim.subject === claims[0]?.subject)
   const allowedAggregate = claims.every(claim => claim.kind === 'crud_lifecycle' || claim.kind === 'cross_channel_consistency') || sameEnumSubject
   if (allowedAggregate) return undefined
   const independent = claims
   const reasons = new Set<string>()
-  const stateVariants = new Set(independent.filter(claim => claim.kind === 'state_transition').map(claim => claim.variant))
-  if (stateVariants.size > 1) reasons.add('multiple_state_transitions')
+  const stateTransitions = new Set(independent.filter(claim => claim.kind === 'state_transition').map(claim => `${claim.transition?.from ?? claim.variant}\u0000${claim.transition?.to ?? claim.variant}`))
+  if (stateTransitions.size > 1) reasons.add('multiple_state_transitions')
   const polarities = new Set(independent.map(claim => claim.polarity))
   if (polarities.has('positive') && polarities.has('negative')) reasons.add('mixed_positive_negative')
   const subjects = new Set(independent.map(claim => claim.subject))
@@ -128,6 +132,12 @@ function atomicityBlocker(caseId: string, title: string, claims: ScenarioClaim[]
 }
 
 function normalizeOracle(value: string) { return value.trim().replace(/\s+/gu, ' ').toLocaleLowerCase('zh-CN') }
+function semanticOracleUnclear(value: string) {
+  const normalized = normalizeOracle(value).replace(/[。；，,.!！?？]/gu, '')
+  return !normalized
+    || /(?:TBD|TODO|待确认|未确定|自行判断|按实际情况)/iu.test(value)
+    || ['获得可观察结果', '功能可用', '查询成功'].includes(normalized)
+}
 
 function blockerResolution(code: string): CoverageAudit['blockers'][number]['resolution'] {
   if (code === 'COVERAGE_REQUIREMENT_UNCOVERED' || code === 'TEST_CASE_DUPLICATE' || code === 'TEST_CASE_COVERAGE_TOO_SHALLOW' || code === 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID' || code === 'TEST_CASE_OVER_MERGED') return 'agent_repair'

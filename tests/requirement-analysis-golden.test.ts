@@ -28,6 +28,7 @@ const extractedSample: CandidateRequirementPoint[] = [
     exceptions: ['已支付订单不可取消'],
     acceptanceCriteria: ['提交取消后订单不再待支付'],
     evidenceRefs: ['E-CANCEL'],
+    coverageTarget: true,
   },
   {
     clientRequirementPointId: 'RP-TIMEOUT',
@@ -41,6 +42,7 @@ const extractedSample: CandidateRequirementPoint[] = [
     exceptions: [],
     acceptanceCriteria: ['超时订单状态为已关闭'],
     evidenceRefs: ['E-TIMEOUT'],
+    coverageTarget: true,
   },
   {
     clientRequirementPointId: 'RP-NOTIFY',
@@ -54,6 +56,7 @@ const extractedSample: CandidateRequirementPoint[] = [
     exceptions: [],
     acceptanceCriteria: ['用户收到状态变更通知'],
     evidenceRefs: ['E-NOTIFY'],
+    coverageTarget: true,
     mergeGroupId: 'notification',
     mergeRationale: '关闭和取消后的通知属于同一状态变更通知规则。',
   },

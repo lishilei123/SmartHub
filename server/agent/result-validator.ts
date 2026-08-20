@@ -118,6 +118,7 @@ export class RequirementPointExtractionValidator {
         exceptions: structuredClone(draftPoint.exceptions),
         acceptanceCriteria: structuredClone(draftPoint.acceptanceCriteria),
         evidenceRefs: pointEvidenceRefs,
+        coverageTarget: true,
         ...(draftPoint.mergeGroupId !== undefined ? { mergeGroupId: draftPoint.mergeGroupId } : {}),
         ...(draftPoint.mergeRationale !== undefined ? { mergeRationale: draftPoint.mergeRationale } : {}),
       })
@@ -201,6 +202,7 @@ export class RequirementPointExtractionValidator {
         exceptions: structuredClone(draftPoint.exceptions),
         acceptanceCriteria: structuredClone(draftPoint.acceptanceCriteria),
         evidenceRefs: pointEvidenceRefs,
+        coverageTarget: true,
         ...(draftPoint.mergeGroupId !== undefined ? { mergeGroupId: draftPoint.mergeGroupId } : {}),
         ...(draftPoint.mergeRationale !== undefined ? { mergeRationale: draftPoint.mergeRationale } : {}),
       })
@@ -395,7 +397,7 @@ export class RequirementAnalysisValidator {
       const path = `requirementPoints[${position}]`
       if (!point || typeof point !== 'object') { issues.push(issue(path, '需求点必须是对象')); return }
       const rawPoint = point as unknown as Record<string, unknown>
-      for (const key of Object.keys(rawPoint)) if (!['id', 'title', 'description', 'sourceTexts'].includes(key)) issues.push(issue(`${path}.${key}`, '模型只提交 id、title、description 和 sourceTexts'))
+      for (const key of Object.keys(rawPoint)) if (!['id', 'title', 'description', 'sourceTexts', 'coverageTarget', 'coverageRationale'].includes(key)) issues.push(issue(`${path}.${key}`, '模型只提交 id、title、description、sourceTexts、coverageTarget 和可选 coverageRationale'))
       const id = typeof point.id === 'string' ? point.id.trim() : ''
       if (!/^RP-\d{3,}$/u.test(id)) issues.push(issue(`${path}.id`, '必须使用 RP- 加至少三位数字的本次提交临时 ID'))
       else if (temporaryIds.has(id)) issues.push(issue(`${path}.id`, '需求点 ID 重复'))
@@ -403,6 +405,8 @@ export class RequirementAnalysisValidator {
       const description = typeof point.description === 'string' ? point.description.trim().toLocaleLowerCase().replace(/\s+/gu, ' ') : ''
       if (description && descriptions.has(description)) issues.push(issue(`${path}.description`, '存在完全重复的需求点描述，请在同一 Agent Session 内完成去重'))
       if (description) descriptions.add(description)
+      if (typeof point.coverageTarget !== 'boolean') issues.push(issue(`${path}.coverageTarget`, '必须明确声明该需求点是否为独立 TestCase coverageTarget'))
+      if (point.coverageRationale !== undefined && (typeof point.coverageRationale !== 'string' || !point.coverageRationale.trim() || point.coverageRationale.length > 2_000)) issues.push(issue(`${path}.coverageRationale`, '如提供，必须是长度不超过 2000 的非空字符串'))
     })
     if (issues.length) return { report: { valid: false, issues } }
 
@@ -480,10 +484,19 @@ export class RequirementAnalysisValidator {
     const blockingClarifications = clarifications.filter(item => item.blocking && item.status === 'pending')
     const overallAssessment = blockingClarifications.length ? 'blocked' : 'pass'
     const fallbackScore = 100
+    const requirementPoints = normalizedPoints.result.requirementPoints.map((point, index) => {
+      const candidate = input.requirementPoints[index]!
+      return {
+        ...point,
+        coverageTarget: candidate.coverageTarget,
+        ...(typeof candidate.coverageRationale === 'string' && candidate.coverageRationale.trim() ? { coverageRationale: candidate.coverageRationale.trim() } : {}),
+      }
+    })
     const core = {
       ...normalizedPoints.result,
+      requirementPoints,
       summary: {
-        overview: typeof modelSummary?.overview === 'string' && modelSummary.overview.trim() ? modelSummary.overview.trim() : `本次分析形成 ${normalizedPoints.result.requirementPoints.length} 个需求点和 ${testFocus.length} 个 Test Focus。`,
+        overview: typeof modelSummary?.overview === 'string' && modelSummary.overview.trim() ? modelSummary.overview.trim() : `本次分析形成 ${requirementPoints.length} 个需求点和 ${testFocus.length} 个 Test Focus。`,
         businessGoals: cleanStrings(modelSummary?.businessGoals),
         overallAssessment,
         score: Number.isFinite(modelSummary?.score) ? Math.min(100, Math.max(0, Number(modelSummary?.score))) : fallbackScore,

@@ -30,6 +30,83 @@ test('Coverage Audit 的 TEST_CASE_OVER_MERGED 会由同一 PlanningAgent repair
   assert.equal(completed.testCases.filter(item => !item.tombstonedAt).length, 2)
   assert.equal(completed.scenarioClaims.map(item => item.caseRef).sort().join(','), 'TC-TASK-IN-PROGRESS-TO-COMPLETED,TC-TASK-TODO-TO-IN-PROGRESS')
   assert.equal(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_OVER_MERGED'), false)
+  const handoffConfirmations = completed.confirmationItems.filter(item => item.executionIssueSignature)
+  assert.equal(handoffConfirmations.length, 1, '同类 UI 执行缺口必须聚合为一个 Confirmation')
+  assert.deepEqual(handoffConfirmations[0]?.affectedRefs.filter(ref => completed.testCases.some(item => !item.tombstonedAt && item.id === ref)).sort(), completed.testCases.filter(item => !item.tombstonedAt).map(item => item.id).sort())
+  await service.reAudit('project-version-1', design.id, run.id)
+  assert.equal((await service.getRun('project-version-1', design.id, run.id)).confirmationItems.filter(item => item.executionIssueSignature).length, 1, '重新 Audit 不得增加相同 Handoff Confirmation')
+})
+
+test('无关 human_decision 不阻止 TEST_CASE_OVER_MERGED 的范围化自动修复', async () => {
+  const store = await storeWithPublishedRequirement()
+  let repairExecuted = false
+  const runtime: PlanningAgentRuntime = {
+    readiness: async () => ({ ready: true, agents: [] }),
+    freezeConfiguration: async () => frozenConfiguration(),
+    execute: async input => {
+      if (input.stage === 'test_case_design') {
+        return {
+          schemaVersion: 'test-case-design/v1',
+          content: candidate(
+            [caseCandidate('TC-MERGED', '状态边合并'), caseCandidate('TC-HUMAN', '待人工业务判断')],
+            [
+              stateClaim('SC-MERGED-TODO', 'TC-MERGED', 'todo->in_progress', 'positive', '状态变更后为 in_progress'),
+              stateClaim('SC-MERGED-COMPLETED', 'TC-MERGED', 'in_progress->completed', 'positive', '状态变更后为 completed'),
+              stateClaim('SC-HUMAN', 'TC-HUMAN', 'completed->todo', 'negative', '待确认具体回退语义'),
+            ],
+          ),
+        }
+      }
+      repairExecuted = (input.upstream as { blockers: Array<{ code: string }> }).blockers.every(item => item.code === 'TEST_CASE_OVER_MERGED')
+      return {
+        schemaVersion: 'test-design-repair/v1',
+        content: candidate(
+          [caseCandidate('TC-TODO', 'todo 到 in_progress'), caseCandidate('TC-COMPLETED', 'in_progress 到 completed'), caseCandidate('TC-HUMAN', '待人工业务判断')],
+          [
+            stateClaim('SC-MERGED-TODO', 'TC-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress'),
+            stateClaim('SC-MERGED-COMPLETED', 'TC-COMPLETED', 'in_progress->completed', 'positive', '状态变更后为 completed'),
+            stateClaim('SC-HUMAN', 'TC-HUMAN', 'completed->todo', 'negative', '待确认具体回退语义'),
+          ],
+          'test-design-repair/v1',
+        ),
+      }
+    },
+  }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '范围化修复', objective: '验证修复作用域', knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('project-version-1', design.id, 'scope-aware-repair', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
+
+  assert.equal(repairExecuted, true)
+  assert.equal(completed.automaticRepair?.status, 'succeeded')
+  assert.equal(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_OVER_MERGED'), false)
+  assert.ok(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR' && item.resolution === 'human_decision'))
+})
+
+test('未尝试的非独立修复在相关 human_decision 下标记 deferred，不会伪造 exhausted', async () => {
+  const store = await storeWithPublishedRequirement()
+  let repairExecuted = false
+  const runtime: PlanningAgentRuntime = {
+    readiness: async () => ({ ready: true, agents: [] }),
+    freezeConfiguration: async () => frozenConfiguration(),
+    execute: async input => {
+      if (input.stage === 'test_design_repair') repairExecuted = true
+      return {
+        schemaVersion: 'test-case-design/v1',
+        content: candidate([caseCandidate('TC-SHALLOW', '覆盖过浅且待确认')], [stateClaim('SC-SHALLOW', 'TC-SHALLOW', 'todo->in_progress', 'positive', '待确认状态展示')]),
+      }
+    },
+  }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '修复状态', objective: '验证状态语义', knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('project-version-1', design.id, 'deferred-repair-state', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
+
+  assert.equal(repairExecuted, false)
+  assert.equal(completed.automaticRepair?.attempt, 0)
+  assert.equal(completed.automaticRepair?.status, 'deferred')
+  assert.ok(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_COVERAGE_TOO_SHALLOW'))
+  assert.ok(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'))
 })
 
 function caseCandidate(ref: string, title: string) {
@@ -45,7 +122,7 @@ function caseCandidate(ref: string, title: string) {
     dataRequirementIds: [],
     cleanup: [],
     dependencies: [],
-    executionMethods: [{ method: 'ui', uiSpec: { entry: '/tasks', selectors: ['data-testid=task-status'] }, steps: [{ key: 'step-1', action: '变更任务状态', expected: '状态变更结果符合该场景' }], verificationChecks: [], executionReadiness: 'ready', automationHint: 'UI 自动化' }],
+    executionMethods: [{ method: 'ui', uiSpec: { entry: '/tasks', selectors: [] }, steps: [{ key: 'step-1', action: '变更任务状态', expected: '状态变更结果符合该场景' }], verificationChecks: [], executionReadiness: 'needs_confirmation', automationHint: 'UI selector 待确认' }],
     executionSpec: { kind: 'functional', method: 'ui' },
     sharedVerificationChecks: [],
     tags: [],
@@ -53,13 +130,13 @@ function caseCandidate(ref: string, title: string) {
   }
 }
 
-function stateClaim(ref: string, caseRef: string, variant: string, polarity: 'positive' | 'negative', oracle: string) { return { ref, caseRef, requirementRefs: ['RP-STATE'], kind: 'state_transition' as const, subject: 'task.status', variant, polarity, oracle } }
+function stateClaim(ref: string, caseRef: string, variant: string, polarity: 'positive' | 'negative', oracle: string) { const [from, to] = variant.split('->'); return { ref, caseRef, requirementRefs: ['RP-STATE'], kind: 'state_transition' as const, subject: 'task.status', variant, polarity, oracle, transition: { from: from?.trim() || variant, to: to?.trim() || variant } } }
 function candidate(cases: ReturnType<typeof caseCandidate>[], scenarioClaims: ReturnType<typeof stateClaim>[], schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1' = 'test-case-design/v1') { return { schemaVersion, cases, scenarioClaims, dataRequirements: [], findings: [], confirmationItems: [], proposals: [] } }
 
 async function storeWithPublishedRequirement() {
   const store = new JsonStore(null)
   await store.load()
-  const requirementsContent = json({ schemaVersion: 'requirements/v1', releaseId: 'release-1', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', sourceAssetVersions: [{ assetVersionId: 'version-fixed' }], requirements: [{ clientRequirementPointId: 'RP-STATE', title: '任务状态转换', description: '任务状态可以迁移', evidenceRefs: [] }] })
+  const requirementsContent = json({ schemaVersion: 'requirements/v1', releaseId: 'release-1', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', sourceAssetVersions: [{ assetVersionId: 'version-fixed' }], requirements: [{ clientRequirementPointId: 'RP-STATE', title: '任务状态转换', description: '任务状态具有正常、异常、边界、权限和状态规则。', evidenceRefs: [] }] })
   const requirementsHash = sha256(requirementsContent)
   const manifestContent = json({ schemaVersion: 'requirement-release-manifest/v1', releaseId: 'release-1', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', artifacts: [{ fileName: 'requirements.json', mediaType: 'application/json', contentSha256: requirementsHash }], machineReadableEntryPoints: { requirements: 'requirements.json' } })
   await store.transaction(state => {

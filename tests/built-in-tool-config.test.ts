@@ -25,10 +25,10 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').piName, 'script_repair_submit_result')
 })
 
-test('Requirement Analysis 方法论更新不改变已发布 v1.2.0 Tool 的绑定令牌', () => {
+test('Requirement Analysis coverageTarget Schema 升级会发布新的 Tool 绑定令牌', () => {
   assert.equal(
     builtInToolBindingToken('requirement-analysis.submit_result'),
-    'requirement-analysis.submit_result@1.2.0#0a12797254fb348acd31703c9a1d73890d2a07d2e5884afde3d6bd8eaabcf9fb',
+    'requirement-analysis.submit_result@1.3.0#e186573f01c63fffea1584cff29b8cd271919a8c7892289c419ccd47996bb4b5',
   )
 })
 
@@ -75,7 +75,7 @@ test('测试用例提交工具向模型声明 Requirement 直接追溯字段', (
     required: string[]
     properties: { cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
   }
-  assert.equal(descriptor.version, '1.2.0')
+  assert.equal(descriptor.version, '1.3.0')
   assert.equal(schema.additionalProperties, false)
   assert.ok(schema.required.includes('cases'))
   assert.equal(schema.properties.cases.minItems, 1)
@@ -90,7 +90,7 @@ test('测试用例与修复提交工具声明闭合的 test-case/v2、executionS
     additionalProperties: boolean
     properties: {
       cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, { minItems?: number }> } }
-      scenarioClaims: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { enum?: string[]; minItems?: number }> } }
+      scenarioClaims: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { enum?: string[]; minItems?: number; required?: string[] }> } }
       dataRequirements: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { description?: string }> } }
       proposals: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
     }
@@ -109,6 +109,7 @@ test('测试用例与修复提交工具声明闭合的 test-case/v2、executionS
   assert.deepEqual(scenarioSchema.required, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle'])
   assert.equal(scenarioSchema.properties.requirementRefs.minItems, 1)
   assert.deepEqual(scenarioSchema.properties.polarity.enum, ['positive', 'negative', 'neutral'])
+  assert.deepEqual(scenarioSchema.properties.transition.required, ['from', 'to'])
   assert.equal(schema.properties.proposals.items.additionalProperties, false)
   assert.ok(schema.properties.proposals.items.required.includes('operation'))
   assert.ok(schema.properties.proposals.items.required.includes('confidence'))

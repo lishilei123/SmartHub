@@ -26,6 +26,8 @@ export interface ScenarioClaim {
   variant: string
   polarity: ScenarioClaimPolarity
   oracle: string
+  /** A state-transition claim declares exactly one concrete edge. */
+  transition?: { from: string; to: string }
   knowledgeRefs?: string[]
 }
 
@@ -438,10 +440,12 @@ export interface CoverageAudit {
 }
 
 export interface TestDesignAutomaticRepairState {
-  status: 'idle' | 'queued' | 'running' | 'succeeded' | 'exhausted' | 'not_needed'
+  status: 'idle' | 'queued' | 'running' | 'succeeded' | 'exhausted' | 'deferred' | 'not_needed'
   attempt: number
   maxAttempts: number
   blockerCodes: string[]
+  /** The exact agent-repair blockers selected by the scope-aware repair gate. */
+  blockerScopes?: Array<{ code: string; subjectId?: string }>
   triggerAuditId?: string
   startedAt?: string
   finishedAt?: string
@@ -528,7 +532,7 @@ export interface LegacyTestCaseMigrationRecord {
 
 export interface TestDesignDispositionAction { id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }
 export interface DesignFinding { id: string; title: string; description: string; severity: 'blocker' | 'high' | 'medium' | 'low'; basisRefs: string[]; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
-export interface ConfirmationItem { id: string; title: string; question: string; decisionType: string; impactStage: 'analysis' | 'case' | 'data' | 'publication' | 'handoff'; affectedRefs: string[]; blocker: boolean; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
+export interface ConfirmationItem { id: string; title: string; question: string; decisionType: string; impactStage: 'analysis' | 'case' | 'data' | 'publication' | 'handoff'; affectedRefs: string[]; blocker: boolean; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[]; executionIssueSignature?: string }
 
 export interface TestDesignWorkflowRun {
   id: string

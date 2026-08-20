@@ -27,6 +27,8 @@ export type RequirementPoint = {
   exceptions: string[]
   acceptanceCriteria: string[]
   evidenceRefs: string[]
+  coverageTarget: boolean
+  coverageRationale?: string
   mergeGroupId?: string
   mergeRationale?: string
 }

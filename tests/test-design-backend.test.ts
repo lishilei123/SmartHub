@@ -8,9 +8,10 @@ import type { ScenarioClaim, TestCase, TestCaseContent } from '../server/domain/
 const executionMethods = [{ method: 'ui' as const, uiSpec: { entry: '/login', selectors: ['data-testid=submit'] }, steps: [{ key: 'step-1', action: '提交表单', expected: '显示登录成功' }], verificationChecks: [{ key: 'check-1', description: '页面显示首页' }], executionReadiness: 'ready' as const, automationHint: 'UI 自动化' }]
 function content(requirementRefs: string[], objective = '验证登录行为'): TestCaseContent { return { schemaVersion: 'test-case/v2', title: objective, objective, dimension: 'functional', requirementRefs, priority: 'P0', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods, executionSpec: { kind: 'functional', method: 'ui', steps: executionMethods[0].steps, verificationChecks: executionMethods[0].verificationChecks, preconditions: [], testDataRequirements: [], executionReadiness: 'ready', automationHint: 'UI 自动化' }, sharedVerificationChecks: [], tags: [], domain: '认证' } }
 function testCase(id: string, value: TestCaseContent, reviewState: TestCase['reviewState'] = 'approved'): TestCase { const revision = { revision: 0, content: value, contentSha256: canonicalSha256(value), semanticSha256: canonicalSha256({ ...value, tags: [] }), diff: [], editorId: 'test', reason: 'test', createdAt: new Date().toISOString() }; return { id, runId: 'run-1', candidateRef: id, origin: 'ai', currentRevision: 0, reviewState, revisions: [revision], reviewActions: [] } }
-function basis(ids: string[], cues = '') { return { schemaVersion: 'test-design-basis-snapshot/v2', projectVersionId: 'pv-1', requirementReleaseId: 'release-1', verificationRunId: 'review-1', requirementsJsonSha256: 'a'.repeat(64), items: ids.map(id => ({ id: `basis-${id}`, kind: 'requirement_release', sourceId: 'release-1', contentSha256: canonicalSha256({ id, cues }), content: { id, description: `${id} ${cues}` }, locator: { requirementPointId: id }, createdAt: new Date().toISOString() })), clarifications: [], createdAt: new Date().toISOString(), snapshotSha256: 'b'.repeat(64) } as never }
-function claim(ref: string, caseRef: string, value: Partial<Omit<ScenarioClaim, 'ref' | 'caseRef' | 'requirementRefs'>> = {}): ScenarioClaim { return { ref, caseRef, requirementRefs: ['REQ-1'], kind: 'other', subject: 'task', variant: ref, polarity: 'neutral', oracle: '结果符合 Requirement', ...value } }
-function audit(cases: TestCase[], ids: string[], scenarioClaims: ScenarioClaim[] = [], cues = '') { return auditTestDesignCoverage({ runId: 'run-1', basis: basis(ids, cues), retrieval: { snapshotSha256: 'c'.repeat(64) } as never, historical: { items: [], snapshotSha256: 'd'.repeat(64) } as never, cases, scenarioClaims, dataSet: { id: 'data-1', version: 1, requirements: [], contentSha256: 'e'.repeat(64), createdAt: new Date().toISOString(), createdBy: 'test' }, findings: [], confirmationItems: [] }) }
+function basis(ids: Array<string | { id: string; coverageTarget?: boolean }>, cues = '') { return { schemaVersion: 'test-design-basis-snapshot/v2', projectVersionId: 'pv-1', requirementReleaseId: 'release-1', verificationRunId: 'review-1', requirementsJsonSha256: 'a'.repeat(64), items: ids.map(item => { const { id, coverageTarget } = typeof item === 'string' ? { id: item, coverageTarget: true } : { id: item.id, coverageTarget: item.coverageTarget ?? true }; return { id: `basis-${id}`, kind: 'requirement_release', sourceId: 'release-1', contentSha256: canonicalSha256({ id, cues }), content: { id, description: `${id} ${cues}` }, locator: { requirementPointId: id, coverageTarget }, createdAt: new Date().toISOString() } }), clarifications: [], createdAt: new Date().toISOString(), snapshotSha256: 'b'.repeat(64) } as never }
+function claim(ref: string, caseRef: string, value: Partial<Omit<ScenarioClaim, 'ref' | 'caseRef' | 'requirementRefs'>> = {}): ScenarioClaim { const result = { ref, caseRef, requirementRefs: ['REQ-1'], kind: 'other' as ScenarioClaim['kind'], subject: 'task', variant: ref, polarity: 'neutral' as const, oracle: '结果符合 Requirement', ...value }; return { ...result, ...(result.kind === 'state_transition' ? { transition: result.transition ?? transition(result.variant) } : {}) } }
+function transition(variant: string) { const [from, to] = variant.split('->'); return { from: from?.trim() || variant, to: to?.trim() || variant } }
+function audit(cases: TestCase[], ids: Array<string | { id: string; coverageTarget?: boolean }>, scenarioClaims: ScenarioClaim[] = [], cues = '') { return auditTestDesignCoverage({ runId: 'run-1', basis: basis(ids, cues), retrieval: { snapshotSha256: 'c'.repeat(64) } as never, historical: { items: [], snapshotSha256: 'd'.repeat(64) } as never, cases, scenarioClaims, dataSet: { id: 'data-1', version: 1, requirements: [], contentSha256: 'e'.repeat(64), createdAt: new Date().toISOString(), createdBy: 'test' }, findings: [], confirmationItems: [] }) }
 function candidate(cases: Array<{ ref: string; content: TestCaseContent }>, scenarioClaims: ScenarioClaim[]) { return { schemaVersion: 'test-case-design/v1', cases: cases.map(item => ({ ref: item.ref, ...item.content })), scenarioClaims, dataRequirements: [], findings: [], confirmationItems: [], proposals: [] } }
 function overMerged(result: ReturnType<typeof audit>) { return result.blockers.find(item => item.code === 'TEST_CASE_OVER_MERGED') }
 
@@ -27,6 +28,14 @@ test('Coverage Audit 直接建立 Requirement 到 TestCase 关系，并识别多
   assert.equal(result.statistics.totalBasis, 2)
   assert.equal(result.statistics.coveredBasis, 2)
   assert.deepEqual(result.relations.map(item => item.caseId), ['case-1', 'case-1'])
+})
+
+test('coverageTarget=false 的项目背景不进入 Coverage，而 true 的业务 Requirement 仍必须覆盖', () => {
+  const contextOnly = audit([], [{ id: 'RP-CONTEXT', coverageTarget: false }])
+  assert.equal(contextOnly.statistics.totalBasis, 0)
+  assert.equal(contextOnly.blockers.some(item => item.code === 'COVERAGE_REQUIREMENT_UNCOVERED'), false)
+  const testable = audit([], [{ id: 'RP-BEHAVIOR', coverageTarget: true }])
+  assert.ok(testable.blockers.some(item => item.code === 'COVERAGE_REQUIREMENT_UNCOVERED' && item.subjectId === 'RP-BEHAVIOR'))
 })
 
 test('Coverage Audit 保留低置信度 shallow coverage 检查，但 Scenario Atomicity 才识别过度合并', () => {
@@ -94,13 +103,22 @@ test('ScenarioClaim 必须引用有效 Case ref、Case Requirement 子集，且 
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [claim('SC-1', 'TC-MISSING')])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [claim('SC-1', 'TC-1', { requirementRefs: ['REQ-2'] })])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
+  assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [{ ref: 'SC-STATE', caseRef: 'TC-1', requirementRefs: ['REQ-1'], kind: 'state_transition', subject: 'task.status', variant: 'completed 回退', polarity: 'negative', oracle: '拒绝状态回退' }] as ScenarioClaim[])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
+  assert.throws(() => validateTestCaseDesignCandidate({ ...candidate(cases, [claim('SC-1', 'TC-1')]), confirmationItems: [{ title: 'Agent 不应创建交接确认', question: '缺少 selector', decisionType: 'execution_contract', impactStage: 'handoff', affectedRefs: ['TC-1'], blocker: true }] }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
 })
 
 test('执行契约待确认是 handoff gate，明确 Expected Result 不会误报语义不清', () => {
   const pending = content(['REQ-1'], '状态迁移')
-  pending.executionMethods = [{ ...pending.executionMethods[0], executionReadiness: 'needs_confirmation', automationHint: 'UI 定位器待确认' }]
+  pending.executionMethods = [{ ...pending.executionMethods[0], uiSpec: { entry: '/login', selectors: [] }, executionReadiness: 'needs_confirmation', automationHint: 'UI 定位器待确认' }]
   pending.executionSpec = { ...pending.executionSpec!, executionReadiness: 'needs_confirmation', automationHint: 'UI 定位器待确认' }
   const result = audit([testCase('TC-READY', pending)], ['REQ-1'], [claim('SC-READY', 'TC-READY', { kind: 'state_transition', subject: 'task.status', variant: 'todo->in_progress', polarity: 'positive', oracle: '状态为 in_progress' })])
   assert.ok(result.blockers.some(item => item.code === 'TEST_CASE_NOT_READY' && item.resolution === 'execution_handoff'))
   assert.equal(result.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'), false)
+})
+
+test('ScenarioClaim.oracle 自身待确认或弱 Oracle 会报告业务 Expected Result 不清', () => {
+  const pendingOracle = audit([testCase('TC-ORACLE', content(['REQ-1']))], ['REQ-1'], [claim('SC-ORACLE', 'TC-ORACLE', { kind: 'state_transition', subject: 'task.status', variant: 'todo->in_progress', polarity: 'positive', oracle: '待确认具体状态表现' })])
+  assert.ok(pendingOracle.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR' && item.resolution === 'human_decision'))
+  const weakOracle = audit([testCase('TC-WEAK', content(['REQ-1']))], ['REQ-1'], [claim('SC-WEAK', 'TC-WEAK', { kind: 'filter', subject: 'task.status', variant: 'status=todo', polarity: 'positive', oracle: '查询成功' })])
+  assert.ok(weakOracle.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'))
 })

@@ -56,6 +56,10 @@ export interface CandidateRequirementPoint {
   exceptions: string[]
   acceptanceCriteria: string[]
   evidenceRefs: string[]
+  /** Whether this point expresses an independently testable acceptance behavior. */
+  coverageTarget: boolean
+  /** Optional explanation for a context-only point excluded from TestCase coverage. */
+  coverageRationale?: string
   mergeGroupId?: string
   mergeRationale?: string
 }
@@ -167,6 +171,8 @@ export interface CandidateRequirementAnalysisV1 {
     title?: string
     description: string
     sourceTexts: string[]
+    coverageTarget: boolean
+    coverageRationale?: string
   }>
   clarifications: CandidatePlanningClarification[]
   testFocus: Array<{

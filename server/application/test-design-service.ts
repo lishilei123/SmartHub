@@ -739,7 +739,7 @@ function caseDesignInput(run: TestDesignWorkflowRun) {
 function repairInput(run: TestDesignWorkflowRun) {
   const state = required(run.automaticRepair, 'TEST_DESIGN_REPAIR_NOT_QUEUED', '自动修复状态不存在')
   const audit = required(run.coverageAudits.find(item => item.id === state.triggerAuditId), 'TEST_DESIGN_REPAIR_AUDIT_NOT_FOUND', '触发修复的 Coverage Audit 不存在')
-  return { schemaVersion: 'test-design-repair-context/v1', attempt: state.attempt, maxAttempts: state.maxAttempts, auditId: audit.id, blockers: audit.blockers.filter(item => item.resolution === 'agent_repair'), candidateWorkspacePath: 'workspace/agent_workspace/planning_agent/current-test-cases.json' }
+  return { schemaVersion: 'test-design-repair-context/v1', attempt: state.attempt, maxAttempts: state.maxAttempts, auditId: audit.id, blockers: selectedRepairBlockers(audit, state), candidateWorkspacePath: 'workspace/agent_workspace/planning_agent/current-test-cases.json' }
 }
 
 function materializeDesignIssues(run: TestDesignWorkflowRun, raw: unknown) {
@@ -757,7 +757,7 @@ function buildBasisSnapshot(design: TestDesign, requirement: BoundRequirementRel
     sourceId: `${requirement.analysisRun.id}:${point.clientRequirementPointId}`,
     contentSha256: canonicalSha256(point),
     content: structuredClone(point),
-    locator: { coverageTarget: true, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementPointId: point.clientRequirementPointId, ordinal: index, evidenceRefs: point.evidenceRefs },
+    locator: { coverageTarget: point.coverageTarget !== false, ...(point.coverageRationale ? { coverageRationale: point.coverageRationale } : {}), requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementPointId: point.clientRequirementPointId, ordinal: index, evidenceRefs: point.evidenceRefs },
   }))
   const clarifications = structuredClone(requirement.analysisRun.result?.clarifications ?? [])
   const clarificationItems = clarifications.map(item => ({
@@ -923,7 +923,13 @@ function publishedRequirements(analysisRun: ReviewRun) {
   const sourceIds = Array.isArray(record.sourceAssetVersions) ? record.sourceAssetVersions.map(item => item && typeof item === 'object' && !Array.isArray(item) ? String((item as { assetVersionId?: unknown }).assetVersionId ?? '') : '') : []
   const requirements = Array.isArray(record.requirements) ? record.requirements : []
   const requirementIds = requirements.map(item => item && typeof item === 'object' && !Array.isArray(item) ? String((item as { clientRequirementPointId?: unknown }).clientRequirementPointId ?? '').trim() : '')
-  const invalidRequirement = requirements.some(item => !item || typeof item !== 'object' || Array.isArray(item) || !Array.isArray((item as { evidenceRefs?: unknown }).evidenceRefs))
+  const invalidRequirement = requirements.some(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return true
+    const point = item as { evidenceRefs?: unknown; coverageTarget?: unknown; coverageRationale?: unknown }
+    return !Array.isArray(point.evidenceRefs)
+      || (point.coverageTarget !== undefined && typeof point.coverageTarget !== 'boolean')
+      || (point.coverageRationale !== undefined && (typeof point.coverageRationale !== 'string' || !point.coverageRationale.trim()))
+  })
   if (record.schemaVersion !== 'requirements/v1' || record.releaseId !== release.id || record.projectVersionId !== analysisRun.projectVersionId || record.verificationRunId !== analysisRun.id || !requirements.length || requirementIds.some(id => !id) || new Set(requirementIds).size !== requirementIds.length || invalidRequirement || canonicalSha256(sourceIds) !== canonicalSha256(release.sourceAssetVersionIds)) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'requirements.json Schema、需求点或发布来源不兼容', 422)
   return { release, manifest, artifact, requirements: record.requirements as NonNullable<ReviewRun['result']>['requirementPoints'] }
 }
@@ -1074,17 +1080,45 @@ function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestC
   })
 }
 
-function materializeExecutionConfirmations(run: TestDesignWorkflowRun, cases: TestCase[]) {
-  for (const testCase of cases) {
-    const revision = currentCaseRevision(testCase)
-    const configuration = executionConfiguration(revision.content)
-    const dataIssues = run.dataSetVersions.at(-1)?.requirements.filter(item => item.caseIds.includes(testCase.id) && item.readiness !== 'ready').map(item => `测试数据 ${item.name} 的准备或重置方式`) ?? []
-    const issues = [...configuration.issues, ...dataIssues]
-    if (!issues.length && revision.content.executionSpec?.executionReadiness !== 'needs_confirmation') continue
-    const missing = issues.length ? issues.join('；') : '执行环境或自动化契约'
-    const title = `${revision.content.title}：确认${missing}`
-    if (run.confirmationItems.some(item => item.title === title)) continue
-    run.confirmationItems.push({ id: `test_design_confirmation_${randomUUID()}`, title, question: `需求或项目配置未提供${missing}；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。`, decisionType: revision.content.executionSpec?.kind ?? revision.content.dimension, impactStage: 'handoff', affectedRefs: [testCase.id, ...(revision.content.requirementRefs ?? [])], blocker: true, state: 'open', actions: [] })
+type ExecutionIssueType = 'ui_execution_contract' | 'api_execution_contract' | 'test_environment' | 'test_data_readiness'
+
+function materializeExecutionConfirmations(run: TestDesignWorkflowRun, _changedCases: TestCase[]) {
+  const groups = new Map<ExecutionIssueType, Set<string>>()
+  const add = (issueType: ExecutionIssueType, refs: string[]) => {
+    const affectedRefs = groups.get(issueType) ?? new Set<string>()
+    refs.filter(Boolean).forEach(ref => affectedRefs.add(ref))
+    groups.set(issueType, affectedRefs)
+  }
+  const activeCases = run.testCases.filter(item => !item.tombstonedAt)
+  for (const testCase of activeCases) {
+    const content = currentCaseRevision(testCase).content
+    const configuration = executionConfiguration(content)
+    const issueTypes = new Set<ExecutionIssueType>()
+    for (const issue of configuration.issues) issueTypes.add(issue.includes('UI') ? 'ui_execution_contract' : issue.includes('API') ? 'api_execution_contract' : 'test_environment')
+    if (configuration.status !== 'ready' && !issueTypes.size) issueTypes.add('test_environment')
+    for (const issueType of issueTypes) add(issueType, [testCase.id, ...(content.requirementRefs ?? [])])
+  }
+  const activeCaseIds = new Set(activeCases.map(item => item.id))
+  for (const dataRequirement of run.dataSetVersions.at(-1)?.requirements ?? []) {
+    if (dataRequirement.readiness === 'ready') continue
+    const caseIds = dataRequirement.caseIds.filter(id => activeCaseIds.has(id))
+    if (caseIds.length) add('test_data_readiness', [dataRequirement.id, ...caseIds, ...(dataRequirement.requirementRefs ?? [])])
+  }
+  for (const [issueType, refs] of groups) {
+    const normalizedIssue = issueType
+    const executionIssueSignature = canonicalSha256({ impactStage: 'handoff', issueType, normalizedIssue })
+    const existing = run.confirmationItems.find(item => item.executionIssueSignature === executionIssueSignature)
+    if (existing) {
+      if (existing.state === 'open') existing.affectedRefs = [...refs].sort((left, right) => left.localeCompare(right, 'zh-CN'))
+      continue
+    }
+    const details: Record<ExecutionIssueType, { title: string; question: string }> = {
+      ui_execution_contract: { title: 'UI 自动化执行契约待补充', question: '需求或项目配置未提供 UI 页面入口或 selector；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
+      api_execution_contract: { title: 'API 自动化执行契约待补充', question: '需求或项目配置未提供 API method、path 或 schema；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
+      test_environment: { title: '测试环境执行契约待补充', question: '需求或项目配置未提供可执行的环境、阈值、时长、矩阵或步骤契约；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
+      test_data_readiness: { title: '测试数据准备与重置待确认', question: '测试数据的准备或重置方式尚未就绪；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
+    }
+    run.confirmationItems.push({ id: `test_design_confirmation_${randomUUID()}`, title: details[issueType].title, question: details[issueType].question, decisionType: issueType, impactStage: 'handoff', affectedRefs: [...refs].sort((left, right) => left.localeCompare(right, 'zh-CN')), blocker: true, state: 'open', actions: [], executionIssueSignature })
   }
 }
 
@@ -1101,16 +1135,17 @@ function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, ac
   finishNode(run, 'coverage_audit')
 
   const repairable = audit.blockers.filter(item => item.resolution === 'agent_repair')
-  const requiresHumanDecision = audit.blockers.some(item => item.resolution === 'human_decision' || item.resolution === 'manual_edit')
+  const selectedRepairable = repairable.filter(item => repairBlockerCanRunIndependently(run, audit, item))
   const state = run.automaticRepair ?? initialAutomaticRepairState()
   run.automaticRepair = state
   const safeToRepair = run.testCases.every(item => item.origin === 'ai' && item.reviewActions.length === 0)
-  if (repairable.length && !requiresHumanDecision && safeToRepair && state.attempt < state.maxAttempts) {
+  if (selectedRepairable.length && safeToRepair && state.attempt < state.maxAttempts) {
     const timestamp = now()
     Object.assign(state, {
       status: 'queued',
       attempt: state.attempt + 1,
-      blockerCodes: [...new Set(repairable.map(item => item.code))],
+      blockerCodes: [...new Set(selectedRepairable.map(item => item.code))],
+      blockerScopes: selectedRepairable.map(item => ({ code: item.code, ...(item.subjectId ? { subjectId: item.subjectId } : {}) })),
       triggerAuditId: audit.id,
       startedAt: state.startedAt ?? timestamp,
       finishedAt: undefined,
@@ -1124,14 +1159,43 @@ function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, ac
   }
 
   const attempted = state.attempt > 0
+  const status = repairable.length
+    ? selectedRepairable.length && state.attempt >= state.maxAttempts ? 'exhausted'
+      : 'deferred'
+    : attempted ? 'succeeded' : 'not_needed'
   Object.assign(state, {
-    status: repairable.length ? 'exhausted' : attempted ? 'succeeded' : 'not_needed',
-    blockerCodes: [...new Set(repairable.map(item => item.code))],
+    status,
+    blockerCodes: [...new Set(selectedRepairable.map(item => item.code))],
+    blockerScopes: selectedRepairable.map(item => ({ code: item.code, ...(item.subjectId ? { subjectId: item.subjectId } : {}) })),
     triggerAuditId: repairable.length ? audit.id : undefined,
     finishedAt: now(),
   })
   Object.assign(run, { status: 'succeeded', stage: 'completed', progress: 100, finishedAt: now(), error: undefined, errorCode: undefined })
   return false
+}
+function selectedRepairBlockers(audit: CoverageAudit, state: NonNullable<TestDesignWorkflowRun['automaticRepair']>) {
+  const scopes = state.blockerScopes
+  const agentRepair = audit.blockers.filter(item => item.resolution === 'agent_repair')
+  if (!scopes?.length) return agentRepair
+  return agentRepair.filter(item => scopes.some(scope => scope.code === item.code && scope.subjectId === item.subjectId))
+}
+function repairBlockerCanRunIndependently(run: TestDesignWorkflowRun, audit: CoverageAudit, blocker: CoverageAudit['blockers'][number]) {
+  if (['TEST_CASE_OVER_MERGED', 'TEST_CASE_DUPLICATE', 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID'].includes(blocker.code)) return true
+  if (blocker.code !== 'COVERAGE_REQUIREMENT_UNCOVERED' || !blocker.subjectId) return false
+  const requirementId = blocker.subjectId
+  const relatedCaseIds = new Set(run.testCases.filter(item => !item.tombstonedAt && currentCaseRevision(item).content.requirementRefs.includes(requirementId)).map(item => item.id))
+  const relatedClarification = (run.basisSnapshot.clarifications ?? []).some(item => item.blocking && item.status === 'pending' && item.requirementPointRefs.includes(requirementId))
+  if (relatedClarification) return false
+  return !audit.blockers.some(item => {
+    if (item.resolution !== 'human_decision' && item.resolution !== 'manual_edit') return false
+    if (relatedCaseIds.has(item.subjectId ?? '')) return true
+    const confirmation = run.confirmationItems.find(candidate => candidate.id === item.subjectId)
+    if (confirmation?.affectedRefs.includes(requirementId) || confirmation?.affectedRefs.some(ref => relatedCaseIds.has(ref))) return true
+    const finding = run.findings.find(candidate => candidate.id === item.subjectId)
+    if (finding?.basisRefs.includes(requirementId)) return true
+    const clarification = (run.basisSnapshot.clarifications ?? []).find(candidate => candidate.id === item.subjectId)
+    return clarification?.requirementPointRefs.includes(requirementId) ?? false
+  })
 }
 function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在'); return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: run.testCases, scenarioClaims: run.scenarioClaims ?? [], dataSet, findings: run.findings, confirmationItems: run.confirmationItems }) }
 function initialAutomaticRepairState(): NonNullable<TestDesignWorkflowRun['automaticRepair']> { return { status: 'idle', attempt: 0, maxAttempts: AUTOMATIC_REPAIR_MAX_ATTEMPTS, blockerCodes: [] } }

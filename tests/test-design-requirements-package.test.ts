@@ -79,6 +79,7 @@ test('TestDesign 只消费已发布 requirements.json，不从 Review 结果或 
   assert.equal(run.basisSnapshot.requirementsJsonSha256, requirementsHash)
   assert.equal(run.workspaceSnapshot.requirementsJsonSha256, requirementsHash)
   assert.equal((run.basisSnapshot.items[0].content as { clientRequirementPointId: string }).clientRequirementPointId, 'RP-MACHINE')
+  assert.equal((run.basisSnapshot.items[0].locator as { coverageTarget?: boolean }).coverageTarget, true, '历史 requirements.json 缺少 coverageTarget 时必须保持可覆盖')
   assert.ok(run.basisSnapshot.items.every(item => item.sourceId !== 'review-run-1:RP-STALE'))
 })
 

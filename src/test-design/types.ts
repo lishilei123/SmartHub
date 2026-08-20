@@ -123,6 +123,7 @@ export type ScenarioClaim = {
   variant: string
   polarity: 'positive' | 'negative' | 'neutral'
   oracle: string
+  transition?: { from: string; to: string }
   knowledgeRefs?: string[]
 }
 

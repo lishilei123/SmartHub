@@ -187,7 +187,7 @@ function validateScenarioClaims(value: unknown, cases: TestCaseDesignCandidate['
   const claims = value.map((candidate, index): ScenarioClaim => {
     const path = `/scenarioClaims/${index}`
     const input = synthesisObject(candidate, path, 'ScenarioClaim 必须是对象')
-    synthesisRejectUnknown(input, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle', 'knowledgeRefs'], path)
+    synthesisRejectUnknown(input, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle', 'transition', 'knowledgeRefs'], path)
     const ref = synthesisText(input.ref, `${path}/ref`, 200)
     if (refs.has(ref)) synthesisFail(`${path}/ref`, `ScenarioClaim ref ${ref} 重复`)
     refs.add(ref)
@@ -201,6 +201,11 @@ function validateScenarioClaims(value: unknown, cases: TestCaseDesignCandidate['
     if (invalidRequirementRefs.length) synthesisFail(`${path}/requirementRefs`, `不能引用 Case requirementRefs 之外的 Requirement：${invalidRequirementRefs.join('、')}`)
     const kind = synthesisEnum(input.kind, `${path}/kind`, ['crud_lifecycle', 'state_transition', 'enum', 'validation', 'filter', 'search', 'permission', 'boundary', 'exception', 'statistics', 'cross_channel_consistency', 'other'] as const)
     const polarity = synthesisEnum(input.polarity, `${path}/polarity`, ['positive', 'negative', 'neutral'] as const)
+    const transition = kind === 'state_transition'
+      ? synthesisTransition(input.transition, `${path}/transition`)
+      : input.transition === undefined
+        ? undefined
+        : synthesisFail(`${path}/transition`, '仅 state_transition ScenarioClaim 可以声明 transition')
     const knowledgeRefs = input.knowledgeRefs === undefined ? undefined : synthesisIds(input.knowledgeRefs, `${path}/knowledgeRefs`)
     return {
       ref,
@@ -211,6 +216,7 @@ function validateScenarioClaims(value: unknown, cases: TestCaseDesignCandidate['
       variant: synthesisText(input.variant, `${path}/variant`, 1_000),
       polarity,
       oracle: synthesisText(input.oracle, `${path}/oracle`, 4_000),
+      ...(transition ? { transition } : {}),
       ...(knowledgeRefs?.length ? { knowledgeRefs } : {}),
     }
   })
@@ -218,6 +224,15 @@ function validateScenarioClaims(value: unknown, cases: TestCaseDesignCandidate['
   for (const claim of claims) claimsByCaseRef.set(claim.caseRef, [...(claimsByCaseRef.get(claim.caseRef) ?? []), claim])
   for (const testCase of cases) if ((testCase.content.dimension === 'functional' || testCase.content.dimension === 'security') && !claimsByCaseRef.get(testCase.ref)?.length) synthesisFail('/scenarioClaims', `functional/security 用例 ${testCase.ref} 必须至少拥有一条 ScenarioClaim`)
   return claims
+}
+
+function synthesisTransition(value: unknown, path: string) {
+  const input = synthesisObject(value, path, 'state_transition 必须声明 transition 对象')
+  synthesisRejectUnknown(input, ['from', 'to'], path)
+  return {
+    from: synthesisText(input.from, `${path}/from`, 500),
+    to: synthesisText(input.to, `${path}/to`, 500),
+  }
 }
 
 function validateProposalCandidates(value: unknown, caseRefs: Set<string>): TestCaseDesignCandidate['proposals'] {
@@ -255,6 +270,7 @@ function validateDesignIssues(input: Record<string, unknown>) {
     const item = synthesisObject(candidate, path, '待确认项必须是对象')
     synthesisRejectUnknown(item, ['title', 'question', 'decisionType', 'impactStage', 'affectedRefs', 'blocker'], path)
     const impactStage = synthesisEnum(item.impactStage, `${path}/impactStage`, ['case', 'data', 'publication', 'handoff'] as const)
+    if (impactStage === 'handoff') synthesisFail(`${path}/impactStage`, 'Execution Handoff Confirmation 只能由 Service 根据 execution readiness 聚合生成')
     if (typeof item.blocker !== 'boolean') synthesisFail(`${path}/blocker`, '必须是布尔值')
     return { title: synthesisText(item.title, `${path}/title`, 500), question: synthesisText(item.question, `${path}/question`, 8_000), decisionType: synthesisText(item.decisionType, `${path}/decisionType`, 200), impactStage, affectedRefs: synthesisIds(item.affectedRefs, `${path}/affectedRefs`), blocker: item.blocker }
   })

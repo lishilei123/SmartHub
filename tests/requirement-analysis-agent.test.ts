@@ -165,6 +165,24 @@ test('Validator 只做结构、引用、Evidence 与 Artifact 安全校验，不
   assert.equal(normalized.result?.requirementPoints.length, 2)
 })
 
+test('Requirement Analysis 明确持久化 coverageTarget，并拒绝新提交遗漏该字段', async () => {
+  const { store } = await successfulRun()
+  const run = (await store.snapshot()).reviewRuns[0]
+  const validator = new RequirementAnalysisValidator(store)
+  const context = analysisCandidate()
+  context.requirementPoints[0] = { ...context.requirementPoints[0], coverageTarget: false, coverageRationale: '项目说明 Context，不产生独立验收行为。' }
+  const normalized = await validator.normalize(context, run.snapshot, run.inputDeliveryManifest!)
+  assert.equal(normalized.report.valid, true)
+  assert.equal(normalized.result?.requirementPoints[0]?.coverageTarget, false)
+  assert.equal(normalized.result?.requirementPoints[0]?.coverageRationale, '项目说明 Context，不产生独立验收行为。')
+
+  const missing = analysisCandidate() as unknown as { requirementPoints: Array<Record<string, unknown>> }
+  delete missing.requirementPoints[0].coverageTarget
+  const rejected = await validator.normalize(missing as CandidateRequirementAnalysisV1, run.snapshot, run.inputDeliveryManifest!)
+  assert.equal(rejected.report.valid, false)
+  assert.ok(rejected.report.issues.some(issue => issue.path === 'requirementPoints[0].coverageTarget'))
+})
+
 test('Validator 只拒绝可确定的错误 Blocking 声明，不用关键词猜测业务语义', async () => {
   const { store } = await successfulRun()
   const run = (await store.snapshot()).reviewRuns[0]
@@ -391,8 +409,8 @@ function analysisCandidate(): CandidateRequirementAnalysisV1 {
       risks: ['关闭状态与异常闭环待确认'],
     },
     requirementPoints: [
-      { id: 'RP-001', title: '取消待支付订单', description: '用户可以取消处于待支付状态的订单。', sourceTexts: ['用户可以取消待支付订单。'] },
-      { id: 'RP-002', title: '超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', sourceTexts: ['订单超过十五分钟未支付时自动关闭。'] },
+      { id: 'RP-001', title: '取消待支付订单', description: '用户可以取消处于待支付状态的订单。', sourceTexts: ['用户可以取消待支付订单。'], coverageTarget: true },
+      { id: 'RP-002', title: '超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', sourceTexts: ['订单超过十五分钟未支付时自动关闭。'], coverageTarget: true },
     ],
     clarifications: [],
     testFocus: [
@@ -453,11 +471,11 @@ function miniTaskCandidate(): CandidateRequirementAnalysisV1 {
       risks: [],
     },
     requirementPoints: [
-      { id: 'RP-001', title: '登录', description: '正确密码登录成功，错误密码登录失败。', sourceTexts: ['正确密码登录成功，错误密码登录失败。'] },
-      { id: 'RP-002', title: '项目名称校验', description: '项目名称不能为空。', sourceTexts: ['项目名称不能为空。'] },
-      { id: 'RP-003', title: '删除项目', description: '删除项目时必须同步删除任务。', sourceTexts: ['删除项目时必须同步删除任务。'] },
-      { id: 'RP-004', title: '任务状态机', description: '任务状态仅允许 todo 到 in_progress 到 completed；completed 后不允许回退。', sourceTexts: ['任务状态仅允许 todo → in_progress → completed；completed 后不允许回退。'] },
-      { id: 'RP-005', title: 'Dashboard', description: 'Dashboard 展示项目数、任务数、已完成数和未完成数。', sourceTexts: ['Dashboard 展示项目数、任务数、已完成数和未完成数。'] },
+      { id: 'RP-001', title: '登录', description: '正确密码登录成功，错误密码登录失败。', sourceTexts: ['正确密码登录成功，错误密码登录失败。'], coverageTarget: true },
+      { id: 'RP-002', title: '项目名称校验', description: '项目名称不能为空。', sourceTexts: ['项目名称不能为空。'], coverageTarget: true },
+      { id: 'RP-003', title: '删除项目', description: '删除项目时必须同步删除任务。', sourceTexts: ['删除项目时必须同步删除任务。'], coverageTarget: true },
+      { id: 'RP-004', title: '任务状态机', description: '任务状态仅允许 todo 到 in_progress 到 completed；completed 后不允许回退。', sourceTexts: ['任务状态仅允许 todo → in_progress → completed；completed 后不允许回退。'], coverageTarget: true },
+      { id: 'RP-005', title: 'Dashboard', description: 'Dashboard 展示项目数、任务数、已完成数和未完成数。', sourceTexts: ['Dashboard 展示项目数、任务数、已完成数和未完成数。'], coverageTarget: true },
     ],
     clarifications: [],
     testFocus: [],
