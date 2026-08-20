@@ -149,19 +149,19 @@ test('PostgreSQL Review Job 的取消标记阻止重试并在失租约后收敛�
 test('PostgreSQL Phase 4 使用规范化事实表并以 nodeRunId 隔离 fencing token', async () => {
   const designId = `${prefix}-test-design`
   const runId = `${prefix}-test-design-run`
-  const nodeRunId = `${prefix}-test-point-design-node`
+  const nodeRunId = `${prefix}-test-case-design-node`
   const design: TestDesign = {
     id: designId, projectVersionId: ids.projectVersion, projectId: ids.project, name: 'PostgreSQL Phase 4', objective: '验证规范化持久化与节点租约',
     input: { name: 'PostgreSQL Phase 4', objective: '验证规范化持久化与节点租约', knowledgeAugmentation: { mode: 'disabled' } },
     logicalInputSha256: '1'.repeat(64), createdBy: 'integration-test', createdAt: now,
   }
   const run: TestDesignWorkflowRun = {
-    id: runId, testDesignId: designId, projectVersionId: ids.projectVersion, status: 'queued', stage: 'test_point_design', progress: 0, idempotencyKey: `${prefix}-phase4`,
+    id: runId, testDesignId: designId, projectVersionId: ids.projectVersion, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey: `${prefix}-phase4`,
     basisSnapshot: { schemaVersion: 'test-design-basis-snapshot/v2', projectVersionId: ids.projectVersion, requirementReleaseId: `${prefix}-release`, verificationRunId: `${prefix}-verification`, requirementsJsonSha256: '2'.repeat(64), items: [{ id: `${prefix}-basis-item`, kind: 'requirement_release', sourceId: `${prefix}-release:RP-1`, contentSha256: '3'.repeat(64), content: { title: '固定需求', description: '固定内容' }, locator: { coverageTarget: true } }], snapshotSha256: '4'.repeat(64), createdAt: now },
     agentConfigurationSnapshot: {} as TestDesignWorkflowRun['agentConfigurationSnapshot'], workspaceSnapshot: {} as TestDesignWorkflowRun['workspaceSnapshot'], formalWorkspaceFiles: [],
     retrievalSnapshot: { canonicalVersion: 'retrieval-snapshot/v1', mode: 'disabled', assetVersionIds: [], queryPlan: [], hits: [], snapshotSha256: '5'.repeat(64), createdAt: now },
     historicalSnapshot: { schemaVersion: 'historical-case-snapshot/v1', items: [], snapshotSha256: '6'.repeat(64), createdAt: now },
-    nodeRuns: [{ id: nodeRunId, nodeKey: 'test_point_design', generation: 1, attempt: 0, status: 'queued', dependencies: [] }], artifacts: [], gateDecisions: [], testCases: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], events: [], createdBy: 'integration-test', createdAt: now,
+    nodeRuns: [{ id: nodeRunId, nodeKey: 'test_case_design', generation: 1, attempt: 0, status: 'queued', dependencies: [] }], artifacts: [], gateDecisions: [], testCases: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], events: [], createdBy: 'integration-test', createdAt: now,
   }
   await store.transaction(state => { const aggregate = state.testDesignState ??= { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], suiteVersions: [], executionHandoffs: [] }; aggregate.designs.push(design); aggregate.runs.push(run) })
   const normalized = await database.query<{ designs: string; runs: string; snapshots: string; items: string }>('SELECT (SELECT count(*) FROM smarthub.test_designs WHERE id=$1)::text AS designs, (SELECT count(*) FROM smarthub.workflow_runs WHERE id=$2)::text AS runs, (SELECT count(*) FROM smarthub.test_design_basis_snapshots WHERE workflow_run_id=$2)::text AS snapshots, (SELECT count(*) FROM smarthub.test_design_snapshot_items WHERE workflow_run_id=$2)::text AS items', [designId, runId])

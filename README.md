@@ -46,11 +46,11 @@
 ## 当前已实现的统一 PlanningAgent 测试设计流程
 
 - `PlanningAgent` 发布配置决定启用哪些 Skill；运行开始时只加载 Enabled Skill Catalog，Agent 自主判断何时通过 `skill.read` 读取正文。Workflow 只推进业务 Stage、收窄 Tool/提交协议和执行 Gate，不调度或激活 Skill。
-- `test_point_design` 阶段从冻结的 `currentInputRefs` 识别本次任务重点，同时可在完整 Project Workspace Snapshot 内自主读取正式需求发布包和旁证资料，直接生成 Test Point Tree Candidate，不存在 CoverageUnit 中间层。
-- Service/Validator 自动校验测试点树的结构、引用与内容 Hash，创建不可变 `TestPointTreeVersion` 并投影 Workspace，然后立即进入 `test_case_design`。人工仍可增加、编辑、删除、拆分、合并或要求 AI 重新设计测试点，但测试点不再是强制人工 Gate；每次修改后都会重新自动校验并生成用例。
+- `test_case_design` 阶段从冻结的 `currentInputRefs` 识别本次任务重点，同时可在完整 Project Workspace Snapshot 内自主读取正式需求发布包和旁证资料，直接生成 Test Case Candidate，不存在 CoverageUnit 中间层。
+- Service/Validator 自动校验用例候选的结构、需求引用、执行规范与内容 Hash，创建不可变的正式用例变更 Proposal。人工审核仍是发布 Gate；每次修改后都会重新校验并生成用例。
 - `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；用例生成后必须经过人工用例审核，发布仍由 Service 门禁控制。
 - Coverage Audit 是服务端确定性步骤，不是 Agent Stage。引用、覆盖、重复、过度合并、维度一致性、UI/API 与数据 readiness、Finding/Confirmation 闭环均由服务端判断。
-- 自动校验固化的树投影到 `workspace/branches/{version}/test_design/test-point-tree.json|test-design.md`；发布用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|test-data.json|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
+- 自动校验后的用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|test-data.json|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、资产版本、索引、同步任务、模型与 AI 资源、Agent 配置、ReviewRun/Job，以及 TestDesign Workflow、Snapshot、树、用例 revision、Coverage、用例集、套件和交接均写入 `smarthub` schema。旧技术方案表和旧测试设计数据由迁移直接删除。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除；未配置 `DATABASE_URL` 时回退到 JSON 文件，生产模式必须使用 PostgreSQL Worker。
 

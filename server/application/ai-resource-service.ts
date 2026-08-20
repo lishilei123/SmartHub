@@ -29,8 +29,6 @@ const builtInSkills: SkillResource[] = [
   builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下修复 Playwright 实现候选。', '1.0.0', 'server/skills/script-repair/SKILL.md', [], ['测试执行', 'Playwright', '脚本修复']),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
-const retiredBuiltInToolKeys = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', 'requirement-repair.submit_result', 'skill.activate', 'skill.execute_script', 'skill.http_request'])
-const retiredBuiltInSkillKeys = new Set(['system.requirement-analysis', 'requirement.review', 'requirement.repair', 'requirement.verification', 'system.query-local-ip'])
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
 const maximumSourceBytes = 512 * 1024
 
@@ -164,14 +162,11 @@ export class AiResourceService {
 
   private async ensureBuiltIns() {
     await this.transaction(state => {
-      state.aiResources = state.aiResources.filter(item => !(
-        item.builtIn
-        && ((item.kind === 'tool' && retiredBuiltInToolKeys.has(item.key)) || (item.kind === 'skill' && retiredBuiltInSkillKeys.has(item.key)))
-      ))
+      state.aiResources = state.aiResources.filter(item => !item.builtIn || isCurrentBuiltInResource(item))
       state.aiResources = state.aiResources.map(item => {
         if (item.builtIn) return item
         if (item.kind === 'mcp') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', ...(item.authType === 'none' || item.credentialEnv ? {} : { credentialEnv: defaultCredentialEnv('MCP', item.key) }) }
-        if (item.kind === 'skill') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready', toolIds: item.toolIds.filter(toolId => !retiredBuiltInToolKeys.has(toolId)) }
+        if (item.kind === 'skill') return { ...item, managedBy: item.managedBy ?? 'catalog', status: 'ready' }
         return { ...item, managedBy: item.managedBy ?? 'catalog', status: item.source !== 'http' || item.endpoint ? 'ready' : 'draft' }
       })
       for (const builtIn of builtInResources) {
@@ -221,7 +216,7 @@ function catalogMetadataNeedsSync(resources: AiResource[]) {
   return resources.some(item => !item.builtIn && (
     !item.managedBy
     || (item.kind === 'mcp' && (item.status !== 'ready' || (item.authType !== 'none' && !item.credentialEnv)))
-    || (item.kind === 'skill' && (item.status !== 'ready' || item.toolIds.some(toolId => retiredBuiltInToolKeys.has(toolId))))
+    || (item.kind === 'skill' && item.status !== 'ready')
     || (item.kind === 'tool' && item.status !== (item.source !== 'http' || item.endpoint ? 'ready' : 'draft'))
   ))
 }
@@ -244,13 +239,16 @@ function catalog(resources: AiResource[]): AiResourceCatalog {
 }
 
 function builtInsNeedSync(resources: AiResource[]) {
-  if (resources.some(item => item.kind === 'tool' && item.builtIn && retiredBuiltInToolKeys.has(item.key))) return true
-  if (resources.some(item => item.kind === 'skill' && item.builtIn && retiredBuiltInSkillKeys.has(item.key))) return true
+  if (resources.some(item => item.builtIn && !isCurrentBuiltInResource(item))) return true
   return builtInResources.some(expected => {
     const actual = resources.find(item => item.kind === expected.kind && item.key === expected.key)
     if (!actual?.builtIn) return true
     return JSON.stringify({ ...actual, createdAt: expected.createdAt, updatedAt: expected.updatedAt }) !== JSON.stringify(expected)
   })
+}
+
+function isCurrentBuiltInResource(resource: AiResource) {
+  return builtInResources.some(item => item.kind === resource.kind && item.key === resource.key)
 }
 
 
@@ -280,7 +278,7 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
   }
   if (kind === 'skill') {
     const runtime = normalizeSkillRuntimePolicy(value.runtime)
-    const toolIds = keys(value.toolIds).filter(toolId => !isSkillRuntimeToolId(toolId) && !retiredBuiltInToolKeys.has(toolId))
+    const toolIds = keys(value.toolIds).filter(toolId => !isSkillRuntimeToolId(toolId))
     return { ...base, kind, entrypoint: text(value.entrypoint, 'Skill 入口', 500), toolIds, tags: stringList(value.tags, 20, 50), runtime, package: value.package === undefined ? undefined : skillPackage(value.package), contentSha256: optionalSha256(value.contentSha256) }
   }
   const source = oneOf(value.source ?? 'local', ['builtin', 'local', 'http', 'mcp'] as const, '工具来源')
@@ -298,7 +296,6 @@ function normalizeResource(kind: AiResourceKind, input: unknown, fixed: Pick<AiR
 
 function validateUnique(resources: AiResource[], candidate: AiResource) {
   if (candidate.kind === 'tool' && isSkillRuntimeToolId(candidate.key)) throw new Error('Skill 运行能力由运行权限清单管理，不能注册为独立工具')
-  if (candidate.kind === 'tool' && retiredBuiltInToolKeys.has(candidate.key)) throw new Error(`工具 ${candidate.key} 已退役，不能重新注册`)
   if (candidate.kind === 'tool' && !candidate.builtIn && defaultBuiltInToolConfigResolver.has(candidate.key)) throw new Error('内置工具标识由受版本控制的配置保留，不能注册为自定义工具')
   if (resources.some(item => item.kind === candidate.kind && item.key.toLocaleLowerCase() === candidate.key.toLocaleLowerCase())) throw new Error(`已存在相同标识的${kindLabel(candidate.kind)}资源`)
 }

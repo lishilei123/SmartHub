@@ -13,9 +13,6 @@ import {
   agentCatalogEntryByDefinition,
 } from '../agent/agent-catalog.js'
 
-const RETIRED_TOOL_KEYS = new Set(['evidence.validate_batch', 'review.answer_submit', 'requirement-points.submit_result', 'review.submit_result', 'technical_solution.input.read', 'technical_solution.evidence.preview', 'technical_solution_points.submit_result', 'technical_solution_review.submit_result', 'test_analysis.submit_result', 'functional_test_design.submit_result', 'non_functional_test_design.submit_result', 'test_case_synthesis.submit_result', 'requirement-repair.submit_result', 'skill.activate', 'skill.execute_script', 'skill.http_request'])
-const RETIRED_SKILL_KEYS = new Set(['system.requirement-analysis', 'requirement.review', 'requirement.repair', 'requirement.verification', 'system.query-local-ip'])
-
 export type AgentConfigurationInput = {
   agentKey: AgentConfigurationAgentKey
   revision: number
@@ -265,7 +262,7 @@ function validateCatalogCapabilities(label: string, toolIds: string[], skillKeys
 function validateCapabilityDependencies(toolIds: string[], skillKeys: string[], mcpServerKeys: string[], label: string, state: DatabaseState) {
   const selectedTools = new Set(toolIds)
   for (const skill of resolveSkills(skillKeys, state)) {
-    const missing = skill.toolIds.filter(toolId => !RETIRED_TOOL_KEYS.has(toolId) && !selectedTools.has(toolId))
+    const missing = skill.toolIds.filter(toolId => !selectedTools.has(toolId))
     if (missing.length) throw new Error(`${label}选择的 Skill ${skill.key} 依赖未选择工具：${missing.join('、')}`)
   }
   const selectedMcps = new Set(mcpServerKeys)
@@ -354,9 +351,9 @@ function normalizeStoredAgentDraft(value: AgentConfigurationAgentDraft | undefin
   const catalog = agentCatalogEntry(agentKey)
   const fallback = defaultAgentDraft(agentKey)
   const definition = value?.definition ?? fallback.definition
-  const skillKeys = stringKeys(definition.skillKeys).filter(key => !RETIRED_SKILL_KEYS.has(key))
+  const skillKeys = stringKeys(definition.skillKeys)
   const mcpServerKeys = stringKeys(definition.mcpServerKeys)
-  const toolIds = activeToolKeys(definition.toolIds)
+  const toolIds = stringKeys(definition.toolIds)
   return {
     ...fallback,
     ...structuredClone(value),
@@ -435,7 +432,7 @@ function resolveMcps(serverKeys: string[], state: DatabaseState) {
   return serverKeys.map(key => required(servers.find(server => server.key === key && server.enabled), `MCP ${key} 不存在或未启用`))
 }
 function normalizeToolIds(value: unknown, label: string, state: DatabaseState) {
-  const toolIds = stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key))
+  const toolIds = stringKeys(value)
   const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
   const known = new Set<string>([...defaultBuiltInToolConfigResolver.keys(), ...tools.map(tool => tool.key)])
   const unknown = toolIds.filter(key => !known.has(key))
@@ -453,7 +450,6 @@ function builtInToolReference(key: string): ToolResource {
   return defaultBuiltInToolConfigResolver.toToolResource(key)
 }
 function stringKeys(value: unknown) { return [...new Set((Array.isArray(value) ? value : []).map(item => String(item).trim()).filter(Boolean))] }
-function activeToolKeys(value: unknown) { return stringKeys(value).filter(key => !RETIRED_TOOL_KEYS.has(key)) }
 function requiredKeys(selected: readonly string[], requiredValues: readonly string[]) { return [...new Set([...selected, ...requiredValues])] }
 function cleanRequired(value: unknown, name: string, max: number) { const result = cleanText(value, max); if (!result) throw new Error(`${name}不能为空`); return result }
 function cleanText(value: unknown, max: number) { const result = String(value ?? '').trim(); if (result.length > max) throw new Error(`文本长度不能超过 ${max}`); return result }

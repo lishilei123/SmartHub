@@ -66,7 +66,7 @@ test('统一 PlanningAgent 发布 Workspace、Knowledge、Skill 与全部提交�
   assert.equal((await service.resolveActive('planning'))?.id, published.id)
 })
 
-test('旧 PlanningAgent 草稿加载和前端发布 payload 都会补齐新增的必需工具', async () => {
+test('PlanningAgent 草稿加载与前端发布 payload 会补齐新增的必需工具', async () => {
   const { store, service } = await fixture()
   const initialState = (await service.get('planning')).agents.planning!
   const firstSaved = await service.save('planning', {

@@ -150,14 +150,18 @@ test('自定义工具不能在目录同步前抢占或更新为内置 Tool 标�
   await assert.rejects(() => service.update('tool', custom.id, { key: 'knowledge.search' }), /内置工具标识/u)
 })
 
-test('AI 资源目录清理已退役的批量校验证据工具', async () => {
+test('AI 资源目录清理不在当前内置目录中的历史内置资源', async () => {
   const store = new JsonStore(null)
   await store.load()
   await store.transaction(state => {
-    state.aiResources.push({ id: 'retired-evidence-tool', kind: 'tool', key: 'evidence.validate_batch', name: '批量校验证据', description: '', version: '1.1.0', enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk: 'read', timeoutMs: 30_000, sourcePath: 'server/tools/evidence-validate-batch.ts', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() })
+    state.aiResources.push(
+      { id: 'obsolete-built-in-tool', kind: 'tool', key: 'obsolete.tool', name: '历史工具', description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: true, source: 'builtin', risk: 'read', timeoutMs: 30_000, sourcePath: 'server/tools/obsolete.ts', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() },
+      { id: 'obsolete-built-in-skill', kind: 'skill', key: 'obsolete-skill', name: '历史 Skill', description: '', version: '1.0.0', enabled: true, status: 'ready', builtIn: true, entrypoint: 'server/skills/obsolete/SKILL.md', toolIds: [], tags: [], createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() },
+    )
   })
   const catalog = await new AiResourceService(store).list()
-  assert.ok(!catalog.tools.some(tool => tool.key === 'evidence.validate_batch'))
+  assert.ok(!catalog.tools.some(tool => tool.key === 'obsolete.tool'))
+  assert.ok(!catalog.skills.some(skill => skill.key === 'obsolete-skill'))
 })
 
 test('AI 资源目录将历史 filesystem 阶段 Skill 提升为内置资源', async () => {
