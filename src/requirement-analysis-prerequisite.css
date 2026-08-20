@@ -1,0 +1,233 @@
+.rav2-session-body.cases > .rav2-test-design-prerequisite {
+  flex: 1;
+  min-width: 0;
+}
+
+.rav2-test-design-prerequisite {
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 50% 0, rgba(101, 116, 239, .11), transparent 45%),
+    #f7f8fa;
+}
+
+.rav2-test-design-prerequisite-card {
+  width: min(680px, 100%);
+  padding: 22px;
+  border: 1px solid #e0e5f2;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 14px 38px rgba(45, 56, 86, .07);
+}
+
+.rav2-test-design-prerequisite-card > header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.rav2-test-design-prerequisite-card > header > span {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: #eef0ff;
+  color: #5965e9;
+}
+
+.rav2-test-design-prerequisite-card > header svg {
+  width: 21px;
+}
+
+.rav2-test-design-prerequisite-card > header > div {
+  min-width: 0;
+}
+
+.rav2-test-design-prerequisite-card > header p {
+  margin: 1px 0 4px;
+  color: #6570c8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+
+.rav2-test-design-prerequisite-card > header h2 {
+  margin: 0;
+  color: #313d51;
+  font-size: 18px;
+}
+
+.rav2-test-design-prerequisite-card > header small {
+  display: block;
+  margin-top: 7px;
+  color: #748094;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.rav2-test-design-prerequisite-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin: 22px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rav2-test-design-prerequisite-steps li {
+  position: relative;
+  min-width: 0;
+  min-height: 88px;
+  padding: 12px 10px;
+  border: 1px solid #e7eaf0;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.rav2-test-design-prerequisite-steps li.complete {
+  border-color: #c9e7d8;
+  background: #f2fbf6;
+}
+
+.rav2-test-design-prerequisite-steps li.current {
+  border-color: #cbd1ff;
+  background: #f3f4ff;
+}
+
+.rav2-test-design-prerequisite-steps li.blocked {
+  border-color: #f0d3d7;
+  background: #fff5f6;
+}
+
+.rav2-test-design-prerequisite-steps li > i {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #e7eaf0;
+  color: #758093;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.rav2-test-design-prerequisite-steps li.complete > i {
+  background: #d9f2e4;
+  color: #238462;
+}
+
+.rav2-test-design-prerequisite-steps li.current > i {
+  background: #dfe3ff;
+  color: #5965e9;
+}
+
+.rav2-test-design-prerequisite-steps li.blocked > i {
+  background: #fde4e7;
+  color: #bf5364;
+}
+
+.rav2-test-design-prerequisite-steps li > div {
+  margin-top: 10px;
+}
+
+.rav2-test-design-prerequisite-steps b,
+.rav2-test-design-prerequisite-steps small {
+  display: block;
+}
+
+.rav2-test-design-prerequisite-steps b {
+  color: #465368;
+  font-size: 12px;
+}
+
+.rav2-test-design-prerequisite-steps small {
+  margin-top: 5px;
+  color: #8993a2;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.rav2-test-design-prerequisite-card > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #edf0f4;
+}
+
+.rav2-test-design-prerequisite-card > footer > span {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #7b8798;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.rav2-test-design-prerequisite-card > footer > span svg {
+  width: 15px;
+  flex: 0 0 15px;
+  color: #6874db;
+}
+
+.rav2-test-design-prerequisite-card > footer button {
+  min-height: 34px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  border: 1px solid #5965e9;
+  border-radius: 8px;
+  background: #5965e9;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rav2-test-design-prerequisite-card > footer button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.rav2-test-design-prerequisite-card > footer button svg {
+  width: 14px;
+}
+
+@media (max-width: 720px) {
+  .rav2-test-design-prerequisite {
+    place-items: start stretch;
+    padding: 16px;
+  }
+
+  .rav2-test-design-prerequisite-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .rav2-test-design-prerequisite-steps li {
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .rav2-test-design-prerequisite-steps li > div {
+    margin-top: 0;
+  }
+
+  .rav2-test-design-prerequisite-card > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rav2-test-design-prerequisite-card > footer button {
+    width: 100%;
+  }
+}

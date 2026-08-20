@@ -33,6 +33,7 @@ import { loadRun as loadTestDesignRun } from './test-design/api'
 import type { TestDesignNodeRun, TestDesignWorkflowRun } from './test-design/types'
 import './requirement-analysis-v2.css'
 import './requirement-analysis-review-flow.css'
+import './requirement-analysis-prerequisite.css'
 
 const EmbeddedTestDesignPage = lazy(() => import('./test-design/TestDesignPage').then(module => ({ default: module.TestDesignPage })))
 
@@ -359,7 +360,7 @@ export function RequirementAnalysisPageV2(props: Props) {
         <div className={`rav2-session-body ${view === 'conversation' ? 'conversation' : view === 'cases' ? 'cases' : 'detail'}`}>
           {view === 'conversation' && <AgentConversation run={selectedRun} projectVersionId={projectVersion.id} linkedTestDesign={linkedTestDesign} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
           {view === 'clarifications' && <Clarifications items={blockingClarificationHistory} answers={clarificationAnswers} actions={clarificationActions} busy={clarificationBusy} onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))} onActionChange={(id, action) => setClarificationActions(current => ({ ...current, [id]: action }))} onSubmit={() => void resolveClarifications()} />}
-          {view === 'cases' && <Suspense fallback={<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>正在加载测试设计运行</h2><p>正在建立测试设计的正式上下文。</p></div>}>{linkedTestDesign ? <EmbeddedTestDesignPage key={`${selectedRun?.id}:${linkedTestDesign.designId}:${linkedTestDesign.runId}`} embedded projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} linkedDesignId={linkedTestDesign.designId} linkedRunId={linkedTestDesign.runId} /> : testDesignReady ? <EmbeddedTestDesignPage key={`new-test-design:${projectVersion.id}:${selectedReleaseBinding?.releaseId}`} projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} initialCreate /> : <div className="rav2-empty"><ShieldCheck /><h2>{selectedRun ? '本次需求分析尚未发布' : '请先完成需求分析'}</h2><p>{selectedRun ? '只有当前选择的成功需求分析 Run 发布 Requirement Release 后，才能创建测试设计。' : '请先在新建对话中启动需求分析，或从运行历史选择一个已发布 Requirement Release 的 Run。'}</p></div>}</Suspense>}
+          {view === 'cases' && <Suspense fallback={<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>正在加载测试设计运行</h2><p>正在建立测试设计的正式上下文。</p></div>}>{linkedTestDesign ? <EmbeddedTestDesignPage key={`${selectedRun?.id}:${linkedTestDesign.designId}:${linkedTestDesign.runId}`} embedded projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} linkedDesignId={linkedTestDesign.designId} linkedRunId={linkedTestDesign.runId} /> : testDesignReady ? <EmbeddedTestDesignPage key={`new-test-design:${projectVersion.id}:${selectedReleaseBinding?.releaseId}`} projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} initialCreate /> : <TestDesignPrerequisite run={selectedRun} blockingClarificationCount={blockingClarifications.length} releaseStatus={release?.status} canRun={canRun} starting={starting} onStart={() => void startAnalysis()} onOpenConversation={() => setView('conversation')} onOpenClarifications={() => setView('clarifications')} onRetry={() => void retryAnalysis()} />}</Suspense>}
           {view === 'details' && <section className="rav2-advanced-details"><header><div><ShieldCheck /><span><b>详细信息</b><small>运行配置、需求基线、正式产物与版本差异仅用于追溯和排障，不影响当前主流程。</small></span></div><nav>{detailTabs.map(tab => <button className={detailView === tab.key ? 'active' : ''} key={tab.key} onClick={() => setDetailView(tab.key)}>{tab.label}</button>)}</nav></header><div>{detailView === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}{detailView === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} />}{detailView === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}</div></section>}
         </div>
         {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>连续 Planning Session</b><small>Requirement、Human Clarification、TestCase 与 Coverage 共用同一父会话；正式事实始终从 Version / Snapshot / Workspace 重新建立。</small></span></footer>}
@@ -534,6 +535,52 @@ function TestDesignConversationEntry({ linkage, run, error }: { linkage: { desig
       {run.error && <article className="rav2-run-control failed"><AlertTriangle /><span><b>测试设计已停止</b><small>{run.error}</small></span></article>}
       {run.nodeRuns.map(node => <TestDesignNodeConversationEntry key={node.id} node={node} />)}
     </>}
+  </section>
+}
+
+function TestDesignPrerequisite({ run, blockingClarificationCount, releaseStatus, canRun, starting, onStart, onOpenConversation, onOpenClarifications, onRetry }: { run?: RunRecord; blockingClarificationCount: number; releaseStatus?: string; canRun: boolean; starting: boolean; onStart: () => void; onOpenConversation: () => void; onOpenClarifications: () => void; onRetry: () => void }) {
+  const isFailed = run?.status === 'failed' || run?.status === 'cancelled'
+  const waitingClarification = Boolean(run && (run.status === 'waiting_clarification' || blockingClarificationCount > 0))
+  const analysisState: RequirementStageState = !run ? 'current' : isFailed ? 'blocked' : run.status === 'running' || waitingClarification ? 'current' : 'complete'
+  const releaseState: RequirementStageState = releaseStatus === 'published' ? 'complete' : run?.status === 'succeeded' && !waitingClarification ? 'current' : 'waiting'
+  const designState: RequirementStageState = releaseStatus === 'published' ? 'current' : 'waiting'
+  let title = '请先完成需求分析'
+  let description = '测试用例只会基于当前 ProjectVersion 已发布的 Requirement Release 创建，不会读取草稿或未完成的分析结果。'
+  let actionLabel = canRun ? '开始需求分析' : '等待可分析的需求输入'
+  let actionDisabled = !canRun || starting
+  let ActionIcon = Play
+  let action = onStart
+  if (run?.status === 'running') {
+    title = '需求分析正在进行'
+    description = `PlanningAgent 正在处理本次需求输入（${run.progress}%）。需求分析完成并发布后，会自动衔接测试设计。`
+    actionLabel = '查看分析进度'; actionDisabled = false; ActionIcon = Activity; action = onOpenConversation
+  } else if (waitingClarification) {
+    title = `等待 ${blockingClarificationCount} 项业务确认`
+    description = '阻断问题需要写入当前 Run 的正式业务事实；完成后 Service 才能发布 Requirement Release 并启动测试设计。'
+    actionLabel = '处理待确认问题'; actionDisabled = false; ActionIcon = Quote; action = onOpenClarifications
+  } else if (isFailed) {
+    title = '本次需求分析未完成'
+    description = '当前 Run 没有形成可发布的 Requirement Release。重新分析会创建新的完整运行，不会覆盖历史记录。'
+    actionLabel = '重新分析'; actionDisabled = !canRun; ActionIcon = RefreshCw; action = onRetry
+  } else if (run && releaseStatus === 'published') {
+    title = 'Requirement Release 已发布，正在进入测试设计'
+    description = 'Service 正在为本次发布的 Release 创建冻结的测试设计运行；完成后此页会自动展示候选用例。'
+    actionLabel = '查看需求分析记录'; actionDisabled = false; ActionIcon = Activity; action = onOpenConversation
+  } else if (run) {
+    title = '本次需求分析尚未发布'
+    description = '只有当前选择的成功需求分析 Run 发布 Requirement Release 后，才能创建测试设计。'
+    actionLabel = '查看需求分析记录'; actionDisabled = false; ActionIcon = Activity; action = onOpenConversation
+  }
+  return <section className="rav2-test-design-prerequisite" aria-label="测试用例前置条件">
+    <div className="rav2-test-design-prerequisite-card">
+      <header><span><TestTube2 /></span><div><p>测试用例 · 前置条件</p><h2>{title}</h2><small>{description}</small></div></header>
+      <ol className="rav2-test-design-prerequisite-steps">
+        <li className={analysisState}><i>1</i><div><b>需求分析</b><small>{!run ? '尚未启动' : isFailed ? '本次运行未完成' : waitingClarification ? '等待业务确认' : run.status === 'running' ? `${run.progress}% 进行中` : '已完成'}</small></div></li>
+        <li className={releaseState}><i>2</i><div><b>Requirement Release</b><small>{releaseStatus === 'published' ? '已由服务端发布' : releaseState === 'current' ? '正在发布正式需求基线' : '等待需求分析完成'}</small></div></li>
+        <li className={designState}><i>3</i><div><b>自动测试设计</b><small>{designState === 'current' ? '正在创建测试设计运行' : '等待冻结 Release'}</small></div></li>
+      </ol>
+      <footer><span><ShieldCheck />正式用例、Coverage 与发布门禁均以冻结的 Requirement Release 为依据。</span><button className="primary" disabled={actionDisabled} onClick={action}><ActionIcon />{starting && !run ? '启动中…' : actionLabel}</button></footer>
+    </div>
   </section>
 }
 
