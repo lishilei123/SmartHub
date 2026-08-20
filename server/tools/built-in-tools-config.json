@@ -6,7 +6,7 @@
       "piName": "read",
       "label": "读取工作区文件",
       "catalogName": "工作区文件读取",
-      "description": "使用 read 语义，按工作区相对路径读取固定文件。支持 offset/limit 续读大文件；只允许当前需求分析运行的只读 /workspace，实际 read 范围才可形成 Evidence。",
+      "description": "使用 read 语义，按工作区相对路径读取固定文件。每次最多读取 240 行；大文件应使用 offset/limit 续读，以保持连续 Planning Session 的上下文可压缩。只允许当前需求分析运行的只读 /workspace，实际 read 范围才可形成 Evidence。",
       "catalogDescription": "按相对路径读取需求分析运行固定的只读工作区文件。",
       "risk": "read",
       "timeoutMs": 30000,
@@ -33,8 +33,8 @@
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 10000,
-            "description": "本次最多读取多少行。"
+            "maximum": 240,
+            "description": "本次最多读取多少行（最大 240；大文件请使用 offset 续读）。"
           }
         },
         "required": [

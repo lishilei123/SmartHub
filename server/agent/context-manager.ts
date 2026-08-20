@@ -1,8 +1,10 @@
-import type {
-  AgentSession,
-  AgentSessionEvent,
-  CompactionResult,
-  ContextUsage,
+import {
+  estimateTokens,
+  sessionEntryToContextMessages,
+  type AgentSession,
+  type AgentSessionEvent,
+  type CompactionResult,
+  type ContextUsage,
 } from '@earendil-works/pi-coding-agent'
 import type {
   AgentExecutionContext,
@@ -13,6 +15,7 @@ import type { PiSessionScope } from './pi-session-runtime.js'
 export type PlanningCompactionCheckpoint =
   | 'requirement_analysis_completed'
   | 'before_test_case_design'
+  | 'test_case_design_completed'
   | 'coverage_repair_completed'
 
 export class ContextManager {
@@ -30,6 +33,7 @@ export class ContextManager {
       checkpoints: [
         'requirement_analysis_completed',
         'before_test_case_design',
+        'test_case_design_completed',
         'coverage_repair_completed',
       ] as PlanningCompactionCheckpoint[],
     }
@@ -107,11 +111,35 @@ export class ContextManager {
 
   async compactAtCheckpoint(session: AgentSession, checkpoint: PlanningCompactionCheckpoint) {
     if (!this.shouldCompact(session)) return undefined
-    return session.compact(protectedCompactionInstructions('manual', `当前检查点：${checkpoint}。`))
+    return this.compactWithBoundary(
+      session,
+      protectedCompactionInstructions('manual', `当前检查点：${checkpoint}。`),
+      checkpoint,
+    )
   }
 
   async compact(session: AgentSession) {
-    return session.compact(protectedCompactionInstructions('manual', '这是用户主动触发的上下文压缩。'))
+    return this.compactWithBoundary(
+      session,
+      protectedCompactionInstructions('manual', '这是用户主动触发的上下文压缩。'),
+      'manual',
+    )
+  }
+
+  private async compactWithBoundary(
+    session: AgentSession,
+    instructions: string,
+    checkpoint: PlanningCompactionCheckpoint | 'manual',
+  ) {
+    if (hasOversizedUnfinishedToolTail(session)) {
+      appendCompactionBoundary(session, checkpoint)
+    }
+    try {
+      return await session.compact(instructions)
+    } catch (error) {
+      if (!isNoCompactionAvailable(error)) throw error
+      return undefined
+    }
   }
 
   private compactionProjection(reason: 'manual' | 'threshold' | 'overflow', result: CompactionResult | undefined, aborted: boolean, willRetry: boolean) {
@@ -128,6 +156,58 @@ export class ContextManager {
       } : {}),
     }
   }
+}
+
+function isNoCompactionAvailable(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  return /Nothing to compact \(session too small\)/iu.test(message)
+}
+
+function hasOversizedUnfinishedToolTail(session: AgentSession) {
+  const entries = session.sessionManager.getBranch()
+  const keepRecentTokens = session.settingsManager.getCompactionSettings().keepRecentTokens
+  let trailingTokens = 0
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const messages = sessionEntryToContextMessages(entries[index])
+    trailingTokens += messages.reduce((total, message) => total + estimateTokens(message), 0)
+    if (trailingTokens < keepRecentTokens) continue
+    // Pi cannot cut at a toolResult. Without a later context-visible entry,
+    // its compactor returns "Nothing to compact" even for a large session.
+    return !entries.slice(index).some(entry => sessionEntryToContextMessages(entry).some(message => isCompactionCutPoint(message.role)))
+  }
+  return false
+}
+
+function isCompactionCutPoint(role: string) {
+  return role === 'user'
+    || role === 'assistant'
+    || role === 'bashExecution'
+    || role === 'custom'
+    || role === 'branchSummary'
+    || role === 'compactionSummary'
+}
+
+function appendCompactionBoundary(
+  session: AgentSession,
+  checkpoint: PlanningCompactionCheckpoint | 'manual',
+) {
+  const latest = session.sessionManager.getBranch().at(-1)
+  if (latest?.type === 'custom_message' && latest.customType === 'smarthub_context_compaction_boundary') return
+  session.sessionManager.appendCustomMessageEntry(
+    'smarthub_context_compaction_boundary',
+    contextCompactionBoundary(checkpoint),
+    false,
+    { checkpoint },
+  )
+}
+
+function contextCompactionBoundary(checkpoint: PlanningCompactionCheckpoint | 'manual') {
+  return [
+    '[SmartHub 系统上下文检查点]',
+    `检查点：${checkpoint}。`,
+    '此前的工具返回仅用于当前推理；本条不是新的业务任务，也不是正式业务事实。',
+    '后续继续时必须以当前任务、Service/PostgreSQL、固定 Release、Snapshot 和 Workspace 重新读取正式事实。',
+  ].join('\n')
 }
 
 export function protectedCompactionInstructions(

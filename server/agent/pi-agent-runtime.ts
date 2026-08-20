@@ -954,6 +954,7 @@ function compactionCheckpoint(
   if (timing === 'before_prompt' && stage === 'test_case_design') return 'before_test_case_design'
   if (timing !== 'completed') return undefined
   if (stage === 'analysis') return 'requirement_analysis_completed'
+  if (stage === 'test_case_design') return 'test_case_design_completed'
   if (stage === 'test_design_repair') return 'coverage_repair_completed'
   return undefined
 }

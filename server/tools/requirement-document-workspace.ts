@@ -49,6 +49,11 @@ const toolNameById: Record<RequirementWorkspaceToolId, 'read' | 'grep' | 'find' 
 
 const toolIdByName = new Map(Object.entries(toolNameById).map(([id, name]) => [name, id as RequirementWorkspaceToolId]))
 
+// A Planning Session is continuous across Workflow stages. Keep one read response
+// small enough that a single unfinished tool turn cannot consume Pi's retained
+// context window; larger files remain available through offset/limit continuation.
+const MAX_WORKSPACE_READ_LINES = 240
+
 /**
  * A run-scoped, read-only filesystem workspace backed by frozen AssetVersion content.
  * Pi's official Coding Agent read-only tools operate on the materialized directory,
@@ -217,7 +222,12 @@ function normalizeToolArguments(toolId: RequirementWorkspaceToolId, value: unkno
   if (toolId === 'workspace.read_file') return {
     path: relativeInput(input.path, false),
     ...(input.offset === undefined ? {} : { offset: positiveInteger(input.offset, 'offset') }),
-    ...(input.limit === undefined ? {} : { limit: positiveInteger(input.limit, 'limit') }),
+    limit: Math.min(
+      input.limit === undefined
+        ? MAX_WORKSPACE_READ_LINES
+        : positiveInteger(input.limit, 'limit'),
+      MAX_WORKSPACE_READ_LINES,
+    ),
   }
   if (toolId === 'workspace.grep_files') return {
     pattern: requiredText(input.pattern, 'pattern'),
