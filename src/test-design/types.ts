@@ -83,7 +83,7 @@ export type AgentEvent = {
 
 export type TestDesignNodeRun = {
   id: string
-  nodeKey: 'test_point_design' | 'test_point_review' | 'test_case_design' | 'coverage_audit' | 'test_design_repair'
+  nodeKey: 'test_case_design' | 'coverage_audit' | 'test_design_repair'
   generation: number
   attempt: number
   status: string
@@ -92,47 +92,7 @@ export type TestDesignNodeRun = {
   finishedAt?: string
   errorCode?: string
   error?: string
-  execution?: { agentKey: 'planning'; workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'; agentVersion: string; modelLabel: string; turns: number; toolCalls: number; toolErrors?: number; context?: AgentExecutionContext; inputDeliveryManifest?: { toolReads?: Array<{ toolCallId: string; relativePath: string; sourceScope?: 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output' }> }; events: AgentEvent[] }
-}
-
-export type TestPointNode = {
-  nodeId: string
-  parentId: string | null
-  sortKey: string
-  title: string
-  objective: string
-  dimension: TestDimension
-  priority: 'P0' | 'P1' | 'P2' | 'P3'
-  applicability: 'applicable' | 'not_applicable' | 'blocked_by_confirmation'
-  designTechniques: string[]
-  entryMethods: ExecutionMethod[]
-  oracle: string
-  dataConditions: string[]
-  risks: string[]
-  assumptions: string[]
-  basisRefs: string[]
-  historicalRefs: string[]
-  deleted?: boolean
-}
-
-export type TestPointTreeOperation =
-  | { op: 'add'; clientNodeRef: string; parentId: string | null; sortKey: string; value: Omit<TestPointNode, 'nodeId' | 'parentId' | 'sortKey' | 'deleted'> }
-  | { op: 'rename'; nodeId: string; title: string }
-  | { op: 'update'; nodeId: string; patch: Partial<Omit<TestPointNode, 'nodeId' | 'parentId' | 'sortKey' | 'deleted'>> }
-  | { op: 'move'; nodeId: string; parentId: string | null; sortKey: string }
-  | { op: 'delete'; nodeId: string }
-  | { op: 'mark_not_applicable'; nodeId: string; reason: string }
-  | { op: 'reorder'; nodeId: string; sortKey: string }
-  | { op: 'split'; nodeId: string; children: Array<{ clientNodeRef: string; sortKey: string; value: Omit<TestPointNode, 'nodeId' | 'parentId' | 'sortKey' | 'deleted'> }> }
-  | { op: 'merge'; sourceNodeIds: string[]; targetNodeId: string; value: Partial<Omit<TestPointNode, 'nodeId' | 'parentId' | 'sortKey' | 'deleted'>> }
-
-export type TestPointTree = {
-  id: string
-  runId: string
-  currentRevision: number
-  currentApprovedVersionId?: string
-  revisions: Array<{ revision: number; nodes: TestPointNode[]; treeSha256: string; reason: string; actorId: string; createdAt: string }>
-  versions: Array<{ id: string; version: number; revision: number; treeSha256: string; approvedBy: string; approvedAt: string; projection: WorkspaceProjection }>
+  execution?: { agentKey: 'planning'; workflowStage: 'test_case_design' | 'test_design_repair'; agentVersion: string; modelLabel: string; turns: number; toolCalls: number; toolErrors?: number; context?: AgentExecutionContext; inputDeliveryManifest?: { toolReads?: Array<{ toolCallId: string; relativePath: string; sourceScope?: 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output' }> }; events: AgentEvent[] }
 }
 
 export type TestCaseContent = {
@@ -140,7 +100,7 @@ export type TestCaseContent = {
   title: string
   objective: string
   dimension: TestDimension
-  testPointIds: string[]
+  requirementRefs: string[]
   priority: 'P0' | 'P1' | 'P2' | 'P3'
   preconditions: string[]
   dataRequirementIds: string[]
@@ -156,12 +116,10 @@ export type TestCaseContent = {
 export type TestCaseTraceability = {
   sourceRequirementReleaseId: string
   requirementRefs: Array<{ requirementReleaseId: string; requirementId: string }>
-  testPointRefs: Array<{ testPointTreeVersionId: string; testPointId: string }>
 }
 
 export type TestDesignCase = {
   id: string
-  treeVersionId: string
   candidateRef?: string
   origin: string
   currentRevision: number
@@ -171,8 +129,8 @@ export type TestDesignCase = {
   tombstonedAt?: string
 }
 
-export type TestDataSetVersion = { id: string; version: number; contentSha256: string; createdAt: string; requirements: Array<{ id: string; name: string; readiness: 'ready' | 'blocked' | 'needs_confirmation'; readinessReason?: string; caseIds: string[]; testPointIds: string[] }> }
-export type TestDesignCoverageAudit = { id: string; treeVersionId: string; dataSetVersionId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalPoints: number; coveredPoints: number; totalCases: number; approvedCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' }>; createdAt: string }
+export type TestDataSetVersion = { id: string; version: number; contentSha256: string; createdAt: string; requirements: Array<{ id: string; name: string; readiness: 'ready' | 'blocked' | 'needs_confirmation'; readinessReason?: string; caseIds: string[] }> }
+export type TestDesignCoverageAudit = { id: string; requirementReleaseId: string; dataSetVersionId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalCases: number; approvedCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' }>; createdAt: string }
 export type WorkspaceProjection = { status: 'pending' | 'succeeded' | 'failed'; files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>; error?: string }
 export type TestCaseSetVersion = { id: string; projectId: string; projectVersionId: string; testDesignId: string; runId: string; version: number; name: string; members: Array<{ caseId: string; revision: number; ordinal: number; contentSha256: string }>; contentSha256: string; publishedBy: string; publishedAt: string; projection: WorkspaceProjection }
 export type TestSuiteVersion = { id: string; projectId: string; suiteType: 'smoke' | 'regression' | 'functional_domain'; version: number; name: string; members: Array<{ caseId: string; revision: number; executionMethods: ExecutionMethod[] }> }
@@ -186,7 +144,7 @@ export type TestCaseExecutionSpec = FunctionalExecutionSpec | PerformanceExecuti
 
 export type CaseChangeOperation = 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'
 export type CaseChangeDecision = 'pending' | 'accepted' | 'accepted_edited' | 'rejected' | 'keep_original' | 'reference' | 'deprecated'
-export type CaseChangeProposal = { id: string; runId: string; operation: CaseChangeOperation; sourceCaseId?: string; sourceRevision?: number; candidateCaseId?: string; candidateContent?: TestCaseContent; diff: Array<{ path: string; before?: unknown; after?: unknown }>; requirementRefs: string[]; testPointIds: string[]; reason: string; confidence: number; decision: CaseChangeDecision; createdAt: string; decidedBy?: string; decidedAt?: string; decisions: Array<{ id: string; expectedVersion: number; decision: Exclude<CaseChangeDecision, 'pending'>; comment?: string; decidedBy: string; decidedAt: string }>; appliedCaseId?: string; appliedRevision?: number }
+export type CaseChangeProposal = { id: string; runId: string; operation: CaseChangeOperation; sourceCaseId?: string; sourceRevision?: number; candidateCaseId?: string; candidateContent?: TestCaseContent; diff: Array<{ path: string; before?: unknown; after?: unknown }>; requirementRefs: string[]; reason: string; confidence: number; decision: CaseChangeDecision; createdAt: string; decidedBy?: string; decidedAt?: string; decisions: Array<{ id: string; expectedVersion: number; decision: Exclude<CaseChangeDecision, 'pending'>; comment?: string; decidedBy: string; decidedAt: string }>; appliedCaseId?: string; appliedRevision?: number }
 
 export type LibraryTestCaseRevision = { revision: number; content: TestCaseContent; contentSha256: string; semanticSha256: string; sourceRunId?: string; sourceProposalId?: string; traceability?: TestCaseTraceability; changeReason: string; createdBy: string; createdAt: string }
 export type LibraryTestCase = { id: string; projectId: string; currentRevision: number; status: 'active' | 'deprecated'; content: TestCaseContent; contentSha256: string; semanticSha256: string; createdAt: string; updatedAt: string; etag: string; revisions?: LibraryTestCaseRevision[] }
@@ -205,7 +163,6 @@ export type TestDesignWorkflowRun = TestDesignRunSummary & {
   workspaceSnapshot: { schemaVersion: 'project-workspace-snapshot/v1'; projectId: string; projectVersionId: string; rootLogicalPath: 'workspace'; activeBranchLogicalPath: string; requirementReleaseId: string; verificationRunId: string; requirementsJsonSha256: string; files: Array<{ logicalPath: string; displayName: string; contentSha256: string; assetId?: string; assetVersionId?: string; sourceScope: 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output' }>; snapshotSha256: string; createdAt: string }
   formalWorkspaceFiles: Array<{ logicalPath: string; displayName: string; contentSha256: string; assetVersionId?: string; sourceScope: 'formal_output' }>
   nodeRuns: TestDesignNodeRun[]
-  testPointTree?: TestPointTree
   testCases: TestDesignCase[]
   dataSetVersions: TestDataSetVersion[]
   coverageAudits: TestDesignCoverageAudit[]

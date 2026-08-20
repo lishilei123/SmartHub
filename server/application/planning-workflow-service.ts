@@ -33,13 +33,7 @@ import type { TestDesignService } from './test-design-service.js'
 import { safeWorkspaceSegment } from './project-workspace-snapshot.js'
 
 export interface TestDesignReviewerSourceSelection {
-  testPointTreeRevision: number
-  approvedTestPointTreeVersionId?: string
-  testCases: Array<{
-    caseId: string
-    treeVersionId: string
-    revision: number
-  }>
+  testCases: Array<{ caseId: string; revision: number }>
   dataSetVersionId?: string
   coverageAuditId?: string
 }
@@ -89,23 +83,6 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
     true,
   ),
   stage(
-    'test_point_design',
-    [
-      ...PLANNING_WORKSPACE_TOOLS,
-      TEST_DESIGN_STAGE_BINDINGS.test_point_design.submitToolId,
-    ],
-    TEST_DESIGN_STAGE_BINDINGS.test_point_design.submitToolId,
-    TEST_DESIGN_STAGE_BINDINGS.test_point_design.schemaVersion,
-    ['test_point'],
-  ),
-  stage(
-    'test_point_review',
-    [],
-    undefined,
-    undefined,
-    ['test_point'],
-  ),
-  stage(
     'test_case_design',
     [
       ...PLANNING_WORKSPACE_TOOLS,
@@ -153,7 +130,6 @@ export class PlanningWorkflowService {
       parentSession: 'project_version',
       subAgents: [
         reviewer('requirement', 'RequirementReviewer'),
-        reviewer('test_point', 'TestPointReviewer'),
         reviewer('test_case', 'TestCaseReviewer'),
         reviewer('coverage', 'CoverageReviewer'),
       ],
@@ -219,7 +195,7 @@ export class PlanningWorkflowService {
         '',
         '接下来继续当前测试策划工作。',
         '',
-        '请基于当前 ProjectVersion 正式绑定的 Requirement Release，以及冻结 Workspace 中相关资料，开始设计测试点。',
+        '请基于当前 ProjectVersion 正式绑定的 Requirement Release，以及冻结 Workspace 中相关资料，开始设计测试用例。',
         '',
         '如需要，可以结合之前的需求分析上下文理解业务，但正式需求事实仍以当前 Requirement Release、正式 Clarification 和 Workspace 为准。',
       ].join('\n'),
@@ -329,56 +305,6 @@ export class PlanningWorkflowService {
       task: projection.task,
       requiredReadPaths: projection.requiredReadPaths,
     }, signal)
-  }
-
-  async testPointsValidated(
-    projectVersionId: string,
-    runId: string,
-    treeVersionId: string,
-  ) {
-    const state = await this.store.snapshot()
-    const projectVersion = required(
-      state.projectVersions.find(item => item.id === projectVersionId),
-      'PROJECT_VERSION_NOT_FOUND',
-    )
-    const run = required(
-      state.testDesignState?.runs.find(
-        item => item.id === runId && item.projectVersionId === projectVersionId,
-      ),
-      'TEST_DESIGN_RUN_NOT_FOUND',
-    )
-    const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND')
-    const version = required(
-      tree.versions.find(
-        item => item.id === treeVersionId
-          && item.id === tree.currentApprovedVersionId,
-      ),
-      'TEST_POINT_TREE_VERSION_NOT_APPROVED',
-    )
-    await this.runtime.appendPlanningTask({
-      projectId: projectVersion.projectId,
-      projectVersionId,
-      taskType: 'test_case_design_after_test_points_validated',
-      task: [
-        '测试点已经完成并通过服务端校验。',
-        '',
-        `当前批准的 TestPointTreeVersion = ${version.id}`,
-        `test-point-tree SHA-256 = ${version.treeSha256}`,
-        '',
-        '请继续当前测试策划工作，基于已批准的 TestPointTreeVersion 编写测试用例。',
-        '',
-        '可以利用前面需求分析和测试点设计的上下文保持业务连续性，但测试点正式内容必须以当前批准版本为准。',
-      ].join('\n'),
-      metadata: {
-        testDesignRunId: run.id,
-        testPointTreeVersionId: version.id,
-        testPointTreeSha256: version.treeSha256,
-      },
-    })
-    this.runtime.queueCompactionCheckpoint(
-      planningScope(projectVersion.projectId, projectVersionId),
-      'test_points_validated',
-    )
   }
 
   private async executeReviewer(
@@ -684,118 +610,17 @@ function captureTestDesignReviewerSource(
   reviewerType: Exclude<PlanningReviewerType, 'requirement'>,
   selection: TestDesignReviewerSourceSelection,
 ): Extract<PlanningReviewerSourceReference, { kind: 'test_design' }> {
-  const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_READY')
-  const audit = reviewerType === 'coverage'
-    ? required(
-        selection.coverageAuditId
-          ? run.coverageAudits.find(item =>
-              item.id === selection.coverageAuditId
-              && item.status === 'valid',
-            )
-          : undefined,
-        selection.coverageAuditId
-          ? 'COVERAGE_AUDIT_NOT_FOUND'
-          : 'COVERAGE_REVIEW_AUDIT_ID_REQUIRED',
-      )
-    : undefined
-  const approvedVersion = selection.approvedTestPointTreeVersionId
-    ? required(
-        tree.versions.find(item =>
-          item.id === selection.approvedTestPointTreeVersionId
-          && item.revision === selection.testPointTreeRevision,
-        ),
-        'TEST_POINT_TREE_APPROVAL_REQUIRED',
-      )
-    : undefined
-  const treeRevision = required(
-    tree.revisions.find(item =>
-      item.revision === selection.testPointTreeRevision
-      && (!approvedVersion || item.treeSha256 === approvedVersion.treeSha256),
-    ),
-    'TEST_POINT_TREE_SOURCE_NOT_FOUND',
-  )
-  if (reviewerType !== 'test_point' && !approvedVersion) {
-    throw new Error('TEST_POINT_TREE_APPROVAL_REQUIRED')
-  }
-  if (reviewerType === 'coverage' && audit?.treeVersionId !== approvedVersion?.id) {
-    throw new Error('COVERAGE_AUDIT_SOURCE_DRIFT')
-  }
-
   const activeCases = run.testCases.filter(item => !item.tombstonedAt)
-  const testCases = reviewerType === 'test_point'
-    ? []
-    : selection.testCases.map(reference => {
-        const item = required(
-          activeCases.find(candidate =>
-            candidate.id === reference.caseId
-            && candidate.treeVersionId === reference.treeVersionId,
-          ),
-          'TEST_CASE_SOURCE_NOT_FOUND',
-        )
-        const revision = required(
-          item.revisions.find(candidate => candidate.revision === reference.revision),
-          'TEST_CASE_REVISION_NOT_FOUND',
-        )
-        return {
-          caseId: item.id,
-          treeVersionId: item.treeVersionId,
-          revision: revision.revision,
-          contentSha256: revision.contentSha256,
-        }
-      }).sort((left, right) => left.caseId.localeCompare(right.caseId))
-  if (
-    reviewerType !== 'test_point'
-    && (
-      testCases.length !== activeCases.length
-      || new Set(testCases.map(item => item.caseId)).size !== testCases.length
-      || activeCases.some(item => !testCases.some(reference => reference.caseId === item.id))
-    )
-  ) {
-    throw new Error('TEST_CASE_SOURCE_SELECTION_INCOMPLETE')
-  }
-
-  const dataSet = reviewerType === 'test_point'
-    ? undefined
-    : required(
-        selection.dataSetVersionId
-          ? run.dataSetVersions.find(item => item.id === selection.dataSetVersionId)
-          : undefined,
-        'TEST_DATA_VERSION_NOT_FOUND',
-      )
-  if (audit) {
-    const caseSetSha256 = canonicalSha256(testCases.map(item => ({
-      caseId: item.caseId,
-      revision: item.revision,
-      contentSha256: item.contentSha256,
-    })))
-    if (
-      audit.caseSetSha256 !== caseSetSha256
-      || audit.dataSetVersionId !== dataSet?.id
-    ) {
-      throw new Error('COVERAGE_AUDIT_SOURCE_DRIFT')
-    }
-  }
-  return {
-    kind: 'test_design',
-    testDesignRunId: run.id,
-    requirementReleaseId: run.basisSnapshot.requirementReleaseId,
-    requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256,
-    testPointTreeId: tree.id,
-    testPointTreeRevision: treeRevision.revision,
-    testPointTreeSha256: treeRevision.treeSha256,
-    ...(approvedVersion ? {
-      approvedTestPointTreeVersionId: approvedVersion.id,
-    } : {}),
-    testCases,
-    ...(dataSet ? {
-      dataSetVersionId: dataSet.id,
-      dataSetContentSha256: dataSet.contentSha256,
-    } : {}),
-    ...(audit ? {
-      coverageAuditId: audit.id,
-      coverageAuditInputSha256: audit.inputSha256,
-    } : {}),
-  }
+  const testCases = selection.testCases.map(reference => {
+    const item = required(activeCases.find(candidate => candidate.id === reference.caseId), 'TEST_CASE_SOURCE_NOT_FOUND')
+    const revision = required(item.revisions.find(candidate => candidate.revision === reference.revision), 'TEST_CASE_REVISION_NOT_FOUND')
+    return { caseId: item.id, revision: revision.revision, contentSha256: revision.contentSha256 }
+  }).sort((left, right) => left.caseId.localeCompare(right.caseId))
+  if (testCases.length !== activeCases.length || new Set(testCases.map(item => item.caseId)).size !== testCases.length) throw new Error('TEST_CASE_SOURCE_SELECTION_INCOMPLETE')
+  const dataSet = required(selection.dataSetVersionId ? run.dataSetVersions.find(item => item.id === selection.dataSetVersionId) : undefined, 'TEST_DATA_VERSION_NOT_FOUND')
+  const audit = reviewerType === 'coverage' ? required(selection.coverageAuditId ? run.coverageAudits.find(item => item.id === selection.coverageAuditId && item.status === 'valid') : undefined, 'COVERAGE_REVIEW_AUDIT_ID_REQUIRED') : undefined
+  if (audit && (audit.dataSetVersionId !== dataSet.id || audit.caseSetSha256 !== canonicalSha256(testCases))) throw new Error('COVERAGE_AUDIT_SOURCE_DRIFT')
+  return { kind: 'test_design', testDesignRunId: run.id, requirementReleaseId: run.basisSnapshot.requirementReleaseId, requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256, testCases, dataSetVersionId: dataSet.id, dataSetContentSha256: dataSet.contentSha256, ...(audit ? { coverageAuditId: audit.id, coverageAuditInputSha256: audit.inputSha256 } : {}) }
 }
 
 function testDesignReviewerProjection(
@@ -805,201 +630,32 @@ function testDesignReviewerProjection(
   sourceReference: Extract<PlanningReviewerSourceReference, { kind: 'test_design' }>,
   configuration: AgentConfigurationVersion,
 ) {
-  const projectVersion = required(
-    state.projectVersions.find(item => item.id === run.projectVersionId),
-    'PROJECT_VERSION_NOT_FOUND',
-  )
-  const project = required(
-    state.projects.find(item => item.id === projectVersion.projectId),
-    'PROJECT_NOT_FOUND',
-  )
-  const files = new Map<string, TestDesignWorkspaceFile>()
-  for (const file of [
-    ...run.workspaceSnapshot.files,
-    ...run.formalWorkspaceFiles,
-  ]) {
-    requireFileHash(file)
-    files.set(file.logicalPath, structuredClone(file))
-  }
-  const requirementPath = required(
-    [...files.values()].find(
-      file => file.logicalPath === `${run.workspaceSnapshot.activeBranchLogicalPath}/requirements/requirements.json`,
-    )?.logicalPath,
-    'TEST_DESIGN_REQUIREMENTS_FILE_NOT_FOUND',
-  )
-  const reviewRoot = `workspace/agent_workspace/planning_agent/reviewer/${run.id}`
-  const tree = required(
-    run.testPointTree?.id === sourceReference.testPointTreeId
-      ? run.testPointTree
-      : undefined,
-    'TEST_POINT_TREE_NOT_READY',
-  )
-  const currentTree = required(
-    tree.revisions.find(
-      revision =>
-        revision.revision === sourceReference.testPointTreeRevision
-        && revision.treeSha256 === sourceReference.testPointTreeSha256,
-    ),
-    'TEST_POINT_TREE_SOURCE_DRIFT',
-  )
-  const approvedTreeVersion = sourceReference.approvedTestPointTreeVersionId
-    ? required(
-        tree.versions.find(
-          version =>
-            version.id === sourceReference.approvedTestPointTreeVersionId
-            && version.revision === sourceReference.testPointTreeRevision
-            && version.treeSha256 === sourceReference.testPointTreeSha256,
-        ),
-        'TEST_POINT_TREE_VERSION_SOURCE_DRIFT',
-      )
-    : undefined
-  const treePayload = {
-    schemaVersion: 'planning-review-test-point-tree/v1',
-    treeId: run.testPointTree?.id,
-    currentRevision: currentTree.revision,
-    currentTreeSha256: currentTree.treeSha256,
-    approvedVersion: approvedTreeVersion ?? null,
-    nodes: currentTree.nodes,
-  }
-  const treePath = `${reviewRoot}/test-point-tree.json`
-  files.set(treePath, candidateFile(treePath, treePayload, run.id))
-
-  const casesPayload = {
-    schemaVersion: 'planning-review-test-cases/v1',
-    cases: sourceReference.testCases.map(reference => {
-      const item = required(
-        run.testCases.find(candidate =>
-          candidate.id === reference.caseId
-          && candidate.treeVersionId === reference.treeVersionId,
-        ),
-        'TEST_CASE_SOURCE_NOT_FOUND',
-      )
-      const revision = required(
-        item.revisions.find(candidate =>
-          candidate.revision === reference.revision
-          && candidate.contentSha256 === reference.contentSha256,
-        ),
-        'TEST_CASE_REVISION_SOURCE_DRIFT',
-      )
-      return {
-        id: item.id,
-        treeVersionId: item.treeVersionId,
-        revisionNumber: reference.revision,
-        reviewState: item.reviewState,
-        revision,
-      }
-    }),
-  }
-  const casesPath = `${reviewRoot}/test-cases.json`
-  files.set(casesPath, candidateFile(casesPath, casesPayload, run.id))
-  const dataSet = sourceReference.dataSetVersionId
-    ? required(
-        run.dataSetVersions.find(candidate =>
-          candidate.id === sourceReference.dataSetVersionId
-          && candidate.contentSha256 === sourceReference.dataSetContentSha256,
-        ),
-        'TEST_DATA_VERSION_SOURCE_DRIFT',
-      )
-    : undefined
-  const dataPath = `${reviewRoot}/test-data-requirements.json`
-  files.set(dataPath, candidateFile(dataPath, {
-    schemaVersion: 'planning-review-test-data/v1',
-    dataSet: dataSet ?? null,
-  }, run.id))
-
+  const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), 'PROJECT_VERSION_NOT_FOUND')
+  const project = required(state.projects.find(item => item.id === projectVersion.projectId), 'PROJECT_NOT_FOUND')
+  const files = new Map<string, TestDesignWorkspaceFile>([...run.workspaceSnapshot.files, ...run.formalWorkspaceFiles].map(file => [file.logicalPath, structuredClone(file)]))
+  const requirementPath = required([...files.values()].find(file => file.logicalPath === run.workspaceSnapshot.activeBranchLogicalPath + '/requirements/requirements.json')?.logicalPath, 'TEST_DESIGN_REQUIREMENTS_FILE_NOT_FOUND')
+  const reviewRoot = 'workspace/agent_workspace/planning_agent/reviewer/' + run.id
+  const casesPath = reviewRoot + '/test-cases.json'
+  files.set(casesPath, candidateFile(casesPath, { schemaVersion: 'planning-review-test-cases/v1', cases: sourceReference.testCases.map(reference => {
+    const item = required(run.testCases.find(candidate => candidate.id === reference.caseId), 'TEST_CASE_SOURCE_NOT_FOUND')
+    const revision = required(item.revisions.find(candidate => candidate.revision === reference.revision && candidate.contentSha256 === reference.contentSha256), 'TEST_CASE_REVISION_SOURCE_DRIFT')
+    return { id: item.id, revisionNumber: reference.revision, reviewState: item.reviewState, revision }
+  }) }, run.id))
+  const dataSet = required(run.dataSetVersions.find(item => item.id === sourceReference.dataSetVersionId && item.contentSha256 === sourceReference.dataSetContentSha256), 'TEST_DATA_VERSION_SOURCE_DRIFT')
+  const dataPath = reviewRoot + '/test-data-requirements.json'
+  files.set(dataPath, candidateFile(dataPath, { schemaVersion: 'planning-review-test-data/v1', dataSet }, run.id))
   let audit: CoverageAudit | undefined
   let auditPath: string | undefined
   if (reviewerType === 'coverage') {
-    audit = required(
-      run.coverageAudits.find(item =>
-        item.id === sourceReference.coverageAuditId
-        && item.inputSha256 === sourceReference.coverageAuditInputSha256
-        && item.treeVersionId === sourceReference.approvedTestPointTreeVersionId
-        && item.dataSetVersionId === sourceReference.dataSetVersionId
-        && item.caseSetSha256 === canonicalSha256(
-          sourceReference.testCases.map(item => ({
-            caseId: item.caseId,
-            revision: item.revision,
-            contentSha256: item.contentSha256,
-          })).sort((left, right) => left.caseId.localeCompare(right.caseId)),
-        ),
-      ),
-      'COVERAGE_AUDIT_SOURCE_DRIFT',
-    )
-    auditPath = `${reviewRoot}/coverage-audit.json`
-    files.set(auditPath, candidateFile(auditPath, {
-      schemaVersion: 'planning-review-coverage-audit/v1',
-      audit,
-      findings: run.findings,
-      confirmationItems: run.confirmationItems,
-    }, run.id))
+    audit = required(run.coverageAudits.find(item => item.id === sourceReference.coverageAuditId && item.inputSha256 === sourceReference.coverageAuditInputSha256), 'COVERAGE_AUDIT_SOURCE_DRIFT')
+    auditPath = reviewRoot + '/coverage-audit.json'
+    files.set(auditPath, candidateFile(auditPath, { schemaVersion: 'planning-review-coverage-audit/v1', audit, findings: run.findings, confirmationItems: run.confirmationItems }, run.id))
   }
-
-  const requiredLogicalPaths = reviewerType === 'test_point'
-    ? [requirementPath, treePath]
-    : reviewerType === 'test_case'
-      ? [requirementPath, treePath, casesPath, dataPath]
-      : [requirementPath, treePath, casesPath, dataPath, required(auditPath, 'COVERAGE_AUDIT_PATH_REQUIRED')]
-  const workspaceFiles = [...files.values()].map(file => ({
-    logicalPath: file.logicalPath,
-    contentSha256: file.contentSha256,
-    content: file.content,
-    displayName: file.displayName,
-    ...(file.assetId ? { assetId: file.assetId } : {}),
-    ...(file.assetVersionId ? { assetVersionId: file.assetVersionId } : {}),
-  })).sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'zh-CN'))
-  const task = testDesignReviewerTask(
-    run,
-    reviewerType,
-    sourceReference,
-    audit,
-  )
-  const snapshot: PlanningReviewerSnapshot = {
-    runId: `review:${reviewerType}:${run.id}`,
-    projectId: project.id,
-    projectName: project.name,
-    projectVersionId: projectVersion.id,
-    projectVersionName: projectVersion.name,
-    knowledgeBaseId: run.workspaceSnapshot.knowledgeBaseId,
-    indexVersionId: run.workspaceSnapshot.indexVersionId,
-    assets: workspaceFiles.flatMap(file => file.assetId && file.assetVersionId ? [{
-      assetId: file.assetId,
-      assetVersionId: file.assetVersionId,
-      assetContentHash: file.contentSha256,
-      logicalPath: file.logicalPath,
-      displayName: file.displayName,
-    }] : []),
-    documentWorkspace: {
-      mode: 'agent_directory',
-      logicalPath: run.workspaceSnapshot.rootLogicalPath,
-      rootLogicalPath: run.workspaceSnapshot.rootLogicalPath,
-      activeBranchLogicalPath: run.workspaceSnapshot.activeBranchLogicalPath,
-      branchLogicalPaths: state.projectVersions.filter(item => item.projectId === project.id).map(item => `workspace/branches/${safeWorkspaceSegment(item.name)}`),
-      agentLogicalPath: run.workspaceSnapshot.agentLogicalPath,
-      layoutVersion: 'workspace/v1',
-      candidateAssetVersionIds: [],
-    },
-    workspaceFiles,
-    agentDefinition: structuredClone(configuration.agentDefinition),
-    taskSha256: canonicalSha256(task),
-    createdAt: new Date().toISOString(),
-  }
-  return {
-    snapshot,
-    task,
-    requiredReadPaths: requiredLogicalPaths.map(path => relativePath('workspace', path)),
-    sourceSha256: canonicalSha256({
-      runId: run.id,
-      reviewerType,
-      requiredFiles: requiredLogicalPaths.map(path => ({
-        path,
-        contentSha256: required(files.get(path), 'REVIEWER_FILE_NOT_FOUND').contentSha256,
-      })),
-      sourceReference,
-      configurationId: run.agentConfigurationSnapshot.configurationId,
-      configurationSha256: run.agentConfigurationSnapshot.configurationSha256,
-    }),
-  }
+  const requiredLogicalPaths = reviewerType === 'test_case' ? [requirementPath, casesPath, dataPath] : [requirementPath, casesPath, dataPath, required(auditPath, 'COVERAGE_AUDIT_PATH_REQUIRED')]
+  const workspaceFiles = [...files.values()].map(file => ({ logicalPath: file.logicalPath, contentSha256: file.contentSha256, content: file.content, displayName: file.displayName, ...(file.assetId ? { assetId: file.assetId } : {}), ...(file.assetVersionId ? { assetVersionId: file.assetVersionId } : {}) })).sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'zh-CN'))
+  const task = testDesignReviewerTask(run, reviewerType, sourceReference, audit)
+  const snapshot: PlanningReviewerSnapshot = { runId: 'review:' + reviewerType + ':' + run.id, projectId: project.id, projectName: project.name, projectVersionId: projectVersion.id, projectVersionName: projectVersion.name, knowledgeBaseId: run.workspaceSnapshot.knowledgeBaseId, indexVersionId: run.workspaceSnapshot.indexVersionId, assets: workspaceFiles.flatMap(file => file.assetId && file.assetVersionId ? [{ assetId: file.assetId, assetVersionId: file.assetVersionId, assetContentHash: file.contentSha256, logicalPath: file.logicalPath, displayName: file.displayName }] : []), documentWorkspace: { mode: 'agent_directory', logicalPath: run.workspaceSnapshot.rootLogicalPath, rootLogicalPath: run.workspaceSnapshot.rootLogicalPath, activeBranchLogicalPath: run.workspaceSnapshot.activeBranchLogicalPath, branchLogicalPaths: state.projectVersions.filter(item => item.projectId === project.id).map(item => 'workspace/branches/' + safeWorkspaceSegment(item.name)), agentLogicalPath: run.workspaceSnapshot.agentLogicalPath, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] }, workspaceFiles, agentDefinition: structuredClone(configuration.agentDefinition), taskSha256: canonicalSha256(task), createdAt: new Date().toISOString() }
+  return { snapshot, task, requiredReadPaths: requiredLogicalPaths.map(path => relativePath('workspace', path)), sourceSha256: canonicalSha256({ runId: run.id, reviewerType, sourceReference, requiredFiles: requiredLogicalPaths.map(path => ({ path, contentSha256: required(files.get(path), 'REVIEWER_FILE_NOT_FOUND').contentSha256 })) }) }
 }
 
 function testDesignReviewerTask(
@@ -1008,18 +664,12 @@ function testDesignReviewerTask(
   sourceReference: Extract<PlanningReviewerSourceReference, { kind: 'test_design' }>,
   audit: CoverageAudit | undefined,
 ) {
-  const objective = {
-    test_point: '审阅当前候选测试点树的覆盖、维度、适用性、Oracle 与需求追踪。',
-    test_case: '审阅当前 TestCase revisions 的步骤、Expected Result、边界、数据、依赖与可执行性。',
-    coverage: '审阅指定 CoverageAudit 的覆盖关系、遗漏、重复、阻塞项和修复后残留风险。',
-  }[reviewerType]
+  const objective = { test_case: '审阅当前 TestCase revisions 的步骤、Expected Result、边界、数据、依赖与可执行性。', coverage: '审阅指定 CoverageAudit 的覆盖关系、遗漏、重复、阻塞项和修复后残留风险。' }[reviewerType]
   return [
     objective,
     `Source TestDesign Run：${run.id}`,
     `Requirement Release：${run.basisSnapshot.requirementReleaseId}`,
     `Requirements Hash：${run.basisSnapshot.requirementsJsonSha256}`,
-    `TestPoint Tree Revision：${sourceReference.testPointTreeRevision}`,
-    `TestPoint Tree Hash：${sourceReference.testPointTreeSha256}`,
     `TestCase Revisions：${JSON.stringify(sourceReference.testCases)}`,
     `DataSet Version：${sourceReference.dataSetVersionId ?? 'none'}`,
     ...(audit ? [`CoverageAudit：${audit.id}`, `Coverage inputSha256：${audit.inputSha256}`] : []),

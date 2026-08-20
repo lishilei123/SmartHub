@@ -4,7 +4,7 @@ import { builtInToolBindingToken, toolBindingToken, toolsetContentHash } from '.
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
 import type { PlanningAgentRuntime } from '../application/test-design-service.js'
-import { TestDesignError, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
+import { TestDesignError, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
@@ -17,10 +17,6 @@ import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.
 const WORKSPACE_TOOL_IDS = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk'] as const
 
 export const TEST_DESIGN_STAGE_BINDINGS = {
-  test_point_design: {
-    submitToolId: 'test_design_points.submit_result',
-    schemaVersion: 'test-point-design/v1',
-  },
   test_case_design: {
     submitToolId: 'test_design_cases.submit_result',
     schemaVersion: 'test-case-design/v1',
@@ -150,9 +146,7 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
       }, signal)
       return {
         schemaVersion: binding.schemaVersion,
-        content: stage === 'test_point_design'
-          ? structuredClone(output.candidate)
-          : projectTestCaseCandidateSubmission(output.candidate as TestCaseDesignCandidate),
+        content: projectTestCaseCandidateSubmission(output.candidate as TestCaseDesignCandidate),
         execution: executionRecord(stage, configuration.agentDefinition.version, model.modelName, output.events, output.turns, output.toolCalls, output.toolErrors, output.framework, output.context, output.inputDeliveryManifest),
       }
     } catch (error) {
@@ -165,7 +159,6 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
 
 export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: TestDesign, stage: TestDesignStage, workspace: TestDesignWorkspaceSnapshot) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
-  const treeVersion = run.testPointTree?.versions.find(item => item.id === run.testPointTree?.currentApprovedVersionId)
   const repairState = stage === 'test_design_repair' ? run.automaticRepair : undefined
   const repairAudit = repairState?.triggerAuditId ? run.coverageAudits.find(item => item.id === repairState.triggerAuditId) : undefined
   if (stage === 'test_design_repair' && (!repairState || !repairAudit)) throw new TestDesignError('TEST_DESIGN_REPAIR_CONTEXT_INVALID', '自动修复任务缺少固定的修复状态或 Coverage Audit', 409)
@@ -182,37 +175,31 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     runtimeBoundary: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
     task: testDesignTaskMessage(stage),
-    ...(treeVersion ? { approvedTestPointTreeVersion: { id: treeVersion.id, revision: treeVersion.revision, treeSha256: treeVersion.treeSha256, path: `/${workspace.activeBranchLogicalPath}/test-design/test-point-tree.json` } } : {}),
     ...(repairState && repairAudit ? { repair: { attempt: repairState.attempt, maxAttempts: repairState.maxAttempts, auditId: repairAudit.id, blockers: repairAudit.blockers.filter(item => item.resolution === 'agent_repair'), currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
     instructions: testDesignStageInstructions(stage),
   })
 }
 
 function testDesignTaskMessage(stage: TestDesignStage) {
-  if (stage === 'test_point_design') {
-    return '需求分析已经完成，Requirement Release 已正式发布。请继续当前测试策划工作，基于当前 ProjectVersion 正式绑定的 Requirement Release 和冻结 Workspace 设计测试点。'
-  }
   if (stage === 'test_case_design') {
-    return '测试点已经完成并通过服务端校验。请继续当前测试策划工作，基于已批准的 TestPointTreeVersion 编写测试用例。'
+    return 'Requirement Release 已正式发布。请继续当前测试策划工作，直接基于正式 Requirement、Clarification 和冻结 Workspace 设计完整测试用例。'
   }
   return 'Coverage Audit 已识别可由 Agent 修复的候选问题。请继续当前测试策划工作，修复任务中列出的 agent_repair blockers，并保持其他候选语义稳定。'
 }
 
 function testDesignStageInstructions(stage: TestDesignStage) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
-  const stageRules = stage === 'test_point_design'
-    ? ['本轮交付测试点候选，并保留 Requirement → TestPoint 的可追溯依据。']
-    : stage === 'test_case_design'
-      ? [
-          '已固化的 test-point-tree.json 是本轮测试点正式基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。',
+  const stageRules = stage === 'test_case_design'
+    ? [
+          'Requirement Release 是本轮唯一正式覆盖基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。每条用例必须使用 requirementRefs 直接关联至少一个 Requirement。',
           '功能和安全用例的执行步骤、检查点、就绪状态及自动化提示只在 executionMethods 的对应 UI/API 方式中完整填写。executionSpec 对此类用例只提交 kind=functional 与同一 method；服务端会从 executionMethods 和用例根字段投影正式 executionSpec。不要提交第二份重复步骤。',
           '非功能 executionSpec 必须使用精确字段：performance 为 kind=performance、method=performance_tool、target、scenario、virtualUsers、duration、rampUp、thresholds、dataStrategy、environmentRequirements、executionReadiness；stability 为 kind=stability、method=long_running、workload、duration、interval、observations、recoveryPolicy、checkpointPolicy、environmentRequirements、executionReadiness；compatibility 为 kind=compatibility、method=environment_matrix、baseMethod、baseCaseRefs、browserMatrix、operatingSystemMatrix、viewportMatrix、versionMatrix、expectedConsistency、executionReadiness。cases[] 根对象和 executionSpec 都不得添加这些列表之外的自定义字段。',
           '性能 thresholds 必须是数组；每一项严格且仅为 { metric, target, sourceRef }，三者都是非空字符串。把比较符、数值、单位和适用范围合并写进 target；不得使用 operator、value、unit，也不得提交缺少其中任一字段的半成品阈值。若没有正式阈值，提交 thresholds: []、executionReadiness: needs_confirmation，并建立 blocker Confirmation Item。',
         ]
-      : ['当前 Coverage Audit 中 resolution=agent_repair 的 blockers 是本轮修复范围；正式需求和已批准测试点保持不变。']
+      : ['当前 Coverage Audit 中 resolution=agent_repair 的 blockers 是本轮修复范围；正式 Requirement 保持不变。']
   return [
     ...stageRules,
-    ...(stage === 'test_point_design' ? [] : ['提交 cases[] 时，每一项必须是扁平的 test-case/v2 对象：ref、schemaVersion、title、executionMethods、executionSpec 等字段同级。禁止使用 { ref, content: {...} } 包装。']),
+    '提交 cases[] 时，每一项必须是扁平的 test-case/v2 对象：ref、schemaVersion、title、requirementRefs、executionMethods、executionSpec 等字段同级。禁止使用 { ref, content: {...} } 包装。',
     'Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 是本轮执行权限边界。',
     'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 查看 Enabled Skill Catalog，并按当前任务自主决定是否通过 skill.read 读取所需方法正文。',
     'currentInputRefs 是重点输入，不是读取白名单；先读取重点输入，再按需使用 ls、find、grep、read 浏览完整冻结 Workspace。',
@@ -268,7 +255,7 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
       name: item.name,
       entityType: item.entityType,
       featureTags: [...item.featureTags],
-      testPointIds: [...item.testPointIds],
+      ...(item.requirementRefs?.length ? { requirementRefs: [...item.requirementRefs] } : {}),
       caseRefs: item.caseIds.map(id => refById.get(id) ?? id),
       fieldConstraints: structuredClone(item.fieldConstraints),
       relationships: [...item.relationships],
@@ -281,7 +268,7 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
       readiness: item.readiness,
       ...(item.readinessReason ? { readinessReason: item.readinessReason } : {}),
     })),
-    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: requiredRepairCaseRef(refById, item.candidateCaseId) } : {}), requirementRefs: item.requirementRefs, testPointIds: item.testPointIds, reason: item.reason, confidence: item.confidence })),
+    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: requiredRepairCaseRef(refById, item.candidateCaseId) } : {}), requirementRefs: item.requirementRefs, reason: item.reason, confidence: item.confidence })),
   }
 }
 
@@ -316,7 +303,7 @@ function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, wo
 
 async function validateStageCandidate(stage: TestDesignStage, candidate: Record<string, unknown>, run: TestDesignWorkflowRun) {
   try {
-    const result = stage === 'test_point_design' ? validateTestPointDesignCandidate(candidate) : validateTestCaseDesignCandidate(candidate, approvedPointIds(run), stage === 'test_design_repair')
+    const result = validateTestCaseDesignCandidate(candidate, stage === 'test_design_repair')
     return { valid: true, result, issues: [] }
   } catch (error) {
     const details = error instanceof TestDesignError && error.details && typeof error.details === 'object' ? error.details as { path?: unknown } : undefined
@@ -351,16 +338,6 @@ export function projectTestCaseCandidateSubmission(
 function testCaseCandidateRecoveryHint(message: string) {
   if (!message.includes('thresholds') && !['operator', 'value', 'unit'].some(field => message.includes(field))) return ''
   return '。性能 executionSpec.thresholds 是数组；每项只能包含 metric、target、sourceRef 三个非空字符串。比较符、数值和单位都写入 target 这个完整字符串，不能传 operator/value/unit，也不能删掉 metric、target 或 sourceRef 中的任一字段。没有正式阈值时提交空数组并标记 needs_confirmation，同时建立阻断 Confirmation Item。'
-}
-
-function approvedPointIds(run: TestDesignWorkflowRun) {
-  const tree = run.testPointTree
-  const version = tree?.versions.find(item => item.id === tree.currentApprovedVersionId)
-  const revision = tree?.revisions.find(item => item.revision === version?.revision)
-  if (!tree || !version || !revision) throw new TestDesignError('TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树尚未通过自动校验并固化', 409)
-  const active = revision.nodes.filter(item => !item.deleted)
-  const parents = new Set(active.flatMap(item => item.parentId ? [item.parentId] : []))
-  return new Set(active.filter(item => item.applicability !== 'not_applicable' && !parents.has(item.nodeId)).map(item => item.nodeId))
 }
 
 function executionRecord(stage: TestDesignStage, agentVersion: string, modelLabel: string, events: AgentExecutionEvent[], turns?: number, toolCalls?: number, toolErrors?: number, framework: AgentExecutionOutput['framework'] = { name: 'pi-agent-core', version: piVersion }, context?: AgentExecutionContext, inputDeliveryManifest?: InputDeliveryManifest) {

@@ -42,7 +42,6 @@ export const BUILT_IN_HANDLER_KEYS = [
   'knowledge.read_chunk',
   'requirement-analysis.submit_result',
   'requirement-release.submit_result',
-  'test_design_points.submit_result',
   'test_design_cases.submit_result',
   'test_design_repair.submit_result',
   'test_script.submit_result',

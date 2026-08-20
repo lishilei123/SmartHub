@@ -307,7 +307,7 @@ export interface AgentExecutionRecord {
   toolCalls: number
   toolErrors?: number
   framework?: { name: 'pi-agent-core' | 'pi-coding-agent'; version: string }
-  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
+  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
   context?: import('./agent-types.js').AgentExecutionContext
   events: AgentExecutionEvent[]
 }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import test from 'node:test'
-import { createRun, loadInputs, patchCase, redesignTestPoints, reviewCase } from '../src/test-design/api.ts'
+import { createRun, loadInputs, patchCase, reviewCase } from '../src/test-design/api.ts'
 import { TestDesignError } from '../server/application/test-design-validation.ts'
 import { routeTestDesign } from '../server/http/test-design-routes.ts'
 
@@ -38,17 +38,10 @@ test('启动 TestDesign Run 携带服务端要求的幂等键', async () => {
   try { const run = await createRun('pv-1', 'design-1'); assert.equal(run.id, 'run-1'); assert.match(idempotencyKey, /^test-design-design-1-[0-9a-f-]{36}$/u) } finally { globalThis.fetch = originalFetch }
 })
 
-test('测试点由服务端自动校验，不再暴露人工批准 API', () => {
+test('测试设计不再暴露 RequirementCoverage API', () => {
   const client = readFileSync(new URL('../src/test-design/api.ts', import.meta.url), 'utf8')
   const routes = readFileSync(new URL('../server/http/test-design-routes.ts', import.meta.url), 'utf8')
-  assert.doesNotMatch(client, /approveTree|test-point-tree\/approve/u)
-  assert.doesNotMatch(routes, /test-point-tree\/approve/u)
-})
-
-test('AI 重新设计测试点使用固定动作接口', async () => {
-  const originalFetch = globalThis.fetch; let requestPath = ''
-  globalThis.fetch = async input => { requestPath = new URL(String(input)).pathname; return Response.json({ id: 'run-1', stage: 'test_point_design' }) }
-  try { await redesignTestPoints('pv-1', 'design-1', 'run-1'); assert.match(requestPath, /actions\/redesign-test-points$/u) } finally { globalThis.fetch = originalFetch }
+  assert.doesNotMatch(client, /approveTree/u)
 })
 
 test('测试用例编辑携带 If-Match 并将审核意见写入单条 Review Action', async () => {
@@ -58,7 +51,7 @@ test('测试用例编辑携带 If-Match 并将审核意见写入单条 Review Ac
     requests.push({ path: new URL(String(input)).pathname, method: init?.method ?? 'GET', etag: new Headers(init?.headers).get('if-match') ?? '', body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
     return Response.json({ id: 'case-1', currentRevision: 2, reviewState: 'draft', revisions: [], reviewActions: [] }, { headers: { etag: '"case:case-1:2:new"' } })
   }
-  const content = { schemaVersion: 'test-case/v1', title: '编辑后的用例', objective: '验证编辑', dimension: 'functional', testPointIds: ['tp-1'], priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/' }, executionReadiness: 'ready', steps: [{ key: 's1', action: '打开页面', expected: '页面可用' }], verificationChecks: [], automationHint: '' }], sharedVerificationChecks: [], tags: [], domain: '订单' } as const
+  const content = { schemaVersion: 'test-case/v1', title: '编辑后的用例', objective: '验证编辑', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/' }, executionReadiness: 'ready', steps: [{ key: 's1', action: '打开页面', expected: '页面可用' }], verificationChecks: [], automationHint: '' }], sharedVerificationChecks: [], tags: [], domain: '订单' } as const
   try {
     await patchCase('pv-1', 'design-1', 'run-1', 'case-1', '"case:case-1:1:old"', content, '人工修订')
     await reviewCase('pv-1', 'design-1', 'run-1', 'case-1', 'request_revision', 2, '补充异常路径')
@@ -98,7 +91,7 @@ test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP �
   assert.equal((await routeCall('GET', '/api/projects/project-1/test-case-library', undefined, {}, service)).status, 200)
   assert.equal((await routeCall('GET', '/api/projects/project-1/test-case-library-versions', undefined, {}, service)).status, 200)
   assert.equal((await routeCall('POST', '/api/projects/project-1/test-case-library', { content: { title: '新增' }, changeReason: '新增正式用例' }, {}, service)).status, 201)
-  const traceability = { sourceRequirementReleaseId: 'release-1', requirementRefs: [{ requirementReleaseId: 'release-1', requirementId: 'REQ-1' }], testPointRefs: [{ testPointTreeVersionId: 'tree-v1', testPointId: 'point-1' }] }
+  const traceability = { sourceRequirementReleaseId: 'release-1', requirementRefs: [{ requirementReleaseId: 'release-1', requirementId: 'REQ-1' }] }
   const edited = await routeCall('PATCH', '/api/projects/project-1/test-case-library/case-1', { content: { title: '修改' }, changeReason: '修改 Revision', traceability }, { 'if-match': '"library-case:case-1:r1:old"' }, service)
   assert.equal(edited.status, 200); assert.equal(edited.headers.get('etag'), '"library-case:case-1:r2:new"')
   assert.equal((await routeCall('POST', '/api/projects/project-1/test-case-library/case-1/copy', { changeReason: '复制' }, {}, service)).status, 201)

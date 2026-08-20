@@ -6,9 +6,9 @@ import { ToolRegistry } from '../server/tools/registry.js'
 
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
-test('checked-in built-in Tool config excludes retired requirement repair submission', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 15)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 14)
+test('checked-in built-in Tool config excludes retired requirement repair submissions', () => {
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 14)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 13)
   assert.ok(defaultBuiltInToolConfigResolver.keys().every(key => !key.startsWith('skill.')))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
@@ -61,22 +61,20 @@ test('resolver copies outputs and descriptors register through the governed regi
   assert.deepEqual(registry.descriptors().map(item => item.id), ['knowledge.search', 'knowledge.read_chunk'])
 })
 
-test('测试点提交工具向模型声明完整临时引用和节点字段', () => {
-  const descriptor = defaultBuiltInToolConfigResolver.toDescriptor('test_design_points.submit_result')
+test('测试用例提交工具向模型声明 Requirement 直接追溯字段', () => {
+  const descriptor = defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result')
   const schema = descriptor.parameters as unknown as {
     additionalProperties: boolean
     required: string[]
-    properties: { nodes: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
+    properties: { cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
   }
-  assert.equal(descriptor.version, '1.0.0')
+  assert.equal(descriptor.version, '1.1.0')
   assert.equal(schema.additionalProperties, false)
-  assert.deepEqual(schema.required, ['schemaVersion', 'nodes', 'findings', 'confirmationItems'])
-  assert.equal(schema.properties.nodes.minItems, 1)
-  assert.equal(schema.properties.nodes.items.additionalProperties, false)
-  assert.ok(schema.properties.nodes.items.required.includes('ref'))
-  assert.ok(schema.properties.nodes.items.required.includes('basisRefs'))
-  assert.ok(schema.properties.nodes.items.required.includes('entryMethods'))
-  assert.ok('parentRef' in schema.properties.nodes.items.properties)
+  assert.ok(schema.required.includes('cases'))
+  assert.equal(schema.properties.cases.minItems, 1)
+  assert.equal(schema.properties.cases.items.additionalProperties, false)
+  assert.ok(schema.properties.cases.items.required.includes('ref'))
+  assert.ok(schema.properties.cases.items.required.includes('requirementRefs'))
 })
 
 test('测试用例与修复提交工具声明闭合的 test-case/v2、executionSpec 与 Proposal 层级', () => {

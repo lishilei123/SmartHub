@@ -84,7 +84,7 @@ export interface TestDesignBasisSnapshot {
 
 export interface TestDesignWorkspaceFile extends ProjectWorkspaceSnapshotFile {
   logicalPath: string
-  sourceType: 'asset_version' | 'requirement_release' | 'test_point_tree_version' | 'test_case_set_version' | 'test_case_library_version' | 'run_candidate'
+  sourceType: 'asset_version' | 'requirement_release' | 'test_case_set_version' | 'test_case_library_version' | 'run_candidate'
   sourceId: string
   contentSha256: string
   content: string
@@ -146,10 +146,10 @@ export interface HistoricalCaseSnapshot {
   snapshotSha256: string
 }
 
-export type TestDesignNodeKey = 'test_point_design' | 'test_point_review' | 'test_case_design' | 'coverage_audit' | 'test_design_repair'
+export type TestDesignNodeKey = 'test_case_design' | 'coverage_audit' | 'test_design_repair'
 export type PlanningTestDesignExecutionRecord = Omit<AgentExecutionRecord, 'agentKey' | 'workflowStage'> & {
   agentKey: 'planning'
-  workflowStage: 'test_point_design' | 'test_case_design' | 'test_design_repair'
+  workflowStage: 'test_case_design' | 'test_design_repair'
   agentVersion: string
   modelLabel: string
   degraded: boolean
@@ -183,7 +183,7 @@ export interface WorkflowArtifact {
 
 export interface WorkflowGateDecision {
   id: string
-  gateKey: 'test-point-tree'
+  gateKey: string
   targetId: string
   targetRevision: number
   version: number
@@ -192,70 +192,6 @@ export interface WorkflowGateDecision {
   actorId: string
   createdAt: string
 }
-
-export interface TestPointNodeContent {
-  title: string
-  objective: string
-  dimension: TestDimension
-  priority: 'P0' | 'P1' | 'P2' | 'P3'
-  applicability: 'applicable' | 'not_applicable' | 'blocked_by_confirmation'
-  designTechniques: string[]
-  entryMethods: Array<'ui' | 'api'>
-  oracle: string
-  dataConditions: string[]
-  risks: string[]
-  assumptions: string[]
-  basisRefs: string[]
-  historicalRefs: string[]
-}
-
-export interface TestPointNodeRevision extends TestPointNodeContent {
-  nodeId: string
-  parentId: string | null
-  sortKey: string
-  deleted?: boolean
-}
-
-export interface TestPointTreeRevision {
-  revision: number
-  parentRevision: number | null
-  nodes: TestPointNodeRevision[]
-  operations: TestPointTreeOperation[]
-  reason: string
-  actorId: string
-  treeSha256: string
-  createdAt: string
-}
-
-export interface TestPointTreeVersion {
-  id: string
-  version: number
-  revision: number
-  treeSha256: string
-  approvedBy: string
-  approvedAt: string
-  projection: WorkspaceArtifactProjection
-}
-
-export interface TestPointTree {
-  id: string
-  runId: string
-  currentRevision: number
-  revisions: TestPointTreeRevision[]
-  versions: TestPointTreeVersion[]
-  currentApprovedVersionId?: string
-}
-
-export type TestPointTreeOperation =
-  | { op: 'add'; clientNodeRef: string; parentId: string | null; sortKey: string; value: TestPointNodeContent }
-  | { op: 'rename'; nodeId: string; title: string }
-  | { op: 'update'; nodeId: string; patch: Partial<TestPointNodeContent> }
-  | { op: 'move'; nodeId: string; parentId: string | null; sortKey: string }
-  | { op: 'delete'; nodeId: string }
-  | { op: 'mark_not_applicable'; nodeId: string; reason: string }
-  | { op: 'reorder'; nodeId: string; sortKey: string }
-  | { op: 'split'; nodeId: string; children: Array<{ clientNodeRef: string; sortKey: string; value: TestPointNodeContent }> }
-  | { op: 'merge'; sourceNodeIds: string[]; targetNodeId: string; value: Partial<TestPointNodeContent> }
 
 export interface TestStep { key: string; action: string; expected: string }
 export interface VerificationCheck { key: string; description: string }
@@ -323,7 +259,8 @@ export interface TestCaseContent {
   title: string
   objective: string
   dimension: TestDimension
-  testPointIds: string[]
+  /** Direct Requirement Release coverage references. */
+  requirementRefs: string[]
   priority: 'P0' | 'P1' | 'P2' | 'P3'
   preconditions: string[]
   dataRequirementIds: string[]
@@ -363,7 +300,6 @@ export interface LibraryTestCaseRevision {
 export interface TestCaseTraceability {
   sourceRequirementReleaseId: string
   requirementRefs: Array<{ requirementReleaseId: string; requirementId: string }>
-  testPointRefs: Array<{ testPointTreeVersionId: string; testPointId: string }>
 }
 
 export interface LibraryTestCase {
@@ -398,8 +334,7 @@ export interface CaseChangeProposal {
   candidateCaseId?: string
   candidateContent?: TestCaseContent
   diff: Array<{ path: string; before?: unknown; after?: unknown }>
-  requirementRefs: string[]
-  testPointIds: string[]
+  requirementRefs?: string[]
   reason: string
   confidence: number
   decision: CaseChangeDecision
@@ -425,7 +360,6 @@ export interface TestCaseReviewAction {
 export interface TestCase {
   id: string
   runId: string
-  treeVersionId: string
   origin: 'ai' | 'manual' | 'historical_unchanged' | 'historical_modified' | 'historical_reference'
   candidateRef?: string
   historicalSourceRef?: string
@@ -441,7 +375,7 @@ export interface TestDataRequirement {
   name: string
   entityType: string
   featureTags: string[]
-  testPointIds: string[]
+  requirementRefs?: string[]
   caseIds: string[]
   fieldConstraints: Record<string, string>
   relationships: string[]
@@ -467,13 +401,14 @@ export interface TestDataRequirementSetVersion {
 export interface CoverageAudit {
   id: string
   runId: string
-  treeVersionId: string
+  /** Directly identifies the frozen Requirement Release used as the audit basis. */
+  requirementReleaseId: string
   dataSetVersionId: string
   caseSetSha256: string
   inputSha256: string
   status: 'valid' | 'stale'
-  statistics: { totalBasis: number; coveredBasis: number; totalPoints: number; coveredPoints: number; totalCases: number; approvedCases: number }
-  relations: Array<{ basisRef: string; testPointId: string; caseId?: string; status: 'covered' | 'partially_covered' | 'not_covered' | 'needs_confirmation'; reason: string }>
+  statistics: { totalBasis: number; coveredBasis: number; totalCases: number; approvedCases: number }
+  relations: Array<{ basisRef: string; requirementId: string; caseId?: string; status: 'covered' | 'partially_covered' | 'not_covered' | 'needs_confirmation'; reason: string }>
   blockers: Array<{
     code: string
     message: string
@@ -503,7 +438,6 @@ export interface TestCaseSetVersion {
   version: number
   schemaVersion: 'test-case-set/v1'
   name: string
-  treeVersionId: string
   dataSetVersionId: string
   coverageAuditId: string
   members: TestCaseSetMember[]
@@ -575,7 +509,7 @@ export interface LegacyTestCaseMigrationRecord {
 
 export interface TestDesignDispositionAction { id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }
 export interface DesignFinding { id: string; title: string; description: string; severity: 'blocker' | 'high' | 'medium' | 'low'; basisRefs: string[]; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
-export interface ConfirmationItem { id: string; title: string; question: string; decisionType: string; impactStage: 'analysis' | 'tree' | 'case' | 'data' | 'publication'; affectedRefs: string[]; blocker: boolean; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
+export interface ConfirmationItem { id: string; title: string; question: string; decisionType: string; impactStage: 'analysis' | 'case' | 'data' | 'publication'; affectedRefs: string[]; blocker: boolean; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
 
 export interface TestDesignWorkflowRun {
   id: string
@@ -597,7 +531,6 @@ export interface TestDesignWorkflowRun {
   nodeRuns: WorkflowNodeRun[]
   artifacts: WorkflowArtifact[]
   gateDecisions: WorkflowGateDecision[]
-  testPointTree?: TestPointTree
   testCases: TestCase[]
   caseChangeProposals: CaseChangeProposal[]
   dataSetVersions: TestDataRequirementSetVersion[]

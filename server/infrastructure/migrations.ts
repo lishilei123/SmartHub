@@ -2380,6 +2380,25 @@ const migrations: Migration[] = [{
       RETURN NEW;
     END $$;
   `,
+}, {
+  version: 30,
+  name: 'remove-test-point-tree-assets',
+  sql: `
+    DROP TABLE IF EXISTS smarthub.library_test_case_revision_test_point_refs;
+    ALTER TABLE smarthub.test_cases DROP COLUMN IF EXISTS tree_version_id;
+    DROP TABLE IF EXISTS smarthub.test_point_trees CASCADE;
+
+    UPDATE smarthub.test_design_state
+    SET data = jsonb_set(
+      data,
+      '{runs}',
+      COALESCE((
+        SELECT jsonb_agg(run - 'testPointTree')
+        FROM jsonb_array_elements(data->'runs') AS run
+      ), '[]'::jsonb),
+      true
+    );
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

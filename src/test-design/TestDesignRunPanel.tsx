@@ -9,8 +9,6 @@ import {
 import type { AgentEvent, TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './types'
 
 const flow = [
-  { key: 'test_point_design', label: '测试点设计', owner: 'PlanningAgent' },
-  { key: 'test_point_review', label: '测试点自动校验', owner: '服务端 Validator' },
   { key: 'test_case_design', label: '用例生成', owner: 'PlanningAgent' },
   { key: 'coverage_audit', label: 'Coverage 检查', owner: '服务端' },
   { key: 'test_design_repair', label: '自动修复', owner: 'PlanningAgent · 最多 2 次' },
@@ -19,14 +17,10 @@ const flow = [
 export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }: { design: TestDesign; run: TestDesignWorkflowRun | null; busy: boolean; onRefresh: () => void; onStartRun: () => void }) {
   const [reviewing, setReviewing] = useState<PlanningReviewerType | ''>('')
   const [reviewError, setReviewError] = useState('')
-  const [treeRevision, setTreeRevision] = useState('')
-  const [treeVersionId, setTreeVersionId] = useState('')
   const [dataSetVersionId, setDataSetVersionId] = useState('')
   const [coverageAuditId, setCoverageAuditId] = useState('')
   const [caseRevisions, setCaseRevisions] = useState<Record<string, string>>({})
   useEffect(() => {
-    setTreeRevision('')
-    setTreeVersionId('')
     setDataSetVersionId('')
     setCoverageAuditId('')
     setCaseRevisions({})
@@ -38,26 +32,18 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
   const selectedCases = run.testCases.filter(item => !item.tombstonedAt).flatMap(item => {
     const revision = Number(caseRevisions[item.id])
     return Number.isInteger(revision) && revision > 0
-      ? [{ caseId: item.id, treeVersionId: item.treeVersionId, revision }]
+      ? [{ caseId: item.id, revision }]
       : []
   })
   const sourceSelection = (
     reviewerType: Exclude<PlanningReviewerType, 'requirement'>,
   ): TestDesignReviewerSourceSelection | undefined => {
-    const revision = Number(treeRevision)
-    if (!Number.isInteger(revision) || revision <= 0) return undefined
-    if (reviewerType === 'test_point') {
-      return { testPointTreeRevision: revision, testCases: [] }
-    }
     if (
-      !treeVersionId
-      || !dataSetVersionId
+      !dataSetVersionId
       || selectedCases.length !== run.testCases.filter(item => !item.tombstonedAt).length
       || (reviewerType === 'coverage' && !coverageAuditId)
     ) return undefined
     return {
-      testPointTreeRevision: revision,
-      approvedTestPointTreeVersionId: treeVersionId,
       testCases: selectedCases,
       dataSetVersionId,
       ...(reviewerType === 'coverage' ? { coverageAuditId } : {}),
@@ -82,7 +68,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
         <Snapshot icon={<Bot />} title="Agent 配置快照" primary={`V${run.agentConfigurationSnapshot.configurationVersion} · ${run.agentConfigurationSnapshot.primaryModel.modelName}`} secondary={run.agentConfigurationSnapshot.configurationId} hash={run.agentConfigurationSnapshot.configurationSha256} />
       </div>
       <PlanningContextMetrics context={context} />
-      <div className="td2-reviewer-actions"><span><ShieldCheck /><b>只读 Reviewer SubAgents</b></span><div className="td2-reviewer-sources"><label>Tree Revision<select aria-label="Test Point Tree Revision" value={treeRevision} onChange={event => setTreeRevision(event.target.value)}><option value="">选择固定 Revision</option>{run.testPointTree?.revisions.map(revision => <option key={revision.revision} value={revision.revision}>R{revision.revision} · {revision.treeSha256.slice(0, 12)}</option>)}</select></label><label>Approved Tree Version<select aria-label="Approved Test Point Tree Version" value={treeVersionId} onChange={event => { const id = event.target.value; setTreeVersionId(id); const version = run.testPointTree?.versions.find(item => item.id === id); setTreeRevision(version ? String(version.revision) : '') }}><option value="">选择固定 Version</option>{run.testPointTree?.versions.map(version => <option key={version.id} value={version.id}>V{version.version} / R{version.revision} · {version.id}</option>)}</select></label><label>DataSet Version<select aria-label="Test DataSet Version" value={dataSetVersionId} onChange={event => setDataSetVersionId(event.target.value)}><option value="">选择固定 DataSet</option>{run.dataSetVersions.map(version => <option key={version.id} value={version.id}>V{version.version} · {version.id}</option>)}</select></label><label>Coverage Audit<select aria-label="Coverage Audit" value={coverageAuditId} onChange={event => { const id = event.target.value; setCoverageAuditId(id); const audit = run.coverageAudits.find(item => item.id === id); if (audit) { setTreeVersionId(audit.treeVersionId); setDataSetVersionId(audit.dataSetVersionId); const version = run.testPointTree?.versions.find(item => item.id === audit.treeVersionId); setTreeRevision(version ? String(version.revision) : '') } }}><option value="">选择固定 Audit</option>{run.coverageAudits.map(audit => <option key={audit.id} value={audit.id}>{audit.id} · {audit.status}</option>)}</select></label>{run.testCases.filter(item => !item.tombstonedAt).map(item => <label key={item.id}>Case {item.id}<select aria-label={`Test Case Revision ${item.id}`} value={caseRevisions[item.id] ?? ''} onChange={event => setCaseRevisions(current => ({ ...current, [item.id]: event.target.value }))}><option value="">选择固定 Revision</option>{item.revisions.map(revision => <option key={revision.revision} value={revision.revision}>R{revision.revision} · {revision.contentSha256.slice(0, 12)}</option>)}</select></label>)}</div><div className="td2-reviewer-buttons"><button disabled={Boolean(reviewing) || !sourceSelection('test_point')} onClick={() => void review('test_point')}>{reviewing === 'test_point' ? '审阅中…' : '测试点审阅'}</button><button disabled={Boolean(reviewing) || !sourceSelection('test_case')} onClick={() => void review('test_case')}>{reviewing === 'test_case' ? '审阅中…' : '测试用例审阅'}</button><button disabled={Boolean(reviewing) || !sourceSelection('coverage')} onClick={() => void review('coverage')}>{reviewing === 'coverage' ? '审阅中…' : 'Coverage 审阅'}</button></div></div>
+      <div className="td2-reviewer-actions"><span><ShieldCheck /><b>只读 Reviewer SubAgents</b></span><div className="td2-reviewer-sources"><label>DataSet Version<select aria-label="Test DataSet Version" value={dataSetVersionId} onChange={event => setDataSetVersionId(event.target.value)}><option value="">选择固定 DataSet</option>{run.dataSetVersions.map(version => <option key={version.id} value={version.id}>V{version.version} · {version.id}</option>)}</select></label><label>Coverage Audit<select aria-label="Coverage Audit" value={coverageAuditId} onChange={event => { const id = event.target.value; setCoverageAuditId(id); const audit = run.coverageAudits.find(item => item.id === id); if (audit) setDataSetVersionId(audit.dataSetVersionId) }}><option value="">选择固定 Audit</option>{run.coverageAudits.map(audit => <option key={audit.id} value={audit.id}>{audit.id} · {audit.status}</option>)}</select></label>{run.testCases.filter(item => !item.tombstonedAt).map(item => <label key={item.id}>Case {item.id}<select aria-label={`Test Case Revision ${item.id}`} value={caseRevisions[item.id] ?? ''} onChange={event => setCaseRevisions(current => ({ ...current, [item.id]: event.target.value }))}><option value="">选择固定 Revision</option>{item.revisions.map(revision => <option key={revision.revision} value={revision.revision}>R{revision.revision} · {revision.contentSha256.slice(0, 12)}</option>)}</select></label>)}</div><div className="td2-reviewer-buttons"><button disabled={Boolean(reviewing) || !sourceSelection('test_case')} onClick={() => void review('test_case')}>{reviewing === 'test_case' ? '审阅中…' : '测试用例审阅'}</button><button disabled={Boolean(reviewing) || !sourceSelection('coverage')} onClick={() => void review('coverage')}>{reviewing === 'coverage' ? '审阅中…' : 'Coverage 审阅'}</button></div></div>
       {reviewError && <div className="td2-error"><b>Reviewer 未完成</b><span>{reviewError}</span></div>}
       <PlanningSubAgentRuns runs={run.planningSubAgentRuns} />
       {run.error && <div className="td2-error"><b>{run.errorCode ?? '运行失败'}</b><span>{run.error}</span></div>}

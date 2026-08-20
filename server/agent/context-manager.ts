@@ -13,7 +13,6 @@ import type { PiSessionScope } from './pi-session-runtime.js'
 export type PlanningCompactionCheckpoint =
   | 'requirement_analysis_completed'
   | 'requirement_release_completed'
-  | 'test_points_validated'
   | 'before_test_case_design'
   | 'coverage_repair_completed'
 
@@ -32,7 +31,6 @@ export class ContextManager {
       checkpoints: [
         'requirement_analysis_completed',
         'requirement_release_completed',
-        'test_points_validated',
         'before_test_case_design',
         'coverage_repair_completed',
       ] as PlanningCompactionCheckpoint[],

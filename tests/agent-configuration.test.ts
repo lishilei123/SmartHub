@@ -48,11 +48,10 @@ async function fixture() {
 test('统一 PlanningAgent 发布 Workspace、Knowledge、Skill 与全部提交协议快照', async () => {
   const { service } = await fixture()
   const initial = (await service.get('planning')).agents.planning!
-  assert.deepEqual(initial.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'requirement-release.submit_result', 'test_design_points.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
+  assert.deepEqual(initial.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'requirement-release.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
   assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
   assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
   assert.ok(initial.draft.definition.skillKeys.includes('requirement.analysis'))
-  assert.ok(initial.draft.definition.skillKeys.includes('test-point-design'))
   assert.ok(initial.draft.definition.skillKeys.includes('test-case-design'))
   const saved = await service.save('planning', {
     agentKey: 'planning',
@@ -383,7 +382,7 @@ function executionRunFixture(agents: ExecutionRun['agents']): ExecutionRun {
 
 function executionTaskFixture(runId: string): ExecutionTask {
   const executionSpec = { kind: 'functional' as const, method: 'ui' as const, steps: [], verificationChecks: [{ key: 'ready', description: '页面已就绪' }], preconditions: [], testDataRequirements: [], executionReadiness: 'ready' as const, automationHint: 'Playwright' }
-  const caseContent = { schemaVersion: 'test-case/v2' as const, title: '状态检查', objective: '检查页面状态', dimension: 'functional' as const, testPointIds: ['point-1'], priority: 'P0' as const, preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [], executionSpec, sharedVerificationChecks: [], tags: [], domain: '状态' }
+  const caseContent = { schemaVersion: 'test-case/v2' as const, title: '状态检查', objective: '检查页面状态', dimension: 'functional' as const, requirementRefs: ['point-1'], priority: 'P0' as const, preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [], executionSpec, sharedVerificationChecks: [], tags: [], domain: '状态' }
   return {
     id: 'task-1',
     runId,
@@ -436,14 +435,14 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
       status: 'draft',
       builtIn: false,
       entrypoint: 'ai/skills/quality-review/SKILL.md',
-      toolIds: ['test_design_points.submit_result', 'quality.lookup'],
+      toolIds: ['quality.lookup'],
       tags: ['质量', '评审'],
       createdAt: '2026-07-27T00:00:00.000Z',
       updatedAt: '2026-07-27T00:00:00.000Z',
     })
   })
   const initial = (await service.get('planning')).agents.planning!
-  assert.ok(initial.requiredToolIds.includes('test_design_points.submit_result'))
+  assert.ok(initial.requiredToolIds.includes('test_design_cases.submit_result'))
   assert.deepEqual(initial.requiredSkillKeys, [])
   assert.deepEqual(initial.requiredMcpServerKeys, [])
   assert.ok(initial.draft.definition.skillKeys.includes('requirement.analysis'))

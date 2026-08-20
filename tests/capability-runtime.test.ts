@@ -20,11 +20,11 @@ import { AgentCapabilityLoader } from '../server/tools/capability-loader.js'
 import { ToolRegistry } from '../server/tools/registry.js'
 
 test('配置已声明但当前阶段未注册的内置工具会产生预警', async () => {
-  const tool = builtInTool('test_design_points.submit_result', 'internal_write', 30_000)
+  const tool = builtInTool('test_design_repair.submit_result', 'internal_write', 30_000)
   const registry = new ToolRegistry()
   const loaded = await new AgentCapabilityLoader(await storeWith(tool)).load(definition([tool]), registry, new AbortController().signal)
   assert.equal(registry.get(tool.key), undefined)
-  assert.ok(loaded.warnings.some(warning => /test_design_points\.submit_result.*当前 Agent 阶段未注册/u.test(warning)))
+  assert.ok(loaded.warnings.some(warning => /test_design_repair\.submit_result.*当前 Agent 阶段未注册/u.test(warning)))
   await loaded.close()
 })
 

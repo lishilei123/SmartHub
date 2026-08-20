@@ -1,6 +1,6 @@
 ---
 name: test-design-baseline
-description: Establish the immutable fact and risk baseline for PlanningAgent from a frozen ProjectVersion Workspace and bound Requirement Release. Use during test_point_design before deriving test points.
+description: Establish the immutable fact and risk baseline for PlanningAgent from a frozen ProjectVersion Workspace and bound Requirement Release before direct test-case design.
 ---
 
 # Test design baseline

@@ -1,4 +1,4 @@
-import type { CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestDesign, TestDesignCase, TestDesignCoverageAudit, TestDesignInputCandidates, TestDesignWorkflowRun, TestPointNode, TestPointTree, TestPointTreeOperation, TestSuiteDraft, TestExecutionMethod } from './types'
+import type { CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestDesign, TestDesignCase, TestDesignCoverageAudit, TestDesignInputCandidates, TestDesignWorkflowRun, TestSuiteDraft, TestExecutionMethod } from './types'
 
 const apiBase = 'http://127.0.0.1:8787/api'
 
@@ -25,18 +25,7 @@ export const loadRun = (projectVersionId: string, designId: string, runId: strin
 export const createDesign = (projectVersionId: string, input: CreateTestDesignInput) => request<TestDesign>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs`, { method: 'POST', body: JSON.stringify(input) })
 export const createRun = (projectVersionId: string, designId: string) => request<TestDesignWorkflowRun>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs/${encodeURIComponent(designId)}/runs`, { method: 'POST', headers: { 'idempotency-key': `test-design-${designId}-${crypto.randomUUID()}` } })
 export const cancelRun = (projectVersionId: string, designId: string, runId: string) => request<TestDesignWorkflowRun>(`${runScope(projectVersionId, designId, runId)}/cancel`, { method: 'POST' })
-export const redesignTestPoints = (projectVersionId: string, designId: string, runId: string) => request<TestDesignWorkflowRun>(`${runScope(projectVersionId, designId, runId)}/actions/redesign-test-points`, { method: 'POST' })
 export const resynthesizeCases = (projectVersionId: string, designId: string, runId: string) => request<TestDesignWorkflowRun>(`${runScope(projectVersionId, designId, runId)}/actions/resynthesize`, { method: 'POST' })
-
-export async function loadTree(projectVersionId: string, designId: string, runId: string) {
-  const { value, response } = await requestWithResponse<{ tree: TestPointTree; revision: { revision: number; nodes: TestPointNode[]; treeSha256: string } }>(`${runScope(projectVersionId, designId, runId)}/test-point-tree`)
-  return { ...value, etag: response.headers.get('etag') ?? '' }
-}
-
-export async function patchTree(projectVersionId: string, designId: string, runId: string, etag: string, operations: TestPointTreeOperation[], reason: string) {
-  const { value, response } = await requestWithResponse<{ tree: TestPointTree; revision: { revision: number; nodes: TestPointNode[]; treeSha256: string }; etag?: string }>(`${runScope(projectVersionId, designId, runId)}/test-point-tree`, { method: 'PATCH', headers: { 'if-match': etag }, body: JSON.stringify({ operations, reason }) })
-  return { ...value, etag: response.headers.get('etag') ?? value.etag ?? '' }
-}
 
 const caseScope = (projectVersionId: string, designId: string, runId: string, caseId: string) => `${runScope(projectVersionId, designId, runId)}/test-cases/${encodeURIComponent(caseId)}`
 

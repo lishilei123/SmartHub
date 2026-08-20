@@ -61,7 +61,6 @@ test('Agent 配置接口返回统一 PlanningAgent 并按场景隔离保存', as
     assert.deepEqual(Object.keys(planning.agents), ['planning'])
     assert.equal(planning.agents.planning.draft.revision, 0)
     assert.ok(planning.agents.planning.requiredToolIds.includes('requirement-analysis.submit_result'))
-    assert.ok(planning.agents.planning.requiredToolIds.includes('test_design_points.submit_result'))
     assert.ok(planning.agents.planning.requiredToolIds.includes('test_design_cases.submit_result'))
     assert.ok(planning.agents.planning.draft.definition.skillKeys.includes('requirement.analysis'))
     assert.ok(planning.agents.planning.draft.definition.skillKeys.includes('test-case-design'))
@@ -105,7 +104,7 @@ test('Agent 配置接口返回统一 PlanningAgent 并按场景隔离保存', as
     const saved = await savedResponse.json() as { definition: { skillKeys: string[]; mcpServerKeys: string[]; toolIds: string[] } }
     assert.ok(saved.definition.skillKeys.includes('http.agent.skill'))
     assert.deepEqual(saved.definition.mcpServerKeys, ['http.agent.mcp'])
-    assert.ok(saved.definition.toolIds.includes('test_design_points.submit_result'))
+    assert.ok(saved.definition.toolIds.includes('test_design_cases.submit_result'))
     assert.ok(saved.definition.toolIds.includes('http.agent.tool'))
   })
 })

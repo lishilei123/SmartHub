@@ -22,7 +22,6 @@ const builtInSkills: SkillResource[] = [
   builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成需求理解、Clarification、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'clarification', 'traceability']),
   builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact']),
   builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release、正式用例库或套件建立测试设计事实和变化基线。', '1.2.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace']),
-  builtInSkill('test-point-design', '测试点设计', '基于冻结需求和历史映射直接设计完整且可审核的 Test Point Tree 候选。', '1.1.0', 'server/skills/test-point-design/SKILL.md', [], ['测试设计', '测试点', 'tree']),
   builtInSkill('test-case-design', '测试用例设计', '生成按维度区分的 executionSpec、测试数据和正式用例库变更 Proposal。', '1.2.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'Proposal']),
   builtInSkill('test-design-repair', '测试设计修复', '保留 Proposal 与 executionSpec，仅修复 Coverage Audit 标记为 agent_repair 的质量问题。', '1.2.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage']),
   builtInSkill('test-script-generation', '测试脚本生成', '从冻结执行任务生成单文件 Playwright UI 或 API 脚本候选。', '1.0.0', 'server/skills/test-script-generation/SKILL.md', [], ['测试执行', 'Playwright', '脚本生成']),

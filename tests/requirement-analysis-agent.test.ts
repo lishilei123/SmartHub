@@ -31,7 +31,6 @@ test('PlanningAgent 通过一个长期定义绑定 Workspace、Knowledge、Skill
     'knowledge.read_chunk',
     'requirement-analysis.submit_result',
     'requirement-release.submit_result',
-    'test_design_points.submit_result',
     'test_design_cases.submit_result',
     'test_design_repair.submit_result',
   ])

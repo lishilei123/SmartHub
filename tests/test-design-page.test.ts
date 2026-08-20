@@ -6,7 +6,7 @@ const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf
 
 test('测试设计页面拆分为固定流程面板且不展示多 Agent DAG', () => {
   const page = read('../src/test-design/TestDesignPage.tsx')
-  for (const panel of ['TestDesignCreatePanel', 'TestDesignRunPanel', 'TestPointReviewPanel', 'TestCasePanel', 'CaseChangeProposalPanel', 'CoverageAuditPanel', 'TestDesignPublicationPanel', 'TestCaseLibraryPanel', 'TestSuiteLibraryPanel']) assert.match(page, new RegExp(panel, 'u'))
+  for (const panel of ['TestDesignCreatePanel', 'TestDesignRunPanel', 'TestCasePanel', 'CaseChangeProposalPanel', 'CoverageAuditPanel', 'TestDesignPublicationPanel', 'TestCaseLibraryPanel', 'TestSuiteLibraryPanel']) assert.match(page, new RegExp(panel, 'u'))
   for (const entry of ['设计任务', '测试用例库', '测试套件', '发布记录']) assert.match(page, new RegExp(entry, 'u'))
   assert.doesNotMatch(page, /ExecutionHandoffPanel/u)
   assert.doesNotMatch(page, /TestAnalysisAgent|FunctionalTestDesignAgent|NonFunctionalTestDesignAgent|TestCaseSynthesisAgent|scope_gate|tree_merge/u)
@@ -25,7 +25,7 @@ test('需求分析页面只在当前选择的成功 Requirement Release Run 上�
   assert.match(source, /请先完成需求分析/u)
   assert.match(source, /loadRun as loadTestDesignRun/u)
   assert.match(source, /<TestDesignConversationEntry linkage=\{linkedTestDesign\}/u)
-  assert.match(source, /测试点设计/u)
+  assert.doesNotMatch(source, /测试点设计|RequirementCoverage/u)
   assert.match(source, /测试设计已停止/u)
 })
 
@@ -55,26 +55,12 @@ test('运行面板展示冻结 Release、Workspace、Agent 配置与实时轨迹
   assert.match(source, /Coverage 检查/u)
 })
 
-test('测试点由服务端自动校验并保留树操作与 AI 重新设计', () => {
-  const review = read('../src/test-design/TestPointReviewPanel.tsx')
-  const tree = read('../src/test-design/TestPointTreePanel.tsx')
-  assert.match(review, /服务端自动校验/u)
-  assert.match(review, /不需要人工批准/u)
-  assert.match(review, /自动校验通过/u)
-  assert.match(review, /AI 重新设计/u)
-  for (const operation of ["op: 'add'", "op: 'rename'", "op: 'delete'", "op: 'split'", "op: 'merge'"]) assert.match(`${review}\n${tree}`, new RegExp(operation, 'u'))
-  assert.match(review, /op: 'update'/u)
-  assert.match(review, /Revision 修改说明/u)
-  assert.match(review, /执行入口/u)
-  assert.doesNotMatch(`${review}\n${tree}`, /window\.(?:prompt|confirm)/u)
-})
-
 test('测试用例支持新增、结构化编辑、单条审核与 Revision 记录', () => {
   const panel = read('../src/test-design/TestCasePanel.tsx')
   const hook = read('../src/test-design/hooks/useTestDesign.ts')
   for (const label of ['新增用例', '编辑并新建 Revision', '要求修改', 'Revision 与审核记录', '确认删除']) assert.match(panel, new RegExp(label, 'u'))
   assert.match(panel, /执行步骤/u)
-  assert.match(panel, /关联可执行测试点/u)
+  assert.match(panel, /Requirement 追溯/u)
   for (const method of ['createCase', 'patchCase', 'deleteCase', 'reviewCase']) assert.match(hook, new RegExp(`api\\.${method}`, 'u'))
 })
 

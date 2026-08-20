@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import * as api from '../api'
-import type { CaseChangeDecision, CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionMethod, TestPointNode, TestPointTree, TestPointTreeOperation, TestSuiteDraft } from '../types'
+import type { CaseChangeDecision, CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionMethod, TestSuiteDraft } from '../types'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 
@@ -9,7 +9,6 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const [designs, setDesigns] = useState<TestDesign[]>([])
   const [design, setDesign] = useState<TestDesign | null>(null)
   const [run, setRun] = useState<TestDesignWorkflowRun | null>(null)
-  const [tree, setTree] = useState<{ tree: TestPointTree; revision: { revision: number; nodes: TestPointNode[]; treeSha256: string }; etag: string } | null>(null)
   const [libraryCases, setLibraryCases] = useState<LibraryTestCase[]>([])
   const [libraryVersions, setLibraryVersions] = useState<TestCaseLibraryVersion[]>([])
   const [suiteDrafts, setSuiteDrafts] = useState<TestSuiteDraft[]>([])
@@ -45,11 +44,10 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (!projectVersionId || !design || !run) return
     const next = await api.loadRun(projectVersionId, design.id, run.id)
     setRun(next)
-    if (next.testPointTree) setTree(await api.loadTree(projectVersionId, design.id, next.id))
     return next
   }, [projectVersionId, design, run])
 
-  useEffect(() => { setInputs(null); setDesigns([]); setDesign(null); setRun(null); setTree(null); setLibraryCases([]); setLibraryVersions([]); setSuiteDrafts([]); setSuiteVersions([]); setHandoffs([]); if (projectVersionId) void loadCollection().catch(cause => setError(cause instanceof Error ? cause.message : String(cause))) }, [projectVersionId, loadCollection])
+  useEffect(() => { setInputs(null); setDesigns([]); setDesign(null); setRun(null); setLibraryCases([]); setLibraryVersions([]); setSuiteDrafts([]); setSuiteVersions([]); setHandoffs([]); if (projectVersionId) void loadCollection().catch(cause => setError(cause instanceof Error ? cause.message : String(cause))) }, [projectVersionId, loadCollection])
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.status)) return
     const timer = window.setInterval(() => { void refreshRun().catch(cause => setError(cause instanceof Error ? cause.message : String(cause))) }, 1800)
@@ -58,56 +56,40 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
 
   const openDesign = useCallback(async (selected: TestDesign) => {
     if (!projectVersionId) return
-    setDesign(selected); setTree(null); setHandoffs([])
+    setDesign(selected); setHandoffs([])
     if (!selected.latestRun) { setRun(null); return }
     const next = await guarded('load-run', () => api.loadRun(projectVersionId, selected.id, selected.latestRun!.id))
     setRun(next)
-    if (next.testPointTree) setTree(await api.loadTree(projectVersionId, selected.id, next.id))
   }, [guarded, projectVersionId])
 
   const openLinkedRun = useCallback(async (designId: string, runId: string) => {
     if (!projectVersionId) return
-    setDesign(null); setRun(null); setTree(null); setHandoffs([])
+    setDesign(null); setRun(null); setHandoffs([])
     const linked = await guarded('load-linked-run', async () => {
       const [nextDesign, nextRun] = await Promise.all([
         api.loadDesign(projectVersionId, designId),
         api.loadRun(projectVersionId, designId, runId),
       ])
-      const nextTree = nextRun.testPointTree
-        ? await api.loadTree(projectVersionId, designId, runId)
-        : null
-      return { design: nextDesign, run: nextRun, tree: nextTree }
+      return { design: nextDesign, run: nextRun }
     })
-    setDesign(linked.design); setRun(linked.run); setTree(linked.tree)
+    setDesign(linked.design); setRun(linked.run)
   }, [guarded, projectVersionId])
 
-  const closeDesign = useCallback(() => { setDesign(null); setRun(null); setTree(null); setHandoffs([]) }, [])
+  const closeDesign = useCallback(() => { setDesign(null); setRun(null); setHandoffs([]) }, [])
 
   const create = useCallback(async (input: CreateTestDesignInput) => {
     if (!projectVersionId) return
     const nextDesign = await guarded('create', () => api.createDesign(projectVersionId, input))
     const nextRun = await api.createRun(projectVersionId, nextDesign.id)
-    setDesign({ ...nextDesign, latestRun: nextRun }); setRun(nextRun); setTree(null)
+    setDesign({ ...nextDesign, latestRun: nextRun }); setRun(nextRun)
     await loadCollection(); notify('测试设计已创建，Requirement Release 与 Workspace 快照已冻结。', 'success')
   }, [guarded, loadCollection, notify, projectVersionId])
 
   const startRun = useCallback(async () => {
     if (!projectVersionId || !design) return
     const next = await guarded('start-run', () => api.createRun(projectVersionId, design.id), '已启动新的测试设计运行。')
-    setRun(next); setTree(null); setHandoffs([])
+    setRun(next); setHandoffs([])
   }, [design, guarded, projectVersionId])
-
-  const updateTree = useCallback(async (operations: TestPointTreeOperation[], reason: string) => {
-    if (!projectVersionId || !design || !run || !tree) return
-    const next = await guarded('tree-edit', () => api.patchTree(projectVersionId, design.id, run.id, tree.etag, operations, reason), '测试点树已生成新 Revision、通过自动校验并进入用例重新生成。')
-    setTree(next); await refreshRun()
-  }, [design, guarded, projectVersionId, refreshRun, run, tree])
-
-  const redesign = useCallback(async () => {
-    if (!projectVersionId || !design || !run) return
-    await guarded('redesign', () => api.redesignTestPoints(projectVersionId, design.id, run.id), '已要求 PlanningAgent 重新设计测试点。')
-    setTree(null); await refreshRun()
-  }, [design, guarded, projectVersionId, refreshRun, run])
 
   const resynthesize = useCallback(async () => {
     if (!projectVersionId || !design || !run) return
@@ -193,5 +175,5 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const previewLegacyMigration = useCallback(async (legacyTestCaseSetVersionId: string) => { if (!inputs) return; const preview = await guarded('legacy-migration-preview', () => api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId)); if (preview) setLegacyMigrationPreview(preview); return preview }, [guarded, inputs])
   const migrateLegacyCaseSet = useCallback(async (legacyTestCaseSetVersionId: string, confirmUncertain = false) => { if (!inputs) return; const preview = legacyMigrationPreview?.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId ? legacyMigrationPreview : await api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId); await guarded('legacy-migration', () => api.migrateLegacyCaseSet(inputs.projectVersion.projectId, { legacyTestCaseSetVersionId, expectedPreviewSha256: preview.previewSha256, confirmUncertain }), '历史已发布用例集已幂等导入正式用例库。'); setLegacyMigrationPreview(null); await loadCollection() }, [guarded, inputs, legacyMigrationPreview, loadCollection])
 
-  return { inputs, designs, design, run, tree, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, loadCollection, openDesign, openLinkedRun, closeDesign, create, startRun, refreshRun, updateTree, redesign, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
+  return { inputs, designs, design, run, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, loadCollection, openDesign, openLinkedRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
 }

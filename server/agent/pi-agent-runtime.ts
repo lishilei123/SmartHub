@@ -890,9 +890,8 @@ function reviewerTool(
 function reviewerSystemPrompt(reviewerType: ReviewerExecutionInput['reviewerType']) {
   const focus = {
     requirement: '需求完整性、一致性、歧义、可验证性与 Test Focus',
-    test_point: '测试点覆盖、维度、适用性、Oracle 与需求追踪',
     test_case: '测试用例步骤、Expected Result、边界、数据、依赖与可执行性',
-    coverage: 'Requirement/TestPoint/TestCase 覆盖关系、遗漏、重复与阻塞项',
+    coverage: 'Requirement/TestCase 覆盖关系、遗漏、重复与阻塞项',
   }[reviewerType]
   return [
     `你是只读 ${reviewerType} Reviewer，专注于${focus}。`,
@@ -907,7 +906,7 @@ function reviewerInstructions(reviewerType: ReviewerExecutionInput['reviewerType
   return [
     `Reviewer 类型固定为 ${reviewerType}，不得改为其他类型。`,
     ...(requiredReadPaths.length ? [`提交前必须逐个使用 read 读取：${requiredReadPaths.map(path => `/workspace/${normalizeReviewPath(path)}`).join('、')}。`] : []),
-    '所有 evidenceRefs 必须指向已读取固定文件路径/行号、固定 Requirement/TestPoint/TestCase 引用或固定 Chunk ID；没有证据时不得编造 Finding。',
+    '所有 evidenceRefs 必须指向已读取固定文件路径/行号、固定 Requirement/TestCase 引用或固定 Chunk ID；没有证据时不得编造 Finding。',
     '完成后仅调用 reviewer_submit_result 一次提交 planning-review-candidate/v1。',
   ].join('\n')
 }

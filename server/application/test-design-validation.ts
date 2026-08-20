@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalLibrarySelection, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension, TestPointNodeContent, TestPointNodeRevision } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalLibrarySelection, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 
 export class TestDesignError extends Error {
@@ -32,13 +32,12 @@ function optionalExecutionMethods(value: unknown): Array<'ui' | 'api'> {
   return [...new Set(value)] as Array<'ui' | 'api'>
 }
 
-export function validateTestCaseContent(value: unknown, validPointIds?: Set<string>): TestCaseContent {
+export function validateTestCaseContent(value: unknown): TestCaseContent {
   const input = object(value, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '用例必须是对象')
-  rejectUnknown(input, ['schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'executionSpec', 'sharedVerificationChecks', 'tags', 'domain'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID')
+  rejectUnknown(input, ['schemaVersion', 'title', 'objective', 'dimension', 'requirementRefs', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'executionSpec', 'sharedVerificationChecks', 'tags', 'domain'], 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID')
   if (input.schemaVersion !== 'test-case/v1' && input.schemaVersion !== 'test-case/v2') fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'schemaVersion 必须为 test-case/v1 或 test-case/v2', 422)
-  const testPointIds = uniqueIds(input.testPointIds, 'testPointIds')
-  if (!testPointIds.length) fail('TEST_CASE_BASIS_REFERENCE_INVALID', '用例至少引用一个已自动校验的测试点', 422)
-  if (validPointIds && testPointIds.some(pointId => !validPointIds.has(pointId))) fail('TEST_CASE_BASIS_REFERENCE_INVALID', '用例引用了当前已校验树之外的测试点', 422)
+  const requirementRefs = uniqueIds(input.requirementRefs, 'requirementRefs')
+  if (!requirementRefs.length) fail('TEST_CASE_BASIS_REFERENCE_INVALID', '用例至少引用一个正式 Requirement', 422)
   const testDimension = dimension(input.dimension)
   const nonFunctionalSpec = input.executionSpec !== undefined && ['performance', 'stability', 'compatibility'].includes(testDimension)
   const methods = executionMethods(input.executionMethods, nonFunctionalSpec)
@@ -53,7 +52,7 @@ export function validateTestCaseContent(value: unknown, validPointIds?: Set<stri
     title: requiredText(input.title, 'title', 500),
     objective: requiredText(input.objective, 'objective', 4_000),
     dimension: testDimension,
-    testPointIds,
+    requirementRefs,
     priority: priority(input.priority),
     preconditions,
     dataRequirementIds,
@@ -67,46 +66,9 @@ export function validateTestCaseContent(value: unknown, validPointIds?: Set<stri
   }
 }
 
-export function validateTreeNodes(nodes: TestPointNodeRevision[]) {
-  const active = nodes.filter(node => !node.deleted)
-  const ids = new Set(active.map(node => node.nodeId))
-  if (ids.size !== active.length) fail('TEST_POINT_TREE_CYCLE', '测试点 ID 重复', 422)
-  const siblingKeys = new Set<string>()
-  for (const node of active) {
-    if (node.parentId && !ids.has(node.parentId)) fail('TEST_POINT_TREE_CYCLE', `测试点 ${node.nodeId} 的父节点不存在`, 422)
-    const siblingKey = `${node.parentId ?? '<root>'}\u0000${node.sortKey}`
-    if (siblingKeys.has(siblingKey)) fail('TEST_POINT_TREE_CYCLE', '同级 sortKey 必须唯一', 422)
-    siblingKeys.add(siblingKey)
-    let current: TestPointNodeRevision | undefined = node
-    const visited = new Set<string>()
-    while (current?.parentId) {
-      if (visited.has(current.parentId) || current.parentId === node.nodeId) fail('TEST_POINT_TREE_CYCLE', '测试点树不能形成父子循环', 422)
-      visited.add(current.parentId)
-      current = active.find(candidate => candidate.nodeId === current!.parentId)
-    }
-  }
-  return canonicalSha256(active.map(node => ({ ...node })).sort((left, right) => left.sortKey.localeCompare(right.sortKey) || left.nodeId.localeCompare(right.nodeId)))
-}
-
-export function executableTestPointIds(nodes: Array<{ nodeId: string; parentId: string | null; deleted?: boolean; applicability: TestPointNodeContent['applicability'] }>) {
-  const active = nodes.filter(node => !node.deleted)
-  const parentIds = new Set(active.flatMap(node => node.parentId ? [node.parentId] : []))
-  return new Set(active.filter(node => node.applicability !== 'not_applicable' && !parentIds.has(node.nodeId)).map(node => node.nodeId))
-}
-
-export type DesignCandidateNode = TestPointNodeContent & { ref: string; parentRef?: string }
-
-export type TestDataRequirementCandidate = Omit<TestDataRequirement, 'id' | 'caseIds' | 'testPointIds'> & {
+export type TestDataRequirementCandidate = Omit<TestDataRequirement, 'id' | 'caseIds'> & {
   ref: string
   caseRefs: string[]
-  testPointIds: string[]
-}
-
-export interface TestPointDesignCandidate extends Record<string, unknown> {
-  schemaVersion: 'test-point-design/v1'
-  nodes: DesignCandidateNode[]
-  findings: Record<string, unknown>[]
-  confirmationItems: Record<string, unknown>[]
 }
 
 /** The wire shape accepted by the test-case submit tools. */
@@ -116,7 +78,7 @@ export interface TestCaseDesignCandidateSubmission extends Record<string, unknow
   dataRequirements: TestDataRequirementCandidate[]
   findings: Record<string, unknown>[]
   confirmationItems: Record<string, unknown>[]
-  proposals: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; testPointIds: string[]; reason: string; confidence: number }>
+  proposals: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; reason: string; confidence: number }>
 }
 
 /** Normalized internal form returned after a flat submission is validated. */
@@ -126,19 +88,10 @@ export interface TestCaseDesignCandidate extends Record<string, unknown> {
   dataRequirements: TestDataRequirementCandidate[]
   findings: Record<string, unknown>[]
   confirmationItems: Record<string, unknown>[]
-  proposals: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; testPointIds: string[]; reason: string; confidence: number }>
+  proposals: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; reason: string; confidence: number }>
 }
 
-export function validateTestPointDesignCandidate(value: unknown): TestPointDesignCandidate {
-  const input = synthesisObject(value, '/', '提交结果必须是对象')
-  synthesisRejectUnknown(input, ['schemaVersion', 'nodes', 'findings', 'confirmationItems'], '/')
-  if (input.schemaVersion !== 'test-point-design/v1') synthesisFail('/schemaVersion', 'schemaVersion 必须为 test-point-design/v1')
-  const nodes = validateCandidateNodes(input.nodes)
-  const { findings, confirmationItems } = validateDesignIssues(input)
-  return { schemaVersion: 'test-point-design/v1', nodes, findings, confirmationItems }
-}
-
-const synthesisCaseFields = ['ref', 'schemaVersion', 'title', 'objective', 'dimension', 'testPointIds', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'executionSpec', 'sharedVerificationChecks', 'tags', 'domain']
+const synthesisCaseFields = ['ref', 'schemaVersion', 'title', 'objective', 'dimension', 'requirementRefs', 'priority', 'preconditions', 'dataRequirementIds', 'cleanup', 'dependencies', 'executionMethods', 'executionSpec', 'sharedVerificationChecks', 'tags', 'domain']
 const legacySynthesisFieldGuidance: Record<string, string> = {
   preConditions: '改为 preconditions',
   steps: '移入 executionMethods[].steps，并使用 action/expected',
@@ -149,7 +102,7 @@ const legacySynthesisFieldGuidance: Record<string, string> = {
   content: '将 content 内的用例字段直接展开到 cases[] 每一项；禁止 { ref, content: {...} } 包装',
 }
 
-export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: Set<string>, repair = false): TestCaseDesignCandidate {
+export function validateTestCaseDesignCandidate(value: unknown, repair = false): TestCaseDesignCandidate {
   const input = synthesisObject(value, '/', '提交结果必须是对象')
   synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dataRequirements', 'findings', 'confirmationItems', 'proposals'], '/')
   const schemaVersion = repair ? 'test-design-repair/v1' : 'test-case-design/v1'
@@ -171,7 +124,7 @@ export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: 
       if (caseRefs.has(ref)) synthesisFail(`${path}/ref`, `临时引用 ${ref} 重复`)
       caseRefs.add(ref)
       const { ref: _ref, ...contentInput } = caseInput
-      const normalized = validateTestCaseContent(contentInput, validPointIds)
+      const normalized = validateTestCaseContent(contentInput)
       if (normalized.dataRequirementIds.length) synthesisFail(`${path}/dataRequirementIds`, '候选中的 dataRequirementIds 必须为空；服务端根据 dataRequirements[].caseRefs 生成正式关联')
       return { ref, content: normalized }
     } catch (error) {
@@ -183,12 +136,11 @@ export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: 
   const dataRequirements = input.dataRequirements.map((candidate, index): TestDataRequirementCandidate => {
     const path = `/dataRequirements/${index}`
     const item = synthesisObject(candidate, path, `dataRequirements[${index}] 必须是对象`)
-    synthesisRejectUnknown(item, ['ref', 'name', 'entityType', 'featureTags', 'testPointIds', 'caseRefs', 'fieldConstraints', 'relationships', 'quantity', 'initialState', 'preparationHint', 'sensitivity', 'isolation', 'resetAndCleanup', 'readiness', 'readinessReason'], path)
+    synthesisRejectUnknown(item, ['ref', 'name', 'entityType', 'featureTags', 'requirementRefs', 'caseRefs', 'fieldConstraints', 'relationships', 'quantity', 'initialState', 'preparationHint', 'sensitivity', 'isolation', 'resetAndCleanup', 'readiness', 'readinessReason'], path)
     const ref = synthesisText(item.ref, `${path}/ref`, 200)
     if (refs.has(ref)) synthesisFail(`${path}/ref`, `临时引用 ${ref} 重复`)
     refs.add(ref)
-    const testPointIds = synthesisIds(item.testPointIds, `${path}/testPointIds`)
-    if (testPointIds.some(pointId => validPointIds && !validPointIds.has(pointId))) synthesisFail(`${path}/testPointIds`, '包含当前已校验测试点树之外的引用')
+    const requirementRefs = synthesisIds(item.requirementRefs, `${path}/requirementRefs`)
     const referencedCaseRefs = synthesisIds(item.caseRefs, `${path}/caseRefs`)
     if (!referencedCaseRefs.length || referencedCaseRefs.some(caseRef => !caseRefs.has(caseRef))) synthesisFail(`${path}/caseRefs`, '必须引用本次提交中的有效用例 ref')
     const fieldConstraints = synthesisStringRecord(item.fieldConstraints, `${path}/fieldConstraints`)
@@ -201,7 +153,7 @@ export function validateTestCaseDesignCandidate(value: unknown, validPointIds?: 
       name: synthesisText(item.name, `${path}/name`, 500),
       entityType: synthesisText(item.entityType, `${path}/entityType`, 200),
       featureTags: synthesisTexts(item.featureTags, `${path}/featureTags`, 100, 100),
-      testPointIds,
+      requirementRefs,
       caseRefs: referencedCaseRefs,
       fieldConstraints,
       relationships: synthesisTexts(item.relationships, `${path}/relationships`, 100, 1_000),
@@ -231,7 +183,7 @@ function validateProposalCandidates(value: unknown, caseRefs: Set<string>): Test
   return value.map((candidate, index) => {
     const path = `/proposals/${index}`
     const input = synthesisObject(candidate, path, 'Proposal 必须是对象')
-    synthesisRejectUnknown(input, ['operation', 'sourceCaseId', 'sourceRevision', 'candidateRef', 'requirementRefs', 'testPointIds', 'reason', 'confidence'], path)
+    synthesisRejectUnknown(input, ['operation', 'sourceCaseId', 'sourceRevision', 'candidateRef', 'requirementRefs', 'reason', 'confidence'], path)
     const operation = synthesisEnum(input.operation, `${path}/operation`, ['reuse', 'update', 'create', 'deprecate', 'reference'] as const)
     const sourceCaseId = input.sourceCaseId === undefined ? undefined : synthesisText(input.sourceCaseId, `${path}/sourceCaseId`, 500)
     const sourceRevision = input.sourceRevision === undefined ? undefined : synthesisPositiveInteger(input.sourceRevision, `${path}/sourceRevision`)
@@ -241,55 +193,8 @@ function validateProposalCandidates(value: unknown, caseRefs: Set<string>): Test
     if ((operation === 'deprecate' || operation === 'reference') && candidateRef && !caseRefs.has(candidateRef)) synthesisFail(`${path}/candidateRef`, 'candidateRef 不属于本次 cases')
     const confidence = Number(input.confidence)
     if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) synthesisFail(`${path}/confidence`, 'confidence 必须是 0 到 1 的数值')
-    return { operation, ...(sourceCaseId ? { sourceCaseId } : {}), ...(sourceRevision ? { sourceRevision } : {}), ...(candidateRef ? { candidateRef } : {}), requirementRefs: synthesisIds(input.requirementRefs, `${path}/requirementRefs`), testPointIds: synthesisIds(input.testPointIds, `${path}/testPointIds`), reason: synthesisText(input.reason, `${path}/reason`, 4_000), confidence }
+    return { operation, ...(sourceCaseId ? { sourceCaseId } : {}), ...(sourceRevision ? { sourceRevision } : {}), ...(candidateRef ? { candidateRef } : {}), requirementRefs: synthesisIds(input.requirementRefs, `${path}/requirementRefs`), reason: synthesisText(input.reason, `${path}/reason`, 4_000), confidence }
   })
-}
-
-function validateCandidateNodes(raw: unknown): DesignCandidateNode[] {
-  if (!Array.isArray(raw) || !raw.length || raw.length > 1_000) candidateFail('/nodes', '必须包含 1 到 1000 个节点')
-  const dimensions: TestDimension[] = ['functional', 'performance', 'stability', 'compatibility', 'security']
-  const refs = new Set<string>()
-  const nodes = raw.map((value, index): DesignCandidateNode => {
-    const path = `/nodes/${index}`
-    if (!value || typeof value !== 'object' || Array.isArray(value)) candidateFail(path, '必须是对象')
-    const input = value as Record<string, unknown>
-    const allowed = ['ref', 'parentRef', 'title', 'objective', 'dimension', 'priority', 'applicability', 'designTechniques', 'entryMethods', 'oracle', 'dataConditions', 'risks', 'assumptions', 'basisRefs', 'historicalRefs']
-    const unexpected = Object.keys(input).filter(key => !allowed.includes(key))
-    if (unexpected.length) candidateFail(path, `包含不允许的字段：${unexpected.join('、')}`)
-    const ref = candidateText(input.ref, `${path}.ref`, 200)
-    if (refs.has(ref)) candidateFail(`${path}.ref`, '在本次提交内重复')
-    refs.add(ref)
-    const parentRef = input.parentRef == null || input.parentRef === '' ? undefined : candidateText(input.parentRef, `${path}.parentRef`, 200)
-    const dimension = String(input.dimension) as TestDimension
-    if (!dimensions.includes(dimension)) candidateFail(`${path}.dimension`, `必须为 ${dimensions.join('、')}`)
-    const priority = String(input.priority)
-    if (!['P0', 'P1', 'P2', 'P3'].includes(priority)) candidateFail(`${path}.priority`, '必须为 P0、P1、P2 或 P3')
-    const applicability = String(input.applicability)
-    if (!['applicable', 'not_applicable', 'blocked_by_confirmation'].includes(applicability)) candidateFail(`${path}.applicability`, '取值无效')
-    const entryMethods = candidateEnumArray(input.entryMethods, `${path}.entryMethods`, ['ui', 'api'] as const, 2)
-    return {
-      ref,
-      ...(parentRef ? { parentRef } : {}),
-      title: candidateText(input.title, `${path}.title`, 500),
-      objective: candidateText(input.objective, `${path}.objective`, 2_000),
-      dimension,
-      priority: priority as DesignCandidateNode['priority'],
-      applicability: applicability as DesignCandidateNode['applicability'],
-      designTechniques: candidateTextArray(input.designTechniques, `${path}.designTechniques`, 50, 200),
-      entryMethods,
-      oracle: candidateText(input.oracle, `${path}.oracle`, 4_000),
-      dataConditions: candidateTextArray(input.dataConditions, `${path}.dataConditions`, 100, 1_000),
-      risks: candidateTextArray(input.risks, `${path}.risks`, 100, 1_000),
-      assumptions: candidateTextArray(input.assumptions, `${path}.assumptions`, 100, 1_000),
-      basisRefs: candidateTextArray(input.basisRefs, `${path}.basisRefs`, 1_000, 500),
-      historicalRefs: candidateTextArray(input.historicalRefs, `${path}.historicalRefs`, 1_000, 500),
-    }
-  })
-  if (nodes.some(node => !node.basisRefs.length)) candidateFail('/nodes', '每个测试点必须至少引用一项固定需求依据')
-  for (const [index, node] of nodes.entries()) {
-    if (node.parentRef && !refs.has(node.parentRef)) candidateFail(`/nodes/${index}/parentRef`, '未引用本次提交内的节点')
-  }
-  return nodes
 }
 
 function validateDesignIssues(input: Record<string, unknown>) {
@@ -306,7 +211,7 @@ function validateDesignIssues(input: Record<string, unknown>) {
     const path = `/confirmationItems/${index}`
     const item = synthesisObject(candidate, path, '待确认项必须是对象')
     synthesisRejectUnknown(item, ['title', 'question', 'decisionType', 'impactStage', 'affectedRefs', 'blocker'], path)
-    const impactStage = synthesisEnum(item.impactStage, `${path}/impactStage`, ['tree', 'case', 'data', 'publication'] as const)
+    const impactStage = synthesisEnum(item.impactStage, `${path}/impactStage`, ['case', 'data', 'publication'] as const)
     if (typeof item.blocker !== 'boolean') synthesisFail(`${path}/blocker`, '必须是布尔值')
     return { title: synthesisText(item.title, `${path}/title`, 500), question: synthesisText(item.question, `${path}/question`, 8_000), decisionType: synthesisText(item.decisionType, `${path}/decisionType`, 200), impactStage, affectedRefs: synthesisIds(item.affectedRefs, `${path}/affectedRefs`), blocker: item.blocker }
   })
@@ -485,10 +390,6 @@ function stringFilters(value: unknown) { const input = object(value, 'TEST_DESIG
 function id(value: unknown, field: string) { const result = requiredText(value, field, 500); if (/^(latest|active)$/iu.test(result)) fail('TEST_DESIGN_LATEST_REFERENCE_FORBIDDEN', `${field} 不允许动态引用`); return result }
 function requiredText(value: unknown, field: string, max: number) { const result = text(value, field, max).trim(); if (!result) fail('TEST_DESIGN_BASIS_MODE_INVALID', `${field} 不能为空`); return result }
 function text(value: unknown, field: string, max: number) { if (typeof value !== 'string' || value.length > max) fail('TEST_DESIGN_BASIS_MODE_INVALID', `${field} 必须是长度不超过 ${max} 的字符串`); return value }
-function candidateText(value: unknown, path: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) candidateFail(path, `必须是长度不超过 ${max} 的非空字符串`); return value.trim() }
-function candidateTextArray(value: unknown, path: string, maxItems: number, maxLength: number) { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => candidateText(item, `${path}[${index}]`, maxLength)) }
-function candidateEnumArray<const T extends string>(value: unknown, path: string, allowed: readonly T[], maxItems: number): T[] { if (!Array.isArray(value) || value.length > maxItems) candidateFail(path, `必须是最多 ${maxItems} 项的数组`); return value.map((item, index) => { if (typeof item !== 'string' || !allowed.includes(item as T)) candidateFail(`${path}[${index}]`, `必须为 ${allowed.join('、')}`); return item as T }) }
-function candidateFail(path: string, message: string): never { throw new TestDesignError('TEST_POINT_TREE_SCHEMA_INVALID', `${path} ${message}`, 422, { path }) }
 function analysisObject(value: unknown, path: string, message: string) { if (!value || typeof value !== 'object' || Array.isArray(value)) analysisFail(path, message); return value as Record<string, unknown> }
 function analysisRejectUnknown(value: Record<string, unknown>, allowed: string[], path: string) { const unexpected = Object.keys(value).filter(key => !allowed.includes(key)); if (unexpected.length) analysisFail(path, `包含不允许的字段：${unexpected.join('、')}`) }
 function analysisText(value: unknown, path: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) analysisFail(path, `必须是长度不超过 ${max} 的非空字符串`); return value.trim() }

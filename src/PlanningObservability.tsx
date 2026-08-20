@@ -4,7 +4,6 @@ import './planning.css'
 
 const reviewerLabels = {
   requirement: 'RequirementReviewer',
-  test_point: 'TestPointReviewer',
   test_case: 'TestCaseReviewer',
   coverage: 'CoverageReviewer',
 } as const

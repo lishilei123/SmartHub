@@ -174,10 +174,10 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     await requireProjectVersion(run.projectVersionId, 'test-design:review')
     const body = await json(request)
     const reviewerType = String(body.reviewerType ?? '')
-    if (!['test_point', 'test_case', 'coverage'].includes(reviewerType)) throw new Error('PLANNING_REVIEWER_TYPE_INVALID')
+    if (!['test_case', 'coverage'].includes(reviewerType)) throw new Error('PLANNING_REVIEWER_TYPE_INVALID')
     return send(response, 202, await planningWorkflowService.reviewTestDesign({
       sourceRunId: run.id,
-      reviewerType: reviewerType as 'test_point' | 'test_case' | 'coverage',
+      reviewerType: reviewerType as 'test_case' | 'coverage',
       sourceSelection: testDesignReviewerSourceSelection(body),
     }))
   }
@@ -428,10 +428,6 @@ async function loadApproval(approvalId: string) {
 
 function stringList(value: unknown) { return Array.isArray(value) ? value.map(String) : undefined }
 function testDesignReviewerSourceSelection(body: Record<string, unknown>): TestDesignReviewerSourceSelection {
-  const revision = Number(body.testPointTreeRevision)
-  if (!Number.isInteger(revision) || revision <= 0) {
-    throw new Error('TEST_POINT_TREE_REVISION_REQUIRED')
-  }
   if (!Array.isArray(body.testCases)) {
     throw new Error('TEST_CASE_SOURCE_SELECTION_REQUIRED')
   }
@@ -442,20 +438,14 @@ function testDesignReviewerSourceSelection(body: Record<string, unknown>): TestD
     const reference = candidate as Record<string, unknown>
     const caseRevision = Number(reference.revision)
     const caseId = String(reference.caseId ?? '').trim()
-    const treeVersionId = String(reference.treeVersionId ?? '').trim()
-    if (!caseId || !treeVersionId || !Number.isInteger(caseRevision) || caseRevision <= 0) {
+    if (!caseId || !Number.isInteger(caseRevision) || caseRevision <= 0) {
       throw new Error(`TEST_CASE_SOURCE_SELECTION_INVALID: ${index}`)
     }
-    return { caseId, treeVersionId, revision: caseRevision }
+    return { caseId, revision: caseRevision }
   })
-  const approvedTestPointTreeVersionId = String(
-    body.approvedTestPointTreeVersionId ?? '',
-  ).trim()
   const dataSetVersionId = String(body.dataSetVersionId ?? '').trim()
   const coverageAuditId = String(body.coverageAuditId ?? '').trim()
   return {
-    testPointTreeRevision: revision,
-    ...(approvedTestPointTreeVersionId ? { approvedTestPointTreeVersionId } : {}),
     testCases,
     ...(dataSetVersionId ? { dataSetVersionId } : {}),
     ...(coverageAuditId ? { coverageAuditId } : {}),

@@ -69,7 +69,7 @@ function task(
     title,
     objective: `验证报告用例 ${ordinal}`,
     dimension: 'functional',
-    testPointIds: [`point-${ordinal}`],
+    requirementRefs: [`REQ-${ordinal}`],
     priority: 'P1',
     preconditions: [],
     dataRequirementIds: [],

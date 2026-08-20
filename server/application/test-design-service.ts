@@ -6,24 +6,23 @@ import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../
 import type {
   CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, CoverageAudit, HistoricalCaseSnapshot, ImpactedRegressionReference, LegacyTestCaseMigrationRecord, LibraryTestCase, LibraryTestCaseRevision, RetrievalSnapshot, SmokeCandidateRelation, TestCase,
   TestCaseContent, TestCaseLibraryVersion, TestCaseLibraryVersionDetail, TestCaseSetVersion, TestDataRequirement, TestDataRequirementSetVersion, TestDesign, TestDesignBasisSnapshot, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot,
-  TestCaseTraceability, TestDesignNodeKey, TestDesignRunAgentConfigurationSnapshot, TestDesignState, TestDesignWorkflowRun, TestExecutionHandoff, TestExecutionMethod, TestPointNodeRevision,
-  TestPointTreeOperation, TestPointTreeRevision, TestSuiteDraft, TestSuiteVersion, TestSuiteVersionMember, WorkflowArtifact, WorkflowNodeRun,
+  TestCaseTraceability, TestDesignNodeKey, TestDesignRunAgentConfigurationSnapshot, TestDesignState, TestDesignWorkflowRun, TestExecutionHandoff, TestExecutionMethod,
+  TestSuiteDraft, TestSuiteVersion, TestSuiteVersionMember, WorkflowArtifact, WorkflowNodeRun,
 } from '../domain/test-design-types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { auditTestDesignCoverage } from './test-design-coverage-auditor.js'
-import { assertEtag, etag, executableTestPointIds, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate, validateTestPointDesignCandidate, validateTreeNodes, type TestCaseDesignCandidate, type TestPointDesignCandidate } from './test-design-validation.js'
+import { assertEtag, etag, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate, type TestCaseDesignCandidate } from './test-design-validation.js'
 import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
-const AUTOMATIC_TEST_POINT_REVIEW_ACTOR = 'system:test-point-validator'
 
 export interface PlanningAgentRuntime {
   readiness?(projectVersionId?: string, requirementReleaseId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
   freezeConfiguration?(projectVersionId: string, requirementReleaseId?: string): Promise<TestDesignRunAgentConfigurationSnapshot>
   appendTask?(input: { projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }): Promise<unknown>
   execute(input: {
-    stage: 'test_point_design' | 'test_case_design' | 'test_design_repair'
+    stage: 'test_case_design' | 'test_design_repair'
     run: TestDesignWorkflowRun
     upstream: unknown
   }, signal: AbortSignal): Promise<{ schemaVersion: string; content: unknown; execution?: WorkflowNodeRun['execution'] }>
@@ -36,19 +35,7 @@ export interface TestCaseAssetProjector {
 
 export class TestDesignService {
   private readonly activeRuns = new Map<string, AbortController>()
-  private testPointsValidatedListener?: (
-    projectVersionId: string,
-    runId: string,
-    treeVersionId: string,
-  ) => void | Promise<void>
-
   constructor(private readonly store: StateStore, private readonly runtime?: PlanningAgentRuntime, private readonly projector?: TestCaseAssetProjector) {}
-
-  onTestPointsValidated(
-    listener: (projectVersionId: string, runId: string, treeVersionId: string) => void | Promise<void>,
-  ) {
-    this.testPointsValidatedListener = listener
-  }
 
   async inputCandidates(projectVersionId: string) {
     const state = await this.store.snapshot()
@@ -100,7 +87,7 @@ export class TestDesignService {
       const activeIndex = state.indexes.find(item => item.id === analysisRun.snapshot.indexVersionId && item.status === 'active')
       const rawInput: CreateTestDesignInput = {
         name: `${projectVersion.name} · 自动测试设计`,
-        objective: result.summary.overview.trim() || '依据已冻结的需求理解生成可追溯测试点与测试用例。',
+        objective: result.summary.overview.trim() || '依据已冻结的需求理解生成可追溯测试用例。',
         includedScopes: [],
         excludedScopes: [],
         focusDimensions: [],
@@ -167,7 +154,7 @@ export class TestDesignService {
       const historicalSnapshot = buildHistoricalSnapshot(state, design, createdAt)
       const workspaceSnapshot = buildWorkspaceSnapshot(state, design, requirement, requirements, historicalSnapshot, createdAt)
       const run: TestDesignWorkflowRun = {
-        id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_point_design', progress: 0, idempotencyKey,
+        id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey,
         basisSnapshot, agentConfigurationSnapshot, currentInputRefs: structuredClone(requirement.analysisRun.snapshot.currentInputRefs), retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
         ...(historicalSnapshot.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: historicalSnapshot.baseTestCaseLibraryVersionId, baseTestCaseLibraryVersionSha256: historicalSnapshot.baseTestCaseLibraryVersionSha256 } : {}),
         nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], caseChangeProposals: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
@@ -194,22 +181,7 @@ export class TestDesignService {
     const run = await this.loadRun(runId)
     if (run.status === 'cancelled' || run.status === 'succeeded') return run
     try {
-      if (['pending', 'queued', 'running', 'failed'].includes(node(run, 'test_point_design').status)) {
-        const output = await this.executeNode(runId, 'test_point_design', signal, pointDesignInput(run))
-        const treeVersionId = await this.store.transaction(state => {
-          const current = findRunById(state, runId)
-          publishArtifact(current, 'test_point_design', output)
-          materializeTestPointDesign(current, output.content, current.createdBy)
-          materializeDesignIssues(current, output.content)
-          finishNode(current, 'test_point_design', output.execution)
-          return startAutomaticTestPointReview(current).id
-        })
-        await this.projectTreeVersion(run.projectVersionId, run.testDesignId, runId, treeVersionId)
-        await this.store.transaction(state => { completeAutomaticTestPointReview(findRunById(state, runId)) })
-        await this.testPointsValidatedListener?.(run.projectVersionId, run.id, treeVersionId)
-      }
       const refreshed = await this.loadRun(runId)
-      if (!refreshed.testPointTree?.currentApprovedVersionId) return refreshed
       if (node(refreshed, 'test_case_design').status !== 'succeeded') {
         const output = await this.executeNode(runId, 'test_case_design', signal, caseDesignInput(refreshed))
         let repairQueued = false
@@ -248,10 +220,10 @@ export class TestDesignService {
     if (!this.runtime) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', '测试设计 Agent Runtime 未配置', 409)
     const initial = await this.loadRun(runId)
     const claimed = required(initial.nodeRuns.find(item => item.id === nodeRunId), 'WORKFLOW_NODE_NOT_FOUND', '领取的工作流节点不存在')
-    if (!['test_point_design', 'test_case_design', 'test_design_repair'].includes(claimed.nodeKey)) throw new TestDesignError('WORKFLOW_NODE_NOT_RETRYABLE', '领取的节点不是 PlanningAgent Stage', 409)
+    if (!['test_case_design', 'test_design_repair'].includes(claimed.nodeKey)) throw new TestDesignError('WORKFLOW_NODE_NOT_RETRYABLE', '领取的节点不是 PlanningAgent Stage', 409)
     if (initial.status === 'cancelled' || claimed.status === 'succeeded' || claimed.status === 'cancelled') return initial
 
-    const key = claimed.nodeKey as 'test_point_design' | 'test_case_design' | 'test_design_repair'
+    const key = claimed.nodeKey as 'test_case_design' | 'test_design_repair'
     try {
       await this.fencedNodeTransaction(nodeRunId, lease, state => {
         const run = findRunById(state, runId)
@@ -265,7 +237,7 @@ export class TestDesignService {
         if (key === 'test_design_repair' && run.automaticRepair?.status === 'queued') Object.assign(run.automaticRepair, { status: 'running', startedAt: now(), finishedAt: undefined })
       })
       const running = await this.loadRun(runId)
-      const upstream = key === 'test_point_design' ? pointDesignInput(running) : key === 'test_case_design' ? caseDesignInput(running) : repairInput(running)
+      const upstream = key === 'test_case_design' ? caseDesignInput(running) : repairInput(running)
       const output = await this.runtime.execute({ stage: key, run: running, upstream }, signal)
       const result = await this.fencedNodeTransaction(nodeRunId, lease, state => {
         const run = findRunById(state, runId)
@@ -273,19 +245,9 @@ export class TestDesignService {
         if (target.status !== 'running') throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '节点已不处于当前执行状态', 409)
         publishArtifact(run, key, output)
         finishNode(run, key, output.execution)
-        if (key === 'test_point_design') {
-          materializeTestPointDesign(run, output.content, run.createdBy)
-          materializeDesignIssues(run, output.content)
-          return { repairQueued: false, treeVersionId: startAutomaticTestPointReview(run).id }
-        }
-        return { repairQueued: finalizeCaseDesignAndAudit(run, output.content, run.createdBy, key === 'test_design_repair'), treeVersionId: undefined }
+        return { repairQueued: finalizeCaseDesignAndAudit(run, output.content, run.createdBy, key === 'test_design_repair') }
       })
-      if (result.treeVersionId) {
-        await this.projectTreeVersion(running.projectVersionId, running.testDesignId, runId, result.treeVersionId)
-        await this.fencedNodeTransaction(nodeRunId, lease, state => { completeAutomaticTestPointReview(findRunById(state, runId)) })
-        await this.testPointsValidatedListener?.(running.projectVersionId, runId, result.treeVersionId)
-        await this.schedule(runId)
-      } else if (result.repairQueued) await this.schedule(runId)
+      if (result.repairQueued) await this.schedule(runId)
       return this.loadRun(runId)
     } catch (error) {
       if (!String(error instanceof Error ? error.message : error).includes('WORKFLOW_JOB_LEASE_LOST')) {
@@ -311,35 +273,25 @@ export class TestDesignService {
 
   async fullRerun(projectVersionId: string, designId: string, runId: string, idempotencyKey: string, principal: Principal) { await this.getRun(projectVersionId, designId, runId); return this.createRun(projectVersionId, designId, idempotencyKey, principal) }
 
-  async redesignTestPoints(projectVersionId: string, designId: string, runId: string) {
-    await this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); advanceNodeGeneration(run, node(run, 'test_point_design'), 'queued'); for (const downstream of run.nodeRuns.filter(item => item.nodeKey !== 'test_point_design')) advanceNodeGeneration(run, downstream, 'pending'); run.testPointTree = undefined; run.formalWorkspaceFiles = []; run.testCases = []; run.caseChangeProposals = []; run.dataSetVersions = []; run.findings = []; run.confirmationItems = []; invalidateAudit(run); Object.assign(run, { status: 'queued', stage: 'test_point_design', progress: 0, error: undefined, errorCode: undefined, finishedAt: undefined }) }); await this.schedule(runId); return this.getRun(projectVersionId, designId, runId)
-  }
-
   async resynthesize(projectVersionId: string, designId: string, runId: string) {
     const state = await this.store.snapshot()
     assertOpenVersion(state, projectVersionId)
-    const current = findRun(state, projectVersionId, designId, runId)
-    const treeVersion = approvedTreeVersion(current)
+    findRun(state, projectVersionId, designId, runId)
     await this.runtime?.appendTask?.({
       projectVersionId,
       taskType: 'test_case_resynthesize',
       task: [
         '请重新生成测试用例。',
         '',
-        `当前已批准 TestPointTreeVersion = ${treeVersion.id}，该正式测试点基线保持不变。`,
-        '',
-        '请继续在当前 Planning Session 中，基于当前 Requirement Release、正式 Clarification、已批准 TestPointTreeVersion 和冻结 Workspace 重新生成完整测试用例候选。',
+        '请继续在当前 Planning Session 中，基于当前 Requirement Release、正式 Clarification 和冻结 Workspace 重新生成完整测试用例候选。',
       ].join('\n'),
       metadata: {
         testDesignRunId: runId,
-        testPointTreeVersionId: treeVersion.id,
-        testPointTreeSha256: treeVersion.treeSha256,
       },
     })
     await this.store.transaction(draft => {
       assertOpenVersion(draft, projectVersionId)
       const run = findRun(draft, projectVersionId, designId, runId)
-      if (approvedTreeVersion(run).id !== treeVersion.id) throw new TestDesignError('TEST_POINT_TREE_VERSION_CHANGED', '批准的测试点版本已变化，请重新发起测试用例生成', 409)
       advanceNodeGeneration(run, node(run, 'test_case_design'), 'queued')
       advanceNodeGeneration(run, node(run, 'coverage_audit'), 'pending')
       advanceNodeGeneration(run, node(run, 'test_design_repair'), 'pending')
@@ -354,40 +306,13 @@ export class TestDesignService {
     return this.getRun(projectVersionId, designId, runId)
   }
 
-  async getTree(projectVersionId: string, designId: string, runId: string) {
-    const run = await this.loadScopedRun(projectVersionId, designId, runId); const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成')
-    const revision = tree.revisions.find(item => item.revision === tree.currentRevision)!; return { tree: structuredClone(tree), revision: structuredClone(revision), etag: etag('tree', tree.id, revision.revision, revision.treeSha256) }
-  }
-  async treeRevisions(projectVersionId: string, designId: string, runId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成').revisions) }
-  async treeDiff(projectVersionId: string, designId: string, runId: string, from: number, to: number) { const run = await this.loadScopedRun(projectVersionId, designId, runId); const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成'); const left = required(tree.revisions.find(item => item.revision === from), 'TEST_POINT_TREE_REVISION_NOT_FOUND', '起始树 revision 不存在'); const right = required(tree.revisions.find(item => item.revision === to), 'TEST_POINT_TREE_REVISION_NOT_FOUND', '目标树 revision 不存在'); return structuralDiff(left.nodes, right.nodes) }
-
-  async patchTree(projectVersionId: string, designId: string, runId: string, ifMatch: string | undefined, input: { operations: TestPointTreeOperation[]; reason: string }, principal: Principal) {
-    const treeVersionId = await this.store.transaction(state => {
-      assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成'); const current = tree.revisions.find(item => item.revision === tree.currentRevision)!
-      if (['queued', 'running'].includes(run.status)) throw new TestDesignError('TEST_DESIGN_RUN_BUSY', 'PlanningAgent 正在处理当前测试设计，暂不能修改测试点', 409)
-      assertEtag(ifMatch, etag('tree', tree.id, current.revision, current.treeSha256), 'TEST_POINT_TREE_REVISION_CONFLICT')
-      if (!Array.isArray(input.operations) || !input.operations.length || input.operations.length > 100) throw new TestDesignError('TEST_POINT_TREE_OPERATION_INVALID', 'operations 必须包含 1 到 100 个操作', 422)
-      const nodes = applyTreeOperations(current.nodes, input.operations)
-      validateTreeReferences(run, nodes)
-      const revision: TestPointTreeRevision = { revision: current.revision + 1, parentRevision: current.revision, nodes, operations: structuredClone(input.operations), reason: cleanRequired(input.reason, '修改说明', 2_000), actorId: principal.subjectId, treeSha256: validateTreeNodes(nodes), createdAt: now() }
-      tree.revisions.push(revision); tree.currentRevision = revision.revision; tree.currentApprovedVersionId = undefined
-      run.testCases.forEach(testCase => { if (!testCase.tombstonedAt) testCase.reviewState = 'draft' }); run.coverageAudits.forEach(audit => { audit.status = 'stale' })
-      return startAutomaticTestPointReview(run).id
-    })
-    await this.projectTreeVersion(projectVersionId, designId, runId, treeVersionId)
-    await this.store.transaction(state => { completeAutomaticTestPointReview(findRun(state, projectVersionId, designId, runId)) })
-    await this.testPointsValidatedListener?.(projectVersionId, runId, treeVersionId)
-    await this.schedule(runId)
-    return this.getTree(projectVersionId, designId, runId)
-  }
-
   async listCases(projectVersionId: string, designId: string, runId: string, filters: { dimension?: string; executionMethod?: string; status?: string } = {}) {
     const run = await this.loadScopedRun(projectVersionId, designId, runId)
     return run.testCases.filter(item => !item.tombstonedAt).filter(item => { const content = currentCaseRevision(item).content; return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || executionMethodForContent(content) === filters.executionMethod || content.executionMethods.some(method => method.method === filters.executionMethod)) && (!filters.status || item.reviewState === filters.status) }).map(testCase => presentCase(testCase))
   }
 
   async createCase(projectVersionId: string, designId: string, runId: string, rawContent: unknown, principal: Principal) {
-    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const treeVersion = approvedTreeVersion(run); const points = approvedPointIds(run, treeVersion.id); const content = validateTestCaseContent(rawContent, points); const testCase = newCase(run.id, treeVersion.id, content, 'manual', principal.subjectId, '人工新建'); run.testCases.push(testCase); materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase) })
+    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const content = validateTestCaseContent(rawContent); const testCase = newCase(run.id, content, 'manual', principal.subjectId, '人工新建'); run.testCases.push(testCase); materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase) })
   }
 
   async getCase(projectVersionId: string, designId: string, runId: string, caseId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return presentCase(findCase(run, caseId), true) }
@@ -398,7 +323,7 @@ export class TestDesignService {
     return this.store.transaction(state => {
       assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const testCase = findCase(run, caseId); if (testCase.reviewState === 'in_review') throw new TestDesignError('TEST_CASE_EDIT_LOCKED', '审核中的用例不能编辑', 409)
       const current = currentCaseRevision(testCase); assertEtag(ifMatch, etag('case', testCase.id, current.revision, current.contentSha256), 'TEST_CASE_REVISION_CONFLICT')
-      const content = validateTestCaseContent(input.content, approvedPointIds(run, testCase.treeVersionId)); const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.reason, current.content); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.reviewState = 'draft'; if (testCase.origin === 'historical_unchanged') testCase.origin = 'historical_modified'; materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase, true)
+      const content = validateTestCaseContent(input.content); const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.reason, current.content); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.reviewState = 'draft'; if (testCase.origin === 'historical_unchanged') testCase.origin = 'historical_modified'; materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase, true)
     })
   }
 
@@ -428,7 +353,7 @@ export class TestDesignService {
   async findings(projectVersionId: string, designId: string, runId: string) { return structuredClone((await this.loadScopedRun(projectVersionId, designId, runId)).findings) }
   async confirmationItems(projectVersionId: string, designId: string, runId: string) { return structuredClone((await this.loadScopedRun(projectVersionId, designId, runId)).confirmationItems) }
   async actOnFinding(projectVersionId: string, designId: string, runId: string, findingId: string, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string }, principal: Principal) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const finding = required(run.findings.find(item => item.id === findingId), 'TEST_DESIGN_FINDING_NOT_FOUND', '测试设计 Finding 不存在'); applyDisposition(finding, input, principal.subjectId); invalidateAudit(run); return structuredClone(finding) }) }
-  async actOnConfirmation(projectVersionId: string, designId: string, runId: string, itemId: string, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string; structuredDecision?: unknown }, principal: Principal) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const item = required(run.confirmationItems.find(candidate => candidate.id === itemId), 'TEST_DESIGN_CONFIRMATION_NOT_FOUND', '待确认项不存在'); applyDisposition(item, input, principal.subjectId); invalidateAudit(run); const requiredAction = item.impactStage === 'tree' ? 'redesign_or_edit_test_points' : item.impactStage === 'publication' ? 're_audit' : 'resynthesize'; return { item: structuredClone(item), requiredAction } }) }
+  async actOnConfirmation(projectVersionId: string, designId: string, runId: string, itemId: string, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string; structuredDecision?: unknown }, principal: Principal) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const item = required(run.confirmationItems.find(candidate => candidate.id === itemId), 'TEST_DESIGN_CONFIRMATION_NOT_FOUND', '待确认项不存在'); applyDisposition(item, input, principal.subjectId); invalidateAudit(run); const requiredAction = item.impactStage === 'publication' ? 're_audit' : 'resynthesize'; return { item: structuredClone(item), requiredAction } }) }
 
   async listCaseChangeProposals(projectVersionId: string, designId: string, runId: string, operation?: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone((run.caseChangeProposals ?? []).filter(item => !operation || item.operation === operation)) }
 
@@ -443,7 +368,7 @@ export class TestDesignService {
       if (input.decision === 'accepted_edited') {
         const candidate = required(run.testCases.find(item => item.id === proposal.candidateCaseId), 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', 'Proposal 候选用例不存在')
         const current = currentCaseRevision(candidate)
-        const content = validateTestCaseContent(input.editedContent, approvedPointIds(run, candidate.treeVersionId))
+        const content = validateTestCaseContent(input.editedContent)
         const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.comment ?? '编辑后接受 Proposal', current.content)
         candidate.revisions.push(revision); candidate.currentRevision = revision.revision; candidate.reviewState = 'draft'
         proposal.candidateContent = structuredClone(content); proposal.diff = proposalSourceContent(run, proposal) ? structuralDiff(proposalSourceContent(run, proposal), content) : []
@@ -591,13 +516,13 @@ export class TestDesignService {
       if (audit.blockers.length) throw new TestDesignError('TEST_CASE_SET_PUBLICATION_BLOCKED', '存在发布阻断项', 409, { blockers: audit.blockers })
       if (audit.caseSetSha256 !== input.expectedCaseSetSha256) throw new TestDesignError('TEST_CASE_SET_HASH_MISMATCH', '用例集合 Hash 与审计不一致', 409)
       const currentAudit = runCoverageAudit(run)
-      if (currentAudit.inputSha256 !== audit.inputSha256 || currentAudit.caseSetSha256 !== audit.caseSetSha256) throw new TestDesignError('COVERAGE_AUDIT_STALE', '当前树、用例、数据、依据或处置状态与审计不一致', 409)
+      if (currentAudit.inputSha256 !== audit.inputSha256 || currentAudit.caseSetSha256 !== audit.caseSetSha256) throw new TestDesignError('COVERAGE_AUDIT_STALE', '当前用例、数据、依据或处置状态与审计不一致', 409)
       if (currentAudit.blockers.length) throw new TestDesignError('TEST_CASE_SET_PUBLICATION_BLOCKED', '当前状态仍存在发布阻断项', 409, { blockers: currentAudit.blockers })
-      const treeVersion = approvedTreeVersion(run); const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在')
+      const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在')
       const members = run.testCases.filter(item => !item.tombstonedAt).map((testCase, ordinal) => { const revision = currentCaseRevision(testCase); if (testCase.reviewState !== 'approved') throw new TestDesignError('TEST_CASE_REVIEW_REQUIRED', `用例 ${testCase.id} 未批准`, 409); return { caseId: testCase.id, revision: revision.revision, ordinal, contentSha256: revision.contentSha256 } })
-      const canonicalContent = { schemaVersion: 'test-case-set/v1', projectVersionId, testDesignId: designId, runId, treeVersion: { id: treeVersion.id, sha256: treeVersion.treeSha256 }, dataSetVersion: { id: dataSet.id, sha256: dataSet.contentSha256 }, coverageAudit: { id: audit.id, inputSha256: audit.inputSha256 }, cases: members.map(member => ({ ...member, content: currentCaseRevision(findCase(run, member.caseId)).content })) }
+      const canonicalContent = { schemaVersion: 'test-case-set/v1', projectVersionId, testDesignId: designId, runId, requirementReleaseId: run.basisSnapshot.requirementReleaseId, dataSetVersion: { id: dataSet.id, sha256: dataSet.contentSha256 }, coverageAudit: { id: audit.id, inputSha256: audit.inputSha256 }, cases: members.map(member => ({ ...member, content: currentCaseRevision(findCase(run, member.caseId)).content })) }
       const contentSha256 = canonicalSha256(canonicalContent); const aggregate = designState(state); const existing = aggregate.caseSetVersions.find(item => item.testDesignId === designId && item.contentSha256 === contentSha256); if (existing) return structuredClone(existing)
-      const version: TestCaseSetVersion = { id: `test_case_set_${randomUUID()}`, projectId: design.projectId, projectVersionId, testDesignId: designId, runId, version: Math.max(0, ...aggregate.caseSetVersions.filter(item => item.testDesignId === designId).map(item => item.version)) + 1, schemaVersion: 'test-case-set/v1', name: cleanRequired(input.name, '用例集名称', 200), treeVersionId: treeVersion.id, dataSetVersionId: dataSet.id, coverageAuditId: audit.id, members, canonicalContent, contentSha256, publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] } }
+      const version: TestCaseSetVersion = { id: `test_case_set_${randomUUID()}`, projectId: design.projectId, projectVersionId, testDesignId: designId, runId, version: Math.max(0, ...aggregate.caseSetVersions.filter(item => item.testDesignId === designId).map(item => item.version)) + 1, schemaVersion: 'test-case-set/v1', name: cleanRequired(input.name, '用例集名称', 200), dataSetVersionId: dataSet.id, coverageAuditId: audit.id, members, canonicalContent, contentSha256, publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] } }
       aggregate.caseSetVersions.push(version); return structuredClone(version)
     })
     if (published.projection.status === 'pending' && published.projection.files.length === 0) await this.projectCaseSet(published.id, 'upload')
@@ -730,7 +655,7 @@ export class TestDesignService {
   async smokeCandidates(versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); return structuredClone(required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在').smokeCandidates.filter(item => !item.testCaseSetVersionId || item.testCaseSetVersionId === versionId)) }
   async impactedRegression(versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); return structuredClone(required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在').impactedRegression.filter(item => !item.testCaseSetVersionId || item.testCaseSetVersionId === versionId)) }
 
-  private async executeNode(runId: string, key: Exclude<TestDesignNodeKey, 'test_point_review' | 'coverage_audit'>, signal: AbortSignal, upstream: unknown) {
+  private async executeNode(runId: string, key: 'test_case_design' | 'test_design_repair', signal: AbortSignal, upstream: unknown) {
     await this.store.transaction(state => { const run = findRunById(state, runId); const target = node(run, key); Object.assign(target, { status: 'running', attempt: target.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined, execution: undefined }); Object.assign(run, { status: 'running', stage: key, startedAt: run.startedAt ?? now(), finishedAt: undefined, error: undefined, errorCode: undefined }); if (key === 'test_design_repair' && run.automaticRepair?.status === 'queued') Object.assign(run.automaticRepair, { status: 'running', startedAt: now(), finishedAt: undefined }) })
     const run = await this.loadRun(runId); return this.runtime!.execute({ stage: key, run, upstream }, signal)
   }
@@ -739,31 +664,6 @@ export class TestDesignService {
   private async fencedNodeTransaction<T>(nodeRunId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>) { if (!this.store.transactionWithTestDesignLease) throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '当前 Store 不支持测试设计节点租约', 503); const result = await this.store.transactionWithTestDesignLease(nodeRunId, lease, operation); if (result === null) throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '测试设计节点租约已失效', 409); return result }
   private async loadRun(runId: string) { const state = await this.store.snapshot(); return structuredClone(findRunById(state, runId)) }
   private async loadScopedRun(projectVersionId: string, designId: string, runId: string) { const state = await this.store.snapshot(); return structuredClone(findRun(state, projectVersionId, designId, runId)) }
-  private async projectTreeVersion(projectVersionId: string, designId: string, runId: string, treeVersionId: string) {
-    if (!this.projector) throw new TestDesignError('TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '测试点树必须投影到正式 AssetVersion，但资产服务不可用', 503)
-    const state = await this.store.snapshot()
-    const run = findRun(state, projectVersionId, designId, runId)
-    const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
-    const base = required(state.knowledgeBases.find(item => item.projectId === projectVersion.projectId), 'TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '项目知识库不存在')
-    const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树不存在')
-    const version = required(tree.versions.find(item => item.id === treeVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树版本不存在')
-    const revision = required(tree.revisions.find(item => item.revision === version.revision), 'TEST_POINT_TREE_REVISION_NOT_FOUND', '测试点树 revision 不存在')
-    const files = testPointProjectionFiles(projectVersion.name, tree, version, revision)
-    try {
-      const projected = await this.projectWorkspaceFiles(base.id, `test-point-tree:${version.id}`, 'test_design', files, 'upload')
-      await this.store.transaction(draft => {
-        const current = findRun(draft, projectVersionId, designId, runId)
-        const target = required(current.testPointTree?.versions.find(item => item.id === version.id), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树版本不存在')
-        target.projection = { status: projected.some(item => item.pending) ? 'pending' : 'succeeded', files: projected.map(item => ({ logicalPath: item.file.logicalPath, contentSha256: item.file.contentSha256, assetVersionId: item.assetVersionId })) }
-        const paths = new Set(projected.map(item => item.file.logicalPath))
-        current.formalWorkspaceFiles = [...current.formalWorkspaceFiles.filter(item => !paths.has(item.logicalPath)), ...projected.map(item => ({ ...item.file, sourceType: 'test_point_tree_version' as const, sourceId: version.id, assetVersionId: item.assetVersionId }))]
-      })
-    } catch (error) {
-      await this.store.transaction(draft => { const target = required(findRun(draft, projectVersionId, designId, runId).testPointTree?.versions.find(item => item.id === version.id), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树版本不存在'); target.projection = { status: 'failed', files: [], error: String(error instanceof Error ? error.message : error).slice(0, 2_000) } })
-      throw error
-    }
-  }
-
   private async projectCaseSet(versionId: string, trigger: 'upload' | 'retry') {
     if (!this.projector) throw new TestDesignError('TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '用例集必须投影到正式 AssetVersion，但资产服务不可用', 503)
     const state = await this.store.snapshot()
@@ -813,23 +713,15 @@ export class TestDesignService {
 
 function workflowNodes(runId: string): WorkflowNodeRun[] {
   const definition: Array<[TestDesignNodeKey, TestDesignNodeKey[]]> = [
-    ['test_point_design', []],
-    ['test_point_review', ['test_point_design']],
-    ['test_case_design', ['test_point_review']],
+    ['test_case_design', []],
     ['coverage_audit', ['test_case_design']],
     ['test_design_repair', ['coverage_audit']],
   ]
-  return definition.map(([nodeKey, dependencies]) => ({ id: `${runId}:${nodeKey}:g1:a0`, nodeKey, generation: 1, attempt: 0, status: nodeKey === 'test_point_design' ? 'queued' : 'pending', dependencies }))
-}
-
-function pointDesignInput(run: TestDesignWorkflowRun) {
-  return { workspaceSnapshotSha256: run.workspaceSnapshot.snapshotSha256, requirementReleaseId: run.workspaceSnapshot.requirementReleaseId, requirementsJsonSha256: run.workspaceSnapshot.requirementsJsonSha256 }
+  return definition.map(([nodeKey, dependencies]) => ({ id: `${runId}:${nodeKey}:g1:a0`, nodeKey, generation: 1, attempt: 0, status: nodeKey === 'test_case_design' ? 'queued' : 'pending', dependencies }))
 }
 
 function caseDesignInput(run: TestDesignWorkflowRun) {
-  const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在')
-  const treeVersion = required(tree.versions.find(item => item.id === tree.currentApprovedVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树尚未通过自动校验并固化')
-  return { treeVersionId: treeVersion.id, treeSha256: treeVersion.treeSha256, projectionFiles: treeVersion.projection.files }
+  return { workspaceSnapshotSha256: run.workspaceSnapshot.snapshotSha256, requirementReleaseId: run.workspaceSnapshot.requirementReleaseId, requirementsJsonSha256: run.workspaceSnapshot.requirementsJsonSha256 }
 }
 
 function repairInput(run: TestDesignWorkflowRun) {
@@ -841,7 +733,7 @@ function repairInput(run: TestDesignWorkflowRun) {
 function materializeDesignIssues(run: TestDesignWorkflowRun, raw: unknown) {
   const value = raw && typeof raw === 'object' ? raw as { findings?: unknown[]; confirmationItems?: unknown[] } : {}
   const findings = (Array.isArray(value.findings) ? value.findings : []).slice(0, 500).map((candidate, index) => { const item = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {}; return { id: `test_design_finding_${randomUUID()}`, title: cleanRequired(String(item.title ?? `Finding ${index + 1}`), 'Finding 标题', 500), description: String(item.description ?? '').slice(0, 8_000), severity: ['blocker', 'high', 'medium', 'low'].includes(String(item.severity)) ? item.severity as 'blocker' | 'high' | 'medium' | 'low' : 'medium', basisRefs: Array.isArray(item.basisRefs) ? item.basisRefs.map(String) : [], state: 'open' as const, actions: [] } })
-  const confirmations = (Array.isArray(value.confirmationItems) ? value.confirmationItems : []).slice(0, 500).map((candidate, index) => { const item = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {}; return { id: `test_design_confirmation_${randomUUID()}`, title: cleanRequired(String(item.title ?? `待确认项 ${index + 1}`), '待确认项标题', 500), question: String(item.question ?? '').slice(0, 8_000), decisionType: String(item.decisionType ?? 'other').slice(0, 200), impactStage: ['tree', 'case', 'data', 'publication'].includes(String(item.impactStage)) ? item.impactStage as 'tree' | 'case' | 'data' | 'publication' : 'publication', affectedRefs: Array.isArray(item.affectedRefs) ? item.affectedRefs.map(String) : [], blocker: item.blocker === true, state: 'open' as const, actions: [] } })
+  const confirmations = (Array.isArray(value.confirmationItems) ? value.confirmationItems : []).slice(0, 500).map((candidate, index) => { const item = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {}; return { id: `test_design_confirmation_${randomUUID()}`, title: cleanRequired(String(item.title ?? `待确认项 ${index + 1}`), '待确认项标题', 500), question: String(item.question ?? '').slice(0, 8_000), decisionType: String(item.decisionType ?? 'other').slice(0, 200), impactStage: ['case', 'data', 'publication'].includes(String(item.impactStage)) ? item.impactStage as 'case' | 'data' | 'publication' : 'publication', affectedRefs: Array.isArray(item.affectedRefs) ? item.affectedRefs.map(String) : [], blocker: item.blocker === true, state: 'open' as const, actions: [] } })
   for (const finding of findings) if (!run.findings.some(item => item.title === finding.title && item.description === finding.description)) run.findings.push(finding)
   for (const confirmation of confirmations) if (!run.confirmationItems.some(item => item.title === confirmation.title && item.question === confirmation.question)) run.confirmationItems.push(confirmation)
 }
@@ -1083,63 +975,8 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
-function materializeTestPointDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string) {
-  const value = validateTestPointDesignCandidate(raw)
-  const idByRef = new Map(value.nodes.map(candidate => [candidate.ref, `test_point_${randomUUID()}`]))
-  const nodes: TestPointNodeRevision[] = value.nodes.map((candidate, index) => ({
-    nodeId: idByRef.get(candidate.ref)!,
-    parentId: candidate.parentRef ? required(idByRef.get(candidate.parentRef), 'TEST_POINT_PARENT_REFERENCE_INVALID', '测试点父引用无效') : null,
-    sortKey: `${String(index + 1).padStart(6, '0')}:${candidate.ref}`,
-    title: candidate.title,
-    objective: candidate.objective,
-    dimension: candidate.dimension,
-    priority: candidate.priority,
-    applicability: candidate.applicability,
-    designTechniques: candidate.designTechniques,
-    entryMethods: candidate.entryMethods,
-    oracle: candidate.oracle,
-    dataConditions: candidate.dataConditions,
-    risks: candidate.risks,
-    assumptions: candidate.assumptions,
-    basisRefs: candidate.basisRefs,
-    historicalRefs: candidate.historicalRefs,
-  }))
-  validateTreeReferences(run, nodes)
-  const treeSha256 = validateTreeNodes(nodes)
-  run.testPointTree = { id: `test_point_tree_${randomUUID()}`, runId: run.id, currentRevision: 0, revisions: [{ revision: 0, parentRevision: null, nodes, operations: [], reason: 'PlanningAgent 测试点候选', actorId, treeSha256, createdAt: now() }], versions: [] }
-}
-
-function normalizeTreeBasisReferences(run: TestDesignWorkflowRun, nodes: TestPointNodeRevision[]) {
-  const canonicalByRequirementPointId = new Map<string, string | null>()
-  for (const item of run.basisSnapshot.items) {
-    if (item.kind !== 'requirement_release') continue
-    const requirementPointId = item.locator?.requirementPointId
-    if (typeof requirementPointId !== 'string' || !requirementPointId) continue
-    const existing = canonicalByRequirementPointId.get(requirementPointId)
-    canonicalByRequirementPointId.set(requirementPointId, existing === undefined || existing === item.id ? item.id : null)
-  }
-  for (const node of nodes) {
-    node.basisRefs = node.basisRefs.map(reference => {
-      const canonical = canonicalByRequirementPointId.get(reference)
-      return typeof canonical === 'string' ? canonical : reference
-    })
-  }
-}
-
-function validateTreeReferences(run: TestDesignWorkflowRun, nodes: TestPointNodeRevision[]) {
-  normalizeTreeBasisReferences(run, nodes)
-  const allowedBasis = new Set([...run.basisSnapshot.items.map(item => item.id), ...run.retrievalSnapshot.hits.map(item => item.id)])
-  const allowedHistorical = new Set(run.historicalSnapshot.items.map(item => item.id))
-  for (const node of nodes.filter(item => !item.deleted)) {
-    const invalidBasis = node.basisRefs.filter(reference => !allowedBasis.has(reference))
-    if (invalidBasis.length) throw new TestDesignError('TEST_POINT_BASIS_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定输入之外的依据`, 422, { nodeId: node.nodeId, invalidRefs: invalidBasis })
-    const invalidHistorical = node.historicalRefs.filter(reference => !allowedHistorical.has(reference))
-    if (invalidHistorical.length) throw new TestDesignError('TEST_POINT_HISTORICAL_REFERENCE_INVALID', `测试点 ${node.title} 引用了固定快照之外的历史用例`, 422, { nodeId: node.nodeId, invalidRefs: invalidHistorical })
-  }
-}
 function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean) {
-  const treeVersion = approvedTreeVersion(run)
-  const value = validateTestCaseDesignCandidate(raw, approvedPointIds(run, treeVersion.id), repair)
+  const value = validateTestCaseDesignCandidate(raw, repair)
   const existingByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
   const idByRef = new Map(value.cases.map(candidate => [candidate.ref, existingByRef.get(candidate.ref)?.id ?? `test_case_${randomUUID()}`]))
   const dataIdByRef = new Map(value.dataRequirements.map(candidate => [candidate.ref, `test_data_${randomUUID()}`]))
@@ -1161,7 +998,7 @@ function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId
     }
     const semanticSha256 = canonicalSha256({ ...content, tags: [...content.tags].sort() })
     const historical = run.historicalSnapshot.items.find(item => item.contentSha256 === semanticSha256)
-    const testCase = newCase(run.id, treeVersion.id, content, historical ? 'historical_unchanged' : 'ai', actorId, historical ? '固定历史用例原样复用' : 'PlanningAgent 候选', idByRef.get(candidate.ref)!)
+    const testCase = newCase(run.id, content, historical ? 'historical_unchanged' : 'ai', actorId, historical ? '固定历史用例原样复用' : 'PlanningAgent 候选', idByRef.get(candidate.ref)!)
     testCase.candidateRef = candidate.ref
     if (historical) testCase.historicalSourceRef = historical.id
     return testCase
@@ -1169,7 +1006,7 @@ function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId
   if (repair) for (const removed of run.testCases.filter(item => item.candidateRef && !idByRef.has(item.candidateRef))) removed.tombstonedAt = now()
   run.testCases = repair ? [...run.testCases.filter(item => !item.candidateRef), ...nextCases] : nextCases
   const requirements: TestDataRequirement[] = value.dataRequirements.map(candidate => ({
-    id: dataIdByRef.get(candidate.ref)!, name: candidate.name, entityType: candidate.entityType, featureTags: candidate.featureTags, testPointIds: candidate.testPointIds,
+    id: dataIdByRef.get(candidate.ref)!, name: candidate.name, entityType: candidate.entityType, featureTags: candidate.featureTags, requirementRefs: candidate.requirementRefs,
     caseIds: candidate.caseRefs.map(reference => required(idByRef.get(reference), 'TEST_DATA_REQUIREMENT_CASE_INVALID', `数据需求引用的用例 ref ${reference} 无效`)),
     fieldConstraints: candidate.fieldConstraints, relationships: candidate.relationships, quantity: candidate.quantity, initialState: candidate.initialState, preparationHint: candidate.preparationHint, sensitivity: candidate.sensitivity, isolation: candidate.isolation, resetAndCleanup: candidate.resetAndCleanup, readiness: candidate.readiness, ...(candidate.readinessReason ? { readinessReason: candidate.readinessReason } : {}),
   }))
@@ -1191,8 +1028,8 @@ function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestC
     const historical = run.historicalSnapshot.items.find(item => item.contentSha256 === revision.semanticSha256)
     const locator = historical?.locator as { caseId?: string; revision?: number } | undefined
     return historical && locator?.caseId && locator.revision !== undefined
-      ? { operation: 'reuse' as const, sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: testCase.candidateRef, requirementRefs: requirementRefsForCase(run, revision.content), testPointIds: revision.content.testPointIds, reason: '与冻结历史 Revision 语义一致，优先复用', confidence: 1 }
-      : { operation: 'create' as const, candidateRef: testCase.candidateRef, requirementRefs: requirementRefsForCase(run, revision.content), testPointIds: revision.content.testPointIds, reason: '冻结历史用例无法覆盖该测试点', confidence: 0.8 }
+      ? { operation: 'reuse' as const, sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: testCase.candidateRef, requirementRefs: requirementRefsForCase(run, revision.content), reason: '与冻结历史 Revision 语义一致，优先复用', confidence: 1 }
+      : { operation: 'create' as const, candidateRef: testCase.candidateRef, requirementRefs: requirementRefsForCase(run, revision.content), reason: '冻结历史用例无法覆盖该 Requirement', confidence: 0.8 }
   })
   const existing = new Map(run.caseChangeProposals.map(item => [proposalIdentity(item.operation, item.sourceCaseId, item.sourceRevision, cases.find(candidate => candidate.id === item.candidateCaseId)?.candidateRef), item]))
   run.caseChangeProposals = candidates.map(candidate => {
@@ -1211,7 +1048,6 @@ function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestC
       ...(testCase ? { candidateCaseId: testCase.id, candidateContent: structuredClone(content) } : {}),
       diff: source && content ? structuralDiff(source.content, content) : [],
       requirementRefs: candidate.requirementRefs,
-      testPointIds: candidate.testPointIds,
       reason: candidate.reason,
       confidence: candidate.confidence,
       decision: retained?.decision ?? 'pending',
@@ -1233,11 +1069,11 @@ function materializeExecutionConfirmations(run: TestDesignWorkflowRun, cases: Te
     if (!missing) continue
     const title = `${revision.content.title}：确认${missing}`
     if (run.confirmationItems.some(item => item.title === title)) continue
-    run.confirmationItems.push({ id: `test_design_confirmation_${randomUUID()}`, title, question: `需求或项目配置未提供${missing}，请人工确认后再发布。`, decisionType: spec?.kind ?? revision.content.dimension, impactStage: 'publication', affectedRefs: [testCase.id, ...revision.content.testPointIds], blocker: true, state: 'open', actions: [] })
+    run.confirmationItems.push({ id: `test_design_confirmation_${randomUUID()}`, title, question: `需求或项目配置未提供${missing}，请人工确认后再发布。`, decisionType: spec?.kind ?? revision.content.dimension, impactStage: 'publication', affectedRefs: [testCase.id, ...(revision.content.requirementRefs ?? [])], blocker: true, state: 'open', actions: [] })
   }
 }
 
-function requirementRefsForCase(run: TestDesignWorkflowRun, content: TestCaseContent) { const pointIds = new Set(content.testPointIds); const revision = run.testPointTree?.revisions.find(item => item.revision === run.testPointTree?.versions.find(version => version.id === run.testPointTree?.currentApprovedVersionId)?.revision); return [...new Set(revision?.nodes.filter(item => pointIds.has(item.nodeId)).flatMap(item => item.basisRefs) ?? [])] }
+function requirementRefsForCase(_run: TestDesignWorkflowRun, content: TestCaseContent) { return [...new Set(content.requirementRefs ?? [])] }
 function proposalIdentity(operation: string, sourceCaseId?: string, sourceRevision?: number, candidateRef?: string) { return `${operation}:${sourceCaseId ?? ''}:${sourceRevision ?? ''}:${candidateRef ?? ''}` }
 
 function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean) {
@@ -1282,23 +1118,8 @@ function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, ac
   Object.assign(run, { status: 'succeeded', stage: 'completed', progress: 100, finishedAt: now(), error: undefined, errorCode: undefined })
   return false
 }
-function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); const version = approvedTreeVersion(run); const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在'); return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, tree, treeVersion: version, cases: run.testCases, dataSet, findings: run.findings, confirmationItems: run.confirmationItems }) }
+function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在'); return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: run.testCases, dataSet, findings: run.findings, confirmationItems: run.confirmationItems }) }
 function initialAutomaticRepairState(): NonNullable<TestDesignWorkflowRun['automaticRepair']> { return { status: 'idle', attempt: 0, maxAttempts: AUTOMATIC_REPAIR_MAX_ATTEMPTS, blockerCodes: [] } }
-
-function testPointProjectionFiles(projectVersionName: string, tree: NonNullable<TestDesignWorkflowRun['testPointTree']>, version: NonNullable<TestDesignWorkflowRun['testPointTree']>['versions'][number], revision: TestPointTreeRevision): TestDesignWorkspaceFile[] {
-  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test-design`
-  const canonicalContent = { schemaVersion: 'test-point-tree/v1', treeId: tree.id, runId: tree.runId, version: version.version, versionId: version.id, revision: revision.revision, treeSha256: revision.treeSha256, nodes: revision.nodes }
-  const json = `${canonicalJson(canonicalContent)}\n`
-  const markdown = [
-    '# 测试点设计', '',
-    `- TestPointTreeVersion: ${version.id}`, `- Version: ${version.version}`, `- Revision: ${revision.revision}`, `- SHA-256: ${revision.treeSha256}`, '',
-    ...revision.nodes.filter(item => !item.deleted).flatMap(item => [`${item.parentId ? '###' : '##'} ${item.title}`, '', item.objective, '', `- TP ID: ${item.nodeId}`, `- Dimension: ${item.dimension}`, `- Priority: ${item.priority}`, `- Applicability: ${item.applicability}`, `- Entry: ${item.entryMethods.join(', ') || 'N/A'}`, `- Basis: ${item.basisRefs.join(', ')}`, `- Oracle: ${item.oracle}`, '']),
-  ].join('\n')
-  return [
-    formalWorkspaceFile(`${directory}/test-point-tree.json`, 'test_point_tree_version', version.id, json),
-    formalWorkspaceFile(`${directory}/test-design.md`, 'test_point_tree_version', version.id, markdown),
-  ]
-}
 
 function testCaseProjectionFiles(projectVersionName: string, version: TestCaseSetVersion, dataSet: TestDataRequirementSetVersion): TestDesignWorkspaceFile[] {
   const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test-cases`
@@ -1314,7 +1135,7 @@ function testCaseProjectionFiles(projectVersionName: string, version: TestCaseSe
   return [...baseFiles, formalWorkspaceFile(`${directory}/manifest.json`, 'test_case_set_version', version.id, manifestContent)]
 }
 
-function formalWorkspaceFile(logicalPath: string, sourceType: 'test_point_tree_version' | 'test_case_set_version', sourceId: string, content: string): TestDesignWorkspaceFile {
+function formalWorkspaceFile(logicalPath: string, sourceType: 'test_case_set_version', sourceId: string, content: string): TestDesignWorkspaceFile {
   return { logicalPath, sourceType, sourceId, contentSha256: canonicalSha256Text(content), content, displayName: logicalPath.split('/').at(-1) ?? logicalPath, sourceScope: 'formal_output' }
 }
 
@@ -1322,9 +1143,9 @@ function normalizeWorkspacePath(value: string) { return value.replaceAll('\\', '
 function isWithinWorkspace(value: string) { const normalized = normalizeWorkspacePath(value); return normalized === 'workspace' || normalized.startsWith('workspace/') }
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 
-function validateDataRequirements(run: TestDesignWorkflowRun, requirements: TestDataRequirement[]) { const caseIds = new Set(run.testCases.filter(item => !item.tombstonedAt).map(item => item.id)); const pointIds = approvedPointIds(run, approvedTreeVersion(run).id); const ids = new Set<string>(); return requirements.map(requirement => { if (!requirement.id || ids.has(requirement.id)) throw new TestDesignError('TEST_DATA_REQUIREMENT_SCHEMA_INVALID', '数据需求 ID 缺失或重复', 422); ids.add(requirement.id); if (!requirement.name?.trim() || !requirement.entityType?.trim() || !Number.isInteger(requirement.quantity) || requirement.quantity < 1) throw new TestDesignError('TEST_DATA_REQUIREMENT_SCHEMA_INVALID', '数据需求基础字段无效', 422); if (requirement.caseIds.some(id => !caseIds.has(id)) || requirement.testPointIds.some(id => !pointIds.has(id))) throw new TestDesignError('TEST_DATA_REQUIREMENT_REFERENCE_INVALID', '数据需求引用不属于当前运行', 422); const serialized = canonicalJson(requirement); if (/(api[_ -]?key|authorization|cookie|token|身份证|真实账号)\s*[:=]\s*[^<\s]/iu.test(serialized)) throw new TestDesignError('TEST_DATA_REQUIREMENT_SECRET_FORBIDDEN', '数据需求不能包含真实凭据或个人敏感数据', 422); return structuredClone(requirement) }) }
+function validateDataRequirements(run: TestDesignWorkflowRun, requirements: TestDataRequirement[]) { const caseIds = new Set(run.testCases.filter(item => !item.tombstonedAt).map(item => item.id)); const ids = new Set<string>(); return requirements.map(requirement => { if (!requirement.id || ids.has(requirement.id)) throw new TestDesignError('TEST_DATA_REQUIREMENT_SCHEMA_INVALID', '数据需求 ID 缺失或重复', 422); ids.add(requirement.id); if (!requirement.name?.trim() || !requirement.entityType?.trim() || !Number.isInteger(requirement.quantity) || requirement.quantity < 1) throw new TestDesignError('TEST_DATA_REQUIREMENT_SCHEMA_INVALID', '数据需求基础字段无效', 422); if (requirement.caseIds.some(id => !caseIds.has(id))) throw new TestDesignError('TEST_DATA_REQUIREMENT_REFERENCE_INVALID', '数据需求引用不属于当前运行', 422); const serialized = canonicalJson(requirement); if (/(api[_ -]?key|authorization|cookie|token|身份证|真实账号)\s*[:=]\s*[^<\s]/iu.test(serialized)) throw new TestDesignError('TEST_DATA_REQUIREMENT_SECRET_FORBIDDEN', '数据需求不能包含真实凭据或个人敏感数据', 422); return structuredClone(requirement) }) }
 function dataSetVersion(version: number, requirements: TestDataRequirement[], actorId: string): TestDataRequirementSetVersion { return { id: `test_data_set_${randomUUID()}`, version, requirements: structuredClone(requirements), contentSha256: canonicalSha256(requirements), createdBy: actorId, createdAt: now() } }
-function newCase(runId: string, treeVersionId: string, content: TestCaseContent, origin: TestCase['origin'], actorId: string, reason: string, id = `test_case_${randomUUID()}`): TestCase { const revision = createCaseRevision(0, content, actorId, reason); return { id, runId, treeVersionId, origin, currentRevision: 0, reviewState: 'draft', revisions: [revision], reviewActions: [] } }
+function newCase(runId: string, content: TestCaseContent, origin: TestCase['origin'], actorId: string, reason: string, id = `test_case_${randomUUID()}`): TestCase { const revision = createCaseRevision(0, content, actorId, reason); return { id, runId, origin, currentRevision: 0, reviewState: 'draft', revisions: [revision], reviewActions: [] } }
 function createCaseRevision(revision: number, content: TestCaseContent, actorId: string, reason: string, previous?: TestCaseContent) { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: canonicalSha256({ ...content, tags: [...content.tags].sort() }), diff: previous ? structuralDiff(previous, content) : [], editorId: actorId, reason: cleanRequired(reason, '保存说明', 2_000), createdAt: now() } }
 function createLibraryRevision(revision: number, content: TestCaseContent, actorId: string, changeReason: string, sourceRunId?: string, sourceProposalId?: string, traceability?: TestCaseTraceability): LibraryTestCaseRevision { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: canonicalSha256({ ...content, tags: [...content.tags].sort() }), ...(sourceRunId ? { sourceRunId } : {}), ...(sourceProposalId ? { sourceProposalId } : {}), ...(traceability ? { traceability: structuredClone(traceability) } : {}), changeReason, createdBy: actorId, createdAt: now() } }
 function currentLibraryRevision(testCase: LibraryTestCase) { return required(testCase.revisions.find(item => item.revision === testCase.currentRevision), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '正式用例当前 Revision 不存在') }
@@ -1369,21 +1190,19 @@ function presentLibraryVersion(aggregate: TestDesignState, version: TestCaseLibr
   })
   return structuredClone({ ...version, members }) as TestCaseLibraryVersionDetail
 }
-function traceabilityRelevantContentChanged(before: TestCaseContent, after: TestCaseContent) { return canonicalSha256({ testPointIds: before.testPointIds, dataRequirementIds: before.dataRequirementIds, dimension: before.dimension, objective: before.objective }) !== canonicalSha256({ testPointIds: after.testPointIds, dataRequirementIds: after.dataRequirementIds, dimension: after.dimension, objective: after.objective }) }
+function traceabilityRelevantContentChanged(before: TestCaseContent, after: TestCaseContent) { return canonicalSha256({ requirementRefs: before.requirementRefs, dataRequirementIds: before.dataRequirementIds, dimension: before.dimension, objective: before.objective }) !== canonicalSha256({ requirementRefs: after.requirementRefs, dataRequirementIds: after.dataRequirementIds, dimension: after.dimension, objective: after.objective }) }
 function dynamicTraceabilityReference(value: string) { return /^(?:latest|active|current)(?:$|[:/@_-])/iu.test(value) }
 function assertTraceabilityMatchesContent(content: TestCaseContent, traceability: TestCaseTraceability) {
-  const pointIds = traceability.testPointRefs.map(item => item.testPointId)
-  if (new Set(pointIds).size !== pointIds.length || canonicalSha256([...new Set(pointIds)].sort()) !== canonicalSha256([...new Set(content.testPointIds)].sort())) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 'traceability.testPointRefs 必须与用例 testPointIds 完全一致且不得重复', 422, { testPointIds: content.testPointIds, traceabilityTestPointIds: pointIds })
   if (!traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(traceability.sourceRequirementReleaseId) || !traceability.requirementRefs.length || traceability.requirementRefs.some(item => item.requirementReleaseId !== traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(item.requirementReleaseId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 'requirementRefs 必须引用同一个固定 Requirement Release ID，禁止 latest、active、current 等动态引用', 422)
-  if (traceability.testPointRefs.some(item => dynamicTraceabilityReference(item.testPointTreeVersionId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 'TestPointTreeVersion 必须是固定版本 ID', 422)
+  const contentRefs = new Set(content.requirementRefs)
+  if (contentRefs.size !== traceability.requirementRefs.length || traceability.requirementRefs.some(item => !contentRefs.has(item.requirementId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', '测试用例 Requirement 引用必须与正式追溯一致', 422)
 }
 function validateLibraryTraceability(state: DatabaseState, projectId: string, content: TestCaseContent, value: unknown): TestCaseTraceability {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 'traceability 必须是对象', 422)
   const input = value as Record<string, unknown>
   const sourceRequirementReleaseId = cleanRequired(input.sourceRequirementReleaseId, 'traceability.sourceRequirementReleaseId', 500)
   const requirementRefs = Array.isArray(input.requirementRefs) ? input.requirementRefs.map((candidate, index) => { if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', `traceability.requirementRefs[${index}] 无效`, 422); const item = candidate as Record<string, unknown>; return { requirementReleaseId: cleanRequired(item.requirementReleaseId, `traceability.requirementRefs[${index}].requirementReleaseId`, 500), requirementId: cleanRequired(item.requirementId, `traceability.requirementRefs[${index}].requirementId`, 500) } }) : []
-  const testPointRefs = Array.isArray(input.testPointRefs) ? input.testPointRefs.map((candidate, index) => { if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', `traceability.testPointRefs[${index}] 无效`, 422); const item = candidate as Record<string, unknown>; return { testPointTreeVersionId: cleanRequired(item.testPointTreeVersionId, `traceability.testPointRefs[${index}].testPointTreeVersionId`, 500), testPointId: cleanRequired(item.testPointId, `traceability.testPointRefs[${index}].testPointId`, 500) } }) : []
-  const traceability = { sourceRequirementReleaseId, requirementRefs, testPointRefs }
+  const traceability = { sourceRequirementReleaseId, requirementRefs }
   const duplicateRequirementRefs = new Set(requirementRefs.map(item => `${item.requirementReleaseId}\u0000${item.requirementId}`)).size !== requirementRefs.length
   if (duplicateRequirementRefs) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', '同一 Requirement 引用不得重复', 422)
   const fixedReleaseExists = state.reviewRuns.some(run => run.workflow?.release?.id === sourceRequirementReleaseId && run.workflow.release.status === 'published' && state.projectVersions.some(version => version.id === run.projectVersionId && version.projectId === projectId))
@@ -1396,22 +1215,19 @@ function proposalSourceContent(run: TestDesignWorkflowRun, proposal: CaseChangeP
 function validateProposalDecision(proposal: CaseChangeProposal, decision: Exclude<CaseChangeDecision, 'pending'>) { const allowed: Record<CaseChangeProposal['operation'], Array<Exclude<CaseChangeDecision, 'pending'>>> = { reuse: ['accepted', 'accepted_edited', 'rejected', 'keep_original', 'reference'], update: ['accepted', 'accepted_edited', 'rejected', 'keep_original', 'reference'], create: ['accepted', 'accepted_edited', 'rejected', 'reference'], deprecate: ['deprecated', 'rejected', 'keep_original', 'reference'], reference: ['reference', 'rejected'] }; if (!allowed[proposal.operation].includes(decision)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_INVALID', `${proposal.operation} 不允许决策 ${decision}`, 422) }
 function traceabilityForProposal(run: TestDesignWorkflowRun, proposal: CaseChangeProposal, content: TestCaseContent): TestCaseTraceability {
   const releaseId = run.basisSnapshot.requirementReleaseId
-  const referencedBasis = new Set([...proposal.requirementRefs, ...requirementRefsForCase(run, content)])
+  const referencedBasis = new Set([...(proposal.requirementRefs ?? []), ...requirementRefsForCase(run, content)])
   const requirementRefs = run.basisSnapshot.items.flatMap(item => {
     const locator = item.locator as { requirementReleaseId?: unknown; requirementPointId?: unknown } | undefined
     if (item.kind !== 'requirement_release' || (!referencedBasis.has(item.id) && !referencedBasis.has(String(locator?.requirementPointId ?? '')))) return []
     const requirementId = String(locator?.requirementPointId ?? '').trim()
     return requirementId ? [{ requirementReleaseId: releaseId, requirementId }] : []
   })
-  const treeVersionId = approvedTreeVersion(run).id
   return {
     sourceRequirementReleaseId: releaseId,
     requirementRefs: [...new Map(requirementRefs.map(item => [`${item.requirementReleaseId}:${item.requirementId}`, item])).values()],
-    testPointRefs: [...new Set(content.testPointIds)].map(testPointId => ({ testPointTreeVersionId: treeVersionId, testPointId })),
   }
 }
 function assertLibraryPublicationGates(aggregate: TestDesignState, projectId: string, run: TestDesignWorkflowRun) {
-  approvedTreeVersion(run)
   const unreviewed = run.testCases.filter(item => !item.tombstonedAt && item.reviewState !== 'approved')
   if (unreviewed.length) throw new TestDesignError('TEST_CASE_REVIEW_REQUIRED', '所有候选用例必须完成人工审核', 409, { caseIds: unreviewed.map(item => item.id) })
   const pendingProposals = run.caseChangeProposals.filter(item => item.decision === 'pending')
@@ -1499,7 +1315,7 @@ function normalizeLegacyCaseContent(value: unknown): TestCaseContent {
     title: typeof input.title === 'string' && input.title.trim() ? input.title : '历史测试用例',
     objective: typeof input.objective === 'string' && input.objective.trim() ? input.objective : '历史用例未提供测试目标，等待人工补充',
     dimension,
-    testPointIds: Array.isArray(input.testPointIds) && input.testPointIds.length ? input.testPointIds : ['legacy-untraced'],
+    requirementRefs: Array.isArray(input.requirementRefs) ? input.requirementRefs : [],
     priority: ['P0', 'P1', 'P2', 'P3'].includes(String(input.priority)) ? input.priority : 'P2',
     preconditions: Array.isArray(input.preconditions) ? input.preconditions : [],
     dataRequirementIds: Array.isArray(input.dataRequirementIds) ? input.dataRequirementIds : [],
@@ -1585,9 +1401,7 @@ function libraryProjectionFiles(projectVersionName: string, version: TestCaseLib
   const markdown = [`# ${version.name}`, '', `- Library Version: ${version.version}`, `- Version ID: ${version.id}`, `- SHA-256: ${version.contentSha256}`, '', ...entries.flatMap(item => {
     const trace = item.traceability
     const requirementIds = trace?.requirementRefs.map(reference => reference.requirementId) ?? []
-    const treeVersions = trace ? [...new Set(trace.testPointRefs.map(reference => reference.testPointTreeVersionId))] : []
-    const pointIds = trace?.testPointRefs.map(reference => reference.testPointId) ?? []
-    return [`## ${item.caseId} r${item.revision} · ${item.content.title}`, '', item.content.objective, '', `- Case ID: ${item.caseId}`, `- Revision: r${item.revision}`, `- Content SHA-256: ${item.contentSha256}`, `- Dimension: ${item.content.dimension}`, `- Priority: ${item.content.priority}`, `- Execution Method: ${executionMethodForContent(item.content)}`, `- Execution Readiness: ${item.executionReadiness}`, `- Execution Spec: ${item.content.executionSpec ? canonicalJson(item.content.executionSpec) : '未配置'}`, `- Requirement Release: ${trace?.sourceRequirementReleaseId ?? '历史数据未建立正式追溯'}`, `- Requirement ID: ${requirementIds.length ? requirementIds.join(', ') : '历史数据未建立正式追溯'}`, `- TestPointTreeVersion: ${treeVersions.length ? treeVersions.join(', ') : '历史数据未建立正式追溯'}`, `- TestPoint ID: ${pointIds.length ? pointIds.join(', ') : '历史数据未建立正式追溯'}`, '']
+    return [`## ${item.caseId} r${item.revision} · ${item.content.title}`, '', item.content.objective, '', `- Case ID: ${item.caseId}`, `- Revision: r${item.revision}`, `- Content SHA-256: ${item.contentSha256}`, `- Dimension: ${item.content.dimension}`, `- Priority: ${item.content.priority}`, `- Execution Method: ${executionMethodForContent(item.content)}`, `- Execution Readiness: ${item.executionReadiness}`, `- Execution Spec: ${item.content.executionSpec ? canonicalJson(item.content.executionSpec) : '未配置'}`, `- Requirement Release: ${trace?.sourceRequirementReleaseId ?? '历史数据未建立正式追溯'}`, `- Requirement ID: ${requirementIds.length ? requirementIds.join(', ') : '历史数据未建立正式追溯'}`, '']
   })].join('\n')
   const manifestBody = { schemaVersion: 'test-case-library-manifest/v2', versionId: version.id, contentSha256: version.contentSha256, members: entries.map(item => ({ caseId: item.caseId, revision: item.revision, contentSha256: item.contentSha256, ...(item.content.executionSpec ? { executionSpec: item.content.executionSpec } : {}), executionReadiness: item.executionReadiness, ...(item.traceability ? { traceability: item.traceability } : { traceabilityStatus: '历史数据未建立正式追溯' }) })), files: [{ name: 'test-cases.json', sha256: canonicalSha256Text(json) }, { name: 'test-cases.md', sha256: canonicalSha256Text(markdown) }] }
   const manifest = `${canonicalJson(manifestBody)}\n`
@@ -1601,37 +1415,6 @@ function structuralDiff(before: unknown, after: unknown, path = ''): Array<{ pat
   const right = after as Record<string, unknown>
   return [...new Set([...Object.keys(left), ...Object.keys(right)])].sort().flatMap(key => structuralDiff(left[key], right[key], `${path}/${key}`))
 }
-function applyTreeOperations(current: TestPointNodeRevision[], operations: TestPointTreeOperation[]) { const nodes = structuredClone(current); const active = (id: string) => required(nodes.find(item => item.nodeId === id && !item.deleted), 'TEST_POINT_NOT_FOUND', `测试点 ${id} 不存在`); for (const operation of operations) { if (operation.op === 'add') { if (operation.parentId) active(operation.parentId); nodes.push({ nodeId: `test_point_${randomUUID()}`, parentId: operation.parentId, sortKey: cleanRequired(operation.sortKey, 'sortKey', 200), ...structuredClone(operation.value) }) } else if (operation.op === 'rename') active(operation.nodeId).title = cleanRequired(operation.title, 'title', 500); else if (operation.op === 'update') Object.assign(active(operation.nodeId), structuredClone(operation.patch), { nodeId: operation.nodeId }); else if (operation.op === 'move') { const node = active(operation.nodeId); if (operation.parentId) active(operation.parentId); node.parentId = operation.parentId; node.sortKey = cleanRequired(operation.sortKey, 'sortKey', 200) } else if (operation.op === 'delete') { const target = active(operation.nodeId); target.deleted = true; nodes.filter(item => item.parentId === target.nodeId && !item.deleted).forEach(item => { item.parentId = target.parentId }) } else if (operation.op === 'mark_not_applicable') { const target = active(operation.nodeId); target.applicability = 'not_applicable'; target.assumptions = [...target.assumptions, cleanRequired(operation.reason, 'reason', 2_000)] } else if (operation.op === 'reorder') active(operation.nodeId).sortKey = cleanRequired(operation.sortKey, 'sortKey', 200); else if (operation.op === 'split') { const target = active(operation.nodeId); operation.children.forEach(child => nodes.push({ nodeId: `test_point_${randomUUID()}`, parentId: target.parentId, sortKey: child.sortKey, ...structuredClone(child.value) })); target.deleted = true } else if (operation.op === 'merge') { const target = active(operation.targetNodeId); operation.sourceNodeIds.filter(id => id !== target.nodeId).forEach(id => { active(id).deleted = true }); Object.assign(target, structuredClone(operation.value), { nodeId: target.nodeId }) } } validateTreeNodes(nodes); return nodes }
-function approveCurrentTree(run: TestDesignWorkflowRun, actorId: string) { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); const revision = tree.revisions.find(item => item.revision === tree.currentRevision)!; const existing = tree.versions.find(item => item.revision === revision.revision && item.treeSha256 === revision.treeSha256); if (existing) { tree.currentApprovedVersionId = existing.id; return existing } const version = { id: `test_point_tree_version_${randomUUID()}`, version: Math.max(0, ...tree.versions.map(item => item.version)) + 1, revision: revision.revision, treeSha256: revision.treeSha256, approvedBy: actorId, approvedAt: now(), projection: { status: 'pending' as const, files: [] } }; tree.versions.push(version); tree.currentApprovedVersionId = version.id; return version }
-function startAutomaticTestPointReview(run: TestDesignWorkflowRun) {
-  const tree = required(run.testPointTree, 'TEST_POINT_TREE_NOT_FOUND', '测试点树尚未生成')
-  const revision = required(tree.revisions.find(item => item.revision === tree.currentRevision), 'TEST_POINT_TREE_REVISION_NOT_FOUND', '测试点树当前 Revision 不存在')
-  validateTreeReferences(run, revision.nodes)
-  const validatedSha256 = validateTreeNodes(revision.nodes)
-  if (validatedSha256 !== revision.treeSha256) throw new TestDesignError('TEST_POINT_TREE_VALIDATION_FAILED', '测试点树内容 Hash 与当前 Revision 不一致', 409)
-  const review = node(run, 'test_point_review')
-  if (review.status !== 'pending') advanceNodeGeneration(run, review, 'pending')
-  Object.assign(review, { status: 'running', attempt: review.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined, inputSha256: validatedSha256 })
-  const version = approveCurrentTree(run, AUTOMATIC_TEST_POINT_REVIEW_ACTOR)
-  Object.assign(run, { status: 'running', stage: 'test_point_review', progress: 40, finishedAt: undefined, error: undefined, errorCode: undefined })
-  return version
-}
-function completeAutomaticTestPointReview(run: TestDesignWorkflowRun) {
-  const review = node(run, 'test_point_review')
-  if (review.status !== 'running') throw new TestDesignError('TEST_POINT_TREE_VALIDATION_FAILED', '测试点自动校验节点不在运行状态', 409)
-  finishNode(run, 'test_point_review')
-  const caseDesign = node(run, 'test_case_design')
-  if (caseDesign.status === 'pending') queueNode(run, 'test_case_design')
-  else if (caseDesign.status !== 'queued') advanceNodeGeneration(run, caseDesign, 'queued')
-  for (const key of ['coverage_audit', 'test_design_repair'] as const) {
-    const downstream = node(run, key)
-    if (downstream.status !== 'pending') advanceNodeGeneration(run, downstream, 'pending')
-  }
-  run.automaticRepair = initialAutomaticRepairState()
-  Object.assign(run, { status: 'queued', stage: 'test_case_design', progress: 50, finishedAt: undefined, error: undefined, errorCode: undefined })
-}
-function approvedTreeVersion(run: TestDesignWorkflowRun) { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); return required(tree.versions.find(item => item.id === tree.currentApprovedVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树尚未通过自动校验并固化') }
-function approvedPointIds(run: TestDesignWorkflowRun, treeVersionId: string) { const tree = required(run.testPointTree, 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树不存在'); const version = required(tree.versions.find(item => item.id === treeVersionId), 'TEST_POINT_TREE_APPROVAL_REQUIRED', '测试点树版本不存在'); const revision = tree.revisions.find(item => item.revision === version.revision)!; return executableTestPointIds(revision.nodes) }
 function applyReviewAction(testCase: TestCase, input: { decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw'; targetRevision: number; comment?: string }, actorId: string) { if (testCase.currentRevision !== input.targetRevision) throw new TestDesignError('TEST_CASE_REVISION_CONFLICT', '审核目标 revision 已变化', 412); const transitions = { draft: { submit: 'in_review' }, in_review: { approve: 'approved', reject: 'rejected', request_revision: 'needs_revision', withdraw: 'draft' }, approved: { request_revision: 'needs_revision' }, rejected: { submit: 'in_review' }, needs_revision: { submit: 'in_review' } } as const; const toState = (transitions[testCase.reviewState] as Record<string, TestCase['reviewState'] | undefined>)[input.decision]; if (!toState) throw new TestDesignError('TEST_CASE_REVIEW_TRANSITION_INVALID', `不能从 ${testCase.reviewState} 执行 ${input.decision}`, 409); testCase.reviewActions.push({ id: `test_case_review_${randomUUID()}`, targetRevision: input.targetRevision, fromState: testCase.reviewState, toState, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), actorId, createdAt: now() }); testCase.reviewState = toState }
 function applyDisposition(target: { state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: Array<{ id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }> }, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string; structuredDecision?: unknown }, actorId: string) { if (target.actions.length !== input.expectedVersion) throw new TestDesignError('TEST_DESIGN_DISPOSITION_VERSION_CONFLICT', '处置版本已变化', 409); const toState = input.decision === 'confirm' ? 'confirmed' : input.decision === 'resolve' ? 'resolved' : input.decision === 'defer' ? 'deferred' : input.decision === 'reject' ? 'rejected' : 'open'; target.actions.push({ id: `test_design_action_${randomUUID()}`, expectedVersion: input.expectedVersion, fromState: target.state, toState, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), ...(input.structuredDecision === undefined ? {} : { structuredDecision: structuredClone(input.structuredDecision) }), actorId, createdAt: now() }); target.state = toState }
 function validateCurrentDependencyGraph(run: TestDesignWorkflowRun) { validateCaseDependencyGraph(run.testCases.filter(item => !item.tombstonedAt).map(item => ({ id: item.id, content: currentCaseRevision(item).content }))) }
@@ -1653,7 +1436,7 @@ function designState(state: DatabaseState): TestDesignState { const aggregate = 
 function readDesignState(state: DatabaseState): TestDesignState { return state.testDesignState ?? emptyTestDesignState() }
 function emptyTestDesignState(): TestDesignState { return { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [] } }
 function presentRun(run: TestDesignWorkflowRun, detail = false) { const value = structuredClone(run); if (value.status === 'succeeded') { value.error = undefined; value.errorCode = undefined } if (!detail) return { id: value.id, testDesignId: value.testDesignId, projectVersionId: value.projectVersionId, status: value.status, stage: value.stage, progress: value.progress, createdAt: value.createdAt, startedAt: value.startedAt, finishedAt: value.finishedAt, errorCode: value.errorCode, error: value.error }; return value }
-function presentCase(testCase: TestCase, detail = false) { const revision = currentCaseRevision(testCase); const value = { id: testCase.id, runId: testCase.runId, treeVersionId: testCase.treeVersionId, origin: testCase.origin, currentRevision: testCase.currentRevision, reviewState: testCase.reviewState, content: structuredClone(revision.content), contentSha256: revision.contentSha256, etag: etag('case', testCase.id, revision.revision, revision.contentSha256), ...(detail ? { revisions: structuredClone(testCase.revisions), reviewActions: structuredClone(testCase.reviewActions), tombstonedAt: testCase.tombstonedAt } : {}) }; return value }
+function presentCase(testCase: TestCase, detail = false) { const revision = currentCaseRevision(testCase); const value = { id: testCase.id, runId: testCase.runId, origin: testCase.origin, currentRevision: testCase.currentRevision, reviewState: testCase.reviewState, content: structuredClone(revision.content), contentSha256: revision.contentSha256, etag: etag('case', testCase.id, revision.revision, revision.contentSha256), ...(detail ? { revisions: structuredClone(testCase.revisions), reviewActions: structuredClone(testCase.reviewActions), tombstonedAt: testCase.tombstonedAt } : {}) }; return value }
 function markdownCaseSet(version: TestCaseSetVersion) { const content = version.canonicalContent as { cases: Array<{ caseId: string; revision: number; content: TestCaseContent }> }; return [`# ${version.name}`, '', `- Version: ${version.version}`, `- Schema: ${version.schemaVersion}`, `- Content SHA-256: ${version.contentSha256}`, '', ...content.cases.flatMap(item => [`## ${item.caseId} r${item.revision}: ${item.content.title}`, '', item.content.objective, '', `- Dimension: ${item.content.dimension}`, `- Priority: ${item.content.priority}`, `- Methods: ${item.content.executionMethods.map(method => method.method).join(', ')}`, ''])].join('\n') }
 async function xlsxCaseSet(version: TestCaseSetVersion) { const value = version.canonicalContent as { cases: Array<{ caseId: string; revision: number; content: TestCaseContent }> }; const rows = [['Case ID', 'Revision', 'Title', 'Objective', 'Dimension', 'Priority', 'Methods', 'Domain', 'Preconditions', 'Steps', 'Checks'], ...value.cases.map(item => [item.caseId, String(item.revision), item.content.title, item.content.objective, item.content.dimension, item.content.priority, item.content.executionMethods.map(method => method.method).join(', '), item.content.domain, item.content.preconditions.join('\n'), item.content.executionMethods.flatMap(method => method.steps.map(step => `[${method.method}] ${step.key}: ${step.action} => ${step.expected}`)).join('\n'), item.content.executionMethods.flatMap(method => method.verificationChecks.map(check => `[${method.method}] ${check.description}`)).concat(item.content.sharedVerificationChecks.map(check => `[shared] ${check.description}`)).join('\n')])]; const sheetRows = rows.map((row, rowIndex) => `<row r="${rowIndex + 1}">${row.map((cell, columnIndex) => `<c r="${columnName(columnIndex + 1)}${rowIndex + 1}" t="inlineStr"${rowIndex === 0 ? ' s="1"' : ''}><is><t xml:space="preserve">${xml(safeSpreadsheetText(cell))}</t></is></c>`).join('')}</row>`).join(''); const zip = new JSZip(); zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'); zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'); zip.file('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Test Cases" sheetId="1" r:id="rId1"/></sheets></workbook>'); zip.file('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'); zip.file('xl/styles.xml', '<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font/><font><b/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf xfId="0"/><xf xfId="0" fontId="1" applyFont="1"/></cellXfs></styleSheet>'); zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`); return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) }
 function columnName(index: number) { let name = ''; for (let value = index; value > 0; value = Math.floor((value - 1) / 26)) name = String.fromCharCode(65 + ((value - 1) % 26)) + name; return name }

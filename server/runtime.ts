@@ -81,13 +81,6 @@ export const planningWorkflowService = new PlanningWorkflowService(
   testDesignService,
 )
 requirementAnalysisService.onUnderstandingReady(async runId => { await planningWorkflowService.requirementUnderstandingReady(runId) })
-testDesignService.onTestPointsValidated(async (projectVersionId, runId, treeVersionId) => {
-  await planningWorkflowService.testPointsValidated(
-    projectVersionId,
-    runId,
-    treeVersionId,
-  )
-})
 export const projectVersionService = new ProjectVersionService(stateStore, service)
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore

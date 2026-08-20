@@ -20,7 +20,7 @@ export function CaseChangeProposalPanel({ run, busy, onDecision }: { run: TestDe
 
 function ProposalDetail({ proposal, busy, onEdit, onDecision }: { proposal: CaseChangeProposal; busy: boolean; onEdit: () => void; onDecision: (decision: Exclude<CaseChangeDecision, 'pending'>, comment?: string) => void }) {
   return <article className="tdw-proposal-detail"><header><div><span className={`tdw-operation ${proposal.operation}`}>{operationLabel(proposal.operation)}</span><h3>{proposal.candidateContent?.title ?? proposal.sourceCaseId ?? '变更建议'}</h3></div><strong>{Math.round(proposal.confidence * 100)}% 置信度</strong></header>
-    <div className="tdw-proposal-kpis"><span><small>历史 Revision</small><b>{proposal.sourceCaseId ? `${proposal.sourceCaseId} / r${proposal.sourceRevision}` : '无（新增）'}</b></span><span><small>关联需求变化</small><b>{proposal.requirementRefs.length || '未标注'}</b></span><span><small>关联测试点</small><b>{proposal.testPointIds.length}</b></span></div>
+    <div className="tdw-proposal-kpis"><span><small>历史 Revision</small><b>{proposal.sourceCaseId ? `${proposal.sourceCaseId} / r${proposal.sourceRevision}` : '无（新增）'}</b></span><span><small>关联需求变化</small><b>{proposal.requirementRefs.length || '未标注'}</b></span></div>
     <section><h4>Agent 修改理由</h4><p>{proposal.reason}</p></section>
     <section><h4>字段级 Diff</h4>{proposal.diff.length ? <div className="tdw-diff-list">{proposal.diff.map((change, index) => <article key={`${change.path}-${index}`}><code>{change.path}</code><div><pre>{format(change.before)}</pre><span>→</span><pre>{format(change.after)}</pre></div></article>)}</div> : <p className="tdw-muted">内容未变化，复用原 Case ID 与 Revision。</p>}</section>
     <section><h4>自动化脚本影响</h4><p>{automationImpact(proposal)}</p></section>

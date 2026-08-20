@@ -364,7 +364,7 @@ export function RequirementAnalysisPageV2(props: Props) {
           {view === 'cases' && <Suspense fallback={<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>正在加载测试设计运行</h2><p>正在建立测试设计的正式上下文。</p></div>}>{linkedTestDesign ? <EmbeddedTestDesignPage key={`${selectedRun?.id}:${linkedTestDesign.designId}:${linkedTestDesign.runId}`} embedded projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} linkedDesignId={linkedTestDesign.designId} linkedRunId={linkedTestDesign.runId} /> : testDesignReady ? <EmbeddedTestDesignPage key={`new-test-design:${projectVersion.id}:${selectedReleaseBinding?.releaseId}`} projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} initialCreate /> : <div className="rav2-empty"><ShieldCheck /><h2>{selectedRun ? '本次需求分析尚未发布' : '请先完成需求分析'}</h2><p>{selectedRun ? '只有当前选择的成功需求分析 Run 发布 Requirement Release 后，才能创建测试设计。' : '请先在新建对话中启动需求分析，或从运行历史选择一个已发布 Requirement Release 的 Run。'}</p></div>}</Suspense>}
           {view === 'details' && <section className="rav2-advanced-details"><header><div><ShieldCheck /><span><b>详细信息</b><small>运行配置、需求理解、Snapshot、版本产物与差异仅用于追溯和排障，不影响当前主流程。</small></span></div><nav>{detailTabs.map(tab => <button className={detailView === tab.key ? 'active' : ''} key={tab.key} onClick={() => setDetailView(tab.key)}>{tab.label}</button>)}</nav></header><div>{detailView === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}{detailView === 'artifacts' && <Artifacts result={result} release={release} understandingSnapshot={understandingSnapshot} runId={selectedRun?.id} />}{detailView === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}</div></section>}
         </div>
-        {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>连续 Planning Session</b><small>Requirement、Human Clarification、TestPoint、TestCase 与 Coverage 共用同一父会话；正式事实始终从 Version / Snapshot / Workspace 重新建立。</small></span></footer>}
+        {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>连续 Planning Session</b><small>Requirement、Human Clarification、TestCase 与 Coverage 共用同一父会话；正式事实始终从 Version / Snapshot / Workspace 重新建立。</small></span></footer>}
       </main>
 
       <aside className="rav2-status-panel">
@@ -519,8 +519,6 @@ function AgentRunEvent({ event, start }: { event: AgentExecutionEvent; start?: A
 }
 
 const testDesignStageLabels: Record<TestDesignNodeRun['nodeKey'], string> = {
-  test_point_design: '测试点设计',
-  test_point_review: '测试点自动校验',
   test_case_design: '测试用例设计',
   coverage_audit: 'Coverage Audit',
   test_design_repair: '测试设计修复',
@@ -532,8 +530,8 @@ function testDesignTone(status?: string) {
 
 function TestDesignConversationEntry({ linkage, run, error }: { linkage: { designId: string; runId: string }; run?: TestDesignWorkflowRun; error: string }) {
   return <section className="rav2-test-design-conversation">
-    <article className="rav2-agent-task"><span><TestTube2 /></span><div><b>自动测试设计</b><p>Requirement Release 已冻结；PlanningAgent 继续在同一 Planning Session 设计测试点、校验覆盖并生成测试用例。</p><small>{linkage.runId} · TestDesign {linkage.designId}</small></div><Badge tone={testDesignTone(run?.status)}>{run ? run.status === 'succeeded' ? '已完成' : run.status === 'failed' ? '失败' : run.status === 'cancelled' ? '已取消' : '执行中' : '正在读取'}</Badge></article>
-    {error ? <article className="rav2-run-control failed"><AlertTriangle /><span><b>测试设计运行读取失败</b><small>{error}</small></span></article> : !run ? <div className="rav2-agent-waiting"><LoaderCircle className="rotating" /><span><b>正在读取测试设计运行</b><small>测试点和测试用例轨迹将同步到当前协作会话。</small></span></div> : <>
+    <article className="rav2-agent-task"><span><TestTube2 /></span><div><b>自动测试设计</b><p>Requirement Release 已冻结；PlanningAgent 继续在同一 Planning Session 生成测试用例并校验覆盖。</p><small>{linkage.runId} · TestDesign {linkage.designId}</small></div><Badge tone={testDesignTone(run?.status)}>{run ? run.status === 'succeeded' ? '已完成' : run.status === 'failed' ? '失败' : run.status === 'cancelled' ? '已取消' : '执行中' : '正在读取'}</Badge></article>
+    {error ? <article className="rav2-run-control failed"><AlertTriangle /><span><b>测试设计运行读取失败</b><small>{error}</small></span></article> : !run ? <div className="rav2-agent-waiting"><LoaderCircle className="rotating" /><span><b>正在读取测试设计运行</b><small>测试用例和覆盖审计轨迹将同步到当前协作会话。</small></span></div> : <>
       <div className="rav2-agent-metrics"><span>{run.progress}% 进度</span><span>{run.nodeRuns.filter(node => node.status === 'succeeded').length}/{run.nodeRuns.length} 阶段完成</span>{run.error ? <span className="failed">{run.errorCode ?? 'TEST_DESIGN_RUN_FAILED'}</span> : null}</div>
       {run.error && <article className="rav2-run-control failed"><AlertTriangle /><span><b>测试设计已停止</b><small>{run.error}</small></span></article>}
       {run.nodeRuns.map(node => <TestDesignNodeConversationEntry key={node.id} node={node} />)}

@@ -72,7 +72,7 @@ const caseContent: TestCaseContent = {
   title: '状态检查',
   objective: '验证状态页显示 Ready',
   dimension: 'functional',
-  testPointIds: ['point-status'],
+  requirementRefs: ['point-status'],
   priority: 'P0',
   preconditions: [],
   dataRequirementIds: [],

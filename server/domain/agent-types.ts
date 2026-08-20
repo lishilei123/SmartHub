@@ -228,10 +228,10 @@ export interface AgentExecutionEvent {
   }
   parentSessionId?: string
   subAgentRunId?: string
-  reviewerType?: 'requirement' | 'test_point' | 'test_case' | 'coverage'
+  reviewerType?: 'requirement' | 'test_case' | 'coverage'
 }
 
-export type PlanningReviewerType = 'requirement' | 'test_point' | 'test_case' | 'coverage'
+export type PlanningReviewerType = 'requirement' | 'test_case' | 'coverage'
 
 export interface ReviewCandidate {
   schemaVersion: 'planning-review-candidate/v1'
@@ -304,7 +304,7 @@ export interface AgentExecutionInput {
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
-    workflowStage: 'analysis' | 'release' | 'test_point_design' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
+    workflowStage: 'analysis' | 'release' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
     allowedToolIds: string[]
     submitToolId: string
     schemaVersion: string
@@ -341,13 +341,8 @@ export type PlanningReviewerSourceReference =
       testDesignRunId: string
       requirementReleaseId: string
       requirementsJsonSha256: string
-      testPointTreeId: string
-      testPointTreeRevision: number
-      testPointTreeSha256: string
-      approvedTestPointTreeVersionId?: string
       testCases: Array<{
         caseId: string
-        treeVersionId: string
         revision: number
         contentSha256: string
       }>
@@ -383,8 +378,6 @@ export type PlanningWorkflowStage =
   | 'requirement_clarification'
   | 'requirement_understanding'
   | 'requirement_release'
-  | 'test_point_design'
-  | 'test_point_review'
   | 'test_case_design'
   | 'test_design_repair'
   | 'test_design_release'

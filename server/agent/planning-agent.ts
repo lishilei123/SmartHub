@@ -61,7 +61,7 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot) {
     [
       '<requirement_analysis_output_contract>',
       '本轮结果范围是需求理解、Clarification 与 Test Focus；Test Focus 是后续测试设计的风险关注点。',
-      'TestPoint、TestCase、Case ID、Revision、Version、Hash、Library 变更和 Handoff 不属于本轮结果 Schema。',
+      'TestCase、Case ID、Revision、Version、Hash、Library 变更和 Handoff 不属于本轮结果 Schema。',
       'RequirementPoint 中只提供来自固定输入的逐字 sourceTexts；Evidence、ID、定位和覆盖由服务端生成并校验。',
       '完成 Self Review 后，通过 requirement_analysis_submit_result 提交一个完整 requirement-analysis/v1 候选；没有新 Clarification 时提交空数组。',
       '若服务端拒绝候选，根据返回的错误路径修正后重新提交；普通文本、Markdown 或中间 JSON 不会被采纳。',

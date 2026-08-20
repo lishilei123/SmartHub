@@ -29,20 +29,11 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (cancel && method === 'POST') { await authorize(cancel[1], 'test-design:cancel'); return send(response, 200, await service.cancelRun(cancel[1], cancel[2], cancel[3], principal)) }
   const fullRerun = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/full-rerun$/.exec(url.pathname)
   if (fullRerun && method === 'POST') { await authorize(fullRerun[1], 'test-design:create'); return send(response, 202, await service.fullRerun(fullRerun[1], fullRerun[2], fullRerun[3], header(request, 'idempotency-key'), principal)) }
-  const redesignPoints = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/redesign-test-points$/.exec(url.pathname)
-  if (redesignPoints && method === 'POST') { await authorize(redesignPoints[1], 'test-design:edit'); return send(response, 202, await service.redesignTestPoints(redesignPoints[1], redesignPoints[2], redesignPoints[3])) }
   const resynthesize = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/resynthesize$/.exec(url.pathname)
   if (resynthesize && method === 'POST') { await authorize(resynthesize[1], 'test-design:edit'); return send(response, 202, await service.resynthesize(resynthesize[1], resynthesize[2], resynthesize[3])) }
   const reaudit = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/actions\/re-audit$/.exec(url.pathname)
   if (reaudit && method === 'POST') { await authorize(reaudit[1], 'test-design:edit'); return send(response, 201, await service.reAudit(reaudit[1], reaudit[2], reaudit[3])) }
 
-  const tree = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-point-tree$/.exec(url.pathname)
-  if (tree && method === 'GET') { await authorize(tree[1], 'test-design:read'); const value = await service.getTree(tree[1], tree[2], tree[3]); response.setHeader('ETag', value.etag); return send(response, 200, value) }
-  if (tree && method === 'PATCH') { await authorize(tree[1], 'test-design:edit'); const value = await service.patchTree(tree[1], tree[2], tree[3], request.headers['if-match'], await json(request) as never, principal); response.setHeader('ETag', value.etag); return send(response, 200, value) }
-  const treeRevisions = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-point-tree\/revisions$/.exec(url.pathname)
-  if (treeRevisions && method === 'GET') { await authorize(treeRevisions[1], 'test-design:read'); return send(response, 200, { items: await service.treeRevisions(treeRevisions[1], treeRevisions[2], treeRevisions[3]) }) }
-  const treeDiff = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-point-tree\/diff$/.exec(url.pathname)
-  if (treeDiff && method === 'GET') { await authorize(treeDiff[1], 'test-design:read'); return send(response, 200, { changes: await service.treeDiff(treeDiff[1], treeDiff[2], treeDiff[3], Number(url.searchParams.get('from')), Number(url.searchParams.get('to'))) }) }
   const cases = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-cases$/.exec(url.pathname)
   if (cases && method === 'GET') { await authorize(cases[1], 'test-design:read'); return send(response, 200, { items: await service.listCases(cases[1], cases[2], cases[3], { dimension: url.searchParams.get('dimension') ?? undefined, executionMethod: url.searchParams.get('executionMethod') ?? undefined, status: url.searchParams.get('status') ?? undefined }) }) }
   if (cases && method === 'POST') { await authorize(cases[1], 'test-design:edit'); const body = await json(request); return send(response, 201, await service.createCase(cases[1], cases[2], cases[3], body.content ?? body, principal)) }

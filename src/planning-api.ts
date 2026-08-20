@@ -2,13 +2,10 @@ import type { AgentConfigurationVersion } from './agent-configuration-api'
 
 const apiBase = import.meta.env.VITE_PLANNING_API_BASE ?? 'http://127.0.0.1:8787/api'
 
-export type PlanningReviewerType = 'requirement' | 'test_point' | 'test_case' | 'coverage'
+export type PlanningReviewerType = 'requirement' | 'test_case' | 'coverage'
 export type TestDesignReviewerSourceSelection = {
-  testPointTreeRevision: number
-  approvedTestPointTreeVersionId?: string
   testCases: Array<{
     caseId: string
-    treeVersionId: string
     revision: number
   }>
   dataSetVersionId?: string
@@ -17,8 +14,6 @@ export type TestDesignReviewerSourceSelection = {
 export type PlanningWorkflowStage =
   | 'requirement_analysis'
   | 'requirement_release'
-  | 'test_point_design'
-  | 'test_point_review'
   | 'test_case_design'
   | 'test_design_repair'
   | 'test_design_release'

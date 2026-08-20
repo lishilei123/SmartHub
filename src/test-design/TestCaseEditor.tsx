@@ -1,12 +1,11 @@
-import type { TestCaseContent, TestCaseExecutionSpec, TestPointNode } from './types'
+import type { TestCaseContent, TestCaseExecutionSpec } from './types'
 
 type Props = {
   value: TestCaseContent
   onChange: (value: TestCaseContent) => void
-  testPoints?: TestPointNode[]
 }
 
-export function TestCaseEditor({ value, onChange, testPoints }: Props) {
+export function TestCaseEditor({ value, onChange }: Props) {
   const patchCommon = (patch: Partial<TestCaseContent>) => {
     const next = { ...value, ...patch }
     if (next.executionSpec?.kind === 'functional') {
@@ -20,7 +19,7 @@ export function TestCaseEditor({ value, onChange, testPoints }: Props) {
     onChange({ ...value, dimension, executionSpec, executionMethods: functionalMethods(executionSpec, value) })
   }
   return <div className="td-case-editor">
-    <CommonCaseFields value={value} testPoints={testPoints} onChange={patchCommon} onDimensionChange={changeDimension} />
+    <CommonCaseFields value={value} onChange={patchCommon} onDimensionChange={changeDimension} />
     {(value.dimension === 'functional' || value.dimension === 'security') && <FunctionalExecutionEditor value={value} onChange={onChange} />}
     {value.dimension === 'performance' && <PerformanceExecutionEditor value={value} onChange={onChange} />}
     {value.dimension === 'stability' && <StabilityExecutionEditor value={value} onChange={onChange} />}
@@ -28,14 +27,14 @@ export function TestCaseEditor({ value, onChange, testPoints }: Props) {
   </div>
 }
 
-export function CommonCaseFields({ value, testPoints, onChange, onDimensionChange }: { value: TestCaseContent; testPoints?: TestPointNode[]; onChange: (patch: Partial<TestCaseContent>) => void; onDimensionChange: (dimension: TestCaseContent['dimension']) => void }) {
+export function CommonCaseFields({ value, onChange, onDimensionChange }: { value: TestCaseContent; onChange: (patch: Partial<TestCaseContent>) => void; onDimensionChange: (dimension: TestCaseContent['dimension']) => void }) {
   return <fieldset className="td-case-editor-section"><legend>CommonCaseFields</legend><div className="td2-editor-grid">
     <label className="wide">标题<input autoFocus value={value.title} onChange={event => onChange({ title: event.target.value })} /></label>
     <label className="wide">测试目标<textarea value={value.objective} onChange={event => onChange({ objective: event.target.value })} /></label>
     <label>维度<select value={value.dimension} onChange={event => onDimensionChange(event.target.value as TestCaseContent['dimension'])}>{['functional', 'performance', 'stability', 'compatibility', 'security'].map(item => <option value={item} key={item}>{item}</option>)}</select></label>
     <label>优先级<select value={value.priority} onChange={event => onChange({ priority: event.target.value as TestCaseContent['priority'] })}>{['P0', 'P1', 'P2', 'P3'].map(item => <option value={item} key={item}>{item}</option>)}</select></label>
     <label className="wide">业务域<input value={value.domain} onChange={event => onChange({ domain: event.target.value })} /></label>
-    {testPoints ? <fieldset className="wide td2-point-picker"><legend>关联可执行测试点（至少一项）</legend>{testPoints.map(point => <label key={point.nodeId}><input type="checkbox" checked={value.testPointIds.includes(point.nodeId)} onChange={() => onChange({ testPointIds: value.testPointIds.includes(point.nodeId) ? value.testPointIds.filter(id => id !== point.nodeId) : [...value.testPointIds, point.nodeId] })} /><span><b>{point.title}</b><code>{point.nodeId}</code></span></label>)}</fieldset> : <label className="wide">关联测试点节点 ID（每行一项）<textarea value={value.testPointIds.join('\n')} onChange={event => onChange({ testPointIds: lines(event.target.value) })} /></label>}
+    <label className="wide">关联 Requirement ID（每行一项）<textarea value={value.requirementRefs.join('\n')} onChange={event => onChange({ requirementRefs: lines(event.target.value) })} /></label>
     <label>前置条件（每行一项）<textarea value={value.preconditions.join('\n')} onChange={event => onChange({ preconditions: lines(event.target.value) })} /></label>
     <label>测试数据需求 ID（每行一项）<textarea value={value.dataRequirementIds.join('\n')} onChange={event => onChange({ dataRequirementIds: lines(event.target.value) })} /></label>
     <label>清理动作（每行一项）<textarea value={value.cleanup.join('\n')} onChange={event => onChange({ cleanup: lines(event.target.value) })} /></label>
@@ -87,9 +86,9 @@ function ChecksEditor({ checks, onChange }: { checks: Extract<TestCaseExecutionS
 function Readiness({ value, onChange }: { value: 'ready' | 'blocked' | 'needs_confirmation'; onChange: (value: 'ready' | 'blocked' | 'needs_confirmation') => void }) { return <label>Execution Readiness<select value={value} onChange={event => onChange(event.target.value as typeof value)}><option value="ready">ready</option><option value="blocked">blocked</option><option value="needs_confirmation">needs_confirmation</option></select></label> }
 function MatrixField({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) { return <label>{label}（每行一项）<textarea value={value.join('\n')} onChange={event => onChange(lines(event.target.value))} /></label> }
 
-export function createEmptyTestCase(pointId = ''): TestCaseContent { const executionSpec = defaultExecutionSpec('functional'); return { schemaVersion: 'test-case/v2', title: '', objective: '', dimension: 'functional', testPointIds: pointId ? [pointId] : [], priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: functionalMethods(executionSpec, { executionMethods: [] } as unknown as TestCaseContent), executionSpec, sharedVerificationChecks: [], tags: [], domain: '未分类' } }
+export function createEmptyTestCase(): TestCaseContent { const executionSpec = defaultExecutionSpec('functional'); return { schemaVersion: 'test-case/v2', title: '', objective: '', dimension: 'functional', requirementRefs: [], priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: functionalMethods(executionSpec, { executionMethods: [] } as unknown as TestCaseContent), executionSpec, sharedVerificationChecks: [], tags: [], domain: '未分类' } }
 export function defaultExecutionSpec(dimension: TestCaseContent['dimension']): TestCaseExecutionSpec { if (dimension === 'performance') return { kind: 'performance', method: 'performance_tool', target: '', scenario: '', virtualUsers: null, duration: null, rampUp: null, thresholds: [], dataStrategy: '', environmentRequirements: [], executionReadiness: 'needs_confirmation' }; if (dimension === 'stability') return { kind: 'stability', method: 'long_running', workload: '', duration: null, interval: null, observations: [], recoveryPolicy: null, checkpointPolicy: null, environmentRequirements: [], executionReadiness: 'needs_confirmation' }; if (dimension === 'compatibility') return { kind: 'compatibility', method: 'environment_matrix', baseMethod: 'ui', baseCaseRefs: [], browserMatrix: [], operatingSystemMatrix: [], viewportMatrix: [], versionMatrix: [], expectedConsistency: '', executionReadiness: 'needs_confirmation' }; return { kind: 'functional', method: 'ui', steps: [{ key: 'step-1', action: '', expected: '' }], verificationChecks: [], preconditions: [], testDataRequirements: [], executionReadiness: 'needs_confirmation', automationHint: '' } }
-export function testCaseEditorValid(value: TestCaseContent) { if (!value.title.trim() || !value.objective.trim() || !value.domain.trim() || !value.testPointIds.length || !value.executionSpec) return false; const spec = value.executionSpec; if (spec.kind === 'functional') { const method = value.executionMethods.find(item => item.method === spec.method); return Boolean(method && spec.steps.length && spec.steps.every(step => step.key.trim() && step.action.trim() && step.expected.trim()) && (method.method === 'ui' ? method.uiSpec.entry.trim() : method.apiSpec.method.trim() && method.apiSpec.path.trim())) } if (spec.kind === 'performance') return Boolean(spec.target.trim() && spec.scenario.trim() && spec.dataStrategy.trim() && spec.thresholds.every(item => item.metric.trim() && item.target.trim() && item.sourceRef.trim())); if (spec.kind === 'stability') return Boolean(spec.workload.trim()); return Boolean(spec.expectedConsistency.trim()) }
+export function testCaseEditorValid(value: TestCaseContent) { if (!value.title.trim() || !value.objective.trim() || !value.domain.trim() || !value.requirementRefs.length || !value.executionSpec) return false; const spec = value.executionSpec; if (spec.kind === 'functional') { const method = value.executionMethods.find(item => item.method === spec.method); return Boolean(method && spec.steps.length && spec.steps.every(step => step.key.trim() && step.action.trim() && step.expected.trim()) && (method.method === 'ui' ? method.uiSpec.entry.trim() : method.apiSpec.method.trim() && method.apiSpec.path.trim())) } if (spec.kind === 'performance') return Boolean(spec.target.trim() && spec.scenario.trim() && spec.dataStrategy.trim() && spec.thresholds.every(item => item.metric.trim() && item.target.trim() && item.sourceRef.trim())); if (spec.kind === 'stability') return Boolean(spec.workload.trim()); return Boolean(spec.expectedConsistency.trim()) }
 export function executionPendingItems(value: TestCaseContent) { const spec = value.executionSpec; if (spec?.kind === 'performance' && !spec.thresholds.length) return ['性能阈值及其需求来源']; if (spec?.kind === 'stability' && !spec.duration) return ['稳定性运行时长']; if (spec?.kind === 'compatibility' && !compatibilityMatrixSize(spec)) return ['兼容性环境矩阵']; return [] }
 export function actualExecutionMethod(value: TestCaseContent) { return value.executionSpec?.method ?? value.executionMethods[0]?.method ?? '未配置' }
 
