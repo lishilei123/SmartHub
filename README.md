@@ -18,7 +18,7 @@
 
 - 测试执行：固定 `PlanningAgent → TestExecutionService → ExecutionPackage → OCI Playwright Runner` 边界，三个执行 Agent 分别发布与冻结，Service 独占状态、重试、诊断和修复决策；支持 UI/API 与 smoke/regression/full/custom，不支持的方法明确落为 `unsupported` 且不创建脚本或 Runner Attempt；
 - 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和三个 Agent 快照；
-- 测试设计：统一 `PlanningAgent`、Agent 配置启用并由运行时统一加载的内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、测试点树自动校验与固化、服务端 Coverage Audit、最多两轮 Agent Repair、人工用例审核与发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
+- 测试设计：统一 `PlanningAgent`、Agent 配置启用并由运行时统一加载的内置方法 Skill、固定 Stage/Submit Tool 映射、显式 Requirement Release 绑定、只读 Workspace 快照、Candidate 级 `ScenarioClaim` Atomicity Audit、服务端 Coverage Audit、最多一轮受控 Agent Repair、人工用例审核与发布、正式 Asset/AssetVersion 投影、套件/冒烟/回归/执行交接 API 与模块化前端；旧四 Agent DAG、TestPoint、Scope Gate、CoverageUnit 协议和旧数据已直接删除；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
 - 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承需求分析运行与对话；
@@ -49,7 +49,7 @@
 - `test_case_design` 阶段从冻结的 `currentInputRefs` 识别本次任务重点，同时可在完整 Project Workspace Snapshot 内自主读取正式需求发布包和旁证资料，直接生成 Test Case Candidate，不存在 CoverageUnit 中间层。
 - Service/Validator 自动校验用例候选的结构、需求引用、执行规范与内容 Hash，创建不可变的正式用例变更 Proposal。人工审核仍是发布 Gate；每次修改后都会重新校验并生成用例。
 - `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；用例生成后必须经过人工用例审核，发布仍由 Service 门禁控制。
-- Coverage Audit 是服务端确定性步骤，不是 Agent Stage。引用、覆盖、重复、过度合并、维度一致性、UI/API 与数据 readiness、Finding/Confirmation 闭环均由服务端判断。
+- Coverage Audit 是服务端确定性步骤，不是 Agent Stage。Requirement 直接追溯、覆盖、重复、维度一致性、UI/API 与数据 readiness、Finding/Confirmation 闭环均由服务端判断；Candidate 根级 `ScenarioClaim` 让状态边、正负路径、独立 subject、查询能力与独立 oracle 的过度合并可确定性识别和修复。`ScenarioClaim` 仅属于当前 Run，不是 TestPoint，也不会进入正式用例库、版本或 Execution Handoff。
 - 自动校验后的用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|test-data.json|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、资产版本、索引、同步任务、模型与 AI 资源、Agent 配置、ReviewRun/Job，以及 TestDesign Workflow、Snapshot、树、用例 revision、Coverage、用例集、套件和交接均写入 `smarthub` schema。旧技术方案表和旧测试设计数据由迁移直接删除。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除；未配置 `DATABASE_URL` 时回退到 JSON 文件，生产模式必须使用 PostgreSQL Worker。
@@ -184,7 +184,7 @@ npm test
 npm run build
 ```
 
-测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、统一 PlanningAgent 配置发布、只读 Workspace、Requirement Release 冻结、Stage/Skill/Submit Tool 映射、测试点自动校验、Coverage Audit/Repair、正式资产投影、TestCaseSet 发布、执行交接、确定性单 Run 报告指标与导出、PostgreSQL 只读报告快照、检索降级、FindingAction 并发控制和参数 Hash 审批。
+测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、统一 PlanningAgent 配置发布、只读 Workspace、Requirement Release 冻结、Stage/Skill/Submit Tool 映射、ScenarioClaim Atomicity Audit、Coverage Audit/Repair、正式资产投影、TestCaseSet 发布、执行交接、确定性单 Run 报告指标与导出、PostgreSQL 只读报告快照、检索降级、FindingAction 并发控制和参数 Hash 审批。
 
 ## 接口摘要
 

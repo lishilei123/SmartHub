@@ -10,6 +10,24 @@ export type WorkflowStatus = 'queued' | 'running' | 'waiting_gate' | 'succeeded'
 export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled' | 'stale'
 export type TestCaseReviewState = 'draft' | 'in_review' | 'approved' | 'rejected' | 'needs_revision'
 export type ExecutionReadiness = 'ready' | 'blocked' | 'needs_confirmation'
+export type ScenarioClaimKind = 'crud_lifecycle' | 'state_transition' | 'enum' | 'validation' | 'filter' | 'search' | 'permission' | 'boundary' | 'exception' | 'statistics' | 'cross_channel_consistency' | 'other'
+export type ScenarioClaimPolarity = 'positive' | 'negative' | 'neutral'
+
+/**
+ * Run-scoped candidate metadata used to audit one Case's atomic test intent.
+ * It is deliberately not a formal TestCase, Version, Revision, or Workspace asset.
+ */
+export interface ScenarioClaim {
+  ref: string
+  caseRef: string
+  requirementRefs: string[]
+  kind: ScenarioClaimKind
+  subject: string
+  variant: string
+  polarity: ScenarioClaimPolarity
+  oracle: string
+  knowledgeRefs?: string[]
+}
 
 export interface ScopeRule { kind: string; value: string }
 export interface HistoricalCaseSelection {
@@ -413,7 +431,8 @@ export interface CoverageAudit {
     code: string
     message: string
     subjectId?: string
-    resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit'
+    resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' | 'execution_handoff'
+    details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number }
   }>
   createdAt: string
 }
@@ -509,7 +528,7 @@ export interface LegacyTestCaseMigrationRecord {
 
 export interface TestDesignDispositionAction { id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }
 export interface DesignFinding { id: string; title: string; description: string; severity: 'blocker' | 'high' | 'medium' | 'low'; basisRefs: string[]; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
-export interface ConfirmationItem { id: string; title: string; question: string; decisionType: string; impactStage: 'analysis' | 'case' | 'data' | 'publication'; affectedRefs: string[]; blocker: boolean; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
+export interface ConfirmationItem { id: string; title: string; question: string; decisionType: string; impactStage: 'analysis' | 'case' | 'data' | 'publication' | 'handoff'; affectedRefs: string[]; blocker: boolean; state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: TestDesignDispositionAction[] }
 
 export interface TestDesignWorkflowRun {
   id: string
@@ -532,6 +551,8 @@ export interface TestDesignWorkflowRun {
   artifacts: WorkflowArtifact[]
   gateDecisions: WorkflowGateDecision[]
   testCases: TestCase[]
+  /** Current candidate-only audit metadata; never promoted into the formal library. */
+  scenarioClaims: ScenarioClaim[]
   caseChangeProposals: CaseChangeProposal[]
   dataSetVersions: TestDataRequirementSetVersion[]
   coverageAudits: CoverageAudit[]

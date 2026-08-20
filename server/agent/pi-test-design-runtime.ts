@@ -192,11 +192,12 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const stageRules = stage === 'test_case_design'
     ? [
           'Requirement Release 是本轮唯一正式覆盖基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。每条用例必须使用 requirementRefs 直接关联至少一个 Requirement。',
+          '每个 functional/security Candidate Case 都必须提供至少一条根级 scenarioClaims。ScenarioClaim 只说明一个可独立判定的 Atomic Test Intent：使用临时 caseRef、Requirement 子集、kind、subject、variant、polarity、明确 oracle，以及可选 knowledgeRefs；它不是 TestPoint，不会获得正式 ID、Revision、Version 或发布。',
           '功能和安全用例的执行步骤、检查点、就绪状态及自动化提示只在 executionMethods 的对应 UI/API 方式中完整填写。executionSpec 对此类用例只提交 kind=functional 与同一 method；服务端会从 executionMethods 和用例根字段投影正式 executionSpec。不要提交第二份重复步骤。',
           '非功能 executionSpec 必须使用精确字段：performance 为 kind=performance、method=performance_tool、target、scenario、virtualUsers、duration、rampUp、thresholds、dataStrategy、environmentRequirements、executionReadiness；stability 为 kind=stability、method=long_running、workload、duration、interval、observations、recoveryPolicy、checkpointPolicy、environmentRequirements、executionReadiness；compatibility 为 kind=compatibility、method=environment_matrix、baseMethod、baseCaseRefs、browserMatrix、operatingSystemMatrix、viewportMatrix、versionMatrix、expectedConsistency、executionReadiness。cases[] 根对象和 executionSpec 都不得添加这些列表之外的自定义字段。',
           '性能 thresholds 必须是数组；每一项严格且仅为 { metric, target, sourceRef }，三者都是非空字符串。把比较符、数值、单位和适用范围合并写进 target；不得使用 operator、value、unit，也不得提交缺少其中任一字段的半成品阈值。若没有正式阈值，提交 thresholds: []、executionReadiness: needs_confirmation，并建立 blocker Confirmation Item。',
         ]
-      : ['当前 Coverage Audit 中 resolution=agent_repair 的 blockers 是本轮修复范围；正式 Requirement 保持不变。']
+      : ['当前 Coverage Audit 中 resolution=agent_repair 的 blockers 是本轮修复范围；正式 Requirement 保持不变。遇到 TEST_CASE_OVER_MERGED 时，依据 blocker.details 和 current-test-cases.json 中的 scenarioClaims 拆分 Candidate Case，并将每条 ScenarioClaim 重新指向承担该独立 Atomic Test Intent 的 caseRef。']
   return [
     ...stageRules,
     '提交 cases[] 时，每一项必须是扁平的 test-case/v2 对象：ref、schemaVersion、title、requirementRefs、executionMethods、executionSpec 等字段同级。禁止使用 { ref, content: {...} } 包装。',
@@ -250,6 +251,7 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
       const revision = testCase.revisions.find(item => item.revision === testCase.currentRevision)!
       return { ref: requiredRepairCaseRef(refById, testCase.id), ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] }
     }),
+    scenarioClaims: structuredClone(run.scenarioClaims ?? []),
     dataRequirements: (dataSet?.requirements ?? []).map((item, index): TestDataRequirementCandidate => ({
       ref: `data-${index + 1}`,
       name: item.name,
@@ -328,6 +330,7 @@ export function projectTestCaseCandidateSubmission(
       ref,
       ...structuredClone(content),
     })),
+    scenarioClaims: structuredClone(candidate.scenarioClaims),
     dataRequirements: structuredClone(candidate.dataRequirements),
     findings: structuredClone(candidate.findings),
     confirmationItems: structuredClone(candidate.confirmationItems),

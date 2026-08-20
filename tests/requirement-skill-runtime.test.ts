@@ -16,7 +16,7 @@ test('System Prompt 只包含 Enabled Skill Catalog，不包含任何 Skill 正�
   assert.match(prompt, /优先于 Agent Configuration、Session 历史或旧 Context Summary/u)
   assert.match(prompt, /当前 Agent 可用 Skills（发布配置目录；不包含 Skill 正文）/u)
   assert.match(prompt, /- requirement\.analysis[\s\S]*description:[\s\S]*version: 1\.0\.0[\s\S]*tags:/u)
-  assert.match(prompt, /- test-case-design[\s\S]*version: 1\.2\.0/u)
+  assert.match(prompt, /- test-case-design[\s\S]*version: 1\.3\.0/u)
   assert.match(prompt, /skill\.read/u)
   assert.doesNotMatch(prompt, /<<<TRUSTED_SKILL/u)
   assert.doesNotMatch(prompt, /# Requirement Analysis 方法论/u)
@@ -42,8 +42,8 @@ test('skill.read 返回当前绑定版本的 TRUSTED_SKILL 正文，并在同轮
   const firstData = first.data as SkillReadData
   assert.equal(first.replayed, undefined)
   assert.equal(firstData.skillKey, 'test-case-design')
-  assert.equal(firstData.version, '1.2.0')
-  assert.match(firstData.content, /^<<<TRUSTED_SKILL key="test-case-design" version="1\.2\.0">>>/u)
+  assert.equal(firstData.version, '1.3.0')
+  assert.match(firstData.content, /^<<<TRUSTED_SKILL key="test-case-design" version="1\.3\.0">>>/u)
   assert.match(firstData.content, /# Test case design/u)
   assert.match(firstData.content, /<<<END_TRUSTED_SKILL>>>$/u)
 

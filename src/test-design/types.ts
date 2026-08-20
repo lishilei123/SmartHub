@@ -113,6 +113,19 @@ export type TestCaseContent = {
   domain: string
 }
 
+/** Candidate-only Atomic Test Intent metadata. It is not a published test asset. */
+export type ScenarioClaim = {
+  ref: string
+  caseRef: string
+  requirementRefs: string[]
+  kind: 'crud_lifecycle' | 'state_transition' | 'enum' | 'validation' | 'filter' | 'search' | 'permission' | 'boundary' | 'exception' | 'statistics' | 'cross_channel_consistency' | 'other'
+  subject: string
+  variant: string
+  polarity: 'positive' | 'negative' | 'neutral'
+  oracle: string
+  knowledgeRefs?: string[]
+}
+
 export type TestCaseTraceability = {
   sourceRequirementReleaseId: string
   requirementRefs: Array<{ requirementReleaseId: string; requirementId: string }>
@@ -130,7 +143,7 @@ export type TestDesignCase = {
 }
 
 export type TestDataSetVersion = { id: string; version: number; contentSha256: string; createdAt: string; requirements: Array<{ id: string; name: string; readiness: 'ready' | 'blocked' | 'needs_confirmation'; readinessReason?: string; caseIds: string[] }> }
-export type TestDesignCoverageAudit = { id: string; requirementReleaseId: string; dataSetVersionId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalCases: number; approvedCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' }>; createdAt: string }
+export type TestDesignCoverageAudit = { id: string; requirementReleaseId: string; dataSetVersionId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalCases: number; approvedCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' | 'execution_handoff'; details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number } }>; createdAt: string }
 export type WorkspaceProjection = { status: 'pending' | 'succeeded' | 'failed'; files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>; error?: string }
 export type TestCaseSetVersion = { id: string; projectId: string; projectVersionId: string; testDesignId: string; runId: string; version: number; name: string; members: Array<{ caseId: string; revision: number; ordinal: number; contentSha256: string }>; contentSha256: string; publishedBy: string; publishedAt: string; projection: WorkspaceProjection }
 export type TestSuiteVersion = { id: string; projectId: string; suiteType: 'smoke' | 'regression' | 'functional_domain'; version: number; name: string; members: Array<{ caseId: string; revision: number; executionMethods: ExecutionMethod[] }> }
@@ -164,6 +177,7 @@ export type TestDesignWorkflowRun = TestDesignRunSummary & {
   formalWorkspaceFiles: Array<{ logicalPath: string; displayName: string; contentSha256: string; assetVersionId?: string; sourceScope: 'formal_output' }>
   nodeRuns: TestDesignNodeRun[]
   testCases: TestDesignCase[]
+  scenarioClaims?: ScenarioClaim[]
   dataSetVersions: TestDataSetVersion[]
   coverageAudits: TestDesignCoverageAudit[]
   findings: Array<{ id: string; title: string; description: string; severity: string; state: string; actions: Array<{ id: string }> }>

@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalLibrarySelection, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalLibrarySelection, ScenarioClaim, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 
 export class TestDesignError extends Error {
@@ -75,6 +75,7 @@ export type TestDataRequirementCandidate = Omit<TestDataRequirement, 'id' | 'cas
 export interface TestCaseDesignCandidateSubmission extends Record<string, unknown> {
   schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1'
   cases: Array<{ ref: string } & TestCaseContent>
+  scenarioClaims: ScenarioClaim[]
   dataRequirements: TestDataRequirementCandidate[]
   findings: Record<string, unknown>[]
   confirmationItems: Record<string, unknown>[]
@@ -85,6 +86,7 @@ export interface TestCaseDesignCandidateSubmission extends Record<string, unknow
 export interface TestCaseDesignCandidate extends Record<string, unknown> {
   schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1'
   cases: Array<{ ref: string; content: TestCaseContent }>
+  scenarioClaims: ScenarioClaim[]
   dataRequirements: TestDataRequirementCandidate[]
   findings: Record<string, unknown>[]
   confirmationItems: Record<string, unknown>[]
@@ -104,7 +106,7 @@ const legacySynthesisFieldGuidance: Record<string, string> = {
 
 export function validateTestCaseDesignCandidate(value: unknown, repair = false): TestCaseDesignCandidate {
   const input = synthesisObject(value, '/', '提交结果必须是对象')
-  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dataRequirements', 'findings', 'confirmationItems', 'proposals'], '/')
+  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'scenarioClaims', 'dataRequirements', 'findings', 'confirmationItems', 'proposals'], '/')
   const schemaVersion = repair ? 'test-design-repair/v1' : 'test-case-design/v1'
   if (input.schemaVersion !== schemaVersion) synthesisFail('/schemaVersion', `schemaVersion 必须为 ${schemaVersion}`)
   if (!Array.isArray(input.cases) || !input.cases.length || input.cases.length > 1_000) synthesisFail('/cases', 'cases 必须包含 1 到 1000 条用例')
@@ -132,6 +134,7 @@ export function validateTestCaseDesignCandidate(value: unknown, repair = false):
       synthesisFail(path, errorMessage(error))
     }
   })
+  const scenarioClaims = validateScenarioClaims(input.scenarioClaims, cases)
   const refs = new Set<string>()
   const dataRequirements = input.dataRequirements.map((candidate, index): TestDataRequirementCandidate => {
     const path = `/dataRequirements/${index}`
@@ -174,7 +177,47 @@ export function validateTestCaseDesignCandidate(value: unknown, repair = false):
     const missing = [...caseRefs].filter(ref => !proposedCaseRefs.has(ref))
     if (missing.length) synthesisFail('/proposals', `每条候选用例都必须由 Proposal 覆盖，缺少：${missing.join('、')}`)
   }
-  return { schemaVersion, cases, dataRequirements, findings, confirmationItems, proposals }
+  return { schemaVersion, cases, scenarioClaims, dataRequirements, findings, confirmationItems, proposals }
+}
+
+function validateScenarioClaims(value: unknown, cases: TestCaseDesignCandidate['cases']): ScenarioClaim[] {
+  if (!Array.isArray(value) || value.length > 10_000) synthesisFail('/scenarioClaims', 'scenarioClaims 必须是最多 10000 项的数组')
+  const caseByRef = new Map(cases.map(item => [item.ref, item]))
+  const refs = new Set<string>()
+  const claims = value.map((candidate, index): ScenarioClaim => {
+    const path = `/scenarioClaims/${index}`
+    const input = synthesisObject(candidate, path, 'ScenarioClaim 必须是对象')
+    synthesisRejectUnknown(input, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle', 'knowledgeRefs'], path)
+    const ref = synthesisText(input.ref, `${path}/ref`, 200)
+    if (refs.has(ref)) synthesisFail(`${path}/ref`, `ScenarioClaim ref ${ref} 重复`)
+    refs.add(ref)
+    const caseRef = synthesisText(input.caseRef, `${path}/caseRef`, 200)
+    const testCase = caseByRef.get(caseRef)
+    if (!testCase) synthesisFail(`${path}/caseRef`, '必须引用本次提交中的有效 Candidate Case ref')
+    const requirementRefs = synthesisIds(input.requirementRefs, `${path}/requirementRefs`)
+    if (!requirementRefs.length) synthesisFail(`${path}/requirementRefs`, '至少引用一个该 Case 已引用的 Requirement')
+    const caseRequirementRefs = new Set(testCase.content.requirementRefs)
+    const invalidRequirementRefs = requirementRefs.filter(item => !caseRequirementRefs.has(item))
+    if (invalidRequirementRefs.length) synthesisFail(`${path}/requirementRefs`, `不能引用 Case requirementRefs 之外的 Requirement：${invalidRequirementRefs.join('、')}`)
+    const kind = synthesisEnum(input.kind, `${path}/kind`, ['crud_lifecycle', 'state_transition', 'enum', 'validation', 'filter', 'search', 'permission', 'boundary', 'exception', 'statistics', 'cross_channel_consistency', 'other'] as const)
+    const polarity = synthesisEnum(input.polarity, `${path}/polarity`, ['positive', 'negative', 'neutral'] as const)
+    const knowledgeRefs = input.knowledgeRefs === undefined ? undefined : synthesisIds(input.knowledgeRefs, `${path}/knowledgeRefs`)
+    return {
+      ref,
+      caseRef,
+      requirementRefs,
+      kind,
+      subject: synthesisText(input.subject, `${path}/subject`, 500),
+      variant: synthesisText(input.variant, `${path}/variant`, 1_000),
+      polarity,
+      oracle: synthesisText(input.oracle, `${path}/oracle`, 4_000),
+      ...(knowledgeRefs?.length ? { knowledgeRefs } : {}),
+    }
+  })
+  const claimsByCaseRef = new Map<string, ScenarioClaim[]>()
+  for (const claim of claims) claimsByCaseRef.set(claim.caseRef, [...(claimsByCaseRef.get(claim.caseRef) ?? []), claim])
+  for (const testCase of cases) if ((testCase.content.dimension === 'functional' || testCase.content.dimension === 'security') && !claimsByCaseRef.get(testCase.ref)?.length) synthesisFail('/scenarioClaims', `functional/security 用例 ${testCase.ref} 必须至少拥有一条 ScenarioClaim`)
+  return claims
 }
 
 function validateProposalCandidates(value: unknown, caseRefs: Set<string>): TestCaseDesignCandidate['proposals'] {
@@ -211,7 +254,7 @@ function validateDesignIssues(input: Record<string, unknown>) {
     const path = `/confirmationItems/${index}`
     const item = synthesisObject(candidate, path, '待确认项必须是对象')
     synthesisRejectUnknown(item, ['title', 'question', 'decisionType', 'impactStage', 'affectedRefs', 'blocker'], path)
-    const impactStage = synthesisEnum(item.impactStage, `${path}/impactStage`, ['case', 'data', 'publication'] as const)
+    const impactStage = synthesisEnum(item.impactStage, `${path}/impactStage`, ['case', 'data', 'publication', 'handoff'] as const)
     if (typeof item.blocker !== 'boolean') synthesisFail(`${path}/blocker`, '必须是布尔值')
     return { title: synthesisText(item.title, `${path}/title`, 500), question: synthesisText(item.question, `${path}/question`, 8_000), decisionType: synthesisText(item.decisionType, `${path}/decisionType`, 200), impactStage, affectedRefs: synthesisIds(item.affectedRefs, `${path}/affectedRefs`), blocker: item.blocker }
   })

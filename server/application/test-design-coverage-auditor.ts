@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { ConfirmationItem, CoverageAudit, HistoricalCaseSnapshot, RetrievalSnapshot, TestCase, TestDataRequirementSetVersion, TestDesignBasisSnapshot } from '../domain/test-design-types.js'
+import type { ConfirmationItem, CoverageAudit, HistoricalCaseSnapshot, RetrievalSnapshot, ScenarioClaim, TestCase, TestDataRequirementSetVersion, TestDesignBasisSnapshot } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 import { validateCaseDependencyGraph } from './test-design-validation.js'
 
@@ -10,6 +10,8 @@ export function auditTestDesignCoverage(input: {
   retrieval: RetrievalSnapshot
   historical: HistoricalCaseSnapshot
   cases: TestCase[]
+  /** Candidate-only metadata; it never becomes a formal TestCase asset. */
+  scenarioClaims: ScenarioClaim[]
   dataSet: TestDataRequirementSetVersion
   findings: Array<{ id: string; title: string; severity: string; state: string }>
   confirmationItems: ConfirmationItem[]
@@ -67,7 +69,7 @@ export function auditTestDesignCoverage(input: {
   for (const item of current) duplicateGroups.set(item.revision.semanticSha256, [...(duplicateGroups.get(item.revision.semanticSha256) ?? []), item.testCase.id])
   for (const caseIds of duplicateGroups.values()) if (caseIds.length > 1) blockers.push({ code: 'TEST_CASE_DUPLICATE', message: `存在 ${caseIds.length} 条语义完全相同的测试用例`, subjectId: caseIds[0] })
   for (const item of input.findings) if (item.state === 'open' && item.severity === 'blocker') blockers.push({ code: 'TEST_DESIGN_FINDING_UNRESOLVED', message: `阻断 Finding ${item.title} 尚未处置`, subjectId: item.id })
-  for (const item of input.confirmationItems) if (item.state === 'open' && item.blocker) blockers.push({ code: 'TEST_DESIGN_CONFIRMATION_UNRESOLVED', message: `阻断待确认项 ${item.title} 尚未处置`, subjectId: item.id })
+  for (const item of input.confirmationItems) if (item.impactStage !== 'handoff' && item.state === 'open' && item.blocker) blockers.push({ code: 'TEST_DESIGN_CONFIRMATION_UNRESOLVED', message: `阻断待确认项 ${item.title} 尚未处置`, subjectId: item.id })
   for (const item of basisItems) {
     const text = String(item.content && typeof item.content === 'object' ? JSON.stringify(item.content) : item.content ?? '')
     const cues = ['正常', '异常', '边界', '权限', '状态'].filter(cue => text.includes(cue)).length
@@ -75,13 +77,62 @@ export function auditTestDesignCoverage(input: {
     const linked = current.filter(candidate => (candidate.revision.content.requirementRefs ?? []).some(ref => requirementByRef.get(ref) === requirementId))
     if (cues >= 2 && linked.length === 1 && linked[0].revision.content.objective.length < 80) blockers.push({ code: 'TEST_CASE_COVERAGE_TOO_SHALLOW', message: `Requirement ${requirementId} 同时包含多个测试维度，但只有一条过于宽泛的用例`, subjectId: linked[0].testCase.id })
   }
-  const inputSha256 = canonicalSha256({ basisSnapshotSha256: input.basis.snapshotSha256, retrievalSnapshotSha256: input.retrieval.snapshotSha256, historicalSnapshotSha256: input.historical.snapshotSha256, requirementReleaseId: input.basis.requirementReleaseId, caseSetSha256, dataSetVersionId: input.dataSet.id, dataSetSha256: input.dataSet.contentSha256, findingStateSha256: canonicalSha256(input.findings.map(item => ({ id: item.id, state: item.state }))), confirmationStateSha256: canonicalSha256(input.confirmationItems.map(item => ({ id: item.id, state: item.state, actions: item.actions.length }))) })
-  return { id: `coverage_audit_${randomUUID()}`, runId: input.runId, requirementReleaseId: input.basis.requirementReleaseId, dataSetVersionId: input.dataSet.id, caseSetSha256, inputSha256, status: 'valid', statistics: { totalBasis: basisItems.length, coveredBasis: basisItems.filter(item => coveredRequirements.has(String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id))).length, totalCases: current.length, approvedCases: current.filter(item => item.testCase.reviewState === 'approved').length }, relations, blockers: blockers.map(item => ({ ...item, resolution: blockerResolution(item.code) })), createdAt: new Date().toISOString() }
+
+  const caseIdByCandidateRef = new Map(current.flatMap(item => item.testCase.candidateRef ? [[item.testCase.candidateRef, item.testCase.id] as const] : []))
+  const claimsByCaseId = new Map<string, ScenarioClaim[]>()
+  for (const claim of input.scenarioClaims) {
+    const caseId = caseIdByCandidateRef.get(claim.caseRef)
+    if (!caseId) continue
+    claimsByCaseId.set(caseId, [...(claimsByCaseId.get(caseId) ?? []), claim])
+  }
+  for (const item of current) {
+    const claims = claimsByCaseId.get(item.testCase.id) ?? []
+    const atomicity = atomicityBlocker(item.testCase.id, item.revision.content.title, claims)
+    if (!atomicity) continue
+    blockers.push(atomicity)
+    for (const relation of relations) if (relation.caseId === item.testCase.id && relation.status === 'covered') {
+      relation.status = 'partially_covered'
+      relation.reason = 'Case 仍可直接追溯 Requirement，但 Scenario / Atomicity Audit 发现多个独立测试意图'
+    }
+  }
+
+  const fullyCoveredRequirements = new Set(relations.filter(item => item.status === 'covered').map(item => item.requirementId))
+  const inputSha256 = canonicalSha256({ basisSnapshotSha256: input.basis.snapshotSha256, retrievalSnapshotSha256: input.retrieval.snapshotSha256, historicalSnapshotSha256: input.historical.snapshotSha256, requirementReleaseId: input.basis.requirementReleaseId, caseSetSha256, scenarioClaimsSha256: canonicalSha256([...input.scenarioClaims].sort((left, right) => left.ref.localeCompare(right.ref))), dataSetVersionId: input.dataSet.id, dataSetSha256: input.dataSet.contentSha256, findingStateSha256: canonicalSha256(input.findings.map(item => ({ id: item.id, state: item.state }))), confirmationStateSha256: canonicalSha256(input.confirmationItems.map(item => ({ id: item.id, impactStage: item.impactStage, state: item.state, actions: item.actions.length }))) })
+  return { id: `coverage_audit_${randomUUID()}`, runId: input.runId, requirementReleaseId: input.basis.requirementReleaseId, dataSetVersionId: input.dataSet.id, caseSetSha256, inputSha256, status: 'valid', statistics: { totalBasis: basisItems.length, coveredBasis: basisItems.filter(item => fullyCoveredRequirements.has(String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id))).length, totalCases: current.length, approvedCases: current.filter(item => item.testCase.reviewState === 'approved').length }, relations, blockers: blockers.map(item => ({ ...item, resolution: blockerResolution(item.code) })), createdAt: new Date().toISOString() }
 }
 
+function atomicityBlocker(caseId: string, title: string, claims: ScenarioClaim[]): Omit<CoverageAudit['blockers'][number], 'resolution'> | undefined {
+  if (claims.length < 2) return undefined
+  const sameEnumSubject = claims.every(claim => claim.kind === 'enum' && claim.subject === claims[0]?.subject)
+  const allowedAggregate = claims.every(claim => claim.kind === 'crud_lifecycle' || claim.kind === 'cross_channel_consistency') || sameEnumSubject
+  if (allowedAggregate) return undefined
+  const independent = claims
+  const reasons = new Set<string>()
+  const stateVariants = new Set(independent.filter(claim => claim.kind === 'state_transition').map(claim => claim.variant))
+  if (stateVariants.size > 1) reasons.add('multiple_state_transitions')
+  const polarities = new Set(independent.map(claim => claim.polarity))
+  if (polarities.has('positive') && polarities.has('negative')) reasons.add('mixed_positive_negative')
+  const subjects = new Set(independent.map(claim => claim.subject))
+  if (subjects.size > 1) reasons.add('multiple_independent_subjects')
+  const queryIntents = new Set(independent.filter(claim => claim.kind === 'filter' || claim.kind === 'search').map(claim => `${claim.kind}:${claim.subject}`))
+  if (queryIntents.size > 1) reasons.add('multiple_query_intents')
+  const oracles = new Set(independent.map(claim => normalizeOracle(claim.oracle)))
+  if (oracles.size > 1) reasons.add('multiple_independent_oracles')
+  if (!reasons.size) return undefined
+  return {
+    code: 'TEST_CASE_OVER_MERGED',
+    message: `用例 ${title} 包含 ${claims.length} 个可独立判定的测试意图，必须按 Atomic Test Intent 拆分`,
+    subjectId: caseId,
+    details: { scenarioRefs: claims.map(claim => claim.ref), reasons: [...reasons].sort(), suggestedSplitCount: Math.max(2, independent.length) },
+  }
+}
+
+function normalizeOracle(value: string) { return value.trim().replace(/\s+/gu, ' ').toLocaleLowerCase('zh-CN') }
+
 function blockerResolution(code: string): CoverageAudit['blockers'][number]['resolution'] {
-  if (code === 'COVERAGE_REQUIREMENT_UNCOVERED' || code === 'TEST_CASE_DUPLICATE' || code === 'TEST_CASE_COVERAGE_TOO_SHALLOW' || code === 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID') return 'agent_repair'
+  if (code === 'COVERAGE_REQUIREMENT_UNCOVERED' || code === 'TEST_CASE_DUPLICATE' || code === 'TEST_CASE_COVERAGE_TOO_SHALLOW' || code === 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID' || code === 'TEST_CASE_OVER_MERGED') return 'agent_repair'
   if (code === 'TEST_CASE_REVIEW_REQUIRED') return 'human_review'
-  if (code === 'TEST_DESIGN_FINDING_UNRESOLVED' || code === 'TEST_DESIGN_CONFIRMATION_UNRESOLVED' || code === 'PLANNING_CLARIFICATION_UNRESOLVED' || code === 'TEST_CASE_NOT_READY' || code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR') return 'human_decision'
+  if (code === 'TEST_CASE_NOT_READY') return 'execution_handoff'
+  if (code === 'TEST_DESIGN_FINDING_UNRESOLVED' || code === 'TEST_DESIGN_CONFIRMATION_UNRESOLVED' || code === 'PLANNING_CLARIFICATION_UNRESOLVED' || code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR') return 'human_decision'
   return 'manual_edit'
 }

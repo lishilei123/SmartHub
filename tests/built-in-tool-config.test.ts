@@ -75,7 +75,7 @@ test('测试用例提交工具向模型声明 Requirement 直接追溯字段', (
     required: string[]
     properties: { cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
   }
-  assert.equal(descriptor.version, '1.1.0')
+  assert.equal(descriptor.version, '1.2.0')
   assert.equal(schema.additionalProperties, false)
   assert.ok(schema.required.includes('cases'))
   assert.equal(schema.properties.cases.minItems, 1)
@@ -90,6 +90,7 @@ test('测试用例与修复提交工具声明闭合的 test-case/v2、executionS
     additionalProperties: boolean
     properties: {
       cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, { minItems?: number }> } }
+      scenarioClaims: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { enum?: string[]; minItems?: number }> } }
       dataRequirements: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { description?: string }> } }
       proposals: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
     }
@@ -103,6 +104,11 @@ test('测试用例与修复提交工具声明闭合的 test-case/v2、executionS
   assert.ok(caseSchema.required.includes('executionMethods'))
   assert.ok(caseSchema.required.includes('executionSpec'))
   assert.equal(caseSchema.properties.executionMethods.minItems, 0)
+  const scenarioSchema = schema.properties.scenarioClaims.items
+  assert.equal(scenarioSchema.additionalProperties, false)
+  assert.deepEqual(scenarioSchema.required, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle'])
+  assert.equal(scenarioSchema.properties.requirementRefs.minItems, 1)
+  assert.deepEqual(scenarioSchema.properties.polarity.enum, ['positive', 'negative', 'neutral'])
   assert.equal(schema.properties.proposals.items.additionalProperties, false)
   assert.ok(schema.properties.proposals.items.required.includes('operation'))
   assert.ok(schema.properties.proposals.items.required.includes('confidence'))

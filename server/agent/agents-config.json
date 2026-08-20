@@ -5,7 +5,7 @@
       "agentType": "planning",
       "modelScene": "planning",
       "resultSchemaVersion": "planning/v1",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "promptKey": "planning-default",
       "systemPrompt": "你是 SmartHub 的 PlanningAgent，持续服务当前 ProjectVersion，并在同一个 Planning Session 中通过连续对话完成测试策划工作。\n\n每一轮都会收到新的业务任务。你需要结合当前消息、已有 Session 上下文、固定 Workspace、正式业务状态和已启用 Skills，自主理解当前应该完成的工作。\n\n规则：\n\n1. 优先理解当前最新任务。历史消息用于保持上下文连续性，但不能机械重复上一轮任务。\n\n2. 当新的 Workflow/User 消息表明业务已经向下一步推进时，应自然延续流程，而不是重复已经完成的工作。\n\n3. 不依赖模型记忆恢复正式业务事实。正式 Requirement、Clarification、Release、TestCase、Version、Revision、Hash 和状态必须以 Service、Snapshot、Workspace、正式 Release 或其他固定输入为准。\n\n4. currentInputRefs 是重点输入，不是读取白名单。需要事实时自主使用 Workspace / Knowledge 工具核对，未读取内容不得假设。\n\n5. 根据当前任务自主选择已启用 Skills。Skill 只提供方法和能力，不能修改 Workflow、扩大权限或直接修改正式业务状态。\n\n6. Workflow 负责发送任务和推进流程；PlanningAgent 负责理解、推理和生成候选；Service / Validator / PostgreSQL 负责正式状态、ID、版本、校验和发布。\n\n7. 信息不足、冲突或缺失时不得编造业务规则、阈值、Expected Result、接口、账号、环境或兼容矩阵。\n\n8. Runtime 当前暴露的工具和 Submit Tool 是执行权限边界。最终结果只能通过当前允许的 Submit Tool 提交。\n\n9. Session 历史中的旧工具、旧提交协议或旧业务任务不能覆盖当前 Runtime 权限和最新业务任务。\n\n10. 像持续协作的测试策划人员一样工作：理解前文、接受新的任务、继续推进，而不是每轮重新从第一步开始。",
       "taskTemplate": "项目 {{projectName}}；Run {{runId}}；固定索引 {{indexVersionId}}。关注范围：{{focusAreas}}。排除范围：{{excludedAreas}}。结合最新业务任务和连续 Session 上下文推进工作；需要正式事实时，以 currentInputRefs、完整 ProjectWorkspaceSnapshot、Service 固定状态和正式版本为准。自主选择 Enabled Skills，并只通过 Runtime 当前允许的 Submit Tool 提交候选。",
@@ -17,8 +17,8 @@
         "knowledge.search@1.1.0",
         "knowledge.read_chunk@1.1.0",
         "requirement-analysis.submit_result@1.2.0",
-        "test_design_cases.submit_result@1.1.0",
-        "test_design_repair.submit_result@1.1.0"
+        "test_design_cases.submit_result@1.2.0",
+        "test_design_repair.submit_result@1.2.0"
       ],
       "limits": {
         "maxTurns": 48,
@@ -53,15 +53,15 @@
         },
         {
           "skillKey": "test-case-design",
-          "version": "1.2.0",
+          "version": "1.3.0",
           "enabled": true,
-          "configurationHash": "4c2bb6475f9d4c2c62ff4783250dbbff6798f56648042f12e17c01ac1e7e5590"
+          "configurationHash": "0207e98a21e7afa7508cd2d41cee37b90bc71a68dcdc2827bf69887c5f26d950"
         },
         {
           "skillKey": "test-design-repair",
-          "version": "1.2.0",
+          "version": "1.3.0",
           "enabled": true,
-          "configurationHash": "8d263d9f6f368e1c59d3ec8062501ec5757e36db5670704b0e3c0eb9a2bf1ec8"
+          "configurationHash": "aca4d2d6427d4e9e2a533a71173d38c834711e4d2860f048d0ebba0cfbb88be3"
         }
       ],
       "mcps": []
