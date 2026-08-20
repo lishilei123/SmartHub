@@ -53,6 +53,21 @@ test('skill.read 返回当前绑定版本的 TRUSTED_SKILL 正文，并在同轮
   assert.equal(snapshotCalls, 1, '同一执行轮重复读取不能再次访问 Skill 存储')
 })
 
+test('Requirement Analysis Skill 将扩展测试风险留在 Test Focus，不把 Knowledge 升级为 Blocking', async () => {
+  const { session } = await prepareSkills(['requirement.analysis'])
+  const registry = new ToolRegistry()
+  session.register(registry)
+  const result = await executeSkillRead(registry, { skillKey: 'requirement.analysis' })
+  const content = (result.data as SkillReadData).content
+
+  assert.match(content, /一个 Clarification 只有\*\*同时\*\*满足以下全部条件/u)
+  assert.match(content, /无法生成至少一个语义正确的核心 TestCase/u)
+  assert.match(content, /不能通过“只测试当前 Requirement 已明确的部分”继续完成测试设计/u)
+  assert.match(content, /纯空白、trim、Tab\/换行、最大长度、字符集和唯一性应作为输入规范化风险/u)
+  assert.match(content, /Knowledge Reference 只能提醒风险/u)
+  assert.match(content, /普通测试风险不要为了记录而创建 `blocking=false` Clarification/u)
+})
+
 test('skill.read 拒绝未绑定 Skill、路径式输入和额外参数', async () => {
   const { session } = await prepareSkills(['test-case-design'])
   const registry = new ToolRegistry()

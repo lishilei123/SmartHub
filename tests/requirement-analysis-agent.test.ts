@@ -165,6 +165,47 @@ test('Validator 只做结构、引用、Evidence 与 Artifact 安全校验，不
   assert.equal(normalized.result?.requirementPoints.length, 2)
 })
 
+test('Validator 只拒绝可确定的错误 Blocking 声明，不用关键词猜测业务语义', async () => {
+  const { store } = await successfulRun()
+  const run = (await store.snapshot()).reviewRuns[0]
+  const validator = new RequirementAnalysisValidator(store)
+
+  const missingReference = await validator.normalize({
+    ...analysisCandidate(),
+    clarifications: [{ question: '任务与项目的关联模型是什么？', reason: '未定义关联关系时无法准备级联删除的核心测试数据。', category: 'dependency', requirementPointRefs: [], blocking: true }],
+  }, run.snapshot, run.inputDeliveryManifest!)
+  assert.equal(missingReference.report.valid, false)
+  assert.ok(missingReference.report.issues.some(issue => issue.path === 'clarifications[0].requirementPointRefs'))
+
+  const coverageOnly = await validator.normalize({
+    ...analysisCandidate(),
+    clarifications: [{ question: '需要覆盖哪些额外浏览器？', reason: '补充更多测试覆盖。', category: 'test_scope', requirementPointRefs: ['RP-001'], blocking: true }],
+  }, run.snapshot, run.inputDeliveryManifest!)
+  assert.equal(coverageOnly.report.valid, false)
+  assert.ok(coverageOnly.report.issues.some(issue => issue.path === 'clarifications[0].category'))
+})
+
+test('名称、状态机、Dashboard 和 Knowledge 风险保留为 Test Focus，不阻断 Requirement Release', async () => {
+  const { response, store } = await successfulMiniTaskRun(nonBlockingRiskCandidate())
+  assert.equal(response.result.clarifications.filter(item => item.blocking && item.status === 'pending').length, 0)
+  assert.deepEqual(response.result.testFocus.map(item => item.title), ['名称输入规范化风险', '状态机扩展风险', 'Dashboard 统计一致性', 'Knowledge 推荐的查询边界'])
+
+  const run = (await store.snapshot()).reviewRuns[0]
+  assert.equal(run.status, 'succeeded')
+  assert.equal(run.workflow?.currentStage, 'release')
+  const service = new RequirementAnalysisService(store, { execute: async () => { throw new Error('发布不应重新执行 Agent') } })
+  const published = await service.finalizeRequirementRelease(run.id)
+  assert.equal(published.release.status, 'published')
+})
+
+test('项目-任务核心关联事实缺失仍可 Blocking Requirement Release', async () => {
+  const { store } = await successfulMiniTaskRun(projectTaskRelationshipBlockingCandidate())
+  const run = (await store.snapshot()).reviewRuns[0]
+  assert.equal(run.status, 'waiting_clarification')
+  assert.equal(run.workflow?.currentStage, 'clarification')
+  assert.match(run.result!.clarifications[0].reason, /级联删除/u)
+})
+
 test('服务恢复中断运行并将重试语义限定为完整单 Agent 重跑', async () => {
   const store = await seededStore()
   await store.transaction(state => {
@@ -306,13 +347,19 @@ test('未处理完全部 Blocking Clarification 时不发布 Requirement Release
 })
 
 async function successfulRun(candidate = analysisCandidate()) {
-  const store = await seededStore()
+  return executeSuccessfulRun(await seededStore(), candidate, ['branches/V1.0/input/requirements/cancel.md', 'branches/V1.0/input/requirements/payment.md'])
+}
+
+async function successfulMiniTaskRun(candidate: CandidateRequirementAnalysisV1) {
+  return executeSuccessfulRun(await seededMiniTaskStore(), candidate, ['branches/V1.0/input/requirements/requirements.md'])
+}
+
+async function executeSuccessfulRun(store: JsonStore, candidate: CandidateRequirementAnalysisV1, paths: string[]) {
   const resources = new AiResourceService(store, undefined, { reloadIntervalMs: 0 })
   await resources.initialize()
   const faux = fauxProvider()
   faux.setResponses([
-    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/cancel.md' }), { stopReason: 'toolUse' }),
-    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/input/requirements/payment.md' }), { stopReason: 'toolUse' }),
+    ...paths.map(path => fauxAssistantMessage(fauxToolCall('read', { path }), { stopReason: 'toolUse' })),
     fauxAssistantMessage(fauxToolCall('knowledge_search', { query: '取消' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('knowledge_read_chunk', { chunkId: 'chunk-1' }), { stopReason: 'toolUse' }),
     fauxAssistantMessage(fauxToolCall('requirement_analysis_submit_result', candidate), { stopReason: 'toolUse' }),
@@ -368,6 +415,56 @@ function blockingClarificationCandidate(): CandidateRequirementAnalysisV1 {
   return candidate
 }
 
+function nonBlockingRiskCandidate(): CandidateRequirementAnalysisV1 {
+  const candidate = miniTaskCandidate()
+  candidate.summary = {
+    ...candidate.summary,
+    risks: ['名称输入规范化、状态机扩展、Dashboard 刷新时点和查询边界未定义；这些不改变已明确核心验收语义。'],
+  }
+  candidate.testFocus = [
+    { title: '名称输入规范化风险', description: '当前“名称不能为空”只断言空字符串不能保存；纯空白、trim、长度和字符集作为扩展风险关注，不擅自增加业务 Expected Result。', requirementPointRefs: ['RP-002'] },
+    { title: '状态机扩展风险', description: '已明确转换可形成核心 Case；状态自环和终态后非状态字段编辑未定义，仅作为扩展风险关注。', requirementPointRefs: ['RP-004'] },
+    { title: 'Dashboard 统计一致性', description: '项目数、任务数与完成数应和源数据交叉验证；刷新时点未定义时不擅自断言。', requirementPointRefs: [] },
+    { title: 'Knowledge 推荐的查询边界', description: 'Knowledge 推荐组合查询和异常边界时仅增强测试维度，不将其提升为当前业务事实。', requirementPointRefs: ['RP-005'] },
+  ]
+  return candidate
+}
+
+function projectTaskRelationshipBlockingCandidate(): CandidateRequirementAnalysisV1 {
+  const candidate = miniTaskCandidate()
+  candidate.clarifications = [{
+    question: '删除项目同步删除任务时，任务与项目的关联模型及归属规则是什么？',
+    reason: '未定义任务是否属于项目及归属关系时，无法准备可靠的级联删除核心测试数据并确定删除后的 Expected Result。',
+    category: 'dependency',
+    requirementPointRefs: ['RP-003'],
+    blocking: true,
+  }]
+  return candidate
+}
+
+function miniTaskCandidate(): CandidateRequirementAnalysisV1 {
+  return {
+    summary: {
+      overview: 'MiniTask 覆盖登录、项目与任务管理、状态机和 Dashboard。',
+      businessGoals: ['完成项目与任务的基础协作流程'],
+      overallAssessment: 'pass',
+      score: 100,
+      strengths: ['核心流程与主要 Expected Result 已明确'],
+      risks: [],
+    },
+    requirementPoints: [
+      { id: 'RP-001', title: '登录', description: '正确密码登录成功，错误密码登录失败。', sourceTexts: ['正确密码登录成功，错误密码登录失败。'] },
+      { id: 'RP-002', title: '项目名称校验', description: '项目名称不能为空。', sourceTexts: ['项目名称不能为空。'] },
+      { id: 'RP-003', title: '删除项目', description: '删除项目时必须同步删除任务。', sourceTexts: ['删除项目时必须同步删除任务。'] },
+      { id: 'RP-004', title: '任务状态机', description: '任务状态仅允许 todo 到 in_progress 到 completed；completed 后不允许回退。', sourceTexts: ['任务状态仅允许 todo → in_progress → completed；completed 后不允许回退。'] },
+      { id: 'RP-005', title: 'Dashboard', description: 'Dashboard 展示项目数、任务数、已完成数和未完成数。', sourceTexts: ['Dashboard 展示项目数、任务数、已完成数和未完成数。'] },
+    ],
+    clarifications: [],
+    testFocus: [],
+    analysisDocument: '当前输入已明确基础操作与核心 Expected Result；未定义的覆盖扩展应保留为风险，不得擅自补写业务规则。',
+  }
+}
+
 async function seededStore() {
   const store = new JsonStore(null)
   await store.load()
@@ -397,6 +494,29 @@ async function seededStore() {
       { ...paymentChunk, assetMetadata: { assetId: 'asset-2', displayName: '支付超时需求', assetType: 'requirement', sourceType: 'upload', logicalPath: `${requirementDirectory}/payment.md` } },
     ], createdAt: '2026-08-12T00:00:00.000Z', activatedAt: '2026-08-12T00:00:01.000Z' })
     state.modelSources.push({ id: 'source-1', name: '测试来源', providerType: 'openai_compatible', baseUrl: 'https://provider.example/v1', apiKey: 'secret', enabled: true, health: 'healthy', priority: 1, models: [{ id: 'model-1', name: 'analysis-model', displayName: 'Analysis Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling'], enabled: true, health: 'healthy', qualityGate: { version: 'model-probe/v2', checkedAt: '2026-08-12T00:00:00.000Z', passed: true, sampleSha256: 'a'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } } }], createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' })
+  })
+  return store
+}
+
+async function seededMiniTaskStore() {
+  const store = await seededStore()
+  const content = [
+    '# MiniTask',
+    '',
+    '正确密码登录成功，错误密码登录失败。',
+    '项目名称不能为空。',
+    '删除项目时必须同步删除任务。',
+    '任务状态仅允许 todo → in_progress → completed；completed 后不允许回退。',
+    'Dashboard 展示项目数、任务数、已完成数和未完成数。',
+  ].join('\n')
+  const contentHash = createHash('sha256').update(content).digest('hex')
+  const chunk = { id: 'chunk-mini-task', chunkKey: 'mini-task', assetVersionId: 'version-mini-task', ordinal: 0, headingPath: ['MiniTask'], content, contentHash: 'mini-task-chunk-hash', tokenCount: 80, startLine: 1, endLine: 7, startChar: 0, endChar: content.length, embedding: [], reused: false }
+  await store.transaction(state => {
+    state.assets = [{ id: 'asset-mini-task', knowledgeBaseId: 'kb-1', displayName: 'requirements.md', logicalPath: `${requirementDirectory}/requirements.md`, assetType: 'requirement', sourceType: 'upload', sourceKey: 'requirements.md', activeVersionId: 'version-mini-task', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' }]
+    state.versions = [{ id: 'version-mini-task', assetId: 'asset-mini-task', number: 1, content, contentHash, status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', readyAt: '2026-08-12T00:00:01.000Z', chunks: [chunk] }]
+    state.projectVersionRequirementBindings = [{ id: 'binding-mini-task', projectVersionId: 'project-version-1', assetId: 'asset-mini-task', assetVersionId: 'version-mini-task', createdAt: '2026-08-12T00:00:01.000Z' }]
+    state.indexes[0].assetVersionIds = ['version-mini-task']
+    state.indexes[0].indexedChunks = [{ ...chunk, assetMetadata: { assetId: 'asset-mini-task', displayName: 'requirements.md', assetType: 'requirement', sourceType: 'upload', logicalPath: `${requirementDirectory}/requirements.md` } }]
   })
   return store
 }

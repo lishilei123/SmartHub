@@ -430,6 +430,9 @@ export class RequirementAnalysisValidator {
       const refs = [...new Set(candidate.requirementPointRefs.map(reference => reference.trim()).filter(Boolean))]
       const invalidRefs = refs.filter(reference => !referenceMap.has(reference))
       if (invalidRefs.length) issues.push(issue(`${path}.requirementPointRefs`, `引用了不存在的需求点：${invalidRefs.join('、')}`))
+      if (candidate.blocking === true && refs.length === 0) issues.push(issue(`${path}.requirementPointRefs`, 'blocking Clarification 必须关联至少一个需求点'))
+      if (candidate.blocking === true && (candidate.category === 'test_scope' || candidate.category === 'environment')) issues.push(issue(`${path}.category`, '测试范围或环境配置不是可阻断的核心业务事实'))
+      if (candidate.blocking === true && question === reason) issues.push(issue(`${path}.reason`, 'blocking Clarification 的原因必须独立说明核心测试或 Expected Result 的影响'))
       if (!question || !reason || invalidRefs.length || !clarificationCategories.has(String(candidate.category)) || typeof candidate.blocking !== 'boolean') return
       const normalized = {
         question: question.slice(0, 8_000),

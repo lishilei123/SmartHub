@@ -20,6 +20,7 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.match(listDirectory.properties.path.description, /空字符串/u)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
+  assert.match(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').description, /核心业务事实/u)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').piName, 'test_script_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').piName, 'failure_analysis_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').piName, 'script_repair_submit_result')

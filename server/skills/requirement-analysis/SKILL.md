@@ -22,13 +22,13 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 
 ## 3. 风险与事实缺口检查
 
-先检查全部需求集合，识别会影响测试正确性的未确定业务事实：
+先检查全部需求集合，但不要把“需求未写全”直接等同于 Clarification。每个未定义项只能归入以下一种结果：
 
-- 单需求中的歧义、缺失、边界、异常、数据、验收或可测试性不足；
-- 跨需求的业务规则、状态、权限、术语、上下游或时序冲突；
-- 整体需求中异常闭环、状态模型、权限模型、失败处理、迁移或非功能要求的关键缺失。
+1. **Blocking Clarification**：缺失的是必须由人工决定的核心业务事实；不回答就无法形成任何语义正确的核心 TestCase。
+2. **Test Focus / Risk**：边界、异常、历史风险、Knowledge 推荐维度或覆盖扩展；可基于当前 Requirement 已明确部分继续形成正确核心 Case。
+3. **Ignore**：对当前版本没有实际测试价值，不输出。
 
-仅当缺失事实会导致测试用例的规则、边界或预期结果不可靠时，才生成 blocking Clarification；不按需求点机械提问，也不按固定数量凑数。不得擅自补写资料中不存在的结论。
+重点检查跨需求的业务规则、状态、权限、对象关系、术语、上下游与时序冲突。不得按需求点机械提问，也不得按固定数量凑数；不得擅自补写资料中不存在的结论。
 
 ## 4. 分析维度
 
@@ -57,14 +57,29 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 
 ## 5. Test Focus
 
-Test Focus 不是完整测试用例。为高风险规则、关键状态、边界、异常、权限、并发、兼容性和待确认决策给出可行动的测试关注点，并关联适用的 Requirement Point；整体关注点可以使用空引用数组。
+Test Focus 不是完整测试用例，也不是待人工处理的 Clarification。为高风险规则、关键状态、边界、异常、权限、并发、兼容性和 Knowledge 推荐维度给出可行动的测试关注点，并关联适用的 Requirement Point；整体关注点可以使用空引用数组。
+
+- 只要当前 Requirement 已能确定主流程的操作和 Expected Result，就先设计这些核心 Case；剩余未定义的覆盖扩展写入 Test Focus 或 summary.risks，不得阻断 Release。
+- Test Focus 必须明确“关注什么风险”，同时明确不得把未定义行为擅自断言为允许、禁止或特定 Expected Result。
+- 例如“名称不能为空”已经支持正常非空名称与空字符串不能保存的核心 Case；纯空白、trim、Tab/换行、最大长度、字符集和唯一性应作为输入规范化风险，而不是 Blocking。
+- 例如状态机已经给出合法转换和禁止回退时，状态自环、终态后的非状态字段编辑等未定义行为属于扩展风险；不得自行推导允许或禁止。
+- Dashboard 已定义统计项目时，应关注源数据交叉验证和数据变化后的一致性；未定义刷新时点或复杂统计范围不能单独阻断。
 
 ## 6. Clarification
 
-- 只有 Current Requirement、完整 Workspace 与 Knowledge Reference 都无法确定，且会影响测试用例正确性的业务事实才生成 Clarification。
-- 不得假设次数、时长、阈值、权限、状态规则、期望结果、依赖契约、范围或环境配置。此类缺失应提出具体问题并说明原因。
-- 改进建议或不影响测试正确性的资料缺口不进入本轮正式结果。
-- `blocking=true` 只用于不回答就无法形成正确测试设计的事实；其他可选确认使用 `blocking=false`。
+- `clarifications[]` 主要保存需要人工处理的业务决策。普通测试风险不要为了记录而创建 `blocking=false` Clarification；优先写入 Test Focus、summary.risks 或 analysisDocument。保留 Service 对历史 `blocking=false` 数据的兼容，不重复提交历史项。
+- 一个 Clarification 只有**同时**满足以下全部条件，才允许 `blocking=true`：
+  1. 缺失的是当前产品的业务事实，不是测试方法、经验或最佳实践；
+  2. Current Requirement、已回答的 Formal Clarification 与完整 Workspace 都无法确定该事实；
+  3. Knowledge 只能提示风险，不能提供该业务事实；
+  4. 该事实会直接改变核心操作是否成立、核心对象的数据关系、合法/非法状态、权限允许/禁止规则或核心 Expected Result 中至少一项；
+  5. 不回答时，无法生成至少一个语义正确的核心 TestCase；
+  6. 不能通过“只测试当前 Requirement 已明确的部分”继续完成测试设计。
+- `question` 必须直接询问缺失的业务事实；`reason` 必须说明该事实缺失会使哪个核心 TestCase 或 Expected Result 无法正确确定；每个 blocking 问题必须关联实际 Requirement Point。多个相关问题应合并为一个核心业务决策，禁止为每个测试维度分别创建问题。
+- 以下情况默认**不得**生成 Blocking Clarification：Knowledge 推荐额外场景；已有明确核心语义但缺少额外边界；只影响覆盖深度、错误文案或页面提示；可先生成当前 Requirement 的正确核心 Case；通用测试最佳实践。
+- 例如“删除项目时同步删除任务”却没有定义任务与项目的关联模型时，可以 Blocking，因为无法准备可靠的级联删除数据并验证核心结果。登录成功后的跳转、会话形式或提示文案，查询组合细节、删除确认取消分支、输入 trim/长度/字符集等不适合整体 Blocking。
+- Knowledge Reference 只能提醒风险、推荐测试维度、提示历史缺陷模式或边界/异常场景。除非知识明确是当前项目已确认的正式业务规范，否则不得因 Knowledge 自身包含规则而要求人工确认，更不得把它升级为 Current Requirement 事实。
+- 不得假设次数、时长、阈值、权限、状态规则、期望结果、依赖契约、范围或环境配置。真正满足上述条件的缺失应提出具体问题并说明核心影响。
 - 一次分析提交必须汇总当前已识别的全部 blocking Clarification，不得拆成逐题追问或预留下一轮才提问。人工会先完整回答这一批问题，Service 再一次性恢复 Planning 流程。
 - `status=answered` 的 Human Answer 是服务端保存的正式业务事实。继续分析时从固定 `formalClarifications` 重新读取，不依赖 Context Summary 或模型记忆，并将答案吸收到更新后的 Requirement Understanding 中。
 - `status=dismissed` 表示人工决定问题不适用或接受当前需求缺口；其 answer 只是可追溯的处置理由，不得作为业务规则、权限、边界、Expected Result 或测试断言依据。保留缺口并只在当前正式需求可验证范围内继续。
@@ -81,6 +96,8 @@ Test Focus 不是完整测试用例。为高风险规则、关键状态、边界
 - Requirement Point 是否有逐字 `sourceTexts`；
 - 关键结论是否能够通过相关 Requirement Point 的 Evidence 或清楚的“缺失事实”追溯；
 - Summary、Test Focus 与分析文档是否相互一致。
-- Clarification 是否只包含无法从正式输入确定的事实，blocking 是否确实影响测试设计正确性。
+- Clarification 是否只包含仍需人工处理的业务决策；普通风险是否已转入 Test Focus / Risk。
+- 对每一个 `blocking=true` 自问：“如果用户不回答，我是否真的无法基于当前 Requirement 生成任何语义正确的核心测试？”答案是否定时，必须改为 Test Focus / Risk 或 Ignore。
+- 多个 blocking 问题是否其实是同一项核心业务决策，能够合并后一次询问。
 
 完成自检后只提交一次完整 `requirement-analysis/v1`。`clarifications` 只包含本轮新识别且仍待人工处理的问题；固定 Snapshot 中已有的 answered/dismissed 历史由服务端合并，不得重复提交；没有新问题时提交空数组。

@@ -233,7 +233,7 @@
       "piName": "requirement_analysis_submit_result",
       "label": "提交统一需求分析结果",
       "catalogName": "提交需求分析",
-      "description": "提交 requirement-analysis/v1。一次提交同时包含需求基线、结构化 Clarification、Test Focus、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
+      "description": "提交 requirement-analysis/v1。Clarification 仅保存仍需人工处理的业务决策；blocking=true 仅限缺失核心业务事实且无法只测试已明确部分形成任何正确核心 TestCase 的情况。边界、异常、Knowledge 推荐和覆盖扩展写入 Test Focus / Risk。服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
       "catalogDescription": "提交单 Agent 需求分析结果，由服务端统一校验和生成 Artifact。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -332,19 +332,21 @@
           "clarifications": {
             "type": "array",
             "maxItems": 500,
-            "description": "只有资料、Workspace 与 Knowledge Reference 都无法确定且会影响测试正确性的业务事实才提问。",
+            "description": "仅保存仍需人工处理的业务决策。blocking=true 必须是 Current Requirement、Formal Clarification 与 Workspace 均无法确定的核心业务事实；不能以 Knowledge、测试最佳实践、额外边界或覆盖深度阻断。普通风险优先进入 Test Focus。",
             "items": {
               "type": "object",
               "properties": {
                 "question": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 8000
+                  "maxLength": 8000,
+                  "description": "直接描述缺失的当前业务事实，不要把测试方法或覆盖建议写成问题。"
                 },
                 "reason": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 8000
+                  "maxLength": 8000,
+                  "description": "blocking=true 时必须说明该事实缺失会使哪个核心 TestCase 或 Expected Result 无法正确确定。"
                 },
                 "category": {
                   "enum": [
@@ -367,7 +369,8 @@
                   }
                 },
                 "blocking": {
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "仅当不回答就无法生成任何语义正确的核心 TestCase，且不能只测试当前已明确部分继续时为 true。"
                 }
               },
               "required": [

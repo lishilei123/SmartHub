@@ -54,8 +54,10 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot) {
       `formalClarifications=${JSON.stringify(formalClarifications)}`,
       '1. status=answered 的 answer 是正式业务事实，必须纳入更新后的需求理解。',
       '2. status=dismissed 的 answer 只是处置理由，不是业务规则、权限、边界或 Expected Result；相关事实缺口必须保留。',
-      '3. Snapshot 中已有的 answered/dismissed 问题不得重复提交。只有无法从正式输入确定且会影响测试正确性的事实，才是新的 blocking Clarification。',
-      '4. 同一轮识别到的 blocking Clarification 必须一次性完整提交。',
+      '3. Snapshot 中已有的 answered/dismissed 问题不得重复提交。blocking=true 仅限当前 Requirement、Formal Clarification 与 Workspace 都无法确定的核心业务事实；该事实必须直接改变核心操作、对象关系、状态/权限规则或核心 Expected Result，且不能仅测试已明确部分继续形成任何正确核心 Case。',
+      '4. Knowledge、测试最佳实践、额外边界、错误文案、覆盖深度或仍可作为 Test Focus / Risk 的事项不得 blocking；不要为普通风险创建非阻断 Clarification。',
+      '5. 每个 blocking 问题的 reason 必须说明无法正确形成的核心 TestCase 或 Expected Result；多个相关维度合并为一个业务决策。',
+      '6. 同一轮识别到的 blocking Clarification 必须一次性完整提交。',
       '</formal_clarification_rules>',
     ].join('\n'),
     [
