@@ -44,8 +44,8 @@ export function renderPlanningRequirementTask(snapshot: ReviewRunSnapshot) {
     [
       '<workspace_rules>',
       '1. currentInputRefs 是本次重点输入，不是读取白名单；完整 ProjectWorkspaceSnapshot 才是可读取边界。',
-      '2. 先读取重点输入，再按需使用 ls、find、grep、read 浏览冻结 Workspace；未读取内容不得假设。',
-      '3. branches、shared、formal-output、Knowledge 和历史资料只可作为标明来源的参考，不能替代当前正式需求事实。',
+      '2. 完整 Workspace 是授权边界，不是默认遍历清单。对 currentInputRefs 按冻结 Hash 建立一次连续、非重叠的完整读取；同一 Hash 和所需行范围的正文仍在当前 Context 时直接复用。仅为缺失事实、未读范围或压缩后不可见正文使用最窄范围的 ls、find、grep 或 read；未读取且未被当前 Context 支持的内容不得假设。',
+      '3. branches、shared、formal-output、Knowledge 和历史资料只可作为标明来源的参考，不能替代当前正式需求事实；补充资料先定位，再读取最小必要范围。',
       '4. 不得调用 Shell、write、edit，不得使用绝对路径、../ 或越过 /workspace。',
       '</workspace_rules>',
     ].join('\n'),

@@ -129,7 +129,7 @@ export class RequirementDocumentWorkspace {
             ? {
                 replayed: true,
                 replayedFromToolCallId: replay.toolCallId,
-                guidance: '该冻结文件的相同行范围仍在当前 Planning Session 中；请直接使用此前返回的正文。',
+                guidance: '该冻结文件所需行范围已被当前 Planning Session 中此前返回的正文包含；请直接使用此前正文。',
               }
             : {
                 output,

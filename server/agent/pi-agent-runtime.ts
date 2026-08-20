@@ -29,7 +29,7 @@ import {
 } from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { SKILL_READ_TOOL_ID } from '../tools/skill-read.js'
-import { AgentSkillRuntime } from './skill-runtime.js'
+import { AgentSkillRuntime, type SkillReadReference } from './skill-runtime.js'
 import { KnowledgeService } from '../application/knowledge-service.js'
 import { ContextManager, protectedCompactionInstructions, type PlanningCompactionCheckpoint } from './context-manager.js'
 import {
@@ -470,7 +470,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     )
     const workspaceProfile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
     const skillRuntime = new AgentSkillRuntime(this.store, this.skillPackages)
-    const skillSession = await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage)
+    const skillSession = await skillRuntime.prepare(
+      input.snapshot.agentDefinition,
+      workspaceProfile.workflowStage,
+      reference => reusableSkillRead(
+        activeSessionManager?.buildSessionContext().messages ?? [],
+        reference,
+      ),
+    )
     const deliveryManifest: InputDeliveryManifest = {
       policyVersion: inputPlan.policyVersion,
       mode: inputPlan.mode,
@@ -818,7 +825,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           details: {
             toolId: descriptor.id,
             version: descriptor.version,
-            data: descriptor.id === 'workspace.read_file' && result.replayed
+            data: (descriptor.id === 'workspace.read_file' || descriptor.id === SKILL_READ_TOOL_ID) && result.replayed
               ? modelResult
               : result.data,
             ...(submissionBatches.callCountByPrimaryId.has(toolCallId) ? { coalescedCallCount: submissionBatches.callCountByPrimaryId.get(toolCallId) } : {}),
@@ -848,9 +855,9 @@ function planningWorkflowTaskContext(task: string, taskType: string) {
     `taskType=${taskType}`,
     task.trim(),
     '这是 Workflow 发送给 PlanningAgent 的最新业务任务。请结合前文自然继续，不要机械重复已经完成的工作。',
-    '消息中的业务进度用于说明下一步；正式事实仍需从 Service 固定状态、Workspace Snapshot、Release 或批准版本重新读取。',
+    'Service 固定状态、Workspace Snapshot、Release 或批准版本定义正式事实的权威来源；这不要求每个 Stage 重读全部资料。内容 Hash 与所需范围未变且正文仍在当前 Context 时复用；仅在任务或 Snapshot 变化、需要未读范围、或压缩后正文不可见时重新读取。',
     '本轮可执行动作以 Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 为准。',
-    '继续使用当前 PlanningAgent、Planning Session 和 Agent Configuration；由 Agent 根据任务查看 Enabled Skill Catalog，并按需通过 skill.read 读取方法正文。',
+    '继续使用当前 PlanningAgent、Planning Session 和 Agent Configuration；由 Agent 根据任务查看 Enabled Skill Catalog，仅在当前 Stage 确有方法缺口时通过 skill.read 读取正文；已有 TRUSTED_SKILL 正文仍在当前 Context 时直接复用。',
     '</planning_workflow_message>',
   ].join('\n')
 }
@@ -1035,7 +1042,8 @@ function renderActiveStageTask(input: AgentExecutionInput) {
     `submitTool=${stageConfiguration(input).submitPiName}`,
     'Runtime 只暴露本轮允许的工具；最终结果通过上述 submitTool 提交。',
     'Session 历史用于保持上下文连续性，不能扩大本轮工具权限或替换最新业务任务。',
-    '对内容 Hash 和实际行范围均未变化的冻结文件，优先复用当前 Session 中此前 read 返回的正文；仅在内容变化、需要其他行范围或正文已不在当前上下文时重新读取。',
+    '完整 Workspace 是本轮冻结的只读授权边界，不是默认遍历清单。任务已声明的正式基线按 Hash 与所需行范围完整读取一次；大文件使用连续、非重叠分页。补充资料先用 grep/find 或 Knowledge 定位，再读取最小必要范围。',
+    '对内容 Hash 不变且此前范围包含本次所需行的冻结文件，优先复用当前 Session 中此前 read 返回的正文；仅在内容变化、需要未读范围或正文已不在当前上下文时重新读取。同一 Skill key、version 和内容 Hash 的 TRUSTED_SKILL 正文仍在当前上下文时直接复用。',
     '</runtime_execution_boundary>',
     '<latest_business_task>',
     profile.initialTask,
@@ -1056,14 +1064,42 @@ function reusableWorkspaceRead(
     }
     if (message.role !== 'toolResult' || message.toolName !== 'read' || typeof message.toolCallId !== 'string') continue
     const data = workspaceReadResultData(message.content)
+    const startLine = typeof data.startLine === 'number' ? data.startLine : undefined
+    const endLine = typeof data.endLine === 'number' ? data.endLine : undefined
     if (
       data.tool !== 'read'
       || typeof data.output !== 'string'
       || data.path !== reference.relativePath
       || data.contentHash !== reference.contentHash
       || optionalString(data.assetVersionId) !== reference.assetVersionId
-      || data.startLine !== reference.startLine
-      || data.endLine !== reference.endLine
+      || startLine === undefined
+      || endLine === undefined
+      || startLine > reference.startLine
+      || endLine < reference.endLine
+    ) continue
+    return { toolCallId: message.toolCallId }
+  }
+  return undefined
+}
+
+function reusableSkillRead(
+  messages: readonly AgentMessage[],
+  reference: SkillReadReference,
+) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as unknown as {
+      role?: unknown
+      toolName?: unknown
+      toolCallId?: unknown
+      content?: unknown
+    }
+    if (message.role !== 'toolResult' || message.toolName !== 'skill_read' || typeof message.toolCallId !== 'string') continue
+    const data = skillReadResultData(message.content)
+    if (
+      typeof data.content !== 'string'
+      || data.skillKey !== reference.skillKey
+      || data.version !== reference.version
+      || data.contentSha256 !== reference.contentSha256
     ) continue
     return { toolCallId: message.toolCallId }
   }
@@ -1083,8 +1119,22 @@ function workspaceReadResultData(content: unknown) {
   try { return asRecord(JSON.parse(text.text)) } catch { return {} }
 }
 
+function skillReadResultData(content: unknown) {
+  return workspaceReadResultData(content)
+}
+
 function replayedModelResult(toolId: string, value: unknown) {
   const data = asRecord(value)
+  if (toolId === SKILL_READ_TOOL_ID) {
+    const { content: _content, ...metadata } = data
+    return {
+      ...metadata,
+      replayed: true,
+      guidance: typeof data.guidance === 'string'
+        ? data.guidance
+        : '这是当前 Session 中已读取的同一 Skill 版本与内容重放；正文仍在上下文中，请直接使用，不要再次读取。',
+    }
+  }
   if (toolId !== 'workspace.read_file') {
     return {
       ...data,

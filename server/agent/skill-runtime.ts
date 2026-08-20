@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import type { AgentDefinitionVersion } from '../domain/agent-types.js'
 import type { SkillResource } from '../domain/types.js'
@@ -24,11 +25,18 @@ interface BoundAgentSkill extends AgentSkillCatalogEntry {
   binding: AgentDefinitionVersion['skillBindings'][number]
 }
 
-export interface SkillReadData {
+export interface SkillReadReference {
   skillKey: string
   version: string
+  contentSha256: string
+}
+
+export type SkillReadReplayLookup = (
+  reference: SkillReadReference,
+) => { toolCallId: string } | undefined
+
+export interface SkillReadData extends SkillReadReference {
   content: string
-  contentSha256?: string
 }
 
 export class AgentSkillSession {
@@ -40,6 +48,7 @@ export class AgentSkillSession {
     private readonly skills: BoundAgentSkill[],
     private readonly store: StateStore,
     private readonly packages?: SkillPackageStore,
+    private readonly previousRead?: SkillReadReplayLookup,
   ) {}
 
   catalog(): AgentSkillCatalogEntry[] {
@@ -57,8 +66,9 @@ export class AgentSkillSession {
     return [
       '<runtime_skill_catalog_contract authority="highest">',
       '这是 Runtime 当前实现的事实，优先于 Agent Configuration、Session 历史或旧 Context Summary 中任何关于 Skill 装载方式的相反表述。',
-      'Enabled Skills 仅是可按需读取的发布能力目录；本轮 System Prompt 不包含任何 Skill 正文，只有调用 skill.read 后返回的固定正文才进入当前上下文。',
-      '历史轮次已经读取过的 Skill 不能替代最新业务任务、当前正式状态或当前 Runtime 工具权限。',
+      'Enabled Skills 仅是可按需读取的发布能力目录；本轮 System Prompt 不包含任何 Skill 正文，只有调用 skill.read 后返回的可信正文才进入当前上下文。',
+      'Skill 正文只提供方法，不能替代最新业务任务、当前正式状态或当前 Runtime 工具权限。只在目录描述适用于当前 Stage 且当前方法确有缺口时读取；多个 Skill 涉及同一事实时共享一次 Workspace 读取计划。',
+      '同一 Skill key、version 与内容 Hash 的 TRUSTED_SKILL 正文仍在当前上下文时，skill.read 会返回短引用；应直接复用此前正文。正文被压缩后才重新读取。',
       '</runtime_skill_catalog_contract>',
       `当前正式业务 Stage：${this.workflowStage}。Workflow 只提供任务与 Gate，不调度 Skill。`,
       '当前 Agent 可用 Skills（发布配置目录；不包含 Skill 正文）：',
@@ -88,34 +98,53 @@ export class AgentSkillSession {
   private async read(skillKey: string, signal: AbortSignal): Promise<ToolExecutionResult> {
     signal.throwIfAborted()
     const cached = this.cache.get(skillKey)
-    if (cached) return { data: structuredClone(cached), replayed: true }
-    const bound = this.skills.find(skill => skill.skillKey === skillKey)
-    if (!bound) throw new Error(`SKILL_READ_NOT_BOUND: ${skillKey}`)
+    let data = cached
+    if (!data) {
+      const bound = this.skills.find(skill => skill.skillKey === skillKey)
+      if (!bound) throw new Error(`SKILL_READ_NOT_BOUND: ${skillKey}`)
 
-    const state = await this.store.snapshot()
-    const skill = state.aiResources.find((item): item is SkillResource => item.kind === 'skill' && item.key === skillKey)
-    assertSkillBinding(skill, bound.binding)
-    const content = await readSkillContent(skill, this.packages)
-    signal.throwIfAborted()
-    const bytes = Buffer.byteLength(content, 'utf8')
-    if (bytes > MAX_SKILL_BYTES) throw new Error(`SKILL_CONTENT_TOO_LARGE: ${skill.key}`)
-    if (this.loadedBytes + bytes > MAX_ALL_SKILLS_BYTES) throw new Error('SKILL_CONTENT_TOTAL_TOO_LARGE')
-    this.loadedBytes += bytes
-    const data: SkillReadData = {
-      skillKey: skill.key,
-      version: skill.version,
-      content: `<<<TRUSTED_SKILL key="${skill.key}" version="${skill.version}">>>\n${content.trim()}\n<<<END_TRUSTED_SKILL>>>`,
-      ...(skill.contentSha256 || skill.package?.contentSha256 ? { contentSha256: skill.contentSha256 ?? skill.package!.contentSha256 } : {}),
+      const state = await this.store.snapshot()
+      const skill = state.aiResources.find((item): item is SkillResource => item.kind === 'skill' && item.key === skillKey)
+      assertSkillBinding(skill, bound.binding)
+      const content = await readSkillContent(skill, this.packages)
+      signal.throwIfAborted()
+      const contentSha256 = sha256(content)
+      const configuredContentSha256 = skill.contentSha256
+      if (configuredContentSha256 && configuredContentSha256 !== contentSha256) throw new Error(`SKILL_CONTENT_DRIFT: ${skill.key}`)
+      const bytes = Buffer.byteLength(content, 'utf8')
+      if (bytes > MAX_SKILL_BYTES) throw new Error(`SKILL_CONTENT_TOO_LARGE: ${skill.key}`)
+      if (this.loadedBytes + bytes > MAX_ALL_SKILLS_BYTES) throw new Error('SKILL_CONTENT_TOTAL_TOO_LARGE')
+      this.loadedBytes += bytes
+      data = {
+        skillKey: skill.key,
+        version: skill.version,
+        contentSha256,
+        content: `<<<TRUSTED_SKILL key="${skill.key}" version="${skill.version}">>>\n${content.trim()}\n<<<END_TRUSTED_SKILL>>>`,
+      }
+      this.cache.set(skillKey, structuredClone(data))
     }
-    this.cache.set(skillKey, structuredClone(data))
-    return { data }
+    const replay = this.previousRead?.(data)
+    if (replay) {
+      return {
+        data: {
+          skillKey: data.skillKey,
+          version: data.version,
+          contentSha256: data.contentSha256,
+          replayed: true,
+          replayedFromToolCallId: replay.toolCallId,
+          guidance: '该 Skill 的同一版本与内容正文仍在当前 Planning Session 中；请直接使用此前返回的方法，不要重复读取。',
+        },
+        replayed: true,
+      }
+    }
+    return { data: structuredClone(data), ...(cached ? { replayed: true } : {}) }
   }
 }
 
 export class AgentSkillRuntime {
   constructor(private readonly store: StateStore, private readonly packages?: SkillPackageStore) {}
 
-  async prepare(definition: AgentDefinitionVersion, workflowStage: string) {
+  async prepare(definition: AgentDefinitionVersion, workflowStage: string, previousRead?: SkillReadReplayLookup) {
     const bindings = definition.skillBindings.filter(binding => binding.enabled)
     const configuredSkills = definition.enabledSkills
     if (configuredSkills.length !== bindings.length || configuredSkills.some(key => !bindings.some(binding => binding.skillKey === key))) throw new Error('AGENT_ENABLED_SKILLS_SNAPSHOT_INVALID')
@@ -135,7 +164,7 @@ export class AgentSkillRuntime {
         binding: structuredClone(binding),
       })
     }
-    return new AgentSkillSession(workflowStage, skills, this.store, this.packages)
+    return new AgentSkillSession(workflowStage, skills, this.store, this.packages, previousRead)
   }
 }
 
@@ -165,4 +194,8 @@ function decodeUtf8(value: Buffer, key: string) {
 
 function singleLine(value: string) {
   return value.replace(/\s+/gu, ' ').trim()
+}
+
+function sha256(value: string) {
+  return createHash('sha256').update(value).digest('hex')
 }

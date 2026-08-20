@@ -14,7 +14,7 @@ export function registerSkillReadTool(
     piName: 'skill_read',
     version: '1.0.0',
     label: '读取已启用 Skill',
-    description: '按 skillKey 读取当前 Agent 发布配置中已启用且版本与 Hash 固定的 Skill 正文。只读，不切换 Workflow Stage、不修改正式状态，也不扩大 Runtime 工具权限。',
+    description: '按 skillKey 读取当前 Agent 发布配置中已启用且版本绑定的 Skill 正文，并返回本次正文的内容 Hash。若同一版本和内容仍在当前 Planning Session 上下文，返回短引用并应直接复用此前方法。只读，不切换 Workflow Stage、不修改正式状态，也不扩大 Runtime 工具权限。',
     risk: 'read',
     parameters: Type.Object({
       skillKey: Type.String({ minLength: 1, maxLength: 100 }),

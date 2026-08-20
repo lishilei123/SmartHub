@@ -49,7 +49,7 @@ export function buildRequirementDirectoryInputPlan(input: {
       workspaceSnapshotSha256: input.workspaceSnapshot.snapshotSha256,
       formalClarifications: input.formalClarifications ?? [],
       clarificationInstruction: 'status=answered 的 answer 是带来源的正式业务事实，必须采用；status=dismissed 是可追溯的人工处置，answer 仅为不适用或接受缺口的理由，不得据此推导业务规则或 Expected Result。两类记录都不得重复提问；pending blocking Clarification 仍须等待人工，不得猜测。',
-      instructions: 'currentInputRefs 是本次重点，不是读取白名单。服务端已冻结正式输入范围和覆盖计划；先基于已投递内容建立理解，再按需使用 ls、find、grep 或 read 浏览 branches/shared/formal-output 中的相关固定资料。Evidence、ID、定位与覆盖由服务端根据 sourceTexts 生成和校验；不要为了提交协议重复读取无关正文，也不得越过工作目录。',
+      instructions: 'currentInputRefs 是本次重点；完整 ProjectWorkspaceSnapshot 是只读授权边界，不是默认遍历清单。先按当前输入的冻结 Hash 建立一次连续、非重叠的读取计划；同一 Hash 和所需行范围的正文仍在 Context 时直接复用。仅为缺失事实、未读范围或压缩后不可见正文使用范围最小的 ls、find、grep、read 或 Knowledge；不要为了确认、提交协议或多个 Skill 的方法重叠重复读取无关正文，也不得越过工作目录。Evidence、ID、定位与覆盖仍由服务端根据 sourceTexts 生成和校验。',
     }),
     '<<<SMARTHUB_PI_DOCUMENT_WORKSPACE_END>>>',
   ].join('\n')
@@ -79,6 +79,7 @@ export function buildTestDesignDirectoryInputPlan(input: {
   maxOutputTokens: number
 }): RequirementInputPlan {
   const safeInputBudget = safeBudget(input)
+  const coreFactPaths = coreTestDesignFactPaths(input.workspace)
   const content = [
     '<<<SMARTHUB_PI_TEST_DESIGN_WORKSPACE_BEGIN>>>',
     JSON.stringify({
@@ -91,7 +92,8 @@ export function buildTestDesignDirectoryInputPlan(input: {
       workspaceSnapshotSha256: input.workspace.snapshotSha256,
       requirementReleaseId: input.workspace.requirementReleaseId,
       currentInputRefs: input.workspace.files.filter(file => file.sourceScope === 'current_input').map(file => ({ logicalPath: file.logicalPath.replace(/^workspace\//u, ''), assetVersionId: file.assetVersionId, contentSha256: file.contentSha256 })),
-      instructions: 'Requirement Release 是当前正式需求基线，currentInputRefs 是本次上传资料重点；两者都不是 Workspace 读取白名单。先读取重点输入，再从工作区根目录使用 ls/find/grep 自主探索 branches/shared/formal-output，并用 read 读取事实资料。不得调用 Shell、write、edit 或越过工作区。',
+      coreFactPaths,
+      instructions: 'Requirement Release 是当前正式需求基线；currentInputRefs 是上传资料重点。完整冻结 Workspace 是授权边界，不是根目录枚举要求。先读取 coreFactPaths：同一 Hash 的大文件使用连续、非重叠 offset 范围；正文仍在当前 Context 时直接复用。historical-test-cases.json 是唯一历史用例库基线；test-case-library/v*/ 下的正式投影不能用于重复建立历史基线。其他 Workspace 或共享知识仅为已命名的当前事实缺口或风险使用最窄范围的 ls/find/grep/read 或 Knowledge；禁止为发现已列明文件执行根目录 find("**") 或批量读取。不得调用 Shell、write、edit 或越过工作区。',
     }),
     '<<<SMARTHUB_PI_TEST_DESIGN_WORKSPACE_END>>>',
   ].join('\n')
@@ -112,6 +114,22 @@ export function buildTestDesignDirectoryInputPlan(input: {
       content,
     }],
   }
+}
+
+function coreTestDesignFactPaths(workspace: TestDesignWorkspaceSnapshot) {
+  const releaseRoot = `${workspace.activeBranchLogicalPath}/requirements/`
+  const roles = new Map([
+    [`${releaseRoot}requirements.json`, 'requirement_release'],
+    [`${releaseRoot}clarifications.json`, 'formal_clarifications'],
+    [`${releaseRoot}test-focus.json`, 'test_focus'],
+    [`${workspace.agentLogicalPath}/historical-test-cases.json`, 'historical_cases'],
+  ])
+  return workspace.files.flatMap(file => {
+    const role = roles.get(file.logicalPath)
+    return role
+      ? [{ role, logicalPath: file.logicalPath.replace(/^workspace\//u, ''), contentSha256: file.contentSha256 }]
+      : []
+  })
 }
 
 export function buildTestExecutionDirectoryInputPlan(input: {
