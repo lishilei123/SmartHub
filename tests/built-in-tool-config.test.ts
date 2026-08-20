@@ -20,10 +20,16 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.match(listDirectory.properties.path.description, /空字符串/u)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
-  assert.match(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').description, /核心业务事实/u)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').piName, 'test_script_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').piName, 'failure_analysis_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').piName, 'script_repair_submit_result')
+})
+
+test('Requirement Analysis 方法论更新不改变已发布 v1.2.0 Tool 的绑定令牌', () => {
+  assert.equal(
+    builtInToolBindingToken('requirement-analysis.submit_result'),
+    'requirement-analysis.submit_result@1.2.0#0a12797254fb348acd31703c9a1d73890d2a07d2e5884afde3d6bd8eaabcf9fb',
+  )
 })
 
 test('测试执行候选工具使用闭合身份与服务端一致的大小边界', () => {

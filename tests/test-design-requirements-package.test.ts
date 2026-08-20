@@ -30,7 +30,17 @@ test('TestDesign 只消费已发布 requirements.json，不从 Review 结果或 
   })
   await store.transaction(state => {
     state.projects.push({ id: 'project-1', name: '订单项目', createdAt: '2026-08-12T00:00:00.000Z' })
-    state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1', status: 'open', requirementReleaseBinding: { releaseId: 'release-1', verificationRunId: 'review-run-1', requirementsJsonSha256: requirementsHash, boundAt: '2026-08-12T00:03:00.000Z' }, createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:03:00.000Z' })
+    const activeBinding = { releaseId: 'release-1', verificationRunId: 'review-run-1', requirementsJsonSha256: requirementsHash, boundAt: '2026-08-12T00:03:00.000Z' }
+    state.projectVersions.push({
+      id: 'project-version-1', projectId: 'project-1', name: 'V1', status: 'open',
+      requirementReleaseBinding: activeBinding,
+      requirementReleaseBindings: [
+        { releaseId: 'released-run-removed', verificationRunId: 'removed-run', requirementsJsonSha256: '0'.repeat(64), boundAt: '2026-08-11T00:03:00.000Z' },
+        activeBinding,
+      ],
+      activeRequirementReleaseId: 'release-1',
+      createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:03:00.000Z',
+    })
     state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', createdAt: '2026-08-12T00:00:00.000Z', activeIndexVersionId: 'index-1', activeConfigVersionId: 'config-1' })
     state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', configVersionId: 'config-1', assetVersionIds: [], indexedChunks: [], createdAt: '2026-08-12T00:00:00.000Z' } as never)
     state.reviewRuns.push({
@@ -55,6 +65,9 @@ test('TestDesign 只消费已发布 requirements.json，不从 Review 结果或 
     execute: async () => { throw new Error('测试无需执行后续 Agent') },
   }
   const service = new TestDesignService(store, runtime)
+  const candidates = await service.inputCandidates('project-version-1')
+  assert.equal(candidates.requirementRelease?.id, 'release-1')
+  assert.deepEqual(candidates.requirementReleases.map(item => item.id), ['release-1'])
   const design = await service.createDesign('project-version-1', {
     name: '订单测试设计', objective: '验证发布需求', knowledgeAugmentation: { mode: 'disabled' },
   }, principal)

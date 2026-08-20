@@ -42,7 +42,15 @@ export class TestDesignService {
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
     const projectBases = state.knowledgeBases.filter(item => item.projectId === projectVersion.projectId)
     const requirementRelease = boundRequirementRelease(state, projectVersionId)
-    const requirementReleases = requirementReleaseBindings(projectVersion).map(binding => required(boundRequirementRelease(state, projectVersionId, binding.releaseId), 'TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 的 Requirement Release 绑定无效'))
+    const requirementReleases = requirementReleaseBindings(projectVersion).flatMap(binding => {
+      try {
+        const resolved = boundRequirementRelease(state, projectVersionId, binding.releaseId)
+        return resolved ? [resolved] : []
+      } catch (error) {
+        if (error instanceof TestDesignError && error.code === 'TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID') return []
+        throw error
+      }
+    })
     const knowledgeAssets = projectBases.flatMap(base => state.assets.filter(asset => asset.knowledgeBaseId === base.id).flatMap(asset => state.versions.filter(version => version.assetId === asset.id).map(version => ({ assetId: asset.id, assetVersionId: version.id, version: version.number, contentHash: version.contentHash, displayName: asset.displayName, logicalPath: asset.logicalPath, assetType: asset.assetType, status: version.status, selectable: version.status === 'ready', reason: version.status === 'ready' ? undefined : '资产版本未就绪' }))))
     const designState = readDesignState(state)
     const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId) : { ready: Boolean(this.runtime), agents: [{ agentKey: 'planning', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'PlanningAgent Runtime 未配置' }] }
