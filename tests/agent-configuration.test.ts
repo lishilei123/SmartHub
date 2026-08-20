@@ -48,7 +48,7 @@ async function fixture() {
 test('统一 PlanningAgent 发布 Workspace、Knowledge、Skill 与全部提交协议快照', async () => {
   const { service } = await fixture()
   const initial = (await service.get('planning')).agents.planning!
-  assert.deepEqual(initial.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'requirement-release.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
+  assert.deepEqual(initial.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
   assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
   assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
   assert.ok(initial.draft.definition.skillKeys.includes('requirement.analysis'))
@@ -75,7 +75,7 @@ test('PlanningAgent 草稿加载与前端发布 payload 会补齐新增的必需
     routing: { ...initialState.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
     definition: initialState.draft.definition,
   })
-  const newlyRequiredTools = new Set(['requirement-release.submit_result'])
+  const newlyRequiredTools = new Set(['test_design_repair.submit_result'])
   await store.transaction(state => {
     const stored = state.agentConfigurationDrafts.find(item => item.scene === 'planning')!.agents.planning!
     stored.definition.toolIds = stored.definition.toolIds.filter(toolId => !newlyRequiredTools.has(toolId))

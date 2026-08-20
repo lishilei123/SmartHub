@@ -30,7 +30,6 @@ test('PlanningAgent 通过一个长期定义绑定 Workspace、Knowledge、Skill
     'knowledge.search',
     'knowledge.read_chunk',
     'requirement-analysis.submit_result',
-    'requirement-release.submit_result',
     'test_design_cases.submit_result',
     'test_design_repair.submit_result',
   ])
@@ -108,8 +107,8 @@ test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结
 
   const run = (await store.snapshot()).reviewRuns[0]
   assert.equal(run.status, 'succeeded')
-  assert.equal(run.step, 'requirement_understanding_ready')
-  assert.equal(run.workflow?.currentStage, 'understanding')
+  assert.equal(run.step, 'requirement_release_ready')
+  assert.equal(run.workflow?.currentStage, 'release')
   assert.equal(run.workflow?.automaticTransition?.status, 'pending')
   assert.equal(run.snapshot.agentDefinition.agentKey, 'planning')
   assert.equal(run.executions?.planning?.agentKey, 'planning')
@@ -211,10 +210,10 @@ test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人�
     },
   } as never)
   const listenerStates: Array<{ status: string; step: string; stage?: string; transition?: string }> = []
-  service.onUnderstandingReady(async id => {
+  service.onRequirementReleaseReady(async id => {
     const current = (await store.snapshot()).reviewRuns.find(run => run.id === id)!
     listenerStates.push({ status: current.status, step: current.step, stage: current.workflow?.currentStage, transition: current.workflow?.automaticTransition?.status })
-    await workflow.requirementUnderstandingReady(id)
+    await workflow.requirementReleaseReady(id)
   })
 
   const resolved = await service.actOnClarifications(runId, {
@@ -228,10 +227,10 @@ test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人�
   assert.equal(tasks.length, 1)
   assert.equal(tasks[0].taskType, 'test_design_after_requirement_release')
   assert.doesNotMatch(tasks[0].task, /Clarification 已经由人工处理/u)
-  assert.deepEqual(listenerStates, [{ status: 'succeeded', step: 'requirement_understanding_ready', stage: 'understanding', transition: 'pending' }])
+  assert.deepEqual(listenerStates, [{ status: 'succeeded', step: 'requirement_release_ready', stage: 'release', transition: 'pending' }])
   assert.deepEqual(automaticDesignCalls, [runId])
   assert.equal(resolved.run.status, 'succeeded')
-  assert.equal(resolved.run.workflow?.understandingSnapshot?.clarifications[0].status, 'answered')
+  assert.equal(resolved.run.workflow?.release?.status, 'published')
   assert.equal(resolved.run.workflow?.automaticTransition?.status, 'succeeded')
   assert.equal(resolved.run.workflow?.automaticTransition?.testDesignRunId, 'test-design-run-1')
 
@@ -246,7 +245,7 @@ test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人�
 
   await assert.rejects(
     () => service.actOnClarifications(runId, { items: [{ clarificationId, action: 'answer', answer: '重复提交' }] }),
-    /REQUIREMENT_UNDERSTANDING_ALREADY_FROZEN/u,
+    /REQUIREMENT_RELEASE_ALREADY_PUBLISHED/u,
   )
 })
 
@@ -259,7 +258,7 @@ test('dismissed Clarification 保留处置记录和事实缺口，但不作为�
     execute: async () => { unexpectedExecuteCalls += 1; throw new Error('dismiss 后不应再次执行需求分析 Agent') },
     appendPlanningClarification: async () => undefined,
   })
-  service.onUnderstandingReady(async id => { await service.freezeUnderstanding(id) })
+  service.onRequirementReleaseReady(async id => { await service.finalizeRequirementRelease(id) })
 
   const resolved = await service.actOnClarifications(runId, {
     items: [{ clarificationId, action: 'dismiss', answer: '当前版本暂不定义关闭失败后的恢复范围，由人工记录风险。' }],
@@ -268,7 +267,7 @@ test('dismissed Clarification 保留处置记录和事实缺口，但不作为�
 
   assert.equal(runtimeCalls(), 1)
   assert.equal(unexpectedExecuteCalls, 0)
-  assert.equal(resolved.run.workflow?.understandingSnapshot?.clarifications[0].status, 'dismissed')
+  assert.equal(resolved.run.workflow?.release?.status, 'published')
   const release = resolved.run.workflow?.release!
   const requirements = JSON.parse(release.artifacts.find(item => item.fileName === 'requirements.json')!.content) as { formalClarifications: unknown[]; clarificationDispositionRecords: Array<{ answer: string }> }
   assert.deepEqual(requirements.formalClarifications, [])
@@ -279,7 +278,7 @@ test('dismissed Clarification 保留处置记录和事实缺口，但不作为�
   assert.doesNotMatch(baseline, /Formal Business Fact[\s\S]*当前版本暂不定义关闭失败后的恢复范围/u)
 })
 
-test('未处理完全部 Blocking Clarification 时不进入 Understanding，也不执行新的 Agent 运行', async () => {
+test('未处理完全部 Blocking Clarification 时不发布 Requirement Release，也不执行新的 Agent 运行', async () => {
   const candidate = blockingClarificationCandidate()
   candidate.clarifications.push({ question: '关闭状态是否通知下游系统？', reason: '影响集成测试范围。', category: 'expected_result', requirementPointRefs: ['RP-002'], blocking: true })
   const { store, runtimeCalls } = await successfulRun(candidate)
@@ -290,7 +289,7 @@ test('未处理完全部 Blocking Clarification 时不进入 Understanding，也
     execute: async () => { unexpectedExecuteCalls += 1; throw new Error('不完整回答不应执行 Agent') },
   })
   let listenerCalls = 0
-  service.onUnderstandingReady(async () => { listenerCalls += 1 })
+  service.onRequirementReleaseReady(async () => { listenerCalls += 1 })
 
   await assert.rejects(
     () => service.actOnClarifications(runId, {

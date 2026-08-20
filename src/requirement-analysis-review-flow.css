@@ -428,24 +428,6 @@
 .rav2-technical-status > summary b { font-size: 9px; }
 .rav2-technical-status > summary small { margin-top: 2px; color: #919aa7; font-size: 7px; }
 
-.rav2-understanding-state {
-  width: 88px;
-  min-height: 80px;
-  flex: 0 0 88px;
-  border: 1px solid #dfe2fa;
-  border-radius: 12px;
-  background: #fff;
-  display: grid;
-  place-content: center;
-  text-align: center;
-}
-
-.rav2-understanding-state svg { width: 18px; margin: 0 auto 5px; color: #2b9a70; }
-.rav2-understanding-state strong,
-.rav2-understanding-state span { display: block; }
-.rav2-understanding-state strong { color: #455266; font-size: 11px; }
-.rav2-understanding-state span { margin-top: 3px; color: #929baa; font-size: 7px; }
-
 .rav2-snapshot-facts {
   margin-bottom: 10px;
   padding: 10px 12px;

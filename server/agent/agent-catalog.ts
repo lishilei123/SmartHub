@@ -37,7 +37,6 @@ export const AGENT_CATALOG = {
       ...WORKSPACE_TOOLS,
       ...KNOWLEDGE_TOOLS,
       'requirement-analysis.submit_result',
-      'requirement-release.submit_result',
       'test_design_cases.submit_result',
       'test_design_repair.submit_result',
     ],

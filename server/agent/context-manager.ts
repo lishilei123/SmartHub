@@ -12,7 +12,6 @@ import type { PiSessionScope } from './pi-session-runtime.js'
 
 export type PlanningCompactionCheckpoint =
   | 'requirement_analysis_completed'
-  | 'requirement_release_completed'
   | 'before_test_case_design'
   | 'coverage_repair_completed'
 
@@ -30,7 +29,6 @@ export class ContextManager {
         this.proactiveThresholdPercent,
       checkpoints: [
         'requirement_analysis_completed',
-        'requirement_release_completed',
         'before_test_case_design',
         'coverage_repair_completed',
       ] as PlanningCompactionCheckpoint[],

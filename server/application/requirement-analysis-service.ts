@@ -4,7 +4,7 @@ import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, Re
 import { activateRequirementReleaseBinding } from '../domain/requirement-release-bindings.js'
 import type { CandidateRequirementAnalysisV1, PlanningClarification, RequirementAnalysisResult } from '../domain/review-types.js'
 import type { Principal } from '../domain/access-control.js'
-import type { RequirementReleaseCandidate, RequirementReleasePackage, RequirementUnderstandingSnapshot, RequirementWorkflowStage, RequirementWorkflowState } from '../domain/requirement-workflow-types.js'
+import type { RequirementReleasePackage, RequirementWorkflowState } from '../domain/requirement-workflow-types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RequirementAnalysisValidator } from '../agent/result-validator.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
@@ -45,14 +45,14 @@ interface PlanningRequirementRuntime extends AgentRuntime {
 export class RequirementAnalysisService {
   private readonly validator: RequirementAnalysisValidator
   private readonly activeRuns = new Map<string, AbortController>()
-  private understandingReadyListener?: (runId: string) => void | Promise<void>
+  private requirementReleaseReadyListener?: (runId: string) => void | Promise<void>
 
   constructor(private readonly store: StateStore, private readonly runtime: PlanningRequirementRuntime, private readonly definitions: AgentDefinitionResolver = defaultAgentDefinitionResolver) {
     this.validator = new RequirementAnalysisValidator(store)
   }
 
-  onUnderstandingReady(listener: (runId: string) => void | Promise<void>) {
-    this.understandingReadyListener = listener
+  onRequirementReleaseReady(listener: (runId: string) => void | Promise<void>) {
+    this.requirementReleaseReadyListener = listener
   }
 
   async recoverInterruptedRuns() {
@@ -100,7 +100,7 @@ export class RequirementAnalysisService {
       const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
       requireOpenProjectVersion(state, run.projectVersionId)
       if (!run.result || !run.execution) throw new Error('Clarification 只能处理已完成一轮分析的正式候选')
-      if (run.workflow?.understandingSnapshot || run.workflow?.release?.status === 'published') throw new Error('REQUIREMENT_UNDERSTANDING_ALREADY_FROZEN: 当前需求理解已冻结，不能回写 Clarification')
+      if (run.workflow?.release?.status === 'published') throw new Error('REQUIREMENT_RELEASE_ALREADY_PUBLISHED: 当前需求发布已冻结，不能回写 Clarification')
       const pendingBlocking = run.result.clarifications.filter(item => item.blocking && item.status === 'pending')
       if (!pendingBlocking.length) {
         throw new Error('CLARIFICATION_BATCH_NOT_REQUIRED: 当前没有待回答的阻断问题')
@@ -126,12 +126,12 @@ export class RequirementAnalysisService {
       })
       refreshAnalysisArtifacts(run.result)
       run.snapshot.formalClarifications = mergeFormalClarifications(run.snapshot.formalClarifications, run.result.clarifications)
-      run.workflow ??= { currentStage: 'understanding' }
-      run.workflow.currentStage = 'understanding'
+      run.workflow ??= { currentStage: 'clarification' }
+      run.workflow.currentStage = 'release'
       run.workflow.automaticTransition = { status: 'pending' }
       Object.assign(run, {
         status: 'succeeded',
-        step: 'requirement_understanding_ready',
+        step: 'requirement_release_ready',
         progress: 100,
         finishedAt: answeredAt,
         error: undefined,
@@ -155,11 +155,11 @@ export class RequirementAnalysisService {
         answeredBy,
       })
     }
-    await this.notifyUnderstandingReady(runId)
+    await this.notifyRequirementReleaseReady(runId)
     return { clarifications: updated.clarifications, run: await this.get(runId) }
   }
 
-  async freezeUnderstanding(runId: string) {
+  async finalizeRequirementRelease(runId: string) {
     return this.store.transaction(state => {
       const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
       requireSucceededRun(run)
@@ -172,62 +172,38 @@ export class RequirementAnalysisService {
         item.status = 'dismissed'
         item.answer = '该问题不影响当前测试设计正确性，作为非阻断风险记录。'
         item.answeredAt = timestamp
-        item.answeredBy = 'system:requirement-understanding-freezer'
+        item.answeredBy = 'system:requirement-release-finalizer'
       }
       refreshAnalysisArtifacts(result)
       run.snapshot.formalClarifications = mergeFormalClarifications(run.snapshot.formalClarifications, result.clarifications)
-      run.workflow ??= { currentStage: 'understanding' }
-      if (run.workflow.understandingSnapshot && run.workflow.release?.status === 'published') return { snapshot: structuredClone(run.workflow.understandingSnapshot), release: structuredClone(run.workflow.release) }
+      run.workflow ??= { currentStage: 'release' }
+      if (run.workflow.release?.status === 'published') return { release: structuredClone(run.workflow.release) }
       assertRequirementInputsStable(state, run)
-      const requirementResultSha256 = sha256Text(JSON.stringify({
-        requirementPoints: result.requirementPoints,
-        evidence: result.evidence,
-        clarifications: result.clarifications,
-        testFocus: result.testFocus,
-      }))
-      const understandingBase = {
-        id: `requirement_understanding_${randomUUID()}`,
-        schemaVersion: 'requirement-understanding-snapshot/v1' as const,
-        projectVersionId: run.projectVersionId,
-        analysisRunId: run.id,
-        sourceAssetVersionIds: run.snapshot.assets.map(item => item.assetVersionId),
-        requirementPointIds: result.requirementPoints.map(item => item.clientRequirementPointId),
-        clarifications: structuredClone(result.clarifications),
-        requirementResultSha256,
-        createdAt: timestamp,
-      }
-      const understanding: RequirementUnderstandingSnapshot = { ...understandingBase, contentSha256: sha256Text(JSON.stringify(understandingBase)) }
       const releaseId = `requirement_release_${randomUUID()}`
-      const candidate: RequirementReleaseCandidate = {
-        schemaVersion: 'requirement-release-candidate/v1',
-        sourceAssetVersionIds: [...understanding.sourceAssetVersionIds],
-        refinedRequirementsMarkdown: required(result.artifacts.find(item => item.fileName === 'requirement-baseline.md'), 'Requirement Baseline 不存在').content,
-      }
-      const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, candidate, generatedAt: timestamp })
+      const refinedRequirementsMarkdown = required(result.artifacts.find(item => item.fileName === 'requirement-baseline.md'), 'Requirement Baseline 不存在').content
+      const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, refinedRequirementsMarkdown, generatedAt: timestamp })
       const release: RequirementReleasePackage = {
         id: releaseId,
         schemaVersion: 'requirement-release-package/v1',
         status: 'published',
         projectVersionId: run.projectVersionId,
         verificationRunId: run.id,
-        sourceAssetVersionIds: [...understanding.sourceAssetVersionIds],
-        candidate,
+        sourceAssetVersionIds: run.snapshot.assets.map(item => item.assetVersionId),
         generationExecution: { ...required(run.execution, '需求分析执行记录不存在'), workflowStage: 'analysis' },
         artifacts: built.artifacts,
         contentSha256: built.contentSha256,
         createdAt: timestamp,
-        createdBy: 'system:requirement-understanding-freezer',
+        createdBy: 'system:requirement-release-finalizer',
         publishedAt: timestamp,
-        publishedBy: 'system:requirement-understanding-freezer',
+        publishedBy: 'system:requirement-release-finalizer',
       }
-      run.workflow.currentStage = 'understanding'
-      run.workflow.understandingSnapshot = understanding
+      run.workflow.currentStage = 'release'
       run.workflow.release = release
       run.workflow.automaticTransition = { status: 'running', startedAt: timestamp }
-      const requirementsArtifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), '需求理解快照缺少 requirements.json')
+      const requirementsArtifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), 'Requirement Release 缺少 requirements.json')
       activateRequirementReleaseBinding(projectVersion, { releaseId: release.id, verificationRunId: run.id, requirementsJsonSha256: requirementsArtifact.contentSha256, boundAt: timestamp })
       projectVersion.updatedAt = timestamp
-      return { snapshot: structuredClone(understanding), release: structuredClone(release) }
+      return { release: structuredClone(release) }
     })
   }
 
@@ -279,65 +255,6 @@ export class RequirementAnalysisService {
     })
     this.activeRuns.get(runId)?.abort(new Error('AGENT_CANCELLED_BY_USER'))
     return this.get(runId)
-  }
-
-  async createReleaseCandidate(runId: string, input: { principal?: Principal }, signal = new AbortController().signal) {
-    const state = await this.store.snapshot()
-    const run = required(state.reviewRuns.find(item => item.id === runId), '复验运行不存在')
-    assertReleaseGate(state, run)
-    if (run.workflow?.release) return structuredClone(run.workflow.release)
-    const expectedAssetVersionIds = run.snapshot.assets.map(item => item.assetVersionId)
-    const task = renderReleaseTask(run)
-    const output = await this.executeWorkspaceStage(run, 'release', 'requirement-release.submit_result', 'requirement-release-candidate/v1', 'PlanningAgent', task, async candidate => normalizeReleaseCandidate(candidate, expectedAssetVersionIds), signal)
-    const candidate = output.candidate as unknown as RequirementReleaseCandidate
-    const releaseId = `requirement_release_${randomUUID()}`
-    const generatedAt = new Date().toISOString()
-    const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, candidate, generatedAt })
-    const release = {
-      id: releaseId,
-      schemaVersion: 'requirement-release-package/v1' as const,
-      status: 'candidate' as const,
-      projectVersionId: run.projectVersionId,
-      verificationRunId: run.id,
-      sourceAssetVersionIds: expectedAssetVersionIds,
-      candidate,
-      generationExecution: executionRecordForStage(output, 'release'),
-      artifacts: built.artifacts,
-      contentSha256: built.contentSha256,
-      createdAt: generatedAt,
-      createdBy: principalId(input.principal),
-    }
-    await this.store.transaction(current => {
-      const stored = required(current.reviewRuns.find(item => item.id === run.id), '复验运行不存在')
-      assertReleaseGate(current, stored)
-      stored.workflow ??= { currentStage: 'release' }
-      stored.workflow.currentStage = 'release'
-      stored.workflow.release = release
-    })
-    return structuredClone(release)
-  }
-
-  async publishRelease(runId: string, input: { principal?: Principal }) {
-    return this.store.transaction(state => {
-      const run = required(state.reviewRuns.find(item => item.id === runId), '复验运行不存在')
-      assertReleaseGate(state, run)
-      const release = required(run.workflow?.release, '请先生成发布候选')
-      if (release.status !== 'candidate') throw new Error('该需求发布包已发布')
-      assertReleasePackageIntegrity(release)
-      release.status = 'published'
-      release.publishedAt = new Date().toISOString()
-      release.publishedBy = principalId(input.principal)
-      const requirementsArtifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), '需求发布包缺少 requirements.json')
-      const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), '项目版本不存在')
-      activateRequirementReleaseBinding(projectVersion, {
-        releaseId: release.id,
-        verificationRunId: run.id,
-        requirementsJsonSha256: requirementsArtifact.contentSha256,
-        boundAt: release.publishedAt,
-      })
-      projectVersion.updatedAt = release.publishedAt
-      return structuredClone(release)
-    })
   }
 
   async releaseArtifact(runId: string, fileName: string) {
@@ -505,64 +422,6 @@ export class RequirementAnalysisService {
     })
   }
 
-  private async executeWorkspaceStage(
-    run: ReviewRun,
-    workflowStage: 'release',
-    submitToolId: string,
-    schemaVersion: string,
-    agentLabel: string,
-    initialTask: string,
-    validateCandidate: (candidate: Record<string, unknown>) => Promise<{ valid: boolean; result?: Record<string, unknown>; issues: Array<{ path: string; message: string }> }>,
-    signal: AbortSignal,
-  ) {
-    const state = await this.store.snapshot()
-    const configuration = run.snapshot.agentConfigurationRef
-      ? required(state.agentConfigurationVersions.find(item => item.id === run.snapshot.agentConfigurationRef!.id), 'PlanningAgent 固定配置版本不存在')
-      : null
-    const models = selectAgentModels(state, configuration, { sourceId: run.snapshot.modelRef.sourceId, modelId: run.snapshot.modelRef.modelId }, 'PlanningAgent')
-    const model = models[0]
-    const fixedPairs = run.snapshot.assets.map(item => {
-      const version = required(state.versions.find(candidate => candidate.id === item.assetVersionId && candidate.status === 'ready'), '固定需求资产版本不可用')
-      if (version.contentHash !== item.assetContentHash) throw new Error('固定需求资产内容 Hash 已漂移')
-      const asset = required(state.assets.find(candidate => candidate.id === item.assetId), '固定需求资产不存在')
-      return { asset: { ...asset, displayName: item.displayName, logicalPath: item.logicalPath, assetType: item.assetType ?? asset.assetType }, version }
-    })
-    const plan = buildRequirementDirectoryInputPlan({
-      workspacePath: required(run.snapshot.documentWorkspace?.logicalPath, '固定 Agent 文档工作目录不存在'),
-      workspaceRootPath: run.snapshot.documentWorkspace?.rootLogicalPath,
-      activeBranchPath: run.snapshot.documentWorkspace?.activeBranchLogicalPath,
-      agentWorkspacePath: run.snapshot.documentWorkspace?.agentLogicalPath,
-      assets: fixedPairs,
-      currentInputRefs: run.snapshot.currentInputRefs,
-      workspaceSnapshot: run.snapshot.workspaceSnapshot,
-      definition: run.snapshot.agentDefinition,
-      contextWindow: run.snapshot.modelRef.contextWindow,
-      maxOutputTokens: run.snapshot.modelRef.maxOutputTokens,
-    })
-    return this.executeOnce({
-      runId: run.id,
-      snapshot: run.snapshot,
-      selection: model,
-      configuration,
-      signal,
-      createInput: modelRef => ({
-        snapshot: { ...run.snapshot, modelRef },
-        model: modelConnection(model, modelRef, configuration),
-        requirementInputPlan: plan,
-        executionProfile: {
-          mode: 'workspace_tools',
-          workflowStage,
-          allowedToolIds: [...REQUIREMENT_WORKSPACE_TOOL_IDS, submitToolId],
-          submitToolId,
-          schemaVersion,
-          agentLabel,
-          initialTask,
-          validateCandidate: async candidate => validateCandidate(candidate),
-        },
-      }),
-    })
-  }
-
   async failPreparedRun(runId: string, lease: TaskLease | undefined, error: unknown, cancelled = false, retryable = false, retry?: { attempt: number; maxAttempts: number; nextAttemptAt?: string }) {
     const message = sanitize(String(error instanceof Error ? error.message : error))
     await this.reviewTransaction(runId, lease, state => {
@@ -628,7 +487,7 @@ export class RequirementAnalysisService {
         const current = required(draft.reviewRuns.find(item => item.id === input.run.id), '需求分析运行不存在')
         Object.assign(current, {
           status: pendingBlockingClarifications.length ? 'waiting_clarification' : 'succeeded',
-          step: pendingBlockingClarifications.length ? 'waiting_clarification' : 'requirement_understanding_ready',
+          step: pendingBlockingClarifications.length ? 'waiting_clarification' : 'requirement_release_ready',
           progress: pendingBlockingClarifications.length ? 55 : 100,
           finishedAt,
           result,
@@ -639,12 +498,12 @@ export class RequirementAnalysisService {
         } satisfies Partial<ReviewRun>)
         current.snapshot.formalClarifications = mergeFormalClarifications(current.snapshot.formalClarifications, result.clarifications)
         current.workflow ??= { currentStage: 'analysis' }
-        current.workflow.currentStage = pendingBlockingClarifications.length ? 'clarification' : 'understanding'
+        current.workflow.currentStage = pendingBlockingClarifications.length ? 'clarification' : 'release'
         if (!pendingBlockingClarifications.length) current.workflow.automaticTransition = { status: 'pending' }
         const attempt = latestRunningExecutionAttempt(current)
         if (attempt) { attempt.activeAgentKey = 'planning'; attempt.status = 'succeeded'; attempt.finishedAt = finishedAt; attempt.modelLabel = current.modelLabel; attempt.executions = { planning: structuredClone(execution) } }
       })
-      if (!pendingBlockingClarifications.length) await this.notifyUnderstandingReady(input.run.id)
+      if (!pendingBlockingClarifications.length) await this.notifyRequirementReleaseReady(input.run.id)
       return required((await this.get(input.run.id)).response, '需求分析结果不存在')
     } catch (error) {
       const message = await this.failRun(input.run.id, error, input.signal, model, events, input.lease, input.retryable ?? false)
@@ -652,10 +511,10 @@ export class RequirementAnalysisService {
     }
   }
 
-  private async notifyUnderstandingReady(runId: string) {
-    if (!this.understandingReadyListener) return
+  private async notifyRequirementReleaseReady(runId: string) {
+    if (!this.requirementReleaseReadyListener) return
     try {
-      await this.understandingReadyListener(runId)
+      await this.requirementReleaseReadyListener(runId)
     } catch (error) {
       const message = sanitize(String(error instanceof Error ? error.message : error))
       await this.store.transaction(state => {
@@ -759,28 +618,6 @@ export class RequirementAnalysisService {
   }
 }
 
-function normalizeReleaseCandidate(candidate: Record<string, unknown>, expectedAssetVersionIds: string[]) {
-  const issues: Array<{ path: string; message: string }> = []
-  const result = candidate as unknown as RequirementReleaseCandidate
-  if (result.schemaVersion !== 'requirement-release-candidate/v1') issues.push({ path: '/schemaVersion', message: '必须为 requirement-release-candidate/v1' })
-  const actualIds = Array.isArray(result.sourceAssetVersionIds) ? [...new Set(result.sourceAssetVersionIds.map(item => String(item).trim()).filter(Boolean))] : []
-  if (actualIds.length !== expectedAssetVersionIds.length || expectedAssetVersionIds.some(item => !actualIds.includes(item))) issues.push({ path: '/sourceAssetVersionIds', message: '必须与复验固定输入版本完全一致' })
-  const markdown = String(result.refinedRequirementsMarkdown ?? '').trim()
-  if (!markdown) issues.push({ path: '/refinedRequirementsMarkdown', message: '完善后的需求文档不能为空' })
-  if (Buffer.byteLength(markdown, 'utf8') > 1_000_000) issues.push({ path: '/refinedRequirementsMarkdown', message: '完善后的需求文档超过 1MB' })
-  const normalized: RequirementReleaseCandidate = { schemaVersion: 'requirement-release-candidate/v1', sourceAssetVersionIds: expectedAssetVersionIds, refinedRequirementsMarkdown: markdown }
-  return Promise.resolve({ valid: issues.length === 0, ...(issues.length ? {} : { result: normalized as unknown as Record<string, unknown> }), issues })
-}
-
-function renderReleaseTask(run: ReviewRun) {
-  return [
-    'Workflow Stage 固定为 release。服务端已通过版本和需求基线门禁。只生成 refinedRequirementsMarkdown 候选；requirements.json、test-focus.json、traceability.json 与 manifest.json 由服务端生成。',
-    `Analysis Run：${run.id}`,
-    `固定 AssetVersion：${JSON.stringify(run.snapshot.assets.map(item => ({ assetVersionId: item.assetVersionId, logicalPath: item.logicalPath, contentSha256: item.assetContentHash })))}`,
-    'requirement.release Skill 已由 Runtime 按发布绑定直接加载。通过 requirement_release_submit_result 提交 requirement-release-candidate/v1；不得自行发布。',
-  ].join('\n')
-}
-
 function requireSucceededRun(run: ReviewRun) { if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的需求分析运行可以进入后续 Workflow Stage') }
 function requireOpenProjectVersion(state: DatabaseState, projectVersionId: string) { const version = required(state.projectVersions.find(item => item.id === projectVersionId), '项目版本不存在'); if (version.status !== 'open') throw new Error('当前项目版本为只读状态，不能推进需求工作流'); return version }
 
@@ -793,61 +630,17 @@ function assertRequirementInputsStable(state: DatabaseState, run: ReviewRun) {
   const expected = new Map(run.snapshot.assets.map(item => [item.assetId, item]))
   const bindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === run.projectVersionId)
   const unexpected = bindings.find(binding => !expected.has(binding.assetId))
-  if (unexpected) throw new Error('REQUIREMENT_UNDERSTANDING_INPUT_CHANGED: 项目版本存在本次分析之外的需求绑定')
+  if (unexpected) throw new Error('REQUIREMENT_RELEASE_INPUT_CHANGED: 项目版本存在本次分析之外的需求绑定')
   for (const reference of run.snapshot.assets) {
-    const asset = required(state.assets.find(item => item.id === reference.assetId), 'REQUIREMENT_UNDERSTANDING_INPUT_MISSING: 需求资产不存在')
-    const version = required(state.versions.find(item => item.id === reference.assetVersionId && item.status === 'ready'), 'REQUIREMENT_UNDERSTANDING_INPUT_MISSING: 需求版本不可用')
-    if (asset.activeVersionId !== reference.assetVersionId || version.contentHash !== reference.assetContentHash) throw new Error('REQUIREMENT_UNDERSTANDING_INPUT_CHANGED: 需求资产版本或 Hash 已变化，请重新分析')
+    const asset = required(state.assets.find(item => item.id === reference.assetId), 'REQUIREMENT_RELEASE_INPUT_MISSING: 需求资产不存在')
+    const version = required(state.versions.find(item => item.id === reference.assetVersionId && item.status === 'ready'), 'REQUIREMENT_RELEASE_INPUT_MISSING: 需求版本不可用')
+    if (asset.activeVersionId !== reference.assetVersionId || version.contentHash !== reference.assetContentHash) throw new Error('REQUIREMENT_RELEASE_INPUT_CHANGED: 需求资产版本或 Hash 已变化，请重新分析')
     const binding = bindings.find(item => item.assetId === reference.assetId)
-    if (binding && binding.assetVersionId !== reference.assetVersionId) throw new Error('REQUIREMENT_UNDERSTANDING_INPUT_CHANGED: 项目版本需求绑定与分析快照不一致')
+    if (binding && binding.assetVersionId !== reference.assetVersionId) throw new Error('REQUIREMENT_RELEASE_INPUT_CHANGED: 项目版本需求绑定与分析快照不一致')
     if (!binding) state.projectVersionRequirementBindings.push({ id: `pvrb_${randomUUID()}`, projectVersionId: run.projectVersionId, assetId: reference.assetId, assetVersionId: reference.assetVersionId, createdAt: new Date().toISOString() })
   }
 }
 
-function sha256Text(value: string) { return createHash('sha256').update(value, 'utf8').digest('hex') }
-
-function assertReleaseGate(state: DatabaseState, run: ReviewRun) {
-  requireSucceededRun(run)
-  requireOpenProjectVersion(state, run.projectVersionId)
-  const result = required(run.result, '复验结果不存在')
-  if (!['pass', 'pass_with_notes'].includes(result.summary.overallAssessment)) throw new Error('RELEASE_GATE_ASSESSMENT_BLOCKED: 总体结论未通过')
-  const bindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === run.projectVersionId)
-  const expected = new Map(run.snapshot.assets.map(item => [item.assetId, item]))
-  if (bindings.length !== expected.size || bindings.some(binding => expected.get(binding.assetId)?.assetVersionId !== binding.assetVersionId)) throw new Error('RELEASE_GATE_REQUIREMENT_BINDINGS_CHANGED: 项目版本需求绑定与复验快照不一致')
-  for (const reference of run.snapshot.assets) {
-    const version = required(state.versions.find(item => item.id === reference.assetVersionId && item.status === 'ready'), '发布依赖的需求版本不可用')
-    if (version.contentHash !== reference.assetContentHash) throw new Error('RELEASE_GATE_ASSET_HASH_CHANGED: 发布依赖的需求版本 Hash 漂移')
-  }
-}
-
-function assertReleasePackageIntegrity(release: RequirementReleasePackage) {
-  release.artifacts.forEach(item => { if (createHash('sha256').update(item.content).digest('hex') !== item.contentSha256) throw new Error(`RELEASE_ARTIFACT_HASH_MISMATCH: ${item.fileName}`) })
-  const manifestArtifact = required(release.artifacts.find(item => item.fileName === 'manifest.json' && item.mediaType === 'application/json'), '发布包缺少 manifest.json')
-  if (manifestArtifact.contentSha256 !== release.contentSha256) throw new Error('RELEASE_MANIFEST_HASH_MISMATCH')
-  let value: unknown
-  try { value = JSON.parse(manifestArtifact.content) } catch { throw new Error('RELEASE_MANIFEST_INVALID: manifest.json 不是合法 JSON') }
-  const manifest = value && typeof value === 'object' && !Array.isArray(value)
-    ? value as { schemaVersion?: unknown; releaseId?: unknown; projectVersionId?: unknown; verificationRunId?: unknown; sourceAssetVersions?: unknown; artifacts?: unknown; machineReadableEntryPoints?: unknown }
-    : {}
-  const entryPoints = manifest.machineReadableEntryPoints && typeof manifest.machineReadableEntryPoints === 'object' && !Array.isArray(manifest.machineReadableEntryPoints)
-    ? manifest.machineReadableEntryPoints as Record<string, unknown>
-    : {}
-  const expectedEntryPoints = { requirements: 'requirements.json', clarifications: 'clarifications.json', testFocus: 'test-focus.json', traceability: 'traceability.json' }
-  if (manifest.schemaVersion !== 'requirement-release-manifest/v1' || manifest.releaseId !== release.id || manifest.projectVersionId !== release.projectVersionId || manifest.verificationRunId !== release.verificationRunId || Object.entries(expectedEntryPoints).some(([key, fileName]) => entryPoints[key] !== fileName)) throw new Error('RELEASE_MANIFEST_INVALID: 发布来源或机器可读入口不一致')
-  const manifestSourceIds = Array.isArray(manifest.sourceAssetVersions) ? manifest.sourceAssetVersions.map(item => item && typeof item === 'object' && !Array.isArray(item) ? String((item as { assetVersionId?: unknown }).assetVersionId ?? '') : '') : []
-  if (JSON.stringify(manifestSourceIds) !== JSON.stringify(release.sourceAssetVersionIds)) throw new Error('RELEASE_MANIFEST_INVALID: 固定需求版本不一致')
-  const manifestArtifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : []
-  const expectedArtifacts = release.artifacts.filter(item => item.fileName !== 'manifest.json')
-  if (manifestArtifacts.length !== expectedArtifacts.length) throw new Error('RELEASE_MANIFEST_INVALID: 发布产物清单数量不一致')
-  for (const artifact of expectedArtifacts) {
-    const entry = manifestArtifacts.find(item => item && typeof item === 'object' && !Array.isArray(item) && (item as { fileName?: unknown }).fileName === artifact.fileName) as { mediaType?: unknown; contentSha256?: unknown; bytes?: unknown } | undefined
-    if (!entry || entry.mediaType !== artifact.mediaType || entry.contentSha256 !== artifact.contentSha256 || entry.bytes !== Buffer.byteLength(artifact.content, 'utf8')) throw new Error(`RELEASE_MANIFEST_INVALID: 产物清单不一致 ${artifact.fileName}`)
-  }
-}
-
-function executionRecordForStage(output: AgentExecutionOutput, workflowStage: RequirementWorkflowStage): AgentExecutionRecord {
-  return { agentKey: 'planning', workflowStage, turns: output.turns, toolCalls: output.toolCalls, toolErrors: output.toolErrors, framework: output.framework, context: output.context, events: output.events }
-}
 function principalId(principal: Principal | undefined) { return String(principal?.subjectId ?? '').trim().slice(0, 200) || 'system' }
 
 function latestRunningExecutionAttempt(run: ReviewRun) { return [...(run.executionAttempts ?? [])].reverse().find(item => item.status === 'running') }
@@ -882,7 +675,6 @@ function presentWorkflowSummary(workflow: RequirementWorkflowState | undefined) 
         artifacts: workflow.release.artifacts.map(item => ({ fileName: item.fileName, mediaType: item.mediaType, contentSha256: item.contentSha256 })),
       },
     } : {}),
-    ...(workflow.understandingSnapshot ? { understandingSnapshot: structuredClone(workflow.understandingSnapshot) } : {}),
     ...(workflow.automaticTransition ? { automaticTransition: structuredClone(workflow.automaticTransition) } : {}),
   }
 }
@@ -907,7 +699,7 @@ function selectAgentModels(state: DatabaseState, configuration: AgentConfigurati
 }
 
 function requirePiWorkspaceAgentDefinition(definition: ReviewRunSnapshot['agentDefinition']) {
-  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'requirement-release.submit_result']
+  const requiredTools = ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result']
   const missing = requiredTools.filter(toolId => !definition.toolIds.includes(toolId))
   if (definition.agentKey !== 'planning' || definition.resultSchemaVersion !== 'planning/v1' || missing.length) throw new Error(`PI_WORKSPACE_AGENT_CONFIGURATION_REQUIRED: 请重新发布 PlanningAgent${missing.length ? `；缺少工具 ${missing.join(', ')}` : ''}`)
 }

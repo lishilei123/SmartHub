@@ -20,7 +20,6 @@ const builtInSkills: SkillResource[] = [
   builtInSkill('system.structured-summary', '结构化摘要示例', '内置 Skill 示例：把已有材料整理为结论、关键事实和待确认项。', '1.0.0', 'server/skills/structured-summary/SKILL.md', [], ['系统', '摘要', '示例']),
   builtInSkill('requirement.baseline', '需求基线', '读取固定需求正文并建立完整、原子且可追溯到原文证据的需求基线草稿。', '1.0.0', 'server/skills/requirement-baseline/SKILL.md', [], ['需求分析', '基线', 'baseline']),
   builtInSkill('requirement.analysis', '需求分析', '在同一 Session 中完成需求理解、Clarification、Test Focus 与自检。', '1.0.0', 'server/skills/requirement-analysis/SKILL.md', [], ['需求分析', 'clarification', 'traceability']),
-  builtInSkill('requirement.release', '需求发布产物', '基于复验通过的固定需求版本生成可供人工发布的最终产物候选。', '1.0.0', 'server/skills/requirement-release/SKILL.md', [], ['需求分析', '发布', 'artifact']),
   builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release、正式用例库或套件建立测试设计事实和变化基线。', '1.2.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace']),
   builtInSkill('test-case-design', '测试用例设计', '生成按维度区分的 executionSpec、测试数据和正式用例库变更 Proposal。', '1.2.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'Proposal']),
   builtInSkill('test-design-repair', '测试设计修复', '保留 Proposal 与 executionSpec，仅修复 Coverage Audit 标记为 agent_repair 的质量问题。', '1.2.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage']),

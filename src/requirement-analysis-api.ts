@@ -105,11 +105,10 @@ export type AgentExecutionRecord = {
 export type RequirementReleasePackage = {
   id: string
   schemaVersion: 'requirement-release-package/v1'
-  status: 'candidate' | 'published'
+  status: 'published'
   projectVersionId: string
   verificationRunId: string
   sourceAssetVersionIds: string[]
-  candidate: { schemaVersion: 'requirement-release-candidate/v1'; sourceAssetVersionIds: string[]; refinedRequirementsMarkdown: string }
   generationExecution: AgentExecutionRecord
   artifacts: Array<{ fileName: string; mediaType: 'text/markdown' | 'application/json' | 'text/plain'; content: string; contentSha256: string }>
   contentSha256: string
@@ -244,9 +243,8 @@ export type RequirementAnalysisRun = {
   inputDeliveryManifest?: InputDeliveryManifest
   planningSubAgentRuns?: PlanningSubAgentRunRecord[]
   workflow?: {
-    currentStage: 'analysis' | 'clarification' | 'understanding' | 'release'
+    currentStage: 'analysis' | 'clarification' | 'release'
     release?: RequirementReleasePackage
-    understandingSnapshot?: { id: string; schemaVersion: 'requirement-understanding-snapshot/v1'; projectVersionId: string; analysisRunId: string; sourceAssetVersionIds: string[]; requirementPointIds: string[]; clarifications: PlanningClarification[]; requirementResultSha256: string; createdAt: string; contentSha256: string }
     automaticTransition?: { status: 'pending' | 'running' | 'succeeded' | 'failed'; testDesignId?: string; testDesignRunId?: string; startedAt?: string; finishedAt?: string; error?: string }
   }
   response?: RequirementAnalysisResponse
@@ -313,20 +311,6 @@ export async function retryRequirementAnalysisRun(runId: string) {
   const body = await response.json() as RequirementAnalysisRun | { error?: string }
   if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求分析重跑失败')
   return body as RequirementAnalysisRun
-}
-
-export async function createRequirementReleaseCandidate(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/release-candidate`, { method: 'POST' })
-  const body = await response.json() as RequirementReleasePackage | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求发布候选生成失败')
-  return body as RequirementReleasePackage
-}
-
-export async function publishRequirementRelease(runId: string) {
-  const response = await fetch(`${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/release/publish`, { method: 'POST' })
-  const body = await response.json() as RequirementReleasePackage | { error?: string }
-  if (!response.ok) throw new Error('error' in body && body.error ? body.error : '需求发布失败')
-  return body as RequirementReleasePackage
 }
 
 export async function retryAutomaticTestDesign(runId: string) {

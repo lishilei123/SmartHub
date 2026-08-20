@@ -1,20 +1,7 @@
 import type { AgentExecutionRecord } from './types.js'
 import type { PlanningClarification } from './review-types.js'
 
-export type RequirementWorkflowStage = 'analysis' | 'clarification' | 'understanding' | 'release'
-
-export interface RequirementUnderstandingSnapshot {
-  id: string
-  schemaVersion: 'requirement-understanding-snapshot/v1'
-  projectVersionId: string
-  analysisRunId: string
-  sourceAssetVersionIds: string[]
-  requirementPointIds: string[]
-  clarifications: PlanningClarification[]
-  requirementResultSha256: string
-  createdAt: string
-  contentSha256: string
-}
+export type RequirementWorkflowStage = 'analysis' | 'clarification' | 'release'
 
 export interface RequirementAutomaticTransitionState {
   status: 'pending' | 'running' | 'succeeded' | 'failed'
@@ -23,12 +10,6 @@ export interface RequirementAutomaticTransitionState {
   startedAt?: string
   finishedAt?: string
   error?: string
-}
-
-export interface RequirementReleaseCandidate {
-  schemaVersion: 'requirement-release-candidate/v1'
-  sourceAssetVersionIds: string[]
-  refinedRequirementsMarkdown: string
 }
 
 export interface RequirementReleaseArtifact {
@@ -41,11 +22,10 @@ export interface RequirementReleaseArtifact {
 export interface RequirementReleasePackage {
   id: string
   schemaVersion: 'requirement-release-package/v1'
-  status: 'candidate' | 'published'
+  status: 'published'
   projectVersionId: string
   verificationRunId: string
   sourceAssetVersionIds: string[]
-  candidate: RequirementReleaseCandidate
   generationExecution: AgentExecutionRecord
   artifacts: RequirementReleaseArtifact[]
   contentSha256: string
@@ -57,7 +37,6 @@ export interface RequirementReleasePackage {
 
 export interface RequirementWorkflowState {
   currentStage: RequirementWorkflowStage
-  understandingSnapshot?: RequirementUnderstandingSnapshot
   automaticTransition?: RequirementAutomaticTransitionState
   release?: RequirementReleasePackage
 }

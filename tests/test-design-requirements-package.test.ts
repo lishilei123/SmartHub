@@ -40,7 +40,6 @@ test('TestDesign 只消费已发布 requirements.json，不从 Review 结果或 
       result: { requirementPoints: [{ clientRequirementPointId: 'RP-STALE', title: '旧运行结果', description: '不能作为 TestDesign 输入', evidenceRefs: [] }] } as never,
       workflow: { currentStage: 'release', release: {
         id: 'release-1', schemaVersion: 'requirement-release-package/v1', status: 'published', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', sourceAssetVersionIds: ['version-fixed'],
-        candidate: { schemaVersion: 'requirement-release-candidate/v1', sourceAssetVersionIds: ['version-fixed'], refinedRequirementsMarkdown: '# 不应被 TestDesign 解析' },
         generationExecution: {} as never,
         artifacts: [
           { fileName: 'requirements.json', mediaType: 'application/json', content: requirementsContent, contentSha256: requirementsHash },

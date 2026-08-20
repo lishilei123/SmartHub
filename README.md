@@ -60,6 +60,8 @@
 
 > 需求分析与测试设计只保留同一个 `PlanningAgent`，并且只接受 `/workspace` 文件工作区。Agent 基于 Pi Agent Core 运行，使用只读 `ls / find / grep / read` 与受控 Knowledge 工具自主探索固定资料，在同一个 ProjectVersion Planning Session 内完成需求分析；Requirement Release 发布后，Workflow 把“开始测试设计”作为下一项真实 Session 消息下发给同一个 Agent，后续上下文可直接读取该任务。旧 `RequirementPointExtractionAgent`、`RequirementReviewAgent` 及其独立提交工具、草稿和配置快照均已删除。
 
+需求分析完成且阻断 Clarification 全部处置后，Service 在同一事务中校验固定输入、生成并绑定唯一的 Requirement Release；不再维护独立的 Requirement Understanding Stage/Snapshot，也不存在 Agent 生成 Release Candidate 后再人工发布的第二条路径。Planning Session 只提供语义连续性，下游正式事实始终来自已发布 Release、`requirements.json` 与固定 Hash。
+
 统一逻辑目录如下：
 
 ```text

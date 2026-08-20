@@ -228,49 +228,6 @@
         "additionalProperties": false
       }
     },
-    "requirement-release.submit_result": {
-      "version": "1.0.0",
-      "piName": "requirement_release_submit_result",
-      "label": "提交需求发布候选",
-      "catalogName": "提交需求发布候选",
-      "description": "提交 requirement-release-candidate/v1；服务端重新校验复验门禁并生成 Markdown 与机器可读 JSON 发布包。",
-      "catalogDescription": "提交 release Stage 的最终需求文档候选。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/requirement-workflow-submit.ts",
-      "handlerKey": "requirement-release.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "schemaVersion": {
-            "const": "requirement-release-candidate/v1"
-          },
-          "sourceAssetVersionIds": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 500,
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            }
-          },
-          "refinedRequirementsMarkdown": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 1000000
-          }
-        },
-        "required": [
-          "schemaVersion",
-          "sourceAssetVersionIds",
-          "refinedRequirementsMarkdown"
-        ],
-        "additionalProperties": false
-      }
-    },
     "requirement-analysis.submit_result": {
       "version": "1.2.0",
       "piName": "requirement_analysis_submit_result",

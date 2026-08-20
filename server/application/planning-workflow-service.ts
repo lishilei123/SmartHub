@@ -68,19 +68,11 @@ const STAGE_PROFILES: PlanningStageProfile[] = [
     true,
   ),
   stage(
-    'requirement_understanding',
-    [],
-    undefined,
-    undefined,
-    [],
-  ),
-  stage(
     'requirement_release',
-    [...PLANNING_WORKSPACE_TOOLS, 'requirement-release.submit_result'],
-    'requirement-release.submit_result',
-    'requirement-release-candidate/v1',
     [],
-    true,
+    undefined,
+    undefined,
+    [],
   ),
   stage(
     'test_case_design',
@@ -209,7 +201,7 @@ export class PlanningWorkflowService {
     const finishedAt = new Date().toISOString()
     await this.store.transaction(draft => {
       const current = required(draft.reviewRuns.find(item => item.id === run.id), 'REQUIREMENT_RUN_NOT_FOUND')
-      current.workflow ??= { currentStage: 'understanding' }
+      current.workflow ??= { currentStage: 'release' }
       current.workflow.automaticTransition = {
         ...(current.workflow.automaticTransition ?? { status: 'succeeded' }),
         status: 'succeeded',
@@ -222,8 +214,8 @@ export class PlanningWorkflowService {
     return automatic
   }
 
-  async requirementUnderstandingReady(runId: string) {
-    await this.requirements.freezeUnderstanding(runId)
+  async requirementReleaseReady(runId: string) {
+    await this.requirements.finalizeRequirementRelease(runId)
     return this.requirementReleasePublished(runId)
   }
 

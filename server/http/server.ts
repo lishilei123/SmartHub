@@ -211,15 +211,6 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     })
     return send(response, 202, await requirementAnalysisService.actOnClarifications(clarificationBatch[1], { items, principal }))
   }
-  const releaseCandidate = /^\/api\/requirement-analysis-runs\/([^/]+)\/release-candidate$/.exec(url.pathname)
-  if (method === 'POST' && releaseCandidate) { await requireRun(releaseCandidate[1], 'requirement-analysis:create'); return send(response, 201, await requirementAnalysisService.createReleaseCandidate(releaseCandidate[1], { principal })) }
-  const releasePublish = /^\/api\/requirement-analysis-runs\/([^/]+)\/release\/publish$/.exec(url.pathname)
-  if (method === 'POST' && releasePublish) {
-    await requireRun(releasePublish[1], 'project-version:manage')
-    const release = await requirementAnalysisService.publishRelease(releasePublish[1], { principal })
-    await planningWorkflowService.requirementReleasePublished(releasePublish[1])
-    return send(response, 200, release)
-  }
   const automaticTestDesignRetry = /^\/api\/requirement-analysis-runs\/([^/]+)\/automatic-test-design\/retry$/.exec(url.pathname)
   if (method === 'POST' && automaticTestDesignRetry) {
     await requireRun(automaticTestDesignRetry[1], 'project-version:manage')
