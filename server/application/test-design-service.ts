@@ -12,7 +12,7 @@ import type {
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { auditTestDesignCoverage } from './test-design-coverage-auditor.js'
-import { assertEtag, etag, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate, type TestCaseDesignCandidate } from './test-design-validation.js'
+import { assertEtag, etag, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateHistoricalProposalPlan, validateTestCaseContent, validateTestCaseDesignCandidate, type TestCaseDesignCandidate } from './test-design-validation.js'
 import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
@@ -998,6 +998,7 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
 
 function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean) {
   const value = validateTestCaseDesignCandidate(raw, repair)
+  validateHistoricalProposalPlan(value, run.historicalSnapshot)
   const existingByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
   const idByRef = new Map(value.cases.map(candidate => [candidate.ref, existingByRef.get(candidate.ref)?.id ?? `test_case_${randomUUID()}`]))
   const dataIdByRef = new Map(value.dataRequirements.map(candidate => [candidate.ref, `test_data_${randomUUID()}`]))

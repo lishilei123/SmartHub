@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
-import { TestDesignError, validateTestCaseDesignCandidate, validateTestCaseContent } from '../server/application/test-design-validation.js'
+import { TestDesignError, validateHistoricalProposalPlan, validateTestCaseDesignCandidate, validateTestCaseContent } from '../server/application/test-design-validation.js'
 import type { ScenarioClaim, TestCase, TestCaseContent } from '../server/domain/test-design-types.js'
 
 const executionMethods = [{ method: 'ui' as const, uiSpec: { entry: '/login', selectors: ['data-testid=submit'] }, steps: [{ key: 'step-1', action: '提交表单', expected: '显示登录成功' }], verificationChecks: [{ key: 'check-1', description: '页面显示首页' }], executionReadiness: 'ready' as const, automationHint: 'UI 自动化' }]
@@ -21,6 +21,40 @@ test('TestCase 候选直接使用 Requirement refs，并允许一个 Requirement
   assert.equal(value.cases.length, 3)
   assert.deepEqual(value.cases[2].content.requirementRefs, ['REQ-1', 'REQ-2'])
   assert.throws(() => validateTestCaseContent({ ...content(['REQ-1']), legacyRefs: ['legacy-reference'] }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID')
+})
+
+test('冻结历史用例不能通过删除 reuse Proposal 从完整 Candidate 中静默消失', () => {
+  const first = content(['REQ-1'], '历史登录用例')
+  const second = content(['REQ-2'], '历史注销用例')
+  const historical = {
+    schemaVersion: 'historical-case-snapshot/v1',
+    items: [
+      { id: 'history-1', kind: 'test_case_library', sourceId: 'library-1:case-1:1', contentSha256: canonicalSha256({ ...first, tags: [] }), content: first, locator: { caseId: 'case-1', revision: 1 } },
+      { id: 'history-2', kind: 'test_case_library', sourceId: 'library-1:case-2:1', contentSha256: canonicalSha256({ ...second, tags: [] }), content: second, locator: { caseId: 'case-2', revision: 1 } },
+    ],
+    createdAt: new Date().toISOString(),
+    snapshotSha256: 'history-snapshot',
+  } as never
+  const incomplete = {
+    ...candidate([{ ref: 'TC-HISTORY-1', content: first }], [claim('SC-HISTORY-1', 'TC-HISTORY-1')]),
+    proposals: [{ operation: 'reuse' as const, sourceCaseId: 'case-1', sourceRevision: 1, candidateRef: 'TC-HISTORY-1', requirementRefs: ['REQ-1'], reason: '冻结历史语义保持不变', confidence: 1 }],
+  }
+  assert.throws(
+    () => validateHistoricalProposalPlan(validateTestCaseDesignCandidate(incomplete), historical),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID' && error.message.includes('不能通过删除 Proposal 省略冻结历史用例'),
+  )
+
+  const complete = {
+    ...candidate(
+      [{ ref: 'TC-HISTORY-1', content: first }, { ref: 'TC-HISTORY-2', content: second }],
+      [claim('SC-HISTORY-1', 'TC-HISTORY-1'), claim('SC-HISTORY-2', 'TC-HISTORY-2', { requirementRefs: ['REQ-2'] })],
+    ),
+    proposals: [
+      { operation: 'reuse', sourceCaseId: 'case-1', sourceRevision: 1, candidateRef: 'TC-HISTORY-1', requirementRefs: ['REQ-1'], reason: '冻结历史语义保持不变', confidence: 1 },
+      { operation: 'reuse', sourceCaseId: 'case-2', sourceRevision: 1, candidateRef: 'TC-HISTORY-2', requirementRefs: ['REQ-2'], reason: '冻结历史语义保持不变', confidence: 1 },
+    ] as const,
+  }
+  assert.doesNotThrow(() => validateHistoricalProposalPlan(validateTestCaseDesignCandidate(complete), historical))
 })
 
 test('Coverage Audit 直接建立 Requirement 到 TestCase 关系，并识别多需求闭环', () => {

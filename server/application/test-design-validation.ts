@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalLibrarySelection, ScenarioClaim, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalCaseSnapshot, HistoricalLibrarySelection, ScenarioClaim, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 
 export class TestDesignError extends Error {
@@ -178,6 +178,55 @@ export function validateTestCaseDesignCandidate(value: unknown, repair = false):
     if (missing.length) synthesisFail('/proposals', `每条候选用例都必须由 Proposal 覆盖，缺少：${missing.join('、')}`)
   }
   return { schemaVersion, cases, scenarioClaims, dataRequirements, findings, confirmationItems, proposals }
+}
+
+/**
+ * A test-design submission is a complete candidate set, not a delta that can
+ * silently omit frozen historical cases. Reused content must therefore be
+ * represented in cases[] with a temporary ref, while its Proposal preserves
+ * the formal source Case ID and Revision.
+ */
+export function validateHistoricalProposalPlan(
+  candidate: TestCaseDesignCandidate,
+  historical: HistoricalCaseSnapshot,
+): void {
+  const historicalCases = new Map<string, HistoricalCaseSnapshot['items'][number]>(historical.items.flatMap(item => {
+    const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
+    return typeof locator?.caseId === 'string' && Number.isInteger(locator.revision)
+      ? [[`${locator.caseId}:${locator.revision}`, item] as const]
+      : []
+  }))
+  const proposals = candidate.proposals
+  if (!proposals.length && !historicalCases.size) return
+  const caseByRef = new Map(candidate.cases.map(item => [item.ref, item]))
+  const sourceKeys = new Set<string>()
+  const candidateRefs = new Set<string>()
+
+  for (const proposal of proposals) {
+    const sourceKey = proposal.sourceCaseId && proposal.sourceRevision !== undefined
+      ? `${proposal.sourceCaseId}:${proposal.sourceRevision}`
+      : undefined
+    const source = sourceKey ? historicalCases.get(sourceKey) : undefined
+    if (sourceKey && !source) synthesisFail('/proposals', `Proposal 来源 ${sourceKey} 不属于冻结历史用例`)
+    if (sourceKey && sourceKeys.has(sourceKey)) synthesisFail('/proposals', `冻结历史用例 ${sourceKey} 只能有一个 Proposal`)
+    if (sourceKey) sourceKeys.add(sourceKey)
+
+    if (!proposal.candidateRef) continue
+    const current = caseByRef.get(proposal.candidateRef)
+    if (!current) synthesisFail('/proposals', `Proposal candidateRef ${proposal.candidateRef} 不属于本次 cases[]`)
+    if (['reuse', 'update', 'create'].includes(proposal.operation)) {
+      if (candidateRefs.has(proposal.candidateRef)) synthesisFail('/proposals', `Candidate Case ${proposal.candidateRef} 只能由一个 reuse、update 或 create Proposal 关联`)
+      candidateRefs.add(proposal.candidateRef)
+    }
+  }
+
+  const missingHistorical = [...historicalCases.keys()].filter(key => !sourceKeys.has(key))
+  if (missingHistorical.length) {
+    const sample = missingHistorical.slice(0, 5).join('、')
+    synthesisFail('/proposals', `不能通过删除 Proposal 省略冻结历史用例；每条历史用例必须恰有一个 reuse、update、deprecate 或 reference Proposal。缺少 ${missingHistorical.length} 条${sample ? `：${sample}` : ''}`)
+  }
+  const missingCandidate = candidate.cases.map(item => item.ref).filter(ref => !candidateRefs.has(ref))
+  if (missingCandidate.length) synthesisFail('/proposals', `每条 Candidate Case 必须恰有一个 reuse、update 或 create Proposal，缺少：${missingCandidate.join('、')}`)
 }
 
 function validateScenarioClaims(value: unknown, cases: TestCaseDesignCandidate['cases']): ScenarioClaim[] {

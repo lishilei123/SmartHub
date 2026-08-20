@@ -4,7 +4,7 @@ import { builtInToolBindingToken, toolBindingToken, toolsetContentHash } from '.
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
 import type { PlanningAgentRuntime } from '../application/test-design-service.js'
-import { TestDesignError, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
+import { TestDesignError, validateHistoricalProposalPlan, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
@@ -195,6 +195,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const stageRules = stage === 'test_case_design'
     ? [
           'Requirement Release 是本轮唯一正式覆盖基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。每条用例必须使用 requirementRefs 直接关联至少一个 Requirement。',
+          'cases[] 是本轮完整候选集合，不是仅新增或修改的差量。每条冻结历史用例必须恰有一个 reuse、update、deprecate 或 reference Proposal。reuse 与 update 都必须让 Proposal.candidateRef 指向本次 cases[] 中完整、扁平的临时 Candidate Case；reuse 的内容必须与冻结历史语义一致，update 才表示内容变化。所谓 reuse 不复制的是正式 Case ID/Revision，不是省略 Candidate Case 正文。不得通过删除 reuse Proposal 来修复 candidateRef 校验错误。',
           '每个 functional/security Candidate Case 都必须提供至少一条根级 scenarioClaims。ScenarioClaim 只说明一个可独立判定的 Atomic Test Intent：使用临时 caseRef、Requirement 子集、kind、subject、variant、polarity、明确且可独立判定的 oracle，以及可选 knowledgeRefs。kind=state_transition 时必须额外声明 transition:{from,to}，一条 Claim 只允许一个明确状态边；它不是 TestPoint，不会获得正式 ID、Revision、Version 或发布。',
           '功能和安全用例的执行步骤、检查点、就绪状态及自动化提示只在 executionMethods 的对应 UI/API 方式中完整填写。executionSpec 对此类用例只提交 kind=functional 与同一 method；服务端会从 executionMethods 和用例根字段投影正式 executionSpec。不要提交第二份重复步骤。',
           '非功能 executionSpec 必须使用精确字段：performance 为 kind=performance、method=performance_tool、target、scenario、virtualUsers、duration、rampUp、thresholds、dataStrategy、environmentRequirements、executionReadiness；stability 为 kind=stability、method=long_running、workload、duration、interval、observations、recoveryPolicy、checkpointPolicy、environmentRequirements、executionReadiness；compatibility 为 kind=compatibility、method=environment_matrix、baseMethod、baseCaseRefs、browserMatrix、operatingSystemMatrix、viewportMatrix、versionMatrix、expectedConsistency、executionReadiness。cases[] 根对象和 executionSpec 都不得添加这些列表之外的自定义字段。',
@@ -208,7 +209,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
         '补充 Workspace 或共享知识只可用于已命名的事实缺口或风险：先用受限路径的 ls/find/grep 或 knowledge.search 定位，再读取最小必要范围。相同 contentHash 和所需行范围仍在当前 Context 时直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。',
       ]
     : [
-        '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。除 blocker 直接引用外，不回读历史用例库或共享知识；完整冻结 Workspace 仍是授权边界，不是默认遍历清单。',
+        '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。除 blocker 直接引用外，不回读历史用例库或共享知识；若服务端报告冻结历史 Proposal 不完整，历史快照是该错误直接引用的资料，必须恢复缺失 Proposal 及其完整 Candidate Case。完整冻结 Workspace 仍是授权边界，不是默认遍历清单。',
       ]
   return [
     ...stageRules,
@@ -322,6 +323,7 @@ function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, wo
 async function validateStageCandidate(stage: TestDesignStage, candidate: Record<string, unknown>, run: TestDesignWorkflowRun) {
   try {
     const result = validateTestCaseDesignCandidate(candidate, stage === 'test_design_repair')
+    validateHistoricalProposalPlan(result, run.historicalSnapshot)
     return { valid: true, result, issues: [] }
   } catch (error) {
     const details = error instanceof TestDesignError && error.details && typeof error.details === 'object' ? error.details as { path?: unknown } : undefined
@@ -355,6 +357,9 @@ export function projectTestCaseCandidateSubmission(
 }
 
 function testCaseCandidateRecoveryHint(message: string) {
+  if (message.includes('不能通过删除 Proposal 省略冻结历史用例')) {
+    return '。请恢复每条缺失历史用例的 Proposal；reuse/update 都要将 sourceCaseId/sourceRevision 与本次 cases[] 中完整、扁平的临时 Candidate Case 通过 candidateRef 关联。不要删除 reuse Proposal 来规避校验。'
+  }
   if (!message.includes('thresholds') && !['operator', 'value', 'unit'].some(field => message.includes(field))) return ''
   return '。性能 executionSpec.thresholds 是数组；每项只能包含 metric、target、sourceRef 三个非空字符串。比较符、数值和单位都写入 target 这个完整字符串，不能传 operator/value/unit，也不能删掉 metric、target 或 sourceRef 中的任一字段。没有正式阈值时提交空数组并标记 needs_confirmation，同时建立阻断 Confirmation Item。'
 }
