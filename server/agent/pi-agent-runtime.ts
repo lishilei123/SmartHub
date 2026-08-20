@@ -23,7 +23,10 @@ import type { SkillPackageStore } from '../infrastructure/skill-package-store.js
 import { GovernedToolRuntime } from '../tools/runtime.js'
 import { AgentCapabilityLoader } from '../tools/capability-loader.js'
 import { createWorkspaceAgentToolRegistry } from '../tools/requirement-tools.js'
-import { RequirementDocumentWorkspace } from '../tools/requirement-document-workspace.js'
+import {
+  RequirementDocumentWorkspace,
+  type WorkspaceReadReference,
+} from '../tools/requirement-document-workspace.js'
 import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.js'
 import { SKILL_READ_TOOL_ID } from '../tools/skill-read.js'
 import { AgentSkillRuntime } from './skill-runtime.js'
@@ -452,11 +455,19 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
     let candidate: AgentCandidateResult | Record<string, unknown> | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
+    let activeSessionManager: SessionManager | undefined
     const stage = stageConfiguration(input)
     const inputPlan = required(input.requirementInputPlan, 'AGENT_INPUT_PLAN_REQUIRED: Agent 缺少服务端输入计划')
     if (inputPlan.mode !== 'agent_directory') throw new Error('PI_WORKSPACE_INPUT_REQUIRED: Workspace Agent 只支持 /workspace 文件工作区输入')
     requireAllowedToolset(input.snapshot.agentDefinition.toolIds, stage.submitToolId, stage.allowedToolIds)
-    const piDocumentWorkspace = new RequirementDocumentWorkspace(this.store, input.snapshot)
+    const piDocumentWorkspace = new RequirementDocumentWorkspace(
+      this.store,
+      input.snapshot,
+      reference => reusableWorkspaceRead(
+        activeSessionManager?.buildSessionContext().messages ?? [],
+        reference,
+      ),
+    )
     const workspaceProfile = required(input.executionProfile, 'WORKSPACE_EXECUTION_PROFILE_REQUIRED')
     const skillRuntime = new AgentSkillRuntime(this.store, this.skillPackages)
     const skillSession = await skillRuntime.prepare(input.snapshot.agentDefinition, workspaceProfile.workflowStage)
@@ -563,6 +574,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       const lease = await this.sessions.acquire(sessionScope)
       releaseSession = lease.release
       const sessionManager = lease.manager
+      activeSessionManager = sessionManager
       const sessionContext = sessionManager.buildSessionContext()
       const systemPrompt = [input.snapshot.agentDefinition.systemPrompt, skillPrompt].filter(Boolean).join('\n\n')
       if (sessionScope.role === 'planning_parent') {
@@ -799,14 +811,16 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         if (result.terminate && submissionBatches.mergedArgumentsByPrimaryId.has(toolCallId)) submissionBatches.acceptedPrimaryIds.add(toolCallId)
         if (descriptor.id !== stage.submitToolId && runtime.remainingStandardCalls === 0) await requireResultSubmission(`普通工具调用额度已用尽，保留最后 ${RESULT_SUBMISSION_TOOL_RESERVE} 次调用仅用于 ${stage.submitPiName} 提交或修正结果。`)
         const modelResult = result.replayed
-          ? { ...asRecord(result.data), replayed: true, guidance: '这是本次运行已成功读取的固定结果重放；请直接使用返回内容，不要再次提交相同参数。' }
+          ? replayedModelResult(descriptor.id, result.data)
           : result.data
         return {
           content: [{ type: 'text', text: JSON.stringify(modelResult) }],
           details: {
             toolId: descriptor.id,
             version: descriptor.version,
-            data: result.data,
+            data: descriptor.id === 'workspace.read_file' && result.replayed
+              ? modelResult
+              : result.data,
             ...(submissionBatches.callCountByPrimaryId.has(toolCallId) ? { coalescedCallCount: submissionBatches.callCountByPrimaryId.get(toolCallId) } : {}),
             ...(result.replayed ? { replayed: true } : {}),
             ...(result.policyError ? { policyError: result.policyError } : {}),
@@ -1021,11 +1035,71 @@ function renderActiveStageTask(input: AgentExecutionInput) {
     `submitTool=${stageConfiguration(input).submitPiName}`,
     'Runtime 只暴露本轮允许的工具；最终结果通过上述 submitTool 提交。',
     'Session 历史用于保持上下文连续性，不能扩大本轮工具权限或替换最新业务任务。',
+    '对内容 Hash 和实际行范围均未变化的冻结文件，优先复用当前 Session 中此前 read 返回的正文；仅在内容变化、需要其他行范围或正文已不在当前上下文时重新读取。',
     '</runtime_execution_boundary>',
     '<latest_business_task>',
     profile.initialTask,
     '</latest_business_task>',
   ].join('\n')
+}
+
+function reusableWorkspaceRead(
+  messages: readonly AgentMessage[],
+  reference: WorkspaceReadReference,
+) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as unknown as {
+      role?: unknown
+      toolName?: unknown
+      toolCallId?: unknown
+      content?: unknown
+    }
+    if (message.role !== 'toolResult' || message.toolName !== 'read' || typeof message.toolCallId !== 'string') continue
+    const data = workspaceReadResultData(message.content)
+    if (
+      data.tool !== 'read'
+      || typeof data.output !== 'string'
+      || data.path !== reference.relativePath
+      || data.contentHash !== reference.contentHash
+      || optionalString(data.assetVersionId) !== reference.assetVersionId
+      || data.startLine !== reference.startLine
+      || data.endLine !== reference.endLine
+    ) continue
+    return { toolCallId: message.toolCallId }
+  }
+  return undefined
+}
+
+function workspaceReadResultData(content: unknown) {
+  if (!Array.isArray(content)) return {}
+  const text = content.find(item => (
+    item
+    && typeof item === 'object'
+    && !Array.isArray(item)
+    && (item as { type?: unknown }).type === 'text'
+    && typeof (item as { text?: unknown }).text === 'string'
+  )) as { text: string } | undefined
+  if (!text) return {}
+  try { return asRecord(JSON.parse(text.text)) } catch { return {} }
+}
+
+function replayedModelResult(toolId: string, value: unknown) {
+  const data = asRecord(value)
+  if (toolId !== 'workspace.read_file') {
+    return {
+      ...data,
+      replayed: true,
+      guidance: '这是本次运行已成功读取的固定结果重放；请直接使用返回内容，不要再次提交相同参数。',
+    }
+  }
+  const { output: _output, details: _details, ...metadata } = data
+  return {
+    ...metadata,
+    replayed: true,
+    guidance: typeof data.guidance === 'string'
+      ? data.guidance
+      : '这是当前 Session 中已成功读取的固定文件重放；正文仍在上下文中，请直接使用，不要再次读取相同内容和范围。',
+  }
 }
 
 function hasEvidenceValidationIssue(issues: Array<{ path: string; message: string }>) {
@@ -1349,6 +1423,10 @@ function asRecord(value: unknown) {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : { data: value }
+}
+
+function optionalString(value: unknown) {
+  return typeof value === 'string' ? value : undefined
 }
 
 function textFromContent(content: unknown) {

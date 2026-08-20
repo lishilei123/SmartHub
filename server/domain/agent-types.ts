@@ -166,6 +166,8 @@ export interface InputDeliveryManifest {
     startLine: number
     endLine: number
     sourceScope?: ProjectWorkspaceSourceScope
+    replayed?: boolean
+    replayedFromToolCallId?: string
   }>
   finalMergeCompleted: boolean
 }

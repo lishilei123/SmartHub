@@ -23,6 +23,18 @@ export type RequirementWorkspaceToolId = typeof REQUIREMENT_WORKSPACE_TOOL_IDS[n
 
 export type RequirementDocumentReadObservation = NonNullable<InputDeliveryManifest['toolReads']>[number]
 
+export type WorkspaceReadReference = {
+  relativePath: string
+  assetVersionId?: string
+  contentHash: string
+  startLine: number
+  endLine: number
+}
+
+export type WorkspaceReadReplayLookup = (
+  reference: WorkspaceReadReference,
+) => { toolCallId: string } | undefined
+
 type WorkspaceFile = {
   relativePath: string
   assetId?: string
@@ -62,7 +74,11 @@ const MAX_WORKSPACE_READ_LINES = 240
 export class RequirementDocumentWorkspace {
   private materialized?: Promise<MaterializedWorkspace>
 
-  constructor(private readonly store: StateStore, private readonly snapshot: ReviewRunSnapshot | PlanningTestDesignSnapshot | TestExecutionAgentSnapshot | PlanningReviewerSnapshot) {}
+  constructor(
+    private readonly store: StateStore,
+    private readonly snapshot: ReviewRunSnapshot | PlanningTestDesignSnapshot | TestExecutionAgentSnapshot | PlanningReviewerSnapshot,
+    private readonly previousRead?: WorkspaceReadReplayLookup,
+  ) {}
 
   async execute(toolId: RequirementWorkspaceToolId, request: ToolExecutionRequest, signal: AbortSignal, onRead?: (observation: RequirementDocumentReadObservation) => void): Promise<ToolExecutionResult> {
     const workspace = await this.ensureMaterialized()
@@ -75,9 +91,18 @@ export class RequirementDocumentWorkspace {
 
       const file = required(workspace.filesByPath.get(pathKey(String(args.path))), `PI_WORKSPACE_FILE_NOT_FOUND: ${String(args.path)}`)
       const range = observedReadRange(file.content, args, result.details)
-       const planned = 'analysisCoveragePlan' in this.snapshot && file.assetVersionId
-         ? this.snapshot.analysisCoveragePlan.find(item => item.assetVersionId === file.assetVersionId)?.chunks ?? []
-         : []
+      const reference = range
+        ? {
+            relativePath: file.relativePath,
+            assetVersionId: file.assetVersionId,
+            contentHash: file.contentHash,
+            ...range,
+          }
+        : undefined
+      const replay = reference ? this.previousRead?.(reference) : undefined
+      const planned = 'analysisCoveragePlan' in this.snapshot && file.assetVersionId
+        ? this.snapshot.analysisCoveragePlan.find(item => item.assetVersionId === file.assetVersionId)?.chunks ?? []
+        : []
       const chunkIds = range
         ? planned.filter(chunk => !chunk.excludedReason && chunk.startLine >= range.startLine && chunk.endLine <= range.endLine).map(chunk => chunk.chunkId)
         : []
@@ -85,10 +110,11 @@ export class RequirementDocumentWorkspace {
         toolCallId: request.toolCallId,
         toolId: 'workspace.read_file',
         relativePath: file.relativePath,
-         assetVersionIds: file.assetVersionId ? [file.assetVersionId] : [],
+        assetVersionIds: file.assetVersionId ? [file.assetVersionId] : [],
         chunkIds,
         ...(file.sourceScope ? { sourceScope: file.sourceScope } : {}),
         ...range,
+        ...(replay ? { replayed: true, replayedFromToolCallId: replay.toolCallId } : {}),
       })
       return {
         data: {
@@ -98,10 +124,19 @@ export class RequirementDocumentWorkspace {
           assetVersionId: file.assetVersionId,
           contentHash: file.contentHash,
           ...(range ?? {}),
-           totalLines: lineCount(file.content),
-          output,
-          ...(result.details === undefined ? {} : { details: result.details }),
+          totalLines: lineCount(file.content),
+          ...(replay
+            ? {
+                replayed: true,
+                replayedFromToolCallId: replay.toolCallId,
+                guidance: '该冻结文件的相同行范围仍在当前 Planning Session 中；请直接使用此前返回的正文。',
+              }
+            : {
+                output,
+                ...(result.details === undefined ? {} : { details: result.details }),
+              }),
         },
+        ...(replay ? { replayed: true } : {}),
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
