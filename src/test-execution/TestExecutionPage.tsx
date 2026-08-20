@@ -118,8 +118,8 @@ export function TestExecutionPage({
         busy={model.busy}
         loading={model.loading}
         onRefresh={model.loadCollection}
-        onCreate={async (handoffId, environmentId) => {
-          const created = await model.create(handoffId, environmentId)
+        onCreate={async (handoffId, environmentId, testDataBindings) => {
+          const created = await model.create(handoffId, environmentId, testDataBindings)
           if (created) updateExecutionRoute(created.id)
           return created
         }}

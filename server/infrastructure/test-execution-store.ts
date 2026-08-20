@@ -28,10 +28,12 @@ import type {
   ExecutionReadiness,
   TestCaseContent,
   TestCaseExecutionSpec,
+  TestCaseLibraryVersionDetail,
   TestCaseLibraryVersionMemberDetail,
   TestCaseTraceability,
   TestDimension,
   TestExecutionHandoffMember,
+  TestExecutionHandoff,
   TestExecutionMethod,
   TestExecutionMode,
   TestSuiteVersionMember,
@@ -211,7 +213,11 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       await client.query('BEGIN')
       const existing = await getAggregateByIdempotencyKey(client, input.run.projectVersionId, input.run.idempotencyKey)
       if (existing) {
-        if (existing.createRequestSha256 !== createRequestSha256) {
+        if (
+          existing.createRequestSha256 !== createRequestSha256
+          || canonicalSha256(existing.run.testData?.bindings ?? [])
+            !== canonicalSha256(input.run.testData?.bindings ?? [])
+        ) {
           throw new Error('TEST_EXECUTION_IDEMPOTENCY_CONFLICT')
         }
         await client.query('COMMIT')
@@ -236,7 +242,11 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       await client.query('ROLLBACK')
       if ((error as { code?: string }).code === '23505') {
         const existing = await getAggregateByIdempotencyKey(client, input.run.projectVersionId, input.run.idempotencyKey)
-        if (existing?.createRequestSha256 === createRequestSha256) {
+        if (
+          existing?.createRequestSha256 === createRequestSha256
+          && canonicalSha256(existing.run.testData?.bindings ?? [])
+            === canonicalSha256(input.run.testData?.bindings ?? [])
+        ) {
           return existing.run
         }
         if (existing) {
@@ -1467,8 +1477,9 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
     suite_version_id: string | null
     execution_mode: string | null
     content_sha256: string
+    data: TestExecutionHandoff
   }>(`
-    SELECT project_version_id,test_case_set_version_id,test_case_library_version_id,suite_version_id,execution_mode,content_sha256
+    SELECT project_version_id,test_case_set_version_id,test_case_library_version_id,suite_version_id,execution_mode,content_sha256,data
     FROM smarthub.test_execution_handoffs WHERE id=$1 FOR SHARE
   `, [run.handoff.handoffId])
   const handoff = handoffResult.rows[0]
@@ -1491,8 +1502,9 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
     source_run_id: string | null
     legacy_test_case_set_version_id: string | null
     content_sha256: string
+    data: TestCaseLibraryVersionDetail
   }>(`
-    SELECT project_id,source_run_id,legacy_test_case_set_version_id,content_sha256
+    SELECT project_id,source_run_id,legacy_test_case_set_version_id,content_sha256,data
     FROM smarthub.test_case_library_versions WHERE id=$1 FOR SHARE
   `, [run.handoff.testCaseLibraryVersionId])
   const library = libraryResult.rows[0]
@@ -1520,6 +1532,13 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
         schemaVersion: 'test-case-library/v1',
         projectId: run.projectId,
         sourceRunId: library.source_run_id,
+        ...(library.data.dataRequirementSet ? {
+          dataRequirementSet: {
+            id: library.data.dataRequirementSet.id,
+            version: library.data.dataRequirementSet.version,
+            contentSha256: library.data.dataRequirementSet.contentSha256,
+          },
+        } : {}),
         members: libraryMembers,
       }
     : library.legacy_test_case_set_version_id && !library.source_run_id
@@ -1554,6 +1573,7 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
     ...(run.handoff.suiteVersionId ? { suiteVersionId: run.handoff.suiteVersionId } : {}),
     mode: run.handoff.mode,
     members: handoffMembers,
+    ...(handoff.data.testDataSnapshot ? { testDataSnapshot: handoff.data.testDataSnapshot } : {}),
   }
   if (canonicalSha256(handoffCanonical) !== handoff.content_sha256) {
     throw new Error('TEST_EXECUTION_HANDOFF_CONTENT_HASH_MISMATCH')
@@ -1566,7 +1586,11 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
     if (!libraryMember) throw new Error('TEST_EXECUTION_HANDOFF_LIBRARY_MEMBER_NOT_FOUND')
     const task = tasksByOrdinal.get(handoffMember.ordinal)
     if (!task) throw new Error('TEST_EXECUTION_HANDOFF_TASK_NOT_FOUND')
-    const frozen = freezeExecutionTaskInput({ handoffMember, libraryMember })
+    const frozen = freezeExecutionTaskInput({
+      handoffMember,
+      libraryMember,
+      ...(run.testData ? { testData: run.testData } : {}),
+    })
     if (canonicalSha256(frozen) !== canonicalSha256(task.input)) {
       throw new Error('TEST_EXECUTION_TASK_PERSISTED_SOURCE_MISMATCH')
     }
@@ -1834,17 +1858,18 @@ async function insertScriptArtifact(client: PoolClient, artifact: ScriptArtifact
     method: artifact.method,
     caseContentSha256: artifact.caseContentSha256,
     executionSpecSha256: artifact.executionSpecSha256,
+    ...(artifact.taskInputSha256 ? { taskInputSha256: artifact.taskInputSha256 } : {}),
     environmentSignature: artifact.environmentSignature,
     testScriptAgentVersion: artifact.testScriptAgentVersion,
     testScriptAgentConfigurationSha256: artifact.testScriptAgentConfigurationSha256,
   })
   if (artifact.cacheKey !== expectedCacheKey) throw new Error('TEST_EXECUTION_SCRIPT_CACHE_KEY_MISMATCH')
   const inserted = await client.query<ScriptArtifactRow>(`
-    INSERT INTO smarthub.test_execution_script_artifacts (id,cache_key,case_id,case_revision,method,case_content_sha256,execution_spec_sha256,environment_signature,test_script_agent_version,test_script_agent_configuration_sha256,created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    INSERT INTO smarthub.test_execution_script_artifacts (id,cache_key,case_id,case_revision,method,case_content_sha256,execution_spec_sha256,task_input_sha256,environment_signature,test_script_agent_version,test_script_agent_configuration_sha256,created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
     ON CONFLICT (cache_key) DO NOTHING
     RETURNING *
-  `, [artifact.id, artifact.cacheKey, artifact.caseId, artifact.caseRevision, artifact.method, artifact.caseContentSha256, artifact.executionSpecSha256, artifact.environmentSignature, artifact.testScriptAgentVersion, artifact.testScriptAgentConfigurationSha256, artifact.createdAt])
+  `, [artifact.id, artifact.cacheKey, artifact.caseId, artifact.caseRevision, artifact.method, artifact.caseContentSha256, artifact.executionSpecSha256, artifact.taskInputSha256 ?? null, artifact.environmentSignature, artifact.testScriptAgentVersion, artifact.testScriptAgentConfigurationSha256, artifact.createdAt])
   if (inserted.rows[0]) return scriptArtifactFromRow(inserted.rows[0])
   const existing = await client.query<ScriptArtifactRow>('SELECT * FROM smarthub.test_execution_script_artifacts WHERE cache_key=$1', [artifact.cacheKey])
   if (!existing.rows[0]) throw new Error('TEST_EXECUTION_SCRIPT_ARTIFACT_CONFLICT')
@@ -1909,6 +1934,7 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
     || cached.method !== scope.method
     || cached.case_content_sha256 !== scope.case_content_sha256
     || cached.execution_spec_sha256 !== scope.execution_spec_sha256
+    || cached.task_input_sha256 !== null && cached.task_input_sha256 !== scope.input_sha256
     || cached.environment_signature !== scope.environment_signature
     || Number(cached.test_script_agent_version) !== scope.test_script_agent_snapshot.configurationVersion
     || cached.test_script_agent_configuration_sha256 !== scope.test_script_agent_snapshot.configurationSha256
@@ -2339,10 +2365,10 @@ function taskFromRow(row: { frozen_input: ExecutionTask['input'] & { taskId?: st
 }
 
 type ScriptArtifactRow = {
-  id: string; cache_key: string; case_id: string; case_revision: number; method: ScriptArtifact['method']; case_content_sha256: string; execution_spec_sha256: string; environment_signature: string; test_script_agent_version: number; test_script_agent_configuration_sha256: string; created_at: Date | string
+  id: string; cache_key: string; case_id: string; case_revision: number; method: ScriptArtifact['method']; case_content_sha256: string; execution_spec_sha256: string; task_input_sha256: string | null; environment_signature: string; test_script_agent_version: number; test_script_agent_configuration_sha256: string; created_at: Date | string
 }
 function scriptArtifactFromRow(row: ScriptArtifactRow): ScriptArtifact {
-  return { id: row.id, cacheKey: row.cache_key, caseId: row.case_id, caseRevision: Number(row.case_revision), method: row.method, caseContentSha256: row.case_content_sha256, executionSpecSha256: row.execution_spec_sha256, environmentSignature: row.environment_signature, testScriptAgentVersion: Number(row.test_script_agent_version), testScriptAgentConfigurationSha256: row.test_script_agent_configuration_sha256, createdAt: iso(row.created_at) }
+  return { id: row.id, cacheKey: row.cache_key, caseId: row.case_id, caseRevision: Number(row.case_revision), method: row.method, caseContentSha256: row.case_content_sha256, executionSpecSha256: row.execution_spec_sha256, ...(row.task_input_sha256 ? { taskInputSha256: row.task_input_sha256 } : {}), environmentSignature: row.environment_signature, testScriptAgentVersion: Number(row.test_script_agent_version), testScriptAgentConfigurationSha256: row.test_script_agent_configuration_sha256, createdAt: iso(row.created_at) }
 }
 
 type ScriptRevisionRow = {

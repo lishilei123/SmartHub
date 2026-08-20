@@ -24,6 +24,50 @@ export type ExecutionTaskStatus =
 export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
 export type TestExecutionMethod = 'ui' | 'api' | 'performance_tool' | 'long_running' | 'environment_matrix'
 
+export type TestDataRequirement = {
+  id: string
+  name: string
+  entityType: string
+  featureTags: string[]
+  requirementRefs?: string[]
+  caseIds: string[]
+  fieldConstraints: Record<string, string>
+  relationships: string[]
+  quantity: number
+  initialState: string
+  preparationHint: string
+  sensitivity: 'public' | 'internal' | 'sensitive'
+  isolation: string
+  resetAndCleanup: string
+  readiness: 'ready' | 'needs_confirmation' | 'blocked'
+  readinessReason?: string
+}
+
+export type ExecutionTestDataBinding = {
+  requirementId: string
+  sourceType: 'fixture' | 'generator' | 'data_reference'
+  sourceRef: string
+  preparationNote?: string
+}
+
+export type ExecutionTestDataSnapshot = {
+  sourceSetId: string
+  sourceSetVersion: number
+  sourceSetSha256: string
+  requirements: TestDataRequirement[]
+  contentSha256: string
+}
+
+export type FrozenExecutionTestDataSnapshot = {
+  sourceSetId: string
+  sourceSetVersion: number
+  sourceSetSha256: string
+  requirementSnapshotSha256: string
+  requirements: TestDataRequirement[]
+  bindings: ExecutionTestDataBinding[]
+  contentSha256: string
+}
+
 export type ExecutionReadiness = {
   ready: boolean
   store: { ready: boolean; reason?: string }
@@ -71,6 +115,7 @@ export type ExecutionHandoff = {
     selectionReason: string
     contentSha256: string
   }>
+  testDataSnapshot?: ExecutionTestDataSnapshot
   contentSha256: string
   createdBy: string
   createdAt: string
@@ -113,6 +158,7 @@ export type ExecutionRun = {
     memberSnapshotSha256: string
   }
   environment: ExecutionEnvironment
+  testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
   agents: {
     testScript: FrozenExecutionAgentSnapshot
@@ -144,6 +190,10 @@ export type ExecutionTask = {
     method: TestExecutionMethod
     dimension: string
     executionSpecSha256: string
+    testDataBindings?: Array<{
+      requirement: TestDataRequirement
+      binding: ExecutionTestDataBinding
+    }>
     inputSha256: string
   }
   status: ExecutionTaskStatus

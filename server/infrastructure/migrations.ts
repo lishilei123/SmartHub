@@ -2399,6 +2399,13 @@ const migrations: Migration[] = [{
       true
     );
   `,
+}, {
+  version: 31,
+  name: 'freeze-test-data-input-in-script-cache',
+  sql: `
+    ALTER TABLE smarthub.test_execution_script_artifacts
+      ADD COLUMN IF NOT EXISTS task_input_sha256 char(64);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

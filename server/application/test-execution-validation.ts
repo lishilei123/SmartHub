@@ -12,6 +12,7 @@ import type {
   ExecutionTaskStatus,
   FailureDiagnosis,
   FailureDiagnosisCategory,
+  FrozenExecutionTestDataSnapshot,
   FrozenExecutionTaskInput,
   ScriptArtifact,
 } from '../domain/test-execution-types.js'
@@ -189,6 +190,7 @@ export function executionCreateRequestSha256(
 export function freezeExecutionTaskInput(input: {
   handoffMember: TestExecutionHandoffMember
   libraryMember: TestCaseLibraryVersionMemberDetail
+  testData?: FrozenExecutionTestDataSnapshot
 }): FrozenExecutionTaskInput {
   const { handoffMember, libraryMember } = input
   if (handoffMember.caseId !== libraryMember.caseId || handoffMember.revision !== libraryMember.revision) {
@@ -241,6 +243,33 @@ export function freezeExecutionTaskInput(input: {
       'Handoff 追溯快照与固定用例库成员不一致',
     )
   }
+  const requiredDataIds = [...new Set(libraryMember.frozenContent.dataRequirementIds)]
+    .sort((left, right) => left.localeCompare(right, 'en'))
+  let testDataBindings: FrozenExecutionTaskInput['testDataBindings']
+  if (requiredDataIds.length) {
+    if (!input.testData) {
+      throw new TestExecutionValidationError(
+        'TEST_EXECUTION_TEST_DATA_REQUIRED',
+        '固定用例需要测试数据，但执行 Run 缺少测试数据供给快照',
+      )
+    }
+    const definitions = new Map(input.testData.requirements.map(requirement => [requirement.id, requirement]))
+    const bindings = new Map(input.testData.bindings.map(binding => [binding.requirementId, binding]))
+    testDataBindings = requiredDataIds.map(requirementId => {
+      const requirement = definitions.get(requirementId)
+      const binding = bindings.get(requirementId)
+      if (!requirement || !binding) {
+        throw new TestExecutionValidationError(
+          'TEST_EXECUTION_TEST_DATA_BINDING_MISMATCH',
+          `测试数据需求 ${requirementId} 缺少冻结定义或供给绑定`,
+        )
+      }
+      return {
+        requirement: structuredClone(requirement),
+        binding: structuredClone(binding),
+      }
+    })
+  }
   const frozen = {
     sourceVersionId: handoffMember.sourceVersionId,
     ordinal: handoffMember.ordinal,
@@ -257,6 +286,7 @@ export function freezeExecutionTaskInput(input: {
     ...(libraryMember.traceability ? { traceability: structuredClone(libraryMember.traceability) } : {}),
     ...(handoffMember.selectionReason ? { selectionReason: handoffMember.selectionReason } : {}),
     ...(handoffMember.readinessOverride ? { readinessOverride: structuredClone(handoffMember.readinessOverride) } : {}),
+    ...(testDataBindings?.length ? { testDataBindings } : {}),
   }
   return { ...frozen, inputSha256: canonicalSha256(frozen) }
 }
@@ -269,6 +299,7 @@ export function scriptCacheKey(input: Omit<ScriptArtifact, 'id' | 'cacheKey' | '
     method: input.method,
     caseContentSha256: input.caseContentSha256,
     executionSpecSha256: input.executionSpecSha256,
+    ...(input.taskInputSha256 ? { taskInputSha256: input.taskInputSha256 } : {}),
     environmentSignature: input.environmentSignature,
     testScriptAgentVersion: input.testScriptAgentVersion,
     testScriptAgentConfigurationSha256: input.testScriptAgentConfigurationSha256,

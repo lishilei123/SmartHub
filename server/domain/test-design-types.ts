@@ -491,6 +491,8 @@ export interface TestCaseLibraryVersion {
   name: string
   sourceRunId?: string
   legacyTestCaseSetVersionId?: string
+  /** Separately frozen test-data requirement definitions; never contains runtime values. */
+  dataRequirementSet?: TestDataRequirementSetVersion
   members: TestCaseLibraryVersionMember[]
   contentSha256: string
   publishedBy: string
@@ -516,7 +518,8 @@ export interface TestSuiteDraft { id: string; projectId: string; suiteKey: strin
 export interface SmokeCandidateRelation { testCaseSetVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'pending' | 'accepted' | 'rejected'; actorId?: string; reviewedAt?: string }
 export interface ImpactedRegressionReference { testCaseSetVersionId?: string; suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; actorId: string; createdAt: string }
 export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression' | TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dedupKey: string; dimension?: TestDimension; executionSpec?: TestCaseExecutionSpec; traceability?: TestCaseTraceability; selectionReason?: string; contentSha256?: string; readinessOverride?: { reason: string; actorId: string; createdAt: string } }
-export interface TestExecutionHandoff { id: string; projectId: string; projectVersionId: string; testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; suiteVersionId?: string; strategy?: 'standard' | 'fast' | 'full'; mode?: TestExecutionMode; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; members: TestExecutionHandoffMember[]; contentSha256: string; createdBy: string; createdAt: string }
+export interface TestExecutionDataRequirementSnapshot { sourceSetId: string; sourceSetVersion: number; sourceSetSha256: string; requirements: TestDataRequirement[]; contentSha256: string }
+export interface TestExecutionHandoff { id: string; projectId: string; projectVersionId: string; testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; suiteVersionId?: string; strategy?: 'standard' | 'fast' | 'full'; mode?: TestExecutionMode; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; members: TestExecutionHandoffMember[]; testDataSnapshot?: TestExecutionDataRequirementSnapshot; contentSha256: string; createdBy: string; createdAt: string }
 
 export interface LegacyTestCaseMigrationRecord {
   id: string

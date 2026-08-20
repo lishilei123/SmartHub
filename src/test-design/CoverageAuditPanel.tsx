@@ -2,21 +2,27 @@ import { AlertTriangle, Bot, CheckCircle2, RefreshCw, Server, UserRoundCheck, Wr
 import type { TestDesignWorkflowRun } from './types'
 
 export function CoverageAuditPanel({ run, busy, onAudit, onResolve }: { run: TestDesignWorkflowRun; busy: boolean; onAudit: () => void; onResolve: (kind: 'finding' | 'confirmation', id: string, expectedVersion: number) => void }) {
-  const audit = [...run.coverageAudits].reverse().find(item => item.status === 'valid')
+  const audit = run.coverageAudits.at(-1)
+  const publicationBlockers = audit?.blockers.filter(item => item.resolution !== 'execution_handoff') ?? []
+  const handoffBlockers = audit?.blockers.filter(item => item.resolution === 'execution_handoff') ?? []
+  const activeCaseIds = new Set(run.testCases.filter(item => !item.tombstonedAt).map(item => item.id))
   const unresolvedFindings = run.findings.filter(item => item.state === 'open')
-  const unresolvedConfirmations = run.confirmationItems.filter(item => item.state === 'open')
-  const pass = Boolean(audit && audit.blockers.length === 0)
+  const unresolvedBusinessConfirmations = run.confirmationItems.filter(item => item.state === 'open' && item.impactStage !== 'handoff')
+  const unresolvedHandoffConfirmations = run.confirmationItems.filter(item => item.state === 'open' && item.impactStage === 'handoff')
+  const pass = Boolean(audit?.status === 'valid' && publicationBlockers.length === 0)
   return <section className="td2-card td2-audit">
     <header className="td2-section-head"><div><p className="td2-kicker">Server Coverage Audit</p><h2>确定性覆盖检查</h2><p>AI 负责怎么测试；服务端负责引用、覆盖、重复、维度、执行与数据就绪规则。</p></div><button className="td2-button ghost" disabled={busy || !run.testCases.length} onClick={onAudit}><RefreshCw />重新检查</button></header>
     {!audit ? <div className="td2-empty-compact"><Server /><span>等待测试用例生成后执行服务端审计</span></div> : <>
-      <div className={pass ? 'td2-audit-result pass' : 'td2-audit-result blocked'}>{pass ? <CheckCircle2 /> : <AlertTriangle />}<div><b>{pass ? 'Audit PASS' : `${audit.blockers.length} 个发布阻断项`}</b><small>{audit.statistics.coveredBasis}/{audit.statistics.totalBasis} Requirement 已覆盖 · {audit.statistics.approvedCases}/{audit.statistics.totalCases} 用例已批准</small><code>{audit.inputSha256}</code></div></div>
-      {audit.blockers.length > 0 && <div className="td2-blocker-groups">{(['agent_repair', 'human_review', 'human_decision', 'manual_edit'] as const).map(resolution => {
+      <div className={pass ? 'td2-audit-result pass' : 'td2-audit-result blocked'}>{pass ? <CheckCircle2 /> : <AlertTriangle />}<div><b>{audit.status === 'stale' ? '最新 Audit 已失效，请重新检查' : pass ? '语义发布 Audit PASS' : `${publicationBlockers.length} 个语义发布阻断项`}</b><small>{audit.statistics.coveredBasis}/{audit.statistics.totalBasis} Requirement 已覆盖 · {audit.statistics.approvedCases}/{audit.statistics.totalCases} 用例已审核通过{handoffBlockers.length ? ` · ${handoffBlockers.length} 项仅阻断 Execution Handoff` : ''}</small><code>{audit.inputSha256}</code></div></div>
+      {publicationBlockers.length > 0 && <div className="td2-blocker-groups">{(['agent_repair', 'human_review', 'human_decision', 'manual_edit'] as const).map(resolution => {
         const items = audit.blockers.filter(item => item.resolution === resolution); if (!items.length) return null
         return <section key={resolution}><header>{resolution === 'agent_repair' ? <Bot /> : resolution === 'human_review' || resolution === 'human_decision' ? <UserRoundCheck /> : <Wrench />}<div><b>{resolutionLabel(resolution)}</b><small>{items.length} 项</small></div></header>{items.map((item, index) => <article key={`${item.code}-${item.subjectId ?? index}`}><code>{item.code}</code><p>{item.message}</p>{item.subjectId && <small>{item.subjectId}</small>}</article>)}</section>
       })}</div>}
+      {handoffBlockers.length > 0 && <div className="td2-decisions"><h3>Execution Handoff 待补充</h3><p>{handoffBlockers.length} 条执行就绪检查尚未满足；它们不阻止语义正确、审核完成的测试用例库发布，但会阻止实际交接/执行。</p></div>}
       <div className="td2-repair-state"><Bot /><div><b>Agent Repair</b><small>仅处理 resolution=agent_repair；最多 {run.automaticRepair?.maxAttempts ?? 2} 轮</small></div><span>{run.automaticRepair?.status ?? 'idle'} · {run.automaticRepair?.attempt ?? 0}/{run.automaticRepair?.maxAttempts ?? 2}</span></div>
     </>}
-    {(unresolvedFindings.length > 0 || unresolvedConfirmations.length > 0) && <div className="td2-decisions"><h3>等待人工决策</h3><p>业务规则、阈值、兼容矩阵与权限不明确时，PlanningAgent 不得猜测。</p>{unresolvedFindings.map(item => <article key={item.id}><AlertTriangle /><div><b>{item.title}</b><p>{item.description}</p><small>Finding · {item.severity}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('finding', item.id, item.actions.length)}>标记已处理</button></article>)}{unresolvedConfirmations.map(item => <article key={item.id}><UserRoundCheck /><div><b>{item.title}</b><p>{item.question}</p><small>Confirmation · {item.impactStage}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('confirmation', item.id, item.actions.length)}>记录决策</button></article>)}</div>}
+    {(unresolvedFindings.length > 0 || unresolvedBusinessConfirmations.length > 0) && <div className="td2-decisions"><h3>等待业务人工决策</h3><p>业务规则、阈值、兼容矩阵与权限不明确时，PlanningAgent 不得猜测。</p>{unresolvedFindings.map(item => <article key={item.id}><AlertTriangle /><div><b>{item.title}</b><p>{item.description}</p><small>Finding · {item.severity}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('finding', item.id, item.actions.length)}>标记已处理</button></article>)}{unresolvedBusinessConfirmations.map(item => <article key={item.id}><UserRoundCheck /><div><b>{item.title}</b><p>{item.question}</p><small>Confirmation · {item.impactStage}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('confirmation', item.id, item.actions.length)}>记录决策</button></article>)}</div>}
+    {unresolvedHandoffConfirmations.length > 0 && <div className="td2-decisions"><h3>聚合的 Handoff 确认</h3><p>Service 按执行问题聚合；确认一项会作用于其列出的所有候选，而不会重复产生每 Case 一条问题。</p>{unresolvedHandoffConfirmations.map(item => { const caseCount = item.affectedRefs?.filter(ref => activeCaseIds.has(ref)).length ?? 0; return <article key={item.id}><Wrench /><div><b>{item.title}</b><p>{item.question}</p><small>影响 {caseCount} 条候选用例 · {item.decisionType ?? 'execution_contract'} · Handoff</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('confirmation', item.id, item.actions.length)}>记录 Handoff 决策</button></article> })}</div>}
   </section>
 }
 

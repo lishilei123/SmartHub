@@ -20,6 +20,7 @@ import { createAiResource, deleteAiResource, loadAiResources, loadToolSource, up
 import { buildWorkspaceKnowledgeTree, type WorkspaceKnowledgeDirectory } from './workspace-knowledge-tree'
 import { loadPlanningAgentProfile, type PlanningAgentProfile } from './planning-api'
 import './planning.css'
+import './workbench-layout.css'
 
 const PlanningPage = lazy(() => import('./PlanningPage').then(module => ({ default: module.PlanningPage })))
 const TestExecutionPage = lazy(() => import('./test-execution/TestExecutionPage').then(module => ({ default: module.TestExecutionPage })))
@@ -242,7 +243,7 @@ function App() {
       </button>
     </aside>
     <main>
-      <section className={`content ${page === 'planning' ? 'planning-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
+      <section className={`content ${page === 'planning' ? 'planning-content' : ''} ${page === 'execution' ? 'execution-content' : ''} ${page === 'reports' ? 'reports-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>
         {page === 'dashboard' && <Dashboard navigate={navigate} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
         {page === 'planning' && <Suspense fallback={<PageLoading label="正在加载测试策划工作台…" />}><PlanningPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}

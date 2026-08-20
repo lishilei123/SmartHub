@@ -6,6 +6,7 @@ import type {
   ExecutionHandoff,
   ExecutionReadiness,
   ExecutionRun,
+  ExecutionTestDataBinding,
   ExecutionTask,
   ExecutionTaskDetail,
   MaintenanceProposalDetail,
@@ -197,6 +198,7 @@ export function useTestExecution(
   const create = useCallback(async (
     handoffId: string,
     environmentId: string,
+    testDataBindings: ExecutionTestDataBinding[],
   ) => {
     if (!projectVersionId || busy) return
     setBusy('create')
@@ -205,6 +207,7 @@ export function useTestExecution(
         projectVersionId,
         handoffId,
         environmentId,
+        testDataBindings,
         api.executionIdempotencyKey('create', handoffId),
       )
       setRun(created)
@@ -218,7 +221,7 @@ export function useTestExecution(
         created.value,
         ...current.filter(item => item.id !== created.value.id),
       ])
-      notify('测试执行已创建，全部业务输入与运行配置已冻结。', 'success')
+      notify('测试执行已创建，测试数据供给、业务输入与运行配置已冻结。', 'success')
       return created.value
     } catch (cause) {
       fail(cause, true)

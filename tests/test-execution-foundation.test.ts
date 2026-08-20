@@ -24,6 +24,7 @@ import {
 } from '../server/application/test-execution-validation.js'
 import type {
   ExecutionPackageCandidate,
+  FrozenExecutionTestDataSnapshot,
   FrozenExecutionTaskInput,
 } from '../server/domain/test-execution-types.js'
 import type {
@@ -198,12 +199,54 @@ test('执行状态迁移由显式状态图约束，终态聚合不会把 unsuppo
   assert.equal(unsupportedExecutionMethodReason('ui'), undefined)
 })
 
-test('任务冻结只接受同一正式用例库成员的内容、执行规范与追溯 Hash', () => {
+test('任务冻结只接受同一正式用例库成员，并逐项冻结本次 Run 的测试数据供给', () => {
   const frozen = freezeExecutionTaskInput({ handoffMember, libraryMember })
   assert.equal(frozen.caseContentSha256, contentSha256)
   assert.equal(frozen.executionSpecSha256, canonicalSha256(functionalSpec))
   const { inputSha256, ...snapshot } = frozen
   assert.equal(inputSha256, canonicalSha256(snapshot))
+
+  const requirement = {
+    id: 'data-status-user',
+    name: '状态页用户',
+    entityType: 'user',
+    featureTags: ['status'],
+    caseIds: ['case-status'],
+    fieldConstraints: { role: 'operator' },
+    relationships: [],
+    quantity: 1,
+    initialState: 'active',
+    preparationHint: '使用受控 fixture',
+    sensitivity: 'internal' as const,
+    isolation: 'per-run',
+    resetAndCleanup: '运行后删除',
+    readiness: 'ready' as const,
+  }
+  const dataContent = { ...caseContent, dataRequirementIds: [requirement.id] }
+  const dataMember = {
+    ...libraryMember,
+    contentSha256: canonicalSha256(dataContent),
+    frozenContent: dataContent,
+  }
+  const testDataBase = {
+    sourceSetId: 'data-set-status',
+    sourceSetVersion: 2,
+    sourceSetSha256: canonicalSha256([requirement]),
+    requirementSnapshotSha256: canonicalSha256([requirement]),
+    requirements: [requirement],
+    bindings: [{ requirementId: requirement.id, sourceType: 'fixture' as const, sourceRef: 'fixture://project/status-user/v2' }],
+  }
+  const testData: FrozenExecutionTestDataSnapshot = {
+    ...testDataBase,
+    contentSha256: canonicalSha256(testDataBase),
+  }
+  const dataFrozen = freezeExecutionTaskInput({ handoffMember: { ...handoffMember, contentSha256: dataMember.contentSha256 }, libraryMember: dataMember, testData })
+  assert.deepEqual(dataFrozen.testDataBindings, [{ requirement, binding: testData.bindings[0] }])
+  assert.notEqual(dataFrozen.inputSha256, frozen.inputSha256)
+  assert.throws(
+    () => freezeExecutionTaskInput({ handoffMember: { ...handoffMember, contentSha256: dataMember.contentSha256 }, libraryMember: dataMember }),
+    error => validationCode(error, 'TEST_EXECUTION_TEST_DATA_REQUIRED'),
+  )
 })
 
 test('任务冻结拒绝损坏的内容 Hash 与 Handoff 执行规范漂移', () => {
@@ -229,6 +272,10 @@ test('ExecutionPackage 使用固定入口、内容 Hash、断言契约与规范�
   assert.notEqual(
     scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, environmentSignature: 'one', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
     scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, environmentSignature: 'two', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
+  )
+  assert.notEqual(
+    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, taskInputSha256: 'c'.repeat(64), environmentSignature: 'one', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
+    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, taskInputSha256: 'd'.repeat(64), environmentSignature: 'one', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
   )
 })
 

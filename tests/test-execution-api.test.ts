@@ -27,7 +27,7 @@ const task = {
   stateVersion: 7,
 }
 
-test('测试执行创建只接受 Handoff 与环境并传入认证主体和幂等键', async () => {
+test('测试执行创建只接受 Handoff、环境与受控数据绑定并传入认证主体和幂等键', async () => {
   let input: Record<string, unknown> | undefined
   const service = {
     async createRun(value: Record<string, unknown>) {
@@ -38,7 +38,15 @@ test('测试执行创建只接受 Handoff 与环境并传入认证主体和幂�
   const result = await routeCall({
     method: 'POST',
     path: '/api/project-versions/pv-1/test-execution-runs',
-    body: { handoffId: 'handoff-1', environmentId: 'staging' },
+    body: {
+      handoffId: 'handoff-1',
+      environmentId: 'staging',
+      testDataBindings: [{
+        requirementId: 'data-login-user',
+        sourceType: 'fixture',
+        sourceRef: 'fixture://project/login-users/v3',
+      }],
+    },
     headers: { 'idempotency-key': 'create-run-key' },
     service,
   })
@@ -48,6 +56,11 @@ test('测试执行创建只接受 Handoff 与环境并传入认证主体和幂�
     projectVersionId: 'pv-1',
     handoffId: 'handoff-1',
     environmentId: 'staging',
+    testDataBindings: [{
+      requirementId: 'data-login-user',
+      sourceType: 'fixture',
+      sourceRef: 'fixture://project/login-users/v3',
+    }],
     idempotencyKey: 'create-run-key',
     createdBy: 'operator-1',
   })

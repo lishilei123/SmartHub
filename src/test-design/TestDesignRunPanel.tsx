@@ -61,7 +61,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
     <div className="td2-card td2-run-main">
       <header className="td2-section-head"><div><p className="td2-kicker">TestDesign Run</p><h2>{design.name}</h2><p>{design.objective}</p></div><div className="td2-run-actions"><span className={`td2-status ${run.status}`}>{run.status}</span><button className="td2-button ghost" disabled={busy} onClick={onRefresh}><RefreshCw />刷新</button></div></header>
       <div className="td2-progress"><span style={{ width: `${run.progress}%` }} /></div>
-      <div className="td2-flow" aria-label="测试设计固定流程">{flow.map(item => <FlowStep key={item.key} node={run.nodeRuns.find(node => node.nodeKey === item.key)} label={item.label} owner={item.owner} />)}</div>
+      <div className="td2-flow" aria-label="测试设计固定流程">{flow.map(item => <FlowStep key={item.key} node={run.nodeRuns.find(node => node.nodeKey === item.key)} label={item.label} owner={item.owner} repairState={item.key === 'test_design_repair' ? run.automaticRepair : undefined} runStatus={run.status} />)}</div>
       <div className="td2-snapshot-grid">
         <Snapshot icon={<LockKeyhole />} title="Requirement Release" primary={run.basisSnapshot.requirementReleaseId} secondary={`verificationRunId ${run.basisSnapshot.verificationRunId}`} hash={run.basisSnapshot.requirementsJsonSha256} />
         <Snapshot icon={<Database />} title="Workspace Snapshot" primary={run.workspaceSnapshot.activeBranchLogicalPath} secondary={`${run.currentInputRefs.length} 个重点输入 · ${run.workspaceSnapshot.files.length} 个冻结文件`} hash={run.workspaceSnapshot.snapshotSha256} />
@@ -77,9 +77,11 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
   </section>
 }
 
-function FlowStep({ node, label, owner }: { node?: TestDesignNodeRun; label: string; owner: string }) {
+function FlowStep({ node, label, owner, repairState, runStatus }: { node?: TestDesignNodeRun; label: string; owner: string; repairState?: TestDesignWorkflowRun['automaticRepair']; runStatus: TestDesignWorkflowRun['status'] }) {
   const Icon = owner.startsWith('服务端') ? Server : Bot
-  return <article className={node?.status ?? 'pending'}><span className="td2-flow-marker">{node?.status === 'succeeded' ? <CheckCircle2 /> : <Icon />}</span><div><b>{label}</b><small>{owner}</small><em>{node?.status ?? 'pending'}{node?.attempt ? ` · attempt ${node.attempt}` : ''}</em></div></article>
+  const repairLabel = repairState?.status === 'not_needed' ? 'not_needed · 无 agent_repair 阻断项' : repairState?.status === 'deferred' ? 'deferred · 等待相关人工决策' : repairState?.status === 'exhausted' ? `exhausted · ${repairState.attempt}/${repairState.maxAttempts}` : undefined
+  const status = repairLabel ?? (node?.status === 'pending' && runStatus === 'succeeded' ? 'not_triggered · 本次 Run 已完成' : node?.status ?? 'pending')
+  return <article className={node?.status ?? 'pending'}><span className="td2-flow-marker">{node?.status === 'succeeded' ? <CheckCircle2 /> : <Icon />}</span><div><b>{label}</b><small>{owner}</small><em>{status}{node?.attempt ? ` · attempt ${node.attempt}` : ''}</em></div></article>
 }
 
 function Snapshot({ icon, title, primary, secondary, hash }: { icon: React.ReactNode; title: string; primary: string; secondary: string; hash: string }) { return <article><i>{icon}</i><div><small>{title}</small><b>{primary}</b><span>{secondary}</span><code>{hash}</code></div></article> }

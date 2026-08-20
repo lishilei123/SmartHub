@@ -2,10 +2,28 @@ import type {
   TestCaseContent,
   TestCaseExecutionSpec,
   TestCaseTraceability,
+  TestDataRequirement,
   TestDimension,
   TestExecutionMethod,
   TestExecutionMode,
 } from './test-design-types.js'
+
+export interface ExecutionTestDataBinding {
+  requirementId: string
+  sourceType: 'fixture' | 'generator' | 'data_reference'
+  sourceRef: string
+  preparationNote?: string
+}
+
+export interface FrozenExecutionTestDataSnapshot {
+  sourceSetId: string
+  sourceSetVersion: number
+  sourceSetSha256: string
+  requirementSnapshotSha256: string
+  requirements: TestDataRequirement[]
+  bindings: ExecutionTestDataBinding[]
+  contentSha256: string
+}
 
 export type ExecutionRunStatus =
   | 'queued'
@@ -122,6 +140,8 @@ export interface ExecutionRun {
   projectVersionId: string
   handoff: FrozenExecutionHandoffSnapshot
   environment: ExecutionEnvironmentSnapshot
+  /** Runtime data supply is frozen per Run and kept separate from formal case content. */
+  testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
   agents: {
     testScript: FrozenExecutionAgentSnapshot
@@ -160,6 +180,10 @@ export interface FrozenExecutionTaskInput {
     actorId: string
     createdAt: string
   }
+  testDataBindings?: Array<{
+    requirement: TestDataRequirement
+    binding: ExecutionTestDataBinding
+  }>
   inputSha256: string
 }
 
@@ -238,6 +262,8 @@ export interface ScriptArtifact {
   method: 'ui' | 'api'
   caseContentSha256: string
   executionSpecSha256: string
+  /** Prevents cache reuse across different frozen runtime data bindings. */
+  taskInputSha256?: string
   environmentSignature: string
   testScriptAgentVersion: number
   testScriptAgentConfigurationSha256: string

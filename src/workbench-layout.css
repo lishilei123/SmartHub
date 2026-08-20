@@ -1,0 +1,63 @@
+.content.execution-content,
+.content.reports-content {
+  max-width: none;
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 0;
+  background: #f4f6fa;
+}
+
+.execution-content > .page-head,
+.reports-content > .page-head {
+  flex: 0 0 auto;
+}
+
+.execution-content > .te-shell,
+.reports-content > .tr-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 0;
+  background: transparent;
+}
+
+/* Keep the Planning page's outer margin, but give its version gate a full workbench canvas. */
+.requirement-analysis-shell > .rav2-gate {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 30px;
+  color: #8490a2;
+}
+
+.requirement-analysis-shell > .rav2-gate > svg {
+  width: 38px;
+  height: 38px;
+  color: #8791e8;
+}
+
+.requirement-analysis-shell > .rav2-gate h1 {
+  margin: 11px 0 18px;
+  color: #566174;
+  font-size: 14px;
+}
+
+@media (max-width: 760px) {
+  .content.execution-content,
+  .content.reports-content {
+    height: auto;
+    min-height: 760px;
+    overflow: visible;
+    padding-bottom: 35px;
+  }
+
+  .execution-content > .te-shell,
+  .reports-content > .tr-shell {
+    overflow: visible;
+  }
+}

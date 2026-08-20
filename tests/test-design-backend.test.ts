@@ -104,6 +104,7 @@ test('ScenarioClaim 必须引用有效 Case ref、Case Requirement 子集，且 
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [claim('SC-1', 'TC-1', { requirementRefs: ['REQ-2'] })])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [{ ref: 'SC-STATE', caseRef: 'TC-1', requirementRefs: ['REQ-1'], kind: 'state_transition', subject: 'task.status', variant: 'completed 回退', polarity: 'negative', oracle: '拒绝状态回退' }] as ScenarioClaim[])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
+  assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [claim('SC-STATE-AMBIGUOUS', 'TC-1', { kind: 'state_transition', subject: 'task.status', variant: 'completed rollback', polarity: 'negative', oracle: '拒绝不允许的回退', transition: { from: 'completed', to: 'todo 或 in_progress' } })])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate({ ...candidate(cases, [claim('SC-1', 'TC-1')]), confirmationItems: [{ title: 'Agent 不应创建交接确认', question: '缺少 selector', decisionType: 'execution_contract', impactStage: 'handoff', affectedRefs: ['TC-1'], blocker: true }] }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
 })
 
@@ -121,4 +122,11 @@ test('ScenarioClaim.oracle 自身待确认或弱 Oracle 会报告业务 Expected
   assert.ok(pendingOracle.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR' && item.resolution === 'human_decision'))
   const weakOracle = audit([testCase('TC-WEAK', content(['REQ-1']))], ['REQ-1'], [claim('SC-WEAK', 'TC-WEAK', { kind: 'filter', subject: 'task.status', variant: 'status=todo', polarity: 'positive', oracle: '查询成功' })])
   assert.ok(weakOracle.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'))
+})
+
+test('合法 todo 状态不是 TODO 占位词，明确状态 Oracle 不会误报', () => {
+  const todoState = audit([testCase('TC-TODO', content(['REQ-1']))], ['REQ-1'], [claim('SC-TODO', 'TC-TODO', { kind: 'state_transition', subject: 'task.status', variant: 'todo->in_progress', polarity: 'positive', oracle: 'todo 任务变更后查询显示 in_progress。' })])
+  assert.equal(todoState.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'), false)
+  const placeholder = audit([testCase('TC-PLACEHOLDER', content(['REQ-1']))], ['REQ-1'], [claim('SC-PLACEHOLDER', 'TC-PLACEHOLDER', { kind: 'state_transition', subject: 'task.status', variant: 'todo->in_progress', polarity: 'positive', oracle: 'TODO：补充状态变更后的业务结果。' })])
+  assert.ok(placeholder.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'))
 })

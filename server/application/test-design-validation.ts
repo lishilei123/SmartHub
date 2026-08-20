@@ -230,9 +230,16 @@ function synthesisTransition(value: unknown, path: string) {
   const input = synthesisObject(value, path, 'state_transition 必须声明 transition 对象')
   synthesisRejectUnknown(input, ['from', 'to'], path)
   return {
-    from: synthesisText(input.from, `${path}/from`, 500),
-    to: synthesisText(input.to, `${path}/to`, 500),
+    from: synthesisStateEndpoint(input.from, `${path}/from`),
+    to: synthesisStateEndpoint(input.to, `${path}/to`),
   }
+}
+
+/** One ScenarioClaim represents one edge, never a compact list of state alternatives. */
+function synthesisStateEndpoint(value: unknown, path: string) {
+  const endpoint = synthesisText(value, path, 500)
+  if (/[|,/、;；]|->|→|\b(?:or|and)\b|(?:或|以及)/iu.test(endpoint)) synthesisFail(path, '状态边端点必须是单个明确状态，不能包含多个候选或另一条状态边')
+  return endpoint
 }
 
 function validateProposalCandidates(value: unknown, caseRefs: Set<string>): TestCaseDesignCandidate['proposals'] {

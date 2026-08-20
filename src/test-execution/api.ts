@@ -4,6 +4,7 @@ import type {
   ExecutionHandoff,
   ExecutionReadiness,
   ExecutionRun,
+  ExecutionTestDataBinding,
   ExecutionTask,
   ExecutionTaskDetail,
   MaintenanceProposalDetail,
@@ -146,12 +147,13 @@ export function createRun(
   projectVersionId: string,
   handoffId: string,
   environmentId: string,
+  testDataBindings: ExecutionTestDataBinding[],
   idempotencyKey: string,
 ) {
   return request<ExecutionRun>(`${projectScope(projectVersionId)}/test-execution-runs`, {
     method: 'POST',
     headers: { 'idempotency-key': idempotencyKey },
-    body: JSON.stringify({ handoffId, environmentId }),
+    body: JSON.stringify({ handoffId, environmentId, testDataBindings }),
   })
 }
 

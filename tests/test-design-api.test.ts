@@ -44,23 +44,23 @@ test('测试设计不再暴露 RequirementCoverage API', () => {
   assert.doesNotMatch(client, /approveTree/u)
 })
 
-test('测试用例编辑携带 If-Match 并将审核意见写入单条 Review Action', async () => {
+test('测试用例编辑携带 If-Match 并将人工审核通过写入单条 Review Action', async () => {
   const originalFetch = globalThis.fetch
   const requests: Array<{ path: string; method: string; etag: string; body: Record<string, unknown> }> = []
   globalThis.fetch = async (input, init) => {
     requests.push({ path: new URL(String(input)).pathname, method: init?.method ?? 'GET', etag: new Headers(init?.headers).get('if-match') ?? '', body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
-    return Response.json({ id: 'case-1', currentRevision: 2, reviewState: 'draft', revisions: [], reviewActions: [] }, { headers: { etag: '"case:case-1:2:new"' } })
+    return Response.json({ id: 'case-1', currentRevision: 2, reviewState: 'approved', revisions: [], reviewActions: [] }, { headers: { etag: '"case:case-1:2:new"' } })
   }
   const content = { schemaVersion: 'test-case/v1', title: '编辑后的用例', objective: '验证编辑', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/' }, executionReadiness: 'ready', steps: [{ key: 's1', action: '打开页面', expected: '页面可用' }], verificationChecks: [], automationHint: '' }], sharedVerificationChecks: [], tags: [], domain: '订单' } as const
   try {
     await patchCase('pv-1', 'design-1', 'run-1', 'case-1', '"case:case-1:1:old"', content, '人工修订')
-    await reviewCase('pv-1', 'design-1', 'run-1', 'case-1', 'request_revision', 2, '补充异常路径')
+    await reviewCase('pv-1', 'design-1', 'run-1', 'case-1', 'approve', 2, '人工审核通过')
     assert.equal(requests[0].method, 'PATCH')
     assert.equal(requests[0].etag, '"case:case-1:1:old"')
     assert.equal(requests[0].body.reason, '人工修订')
     assert.match(requests[0].path, /test-cases\/case-1$/u)
-    assert.equal(requests[1].body.decision, 'request_revision')
-    assert.equal(requests[1].body.comment, '补充异常路径')
+    assert.equal(requests[1].body.decision, 'approve')
+    assert.equal(requests[1].body.comment, '人工审核通过')
     assert.match(requests[1].path, /test-cases\/case-1\/review-actions$/u)
   } finally { globalThis.fetch = originalFetch }
 })

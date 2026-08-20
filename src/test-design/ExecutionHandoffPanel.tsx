@@ -8,9 +8,9 @@ export function ExecutionHandoffPanel({ run, suites, handoffs, busy, onPublish, 
   const [strategy, setStrategy] = useState<'standard' | 'fast' | 'full'>('standard')
   const [smokeSuite, setSmokeSuite] = useState('')
   const [regressionSuite, setRegressionSuite] = useState('')
-  const audit = [...run.coverageAudits].reverse().find(item => item.status === 'valid')
+  const audit = run.coverageAudits.at(-1)
   const published = run.caseSetVersions?.at(-1)
-  const canPublish = Boolean(audit && audit.blockers.length === 0 && run.testCases.filter(item => !item.tombstonedAt).every(item => item.reviewState === 'approved'))
+  const canPublish = Boolean(audit?.status === 'valid' && audit.blockers.every(item => item.resolution === 'execution_handoff') && run.testCases.filter(item => !item.tombstonedAt).every(item => item.reviewState === 'approved'))
   const submitPublish = () => void onPublish(name.trim() || '测试用例集')
   const canHandoff = Boolean(published && regressionSuite && (strategy === 'full' || smokeSuite))
   return <section className="td2-card td2-handoff">

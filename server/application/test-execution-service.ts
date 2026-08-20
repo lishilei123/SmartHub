@@ -11,7 +11,9 @@ import type {
   ExecutionPackageCandidate,
   ExecutionRun,
   ExecutionTask,
+  ExecutionTestDataBinding,
   FailureDiagnosis,
+  FrozenExecutionTestDataSnapshot,
   FrozenExecutionAgentSnapshot,
   ScriptArtifact,
   ScriptRevision,
@@ -33,7 +35,7 @@ import type {
   TestExecutionTransaction,
 } from '../infrastructure/test-execution-store.js'
 import type { PlaywrightRunner } from '../runner/playwright-runner.js'
-import { canonicalSha256 } from './canonical-json.js'
+import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import {
   assertExecutionPackageIntegrity,
   automaticRepairAllowed,
@@ -84,6 +86,7 @@ export type CreateTestExecutionRunInput = {
   projectVersionId: string
   handoffId: string
   environmentId: string
+  testDataBindings?: unknown
   idempotencyKey: string
   createdBy: string
 }
@@ -382,12 +385,14 @@ export class TestExecutionService {
     const environmentId = requiredIdentity(input.environmentId, 'environmentId')
     const idempotencyKey = requiredIdentity(input.idempotencyKey, 'idempotencyKey')
     const createdBy = requiredIdentity(input.createdBy, 'createdBy')
+    const requestedTestDataBindings = normalizeExecutionTestDataBindings(input.testDataBindings)
     const replay = await this.store.getRunByIdempotencyKey(projectVersionId, idempotencyKey)
     if (replay) {
       if (
         replay.handoff.handoffId !== handoffId
         || replay.environment.environmentId !== environmentId
         || replay.createdBy !== createdBy
+        || canonicalSha256(replay.testData?.bindings ?? []) !== canonicalSha256(requestedTestDataBindings)
       ) {
         throw new TestExecutionServiceError(
           'TEST_EXECUTION_IDEMPOTENCY_CONFLICT',
@@ -405,6 +410,7 @@ export class TestExecutionService {
       modern.testCaseLibraryVersionId,
     )
     validateLibraryVersion(library, modern.projectId)
+    const testData = freezeExecutionTestDataSnapshot(modern, library, requestedTestDataBindings)
     const suite = modern.suiteVersionId
       ? await this.sources.getSuite(modern.projectId, modern.suiteVersionId)
       : undefined
@@ -423,6 +429,7 @@ export class TestExecutionService {
           'TEST_EXECUTION_HANDOFF_LIBRARY_MEMBER_NOT_FOUND',
           `Handoff 成员 ${member.caseId}@${member.revision} 不属于固定用例库版本`,
         ),
+        ...(testData ? { testData } : {}),
       }))
     if (!frozenInputs.length) {
       throw new TestExecutionServiceError(
@@ -499,6 +506,7 @@ export class TestExecutionService {
         memberSnapshotSha256: canonicalSha256(frozenInputs),
       },
       environment,
+      ...(testData ? { testData } : {}),
       runner: structuredClone(runnerReadiness.snapshot),
       agents: structuredClone(agents),
       status: 'queued',
@@ -692,6 +700,7 @@ export class TestExecutionService {
         method: executableMethod(task),
         caseContentSha256: task.input.caseContentSha256,
         executionSpecSha256: task.input.executionSpecSha256,
+        taskInputSha256: task.input.inputSha256,
         environmentSignature: run.environment.signature,
         testScriptAgentVersion: run.agents.testScript.configurationVersion,
         testScriptAgentConfigurationSha256: run.agents.testScript.configurationSha256,
@@ -1292,6 +1301,7 @@ function validateModernHandoff(handoff: TestExecutionHandoff, projectVersionId: 
     ...(handoff.suiteVersionId ? { suiteVersionId: handoff.suiteVersionId } : {}),
     mode: handoff.mode,
     members: handoff.members,
+    ...(handoff.testDataSnapshot ? { testDataSnapshot: handoff.testDataSnapshot } : {}),
   }
   if (canonicalSha256(canonical) !== handoff.contentSha256) {
     throw new TestExecutionServiceError(
@@ -1317,6 +1327,7 @@ function validateLibraryVersion(library: TestCaseLibraryVersionDetail, projectId
         schemaVersion: 'test-case-library/v1',
         projectId,
         sourceRunId: library.sourceRunId,
+        ...(library.dataRequirementSet ? { dataRequirementSet: { id: library.dataRequirementSet.id, version: library.dataRequirementSet.version, contentSha256: library.dataRequirementSet.contentSha256 } } : {}),
         members: library.members,
       }
     : library.legacyTestCaseSetVersionId && !library.sourceRunId
@@ -1333,6 +1344,62 @@ function validateLibraryVersion(library: TestCaseLibraryVersionDetail, projectId
       '固定用例库版本内容 Hash 无效',
     )
   }
+  if (library.dataRequirementSet && canonicalSha256(library.dataRequirementSet.requirements) !== library.dataRequirementSet.contentSha256) {
+    throw new TestExecutionServiceError(
+      'TEST_EXECUTION_DATA_REQUIREMENT_SET_HASH_MISMATCH',
+      '固定测试数据需求版本内容 Hash 无效',
+    )
+  }
+}
+
+function normalizeExecutionTestDataBindings(value: unknown): ExecutionTestDataBinding[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 10_000) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDINGS_INVALID', 'testDataBindings 必须是最多 10000 项的数组', 400)
+  const seen = new Set<string>()
+  const bindings = value.map((candidate, index): ExecutionTestDataBinding => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDINGS_INVALID', `testDataBindings[${index}] 必须是对象`, 400)
+    const input = candidate as Record<string, unknown>
+    const unknownFields = Object.keys(input).filter(key => !['requirementId', 'sourceType', 'sourceRef', 'preparationNote'].includes(key))
+    if (unknownFields.length) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDINGS_INVALID', `testDataBindings[${index}] 包含未知字段`, 400, { fields: unknownFields })
+    const requirementId = boundedExecutionText(input.requirementId, `testDataBindings[${index}].requirementId`, 500)
+    if (seen.has(requirementId)) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDINGS_INVALID', `测试数据需求 ${requirementId} 重复绑定`, 400)
+    seen.add(requirementId)
+    const sourceType = String(input.sourceType ?? '')
+    if (!['fixture', 'generator', 'data_reference'].includes(sourceType)) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDINGS_INVALID', `testDataBindings[${index}].sourceType 无效`, 400)
+    const sourceRef = boundedExecutionText(input.sourceRef, `testDataBindings[${index}].sourceRef`, 2_000)
+    const preparationNote = typeof input.preparationNote === 'string' && input.preparationNote.trim() ? input.preparationNote.trim().slice(0, 2_000) : undefined
+    const serialized = canonicalJson({ sourceRef, ...(preparationNote ? { preparationNote } : {}) })
+    if (/(?:password|passwd|api[_ -]?key|authorization|cookie|token|身份证|真实账号)\s*[:=]\s*[^<\s]/iu.test(serialized)) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_SECRET_FORBIDDEN', '测试执行数据只能保存受控 Fixture、生成器或数据引用，禁止提交真实凭据和个人敏感值', 422, { requirementId })
+    return { requirementId, sourceType: sourceType as ExecutionTestDataBinding['sourceType'], sourceRef, ...(preparationNote ? { preparationNote } : {}) }
+  })
+  return bindings.sort((left, right) => left.requirementId.localeCompare(right.requirementId, 'en'))
+}
+
+function freezeExecutionTestDataSnapshot(handoff: TestExecutionHandoff, library: TestCaseLibraryVersionDetail, bindings: ExecutionTestDataBinding[]): FrozenExecutionTestDataSnapshot | undefined {
+  const selectedKeys = new Set(handoff.members.map(member => caseRevisionKey(member.caseId, member.revision)))
+  const requirementIds = [...new Set(library.members.filter(member => selectedKeys.has(caseRevisionKey(member.caseId, member.revision))).flatMap(member => member.frozenContent.dataRequirementIds))].sort((left, right) => left.localeCompare(right, 'en'))
+  if (!requirementIds.length) {
+    if (bindings.length) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDING_UNEXPECTED', '当前 Handoff 不需要测试数据，不能提交额外绑定', 422)
+    return undefined
+  }
+  const snapshot = required(handoff.testDataSnapshot, 'TEST_EXECUTION_TEST_DATA_SNAPSHOT_REQUIRED', 'Handoff 缺少独立测试数据需求快照，请重新生成 Handoff', 409)
+  const snapshotBody = { sourceSetId: snapshot.sourceSetId, sourceSetVersion: snapshot.sourceSetVersion, sourceSetSha256: snapshot.sourceSetSha256, requirements: snapshot.requirements }
+  if (canonicalSha256(snapshotBody) !== snapshot.contentSha256) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_SNAPSHOT_HASH_MISMATCH', 'Handoff 测试数据需求快照 Hash 无效')
+  if (library.dataRequirementSet && (library.dataRequirementSet.id !== snapshot.sourceSetId || library.dataRequirementSet.version !== snapshot.sourceSetVersion || library.dataRequirementSet.contentSha256 !== snapshot.sourceSetSha256)) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_SOURCE_MISMATCH', 'Handoff 测试数据需求来源与正式用例库版本不一致')
+  const definitions = new Map(snapshot.requirements.map(requirement => [requirement.id, requirement]))
+  if (definitions.size !== snapshot.requirements.length || requirementIds.some(id => !definitions.has(id)) || snapshot.requirements.some(requirement => !requirementIds.includes(requirement.id))) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_REQUIREMENT_MISMATCH', 'Handoff 测试数据需求与选中用例不一致')
+  const byId = new Map(bindings.map(binding => [binding.requirementId, binding]))
+  const missing = requirementIds.filter(id => !byId.has(id))
+  const extra = bindings.filter(binding => !definitions.has(binding.requirementId)).map(binding => binding.requirementId)
+  if (missing.length || extra.length) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDING_REQUIRED', '创建执行 Run 前必须逐项绑定测试数据供给', 422, { missingRequirementIds: missing, unexpectedRequirementIds: extra })
+  const frozen = { sourceSetId: snapshot.sourceSetId, sourceSetVersion: snapshot.sourceSetVersion, sourceSetSha256: snapshot.sourceSetSha256, requirementSnapshotSha256: snapshot.contentSha256, requirements: structuredClone(snapshot.requirements), bindings: structuredClone(bindings) }
+  return { ...frozen, contentSha256: canonicalSha256(frozen) }
+}
+
+function boundedExecutionText(value: unknown, field: string, max: number) {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (!normalized || normalized.length > max) throw new TestExecutionServiceError('TEST_EXECUTION_TEST_DATA_BINDINGS_INVALID', `${field} 无效`, 400)
+  return normalized
 }
 
 function validateSuiteVersion(
@@ -1388,6 +1455,7 @@ function taskScriptCacheKey(run: ExecutionRun, task: ExecutionTask) {
     method: executableMethod(task),
     caseContentSha256: task.input.caseContentSha256,
     executionSpecSha256: task.input.executionSpecSha256,
+    taskInputSha256: task.input.inputSha256,
     environmentSignature: run.environment.signature,
     testScriptAgentVersion: run.agents.testScript.configurationVersion,
     testScriptAgentConfigurationSha256: run.agents.testScript.configurationSha256,

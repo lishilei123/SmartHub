@@ -18,6 +18,7 @@ import type {
   ExecutionHandoff,
   ExecutionReadiness,
   ExecutionRun,
+  ExecutionTestDataBinding,
   Versioned,
 } from './types'
 
@@ -47,13 +48,18 @@ export function ExecutionRunPanel({
   busy: string
   loading: boolean
   onRefresh: () => Promise<void>
-  onCreate: (handoffId: string, environmentId: string) => Promise<ExecutionRun | undefined>
+  onCreate: (handoffId: string, environmentId: string, testDataBindings: ExecutionTestDataBinding[]) => Promise<ExecutionRun | undefined>
   onOpen: (runId: string) => Promise<ExecutionRun | undefined>
   onCancel: () => Promise<void>
   onToggleMaintenanceFilter: () => void
 }) {
   const [handoffId, setHandoffId] = useState('')
   const [environmentId, setEnvironmentId] = useState('')
+  const [testDataDrafts, setTestDataDrafts] = useState<Record<string, {
+    sourceType: ExecutionTestDataBinding['sourceType']
+    sourceRef: string
+    preparationNote: string
+  }>>({})
   useEffect(() => {
     setHandoffId(current => handoffs.some(item => item.id === current)
       ? current
@@ -65,6 +71,24 @@ export function ExecutionRunPanel({
       : environments[0]?.environmentId ?? '')
   }, [environments])
   const handoff = handoffs.find(item => item.id === handoffId)
+  const dataRequirements = useMemo(() => handoff?.testDataSnapshot?.requirements ?? [], [handoff])
+  useEffect(() => {
+    setTestDataDrafts(Object.fromEntries(dataRequirements.map(requirement => [requirement.id, {
+      sourceType: 'fixture' as const,
+      sourceRef: '',
+      preparationNote: '',
+    }])))
+  }, [handoffId, dataRequirements])
+  const testDataBindings = useMemo<ExecutionTestDataBinding[]>(() => dataRequirements.map(requirement => {
+    const draft = testDataDrafts[requirement.id] ?? { sourceType: 'fixture' as const, sourceRef: '', preparationNote: '' }
+    return {
+      requirementId: requirement.id,
+      sourceType: draft.sourceType,
+      sourceRef: draft.sourceRef.trim(),
+      ...(draft.preparationNote.trim() ? { preparationNote: draft.preparationNote.trim() } : {}),
+    }
+  }), [dataRequirements, testDataDrafts])
+  const missingDataBindingCount = testDataBindings.filter(binding => !binding.sourceRef).length
   const pendingMaintenanceCount = maintenanceProposals.filter(item => item.status === 'pending').length
   const counts = useMemo(() => handoff?.members.reduce((result, member) => {
     if (member.method === 'ui') result.ui += 1
@@ -87,15 +111,32 @@ export function ExecutionRunPanel({
     </section>
 
     <section className="te-card te-create-card">
-      <header><div><h2>创建测试执行</h2><p>唯一正式输入是已发布的 TestExecutionHandoff；执行模式只读。</p></div></header>
+      <header><div><h2>创建测试执行</h2><p>用例与数据需求来自不可变 Handoff；这里仅绑定本次 Run 的受控数据供给。</p></div></header>
       <label>Execution Handoff<select value={handoffId} onChange={event => setHandoffId(event.target.value)}><option value="">选择不可变 Handoff</option>{handoffs.map(item => <option key={item.id} value={item.id}>{item.mode} · {item.members.length} 个成员 · {shortId(item.id)}</option>)}</select></label>
       <label>执行环境<select value={environmentId} onChange={event => setEnvironmentId(event.target.value)}><option value="">选择服务端环境</option>{environments.map(item => <option key={item.environmentId} value={item.environmentId}>{item.name} · {item.baseUrl}</option>)}</select></label>
       {handoff && <div className="te-handoff-preview">
         <div><span>模式</span><b>{handoff.mode}</b></div><div><span>UI</span><b>{counts.ui}</b></div><div><span>API</span><b>{counts.api}</b></div><div><span>Unsupported</span><b>{counts.unsupported}</b></div>
         <code title={handoff.contentSha256}>{handoff.contentSha256}</code>
       </div>}
+      {handoff && <section className="te-test-data-supply">
+        <header><div><Database /><span><b>测试数据供给</b><small>定义保留在正式版本中，创建 Run 时才绑定实际来源。</small></span></div><em>{dataRequirements.length} 项</em></header>
+        {dataRequirements.map(requirement => {
+          const draft = testDataDrafts[requirement.id] ?? { sourceType: 'fixture' as const, sourceRef: '', preparationNote: '' }
+          return <article key={requirement.id}>
+            <div className="te-test-data-heading"><span><b>{requirement.name}</b><small>{requirement.entityType} · {requirement.quantity} 条 · {testDataReadinessLabel(requirement.readiness)}</small></span><code>{shortId(requirement.id)}</code></div>
+            <p>{requirement.initialState}{requirement.readinessReason ? ` · ${requirement.readinessReason}` : ''}</p>
+            <div className="te-test-data-controls">
+              <label>供给方式<select value={draft.sourceType} onChange={event => updateTestDataDraft(setTestDataDrafts, requirement.id, { sourceType: event.target.value as ExecutionTestDataBinding['sourceType'] })}><option value="fixture">固定 Fixture</option><option value="generator">数据生成器</option><option value="data_reference">受控数据引用</option></select></label>
+              <label>来源引用<input value={draft.sourceRef} onChange={event => updateTestDataDraft(setTestDataDrafts, requirement.id, { sourceRef: event.target.value })} placeholder={testDataReferencePlaceholder(draft.sourceType)} /></label>
+              <label className="wide">准备说明（可选）<input value={draft.preparationNote} onChange={event => updateTestDataDraft(setTestDataDrafts, requirement.id, { preparationNote: event.target.value })} placeholder={requirement.preparationHint || '仅填写准备方式，不填写真实账号、密码或个人数据'} /></label>
+            </div>
+          </article>
+        })}
+        {!dataRequirements.length && <p className="te-test-data-empty">当前 Handoff 的用例不需要额外测试数据。</p>}
+        {dataRequirements.length > 0 && <p className="te-test-data-policy"><ShieldAlert />只保存 Fixture、生成器或数据资产引用；真实凭据与敏感值必须由受控运行环境解析。</p>}
+      </section>}
       {!handoffs.length && !loading && <p className="te-empty-note"><ShieldAlert />当前项目版本没有可执行 Handoff，请先在测试设计中发布正式用例库与交接。</p>}
-      <button className="te-primary" disabled={!readiness?.ready || !handoffId || !environmentId || Boolean(busy)} onClick={() => void onCreate(handoffId, environmentId)}><Play />{busy === 'create' ? '正在冻结执行输入…' : '创建执行 Run'}</button>
+      <button className="te-primary" disabled={!readiness?.ready || !handoffId || !environmentId || missingDataBindingCount > 0 || Boolean(busy)} onClick={() => void onCreate(handoffId, environmentId, testDataBindings)}><Play />{busy === 'create' ? '正在冻结执行输入…' : missingDataBindingCount > 0 ? `还需绑定 ${missingDataBindingCount} 项数据` : '创建执行 Run'}</button>
     </section>
 
     <section className="te-card te-run-history">
@@ -119,12 +160,42 @@ export function ExecutionRunPanel({
         <div><dt>Handoff</dt><dd>{shortId(run.value.handoff.handoffId)} · {run.value.handoff.mode}</dd></div>
         <div><dt>Library</dt><dd title={run.value.handoff.testCaseLibraryVersionSha256}>{shortId(run.value.handoff.testCaseLibraryVersionId)}</dd></div>
         <div><dt>Environment</dt><dd>{run.value.environment.name} · {shortId(run.value.environment.signature)}</dd></div>
+        <div><dt>Test data</dt><dd>{run.value.testData ? `需求 V${run.value.testData.sourceSetVersion} · ${run.value.testData.bindings.length} 项供给 · ${shortId(run.value.testData.contentSha256)}` : '无额外数据需求'}</dd></div>
         <div><dt>Runner</dt><dd>{run.value.runner.runnerVersion} · Playwright {run.value.runner.playwrightVersion}</dd></div>
         <div><dt>Image</dt><dd title={`${run.value.runner.imageReference}@${run.value.runner.imageDigest}`}>{run.value.runner.imageReference} · {shortId(run.value.runner.imageDigest)}</dd></div>
         <div><dt>Agent snapshots</dt><dd>{Object.values(run.value.agents).map(agent => `${agent.agentKey} v${agent.configurationVersion}`).join(' · ')}</dd></div>
       </dl>
     </section>}
   </div>
+}
+
+function updateTestDataDraft(
+  setDrafts: React.Dispatch<React.SetStateAction<Record<string, { sourceType: ExecutionTestDataBinding['sourceType']; sourceRef: string; preparationNote: string }>>>,
+  requirementId: string,
+  patch: Partial<{ sourceType: ExecutionTestDataBinding['sourceType']; sourceRef: string; preparationNote: string }>,
+) {
+  setDrafts(current => {
+    const existing = current[requirementId]
+    return {
+      ...current,
+      [requirementId]: {
+        sourceType: existing?.sourceType ?? 'fixture',
+        sourceRef: existing?.sourceRef ?? '',
+        preparationNote: existing?.preparationNote ?? '',
+        ...patch,
+      },
+    }
+  })
+}
+
+function testDataReferencePlaceholder(sourceType: ExecutionTestDataBinding['sourceType']) {
+  if (sourceType === 'generator') return 'generator://project/customer-seed/v2'
+  if (sourceType === 'data_reference') return 'data://project-version/asset/version'
+  return 'fixture://project/login-users/v3'
+}
+
+function testDataReadinessLabel(readiness: 'ready' | 'needs_confirmation' | 'blocked') {
+  return ({ ready: '定义就绪', needs_confirmation: '需在执行前确认', blocked: '定义受阻' })[readiness]
 }
 
 function Metric({ label, value }: { label: string; value: number }) {

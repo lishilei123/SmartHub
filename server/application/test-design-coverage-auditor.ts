@@ -135,7 +135,10 @@ function normalizeOracle(value: string) { return value.trim().replace(/\s+/gu, '
 function semanticOracleUnclear(value: string) {
   const normalized = normalizeOracle(value).replace(/[。；，,.!！?？]/gu, '')
   return !normalized
-    || /(?:TBD|TODO|待确认|未确定|自行判断|按实际情况)/iu.test(value)
+    // `todo` is a valid product state in the current MiniTask Requirement. Keep
+    // placeholder markers explicit rather than treating every lower-case state
+    // occurrence as an unresolved semantic oracle.
+    || /(?:\bTBD\b|\bTODO\b|待确认|未确定|自行判断|按实际情况)/u.test(value)
     || ['获得可观察结果', '功能可用', '查询成功'].includes(normalized)
 }
 
