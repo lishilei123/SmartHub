@@ -36,8 +36,9 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (!projectVersionId) return
     const [nextInputs, nextDesigns] = await Promise.all([api.loadInputs(projectVersionId), api.loadDesigns(projectVersionId)])
     const projectId = nextInputs.projectVersion.projectId
+    setInputs(nextInputs); setDesigns(nextDesigns.items)
     const [cases, versions, drafts, suites, nextHandoffs] = await Promise.all([api.loadLibraryCases(projectId), api.loadLibraryVersions(projectId), api.loadSuiteDrafts(projectId), api.loadSuiteVersions(projectId), api.loadLibraryHandoffs(projectVersionId)])
-    setInputs(nextInputs); setDesigns(nextDesigns.items); setLibraryCases(cases.items); setLibraryVersions(versions.items); setSuiteDrafts(drafts.items); setSuiteVersions(suites.items); setHandoffs(nextHandoffs.items)
+    setLibraryCases(cases.items); setLibraryVersions(versions.items); setSuiteDrafts(drafts.items); setSuiteVersions(suites.items); setHandoffs(nextHandoffs.items)
   }, [projectVersionId])
 
   const refreshRun = useCallback(async () => {

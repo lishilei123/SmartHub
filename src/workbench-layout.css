@@ -47,6 +47,118 @@
   font-size: 14px;
 }
 
+.tdw-context-loading {
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.tdw-context-loading-card {
+  width: min(100%, 620px);
+  padding: 22px;
+  border: 1px solid #e0e4ee;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 10px 30px rgba(32, 43, 66, 0.05);
+}
+
+.tdw-context-loading-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tdw-context-loading-head > span {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--tdw-primary);
+  background: #eef0ff;
+}
+
+.tdw-context-loading-head svg {
+  width: 21px;
+}
+
+.tdw-context-loading-head > div {
+  min-width: 0;
+}
+
+.tdw-context-loading-head b,
+.tdw-context-loading-head small {
+  display: block;
+}
+
+.tdw-context-loading-head b {
+  color: #3c485a;
+  font-size: 12px;
+}
+
+.tdw-context-loading-head small {
+  margin-top: 4px;
+  color: #7f8a9a;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.tdw-context-loading-skeleton {
+  display: grid;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.tdw-context-loading-skeleton i {
+  display: block;
+  height: 10px;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #f1f3f7 20%, #fafbfc 38%, #f1f3f7 58%);
+  background-size: 220% 100%;
+  animation: test-design-loading-shimmer 1.25s ease-in-out infinite;
+}
+
+.tdw-context-loading-skeleton i:nth-child(2) {
+  width: 82%;
+}
+
+.tdw-context-loading-skeleton i:nth-child(3) {
+  width: 58%;
+}
+
+.tdw-context-loading-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #eef0f3;
+  color: #bd4659;
+  font-size: 9px;
+}
+
+.tdw-context-loading-error span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tdw-context-loading-error button {
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid #e8bec6;
+  border-radius: 7px;
+  color: #b63f53;
+  background: #fff;
+  font-size: 9px;
+}
+
+@keyframes test-design-loading-shimmer {
+  to { background-position: -120% 0; }
+}
+
 @media (max-width: 760px) {
   .content.execution-content,
   .content.reports-content {
@@ -59,5 +171,24 @@
   .execution-content > .te-shell,
   .reports-content > .tr-shell {
     overflow: visible;
+  }
+
+  .tdw-context-loading {
+    padding: 10px;
+  }
+
+  .tdw-context-loading-card {
+    padding: 16px;
+  }
+
+  .tdw-context-loading-error {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tdw-context-loading-skeleton i {
+    animation: none;
   }
 }
