@@ -274,7 +274,10 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   )
 
   await appendScriptAndAttempt(reclaimed)
-  assert.equal((await firstStore.listAttempts(ids.task)).length, 1)
+  assert.deepEqual(
+    (await firstStore.listAttempts(ids.task)).map(item => item.ordinal),
+    [1, 2, 3],
+  )
   assert.equal(await secondStore.finishJob(reclaimed.id, lease(reclaimed), 'succeeded'), false)
   assert.equal(await secondStore.finishJob(reclaimed.id, lease(reclaimed), 'failed'), true)
 
@@ -333,6 +336,12 @@ test('PostgreSQL 并发同请求只创建一个聚合并返回唯一键赢家', 
     (await firstStore.listTasks(firstResult.id)).length,
     1,
   )
+  const cancelled = await firstStore.cancelRun(
+    firstResult.id,
+    0,
+    new Date().toISOString(),
+  )
+  assert.equal(cancelled.status, 'cancelled')
 })
 
 test('PostgreSQL 对 canonical text 的原始 UTF-8 字节求 Hash', async () => {
@@ -452,6 +461,12 @@ test('PostgreSQL 拒绝终态 run 与任务聚合矛盾', async () => {
     constraintClient.release()
   }
   assert.equal((await firstStore.getRun(aggregate.run.id))?.status, 'queued')
+  const cancelled = await firstStore.cancelRun(
+    aggregate.run.id,
+    0,
+    new Date().toISOString(),
+  )
+  assert.equal(cancelled.status, 'cancelled')
 })
 
 test('PostgreSQL 拒绝使用同一 fencing token 复活过期 lease', async () => {
@@ -864,6 +879,25 @@ test('PostgreSQL claim reconciliation 与 cancel 使用无环锁序', { timeout:
     finalTasks.map(taskValue => taskValue.status),
     ['cancelled', 'blocked'],
   )
+})
+
+test('PostgreSQL deferred aggregate Trigger 按表读取 run、task、job RECORD', async () => {
+  const aggregate = executionAggregateVariant('cross-table-trigger-record-access', 2)
+
+  const created = await firstStore.createAggregate(aggregate)
+
+  assert.equal(created.id, aggregate.run.id)
+  const persisted = await database.query<{
+    runs: string
+    tasks: string
+    jobs: string
+  }>(`
+    SELECT
+      (SELECT count(*) FROM smarthub.test_execution_runs WHERE id=$1) AS runs,
+      (SELECT count(*) FROM smarthub.test_execution_tasks WHERE run_id=$1) AS tasks,
+      (SELECT count(*) FROM smarthub.test_execution_jobs WHERE run_id=$1) AS jobs
+  `, [aggregate.run.id])
+  assert.deepEqual(persisted.rows[0], { runs: '1', tasks: '1', jobs: '1' })
 })
 
 async function appendScriptAndAttempt(claimed: ExecutionJob) {

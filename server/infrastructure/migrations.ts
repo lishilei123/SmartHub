@@ -2406,6 +2406,156 @@ const migrations: Migration[] = [{
     ALTER TABLE smarthub.test_execution_script_artifacts
       ADD COLUMN IF NOT EXISTS task_input_sha256 char(64);
   `,
+}, {
+  version: 32,
+  name: 'fix-test-execution-cross-table-trigger-record-access',
+  sql: `
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_aggregate_completeness()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_run_id text;
+    DECLARE declared_tasks integer;
+    DECLARE actual_tasks integer;
+    DECLARE executable_tasks integer;
+    DECLARE actual_jobs integer;
+    DECLARE run_status text;
+    DECLARE run_state_version integer;
+    DECLARE aggregate_status text;
+    DECLARE initial_tasks boolean;
+    BEGIN
+      IF TG_TABLE_NAME = 'test_execution_runs' THEN
+        target_run_id := NEW.id;
+      ELSIF TG_TABLE_NAME IN ('test_execution_tasks', 'test_execution_jobs') THEN
+        IF TG_OP = 'DELETE' THEN
+          target_run_id := OLD.run_id;
+        ELSE
+          target_run_id := NEW.run_id;
+        END IF;
+      ELSE
+        RAISE EXCEPTION 'TEST_EXECUTION_AGGREGATE_TRIGGER_TABLE_UNSUPPORTED: %', TG_TABLE_NAME;
+      END IF;
+      SELECT task_count,status,state_version
+        INTO declared_tasks,run_status,run_state_version
+      FROM smarthub.test_execution_runs WHERE id=target_run_id;
+      IF NOT FOUND THEN RETURN NEW; END IF;
+      SELECT count(*),count(*) FILTER (WHERE status <> 'unsupported'),
+        CASE
+          WHEN bool_or(status NOT IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled')) THEN 'running'
+          WHEN bool_and(status='cancelled') THEN 'cancelled'
+          WHEN bool_and(status='passed') THEN 'succeeded'
+          WHEN bool_and(status='failed') THEN 'failed'
+          ELSE 'partial'
+        END,
+        bool_and(state_version=0 AND status IN ('pending','unsupported'))
+        INTO actual_tasks,executable_tasks,aggregate_status,initial_tasks
+      FROM smarthub.test_execution_tasks WHERE run_id=target_run_id;
+      SELECT count(DISTINCT task_id) INTO actual_jobs
+      FROM smarthub.test_execution_jobs WHERE run_id=target_run_id;
+      IF actual_tasks <> declared_tasks OR actual_jobs <> executable_tasks THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_AGGREGATE_INCOMPLETE';
+      END IF;
+      IF NOT (
+        (run_status='queued' AND run_state_version=0 AND initial_tasks)
+        OR (run_status='running' AND aggregate_status='running')
+        OR (run_status IN ('succeeded','failed','partial','cancelled') AND run_status=aggregate_status)
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_RUN_TASK_STATUS_MISMATCH';
+      END IF;
+      RETURN NEW;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_task_attempts()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_task_id text;
+    DECLARE task_status text;
+    DECLARE declared_attempts integer;
+    DECLARE declared_retries integer;
+    DECLARE actual_attempts integer;
+    DECLARE actual_retries integer;
+    DECLARE running_attempts integer;
+    BEGIN
+      IF TG_TABLE_NAME = 'test_execution_tasks' THEN
+        target_task_id := NEW.id;
+      ELSIF TG_TABLE_NAME = 'test_execution_attempts' THEN
+        target_task_id := NEW.task_id;
+      ELSE
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_ATTEMPTS_TRIGGER_TABLE_UNSUPPORTED: %', TG_TABLE_NAME;
+      END IF;
+      SELECT status,runner_attempt_count,same_script_retry_count
+        INTO task_status,declared_attempts,declared_retries
+      FROM smarthub.test_execution_tasks WHERE id=target_task_id;
+      IF NOT FOUND THEN RETURN NEW; END IF;
+      SELECT count(*),
+             count(*) FILTER (WHERE attempt_kind='same_script_retry'),
+             count(*) FILTER (WHERE status='running')
+        INTO actual_attempts,actual_retries,running_attempts
+      FROM smarthub.test_execution_attempts WHERE task_id=target_task_id;
+      IF actual_attempts <> declared_attempts
+        OR actual_retries <> declared_retries
+        OR (task_status='running' AND running_attempts <> 1)
+        OR (task_status<>'running' AND running_attempts <> 0) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_ATTEMPT_STATE_MISMATCH';
+      END IF;
+      RETURN NEW;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_task_revisions()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_task_id text;
+    DECLARE current_revision_id text;
+    DECLARE declared_repairs integer;
+    DECLARE actual_revisions integer;
+    DECLARE actual_repairs integer;
+    DECLARE latest_revision_id text;
+    BEGIN
+      IF TG_TABLE_NAME = 'test_execution_tasks' THEN
+        target_task_id := NEW.id;
+      ELSIF TG_TABLE_NAME = 'test_execution_script_revisions' THEN
+        target_task_id := NEW.task_id;
+      ELSE
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_REVISIONS_TRIGGER_TABLE_UNSUPPORTED: %', TG_TABLE_NAME;
+      END IF;
+      SELECT current_script_revision_id,repair_count
+        INTO current_revision_id,declared_repairs
+      FROM smarthub.test_execution_tasks WHERE id=target_task_id;
+      IF NOT FOUND THEN RETURN NEW; END IF;
+      SELECT count(*),count(*) FILTER (WHERE generation_source='repair')
+        INTO actual_revisions,actual_repairs
+      FROM smarthub.test_execution_script_revisions WHERE task_id=target_task_id;
+      SELECT id INTO latest_revision_id
+      FROM smarthub.test_execution_script_revisions
+      WHERE task_id=target_task_id ORDER BY revision DESC LIMIT 1;
+      IF actual_repairs <> declared_repairs
+        OR (actual_revisions=0 AND current_revision_id IS NOT NULL)
+        OR (actual_revisions>0 AND current_revision_id IS DISTINCT FROM latest_revision_id) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_REVISION_STATE_MISMATCH';
+      END IF;
+      RETURN NEW;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_diagnosis_attempt_terminal()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_attempt_id text;
+    BEGIN
+      IF TG_TABLE_NAME = 'test_execution_attempts' THEN
+        target_attempt_id := NEW.id;
+      ELSIF TG_TABLE_NAME = 'test_execution_diagnosis_attempts' THEN
+        target_attempt_id := NEW.attempt_id;
+      ELSE
+        RAISE EXCEPTION 'TEST_EXECUTION_DIAGNOSIS_ATTEMPT_TRIGGER_TABLE_UNSUPPORTED: %', TG_TABLE_NAME;
+      END IF;
+      IF EXISTS (
+        SELECT 1
+        FROM smarthub.test_execution_diagnosis_attempts diagnosis_attempt
+        JOIN smarthub.test_execution_attempts attempt
+          ON attempt.id=diagnosis_attempt.attempt_id
+        WHERE diagnosis_attempt.attempt_id=target_attempt_id
+          AND attempt.status='running'
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_DIAGNOSIS_ATTEMPT_NOT_TERMINAL';
+      END IF;
+      RETURN NEW;
+    END $$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {
