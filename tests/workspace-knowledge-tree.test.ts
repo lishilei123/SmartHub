@@ -42,6 +42,7 @@ test('知识库目录以 /workspace 为根并补齐完整工作区骨架', () =>
   assert.equal(tree.rootDirectoryId, 'dir-workspace')
   assert.deepEqual(tree.directories.filter(directory => directory.parentId === null).map(directory => directory.name), ['branches', 'shared', 'agent_workspace'])
   assert.ok(tree.directories.some(directory => directory.logicalPath === 'workspace/branches/release-3.2/input/api' && directory.structural && !directory.persisted))
+  assert.ok(!tree.directories.some(directory => directory.logicalPath === 'workspace/branches/release-3.2/requirements'))
   assert.ok(tree.directories.some(directory => directory.logicalPath === 'workspace/shared/knowledge'))
   assert.ok(tree.directories.some(directory => directory.logicalPath === 'workspace/agent_workspace/planning_agent'))
   assert.ok(!tree.directories.some(directory => directory.name === 'workspace'))

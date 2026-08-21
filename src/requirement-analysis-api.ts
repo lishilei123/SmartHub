@@ -110,7 +110,7 @@ export type RequirementReleasePackage = {
   status: 'published'
   projectVersionId: string
   verificationRunId: string
-  content?: {
+  content: {
     requirements: RequirementPoint[]
     evidence: AnalysisEvidence[]
     clarifications: PlanningClarification[]

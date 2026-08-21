@@ -11,6 +11,7 @@ export function CoverageAuditPanel({ run, busy, onAudit, onResolve, onOpenHandof
   const unresolvedFindings = run.findings.filter(item => item.state === 'open')
   const unresolvedBusinessConfirmations = run.confirmationItems.filter(item => item.state === 'open' && item.impactStage !== 'handoff')
   const unresolvedHandoffConfirmations = run.confirmationItems.filter(item => item.state === 'open' && item.impactStage === 'handoff')
+  const repairState = run.automaticRepair
   const isStale = audit?.status === 'stale'
   const pass = Boolean(audit?.status === 'valid' && publicationBlockers.length === 0)
 
@@ -30,7 +31,7 @@ export function CoverageAuditPanel({ run, busy, onAudit, onResolve, onOpenHandof
       <AuditSnapshot audit={audit} publicationBlockerCount={publicationBlockers.length} handoffBlockerCount={handoffBlockers.length} stale={isStale} />
       {audit.blockers.length > 0 && <BlockerCategories audit={audit} stale={isStale} />}
       {audit.advisories?.length > 0 && <section className="td2-audit-categories"><header><div><h3>覆盖优化建议</h3><p>建议用于补充风险场景或拆分过宽的维度覆盖，不参与发布门禁。</p></div></header><div className="td2-audit-category-grid"><section className="td2-audit-category"><header><AlertTriangle /><div><b>Advisories</b><small>{audit.advisories.length} 项</small></div></header><div className="td2-audit-category-list">{audit.advisories.map((item, index) => <article key={`${item.code}-${item.subjectId ?? index}`}><code>{item.code}</code><p>{item.message}</p>{item.subjectId && <small>{item.subjectId}</small>}</article>)}</div></section></div></section>}
-      <div className="td2-repair-state"><Bot /><div><b>Agent Repair</b><small>仅处理 resolution=agent_repair；最多 {run.automaticRepair?.maxAttempts ?? 2} 轮</small></div><span>{run.automaticRepair?.status ?? 'idle'} · {run.automaticRepair?.attempt ?? 0}/{run.automaticRepair?.maxAttempts ?? 2}</span></div>
+      <div className="td2-repair-state"><Bot /><div><b>Agent Repair</b><small>{repairState ? `仅处理 resolution=agent_repair；最多 ${repairState.maxAttempts} 轮` : '仅处理 resolution=agent_repair；次数由运行数据决定'}</small></div><span>{repairState ? `${repairState.status} · ${repairState.attempt}/${repairState.maxAttempts}` : '等待自动修复状态'}</span></div>
     </>}
 
     {(unresolvedFindings.length > 0 || unresolvedBusinessConfirmations.length > 0) && <div className="td2-decisions"><h3>等待业务人工决策</h3><p>业务规则、阈值、兼容矩阵与权限不明确时，PlanningAgent 不得猜测。</p>{unresolvedFindings.map(item => <article key={item.id}><AlertTriangle /><div><b>{item.title}</b><p>{item.description}</p><small>Finding · {item.severity}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('finding', item.id, item.actions.length)}>标记已处理</button></article>)}{unresolvedBusinessConfirmations.map(item => <article key={item.id}><UserRoundCheck /><div><b>{item.title}</b><p>{item.question}</p><small>Confirmation · {item.impactStage}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('confirmation', item.id, item.actions.length)}>记录决策</button></article>)}</div>}

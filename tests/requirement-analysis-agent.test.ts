@@ -297,6 +297,7 @@ test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人�
 
   const release = resolved.run.workflow?.release
   assert.equal(release?.status, 'published')
+  assert.equal(release!.artifacts.length, 1)
   assert.deepEqual(release!.artifacts.map(item => item.fileName), ['requirement-analysis.md'])
   assert.deepEqual(release!.content.clarifications.filter(item => item.status === 'answered').map(item => item.answer), ['关闭失败时保持待支付，可由用户重试。'])
   assert.deepEqual(release!.content.clarifications.filter(item => item.status === 'dismissed'), [])

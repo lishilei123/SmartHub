@@ -2,7 +2,7 @@
 
 当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 编排三个独立发布的 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`，并只把服务端校验后的 `ExecutionPackage` 交给非 Agentic OCI Playwright Runner。PostgreSQL 保存正式状态，Workspace 与 Artifact Store 只保存不可变投影和产物。
 
-测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`requirements.json` Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库、套件与 `TestExecutionHandoff`。执行 Run 仅接受 Handoff 与服务端环境标识，冻结业务输入、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
+测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库、套件与 `TestExecutionHandoff`。执行 Run 仅接受 Handoff 与服务端环境标识，冻结业务输入、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
 
 ## 模块状态
 
@@ -46,7 +46,7 @@
 ## 当前已实现的统一 PlanningAgent 测试设计流程
 
 - `PlanningAgent` 发布配置决定启用哪些 Skill；运行开始时只加载 Enabled Skill Catalog，Agent 自主判断何时通过 `skill.read` 读取正文。Workflow 只推进业务 Stage、收窄 Tool/提交协议和执行 Gate，不调度或激活 Skill。
-- `test_case_design` 阶段从冻结的 `currentInputRefs` 识别本次任务重点，同时可在完整 Project Workspace Snapshot 内自主读取正式需求发布包和旁证资料，直接生成 Test Case Candidate，不存在 CoverageUnit 中间层。
+- `test_case_design` 阶段由 Runtime 直接提供完整冻结的 `RequirementRelease.content`，并从 `currentInputRefs` 识别本次任务重点；Agent 可在 Project Workspace Snapshot 内按需读取用户资料、shared 资料和明确冻结的历史用例快照，直接生成 Test Case Candidate，不存在 CoverageUnit 中间层。
 - Service/Validator 自动校验用例候选的结构、需求引用、执行规范与内容 Hash，创建不可变的正式用例变更 Proposal。人工审核仍是发布 Gate；每次修改后都会重新校验并生成用例。
 - `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；用例生成后必须经过人工用例审核，发布仍由 Service 门禁控制。
 - Coverage Audit 是服务端确定性步骤，不是 Agent Stage。Requirement 直接追溯、覆盖、重复、维度一致性、UI/API 与数据 readiness、Finding/Confirmation 闭环均由服务端判断；Candidate 根级 `ScenarioClaim` 让状态边、正负路径、独立 subject、查询能力与独立 oracle 的过度合并可确定性识别和修复。`ScenarioClaim` 仅属于当前 Run，不是 TestPoint，也不会进入正式用例库、版本或 Execution Handoff。
@@ -60,7 +60,7 @@
 
 > 需求分析与测试设计只保留同一个 `PlanningAgent`，并且只接受 `/workspace` 文件工作区。Agent 基于 Pi Agent Core 运行，使用只读 `ls / find / grep / read` 与受控 Knowledge 工具自主探索固定资料，在同一个 ProjectVersion Planning Session 内完成需求分析；Requirement Release 发布后，Workflow 把“开始测试设计”作为下一项真实 Session 消息下发给同一个 Agent，后续上下文可直接读取该任务。旧 `RequirementPointExtractionAgent`、`RequirementReviewAgent` 及其独立提交工具、草稿和配置快照均已删除。
 
-需求分析完成且阻断 Clarification 全部处置后，Service 在同一事务中校验固定输入、生成并绑定唯一的 Requirement Release；不再维护独立的 Requirement Understanding Stage/Snapshot，也不存在 Agent 生成 Release Candidate 后再人工发布的第二条路径。Planning Session 只提供语义连续性，下游正式事实始终来自已发布 Release、`requirements.json` 与固定 Hash。
+需求分析完成且阻断 Clarification 全部处置后，Service 在同一事务中校验固定输入、生成并绑定唯一的 Requirement Release；不再维护独立的 Requirement Understanding Stage/Snapshot，也不存在 Agent 生成 Release Candidate 后再人工发布的第二条路径。Planning Session 只提供语义连续性，下游正式事实始终来自已发布的 `RequirementRelease.content` 与固定 Content Hash。
 
 统一逻辑目录如下：
 
@@ -68,7 +68,6 @@
 /workspace/
 ├── branches/{release}/
 │   ├── input/{requirements,api,ui,environment}/
-│   ├── requirements/
 │   ├── test_design/
 │   ├── test_cases/
 │   ├── scripts/

@@ -7,7 +7,7 @@ import type { TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './typ
 const flow = [
   { key: 'test_case_design', label: '用例生成', owner: 'PlanningAgent' },
   { key: 'coverage_audit', label: 'Coverage 检查', owner: '服务端' },
-  { key: 'test_design_repair', label: '自动修复', owner: 'PlanningAgent · 最多 2 次' },
+  { key: 'test_design_repair', label: '自动修复', owner: 'PlanningAgent · 自动修复' },
 ] as const
 
 export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }: { design: TestDesign; run: TestDesignWorkflowRun | null; busy: boolean; onRefresh: () => void; onStartRun: () => void }) {

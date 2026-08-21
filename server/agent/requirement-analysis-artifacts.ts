@@ -12,7 +12,7 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
     '# 需求分析报告', '',
     '## 1. 需求概述', '', safe(result.summary.overview), '',
     '## 2. 业务目标', '', ...(result.summary.businessGoals.length ? result.summary.businessGoals.map(item => `- ${safe(item)}`) : ['- 未在当前需求中明确说明。']), '',
-    '## 3. 核心业务流程', '', safe(result.analysisDocument || '结构化结果未附加独立流程说明；请结合 Requirement Baseline 与 Test Focus 阅读。'), '',
+    '## 3. 核心业务流程', '', safe(result.analysisDocument || '结构化结果未附加独立流程说明；请结合正式需求点、Clarification 与 Test Focus 阅读。'), '',
     '## 4. 正式需求点与来源', '',
     ...result.requirementPoints.flatMap(point => [
       `### ${safe(point.clientRequirementPointId)} · ${safe(point.title)}`, '',

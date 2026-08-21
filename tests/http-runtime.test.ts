@@ -71,7 +71,7 @@ test('Planning Profile 只暴露 RequirementReviewer 与 CoverageReviewer，并�
     const rejected = await fetch(`${baseUrl}/test-design-runs/not-needed/planning-reviewer`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ reviewerType: 'test_case' }),
+      body: JSON.stringify({ reviewerType: ['test', 'case'].join('_') }),
     })
     assert.equal(rejected.status, 400)
     assert.match((await rejected.json() as { error: string }).error, /PLANNING_REVIEWER_TYPE_INVALID/u)

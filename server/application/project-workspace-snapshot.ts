@@ -60,13 +60,13 @@ export function classifyWorkspaceSourceScope(
   activeBranchLogicalPath: string,
   currentInput = false,
 ): ProjectWorkspaceSourceScope {
-  if (currentInput) return 'current_input'
   const path = normalizeWorkspacePath(logicalPath)
   const activeBranch = normalizeWorkspacePath(activeBranchLogicalPath)
   if (path === 'workspace/shared' || path.startsWith('workspace/shared/')) return 'shared'
   if (path === 'workspace/formal-output' || path.startsWith('workspace/formal-output/')) return 'formal_output'
+  if (isFormalBranchOutput(path)) return 'formal_output'
+  if (currentInput) return 'current_input'
   if (path.startsWith('workspace/branches/') && path !== activeBranch && !path.startsWith(`${activeBranch}/`)) return 'historical_branch'
-  if (isFormalBranchOutput(path, activeBranch)) return 'formal_output'
   return 'current_branch'
 }
 
@@ -86,7 +86,10 @@ export function safeWorkspaceSegment(value: string) {
   return safe
 }
 
-function isFormalBranchOutput(path: string, activeBranch: string) {
+function isFormalBranchOutput(path: string) {
+  const match = /^workspace\/branches\/[^/]+\/(.+)$/u.exec(path)
+  if (!match) return false
+  const branchRelativePath = match[1]
   return [
     'requirements',
     'test-design',
@@ -98,5 +101,5 @@ function isFormalBranchOutput(path: string, activeBranch: string) {
     'scripts',
     'execution',
     'reports',
-  ].some(directory => path === `${activeBranch}/${directory}` || path.startsWith(`${activeBranch}/${directory}/`))
+  ].some(directory => branchRelativePath === directory || branchRelativePath.startsWith(`${directory}/`))
 }

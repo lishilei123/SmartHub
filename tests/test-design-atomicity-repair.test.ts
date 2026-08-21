@@ -127,6 +127,7 @@ test('test-case-design/v2 提交 cases: [] 时，Service 从明确继承的冻�
   const service = new TestDesignService(store, runtime)
   const design = await service.createDesign('project-version-1', { name: '引用式历史复用', objective: '验证冻结历史复用', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal)
   const run = await service.createRun('project-version-1', design.id, 'reference-submission', principal)
+  assert.ok(run.workspaceSnapshot.files.some(item => item.logicalPath.endsWith('/historical-test-cases.json')))
   const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
 
   assert.equal(completed.status, 'succeeded', completed.error)

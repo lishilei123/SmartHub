@@ -3,7 +3,7 @@ import { requirementWorkspaceDirectory } from './version-document-path'
 
 const workspaceRoot = 'workspace'
 
-const branchDirectoryNames = ['input', 'requirements', 'test-design', 'test-cases', 'scripts', 'execution', 'reports'] as const
+const branchDirectoryNames = ['input', 'test-design', 'test-cases', 'scripts', 'execution', 'reports'] as const
 const inputDirectoryNames = ['requirements', 'api', 'ui', 'environment'] as const
 const sharedDirectoryNames = ['knowledge', 'common_scripts', 'common_docs'] as const
 const agentDirectoryNames = ['planning_agent', 'execution_agent', 'report_agent'] as const

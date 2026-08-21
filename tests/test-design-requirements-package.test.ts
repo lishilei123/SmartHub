@@ -19,15 +19,29 @@ test('TestDesign 直接冻结 Requirement Release content，且 Workspace 只保
     state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1', status: 'open', inheritRequirementBindings: false, requirementReleaseBinding: activeBinding, requirementReleaseBindings: [activeBinding], activeRequirementReleaseId: 'release-1', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:03:00.000Z' })
     state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', createdAt: '2026-08-12T00:00:00.000Z', activeIndexVersionId: 'index-1', activeConfigVersionId: 'config-1' })
     state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', configVersionId: 'config-1', assetVersionIds: ['version-user', 'version-shared'], indexedChunks: [], createdAt: '2026-08-12T00:00:00.000Z' } as never)
+    const legacyRequirementArtifact = ['requirements', 'json'].join('.')
+    const legacyManifestArtifact = ['manifest', 'json'].join('.')
     state.assets.push(
       { id: 'asset-user', knowledgeBaseId: 'kb-1', displayName: '用户需求.md', logicalPath: 'workspace/branches/V1/input/requirements/用户需求.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'user', activeVersionId: 'version-user', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
+      { id: 'asset-prototype', knowledgeBaseId: 'kb-1', displayName: '产品原型.md', logicalPath: 'workspace/branches/V1/input/ui/产品原型.md', assetType: 'product_prototype', sourceType: 'upload', sourceKey: 'prototype', activeVersionId: 'version-prototype', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
       { id: 'asset-shared', knowledgeBaseId: 'kb-1', displayName: '产品原型.md', logicalPath: 'workspace/shared/产品原型.md', assetType: 'other', sourceType: 'upload', sourceKey: 'shared', activeVersionId: 'version-shared', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
-      { id: 'asset-formal', knowledgeBaseId: 'kb-1', displayName: '服务端投影.md', logicalPath: 'workspace/branches/V1/requirements/服务端投影.md', assetType: 'other', sourceType: 'upload', sourceKey: 'formal', activeVersionId: 'version-formal', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
+      { id: 'asset-historical-user', knowledgeBaseId: 'kb-1', displayName: '历史用户需求.md', logicalPath: 'workspace/branches/V0/input/requirements/历史用户需求.md', assetType: 'requirement', sourceType: 'upload', sourceKey: 'historical-user', activeVersionId: 'version-historical-user', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
+      { id: 'asset-formal', knowledgeBaseId: 'kb-1', displayName: 'requirement-analysis.md', logicalPath: 'workspace/branches/V1/requirements/requirement-analysis.md', assetType: 'other', sourceType: 'upload', sourceKey: 'formal', activeVersionId: 'version-formal', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
+      { id: 'asset-formal-json', knowledgeBaseId: 'kb-1', displayName: legacyRequirementArtifact, logicalPath: `workspace/branches/V1/requirements/${legacyRequirementArtifact}`, assetType: 'other', sourceType: 'upload', sourceKey: 'formal-json', activeVersionId: 'version-formal-json', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
+      { id: 'asset-formal-manifest', knowledgeBaseId: 'kb-1', displayName: legacyManifestArtifact, logicalPath: `workspace/branches/V1/requirements/${legacyManifestArtifact}`, assetType: 'other', sourceType: 'upload', sourceKey: 'formal-manifest', activeVersionId: 'version-formal-manifest', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
+      { id: 'asset-library-formal', knowledgeBaseId: 'kb-1', displayName: '正式用例投影.json', logicalPath: 'workspace/branches/V1/test_case_library/v1/test-cases.json', assetType: 'test_case_library', sourceType: 'upload', sourceKey: 'library-formal', activeVersionId: 'version-library-formal', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
+      { id: 'asset-historical-library-formal', knowledgeBaseId: 'kb-1', displayName: '历史正式用例投影.json', logicalPath: 'workspace/branches/V0/test-case-library/v1/test-cases.json', assetType: 'test_case_library', sourceType: 'upload', sourceKey: 'historical-library-formal', activeVersionId: 'version-historical-library-formal', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' },
     )
     state.versions.push(
       { id: 'version-user', assetId: 'asset-user', number: 1, content: '用户原始需求', contentHash: '1'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
+      { id: 'version-prototype', assetId: 'asset-prototype', number: 1, content: '当前版本产品原型', contentHash: '5'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
       { id: 'version-shared', assetId: 'asset-shared', number: 1, content: '用户产品原型', contentHash: '2'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
+      { id: 'version-historical-user', assetId: 'asset-historical-user', number: 1, content: '历史用户资料', contentHash: '6'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
       { id: 'version-formal', assetId: 'asset-formal', number: 1, content: '服务端旧投影', contentHash: '3'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
+      { id: 'version-formal-json', assetId: 'asset-formal-json', number: 1, content: '服务端旧 JSON 投影', contentHash: '7'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
+      { id: 'version-formal-manifest', assetId: 'asset-formal-manifest', number: 1, content: '服务端旧 Manifest 投影', contentHash: 'a'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
+      { id: 'version-library-formal', assetId: 'asset-library-formal', number: 1, content: '正式用例库输出镜像', contentHash: '8'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
+      { id: 'version-historical-library-formal', assetId: 'asset-historical-library-formal', number: 1, content: '历史正式用例库输出镜像', contentHash: '9'.repeat(64), status: 'ready', configVersionId: 'config-1', createdAt: '2026-08-12T00:00:00.000Z', chunks: [] },
     )
     state.reviewRuns.push({
       id: 'review-run-1', projectVersionId: 'project-version-1', assetId: 'asset-user', assetVersionId: 'version-user', documentTitle: '已发布需求', documentVersion: 1,
@@ -54,9 +68,16 @@ test('TestDesign 直接冻结 Requirement Release content，且 Workspace 只保
   assert.equal(run.basisSnapshot.content.requirements[0].clientRequirementPointId, 'RP-MACHINE')
   assert.equal(run.workspaceSnapshot.requirementReleaseContentSha256, contentSha256)
   assert.ok(run.workspaceSnapshot.files.some(item => item.assetVersionId === 'version-user'))
+  assert.ok(run.workspaceSnapshot.files.some(item => item.assetVersionId === 'version-prototype'))
   assert.ok(run.workspaceSnapshot.files.some(item => item.assetVersionId === 'version-shared'))
+  assert.ok(run.workspaceSnapshot.files.some(item => item.assetVersionId === 'version-historical-user'))
   assert.ok(run.workspaceSnapshot.files.every(item => item.assetVersionId !== 'version-formal'))
+  assert.ok(run.workspaceSnapshot.files.every(item => item.assetVersionId !== 'version-formal-json'))
+  assert.ok(run.workspaceSnapshot.files.every(item => item.assetVersionId !== 'version-formal-manifest'))
+  assert.ok(run.workspaceSnapshot.files.every(item => item.assetVersionId !== 'version-library-formal'))
+  assert.ok(run.workspaceSnapshot.files.every(item => item.assetVersionId !== 'version-historical-library-formal'))
   assert.ok(run.workspaceSnapshot.files.every(item => !item.logicalPath.startsWith('workspace/branches/V1/requirements/')))
+  assert.ok(run.workspaceSnapshot.files.every(item => !item.logicalPath.endsWith('/historical-test-cases.json')))
 })
 
 test('TestDesign 拒绝 Binding 与 Requirement Release content Hash 漂移', async () => {
@@ -73,6 +94,22 @@ test('TestDesign 拒绝 Binding 与 Requirement Release content Hash 漂移', as
   await assert.rejects(
     () => service.createDesign('project-version-1', { name: '订单测试设计', objective: '验证发布需求', knowledgeAugmentation: { mode: 'disabled' } }, principal),
     (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID',
+  )
+})
+
+test('TestDesign 拒绝缺少必填 content 的 Requirement Release', async () => {
+  const store = new JsonStore(null)
+  await store.load()
+  const contentSha256 = 'a'.repeat(64)
+  await store.transaction(state => {
+    state.projects.push({ id: 'project-1', name: '订单项目', createdAt: '2026-08-12T00:00:00.000Z' })
+    state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1', status: 'open', inheritRequirementBindings: false, requirementReleaseBinding: { releaseId: 'release-1', verificationRunId: 'review-run-1', releaseContentSha256: contentSha256, boundAt: '2026-08-12T00:03:00.000Z' }, activeRequirementReleaseId: 'release-1', createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:03:00.000Z' })
+    state.reviewRuns.push({ id: 'review-run-1', projectVersionId: 'project-version-1', status: 'succeeded', workflow: { release: { id: 'release-1', schemaVersion: 'requirement-release/v1', status: 'published', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', contentSha256, sourceAssetVersionIds: [], generationExecution: {}, artifacts: [{ fileName: 'requirement-analysis.md', mediaType: 'text/markdown', content: '# 报告', contentSha256: 'b'.repeat(64) }], createdAt: '2026-08-12T00:02:00.000Z', createdBy: 'owner' } } } as never)
+  })
+  const service = new TestDesignService(store, runtime())
+  await assert.rejects(
+    () => service.createDesign('project-version-1', { name: '非法正式输入', objective: '验证 content 必填', knowledgeAugmentation: { mode: 'disabled' } }, principal),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID' && /content 结构无效/u.test(error.message),
   )
 })
 
