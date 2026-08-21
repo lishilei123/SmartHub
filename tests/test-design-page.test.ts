@@ -49,19 +49,19 @@ test('创建面板明确展示绑定需求发布包并定义范围、维度和�
   assert.doesNotMatch(source, /basisMode|review_baseline|sourceTechnicalSolutionRunId/u)
 })
 
-test('历史未变化复用仅可经 Service 确认批量接受', () => {
+test('自动 Proposal 不再形成第二套人工审核，只有特殊历史变更需要确认', () => {
   const panel = read('../src/test-design/CaseChangeProposalPanel.tsx')
   const api = read('../src/test-design/api.ts')
   const hook = read('../src/test-design/hooks/useTestDesign.ts')
   const service = read('../server/application/test-design-service.ts')
-  assert.match(panel, /批量接受未变化复用/u)
-  assert.match(panel, /确认接受/u)
-  assert.match(panel, /来源 Revision 语义完全一致/u)
-  assert.match(panel, /historical_unchanged/u)
-  assert.match(api, /batch-accept-unchanged-reuse/u)
-  assert.match(hook, /batchAcceptUnchangedReuseProposals/u)
-  assert.match(service, /batchAcceptUnchangedReuseProposals/u)
-  assert.match(service, /CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u)
+  assert.match(panel, /复用由 Service 自动处理/u)
+  assert.match(panel, /新增和修改随当前用例 Revision 审核通过自动接受/u)
+  assert.match(panel, /需要人工确认/u)
+  assert.match(panel, /requiresHumanDecision/u)
+  assert.match(service, /reconcileAutomaticProposalDecisions/u)
+  assert.doesNotMatch(api, /batch-accept-unchanged-reuse/u)
+  assert.doesNotMatch(hook, /batchAcceptUnchangedReuseProposals/u)
+  assert.doesNotMatch(service, /batchAcceptUnchangedReuseProposals|CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u)
 })
 
 test('运行面板展示冻结 Release、Workspace、Agent 配置与实时轨迹', () => {
@@ -81,7 +81,7 @@ test('同一 TestDesign 展示运行历史并以选中 runId 切换完整工作�
   const page = read('../src/test-design/TestDesignPage.tsx')
   const hook = read('../src/test-design/hooks/useTestDesign.ts')
   const api = read('../src/test-design/api.ts')
-  for (const label of ['运行历史', '新建运行', '状态 / 阶段', '历史基线', '用例 / 待处理 Proposal', '已发布', '未发布']) assert.match(page, new RegExp(label, 'u'))
+  for (const label of ['运行历史', '新建运行', '状态 / 阶段', '历史基线', '用例 / 特殊变更待确认', '已发布', '未发布']) assert.match(page, new RegExp(label, 'u'))
   assert.match(page, /model\.openRun\(item\.id\)/u)
   assert.match(hook, /api\.loadRuns/u)
   assert.match(hook, /api\.loadRun\(projectVersionId, design\.id, runId\)/u)

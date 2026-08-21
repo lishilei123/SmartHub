@@ -63,7 +63,7 @@ export type TestDesignRunSummary = {
   baseTestCaseLibraryVersionId?: string
   baseTestCaseLibraryVersion?: { id: string; version: number; name: string }
   caseCount?: number
-  pendingProposalCount?: number
+  pendingManualProposalCount?: number
   published?: boolean
 }
 
@@ -151,7 +151,7 @@ export type TestDesignCase = {
 
 export type TestDataRequirement = { id: string; name: string; entityType: string; featureTags: string[]; requirementRefs?: string[]; caseIds: string[]; fieldConstraints: Record<string, string>; relationships: string[]; quantity: number; initialState: string; preparationHint: string; sensitivity: 'public' | 'internal' | 'sensitive'; isolation: string; resetAndCleanup: string; readiness: 'ready' | 'blocked' | 'needs_confirmation'; readinessReason?: string }
 export type TestDataSetVersion = { id: string; version: number; contentSha256: string; createdBy?: string; createdAt: string; requirements: TestDataRequirement[] }
-export type TestDesignCoverageAudit = { id: string; requirementReleaseId: string; dataSetVersionId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalCases: number; approvedCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' | 'execution_handoff'; details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number } }>; advisories: Array<{ code: string; message: string; subjectId?: string; details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number } }>; createdAt: string }
+export type TestDesignCoverageAudit = { id: string; requirementReleaseId: string; dataSetVersionId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_decision' | 'manual_edit' | 'execution_handoff'; details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number } }>; advisories: Array<{ code: string; message: string; subjectId?: string; details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number } }>; createdAt: string }
 export type WorkspaceProjection = { status: 'pending' | 'succeeded' | 'failed'; files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>; error?: string }
 export type TestCaseSetVersion = { id: string; projectId: string; projectVersionId: string; testDesignId: string; runId: string; version: number; name: string; members: Array<{ caseId: string; revision: number; ordinal: number; contentSha256: string }>; contentSha256: string; publishedBy: string; publishedAt: string; projection: WorkspaceProjection }
 export type TestSuiteVersion = { id: string; projectId: string; suiteType: 'smoke' | 'regression' | 'functional_domain'; version: number; name: string; members: Array<{ caseId: string; revision: number; executionMethods: ExecutionMethod[] }> }
@@ -164,7 +164,7 @@ export type CompatibilityExecutionSpec = { kind: 'compatibility'; method: 'envir
 export type TestCaseExecutionSpec = FunctionalExecutionSpec | PerformanceExecutionSpec | StabilityExecutionSpec | CompatibilityExecutionSpec
 
 export type CaseChangeOperation = 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'
-export type CaseChangeDecision = 'pending' | 'accepted' | 'accepted_edited' | 'rejected' | 'keep_original' | 'reference' | 'deprecated'
+export type CaseChangeDecision = 'pending' | 'accepted' | 'rejected' | 'keep_original' | 'reference' | 'deprecated'
 export type CaseChangeProposal = { id: string; runId: string; operation: CaseChangeOperation; sourceCaseId?: string; sourceRevision?: number; candidateCaseId?: string; candidateContent?: TestCaseContent; diff: Array<{ path: string; before?: unknown; after?: unknown }>; requirementRefs: string[]; reason: string; confidence: number; decision: CaseChangeDecision; createdAt: string; decidedBy?: string; decidedAt?: string; decisions: Array<{ id: string; expectedVersion: number; decision: Exclude<CaseChangeDecision, 'pending'>; comment?: string; decidedBy: string; decidedAt: string }>; appliedCaseId?: string; appliedRevision?: number }
 
 export type LibraryTestCaseRevision = { revision: number; content: TestCaseContent; contentSha256: string; semanticSha256: string; sourceRunId?: string; sourceProposalId?: string; traceability?: TestCaseTraceability; changeReason: string; createdBy: string; createdAt: string }

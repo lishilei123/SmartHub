@@ -26,7 +26,7 @@ export function CoverageAuditPanel({ run, busy, onAudit, onResolve, onOpenHandof
 
     {!audit ? <div className="td2-empty-compact"><Server /><span>等待测试用例生成后执行服务端审计</span></div> : <>
       <AuditState audit={audit} pass={pass} publicationBlockerCount={publicationBlockers.length} />
-      {isStale && <div className="td2-audit-recheck-hint"><RefreshCw /><div><b>当前内容已发生变动</b><small>用例增删改、审核、数据需求或业务确认变化后，服务端会将旧 Audit 标记为失效。下方仅保留上次检查快照，不能用于发布。</small></div></div>}
+      {isStale && <div className="td2-audit-recheck-hint"><RefreshCw /><div><b>当前内容已发生变动</b><small>用例增删改、数据需求或影响 Coverage 的业务确认变化后，服务端会将旧 Audit 标记为失效。单纯审核状态变化不会使 Audit 失效。</small></div></div>}
       <AuditSnapshot audit={audit} publicationBlockerCount={publicationBlockers.length} handoffBlockerCount={handoffBlockers.length} stale={isStale} />
       {audit.blockers.length > 0 && <BlockerCategories audit={audit} stale={isStale} />}
       {audit.advisories?.length > 0 && <section className="td2-audit-categories"><header><div><h3>覆盖优化建议</h3><p>建议用于补充风险场景或拆分过宽的维度覆盖，不参与发布门禁。</p></div></header><div className="td2-audit-category-grid"><section className="td2-audit-category"><header><AlertTriangle /><div><b>Advisories</b><small>{audit.advisories.length} 项</small></div></header><div className="td2-audit-category-list">{audit.advisories.map((item, index) => <article key={`${item.code}-${item.subjectId ?? index}`}><code>{item.code}</code><p>{item.message}</p>{item.subjectId && <small>{item.subjectId}</small>}</article>)}</div></section></div></section>}
@@ -44,7 +44,7 @@ function AuditState({ audit, pass, publicationBlockerCount }: { audit: TestDesig
   const detail = stale
     ? '当前候选已不再与该审计快照一致；请重新检查后再判断覆盖或发布状态。'
     : pass
-      ? '需求映射、审核与语义门禁均基于当前冻结输入通过。'
+      ? '需求映射与测试设计质量门禁均基于当前冻结输入通过；用例审核由发布 Gate 独立检查。'
       : '请优先处理发布门禁；执行交接问题会单独统计，不混入发布阻断。'
   return <div className={`td2-audit-state ${stale ? 'stale' : pass ? 'pass' : 'blocked'}`}>{pass ? <CheckCircle2 /> : <AlertTriangle />}<div><b>{title}</b><small>{detail}</small></div><span>{stale ? '待重新检查' : pass ? '可进入发布' : '发布未就绪'}</span></div>
 }
@@ -54,7 +54,7 @@ function AuditSnapshot({ audit, publicationBlockerCount, handoffBlockerCount, st
     <header><div><b>{stale ? '上次审计快照' : '当前审计摘要'}</b><small>{new Date(audit.createdAt).toLocaleString('zh-CN')} · {stale ? '仅供追溯，不代表当前状态' : '与当前候选内容一致'}</small></div><span>{stale ? '历史快照' : '当前有效'}</span></header>
     <div className="td2-audit-metrics">
       <Metric label="Requirement 映射" value={`${audit.statistics.coveredBasis}/${audit.statistics.totalBasis}`} detail="已直接关联测试用例" />
-      <Metric label="用例审核" value={`${audit.statistics.approvedCases}/${audit.statistics.totalCases}`} detail="当前 Revision 已批准" />
+      <Metric label="当前用例" value={`${audit.statistics.totalCases}`} detail="参与本次 Coverage 检查" />
       <Metric label="发布门禁" value={`${publicationBlockerCount}`} detail="不含 Execution Handoff" tone={publicationBlockerCount ? 'warning' : 'success'} />
       <Metric label="执行交接" value={`${handoffBlockerCount}`} detail="仅在 Handoff / 执行前处理" tone={handoffBlockerCount ? 'warning' : 'success'} />
       <Metric label="优化建议" value={`${audit.advisories?.length ?? 0}`} detail="不阻止发布" tone={audit.advisories?.length ? 'warning' : 'success'} />
@@ -70,7 +70,6 @@ function Metric({ label, value, detail, tone }: { label: string; value: string; 
 function BlockerCategories({ audit, stale }: { audit: TestDesignCoverageAudit; stale: boolean }) {
   const categories: Array<{ resolution: BlockerResolution; icon: typeof Bot; label: string; detail: string }> = [
     { resolution: 'agent_repair', icon: Bot, label: 'PlanningAgent 可修复', detail: 'resolution=agent_repair 的事项会进入受限自动修复流程。' },
-    { resolution: 'human_review', icon: UserRoundCheck, label: '需要用例审核', detail: '请在“测试用例”确认当前 Revision 后重新检查。' },
     { resolution: 'human_decision', icon: UserRoundCheck, label: '需要业务决策', detail: '预期结果或业务规则缺少正式结论，不能由 Agent 推测。' },
     { resolution: 'manual_edit', icon: Wrench, label: '需要人工编辑', detail: '请修正候选用例或追溯信息后重新检查。' },
     { resolution: 'execution_handoff', icon: Wrench, label: 'Execution Handoff 待补充', detail: '不阻止语义正确的用例库发布，但会阻止实际交接和执行。' },

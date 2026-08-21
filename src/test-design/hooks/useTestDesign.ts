@@ -9,7 +9,7 @@ function rawErrorMessage(cause: unknown) { return cause instanceof Error ? cause
 function actionableErrorMessage(raw: string) {
   if (/COVERAGE_AUDIT_STALE|没有有效 Coverage Audit|测试设计状态已变化/u.test(raw)) return '测试用例已经发生变化，请重新执行覆盖检查。'
   if (/CASE_CHANGE_PROPOSAL_DECISION_REQUIRED/u.test(raw)) return '还有历史用例变更需要确认。'
-  if (/TEST_CASE_REVIEW_REQUIRED/u.test(raw)) return '仍有测试用例尚未审核通过。'
+  if (/TEST_CASE_REVIEW_REQUIRED/u.test(raw)) return '仍有测试用例尚未审核通过，无法发布正式用例库。'
   if (/TEST_CASE_LIBRARY_BASE_CHANGED|CASE_CHANGE_PROPOSAL_SOURCE_STALE|LIBRARY_TEST_CASE_REVISION_CONFLICT/u.test(raw)) return '正式用例库已发生变化，请基于最新版本重新处理后再发布。'
   if (/TEST_CASE_LIBRARY_PUBLICATION_BLOCKED/u.test(raw)) return '仍存在阻断发布的问题，请先在待处理问题中完成处置。'
   return raw
@@ -68,7 +68,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (!projectVersionId || !design || !run) return
     const next = await api.loadRun(projectVersionId, design.id, run.id)
     setRun(next)
-    setRuns(current => current.map(item => item.id === next.id ? { ...item, status: next.status, stage: next.stage, progress: next.progress, startedAt: next.startedAt, finishedAt: next.finishedAt, errorCode: next.errorCode, error: next.error, baseTestCaseLibraryVersionId: next.baseTestCaseLibraryVersionId, caseCount: next.testCases.filter(testCase => !testCase.tombstonedAt).length, pendingProposalCount: next.caseChangeProposals.filter(proposal => proposal.decision === 'pending').length } : item))
+    setRuns(current => current.map(item => item.id === next.id ? { ...item, status: next.status, stage: next.stage, progress: next.progress, startedAt: next.startedAt, finishedAt: next.finishedAt, errorCode: next.errorCode, error: next.error, baseTestCaseLibraryVersionId: next.baseTestCaseLibraryVersionId, caseCount: next.testCases.filter(testCase => !testCase.tombstonedAt).length, pendingManualProposalCount: next.caseChangeProposals.filter(proposal => proposal.decision === 'pending' && (proposal.operation === 'deprecate' || proposal.operation === 'reference')).length } : item))
     return next
   }, [projectVersionId, design, run])
 
@@ -176,8 +176,8 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     const targets = run.testCases.filter(item => !item.tombstonedAt && item.reviewState === 'in_review').map(item => ({ caseId: item.id, targetRevision: item.currentRevision }))
     if (!targets.length) return
     await guarded('case-approve', () => api.batchReviewCases(projectVersionId, design.id, run.id, targets, 'approve'), '当前待审核 Revision 已批量审核通过。')
-    await refreshAndScheduleAudit()
-  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run])
+    await refreshRun()
+  }, [design, guarded, projectVersionId, refreshRun, run])
 
   const createCase = useCallback(async (content: TestCaseContent) => {
     if (!projectVersionId || !design || !run) return
@@ -202,8 +202,8 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (!projectVersionId || !design || !run) return
     const message = ({ submit: `Revision ${targetRevision} 已提交人工审核。`, approve: `Revision ${targetRevision} 已审核通过。`, reject: `Revision ${targetRevision} 已拒绝。`, request_revision: `Revision ${targetRevision} 已退回修改。`, withdraw: `Revision ${targetRevision} 已撤回审核并回到草稿。` } as const)[decision]
     await guarded(`case-${decision}`, () => api.reviewCase(projectVersionId, design.id, run.id, caseId, decision, targetRevision, comment), message)
-    await refreshAndScheduleAudit()
-  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run])
+    await refreshRun()
+  }, [design, guarded, projectVersionId, refreshRun, run])
 
   const reAudit = useCallback(async () => {
     if (!design || !run) return
@@ -223,20 +223,13 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     await refreshAndScheduleAudit()
   }, [design, guarded, projectVersionId, refreshAndScheduleAudit, resynthesize, run])
 
-  const decideProposal = useCallback(async (proposalId: string, decision: Exclude<CaseChangeDecision, 'pending'>, comment?: string, editedContent?: TestCaseContent) => {
+  const decideProposal = useCallback(async (proposalId: string, decision: Exclude<CaseChangeDecision, 'pending'>, comment?: string) => {
     if (!projectVersionId || !design || !run) return
     const proposal = run.caseChangeProposals.find(item => item.id === proposalId)
     if (!proposal) return
-    await guarded('proposal-decision', () => api.decideProposal(projectVersionId, design.id, run.id, proposalId, { expectedVersion: proposal.decisions.length, decision, comment, editedContent }), '历史用例变更决定已记录。')
-    await refreshAndScheduleAudit()
-  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run])
-
-  const batchAcceptUnchangedReuseProposals = useCallback(async (targets: Array<{ proposalId: string; expectedVersion: number }>) => {
-    if (!projectVersionId || !design || !run) return
-    const result = await guarded('proposal-batch-accept', () => api.batchAcceptUnchangedReuseProposals(projectVersionId, design.id, run.id, targets))
+    await guarded('proposal-decision', () => api.decideProposal(projectVersionId, design.id, run.id, proposalId, { expectedVersion: proposal.decisions.length, decision, comment }), '特殊用例库变更决定已记录。')
     await refreshRun()
-    if (result) notify(`已批量接受 ${result.acceptedCount} 条未变化复用 Proposal。`, 'success')
-  }, [design, guarded, notify, projectVersionId, refreshRun, run])
+  }, [design, guarded, projectVersionId, refreshRun, run])
 
   const publish = useCallback(async (name: string) => {
     if (!projectVersionId || !design || !run) return
@@ -266,5 +259,5 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const previewLegacyMigration = useCallback(async (legacyTestCaseSetVersionId: string) => { if (!inputs) return; const preview = await guarded('legacy-migration-preview', () => api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId)); if (preview) setLegacyMigrationPreview(preview); return preview }, [guarded, inputs])
   const migrateLegacyCaseSet = useCallback(async (legacyTestCaseSetVersionId: string, confirmUncertain = false) => { if (!inputs) return; const preview = legacyMigrationPreview?.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId ? legacyMigrationPreview : await api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId); await guarded('legacy-migration', () => api.migrateLegacyCaseSet(inputs.projectVersion.projectId, { legacyTestCaseSetVersionId, expectedPreviewSha256: preview.previewSha256, confirmUncertain }), '历史已发布用例集已幂等导入正式用例库。'); setLegacyMigrationPreview(null); await loadCollection() }, [guarded, inputs, legacyMigrationPreview, loadCollection])
 
-  return { inputs, designs, design, run, runs, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, openRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, batchAcceptUnchangedReuseProposals, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
+  return { inputs, designs, design, run, runs, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, openRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
 }

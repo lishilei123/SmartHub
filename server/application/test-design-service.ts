@@ -18,6 +18,7 @@ import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
 const PLANNING_AGENT_EDITOR_ID = 'planning-agent'
+const TEST_DESIGN_SERVICE_ACTOR_ID = 'system:test-design-service'
 
 type RepairCandidateCase = { ref: string } & TestCaseContent & { changeReason?: string; confidence?: number }
 type RepairCandidateSnapshot = {
@@ -201,7 +202,7 @@ export class TestDesignService {
     const publishedRunIds = new Set(aggregate.libraryVersions.flatMap(item => item.sourceRunId ? [item.sourceRunId] : []))
     return aggregate.runs.filter(item => item.projectVersionId === projectVersionId && item.testDesignId === designId).sort(newest).map(run => {
       const baseline = run.baseTestCaseLibraryVersionId ? aggregate.libraryVersions.find(item => item.id === run.baseTestCaseLibraryVersionId) : undefined
-      return { ...presentRun(run), ...(run.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: run.baseTestCaseLibraryVersionId } : {}), ...(baseline ? { baseTestCaseLibraryVersion: { id: baseline.id, version: baseline.version, name: baseline.name } } : {}), caseCount: run.testCases.filter(item => !item.tombstonedAt).length, pendingProposalCount: run.caseChangeProposals.filter(item => item.decision === 'pending').length, published: publishedRunIds.has(run.id) }
+      return { ...presentRun(run), ...(run.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: run.baseTestCaseLibraryVersionId } : {}), ...(baseline ? { baseTestCaseLibraryVersion: { id: baseline.id, version: baseline.version, name: baseline.name } } : {}), caseCount: run.testCases.filter(item => !item.tombstonedAt).length, pendingManualProposalCount: run.caseChangeProposals.filter(item => item.decision === 'pending' && requiresHumanProposalDecision(item)).length, published: publishedRunIds.has(run.id) }
     })
   }
 
@@ -360,7 +361,7 @@ export class TestDesignService {
   }
 
   async createCase(projectVersionId: string, designId: string, runId: string, rawContent: unknown, principal: Principal) {
-    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const content = validateTestCaseContent(rawContent); const testCase = newCase(run.id, content, 'manual', principal.subjectId, '人工新建'); run.testCases.push(testCase); materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase) })
+    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const content = validateTestCaseContent(rawContent); const testCase = newCase(run.id, content, 'manual', principal.subjectId, '人工新建'); run.testCases.push(testCase); ensureCandidateProposal(run, testCase, '人工新增测试用例'); materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase) })
   }
 
   async getCase(projectVersionId: string, designId: string, runId: string, caseId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return presentCase(findCase(run, caseId), true) }
@@ -373,18 +374,18 @@ export class TestDesignService {
       const editableReviewStates: ReadonlyArray<TestCase['reviewState']> = ['draft', 'needs_revision', 'rejected']
       if (!editableReviewStates.includes(testCase.reviewState)) throw new TestDesignError('TEST_CASE_EDIT_REVIEW_STATE_INVALID', '审核中的 Revision 不能直接修改；请先撤回审核、退回修改或发起变更。', 409, { caseId: testCase.id, reviewState: testCase.reviewState })
       const current = currentCaseRevision(testCase); assertEtag(ifMatch, etag('case', testCase.id, current.revision, current.contentSha256), 'TEST_CASE_REVISION_CONFLICT')
-      const content = validateTestCaseContent(input.content); const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.reason, current.content); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.reviewState = 'draft'; if (testCase.origin === 'historical_unchanged') testCase.origin = 'historical_modified'; materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase, true)
+      const content = validateTestCaseContent(input.content); const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.reason, current.content); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.reviewState = 'draft'; if (testCase.origin === 'historical_unchanged') testCase.origin = 'historical_modified'; ensureCandidateProposal(run, testCase, input.reason); materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase, true)
     })
   }
 
-  async deleteCase(projectVersionId: string, designId: string, runId: string, caseId: string, principal: Principal) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const testCase = findCase(run, caseId); testCase.tombstonedAt ??= now(); testCase.reviewState = 'draft'; invalidateAudit(run); validateCurrentDependencyGraph(run); return { caseId, deletedBy: principal.subjectId, tombstonedAt: testCase.tombstonedAt } }) }
+  async deleteCase(projectVersionId: string, designId: string, runId: string, caseId: string, principal: Principal) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const testCase = findCase(run, caseId); testCase.tombstonedAt ??= now(); testCase.reviewState = 'draft'; convertDeletedCandidateProposal(run, testCase); invalidateAudit(run); validateCurrentDependencyGraph(run); return { caseId, deletedBy: principal.subjectId, tombstonedAt: testCase.tombstonedAt } }) }
 
   async reviewCase(projectVersionId: string, designId: string, runId: string, caseId: string, input: { decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw'; targetRevision: number; comment?: string }, principal: Principal) {
-    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const testCase = findCase(run, caseId); applyReviewAction(testCase, input, principal.subjectId); invalidateAudit(run); return presentCase(testCase, true) })
+    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const testCase = findCase(run, caseId); applyReviewAction(testCase, input, principal.subjectId); reconcileAutomaticProposalDecisions(run); return presentCase(testCase, true) })
   }
 
   async batchReview(projectVersionId: string, designId: string, runId: string, input: { targets: Array<{ caseId: string; targetRevision: number }>; decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw'; comment?: string }, principal: Principal) {
-    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const targets = input.targets.map(target => ({ target, testCase: findCase(run, target.caseId) })); targets.forEach(({ target, testCase }) => { if (testCase.currentRevision !== target.targetRevision) throw new TestDesignError('TEST_CASE_REVISION_CONFLICT', `用例 ${testCase.id} revision 已变化`, 412) }); targets.forEach(({ target, testCase }) => applyReviewAction(testCase, { ...input, targetRevision: target.targetRevision }, principal.subjectId)); invalidateAudit(run); return targets.map(item => presentCase(item.testCase)) })
+    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const targets = input.targets.map(target => ({ target, testCase: findCase(run, target.caseId) })); targets.forEach(({ target, testCase }) => { if (testCase.currentRevision !== target.targetRevision) throw new TestDesignError('TEST_CASE_REVISION_CONFLICT', `用例 ${testCase.id} revision 已变化`, 412) }); targets.forEach(({ target, testCase }) => applyReviewAction(testCase, { ...input, targetRevision: target.targetRevision }, principal.subjectId)); reconcileAutomaticProposalDecisions(run); return targets.map(item => presentCase(item.testCase)) })
   }
 
   async getDataRequirements(projectVersionId: string, designId: string, runId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(run.dataSetVersions) }
@@ -407,60 +408,18 @@ export class TestDesignService {
 
   async listCaseChangeProposals(projectVersionId: string, designId: string, runId: string, operation?: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone((run.caseChangeProposals ?? []).filter(item => !operation || item.operation === operation)) }
 
-  async decideCaseChangeProposal(projectVersionId: string, designId: string, runId: string, proposalId: string, input: { expectedVersion: number; decision: Exclude<CaseChangeDecision, 'pending'>; comment?: string; editedContent?: unknown }, principal: Principal) {
+  async decideCaseChangeProposal(projectVersionId: string, designId: string, runId: string, proposalId: string, input: { expectedVersion: number; decision: Exclude<CaseChangeDecision, 'pending'>; comment?: string }, principal: Principal) {
     return this.store.transaction(state => {
       assertOpenVersion(state, projectVersionId)
       const run = findRun(state, projectVersionId, designId, runId)
       const proposal = required(run.caseChangeProposals.find(item => item.id === proposalId), 'CASE_CHANGE_PROPOSAL_NOT_FOUND', '用例库变更 Proposal 不存在')
+      if (!requiresHumanProposalDecision(proposal)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_AUTOMATIC', `${proposal.operation} Proposal 由 Service 随用例审核状态自动处理`, 409)
       if (proposal.decisions.length !== input.expectedVersion) throw new TestDesignError('CASE_CHANGE_PROPOSAL_VERSION_CONFLICT', 'Proposal 决策版本已变化', 409)
       validateProposalDecision(proposal, input.decision)
-      let editedContentSha256: string | undefined
-      if (input.decision === 'accepted_edited') {
-        const candidate = required(run.testCases.find(item => item.id === proposal.candidateCaseId), 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', 'Proposal 候选用例不存在')
-        const current = currentCaseRevision(candidate)
-        const content = validateTestCaseContent(input.editedContent)
-        const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.comment ?? '编辑后接受 Proposal', current.content)
-        candidate.revisions.push(revision); candidate.currentRevision = revision.revision; candidate.reviewState = 'draft'
-        proposal.candidateContent = structuredClone(content); proposal.requirementRefs = requirementRefsForCase(run, content); proposal.diff = proposalSourceContent(run, proposal) ? structuralDiff(proposalSourceContent(run, proposal), content) : []
-        editedContentSha256 = revision.contentSha256
-        materializeExecutionConfirmations(run, [candidate])
-        invalidateAudit(run)
-      }
       const decidedAt = now()
       proposal.decision = input.decision; proposal.decidedBy = principal.subjectId; proposal.decidedAt = decidedAt
-      proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: input.expectedVersion, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), ...(editedContentSha256 ? { editedContentSha256 } : {}), decidedBy: principal.subjectId, decidedAt })
+      proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: input.expectedVersion, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), decidedBy: principal.subjectId, decidedAt })
       return structuredClone(proposal)
-    })
-  }
-
-  async batchAcceptUnchangedReuseProposals(projectVersionId: string, designId: string, runId: string, input: { targets: Array<{ proposalId: string; expectedVersion: number }> }, principal: Principal) {
-    return this.store.transaction(state => {
-      assertOpenVersion(state, projectVersionId)
-      const run = findRun(state, projectVersionId, designId, runId)
-      if (!Array.isArray(input.targets) || !input.targets.length || input.targets.length > 1_000) throw new TestDesignError('CASE_CHANGE_PROPOSAL_BATCH_INPUT_INVALID', '批量接受必须提交 1 到 1000 条 Proposal 目标', 422)
-      const targetIds = new Set<string>()
-      const targets = input.targets.map(target => {
-        if (!target || typeof target.proposalId !== 'string' || !target.proposalId || !Number.isInteger(target.expectedVersion) || target.expectedVersion < 0) throw new TestDesignError('CASE_CHANGE_PROPOSAL_BATCH_INPUT_INVALID', '批量接受目标必须包含 proposalId 和非负 expectedVersion', 422)
-        if (targetIds.has(target.proposalId)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_BATCH_INPUT_INVALID', `Proposal ${target.proposalId} 重复`, 422)
-        targetIds.add(target.proposalId)
-        return { target, proposal: required(run.caseChangeProposals.find(item => item.id === target.proposalId), 'CASE_CHANGE_PROPOSAL_NOT_FOUND', '用例库变更 Proposal 不存在') }
-      })
-      for (const { target, proposal } of targets) {
-        if (proposal.decisions.length !== target.expectedVersion) throw new TestDesignError('CASE_CHANGE_PROPOSAL_VERSION_CONFLICT', `Proposal ${proposal.id} 决策版本已变化`, 409)
-        if (proposal.decision === 'accepted') continue
-        if (proposal.decision !== 'pending' || !isUnchangedReuseProposal(run, proposal)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID', `Proposal ${proposal.id} 不是可批量接受的未变化 reuse Candidate`, 409)
-      }
-      const decidedAt = now()
-      const accepted: CaseChangeProposal[] = []
-      for (const { proposal } of targets) {
-        if (proposal.decision === 'accepted') continue
-        proposal.decision = 'accepted'
-        proposal.decidedBy = principal.subjectId
-        proposal.decidedAt = decidedAt
-        proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: proposal.decisions.length, decision: 'accepted', comment: '批量接受未变化复用', decidedBy: principal.subjectId, decidedAt })
-        accepted.push(structuredClone(proposal))
-      }
-      return { acceptedCount: accepted.length, alreadyAcceptedCount: targets.length - accepted.length, proposals: accepted }
     })
   }
 
@@ -512,6 +471,7 @@ export class TestDesignService {
       const baseline = run.baseTestCaseLibraryVersionId
         ? required(aggregate.libraryVersions.find(item => item.id === run.baseTestCaseLibraryVersionId && item.projectId === design.projectId && item.contentSha256 === run.baseTestCaseLibraryVersionSha256), 'TEST_CASE_LIBRARY_BASE_CHANGED', 'Run 冻结的正式用例库版本或 Hash 不存在')
         : undefined
+      reconcileAutomaticProposalDecisions(run)
       const audit = required(run.coverageAudits.find(item => item.id === input.expectedAuditId && item.status === 'valid'), 'COVERAGE_AUDIT_STALE', '覆盖审计不存在或已失效')
       const dataRequirementSet = required(run.dataSetVersions.find(item => item.id === audit.dataSetVersionId), 'TEST_DATA_REQUIREMENT_SET_NOT_FOUND', 'Coverage Audit 固定的测试数据需求版本不存在')
       if (canonicalSha256(dataRequirementSet.requirements) !== dataRequirementSet.contentSha256) throw new TestDesignError('TEST_DATA_REQUIREMENT_SET_HASH_MISMATCH', '测试数据需求版本 Hash 不一致', 409)
@@ -520,7 +480,7 @@ export class TestDesignService {
       if (audit.caseSetSha256 !== input.expectedCaseSetSha256) throw new TestDesignError('TEST_CASE_LIBRARY_HASH_MISMATCH', '候选用例 Hash 与审计不一致', 409)
       const proposalSha256 = caseChangeProposalSha256(run.caseChangeProposals)
       if (proposalSha256 !== input.expectedProposalSha256) throw new TestDesignError('CASE_CHANGE_PROPOSAL_HASH_MISMATCH', 'Proposal 决策 Hash 已变化', 409)
-      const pending = run.caseChangeProposals.filter(item => item.decision === 'pending'); if (pending.length) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_REQUIRED', '所有 Proposal 必须先完成人工处置', 409, { proposalIds: pending.map(item => item.id) })
+      const pending = run.caseChangeProposals.filter(item => item.decision === 'pending' && requiresHumanProposalDecision(item)); if (pending.length) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_REQUIRED', '高风险用例库变更必须先完成人工处置', 409, { proposalIds: pending.map(item => item.id) })
       const currentAudit = runCoverageAudit(run); if (currentAudit.inputSha256 !== audit.inputSha256 || currentAudit.caseSetSha256 !== audit.caseSetSha256 || currentAudit.blockers.some(item => item.resolution !== 'execution_handoff')) throw new TestDesignError('COVERAGE_AUDIT_STALE', '发布前测试设计状态已变化，请重新审计', 409)
       assertLibraryPublicationGates(aggregate, design.projectId, run)
       assertLibraryBaselineMembersCurrent(aggregate, design.projectId, run, baseline)
@@ -1384,6 +1344,7 @@ function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestC
       ...(!resetDecision && retained?.appliedRevision !== undefined ? { appliedRevision: retained.appliedRevision } : {}),
     }
   })
+  reconcileAutomaticProposalDecisions(run)
 }
 
 type ExecutionIssueType = 'ui_execution_contract' | 'api_execution_contract' | 'test_environment' | 'test_data_readiness'
@@ -1668,7 +1629,60 @@ function isUnchangedReuseProposal(run: TestDesignWorkflowRun, proposal: CaseChan
   const source = proposalSourceContent(run, proposal)
   return Boolean(candidate && source && candidate.origin === 'historical_unchanged' && candidate.reviewActions.length === 0 && candidate.revisions.every(revision => revision.editorId === PLANNING_AGENT_EDITOR_ID) && currentCaseRevision(candidate).semanticSha256 === semanticContentSha256(source))
 }
-function validateProposalDecision(proposal: CaseChangeProposal, decision: Exclude<CaseChangeDecision, 'pending'>) { const allowed: Record<CaseChangeProposal['operation'], Array<Exclude<CaseChangeDecision, 'pending'>>> = { reuse: ['accepted', 'accepted_edited', 'rejected', 'keep_original', 'reference'], update: ['accepted', 'accepted_edited', 'rejected', 'keep_original', 'reference'], create: ['accepted', 'accepted_edited', 'rejected', 'reference'], deprecate: ['deprecated', 'rejected', 'keep_original', 'reference'], reference: ['reference', 'rejected'] }; if (!allowed[proposal.operation].includes(decision)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_INVALID', `${proposal.operation} 不允许决策 ${decision}`, 422) }
+function requiresHumanProposalDecision(proposal: CaseChangeProposal) { return proposal.operation === 'deprecate' || proposal.operation === 'reference' }
+function resetProposalDecision(proposal: CaseChangeProposal) {
+  proposal.decision = 'pending'
+  delete proposal.decidedBy
+  delete proposal.decidedAt
+  delete proposal.appliedCaseId
+  delete proposal.appliedRevision
+}
+function ensureCandidateProposal(run: TestDesignWorkflowRun, testCase: TestCase, reason: string) {
+  const revision = currentCaseRevision(testCase)
+  const existing = run.caseChangeProposals.find(item => item.candidateCaseId === testCase.id)
+  const source = existing ? proposalSourceContent(run, existing) : undefined
+  const operation: CaseChangeProposal['operation'] = source ? (revision.semanticSha256 === semanticContentSha256(source) ? 'reuse' : 'update') : 'create'
+  if (!existing) {
+    run.caseChangeProposals.push({ id: `case_change_proposal_${randomUUID()}`, runId: run.id, operation, candidateCaseId: testCase.id, candidateContent: structuredClone(revision.content), diff: [], requirementRefs: requirementRefsForCase(run, revision.content), reason, confidence: 1, decision: 'pending', createdAt: now(), decisions: [] })
+    return
+  }
+  const changed = existing.operation !== operation || !existing.candidateContent || semanticContentSha256(existing.candidateContent) !== revision.semanticSha256
+  existing.operation = operation
+  existing.candidateContent = structuredClone(revision.content)
+  existing.diff = source ? structuralDiff(source, revision.content) : []
+  existing.requirementRefs = requirementRefsForCase(run, revision.content)
+  existing.reason = reason
+  if (changed) resetProposalDecision(existing)
+}
+function convertDeletedCandidateProposal(run: TestDesignWorkflowRun, testCase: TestCase) {
+  const proposal = run.caseChangeProposals.find(item => item.candidateCaseId === testCase.id)
+  if (!proposal) return
+  if (!proposal.sourceCaseId || proposal.sourceRevision === undefined) {
+    run.caseChangeProposals = run.caseChangeProposals.filter(item => item.id !== proposal.id)
+    return
+  }
+  proposal.operation = 'deprecate'
+  proposal.reason = '人工删除当前候选用例；废弃正式历史 Case 需要显式确认'
+  proposal.diff = []
+  delete proposal.candidateCaseId
+  delete proposal.candidateContent
+  resetProposalDecision(proposal)
+}
+function reconcileAutomaticProposalDecisions(run: TestDesignWorkflowRun) {
+  for (const proposal of run.caseChangeProposals) {
+    if (proposal.decision !== 'pending' || requiresHumanProposalDecision(proposal)) continue
+    const candidate = proposal.candidateCaseId ? run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt) : undefined
+    const eligible = isUnchangedReuseProposal(run, proposal)
+      || ((proposal.operation === 'create' || proposal.operation === 'update') && candidate?.reviewState === 'approved')
+    if (!eligible) continue
+    const decidedAt = now()
+    proposal.decision = 'accepted'
+    proposal.decidedBy = TEST_DESIGN_SERVICE_ACTOR_ID
+    proposal.decidedAt = decidedAt
+    proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: proposal.decisions.length, decision: 'accepted', comment: proposal.operation === 'reuse' ? 'Service 自动接受与冻结 Snapshot 一致的未变化复用' : 'Service 随当前 TestCase Revision 审核通过自动接受', decidedBy: TEST_DESIGN_SERVICE_ACTOR_ID, decidedAt })
+  }
+}
+function validateProposalDecision(proposal: CaseChangeProposal, decision: Exclude<CaseChangeDecision, 'pending'>) { const allowed: Record<CaseChangeProposal['operation'], Array<Exclude<CaseChangeDecision, 'pending'>>> = { reuse: [], update: [], create: [], deprecate: ['deprecated', 'keep_original'], reference: ['reference', 'rejected'] }; if (!allowed[proposal.operation].includes(decision)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_INVALID', `${proposal.operation} 不允许决策 ${decision}`, 422) }
 function traceabilityForProposal(run: TestDesignWorkflowRun, proposal: CaseChangeProposal, content: TestCaseContent): TestCaseTraceability {
   const releaseId = run.basisSnapshot.requirementReleaseId
   const referencedBasis = new Set([...(proposal.requirementRefs ?? []), ...requirementRefsForCase(run, content)])
@@ -1686,8 +1700,8 @@ function traceabilityForProposal(run: TestDesignWorkflowRun, proposal: CaseChang
 function assertLibraryPublicationGates(aggregate: TestDesignState, projectId: string, run: TestDesignWorkflowRun) {
   const unreviewed = run.testCases.filter(item => !item.tombstonedAt && item.reviewState !== 'approved')
   if (unreviewed.length) throw new TestDesignError('TEST_CASE_REVIEW_REQUIRED', '所有候选用例必须完成人工审核', 409, { caseIds: unreviewed.map(item => item.id) })
-  const pendingProposals = run.caseChangeProposals.filter(item => item.decision === 'pending')
-  if (pendingProposals.length) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_REQUIRED', '所有 Proposal 必须先完成人工处置', 409, { proposalIds: pendingProposals.map(item => item.id) })
+  const pendingProposals = run.caseChangeProposals.filter(item => item.decision === 'pending' && requiresHumanProposalDecision(item))
+  if (pendingProposals.length) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_REQUIRED', '高风险用例库变更必须先完成人工处置', 409, { proposalIds: pendingProposals.map(item => item.id) })
   const blockingFindings = run.findings.filter(item => item.severity === 'blocker' && item.state !== 'resolved' && item.state !== 'rejected')
   if (blockingFindings.length) throw new TestDesignError('TEST_CASE_LIBRARY_PUBLICATION_BLOCKED', '阻断级 Finding 尚未处理', 409, { findingIds: blockingFindings.map(item => item.id) })
   const blockingConfirmations = run.confirmationItems.filter(item => item.blocker && item.impactStage !== 'handoff' && item.state !== 'resolved' && item.state !== 'rejected')
@@ -1787,7 +1801,8 @@ function applyProposalToLibrary(aggregate: TestDesignState, projectId: string, r
   const candidate = proposal.candidateCaseId ? required(run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt), 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', 'Proposal 候选用例不存在') : undefined
   const candidateRevision = candidate ? currentCaseRevision(candidate) : undefined
   if (candidate && candidate.reviewState !== 'approved') throw new TestDesignError('TEST_CASE_REVIEW_REQUIRED', `Proposal 候选用例 ${candidate.id} 未批准`, 409)
-  if (proposal.decision === 'reference' || proposal.decision === 'rejected') return
+  if (proposal.decision === 'reference') { if (source) members.delete(source.id); return }
+  if (proposal.decision === 'rejected') return
   if (proposal.decision === 'keep_original') { if (source && sourceRevision) members.set(source.id, { caseId: source.id, revision: sourceRevision.revision, ordinal: 0, contentSha256: sourceRevision.contentSha256 }); return }
   if (proposal.operation === 'reuse') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '复用来源用例不存在'); const revision = required(sourceRevision, 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '复用来源 Revision 不存在'); members.set(testCase.id, { caseId: testCase.id, revision: revision.revision, ordinal: 0, contentSha256: revision.contentSha256 }); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = revision.revision; return }
   if (proposal.operation === 'update') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '修改来源用例不存在'); const content = required(candidateRevision?.content, 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', '修改 Proposal 缺少候选内容'); const revision = createLibraryRevision(testCase.currentRevision + 1, content, actorId, proposal.reason, run.id, proposal.id, traceabilityForProposal(run, proposal, content)); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.status = 'active'; testCase.updatedAt = revision.createdAt; members.set(testCase.id, { caseId: testCase.id, revision: revision.revision, ordinal: 0, contentSha256: revision.contentSha256 }); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = revision.revision; return }

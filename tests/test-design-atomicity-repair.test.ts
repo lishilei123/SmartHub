@@ -129,7 +129,8 @@ test('test-case-design/v2 提交 cases: [] 时，Service 从明确继承的冻�
   assert.equal(completed.testCases.filter(item => !item.tombstonedAt).length, 100)
   assert.equal(completed.caseChangeProposals.filter(item => item.operation === 'reuse').length, 100)
   assert.equal(completed.caseChangeProposals.filter(item => item.operation === 'create').length, 0)
-  assert.equal(completed.caseChangeProposals.filter(item => item.decision === 'pending').length, 100, 'Service 自动 Proposal 仍须人工处置')
+  assert.equal(completed.caseChangeProposals.filter(item => item.decision === 'accepted').length, 100, 'Service 必须自动接受与冻结 Snapshot 一致的 reuse Proposal')
+  assert.ok(completed.caseChangeProposals.every(item => item.decidedBy === 'system:test-design-service'))
   assert.ok(completed.testCases.some(item => item.origin === 'historical_unchanged' && item.revisions[item.currentRevision].content.title === '冻结历史 1'))
   const artifact = completed.artifacts.find(item => item.id === completed.nodeRuns.find(item => item.nodeKey === 'test_case_design')?.outputArtifactId)
   assert.equal((artifact?.content as { cases?: unknown[] }).cases?.length, 100, 'Artifact 必须保存 Service 生成的完整 Candidate Snapshot')
@@ -236,9 +237,9 @@ test('同一 TestDesign 的重试幂等、两个 Run 候选 Proposal Audit 审�
   assert.equal(completedB.historicalSnapshot.baseTestCaseLibraryVersionId, 'library-v1')
   const beforeB = structuredClone(completedB)
 
+  const auditAId = completedA.coverageAudits.at(-1)!.id
   for (const testCase of completedA.testCases) await service.reviewCase('project-version-1', design.id, completedA.id, testCase.id, { decision: 'approve', targetRevision: testCase.currentRevision, comment: 'Run A 独立审核' }, principal)
-  for (const proposal of completedA.caseChangeProposals) await service.decideCaseChangeProposal('project-version-1', design.id, completedA.id, proposal.id, { expectedVersion: 0, decision: 'accepted', comment: '仅接受 Run A' }, principal)
-  await service.reAudit('project-version-1', design.id, completedA.id)
+  assert.equal((await service.getRun('project-version-1', design.id, completedA.id)).coverageAudits.at(-1)?.id, auditAId, '审核不应触发重复 Coverage Audit')
   const afterB = await service.getRun('project-version-1', design.id, completedB.id)
   assert.deepEqual(afterB.testCases, beforeB.testCases)
   assert.deepEqual(afterB.caseChangeProposals, beforeB.caseChangeProposals)
@@ -247,8 +248,6 @@ test('同一 TestDesign 的重试幂等、两个 Run 候选 Proposal Audit 审�
   assert.deepEqual(afterB.historicalSnapshot, beforeB.historicalSnapshot)
 
   for (const testCase of afterB.testCases) await service.reviewCase('project-version-1', design.id, afterB.id, testCase.id, { decision: 'approve', targetRevision: testCase.currentRevision, comment: 'Run B 独立审核' }, principal)
-  for (const proposal of afterB.caseChangeProposals) await service.decideCaseChangeProposal('project-version-1', design.id, afterB.id, proposal.id, { expectedVersion: 0, decision: 'accepted', comment: '仅接受 Run B' }, principal)
-  await service.reAudit('project-version-1', design.id, afterB.id)
   const publishableA = await service.getRun('project-version-1', design.id, completedA.id)
   const publishableB = await service.getRun('project-version-1', design.id, completedB.id)
   const auditA = publishableA.coverageAudits.at(-1)!
@@ -268,7 +267,7 @@ test('同一 TestDesign 的重试幂等、两个 Run 候选 Proposal Audit 审�
   const history = await service.listRuns('project-version-1', design.id)
   assert.equal(history.length, 2)
   assert.deepEqual(new Set(history.map(item => item.id)), new Set([completedA.id, completedB.id]))
-  assert.equal(history.find(item => item.id === completedB.id)?.pendingProposalCount, 0)
+  assert.equal(history.find(item => item.id === completedB.id)?.pendingManualProposalCount, 0)
   assert.equal(history.every(item => item.published), true)
 })
 
@@ -282,11 +281,8 @@ test('Patch 修改复用历史 Candidate 时仅创建当前 Run Revision，Propo
   const completed = await waitForCompletedRun(service, 'project-version-1', design.id, created.id)
   assert.equal(completed.status, 'succeeded', completed.error)
   const reuse = completed.caseChangeProposals.find(item => item.operation === 'reuse')!
-  await service.batchAcceptUnchangedReuseProposals('project-version-1', design.id, completed.id, { targets: [{ proposalId: reuse.id, expectedVersion: 0 }] }, principal)
-  await assert.rejects(
-    () => service.batchAcceptUnchangedReuseProposals('project-version-1', design.id, completed.id, { targets: [{ proposalId: completed.caseChangeProposals.find(item => item.operation === 'create')!.id, expectedVersion: 0 }] }, principal),
-    /CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u,
-  )
+  assert.equal(reuse.decision, 'accepted')
+  await assert.rejects(() => service.decideCaseChangeProposal('project-version-1', design.id, completed.id, reuse.id, { expectedVersion: reuse.decisions.length, decision: 'accepted' }, principal), /CASE_CHANGE_PROPOSAL_AUTOMATIC/u)
 
   const run = await service.getRun('project-version-1', design.id, completed.id)
   const historical = run.testCases.find(item => item.origin === 'historical_unchanged')!
@@ -319,12 +315,9 @@ test('Patch 修改复用历史 Candidate 时仅创建当前 Run Revision，Propo
   await store.transaction(state => {
     const persisted = state.testDesignState!.runs.find(item => item.id === run.id)!
     Object.assign(persisted, structuredClone(run))
-    persisted.caseChangeProposals.push({ id: 'proposal-deprecate', runId: run.id, operation: 'deprecate', sourceCaseId: updated.sourceCaseId, sourceRevision: updated.sourceRevision, diff: [], requirementRefs: [], reason: '测试批量边界', confidence: 1, decision: 'pending', createdAt: new Date().toISOString(), decisions: [] })
   })
-  await assert.rejects(
-    () => service.batchAcceptUnchangedReuseProposals('project-version-1', design.id, run.id, { targets: [{ proposalId: updated.id, expectedVersion: updated.decisions.length }, { proposalId: 'proposal-deprecate', expectedVersion: 0 }] }, principal),
-    /CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u,
-  )
+  await service.reviewCase('project-version-1', design.id, run.id, changedCase.id, { decision: 'approve', targetRevision: changedCase.currentRevision }, principal)
+  assert.equal((await service.getRun('project-version-1', design.id, run.id)).caseChangeProposals.find(item => item.id === updated.id)?.decision, 'accepted')
 })
 
 test('未变化历史复用与当前 AI Candidate 并存时，可修复的 Coverage Blocker 仍进入自动 Repair', async () => {
@@ -416,6 +409,75 @@ test('test-design-repair/v2 拒绝过期 baseCandidateSha256，不会将 Patch �
   assert.match(completed.error ?? '', /TEST_DESIGN_REPAIR_BASE_CANDIDATE_CONFLICT/)
 })
 
+test('Case 审核不使 Audit stale，create 随批准自动接受；内容修改才失效且重新审核后可直接发布', async () => {
+  const store = await storeWithPublishedRequirement()
+  const original = caseCandidate('TC-CREATE', longTitle('新增用例'))
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v2', content: referenceCandidate([original]) }) }
+  const projector = { ingest: async () => ({ version: { id: 'projected-create-version' }, task: null }) }
+  const service = new TestDesignService(store, runtime, projector)
+  const design = await service.createDesign('project-version-1', { name: '自动 Proposal 发布', objective: '验证审核与 Coverage 解耦', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'none' } }, principal)
+  const created = await service.createRun('project-version-1', design.id, 'automatic-create-publication', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, created.id)
+  const initialAudit = completed.coverageAudits.at(-1)!
+  const testCase = completed.testCases[0]!
+  const createProposal = completed.caseChangeProposals.find(item => item.operation === 'create')!
+  assert.equal(initialAudit.status, 'valid')
+  assert.equal(initialAudit.blockers.some(item => item.code === 'TEST_CASE_REVIEW_REQUIRED'), false)
+  assert.equal(createProposal.decision, 'pending')
+
+  await service.reviewCase('project-version-1', design.id, completed.id, testCase.id, { decision: 'approve', targetRevision: testCase.currentRevision }, principal)
+  let current = await service.getRun('project-version-1', design.id, completed.id)
+  assert.equal(current.coverageAudits.at(-1)?.id, initialAudit.id)
+  assert.equal(current.coverageAudits.at(-1)?.status, 'valid')
+  assert.equal(current.caseChangeProposals.find(item => item.id === createProposal.id)?.decision, 'accepted')
+
+  await service.reviewCase('project-version-1', design.id, completed.id, testCase.id, { decision: 'request_revision', targetRevision: testCase.currentRevision, comment: '补充标题说明' }, principal)
+  assert.equal((await service.getRun('project-version-1', design.id, completed.id)).coverageAudits.at(-1)?.status, 'valid')
+  const loaded = await service.getCase('project-version-1', design.id, completed.id, testCase.id) as { etag: string; content: ReturnType<typeof validateTestCaseContent> }
+  await service.patchCase('project-version-1', design.id, completed.id, testCase.id, loaded.etag, { content: { ...loaded.content, title: longTitle('修改后的新增用例') }, reason: '修改实际 Case Content' }, principal)
+  current = await service.getRun('project-version-1', design.id, completed.id)
+  assert.equal(current.coverageAudits.at(-1)?.status, 'stale')
+  assert.equal(current.caseChangeProposals.find(item => item.id === createProposal.id)?.decision, 'pending')
+
+  const revised = current.testCases.find(item => item.id === testCase.id)!
+  await service.reviewCase('project-version-1', design.id, completed.id, testCase.id, { decision: 'submit', targetRevision: revised.currentRevision }, principal)
+  await service.reviewCase('project-version-1', design.id, completed.id, testCase.id, { decision: 'approve', targetRevision: revised.currentRevision }, principal)
+  await service.reAudit('project-version-1', design.id, completed.id)
+  current = await service.getRun('project-version-1', design.id, completed.id)
+  assert.equal(current.caseChangeProposals.find(item => item.id === createProposal.id)?.decision, 'accepted')
+  const audit = current.coverageAudits.at(-1)!
+  const version = await service.publishLibraryVersion('project-version-1', design.id, completed.id, { name: '无需二次 Proposal 审核', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256, expectedProposalSha256: current.caseChangeProposalSha256 }, principal)
+  assert.equal(version.members.length, 1)
+})
+
+test('deprecate 保持人工 Gate，未确认时阻止发布，确认后从新版本移除并废弃正式 Case', async () => {
+  const store = await storeWithPublishedRequirement()
+  await installHistoricalLibrary(store, 1)
+  const submission = { ...referenceCandidate([caseCandidate('TC-REPLACEMENT', longTitle('替代历史用例'))]), historicalChanges: [{ operation: 'deprecate' as const, sourceCaseId: 'CASE-001', sourceRevision: 1, reason: '当前 Requirement 已由新场景替代', confidence: 0.98 }] }
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v2', content: submission }) }
+  const projector = { ingest: async () => ({ version: { id: 'projected-deprecate-version' }, task: null }) }
+  const service = new TestDesignService(store, runtime, projector)
+  const design = await service.createDesign('project-version-1', { name: '废弃人工门禁', objective: '验证破坏性资产变更', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal)
+  const created = await service.createRun('project-version-1', design.id, 'manual-deprecate-gate', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, created.id)
+  const newCase = completed.testCases.find(item => item.candidateRef === 'TC-REPLACEMENT')!
+  await service.reviewCase('project-version-1', design.id, completed.id, newCase.id, { decision: 'approve', targetRevision: newCase.currentRevision }, principal)
+  let current = await service.getRun('project-version-1', design.id, completed.id)
+  const deprecate = current.caseChangeProposals.find(item => item.operation === 'deprecate')!
+  const audit = current.coverageAudits.at(-1)!
+  assert.equal(deprecate.decision, 'pending')
+  await assert.rejects(() => service.publishLibraryVersion('project-version-1', design.id, completed.id, { name: '禁止发布', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256, expectedProposalSha256: current.caseChangeProposalSha256 }, principal), /CASE_CHANGE_PROPOSAL_DECISION_REQUIRED/u)
+
+  await service.decideCaseChangeProposal('project-version-1', design.id, completed.id, deprecate.id, { expectedVersion: deprecate.decisions.length, decision: 'deprecated', comment: '确认破坏性资产变更' }, principal)
+  current = await service.getRun('project-version-1', design.id, completed.id)
+  assert.equal(current.coverageAudits.at(-1)?.status, 'valid')
+  const version = await service.publishLibraryVersion('project-version-1', design.id, completed.id, { name: '废弃已确认', expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256, expectedProposalSha256: current.caseChangeProposalSha256 }, principal)
+  assert.equal(version.members.some(item => item.caseId === 'CASE-001'), false)
+  assert.equal((await service.getLibraryCase('project-1', 'CASE-001') as { status: string }).status, 'deprecated')
+})
+
+function longTitle(prefix: string) { return `${prefix}：验证任务状态在正常、异常、边界、权限、并发、重试、恢复和跨入口一致性场景下均产生独立且可判定的业务结果，并保持正式 Requirement 追溯。` }
+
 function caseCandidate(ref: string, title: string) {
   return {
     ref,
@@ -470,7 +532,7 @@ async function installHistoricalLibrary(store: JsonStore, count: number) {
     state.testDesignState = {
       architectureVersion: 'single-agent-skills/v1', designs: [], runs: [{ id: 'history-run', projectVersionId: sourceProjectVersionId } as never], caseSetVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [],
       libraryCases: requirements.map(item => ({ id: item.caseId, projectId: 'project-1', currentRevision: 1, status: 'active', createdAt: '2026-08-20T00:00:00.000Z', updatedAt: '2026-08-20T00:00:00.000Z', revisions: [{ revision: 1, content: item.content, contentSha256: canonicalSha256(item.content), semanticSha256: item.semanticSha256, changeReason: '冻结 Fixture', createdBy: 'test-owner', createdAt: '2026-08-20T00:00:00.000Z' }] })),
-      libraryVersions: [{ id: 'library-v1', projectId: 'project-1', version: 1, name: '冻结历史', sourceRunId: 'history-run', dataRequirementSet: { id: 'data-history', version: 1, requirements: [], contentSha256: canonicalSha256([]), createdAt: '2026-08-20T00:00:00.000Z', createdBy: 'test-owner' }, members: requirements.map((item, index) => ({ caseId: item.caseId, revision: 1, ordinal: index, contentSha256: canonicalSha256(item.content), frozenContent: item.content })), contentSha256: canonicalSha256(requirements.map(item => item.caseId)), publishedBy: 'test-owner', publishedAt: '2026-08-20T00:00:00.000Z', projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics: { reuse: count, update: 0, create: 0, deprecate: 0, reference: 0 }, dimensionStatistics: { functional: count }, coverageAudit: { id: 'history-audit', statistics: { totalBasis: 1, coveredBasis: 1, totalCases: count, approvedCases: count }, blockerCount: 0 } } }],
+      libraryVersions: [{ id: 'library-v1', projectId: 'project-1', version: 1, name: '冻结历史', sourceRunId: 'history-run', dataRequirementSet: { id: 'data-history', version: 1, requirements: [], contentSha256: canonicalSha256([]), createdAt: '2026-08-20T00:00:00.000Z', createdBy: 'test-owner' }, members: requirements.map((item, index) => ({ caseId: item.caseId, revision: 1, ordinal: index, contentSha256: canonicalSha256(item.content), frozenContent: item.content })), contentSha256: canonicalSha256(requirements.map(item => item.caseId)), publishedBy: 'test-owner', publishedAt: '2026-08-20T00:00:00.000Z', projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics: { reuse: count, update: 0, create: 0, deprecate: 0, reference: 0 }, dimensionStatistics: { functional: count }, coverageAudit: { id: 'history-audit', statistics: { totalBasis: 1, coveredBasis: 1, totalCases: count }, blockerCount: 0 } } }],
     } as never
   })
 }

@@ -110,6 +110,14 @@ test('Coverage Audit 直接建立 Requirement 到 TestCase 关系，并识别多
   assert.deepEqual(result.relations.map(item => item.caseId), ['case-1', 'case-1'])
 })
 
+test('Coverage Audit 与人工审核状态解耦，draft Case 不产生审核 blocker', () => {
+  const draft = testCase('case-draft', content(['REQ-1']), 'draft')
+  const result = audit([draft], ['REQ-1'], [claim('SC-DRAFT', 'case-draft')])
+  assert.equal(result.status, 'valid')
+  assert.equal(result.blockers.some(item => item.code === 'TEST_CASE_REVIEW_REQUIRED'), false)
+  assert.equal('approvedCases' in result.statistics, false)
+})
+
 test('coverageTarget=false 的项目背景不进入 Coverage，而 true 的业务 Requirement 仍必须覆盖', () => {
   const contextOnly = audit([], [{ id: 'RP-CONTEXT', coverageTarget: false }])
   assert.equal(contextOnly.statistics.totalBasis, 0)
