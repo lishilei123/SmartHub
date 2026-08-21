@@ -101,9 +101,9 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
 
   const reviewCases = useCallback(async () => {
     if (!projectVersionId || !design || !run) return
-    const targets = run.testCases.filter(item => !item.tombstonedAt && item.reviewState !== 'approved').map(item => ({ caseId: item.id, targetRevision: item.currentRevision }))
+    const targets = run.testCases.filter(item => !item.tombstonedAt && item.reviewState === 'in_review').map(item => ({ caseId: item.id, targetRevision: item.currentRevision }))
     if (!targets.length) return
-    await guarded('case-approve', () => api.batchReviewCases(projectVersionId, design.id, run.id, targets, 'approve'), '当前候选用例已批量审核通过。')
+    await guarded('case-approve', () => api.batchReviewCases(projectVersionId, design.id, run.id, targets, 'approve'), '当前待审核 Revision 已批量审核通过。')
     await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 
@@ -116,7 +116,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const editCase = useCallback(async (caseId: string, content: TestCaseContent, reason: string) => {
     if (!projectVersionId || !design || !run) return
     const current = await guarded('case-load', () => api.loadCase(projectVersionId, design.id, run.id, caseId))
-    await guarded('case-edit', () => api.patchCase(projectVersionId, design.id, run.id, caseId, current.etag, content, reason), '测试用例已生成新 Revision。')
+    await guarded('case-edit', () => api.patchCase(projectVersionId, design.id, run.id, caseId, current.etag, content, reason), '测试用例已生成新的草稿 Revision，请提交审核。')
     await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 
@@ -126,9 +126,10 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 
-  const reviewCase = useCallback(async (caseId: string, decision: 'approve', targetRevision: number, comment?: string) => {
+  const reviewCase = useCallback(async (caseId: string, decision: api.TestCaseReviewDecision, targetRevision: number, comment?: string) => {
     if (!projectVersionId || !design || !run) return
-    await guarded(`case-${decision}`, () => api.reviewCase(projectVersionId, design.id, run.id, caseId, decision, targetRevision, comment), `Revision ${targetRevision} 已审核通过。`)
+    const message = ({ submit: `Revision ${targetRevision} 已提交人工审核。`, approve: `Revision ${targetRevision} 已审核通过。`, reject: `Revision ${targetRevision} 已拒绝。`, request_revision: `Revision ${targetRevision} 已退回修改。`, withdraw: `Revision ${targetRevision} 已撤回审核并回到草稿。` } as const)[decision]
+    await guarded(`case-${decision}`, () => api.reviewCase(projectVersionId, design.id, run.id, caseId, decision, targetRevision, comment), message)
     await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 

@@ -1,5 +1,5 @@
 import { CheckCircle2, FileCheck2, GitCompareArrows, LockKeyhole, PackageCheck, Rocket, Send, ShieldAlert } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as api from './api'
 import type { ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseLibraryVersion, TestDesignWorkflowRun, TestExecutionMode } from './types'
 
@@ -11,11 +11,12 @@ type PublicationProps = {
   suites: LibraryTestSuiteVersion[]
   handoffs: LibraryExecutionHandoff[]
   busy: boolean
+  handoffFocusRequest?: number
   onPublish?: (name: string) => void
   onHandoff: (version: TestCaseLibraryVersion, mode: TestExecutionMode, suiteVersionId?: string, impactedCaseIds?: string[], executionReadinessOverrides?: ExecutionReadinessOverrideInput[]) => void
 }
 
-export function TestDesignPublicationPanel({ projectId, run, cases, versions, suites, handoffs, busy, onPublish, onHandoff }: PublicationProps) {
+export function TestDesignPublicationPanel({ projectId, run, cases, versions, suites, handoffs, busy, handoffFocusRequest, onPublish, onHandoff }: PublicationProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = versions.find(item => item.id === selectedId) ?? versions[0]
   const [publishName, setPublishName] = useState(run ? `测试用例库 · ${new Date().toLocaleDateString('zh-CN')}` : '')
@@ -24,6 +25,13 @@ export function TestDesignPublicationPanel({ projectId, run, cases, versions, su
   const [impacted, setImpacted] = useState('')
   const [diff, setDiff] = useState<Array<{ caseId: string; change: string }> | null>(null)
   const [overrideReasons, setOverrideReasons] = useState<Record<string, string>>({})
+  const handoffRef = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    if (!handoffFocusRequest) return
+    setMode('full'); setSuiteId(''); setImpacted(''); setOverrideReasons({})
+    const frame = window.requestAnimationFrame(() => handoffRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [handoffFocusRequest])
   const audit = run?.coverageAudits.at(-1)
   const publicationAuditBlockers = audit?.blockers.filter(item => item.resolution !== 'execution_handoff') ?? []
   const executionHandoffBlockerCount = audit?.blockers.filter(item => item.resolution === 'execution_handoff').length ?? 0
@@ -58,7 +66,7 @@ export function TestDesignPublicationPanel({ projectId, run, cases, versions, su
         <section><h4>Coverage Audit</h4>{selected.publicationSummary ? <div className="tdw-audit-summary"><CheckCircle2 /><span><b>{selected.publicationSummary.coverageAudit.id}</b><small>Requirement {selected.publicationSummary.coverageAudit.statistics.coveredBasis}/{selected.publicationSummary.coverageAudit.statistics.totalBasis} · Blockers {selected.publicationSummary.coverageAudit.blockerCount}</small></span></div> : <p className="tdw-muted">该版本没有新版发布统计快照。</p>}</section>
         <section><h4>Workspace 投影</h4><div className="tdw-projection">{selected.projection.files.map(file => <article key={file.logicalPath}><FileCheck2 /><span><b>{file.logicalPath}</b><code>{file.contentSha256}</code></span></article>)}</div></section>
         <section><h4>版本 Diff</h4><div className="tdw-compare"><GitCompareArrows /><select defaultValue="" onChange={async event => event.target.value && setDiff((await api.diffLibraryVersions(projectId, event.target.value, selected.id)).changes)}><option value="">选择起始版本</option>{versions.filter(item => item.id !== selected.id).map(item => <option key={item.id} value={item.id}>V{item.version} · {item.name}</option>)}</select></div>{diff && <div className="tdw-version-diff">{diff.length ? diff.map(item => <span key={item.caseId} className={item.change}><b>{item.change}</b><code>{item.caseId}</code></span>) : <p>成员一致。</p>}</div>}</section>
-        <section className="tdw-handoff-box"><h4>生成 Execution Handoff</h4><p>冻结 Case Revision、executionSpec、追溯、内容 Hash 和独立测试数据需求快照；实际 Fixture / 生成器 / 数据引用到创建执行 Run 时再绑定。</p><div><select value={mode} onChange={event => { setMode(event.target.value as TestExecutionMode); setSuiteId(''); setOverrideReasons({}) }}><option value="smoke">smoke</option><option value="regression">regression</option><option value="full">full</option><option value="custom">custom</option></select>{mode !== 'full' && <select value={suiteId} onChange={event => { setSuiteId(event.target.value); setOverrideReasons({}) }}><option value="">选择当前用例库版本的 {mode} 套件版本</option>{eligibleSuites.map(item => <option key={item.id} value={item.id}>{item.name} V{item.version}</option>)}</select>}{mode === 'regression' && <input value={impacted} onChange={event => setImpacted(event.target.value)} placeholder="受影响 Case ID，逗号分隔（可选）" />}</div>
+        <section ref={handoffRef} className="tdw-handoff-box"><h4>生成 Execution Handoff</h4><p>冻结 Case Revision、executionSpec、追溯、内容 Hash 和独立测试数据需求快照；实际 Fixture / 生成器 / 数据引用到创建执行 Run 时再绑定。</p><p className="td-confirmation-note"><ShieldAlert />此处可填写 needs_confirmation 用例的人工覆盖原因；UI 入口、API 契约、环境或阈值等实际执行配置，需要通过新 Revision 补全后重新发布。</p><div><select value={mode} onChange={event => { setMode(event.target.value as TestExecutionMode); setSuiteId(''); setOverrideReasons({}) }}><option value="smoke">smoke</option><option value="regression">regression</option><option value="full">full</option><option value="custom">custom</option></select>{mode !== 'full' && <select value={suiteId} onChange={event => { setSuiteId(event.target.value); setOverrideReasons({}) }}><option value="">选择当前用例库版本的 {mode} 套件版本</option>{eligibleSuites.map(item => <option key={item.id} value={item.id}>{item.name} V{item.version}</option>)}</select>}{mode === 'regression' && <input value={impacted} onChange={event => setImpacted(event.target.value)} placeholder="受影响 Case ID，逗号分隔（可选）" />}</div>
           {blockedMembers.length > 0 && <p className="td-confirmation-note"><ShieldAlert />{blockedMembers.map(item => `${item.caseId} r${item.revision}`).join('、')} 为 blocked，不能进入 Handoff。</p>}
           {confirmationMembers.length > 0 && <div className="tdw-readiness-overrides"><p className="td-confirmation-note"><ShieldAlert />以下 needs_confirmation 成员默认被服务端阻断；如需人工覆盖，必须逐条填写原因。</p>{confirmationMembers.map(member => { const key = `${member.caseId}:${member.revision}`; return <label key={key}><span>{member.frozenContent.title}<code>{member.caseId} · r{member.revision}</code></span><input value={overrideReasons[key] ?? ''} onChange={event => setOverrideReasons(current => ({ ...current, [key]: event.target.value }))} placeholder="人工覆盖原因（必填）" /></label> })}</div>}
           <button className="primary" disabled={busy || (mode !== 'full' && !suiteId) || blockedMembers.length > 0 || overrideInputs.some(item => !item.reason)} onClick={() => onHandoff(selected, mode, suiteId || undefined, impacted.split(',').map(item => item.trim()).filter(Boolean), overrideInputs.length ? overrideInputs : undefined)}><Send />生成 Handoff</button>

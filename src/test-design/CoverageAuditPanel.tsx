@@ -3,7 +3,7 @@ import type { TestDesignCoverageAudit, TestDesignWorkflowRun } from './types'
 
 type BlockerResolution = TestDesignCoverageAudit['blockers'][number]['resolution']
 
-export function CoverageAuditPanel({ run, busy, onAudit, onResolve }: { run: TestDesignWorkflowRun; busy: boolean; onAudit: () => void; onResolve: (kind: 'finding' | 'confirmation', id: string, expectedVersion: number) => void }) {
+export function CoverageAuditPanel({ run, busy, onAudit, onResolve, onOpenHandoff }: { run: TestDesignWorkflowRun; busy: boolean; onAudit: () => void; onResolve: (kind: 'finding' | 'confirmation', id: string, expectedVersion: number) => void; onOpenHandoff: () => void }) {
   const audit = run.coverageAudits.at(-1)
   const publicationBlockers = audit?.blockers.filter(item => item.resolution !== 'execution_handoff') ?? []
   const handoffBlockers = audit?.blockers.filter(item => item.resolution === 'execution_handoff') ?? []
@@ -33,7 +33,7 @@ export function CoverageAuditPanel({ run, busy, onAudit, onResolve }: { run: Tes
     </>}
 
     {(unresolvedFindings.length > 0 || unresolvedBusinessConfirmations.length > 0) && <div className="td2-decisions"><h3>等待业务人工决策</h3><p>业务规则、阈值、兼容矩阵与权限不明确时，PlanningAgent 不得猜测。</p>{unresolvedFindings.map(item => <article key={item.id}><AlertTriangle /><div><b>{item.title}</b><p>{item.description}</p><small>Finding · {item.severity}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('finding', item.id, item.actions.length)}>标记已处理</button></article>)}{unresolvedBusinessConfirmations.map(item => <article key={item.id}><UserRoundCheck /><div><b>{item.title}</b><p>{item.question}</p><small>Confirmation · {item.impactStage}</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('confirmation', item.id, item.actions.length)}>记录决策</button></article>)}</div>}
-    {unresolvedHandoffConfirmations.length > 0 && <div className="td2-decisions"><h3>聚合的 Handoff 确认</h3><p>Service 按执行问题聚合；确认一项会作用于其列出的所有候选，而不会重复产生每 Case 一条问题。</p>{unresolvedHandoffConfirmations.map(item => { const caseCount = item.affectedRefs?.filter(ref => activeCaseIds.has(ref)).length ?? 0; return <article key={item.id}><Wrench /><div><b>{item.title}</b><p>{item.question}</p><small>影响 {caseCount} 条候选用例 · {item.decisionType ?? 'execution_contract'} · Handoff</small></div><button className="td2-button ghost" disabled={busy} onClick={() => onResolve('confirmation', item.id, item.actions.length)}>记录 Handoff 决策</button></article> })}</div>}
+    {unresolvedHandoffConfirmations.length > 0 && <div className="td2-decisions"><h3>Execution Handoff 补充入口</h3><p>Service 按执行问题聚合。前往 Handoff 后会默认选择全部冻结用例，并显示每条 needs_confirmation 用例的人工覆盖原因输入框。</p>{unresolvedHandoffConfirmations.map(item => { const caseCount = item.affectedRefs?.filter(ref => activeCaseIds.has(ref)).length ?? 0; return <article key={item.id}><Wrench /><div><b>{item.title}</b><p>{item.question}</p><small>影响 {caseCount} 条候选用例 · {item.decisionType ?? 'execution_contract'} · Handoff</small></div><button className="td2-button primary" disabled={busy} onClick={onOpenHandoff}><Wrench />前往 Handoff 补充</button></article> })}</div>}
   </section>
 }
 
