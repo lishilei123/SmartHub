@@ -18,6 +18,7 @@ type Props = {
   knowledgeBaseId: string
   apiState: 'connecting' | 'ready' | 'offline'
   refreshKnowledge: () => Promise<void>
+  refreshProjectVersions: () => Promise<ProjectVersion[]>
   onManageVersions: () => void
   onOpenKnowledge: () => void
   onOpenActivity: () => void

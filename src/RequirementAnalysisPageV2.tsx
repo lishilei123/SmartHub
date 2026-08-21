@@ -52,6 +52,7 @@ type Props = {
   knowledgeBaseId: string
   apiState: 'connecting' | 'ready' | 'offline'
   refreshKnowledge: () => Promise<void>
+  refreshProjectVersions: () => Promise<ProjectVersion[]>
   onManageVersions: () => void
   onOpenKnowledge: () => void
   onOpenActivity: () => void
@@ -153,7 +154,7 @@ function replaceRunDetail(current: RunRecord[], detail: RequirementAnalysisRun) 
 }
 
 export function RequirementAnalysisPageV2(props: Props) {
-  const { projectVersion, documents, apiState, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenInputDocument, onDeleteInputDocument, canDeleteInputDocument = false } = props
+  const { projectVersion, documents, apiState, refreshProjectVersions, notify, addAudit, onManageVersions, onOpenKnowledge, onOpenActivity, onOpenInputDocument, onDeleteInputDocument, canDeleteInputDocument = false } = props
   const [view, setView] = useState<ViewKey>(() => {
     const params = new URL(window.location.href).searchParams
     return params.get('planningTab') === 'test-design' || Boolean(params.get('testDesignEntry')) ? 'cases' : 'conversation'
@@ -177,6 +178,8 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [diffLoading, setDiffLoading] = useState(false)
   const [linkedFormalOutput, setLinkedFormalOutput] = useState<LinkedFormalOutput>()
   const [linkedFormalOutputError, setLinkedFormalOutputError] = useState('')
+  const [linkedTestDesignRun, setLinkedTestDesignRun] = useState<TestDesignWorkflowRun>()
+  const [linkedTestDesignRunError, setLinkedTestDesignRunError] = useState('')
   const openDetails = (next: DetailViewKey) => { setDetailView(next); setView('details') }
 
   const projectVersionName = projectVersion?.name ?? ''
@@ -326,6 +329,28 @@ export function RequirementAnalysisPageV2(props: Props) {
     ? { designId: automaticTransition.testDesignId, runId: automaticTransition.testDesignRunId }
     : undefined
   useEffect(() => {
+    if (!projectVersion || !linkedTestDesign) { setLinkedTestDesignRun(undefined); setLinkedTestDesignRunError(''); return }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const detail = await loadTestDesignRun(projectVersion.id, linkedTestDesign.designId, linkedTestDesign.runId)
+        if (cancelled) return
+        setLinkedTestDesignRun(detail)
+        setLinkedTestDesignRunError('')
+        if (!['succeeded', 'failed', 'cancelled'].includes(detail.status)) timer = setTimeout(() => void poll(), 1_000)
+      } catch (error) {
+        if (cancelled) return
+        const message = error instanceof Error ? error.message : '测试设计运行读取失败'
+        const transientNetworkFailure = error instanceof TypeError || /failed to fetch|networkerror|network request failed/iu.test(message)
+        setLinkedTestDesignRunError(transientNetworkFailure ? '测试设计服务暂时不可用，正在自动重试。' : message)
+        if (transientNetworkFailure) timer = setTimeout(() => void poll(), 1_500)
+      }
+    }
+    void poll()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [projectVersion?.id, linkedTestDesign?.designId, linkedTestDesign?.runId])
+  useEffect(() => {
     if (!projectVersion || !linkedTestDesign) { setLinkedFormalOutput(undefined); setLinkedFormalOutputError(''); return }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -354,18 +379,30 @@ export function RequirementAnalysisPageV2(props: Props) {
   }, [projectVersion?.id, projectVersion?.projectId, linkedTestDesign?.designId, linkedTestDesign?.runId])
   const currentProjectVersionId = projectVersion?.id
   const selectedReleaseBinding = selectedRun ? releaseBindings.find(binding => binding.verificationRunId === selectedRun.id && binding.releaseId === selectedRun.workflow?.release?.id) : undefined
+  const releasePublished = release?.status === 'published'
   const testDesignReady = Boolean(selectedRun && selectedReleaseBinding
     && selectedRun.projectVersionId === currentProjectVersionId
     && selectedRun.status === 'succeeded'
     && selectedRun.workflow?.release?.id === selectedReleaseBinding.releaseId
     && selectedRun.workflow.release.status === 'published')
+  useEffect(() => {
+    if (!projectVersion || !releasePublished || selectedReleaseBinding) return
+    void refreshProjectVersions().catch(() => undefined)
+  }, [projectVersion?.id, release?.id, releasePublished, selectedReleaseBinding, refreshProjectVersions])
   const formalLibraryVersion = linkedFormalOutput?.libraryVersion
   const formalHandoffs = linkedFormalOutput?.handoffs ?? []
+  const activeTestDesignCases = linkedTestDesignRun?.testCases.filter(item => !item.tombstonedAt) ?? []
+  const activeTestDesignNode = linkedTestDesignRun?.nodeRuns.find(item => item.status === 'running')
+  const testDesignRunFailed = linkedTestDesignRun?.status === 'failed' || linkedTestDesignRun?.status === 'cancelled'
+  const testDesignRunComplete = linkedTestDesignRun?.status === 'succeeded'
+  const testDesignProgressDetail = linkedTestDesignRun
+    ? `${activeTestDesignNode ? testDesignStageLabels[activeTestDesignNode.nodeKey] : linkedTestDesignRun.stage} · ${linkedTestDesignRun.progress}%`
+    : '正在读取测试设计运行'
   const stages: Array<{ label: string; detail: string; state: RequirementStageState }> = [
     { label: '资料输入', detail: analysisInputDocuments.length ? `${analysisInputDocuments.length} 份已就绪` : '待上传', state: analysisInputDocuments.length ? 'complete' : 'current' },
-    { label: '需求分析与发布', detail: !selectedRun ? '当前对话未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : blockingClarifications.length ? `等待 ${blockingClarifications.length} 个业务事实` : testDesignReady ? 'Requirement Release 已发布' : selectedRun.status === 'failed' ? '执行失败' : '正在发布', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' || blockingClarifications.length ? 'current' : testDesignReady ? 'complete' : selectedRun.status === 'failed' ? 'blocked' : 'waiting' },
-    { label: 'Agent 自动设计测试', detail: automaticTransition?.status === 'succeeded' ? '测试设计运行已创建，请查看实时进度' : automaticTransition?.status === 'failed' ? '自动衔接失败' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : testDesignReady ? '可基于本次发布的 Release 设计测试' : '等待 Requirement Release', state: automaticTransition?.status === 'succeeded' ? 'complete' : automaticTransition?.status === 'failed' ? 'blocked' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' || testDesignReady ? 'current' : 'waiting' },
-    { label: '最终用例审核与发布', detail: formalLibraryVersion ? `正式用例库 V${formalLibraryVersion.version} 已发布` : automaticTransition?.status === 'succeeded' ? '测试用例候选待审核与发布' : '等待 Agent 完成', state: formalLibraryVersion ? 'complete' : automaticTransition?.status === 'succeeded' ? 'current' : 'waiting' },
+    { label: '需求分析与发布', detail: !selectedRun ? '当前对话未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : blockingClarifications.length ? `等待 ${blockingClarifications.length} 个业务事实` : releasePublished ? 'Requirement Release 已发布' : ['failed', 'cancelled'].includes(selectedRun.status) ? selectedRun.status === 'failed' ? '执行失败' : '已取消' : '正在发布', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' || blockingClarifications.length ? 'current' : releasePublished ? 'complete' : ['failed', 'cancelled'].includes(selectedRun.status) ? 'blocked' : 'waiting' },
+    { label: 'Agent 自动设计测试', detail: testDesignRunComplete ? `已生成 ${activeTestDesignCases.length} 条候选用例` : testDesignRunFailed ? linkedTestDesignRun?.status === 'cancelled' ? '测试设计已取消' : '测试设计运行失败' : linkedTestDesignRunError ? '测试设计运行状态读取失败' : linkedTestDesign ? testDesignProgressDetail : automaticTransition?.status === 'failed' ? '自动衔接失败' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : releasePublished && !testDesignReady ? '当前版本 Release Binding 未就绪' : testDesignReady ? '可基于本次发布的 Release 设计测试' : '等待 Requirement Release', state: testDesignRunComplete ? 'complete' : testDesignRunFailed || Boolean(linkedTestDesignRunError) || automaticTransition?.status === 'failed' || releasePublished && !testDesignReady && !linkedTestDesign ? 'blocked' : linkedTestDesign || automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' || testDesignReady ? 'current' : 'waiting' },
+    { label: '最终用例审核与发布', detail: formalLibraryVersion ? `正式用例库 V${formalLibraryVersion.version} 已发布` : testDesignRunComplete && activeTestDesignCases.length ? `${activeTestDesignCases.length} 条候选用例待审核与发布` : testDesignRunComplete ? '测试设计完成，但没有可审核候选' : testDesignRunFailed ? '测试设计未完成' : '等待 Agent 完成', state: formalLibraryVersion ? 'complete' : testDesignRunComplete && activeTestDesignCases.length ? 'current' : testDesignRunComplete || testDesignRunFailed ? 'blocked' : 'waiting' },
   ]
   const activityExecution = planningExecutionGroups(selectedRun).at(-1)?.execution
   const activityEvents = activityExecution?.events ?? []
@@ -390,9 +427,9 @@ export function RequirementAnalysisPageV2(props: Props) {
         </header>
         <nav className="rav2-session-tabs">{viewTabs.map(tab => <button className={view === tab.key ? 'active' : ''} key={tab.key} onClick={() => setView(tab.key)}><tab.icon />{tab.label}{tab.key === 'clarifications' && blockingClarifications.length ? <i>{blockingClarifications.length}</i> : null}</button>)}</nav>
         <div className={`rav2-session-body ${view === 'conversation' ? 'conversation' : view === 'cases' ? 'cases' : 'detail'}`}>
-          {view === 'conversation' && <AgentConversation run={selectedRun} projectVersionId={projectVersion.id} linkedTestDesign={linkedTestDesign} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
+          {view === 'conversation' && <AgentConversation run={selectedRun} linkedTestDesign={linkedTestDesign} testDesignRun={linkedTestDesignRun} testDesignLoadError={linkedTestDesignRunError} onReviewed={detail => setRuns(current => replaceRunDetail(current, detail))} notify={notify} />}
           {view === 'clarifications' && <Clarifications items={blockingClarificationHistory} answers={clarificationAnswers} actions={clarificationActions} busy={clarificationBusy} onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))} onActionChange={(id, action) => setClarificationActions(current => ({ ...current, [id]: action }))} onSubmit={() => void resolveClarifications()} />}
-          {view === 'cases' && <Suspense fallback={<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>正在加载测试设计运行</h2><p>正在建立测试设计的正式上下文。</p></div>}>{linkedTestDesign ? <EmbeddedTestDesignPage key={`${selectedRun?.id}:${linkedTestDesign.designId}:${linkedTestDesign.runId}`} embedded projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} linkedDesignId={linkedTestDesign.designId} linkedRunId={linkedTestDesign.runId} /> : testDesignReady ? <EmbeddedTestDesignPage key={`new-test-design:${projectVersion.id}:${selectedReleaseBinding?.releaseId}`} projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} initialCreate /> : <TestDesignPrerequisite run={selectedRun} blockingClarificationCount={blockingClarifications.length} releaseStatus={release?.status} canRun={canRun} starting={starting} onStart={() => void startAnalysis()} onOpenConversation={() => setView('conversation')} onOpenClarifications={() => setView('clarifications')} onRetry={() => void retryAnalysis()} />}</Suspense>}
+          {view === 'cases' && <Suspense fallback={<div className="rav2-empty"><LoaderCircle className="rotating" /><h2>正在加载测试设计运行</h2><p>正在建立测试设计的正式上下文。</p></div>}>{linkedTestDesign ? <EmbeddedTestDesignPage key={`${selectedRun?.id}:${linkedTestDesign.designId}:${linkedTestDesign.runId}`} embedded projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} linkedDesignId={linkedTestDesign.designId} linkedRunId={linkedTestDesign.runId} /> : testDesignReady ? <EmbeddedTestDesignPage key={`new-test-design:${projectVersion.id}:${selectedReleaseBinding?.releaseId}`} projectVersion={projectVersion} onManageVersions={onManageVersions} notify={notify} initialCreate /> : <TestDesignPrerequisite run={selectedRun} blockingClarificationCount={blockingClarifications.length} releaseStatus={release?.status} bindingReady={Boolean(selectedReleaseBinding)} canRun={canRun} starting={starting} onStart={() => void startAnalysis()} onOpenConversation={() => setView('conversation')} onOpenClarifications={() => setView('clarifications')} onRetry={() => void retryAnalysis()} />}</Suspense>}
           {view === 'details' && <section className="rav2-advanced-details"><header><div><ShieldCheck /><span><b>详细信息</b><small>运行配置、需求基线、正式产物与版本差异仅用于追溯和排障，不影响当前主流程。</small></span></div><nav>{detailTabs.map(tab => <button className={detailView === tab.key ? 'active' : ''} key={tab.key} onClick={() => setDetailView(tab.key)}>{tab.label}</button>)}</nav></header><div>{detailView === 'baseline' && <Baseline result={result} onEvidence={openEvidence} />}{detailView === 'artifacts' && <Artifacts result={result} release={release} runId={selectedRun?.id} />}{detailView === 'diff' && <Diff versions={versionHistory} value={diffVersionIds} onChange={setDiffVersionIds} loading={diffLoading} removed={removedLines} added={addedLines} />}</div></section>}
         </div>
         {view === 'conversation' && <footer className="rav2-session-boundary"><ShieldCheck /><span><b>连续 Planning Session</b><small>Requirement、Human Clarification、TestCase 与 Coverage 共用同一父会话；正式事实始终从 Version / Snapshot / Workspace 重新建立。</small></span></footer>}
@@ -402,11 +439,11 @@ export function RequirementAnalysisPageV2(props: Props) {
         <header><span><b>当前任务 / 产物状态</b><small>{selectedRun?.id ? `Run ${selectedRun.id.replace('analysis_run_', '').slice(0, 10)}` : '新建对话（未创建 Run）'}</small></span><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{selectedRun ? runLabel(selectedRun) : '新建对话'}</Badge></header>
         <div className="rav2-status-scroll">
           <section className="rav2-status-card"><header><i>①</i><b>当前业务阶段</b></header><div className="rav2-stage-list">{stages.map(stage => <article className={stage.state} key={stage.label}><span /><b>{stage.label}</b><small>{stage.detail}</small></article>)}</div></section>
-          <section className="rav2-status-card"><header><i>②</i><b>产物状态</b></header><div className="rav2-formal-list"><button onClick={() => openDetails('artifacts')} disabled={!result}><span><b>Requirement Release</b><small>{release?.status === 'published' ? `已由服务端发布 · ${formatTime(release.publishedAt ?? release.createdAt)}` : '等待需求分析和必要澄清完成'}</small></span><em className={release?.status === 'published' ? 'published' : 'empty'}>{release?.status === 'published' ? '已发布' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>{formalLibraryVersion ? '正式测试用例库' : '测试用例候选'}</b><small>{formalLibraryVersion ? `V${formalLibraryVersion.version} · ${formalLibraryVersion.members.length} 条冻结用例` : linkedFormalOutputError ? '正式发布状态暂时无法读取' : linkedTestDesign ? 'Test Design Run 已创建，尚未发布正式用例库' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : '等待 Requirement Release'}</small></span><em className={formalLibraryVersion ? 'published' : 'empty'}>{formalLibraryVersion ? '已发布' : linkedTestDesign ? '非正式' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>Execution Handoff</b><small>{formalHandoffs.length ? `${formalHandoffs.length} 个冻结交接记录` : formalLibraryVersion ? '正式用例库已发布，尚未创建执行交接' : '由正式测试用例库生成'}</small></span><em className={formalHandoffs.length ? 'published' : 'empty'}>{formalHandoffs.length ? '已生成' : '—'}</em></button></div></section>
+          <section className="rav2-status-card"><header><i>②</i><b>产物状态</b></header><div className="rav2-formal-list"><button onClick={() => openDetails('artifacts')} disabled={!result}><span><b>Requirement Release</b><small>{release?.status === 'published' ? `已由服务端发布 · ${formatTime(release.publishedAt ?? release.createdAt)}` : '等待需求分析和必要澄清完成'}</small></span><em className={release?.status === 'published' ? 'published' : 'empty'}>{release?.status === 'published' ? '已发布' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>{formalLibraryVersion ? '正式测试用例库' : activeTestDesignCases.length ? '测试用例候选' : '测试设计运行'}</b><small>{formalLibraryVersion ? `V${formalLibraryVersion.version} · ${formalLibraryVersion.members.length} 条冻结用例` : linkedFormalOutputError ? '正式发布状态暂时无法读取' : linkedTestDesignRunError ? '测试设计运行状态暂时无法读取' : activeTestDesignCases.length ? `${activeTestDesignCases.length} 条候选用例，尚未发布正式用例库` : linkedTestDesignRun ? testDesignRunFailed ? linkedTestDesignRun.status === 'cancelled' ? '测试设计已取消' : '测试设计运行失败' : testDesignProgressDetail : linkedTestDesign ? '正在读取测试设计运行' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : '等待 Requirement Release'}</small></span><em className={formalLibraryVersion ? 'published' : 'empty'}>{formalLibraryVersion ? '已发布' : activeTestDesignCases.length ? '非正式' : linkedTestDesignRun?.status === 'running' ? '进行中' : testDesignRunFailed ? '失败' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>Execution Handoff</b><small>{formalHandoffs.length ? `${formalHandoffs.length} 个冻结交接记录` : formalLibraryVersion ? '正式用例库已发布，尚未创建执行交接' : '由正式测试用例库生成'}</small></span><em className={formalHandoffs.length ? 'published' : 'empty'}>{formalHandoffs.length ? '已生成' : '—'}</em></button></div></section>
           <details className="rav2-status-card rav2-technical-status"><summary><Activity /><span><b>运行记录</b><small>Turn、工具调用、事件与异常</small></span></summary><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></details>
         </div>
         <footer className="rav2-status-action">
-          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : linkedTestDesign ? <button className="primary" onClick={() => setView('cases')}><Play />查看测试设计运行</button> : testDesignReady ? <button className="primary" onClick={() => setView('cases')}><Play />新建测试设计</button> : <button className="primary" disabled><AlertTriangle />本次需求分析尚未发布</button>}
+          {!selectedRun ? <button className="primary" onClick={startAnalysis} disabled={!canRun}><Play />{starting ? '启动中…' : '开始分析'}</button> : selectedRun.status === 'running' ? <button className="danger" onClick={cancelAnalysis}><XCircle />取消当前运行</button> : blockingClarifications.length ? <button className="primary" onClick={() => setView('clarifications')}><Quote />回答 {blockingClarifications.length} 个待确认问题</button> : ['failed', 'cancelled'].includes(selectedRun.status) ? <button className="primary" onClick={retryAnalysis} disabled={!canRun}><RefreshCw />重新分析</button> : automaticTransition?.status === 'failed' ? <button className="primary" onClick={() => void retryAutomaticTransition()} disabled={releaseBusy}><RefreshCw />重试自动测试设计</button> : linkedTestDesign ? <button className="primary" onClick={() => setView('cases')}><Play />查看测试设计运行</button> : testDesignReady ? <button className="primary" onClick={() => setView('cases')}><Play />新建测试设计</button> : releasePublished ? <button className="primary" disabled><AlertTriangle />当前版本 Release Binding 未就绪</button> : <button className="primary" disabled><AlertTriangle />本次需求分析尚未发布</button>}
         </footer>
       </aside>
     </div>
@@ -481,11 +518,9 @@ function Diff({ versions,value,onChange,loading,removed,added }:{ versions:NonNu
   return <div className="rav2-diff"><header><div><span>基准版本</span><select value={value[0]} onChange={e=>onChange([e.target.value,value[1]])}>{versions.map(v=><option value={v.id} key={v.id}>V{v.number}</option>)}</select></div><div><span>目标版本</span><select value={value[1]} onChange={e=>onChange([value[0],e.target.value])}>{versions.map(v=><option value={v.id} key={v.id}>V{v.number}</option>)}</select></div></header>{loading?<div className="rav2-empty"><LoaderCircle className="rotating" /></div>:<div className="rav2-diff-grid"><section><h3>删除 <span>{removed.length}</span></h3>{removed.map((line,i)=><p className="removed" key={`${i}-${line}`}>− {line}</p>)}</section><section><h3>新增 <span>{added.length}</span></h3>{added.map((line,i)=><p className="added" key={`${i}-${line}`}>+ {line}</p>)}</section></div>}</div>
 }
 
-function AgentConversation({ run, projectVersionId, linkedTestDesign, onReviewed, notify }: { run?: RunRecord; projectVersionId: string; linkedTestDesign?: { designId: string; runId: string }; onReviewed: (run: RequirementAnalysisRun) => void; notify: Notify }) {
+function AgentConversation({ run, linkedTestDesign, testDesignRun, testDesignLoadError, onReviewed, notify }: { run?: RunRecord; linkedTestDesign?: { designId: string; runId: string }; testDesignRun?: TestDesignWorkflowRun; testDesignLoadError: string; onReviewed: (run: RequirementAnalysisRun) => void; notify: Notify }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [reviewing, setReviewing] = useState(false)
-  const [testDesignRun, setTestDesignRun] = useState<TestDesignWorkflowRun>()
-  const [testDesignLoadError, setTestDesignLoadError] = useState('')
   const executionGroups = planningExecutionGroups(run)
   const clarificationBatches = humanClarificationBatches(run)
   const timeline = [
@@ -504,28 +539,6 @@ function AgentConversation({ run, projectVersionId, linkedTestDesign, onReviewed
   const totalTurnCount = turnCount + testDesignExecutions.reduce((total, execution) => total + execution.turns, 0)
   const totalToolCallCount = toolCallCount + testDesignExecutions.reduce((total, execution) => total + execution.toolCalls, 0)
   const totalToolErrorCount = toolErrorCount + testDesignExecutions.reduce((total, execution) => total + (execution.toolErrors ?? 0), 0)
-  useEffect(() => {
-    if (!linkedTestDesign) { setTestDesignRun(undefined); setTestDesignLoadError(''); return }
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const poll = async () => {
-      try {
-        const detail = await loadTestDesignRun(projectVersionId, linkedTestDesign.designId, linkedTestDesign.runId)
-        if (cancelled) return
-        setTestDesignRun(detail)
-        setTestDesignLoadError('')
-        if (!['succeeded', 'failed', 'cancelled'].includes(detail.status)) timer = setTimeout(() => void poll(), 1_000)
-      } catch (error) {
-        if (cancelled) return
-        const message = error instanceof Error ? error.message : '测试设计运行读取失败'
-        const transientNetworkFailure = error instanceof TypeError || /failed to fetch|networkerror|network request failed/iu.test(message)
-        setTestDesignLoadError(transientNetworkFailure ? '测试设计服务暂时不可用，正在自动重试。' : message)
-        if (transientNetworkFailure) timer = setTimeout(() => void poll(), 1_500)
-      }
-    }
-    void poll()
-    return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [projectVersionId, linkedTestDesign?.designId, linkedTestDesign?.runId])
   useEffect(() => { const root = scrollRef.current; if (root) root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' }) }, [eventCount, latestClarificationAt, testDesignEventCount, testDesignRun?.status])
   const review = async () => {
     if (!run || reviewing) return
@@ -602,12 +615,12 @@ function TestDesignConversationEntry({ linkage, run, error }: { linkage: { desig
   </section>
 }
 
-function TestDesignPrerequisite({ run, blockingClarificationCount, releaseStatus, canRun, starting, onStart, onOpenConversation, onOpenClarifications, onRetry }: { run?: RunRecord; blockingClarificationCount: number; releaseStatus?: string; canRun: boolean; starting: boolean; onStart: () => void; onOpenConversation: () => void; onOpenClarifications: () => void; onRetry: () => void }) {
+function TestDesignPrerequisite({ run, blockingClarificationCount, releaseStatus, bindingReady, canRun, starting, onStart, onOpenConversation, onOpenClarifications, onRetry }: { run?: RunRecord; blockingClarificationCount: number; releaseStatus?: string; bindingReady: boolean; canRun: boolean; starting: boolean; onStart: () => void; onOpenConversation: () => void; onOpenClarifications: () => void; onRetry: () => void }) {
   const isFailed = run?.status === 'failed' || run?.status === 'cancelled'
   const waitingClarification = Boolean(run && (run.status === 'waiting_clarification' || blockingClarificationCount > 0))
   const analysisState: RequirementStageState = !run ? 'current' : isFailed ? 'blocked' : run.status === 'running' || waitingClarification ? 'current' : 'complete'
   const releaseState: RequirementStageState = releaseStatus === 'published' ? 'complete' : run?.status === 'succeeded' && !waitingClarification ? 'current' : 'waiting'
-  const designState: RequirementStageState = releaseStatus === 'published' ? 'current' : 'waiting'
+  const designState: RequirementStageState = releaseStatus === 'published' && bindingReady ? 'current' : 'waiting'
   let title = '请先完成需求分析'
   let description = '测试用例只会基于当前 ProjectVersion 已发布的 Requirement Release 创建，不会读取草稿或未完成的分析结果。'
   let actionLabel = canRun ? '开始需求分析' : '等待可分析的需求输入'
@@ -626,6 +639,10 @@ function TestDesignPrerequisite({ run, blockingClarificationCount, releaseStatus
     title = '本次需求分析未完成'
     description = '当前 Run 没有形成可发布的 Requirement Release。重新分析会创建新的完整运行，不会覆盖历史记录。'
     actionLabel = '重新分析'; actionDisabled = !canRun; ActionIcon = RefreshCw; action = onRetry
+  } else if (run && releaseStatus === 'published' && !bindingReady) {
+    title = 'Requirement Release 已发布，正在同步版本绑定'
+    description = '页面正在重新读取当前 ProjectVersion 的正式 Release Binding；绑定就绪后才会开放新的测试设计运行。'
+    actionLabel = '查看需求分析记录'; actionDisabled = false; ActionIcon = Activity; action = onOpenConversation
   } else if (run && releaseStatus === 'published') {
     title = 'Requirement Release 已发布，正在进入测试设计'
     description = 'Service 正在为本次发布的 Release 创建冻结的测试设计运行；完成后此页会自动展示候选用例。'
@@ -641,7 +658,7 @@ function TestDesignPrerequisite({ run, blockingClarificationCount, releaseStatus
       <ol className="rav2-test-design-prerequisite-steps">
         <li className={analysisState}><i>1</i><div><b>需求分析</b><small>{!run ? '尚未启动' : isFailed ? '本次运行未完成' : waitingClarification ? '等待业务确认' : run.status === 'running' ? `${run.progress}% 进行中` : '已完成'}</small></div></li>
         <li className={releaseState}><i>2</i><div><b>Requirement Release</b><small>{releaseStatus === 'published' ? '已由服务端发布' : releaseState === 'current' ? '正在发布正式需求基线' : '等待需求分析完成'}</small></div></li>
-        <li className={designState}><i>3</i><div><b>自动测试设计</b><small>{designState === 'current' ? '正在创建测试设计运行' : '等待冻结 Release'}</small></div></li>
+        <li className={designState}><i>3</i><div><b>自动测试设计</b><small>{designState === 'current' ? '正在创建测试设计运行' : releaseStatus === 'published' ? '等待当前版本 Release Binding' : '等待冻结 Release'}</small></div></li>
       </ol>
       <footer><span><ShieldCheck />正式用例、Coverage 与发布门禁均以冻结的 Requirement Release 为依据。</span><button className="primary" disabled={actionDisabled} onClick={action}><ActionIcon />{starting && !run ? '启动中…' : actionLabel}</button></footer>
     </div>
