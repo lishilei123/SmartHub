@@ -34,9 +34,10 @@ test('Coverage Audit 的 TEST_CASE_OVER_MERGED 会由同一 PlanningAgent repair
     freezeConfiguration: async () => frozenConfiguration(),
     execute: async input => {
       stages.push(input.stage)
-      if (input.stage === 'test_case_design') return { schemaVersion: 'test-case-design/v1', content: candidate([caseCandidate('TC-TASK-STATE-TRANSITIONS', '任务状态转换')], [stateClaim('SC-TODO-IN-PROGRESS', 'TC-TASK-STATE-TRANSITIONS', 'todo->in_progress', 'positive', '状态为 in_progress'), stateClaim('SC-IN-PROGRESS-COMPLETED', 'TC-TASK-STATE-TRANSITIONS', 'in_progress->completed', 'positive', '状态为 completed')]) }
+      if (input.stage === 'test_case_design') return { schemaVersion: 'test-case-design/v2', content: referenceCandidate([{ ...caseCandidate('TC-TASK-STATE-TRANSITIONS', '任务状态转换'), coverageClaims: [inlineStateClaim('SC-TODO-IN-PROGRESS', 'todo->in_progress', 'positive', '状态为 in_progress'), inlineStateClaim('SC-IN-PROGRESS-COMPLETED', 'in_progress->completed', 'positive', '状态为 completed')] }]) }
       repairSawClaims = input.run.scenarioClaims.length === 2 && (input.upstream as { blockers: Array<{ code: string }> }).blockers.some(item => item.code === 'TEST_CASE_OVER_MERGED')
-      return { schemaVersion: 'test-design-repair/v1', content: candidate([caseCandidate('TC-TASK-TODO-TO-IN-PROGRESS', 'todo 到 in_progress'), caseCandidate('TC-TASK-IN-PROGRESS-TO-COMPLETED', 'in_progress 到 completed')], [stateClaim('SC-TODO-IN-PROGRESS', 'TC-TASK-TODO-TO-IN-PROGRESS', 'todo->in_progress', 'positive', '状态为 in_progress'), stateClaim('SC-IN-PROGRESS-COMPLETED', 'TC-TASK-IN-PROGRESS-TO-COMPLETED', 'in_progress->completed', 'positive', '状态为 completed')], 'test-design-repair/v1') }
+      const upstream = input.upstream as { baseCandidateSha256: string }
+      return { schemaVersion: 'test-design-repair/v2', content: { schemaVersion: 'test-design-repair/v2', baseCandidateSha256: upstream.baseCandidateSha256, upsertCases: [{ ...caseCandidate('TC-TASK-TODO-TO-IN-PROGRESS', 'todo 到 in_progress'), coverageClaims: [inlineStateClaim('SC-TODO-IN-PROGRESS', 'todo->in_progress', 'positive', '状态为 in_progress')] }, { ...caseCandidate('TC-TASK-IN-PROGRESS-TO-COMPLETED', 'in_progress 到 completed'), coverageClaims: [inlineStateClaim('SC-IN-PROGRESS-COMPLETED', 'in_progress->completed', 'positive', '状态为 completed')] }], removeCaseRefs: ['TC-TASK-STATE-TRANSITIONS'], upsertDataRequirements: [], removeDataRequirementRefs: [], dimensionAssessmentUpdates: [] } }
     },
   }
   const service = new TestDesignService(store, runtime)
@@ -63,29 +64,18 @@ test('无关 human_decision 不阻止 TEST_CASE_OVER_MERGED 的范围化自动�
     execute: async input => {
       if (input.stage === 'test_case_design') {
         return {
-          schemaVersion: 'test-case-design/v1',
-          content: candidate(
-            [caseCandidate('TC-MERGED', '状态边合并'), caseCandidate('TC-HUMAN', '待人工业务判断')],
-            [
-              stateClaim('SC-MERGED-TODO', 'TC-MERGED', 'todo->in_progress', 'positive', '状态变更后为 in_progress'),
-              stateClaim('SC-MERGED-COMPLETED', 'TC-MERGED', 'in_progress->completed', 'positive', '状态变更后为 completed'),
-              stateClaim('SC-HUMAN', 'TC-HUMAN', 'completed->todo', 'negative', '待确认具体回退语义'),
-            ],
-          ),
+          schemaVersion: 'test-case-design/v2',
+          content: referenceCandidate([
+            { ...caseCandidate('TC-MERGED', '状态边合并'), coverageClaims: [inlineStateClaim('SC-MERGED-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress'), inlineStateClaim('SC-MERGED-COMPLETED', 'in_progress->completed', 'positive', '状态变更后为 completed')] },
+            { ...caseCandidate('TC-HUMAN', '待人工业务判断'), coverageClaims: [inlineStateClaim('SC-HUMAN', 'completed->todo', 'negative', '待确认具体回退语义')] },
+          ]),
         }
       }
       repairExecuted = (input.upstream as { blockers: Array<{ code: string }> }).blockers.every(item => item.code === 'TEST_CASE_OVER_MERGED')
+      const upstream = input.upstream as { baseCandidateSha256: string }
       return {
-        schemaVersion: 'test-design-repair/v1',
-        content: candidate(
-          [caseCandidate('TC-TODO', 'todo 到 in_progress'), caseCandidate('TC-COMPLETED', 'in_progress 到 completed'), caseCandidate('TC-HUMAN', '待人工业务判断')],
-          [
-            stateClaim('SC-MERGED-TODO', 'TC-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress'),
-            stateClaim('SC-MERGED-COMPLETED', 'TC-COMPLETED', 'in_progress->completed', 'positive', '状态变更后为 completed'),
-            stateClaim('SC-HUMAN', 'TC-HUMAN', 'completed->todo', 'negative', '待确认具体回退语义'),
-          ],
-          'test-design-repair/v1',
-        ),
+        schemaVersion: 'test-design-repair/v2',
+        content: { schemaVersion: 'test-design-repair/v2', baseCandidateSha256: upstream.baseCandidateSha256, upsertCases: [{ ...caseCandidate('TC-TODO', 'todo 到 in_progress'), coverageClaims: [inlineStateClaim('SC-MERGED-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress')] }, { ...caseCandidate('TC-COMPLETED', 'in_progress 到 completed'), coverageClaims: [inlineStateClaim('SC-MERGED-COMPLETED', 'in_progress->completed', 'positive', '状态变更后为 completed')] }], removeCaseRefs: ['TC-MERGED'], upsertDataRequirements: [], removeDataRequirementRefs: [], dimensionAssessmentUpdates: [] },
       }
     },
   }
@@ -109,8 +99,8 @@ test('未尝试的非独立修复在相关 human_decision 下标记 deferred，�
     execute: async input => {
       if (input.stage === 'test_design_repair') repairExecuted = true
       return {
-        schemaVersion: 'test-case-design/v1',
-        content: candidate([caseCandidate('TC-SHALLOW', '覆盖过浅且待确认')], [stateClaim('SC-SHALLOW', 'TC-SHALLOW', 'todo->in_progress', 'positive', '待确认状态展示')]),
+        schemaVersion: 'test-case-design/v2',
+        content: referenceCandidate([{ ...caseCandidate('TC-SHALLOW', '覆盖过浅且待确认'), coverageClaims: [inlineStateClaim('SC-SHALLOW', 'todo->in_progress', 'positive', '待确认状态展示')] }]),
       }
     },
   }
@@ -150,8 +140,8 @@ test('test-case-design/v2 提交 cases: [] 时，Service 从明确继承的冻�
   const artifact = completed.artifacts.find(item => item.id === completed.nodeRuns.find(item => item.nodeKey === 'test_case_design')?.outputArtifactId)
   assert.equal((artifact?.content as { cases?: unknown[] }).cases?.length, 100, 'Artifact 必须保存 Service 生成的完整 Candidate Snapshot')
 
-  const legacyLike = {
-    schemaVersion: 'test-case-design/v1',
+  const legacyCompleteCandidate = {
+    schemaVersion: 'legacy-complete-candidate',
     cases: completed.testCases.filter(item => !item.tombstonedAt).map(item => ({ ref: item.candidateRef, ...item.revisions[item.currentRevision].content })),
     dimensionAssessments: submitted.dimensionAssessments,
     scenarioClaims: completed.scenarioClaims,
@@ -160,7 +150,7 @@ test('test-case-design/v2 提交 cases: [] 时，Service 从明确继承的冻�
     confirmationItems: [],
     proposals: completed.caseChangeProposals.map(item => ({ operation: item.operation, sourceCaseId: item.sourceCaseId, sourceRevision: item.sourceRevision, candidateRef: completed.testCases.find(testCase => testCase.id === item.candidateCaseId)?.candidateRef, requirementRefs: item.requirementRefs, reason: item.reason, confidence: item.confidence })),
   }
-  assert.ok(Buffer.byteLength(JSON.stringify(submitted)) <= Buffer.byteLength(JSON.stringify(legacyLike)) * 0.6, '引用式提交应比同一完整历史集合至少减少 40%')
+  assert.ok(Buffer.byteLength(JSON.stringify(submitted)) <= Buffer.byteLength(JSON.stringify(legacyCompleteCandidate)) * 0.6, '引用式提交应比同一完整历史集合至少减少 40%')
 })
 
 test('未选择来源版本时，test-case-design/v2 的 cases: [] 由 Service 明确拒绝', async () => {
@@ -221,7 +211,7 @@ test('来源版本没有正式用例库时，自动创建按首次全量生成�
     const analysis = state.reviewRuns.find(item => item.id === 'review-run-1')!
     analysis.result = { summary: { overview: '首次全量设计' }, testFocus: [] } as never
   })
-  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v1', content: candidate([caseCandidate('TC-FIRST', '首次生成')], [stateClaim('SC-FIRST', 'TC-FIRST', 'todo->in_progress', 'positive', '状态为 in_progress')]) }) }
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v2', content: referenceCandidate([{ ...caseCandidate('TC-FIRST', '首次生成'), coverageClaims: [inlineStateClaim('SC-FIRST', 'todo->in_progress', 'positive', '状态为 in_progress')] }]) }) }
   const service = new TestDesignService(store, runtime)
   const created = await service.createAutomaticDesignAndRun('project-version-1', 'review-run-1')
   assert.deepEqual(created.design.input.historicalLibrarySelection, { mode: 'none' })
@@ -565,9 +555,6 @@ async function addHistoricalLibraryVersion(store: JsonStore, version: number, pu
     aggregate.libraryVersions.push({ ...structuredClone(source), id: `library-v${version}`, version, name: `冻结历史 V${version}`, sourceRunId, contentSha256: `library-v${version}-sha256`, publishedAt })
   })
 }
-
-function stateClaim(ref: string, caseRef: string, variant: string, polarity: 'positive' | 'negative', oracle: string) { const [from, to] = variant.split('->'); return { ref, caseRef, requirementRefs: ['RP-STATE'], kind: 'state_transition' as const, subject: 'task.status', variant, polarity, oracle, transition: { from: from?.trim() || variant, to: to?.trim() || variant } } }
-function candidate(cases: ReturnType<typeof caseCandidate>[], scenarioClaims: ReturnType<typeof stateClaim>[], schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1' = 'test-case-design/v1') { return { schemaVersion, cases, scenarioClaims, dataRequirements: [], findings: [], confirmationItems: [], proposals: [] } }
 
 async function storeWithPublishedRequirement() {
   const store = new JsonStore(null)

@@ -12,7 +12,20 @@ function basis(ids: Array<string | { id: string; coverageTarget?: boolean }>, cu
 function claim(ref: string, caseRef: string, value: Partial<Omit<ScenarioClaim, 'ref' | 'caseRef' | 'requirementRefs'>> = {}): ScenarioClaim { const result = { ref, caseRef, requirementRefs: ['REQ-1'], kind: 'other' as ScenarioClaim['kind'], subject: 'task', variant: ref, polarity: 'neutral' as const, oracle: '结果符合 Requirement', ...value }; return { ...result, ...(result.kind === 'state_transition' ? { transition: result.transition ?? transition(result.variant) } : {}) } }
 function transition(variant: string) { const [from, to] = variant.split('->'); return { from: from?.trim() || variant, to: to?.trim() || variant } }
 function audit(cases: TestCase[], ids: Array<string | { id: string; coverageTarget?: boolean }>, scenarioClaims: ScenarioClaim[] = [], cues = '') { return auditTestDesignCoverage({ runId: 'run-1', basis: basis(ids, cues), retrieval: { snapshotSha256: 'c'.repeat(64) } as never, historical: { items: [], snapshotSha256: 'd'.repeat(64) } as never, cases, scenarioClaims, dataSet: { id: 'data-1', version: 1, requirements: [], contentSha256: 'e'.repeat(64), createdAt: new Date().toISOString(), createdBy: 'test' }, findings: [], confirmationItems: [] }) }
-function candidate(cases: Array<{ ref: string; content: TestCaseContent }>, scenarioClaims: ScenarioClaim[]) { return { schemaVersion: 'test-case-design/v1', cases: cases.map(item => ({ ref: item.ref, ...item.content })), scenarioClaims, dataRequirements: [], findings: [], confirmationItems: [], proposals: [] } }
+function candidate(cases: Array<{ ref: string; content: TestCaseContent }>, scenarioClaims: ScenarioClaim[]) {
+  return {
+    schemaVersion: 'test-case-design/v2',
+    cases: cases.map(item => ({
+      ref: item.ref,
+      ...item.content,
+      coverageClaims: scenarioClaims.filter(claim => claim.caseRef === item.ref).map(({ caseRef: _caseRef, requirementRefs: _requirementRefs, ...inline }) => inline),
+    })),
+    dimensionAssessments: fiveDimensions(),
+    dataRequirements: [],
+    findings: [],
+    confirmationItems: [],
+  }
+}
 function overMerged(result: ReturnType<typeof audit>) { return result.blockers.find(item => item.code === 'TEST_CASE_OVER_MERGED') }
 
 test('TestCase 候选直接使用 Requirement refs，并允许一个 Requirement 展开多条场景', () => {
@@ -23,38 +36,16 @@ test('TestCase 候选直接使用 Requirement refs，并允许一个 Requirement
   assert.throws(() => validateTestCaseContent({ ...content(['REQ-1']), legacyRefs: ['legacy-reference'] }), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID')
 })
 
-test('冻结历史用例不能通过删除 reuse Proposal 从完整 Candidate 中静默消失', () => {
-  const first = content(['REQ-1'], '历史登录用例')
-  const second = content(['REQ-2'], '历史注销用例')
-  const historical = {
-    schemaVersion: 'historical-case-snapshot/v1',
-    items: [
-      { id: 'history-1', kind: 'test_case_library', sourceId: 'library-1:case-1:1', contentSha256: canonicalSha256({ ...first, tags: [] }), content: first, locator: { caseId: 'case-1', revision: 1 } },
-      { id: 'history-2', kind: 'test_case_library', sourceId: 'library-1:case-2:1', contentSha256: canonicalSha256({ ...second, tags: [] }), content: second, locator: { caseId: 'case-2', revision: 1 } },
-    ],
-    createdAt: new Date().toISOString(),
-    snapshotSha256: 'history-snapshot',
-  } as never
-  const incomplete = {
-    ...candidate([{ ref: 'TC-HISTORY-1', content: first }], [claim('SC-HISTORY-1', 'TC-HISTORY-1')]),
-    proposals: [{ operation: 'reuse' as const, sourceCaseId: 'case-1', sourceRevision: 1, candidateRef: 'TC-HISTORY-1', requirementRefs: ['REQ-1'], reason: '冻结历史语义保持不变', confidence: 1 }],
-  }
+test('测试用例候选提交只接受 v2，且不再接受根级 proposals', () => {
+  const valid = candidate([{ ref: 'TC-1', content: content(['REQ-1']) }], [claim('SC-1', 'TC-1')])
   assert.throws(
-    () => validateHistoricalProposalPlan(validateTestCaseDesignCandidate(incomplete), historical),
-    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID' && error.message.includes('不能通过删除 Proposal 省略冻结历史用例'),
+    () => validateTestCaseDesignCandidate({ ...valid, schemaVersion: 'test-case-design/v1' }),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID' && error.message.includes('v1 提交协议已删除'),
   )
-
-  const complete = {
-    ...candidate(
-      [{ ref: 'TC-HISTORY-1', content: first }, { ref: 'TC-HISTORY-2', content: second }],
-      [claim('SC-HISTORY-1', 'TC-HISTORY-1'), claim('SC-HISTORY-2', 'TC-HISTORY-2', { requirementRefs: ['REQ-2'] })],
-    ),
-    proposals: [
-      { operation: 'reuse', sourceCaseId: 'case-1', sourceRevision: 1, candidateRef: 'TC-HISTORY-1', requirementRefs: ['REQ-1'], reason: '冻结历史语义保持不变', confidence: 1 },
-      { operation: 'reuse', sourceCaseId: 'case-2', sourceRevision: 1, candidateRef: 'TC-HISTORY-2', requirementRefs: ['REQ-2'], reason: '冻结历史语义保持不变', confidence: 1 },
-    ] as const,
-  }
-  assert.doesNotThrow(() => validateHistoricalProposalPlan(validateTestCaseDesignCandidate(complete), historical))
+  assert.throws(
+    () => validateTestCaseDesignCandidate({ ...valid, proposals: [] }),
+    (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID' && error.message.includes('proposals'),
+  )
 })
 
 test('v2 将内联 coverageClaims 和历史变更规范化为完整内部 Claim/Proposal，update/deprecate/reference 不要求重复正文', () => {
@@ -90,7 +81,7 @@ test('v2 将内联 coverageClaims 和历史变更规范化为完整内部 Claim/
   assert.deepEqual(complete.proposals.map(item => [item.operation, item.candidateRef]).sort(), [['deprecate', undefined], ['reference', undefined], ['update', 'case-updated']])
 
   const duplicateClaim = { ...submission, scenarioClaims: [claim('SC-UPDATED', 'case-updated')] }
-  assert.throws(() => validateTestCaseDesignCandidate(duplicateClaim), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID' && error.message.includes('同时出现在根级'))
+  assert.throws(() => validateTestCaseDesignCandidate(duplicateClaim), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID' && error.message.includes('scenarioClaims'))
 })
 
 function fiveDimensions() {
@@ -186,10 +177,12 @@ test('状态筛选、优先级筛选与关键字搜索同 Case 会报告多个�
   assert.equal(overMerged(split), undefined)
 })
 
-test('ScenarioClaim 必须引用有效 Case ref、Case Requirement 子集，且 functional/security 不能缺失', () => {
+test('coverageClaims 由所属 Case 派生追溯，且 functional/security 不能缺失', () => {
   const cases = [{ ref: 'TC-1', content: content(['REQ-1']) }]
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [claim('SC-1', 'TC-MISSING')])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
-  assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [claim('SC-1', 'TC-1', { requirementRefs: ['REQ-2'] })])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
+  const repeatedTraceability = candidate(cases, [claim('SC-1', 'TC-1')])
+  Object.assign(repeatedTraceability.cases[0].coverageClaims[0]!, { requirementRefs: ['REQ-2'] })
+  assert.throws(() => validateTestCaseDesignCandidate(repeatedTraceability), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [{ ref: 'SC-STATE', caseRef: 'TC-1', requirementRefs: ['REQ-1'], kind: 'state_transition', subject: 'task.status', variant: 'completed 回退', polarity: 'negative', oracle: '拒绝状态回退' }] as ScenarioClaim[])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')
   assert.throws(() => validateTestCaseDesignCandidate(candidate(cases, [claim('SC-STATE-AMBIGUOUS', 'TC-1', { kind: 'state_transition', subject: 'task.status', variant: 'completed rollback', polarity: 'negative', oracle: '拒绝不允许的回退', transition: { from: 'completed', to: 'todo 或 in_progress' } })])), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID')

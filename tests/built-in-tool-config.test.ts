@@ -73,10 +73,14 @@ test('测试用例提交工具向模型声明 Requirement 直接追溯字段', (
   const schema = descriptor.parameters as unknown as {
     additionalProperties: boolean
     required: string[]
-    properties: { cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
+    properties: { schemaVersion: { const: string }; cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }; scenarioClaims?: unknown; proposals?: unknown; historicalChanges: unknown }
   }
-  assert.equal(descriptor.version, '2.0.0')
+  assert.equal(descriptor.version, '3.0.0')
   assert.equal(schema.additionalProperties, false)
+  assert.equal(schema.properties.schemaVersion.const, 'test-case-design/v2')
+  assert.equal('scenarioClaims' in schema.properties, false)
+  assert.equal('proposals' in schema.properties, false)
+  assert.equal('historicalChanges' in schema.properties, true)
   assert.ok(schema.required.includes('cases'))
   assert.equal(schema.properties.cases.minItems, 0)
   assert.equal(schema.properties.cases.items.additionalProperties, false)
@@ -104,15 +108,20 @@ test('测试用例与修复提交工具声明闭合的 test-case/v2、executionS
   assert.ok(caseSchema.required.includes('executionMethods'))
   assert.ok(caseSchema.required.includes('executionSpec'))
   assert.equal(caseSchema.properties.executionMethods.minItems, 0)
-  const scenarioSchema = schema.properties.scenarioClaims.items
-  assert.equal(scenarioSchema.additionalProperties, false)
-  assert.deepEqual(scenarioSchema.required, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle'])
-  assert.equal(scenarioSchema.properties.requirementRefs.minItems, 1)
-  assert.deepEqual(scenarioSchema.properties.polarity.enum, ['positive', 'negative', 'neutral'])
-  assert.deepEqual(scenarioSchema.properties.transition.required, ['from', 'to'])
-  assert.equal(schema.properties.proposals.items.additionalProperties, false)
-  assert.ok(schema.properties.proposals.items.required.includes('operation'))
-  assert.ok(schema.properties.proposals.items.required.includes('confidence'))
+  if (toolId === 'test_design_repair.submit_result') {
+    const scenarioSchema = schema.properties.scenarioClaims.items
+    assert.equal(scenarioSchema.additionalProperties, false)
+    assert.deepEqual(scenarioSchema.required, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle'])
+    assert.equal(scenarioSchema.properties.requirementRefs.minItems, 1)
+    assert.deepEqual(scenarioSchema.properties.polarity.enum, ['positive', 'negative', 'neutral'])
+    assert.deepEqual(scenarioSchema.properties.transition.required, ['from', 'to'])
+    assert.equal(schema.properties.proposals.items.additionalProperties, false)
+    assert.ok(schema.properties.proposals.items.required.includes('operation'))
+    assert.ok(schema.properties.proposals.items.required.includes('confidence'))
+  } else {
+    assert.equal('scenarioClaims' in schema.properties, false)
+    assert.equal('proposals' in schema.properties, false)
+  }
   assert.ok(!('preConditions' in caseSchema.properties))
   assert.ok(!('steps' in caseSchema.properties))
   assert.equal(dataSchema.additionalProperties, false)

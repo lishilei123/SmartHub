@@ -80,7 +80,7 @@ export type TestCaseDesignCandidateSubmission = Record<string, unknown>
 
 /** Normalized internal form returned after a flat complete submission is validated. */
 export interface TestCaseDesignCandidate extends Record<string, unknown> {
-  schemaVersion: 'test-case-design/v1' | 'test-case-design/v2' | 'test-design-repair/v1'
+  schemaVersion: 'test-case-design/v2' | 'test-design-repair/v1'
   cases: CandidateCase[]
   dimensionAssessments: DimensionAssessment[]
   scenarioClaims: ScenarioClaim[]
@@ -118,20 +118,22 @@ const legacySynthesisFieldGuidance: Record<string, string> = {
 
 export function validateTestCaseDesignCandidate(value: unknown, repair = false): TestCaseDesignCandidate | TestDesignRepairPatch {
   const input = synthesisObject(value, '/', '提交结果必须是对象')
-  const expectedV1 = repair ? 'test-design-repair/v1' : 'test-case-design/v1'
-  const expectedV2 = repair ? 'test-design-repair/v2' : 'test-case-design/v2'
-  if (input.schemaVersion === expectedV2 && repair) return validateTestDesignRepairPatch(input)
-  if (input.schemaVersion !== expectedV1 && input.schemaVersion !== expectedV2) synthesisFail('/schemaVersion', `schemaVersion 必须为 ${expectedV1} 或 ${expectedV2}`)
-  const referenceProtocol = input.schemaVersion === 'test-case-design/v2'
-  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dimensionAssessments', 'scenarioClaims', 'dataRequirements', 'findings', 'confirmationItems', 'proposals', 'historicalChanges'], '/')
-  if (referenceProtocol && input.proposals !== undefined) synthesisFail('/proposals', 'test-case-design/v2 使用 historicalChanges；不要提交完整 proposals')
-  if (!referenceProtocol && input.historicalChanges !== undefined) synthesisFail('/historicalChanges', `${expectedV1} 不支持 historicalChanges；请继续使用 proposals`)
-  if (!Array.isArray(input.cases) || input.cases.length > 1_000 || (!referenceProtocol && !input.cases.length)) synthesisFail('/cases', referenceProtocol ? 'test-case-design/v2 的 cases 必须是最多 1000 条用例的数组；是否可为空由 Service 根据冻结历史快照判定' : 'cases 必须包含 1 到 1000 条用例')
+  if (repair) {
+    if (input.schemaVersion !== 'test-design-repair/v1' && input.schemaVersion !== 'test-design-repair/v2') synthesisFail('/schemaVersion', 'schemaVersion 必须为 test-design-repair/v1 或 test-design-repair/v2')
+    if (input.schemaVersion === 'test-design-repair/v2') return validateTestDesignRepairPatch(input)
+  } else if (input.schemaVersion !== 'test-case-design/v2') {
+    synthesisFail('/schemaVersion', 'schemaVersion 必须为 test-case-design/v2；v1 提交协议已删除')
+  }
+  const referenceProtocol = !repair
+  synthesisRejectUnknown(input, repair
+    ? ['schemaVersion', 'cases', 'dimensionAssessments', 'scenarioClaims', 'dataRequirements', 'findings', 'confirmationItems', 'proposals']
+    : ['schemaVersion', 'cases', 'dimensionAssessments', 'dataRequirements', 'findings', 'confirmationItems', 'historicalChanges'], '/')
+  if (!Array.isArray(input.cases) || input.cases.length > 1_000 || (repair && !input.cases.length)) synthesisFail('/cases', referenceProtocol ? 'test-case-design/v2 的 cases 必须是最多 1000 条用例的数组；是否可为空由 Service 根据冻结历史快照判定' : 'cases 必须包含 1 到 1000 条用例')
   if (referenceProtocol && input.dimensionAssessments === undefined) synthesisFail('/dimensionAssessments', 'test-case-design/v2 必须完整提交五维 dimensionAssessments')
 
   const cases = validateCandidateCases(input.cases, '/cases')
   const caseRefs = new Set(cases.map(item => item.ref))
-  const rootClaims = validateScenarioClaims(input.scenarioClaims ?? [], cases, '/scenarioClaims')
+  const rootClaims = referenceProtocol ? [] : validateScenarioClaims(input.scenarioClaims ?? [], cases, '/scenarioClaims')
   const inlineClaims = cases.flatMap((candidate, index) => candidate.coverageClaims?.map(claim => ({ claim, index })) ?? [])
   const scenarioClaims = [
     ...rootClaims,
