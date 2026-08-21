@@ -121,6 +121,16 @@ test('测试用例与修复提交工具声明闭合的 test-case/v2、executionS
   }
 })
 
+test('测试设计提交工具允许执行阶段字段留空并保留 UI/API 通道', () => {
+  for (const toolId of ['test_design_cases.submit_result', 'test_design_repair.submit_result']) {
+    const schema = defaultBuiltInToolConfigResolver.toDescriptor(toolId).parameters as any
+    const methodSchema = schema.properties.cases.items.properties.executionMethods.items.properties
+    assert.equal(methodSchema.uiSpec.properties.entry.minLength, 0)
+    assert.equal(methodSchema.apiSpec.properties.method.minLength, 0)
+    assert.equal(methodSchema.apiSpec.properties.path.minLength, 0)
+  }
+})
+
 test('configuration validation rejects unsafe paths, unknown handlers, duplicate Pi names, and privileged variants', () => {
   const unsafePath = cloneConfig()
   unsafePath.tools['knowledge.search'].sourcePath = 'server/tools/../secret.ts'

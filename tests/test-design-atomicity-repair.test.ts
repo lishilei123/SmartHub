@@ -8,6 +8,23 @@ import { JsonStore } from '../server/infrastructure/store.js'
 
 const principal = { subjectId: 'test-owner', displayName: '测试负责人' }
 
+test('选择 UI 和 API 时拒绝静默退化为全 UI，未知 API 契约可用空字段保留通道', async () => {
+  const store = await storeWithPublishedRequirement()
+  const uiOnly = caseCandidate('TC-UI-ONLY', '仅 UI 候选')
+  uiOnly.executionMethods = uiOnly.executionMethods.filter(method => method.method === 'ui')
+  const runtime: PlanningAgentRuntime = {
+    readiness: async () => ({ ready: true, agents: [] }),
+    freezeConfiguration: async () => frozenConfiguration(),
+    execute: async () => ({ schemaVersion: 'test-case-design/v2', content: referenceCandidate([uiOnly]) }),
+  }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '执行方式覆盖', objective: 'UI 和 API 通道都必须保留', executionMethods: ['ui', 'api'], knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('project-version-1', design.id, 'execution-method-coverage', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
+  assert.equal(completed.status, 'failed')
+  assert.match(completed.error ?? '', /TEST_DESIGN_EXECUTION_METHOD_UNCOVERED/u)
+})
+
 test('Coverage Audit 的 TEST_CASE_OVER_MERGED 会由同一 PlanningAgent repair 读取并重分配 ScenarioClaims 后闭环', async () => {
   const store = await storeWithPublishedRequirement()
   let repairSawClaims = false
@@ -32,11 +49,9 @@ test('Coverage Audit 的 TEST_CASE_OVER_MERGED 会由同一 PlanningAgent repair
   assert.equal(completed.testCases.filter(item => !item.tombstonedAt).length, 2)
   assert.equal(completed.scenarioClaims.map(item => item.caseRef).sort().join(','), 'TC-TASK-IN-PROGRESS-TO-COMPLETED,TC-TASK-TODO-TO-IN-PROGRESS')
   assert.equal(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_OVER_MERGED'), false)
-  const handoffConfirmations = completed.confirmationItems.filter(item => item.executionIssueSignature)
-  assert.equal(handoffConfirmations.length, 1, '同类 UI 执行缺口必须聚合为一个 Confirmation')
-  assert.deepEqual(handoffConfirmations[0]?.affectedRefs.filter(ref => completed.testCases.some(item => !item.tombstonedAt && item.id === ref)).sort(), completed.testCases.filter(item => !item.tombstonedAt).map(item => item.id).sort())
+  assert.equal(completed.confirmationItems.some(item => item.executionIssueSignature), false, '测试设计阶段不应为执行配置缺口创建待确认项')
   await service.reAudit('project-version-1', design.id, run.id)
-  assert.equal((await service.getRun('project-version-1', design.id, run.id)).confirmationItems.filter(item => item.executionIssueSignature).length, 1, '重新 Audit 不得增加相同 Handoff Confirmation')
+  assert.equal((await service.getRun('project-version-1', design.id, run.id)).confirmationItems.some(item => item.executionIssueSignature), false, '重新 Audit 也不得增加执行配置待确认项')
 })
 
 test('无关 human_decision 不阻止 TEST_CASE_OVER_MERGED 的范围化自动修复', async () => {
@@ -491,7 +506,10 @@ function caseCandidate(ref: string, title: string) {
     dataRequirementIds: [],
     cleanup: [],
     dependencies: [],
-    executionMethods: [{ method: 'ui', uiSpec: { entry: '/tasks', selectors: [] }, steps: [{ key: 'step-1', action: '变更任务状态', expected: '状态变更结果符合该场景' }], verificationChecks: [], executionReadiness: 'needs_confirmation', automationHint: 'UI selector 待确认' }],
+    executionMethods: [
+      { method: 'ui', uiSpec: { entry: '/tasks', selectors: [] }, steps: [{ key: 'step-1', action: '变更任务状态', expected: '状态变更结果符合该场景' }], verificationChecks: [], executionReadiness: 'needs_confirmation', automationHint: 'UI selector 待确认' },
+      { method: 'api', apiSpec: { method: '', path: '' }, steps: [{ key: 'api-step-1', action: '通过 API 变更任务状态', expected: '状态变更结果符合该场景' }], verificationChecks: [], executionReadiness: 'needs_confirmation', automationHint: 'API 契约在测试执行时补充' },
+    ],
     executionSpec: { kind: 'functional', method: 'ui' },
     sharedVerificationChecks: [],
     tags: [],
@@ -519,7 +537,7 @@ async function installHistoricalLibrary(store: JsonStore, count: number) {
     const requirements = Array.from({ length: count }, (_, index) => {
       const source = caseCandidate(`HISTORY-${index + 1}`, `冻结历史 ${index + 1}`)
       const { ref: _ref, ...base } = source
-      const content = validateTestCaseContent({ ...base, executionMethods: [{ ...source.executionMethods[0], executionReadiness: 'ready' as const }], executionSpec: { kind: 'functional' as const, method: 'ui' as const } })
+      const content = validateTestCaseContent({ ...base, executionMethods: source.executionMethods, executionSpec: { kind: 'functional' as const, method: 'ui' as const } })
       const semanticSha256 = canonicalSha256({ ...content, tags: [...content.tags].sort() })
       return { caseId: `CASE-${String(index + 1).padStart(3, '0')}`, content, semanticSha256 }
     })

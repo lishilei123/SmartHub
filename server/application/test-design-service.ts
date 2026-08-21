@@ -184,7 +184,7 @@ export class TestDesignService {
       const historicalSnapshot = buildHistoricalSnapshot(state, design, createdAt)
       const workspaceSnapshot = buildWorkspaceSnapshot(state, design, requirement, requirements, historicalSnapshot, createdAt)
       const run: TestDesignWorkflowRun = {
-        id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey,
+        id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey, requestedExecutionMethods: [...(design.input.executionMethods ?? [])],
         basisSnapshot, agentConfigurationSnapshot, currentInputRefs: structuredClone(requirement.analysisRun.snapshot.currentInputRefs), retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
         ...(historicalSnapshot.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: historicalSnapshot.baseTestCaseLibraryVersionId, baseTestCaseLibraryVersionSha256: historicalSnapshot.baseTestCaseLibraryVersionSha256 } : {}),
         nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], scenarioClaims: [], dimensionAssessments: [], caseChangeProposals: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
@@ -361,7 +361,7 @@ export class TestDesignService {
   }
 
   async createCase(projectVersionId: string, designId: string, runId: string, rawContent: unknown, principal: Principal) {
-    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const content = validateTestCaseContent(rawContent); const testCase = newCase(run.id, content, 'manual', principal.subjectId, '人工新建'); run.testCases.push(testCase); ensureCandidateProposal(run, testCase, '人工新增测试用例'); materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase) })
+    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const content = validateTestCaseContent(rawContent); const testCase = newCase(run.id, content, 'manual', principal.subjectId, '人工新建'); run.testCases.push(testCase); ensureCandidateProposal(run, testCase, '人工新增测试用例'); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase) })
   }
 
   async getCase(projectVersionId: string, designId: string, runId: string, caseId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return presentCase(findCase(run, caseId), true) }
@@ -374,7 +374,7 @@ export class TestDesignService {
       const editableReviewStates: ReadonlyArray<TestCase['reviewState']> = ['draft', 'needs_revision', 'rejected']
       if (!editableReviewStates.includes(testCase.reviewState)) throw new TestDesignError('TEST_CASE_EDIT_REVIEW_STATE_INVALID', '审核中的 Revision 不能直接修改；请先撤回审核、退回修改或发起变更。', 409, { caseId: testCase.id, reviewState: testCase.reviewState })
       const current = currentCaseRevision(testCase); assertEtag(ifMatch, etag('case', testCase.id, current.revision, current.contentSha256), 'TEST_CASE_REVISION_CONFLICT')
-      const content = validateTestCaseContent(input.content); const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.reason, current.content); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.reviewState = 'draft'; if (testCase.origin === 'historical_unchanged') testCase.origin = 'historical_modified'; ensureCandidateProposal(run, testCase, input.reason); materializeExecutionConfirmations(run, [testCase]); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase, true)
+      const content = validateTestCaseContent(input.content); const revision = createCaseRevision(current.revision + 1, content, principal.subjectId, input.reason, current.content); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.reviewState = 'draft'; if (testCase.origin === 'historical_unchanged') testCase.origin = 'historical_modified'; ensureCandidateProposal(run, testCase, input.reason); invalidateAudit(run); validateCurrentDependencyGraph(run); return presentCase(testCase, true)
     })
   }
 
@@ -1170,6 +1170,7 @@ export function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, 
     ? applyRepairPatch(run, submitted)
     : validateHistoricalProposalPlan(submitted, run.historicalSnapshot)
   if (!value.cases.length) throw new TestDesignError('TEST_DESIGN_CANDIDATE_EMPTY_WITHOUT_REUSABLE_HISTORY', 'test-case-design/v2 提交 cases: [] 时，当前版本必须明确继承且冻结快照中至少存在一条可复用历史用例', 422)
+  assertRequestedExecutionMethodCoverage(run, value)
   const existingByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
   const idByRef = new Map(value.cases.map(candidate => [candidate.ref, existingByRef.get(candidate.ref)?.id ?? `test_case_${randomUUID()}`]))
   const existingDataIdByRef = new Map((run.dataSetVersions.at(-1)?.requirements ?? []).map((item, index) => [`data-${index + 1}`, item.id]))
@@ -1217,9 +1218,19 @@ export function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, 
   if (!currentDataSet || currentDataSet.contentSha256 !== canonicalSha256(normalizedRequirements)) run.dataSetVersions.push(dataSetVersion(run.dataSetVersions.length + 1, normalizedRequirements, actorId))
   materializeCaseChangeProposals(run, value, nextCases)
   materializeDesignIssues(run, value)
-  materializeExecutionConfirmations(run, nextCases)
   validateCurrentDependencyGraph(run)
   return value
+}
+
+function assertRequestedExecutionMethodCoverage(run: TestDesignWorkflowRun, value: TestCaseDesignCandidate) {
+  const covered = new Set(value.cases.flatMap(candidate => candidate.content.executionMethods.map(method => method.method)))
+  const missingMethods = (run.requestedExecutionMethods ?? []).filter(method => !covered.has(method))
+  if (missingMethods.length) throw new TestDesignError(
+    'TEST_DESIGN_EXECUTION_METHOD_UNCOVERED',
+    `测试设计选择的执行方式未出现在任何功能或安全用例中：${missingMethods.join('、')}；缺少接口、URL 或定位器等执行数据时请保留对应方式、将字段留空并标记 needs_confirmation`,
+    422,
+    { requestedExecutionMethods: run.requestedExecutionMethods, coveredExecutionMethods: [...covered], missingMethods },
+  )
 }
 
 function applyRepairPatch(run: TestDesignWorkflowRun, patch: TestDesignRepairPatch): TestCaseDesignCandidate {
@@ -1345,48 +1356,6 @@ function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestC
     }
   })
   reconcileAutomaticProposalDecisions(run)
-}
-
-type ExecutionIssueType = 'ui_execution_contract' | 'api_execution_contract' | 'test_environment' | 'test_data_readiness'
-
-function materializeExecutionConfirmations(run: TestDesignWorkflowRun, _changedCases: TestCase[]) {
-  const groups = new Map<ExecutionIssueType, Set<string>>()
-  const add = (issueType: ExecutionIssueType, refs: string[]) => {
-    const affectedRefs = groups.get(issueType) ?? new Set<string>()
-    refs.filter(Boolean).forEach(ref => affectedRefs.add(ref))
-    groups.set(issueType, affectedRefs)
-  }
-  const activeCases = run.testCases.filter(item => !item.tombstonedAt)
-  for (const testCase of activeCases) {
-    const content = currentCaseRevision(testCase).content
-    const configuration = executionConfiguration(content)
-    const issueTypes = new Set<ExecutionIssueType>()
-    for (const issue of configuration.issues) issueTypes.add(issue.includes('UI') ? 'ui_execution_contract' : issue.includes('API') ? 'api_execution_contract' : 'test_environment')
-    if (configuration.status !== 'ready' && !issueTypes.size) issueTypes.add('test_environment')
-    for (const issueType of issueTypes) add(issueType, [testCase.id, ...(content.requirementRefs ?? [])])
-  }
-  const activeCaseIds = new Set(activeCases.map(item => item.id))
-  for (const dataRequirement of run.dataSetVersions.at(-1)?.requirements ?? []) {
-    if (dataRequirement.readiness === 'ready') continue
-    const caseIds = dataRequirement.caseIds.filter(id => activeCaseIds.has(id))
-    if (caseIds.length) add('test_data_readiness', [dataRequirement.id, ...caseIds, ...(dataRequirement.requirementRefs ?? [])])
-  }
-  for (const [issueType, refs] of groups) {
-    const normalizedIssue = issueType
-    const executionIssueSignature = canonicalSha256({ impactStage: 'handoff', issueType, normalizedIssue })
-    const existing = run.confirmationItems.find(item => item.executionIssueSignature === executionIssueSignature)
-    if (existing) {
-      if (existing.state === 'open') existing.affectedRefs = [...refs].sort((left, right) => left.localeCompare(right, 'zh-CN'))
-      continue
-    }
-    const details: Record<ExecutionIssueType, { title: string; question: string }> = {
-      ui_execution_contract: { title: 'UI 自动化执行契约待补充', question: '需求或项目配置未提供 UI 页面入口或 selector；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
-      api_execution_contract: { title: 'API 自动化执行契约待补充', question: '需求或项目配置未提供 API method、path 或 schema；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
-      test_environment: { title: '测试环境执行契约待补充', question: '需求或项目配置未提供可执行的环境、阈值、时长、矩阵或步骤契约；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
-      test_data_readiness: { title: '测试数据准备与重置待确认', question: '测试数据的准备或重置方式尚未就绪；这不会改变已明确的业务用例语义，但必须在 Execution Handoff 或实际执行前确认。' },
-    }
-    run.confirmationItems.push({ id: `test_design_confirmation_${randomUUID()}`, title: details[issueType].title, question: details[issueType].question, decisionType: issueType, impactStage: 'handoff', affectedRefs: [...refs].sort((left, right) => left.localeCompare(right, 'zh-CN')), blocker: true, state: 'open', actions: [], executionIssueSignature })
-  }
 }
 
 function requirementRefsForCase(_run: TestDesignWorkflowRun, content: TestCaseContent) { return [...new Set(content.requirementRefs ?? [])] }

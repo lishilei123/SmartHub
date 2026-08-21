@@ -441,7 +441,12 @@ function AgentConversation({ run, projectVersionId, linkedTestDesign, onReviewed
   const toolCallCount = executionGroups.reduce((total, group) => total + group.execution.toolCalls, 0)
   const toolErrorCount = executionGroups.reduce((total, group) => total + (group.execution.toolErrors ?? 0), 0)
   const latestClarificationAt = clarificationBatches.at(-1)?.answeredAt
-  const testDesignEventCount = testDesignRun?.nodeRuns.reduce((total, node) => total + (node.execution?.events.length ?? 0), 0) ?? 0
+  const testDesignExecutions = testDesignRun?.nodeRuns.flatMap(node => node.execution ? [node.execution] : []) ?? []
+  const testDesignEventCount = testDesignExecutions.reduce((total, execution) => total + execution.events.length, 0)
+  const totalEventCount = eventCount + testDesignEventCount
+  const totalTurnCount = turnCount + testDesignExecutions.reduce((total, execution) => total + execution.turns, 0)
+  const totalToolCallCount = toolCallCount + testDesignExecutions.reduce((total, execution) => total + execution.toolCalls, 0)
+  const totalToolErrorCount = toolErrorCount + testDesignExecutions.reduce((total, execution) => total + (execution.toolErrors ?? 0), 0)
   useEffect(() => {
     if (!linkedTestDesign) { setTestDesignRun(undefined); setTestDesignLoadError(''); return }
     let cancelled = false
@@ -480,7 +485,7 @@ function AgentConversation({ run, projectVersionId, linkedTestDesign, onReviewed
     <div className="rav2-conversation-scroll" ref={scrollRef}>
       {!run ? <div className="rav2-agent-empty"><span className="rav2-agent-empty-icon"><Bot /></span><div><b>等待启动 Pi Agent</b><p>开始需求分析后，这里会同步展示任务输入、Agent 消息、工具调用与运行状态。</p></div><ul className="rav2-agent-empty-preview"><li><FileText />任务输入与分析进度</li><li><Wrench />工具调用与执行结果</li><li><Sparkles />关键状态与最终产物</li></ul></div> : <>
         <article className="rav2-agent-task"><span><FileText /></span><div><b>需求理解与测试关注点分析</b><p>PlanningAgent 正在基于本次重点输入和冻结 Workspace 建立需求理解；若存在会影响测试正确性的缺失事实，会在本阶段统一提出待确认问题。</p><small>{run.id} · 已提交 {run.snapshot?.currentInputRefs.length ?? run.assetVersionIds.length} 个重点输入 · Workspace Snapshot {run.snapshot?.workspaceSnapshot.files.length ?? '—'} 个文件</small></div></article>
-        <div className="rav2-agent-metrics"><span>{turnCount} Turn</span><span>{toolCallCount} 次工具</span><span>{eventCount} 条事件</span>{toolErrorCount ? <span className="failed">{toolErrorCount} 次异常</span> : null}</div>
+        <div className="rav2-agent-metrics"><span>{totalTurnCount} Turn</span><span>{totalToolCallCount} 次工具</span><span>{totalEventCount} 条事件</span>{totalToolErrorCount ? <span className="failed">{totalToolErrorCount} 次异常</span> : null}</div>
         <details className="rav2-runtime-details"><summary><ShieldCheck />运行上下文与只读 Reviewer</summary><PlanningContextMetrics context={latestExecution?.context} /><button className="planning-reviewer-button" disabled={reviewing || run.status === 'running'} onClick={() => void review()}><ShieldCheck />{reviewing ? 'RequirementReviewer 审阅中…' : '运行只读 RequirementReviewer'}</button><PlanningSubAgentRuns runs={run.planningSubAgentRuns} /></details>
         {timeline.map(item => {
           if (item.kind === 'clarification') return <HumanClarificationEntry batch={item.batch} key={`clarification:${item.id}`} />

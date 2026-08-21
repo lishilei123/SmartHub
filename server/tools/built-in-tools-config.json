@@ -556,7 +556,7 @@
                         "properties": {
                           "entry": {
                             "type": "string",
-                            "minLength": 1,
+                            "minLength": 0,
                             "maxLength": 2000
                           },
                           "viewport": {
@@ -584,12 +584,12 @@
                         "properties": {
                           "method": {
                             "type": "string",
-                            "minLength": 1,
+                            "minLength": 0,
                             "maxLength": 20
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1,
+                            "minLength": 0,
                             "maxLength": 2000
                           },
                           "requestSchemaRef": {
@@ -1318,7 +1318,7 @@
                         "properties": {
                           "entry": {
                             "type": "string",
-                            "minLength": 1,
+                            "minLength": 0,
                             "maxLength": 2000
                           },
                           "viewport": {
@@ -1346,12 +1346,12 @@
                         "properties": {
                           "method": {
                             "type": "string",
-                            "minLength": 1,
+                            "minLength": 0,
                             "maxLength": 20
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1,
+                            "minLength": 0,
                             "maxLength": 2000
                           },
                           "requestSchemaRef": {

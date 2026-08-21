@@ -205,6 +205,21 @@ test('执行契约待确认是 handoff gate，明确 Expected Result 不会误�
   assert.equal(result.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'), false)
 })
 
+test('缺少 UI/API 执行数据时允许留空，Service Validator 不改写候选 readiness', () => {
+  const pending = validateTestCaseContent({
+    ...content(['REQ-1'], '跨通道状态迁移'),
+    executionMethods: [
+      { ...executionMethods[0], uiSpec: { entry: '', selectors: [] }, executionReadiness: 'ready' },
+      { method: 'api', apiSpec: { method: '', path: '' }, steps: [{ key: 'api-step-1', action: '提交状态变更请求', expected: '任务状态变更为 in_progress' }], verificationChecks: [], executionReadiness: 'ready', automationHint: '' },
+    ],
+    executionSpec: { kind: 'functional', method: 'api' },
+  })
+  assert.equal(pending.executionMethods.find(item => item.method === 'ui')?.executionReadiness, 'ready')
+  const api = pending.executionMethods.find(item => item.method === 'api')
+  assert.equal(api?.executionReadiness, 'ready')
+  assert.deepEqual(api?.method === 'api' ? api.apiSpec : undefined, { method: '', path: '' })
+})
+
 test('ScenarioClaim.oracle 自身待确认或弱 Oracle 会报告业务 Expected Result 不清', () => {
   const pendingOracle = audit([testCase('TC-ORACLE', content(['REQ-1']))], ['REQ-1'], [claim('SC-ORACLE', 'TC-ORACLE', { kind: 'state_transition', subject: 'task.status', variant: 'todo->in_progress', polarity: 'positive', oracle: '待确认具体状态表现' })])
   assert.ok(pendingOracle.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR' && item.resolution === 'human_decision'))

@@ -580,6 +580,8 @@ export interface TestDesignWorkflowRun {
   stage: TestDesignNodeKey | 'completed' | 'cancelled' | 'failed'
   progress: number
   idempotencyKey: string
+  /** Frozen UI/API channels requested by the TestDesign input for this Run. */
+  requestedExecutionMethods?: Array<'ui' | 'api'>
   basisSnapshot: TestDesignBasisSnapshot
   agentConfigurationSnapshot: TestDesignRunAgentConfigurationSnapshot
   currentInputRefs: CurrentInputRef[]

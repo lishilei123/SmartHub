@@ -64,16 +64,19 @@ test('自动 Proposal 不再形成第二套人工审核，只有特殊历史变�
   assert.doesNotMatch(service, /batchAcceptUnchangedReuseProposals|CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u)
 })
 
-test('运行面板展示冻结 Release、Workspace、Agent 配置与实时轨迹', () => {
+test('运行面板展示冻结配置与折叠技术诊断，Agent 轨迹统一进入主界面协作', () => {
   const source = read('../src/test-design/TestDesignRunPanel.tsx')
+  const planningPage = read('../src/RequirementAnalysisPageV2.tsx')
   assert.match(source, /Requirement Release/u)
   assert.match(source, /verificationRunId/u)
   assert.match(source, /requirementsJsonSha256/u)
   assert.match(source, /Workspace Snapshot/u)
   assert.match(source, /Agent 配置快照/u)
-  assert.match(source, /Pi Agent 实时轨迹/u)
-  assert.match(source, /Skill 已读取/u)
-  assert.match(source, /skillKey/u)
+  assert.match(source, /技术诊断/u)
+  assert.doesNotMatch(source, /Pi Agent 实时轨迹/u)
+  assert.match(planningPage, /TestDesignNodeConversationEntry/u)
+  assert.match(planningPage, /totalEventCount/u)
+  assert.match(planningPage, /testDesignExecutions/u)
   assert.match(source, /Coverage 检查/u)
 })
 
