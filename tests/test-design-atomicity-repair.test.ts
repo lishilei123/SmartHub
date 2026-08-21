@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
-import { TestDesignService, type PlanningAgentRuntime } from '../server/application/test-design-service.js'
+import { materializeCaseDesign, repairCandidateContent, TestDesignService, type PlanningAgentRuntime } from '../server/application/test-design-service.js'
 import { validateTestCaseContent } from '../server/application/test-design-validation.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
@@ -111,28 +111,28 @@ test('未尝试的非独立修复在相关 human_decision 下标记 deferred，�
   assert.ok(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'))
 })
 
-test('test-case-design/v2 仅提交新用例时，Service 从冻结快照恢复 100 条历史用例并派生完整 reuse/create Proposal', async () => {
+test('test-case-design/v2 提交 cases: [] 时，Service 从明确继承的冻结快照恢复 100 条历史用例并派生完整 reuse Proposal', async () => {
   const store = await storeWithPublishedRequirement()
   await installHistoricalLibrary(store, 100)
-  const submitted = referenceCandidate([caseCandidate('TC-NEW', '新增状态校验')])
+  const submitted = referenceCandidate([])
   const runtime: PlanningAgentRuntime = {
     readiness: async () => ({ ready: true, agents: [] }),
     freezeConfiguration: async () => frozenConfiguration(),
     execute: async () => ({ schemaVersion: 'test-case-design/v2', content: submitted }),
   }
   const service = new TestDesignService(store, runtime)
-  const design = await service.createDesign('project-version-1', { name: '引用式历史复用', objective: '验证冻结历史复用', knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const design = await service.createDesign('project-version-1', { name: '引用式历史复用', objective: '验证冻结历史复用', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal)
   const run = await service.createRun('project-version-1', design.id, 'reference-submission', principal)
   const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
 
   assert.equal(completed.status, 'succeeded', completed.error)
-  assert.equal(completed.testCases.filter(item => !item.tombstonedAt).length, 101)
+  assert.equal(completed.testCases.filter(item => !item.tombstonedAt).length, 100)
   assert.equal(completed.caseChangeProposals.filter(item => item.operation === 'reuse').length, 100)
-  assert.equal(completed.caseChangeProposals.filter(item => item.operation === 'create').length, 1)
-  assert.equal(completed.caseChangeProposals.filter(item => item.decision === 'pending').length, 101, 'Service 自动 Proposal 仍须人工处置')
+  assert.equal(completed.caseChangeProposals.filter(item => item.operation === 'create').length, 0)
+  assert.equal(completed.caseChangeProposals.filter(item => item.decision === 'pending').length, 100, 'Service 自动 Proposal 仍须人工处置')
   assert.ok(completed.testCases.some(item => item.origin === 'historical_unchanged' && item.revisions[item.currentRevision].content.title === '冻结历史 1'))
   const artifact = completed.artifacts.find(item => item.id === completed.nodeRuns.find(item => item.nodeKey === 'test_case_design')?.outputArtifactId)
-  assert.equal((artifact?.content as { cases?: unknown[] }).cases?.length, 101, 'Artifact 必须保存 Service 生成的完整 Candidate Snapshot')
+  assert.equal((artifact?.content as { cases?: unknown[] }).cases?.length, 100, 'Artifact 必须保存 Service 生成的完整 Candidate Snapshot')
 
   const legacyLike = {
     schemaVersion: 'test-case-design/v1',
@@ -145,6 +145,111 @@ test('test-case-design/v2 仅提交新用例时，Service 从冻结快照恢复 
     proposals: completed.caseChangeProposals.map(item => ({ operation: item.operation, sourceCaseId: item.sourceCaseId, sourceRevision: item.sourceRevision, candidateRef: completed.testCases.find(testCase => testCase.id === item.candidateCaseId)?.candidateRef, requirementRefs: item.requirementRefs, reason: item.reason, confidence: item.confidence })),
   }
   assert.ok(Buffer.byteLength(JSON.stringify(submitted)) <= Buffer.byteLength(JSON.stringify(legacyLike)) * 0.6, '引用式提交应比同一完整历史集合至少减少 40%')
+})
+
+test('未选择来源版本时，test-case-design/v2 的 cases: [] 由 Service 明确拒绝', async () => {
+  const store = await storeWithPublishedRequirement()
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v2', content: referenceCandidate([]) }) }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '空候选', objective: '没有来源版本时不能提交空候选', knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('project-version-1', design.id, 'empty-without-history', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
+  assert.equal(completed.status, 'failed')
+  assert.match(completed.error ?? '', /TEST_DESIGN_CANDIDATE_EMPTY_WITHOUT_REUSABLE_HISTORY/u)
+})
+
+test('仅保留来源关系而未继承时，不暴露也不加载来源冻结历史用例', async () => {
+  const store = await storeWithPublishedRequirement()
+  await installHistoricalLibrary(store, 1)
+  await store.transaction(state => { state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.id !== 'binding-target') })
+  const service = new TestDesignService(store)
+  const inputs = await service.inputCandidates('project-version-1')
+  assert.equal(inputs.projectVersion.inheritsSourceAssets, false)
+  assert.equal(inputs.testCaseLibraryVersions.length, 0)
+  await assert.rejects(
+    () => service.createDesign('project-version-1', { name: '错误继承', objective: '未勾选继承不能选择来源历史', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal),
+    /TEST_DESIGN_SOURCE_INHERITANCE_REQUIRED/u,
+  )
+})
+
+test('Patch 修改复用历史 Candidate 时仅创建当前 Run Revision，Proposal/Claim/决策保持一致且相同 Patch 幂等', async () => {
+  const store = await storeWithPublishedRequirement()
+  await installHistoricalLibrary(store, 1)
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v2', content: referenceCandidate([caseCandidate('TC-AI', '当前版本 AI 新增用例')]) }) }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '历史 Patch 治理', objective: '校验 Repair 当前 Candidate 与 Proposal 一致性', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal)
+  const created = await service.createRun('project-version-1', design.id, 'history-patch-governance', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, created.id)
+  assert.equal(completed.status, 'succeeded', completed.error)
+  const reuse = completed.caseChangeProposals.find(item => item.operation === 'reuse')!
+  await service.batchAcceptUnchangedReuseProposals('project-version-1', design.id, completed.id, { targets: [{ proposalId: reuse.id, expectedVersion: 0 }] }, principal)
+  await assert.rejects(
+    () => service.batchAcceptUnchangedReuseProposals('project-version-1', design.id, completed.id, { targets: [{ proposalId: completed.caseChangeProposals.find(item => item.operation === 'create')!.id, expectedVersion: 0 }] }, principal),
+    /CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u,
+  )
+
+  const run = await service.getRun('project-version-1', design.id, completed.id)
+  const historical = run.testCases.find(item => item.origin === 'historical_unchanged')!
+  const sourceBefore = structuredClone((await store.snapshot()).testDesignState!.libraryCases.find(item => item.id === reuse.sourceCaseId)!.revisions)
+  const sourceClaim = run.scenarioClaims.find(item => item.caseRef === historical.candidateRef)!
+  const { caseRef: _caseRef, requirementRefs: _requirementRefs, ...inlineClaim } = sourceClaim
+  run.basisSnapshot.items.push({ id: 'requirement-rp-alt', kind: 'requirement_release', sourceId: 'release-1:RP-ALT', contentSha256: 'b'.repeat(64), content: '{"clientRequirementPointId":"RP-ALT"}', locator: { requirementReleaseId: 'release-1', requirementPointId: 'RP-ALT' } })
+  const changedContent = { ...historical.revisions[historical.currentRevision].content, title: '来源用例的当前 Run Repair Revision', requirementRefs: ['RP-STATE', 'RP-ALT'] }
+  const patch = (baseCandidateSha256: string) => ({ schemaVersion: 'test-design-repair/v2' as const, baseCandidateSha256, upsertCases: [{ ref: historical.candidateRef!, ...changedContent, changeReason: 'Coverage Audit 修复历史复用 Candidate', confidence: 0.93, coverageClaims: [inlineClaim] }], removeCaseRefs: [], upsertDataRequirements: [], removeDataRequirementRefs: [], dimensionAssessmentUpdates: [] })
+  materializeCaseDesign(run, patch(canonicalSha256(repairCandidateContent(run))), principal.subjectId, true)
+  const changedCase = run.testCases.find(item => item.id === historical.id)!
+  const updated = run.caseChangeProposals.find(item => item.id === reuse.id)!
+  assert.equal(changedCase.origin, 'historical_modified')
+  assert.equal(changedCase.revisions.length, 2)
+  assert.equal(updated.operation, 'update')
+  assert.deepEqual(updated.requirementRefs, changedCase.revisions[changedCase.currentRevision].content.requirementRefs)
+  assert.deepEqual(run.scenarioClaims.find(item => item.caseRef === historical.candidateRef)?.requirementRefs, changedCase.revisions[changedCase.currentRevision].content.requirementRefs)
+  assert.equal(updated.candidateContent?.title, changedContent.title)
+  assert.ok(updated.diff.length > 0)
+  assert.equal(updated.decision, 'pending')
+  assert.equal(updated.decidedBy, undefined)
+  assert.equal(updated.appliedCaseId, undefined)
+  assert.equal(updated.decisions.length, 1, '旧 accepted 决策保留为审计历史，但不再是有效批准')
+  assert.deepEqual((await store.snapshot()).testDesignState!.libraryCases.find(item => item.id === reuse.sourceCaseId)!.revisions, sourceBefore, '来源冻结 Revision 不得被 Repair 改写')
+  const revisionCount = changedCase.revisions.length
+  const decisionCount = updated.decisions.length
+  materializeCaseDesign(run, patch(canonicalSha256(repairCandidateContent(run))), principal.subjectId, true)
+  assert.equal(changedCase.revisions.length, revisionCount, '语义无变化的 Patch 不创建伪 Revision')
+  assert.equal(updated.decisions.length, decisionCount, '语义无变化的 Patch 不重复重置人工决策')
+  await store.transaction(state => {
+    const persisted = state.testDesignState!.runs.find(item => item.id === run.id)!
+    Object.assign(persisted, structuredClone(run))
+    persisted.caseChangeProposals.push({ id: 'proposal-deprecate', runId: run.id, operation: 'deprecate', sourceCaseId: updated.sourceCaseId, sourceRevision: updated.sourceRevision, diff: [], requirementRefs: [], reason: '测试批量边界', confidence: 1, decision: 'pending', createdAt: new Date().toISOString(), decisions: [] })
+  })
+  await assert.rejects(
+    () => service.batchAcceptUnchangedReuseProposals('project-version-1', design.id, run.id, { targets: [{ proposalId: updated.id, expectedVersion: updated.decisions.length }, { proposalId: 'proposal-deprecate', expectedVersion: 0 }] }, principal),
+    /CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u,
+  )
+})
+
+test('未变化历史复用与当前 AI Candidate 并存时，可修复的 Coverage Blocker 仍进入自动 Repair', async () => {
+  const store = await storeWithPublishedRequirement()
+  await installHistoricalLibrary(store, 1)
+  const stages: string[] = []
+  const runtime: PlanningAgentRuntime = {
+    readiness: async () => ({ ready: true, agents: [] }),
+    freezeConfiguration: async () => frozenConfiguration(),
+    execute: async input => {
+      stages.push(input.stage)
+      if (input.stage === 'test_case_design') return { schemaVersion: 'test-case-design/v2', content: referenceCandidate([{ ...caseCandidate('TC-MERGED', '当前 AI 合并状态迁移'), coverageClaims: [inlineStateClaim('SC-AI-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress'), inlineStateClaim('SC-AI-DONE', 'in_progress->completed', 'positive', '状态变更后为 completed')] }]) }
+      const upstream = input.upstream as { baseCandidateSha256: string }
+      return { schemaVersion: 'test-design-repair/v2', content: { schemaVersion: 'test-design-repair/v2', baseCandidateSha256: upstream.baseCandidateSha256, upsertCases: [{ ...caseCandidate('TC-AI-TODO', 'AI todo 到 in_progress'), coverageClaims: [inlineStateClaim('SC-AI-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress')] }, { ...caseCandidate('TC-AI-DONE', 'AI in_progress 到 completed'), coverageClaims: [inlineStateClaim('SC-AI-DONE', 'in_progress->completed', 'positive', '状态变更后为 completed')] }], removeCaseRefs: ['TC-MERGED'], upsertDataRequirements: [], removeDataRequirementRefs: [], dimensionAssessmentUpdates: [] } }
+    },
+  }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '历史与 AI Repair', objective: '历史复用不应阻塞当前 Candidate 自动修复', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal)
+  const created = await service.createRun('project-version-1', design.id, 'history-and-ai-repair', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, created.id)
+  assert.equal(completed.status, 'succeeded', completed.error)
+  assert.deepEqual(stages, ['test_case_design', 'test_design_repair'])
+  assert.equal(completed.automaticRepair?.attempt, 1)
+  assert.ok(completed.testCases.some(item => item.origin === 'historical_unchanged'))
+  assert.deepEqual(completed.testCases.filter(item => !item.tombstonedAt).map(item => item.candidateRef).sort(), ['TC-AI-DONE', 'TC-AI-TODO', completed.testCases.find(item => item.origin === 'historical_unchanged')!.candidateRef].sort())
 })
 
 test('test-design-repair/v2 仅应用指定 Patch、重跑审计并保存修复前后完整 Diff', async () => {
@@ -256,8 +361,13 @@ async function installHistoricalLibrary(store: JsonStore, count: number) {
       const semanticSha256 = canonicalSha256({ ...content, tags: [...content.tags].sort() })
       return { caseId: `CASE-${String(index + 1).padStart(3, '0')}`, content, semanticSha256 }
     })
+    const target = state.projectVersions.find(item => item.id === 'project-version-1')!
+    const sourceProjectVersionId = 'project-version-source'
+    target.sourceProjectVersionId = sourceProjectVersionId
+    state.projectVersions.push({ id: sourceProjectVersionId, projectId: target.projectId, name: 'V0', status: 'locked', createdAt: '2026-08-19T00:00:00.000Z', updatedAt: '2026-08-19T00:00:00.000Z' } as never)
+    state.projectVersionRequirementBindings.push({ id: 'binding-source', projectVersionId: sourceProjectVersionId, assetId: 'asset-1', assetVersionId: 'version-fixed', createdAt: '2026-08-19T00:00:00.000Z' }, { id: 'binding-target', projectVersionId: target.id, assetId: 'asset-1', assetVersionId: 'version-fixed', createdAt: '2026-08-20T00:00:00.000Z' })
     state.testDesignState = {
-      architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [],
+      architectureVersion: 'single-agent-skills/v1', designs: [], runs: [{ id: 'history-run', projectVersionId: sourceProjectVersionId } as never], caseSetVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [],
       libraryCases: requirements.map(item => ({ id: item.caseId, projectId: 'project-1', currentRevision: 1, status: 'active', createdAt: '2026-08-20T00:00:00.000Z', updatedAt: '2026-08-20T00:00:00.000Z', revisions: [{ revision: 1, content: item.content, contentSha256: canonicalSha256(item.content), semanticSha256: item.semanticSha256, changeReason: '冻结 Fixture', createdBy: 'test-owner', createdAt: '2026-08-20T00:00:00.000Z' }] })),
       libraryVersions: [{ id: 'library-v1', projectId: 'project-1', version: 1, name: '冻结历史', sourceRunId: 'history-run', dataRequirementSet: { id: 'data-history', version: 1, requirements: [], contentSha256: canonicalSha256([]), createdAt: '2026-08-20T00:00:00.000Z', createdBy: 'test-owner' }, members: requirements.map((item, index) => ({ caseId: item.caseId, revision: 1, ordinal: index, contentSha256: canonicalSha256(item.content), frozenContent: item.content })), contentSha256: canonicalSha256(requirements.map(item => item.caseId)), publishedBy: 'test-owner', publishedAt: '2026-08-20T00:00:00.000Z', projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics: { reuse: count, update: 0, create: 0, deprecate: 0, reference: 0 }, dimensionStatistics: { functional: count }, coverageAudit: { id: 'history-audit', statistics: { totalBasis: 1, coveredBasis: 1, totalCases: count, approvedCases: count }, blockerCount: 0 } } }],
     } as never

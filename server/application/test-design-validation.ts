@@ -126,7 +126,7 @@ export function validateTestCaseDesignCandidate(value: unknown, repair = false):
   synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dimensionAssessments', 'scenarioClaims', 'dataRequirements', 'findings', 'confirmationItems', 'proposals', 'historicalChanges'], '/')
   if (referenceProtocol && input.proposals !== undefined) synthesisFail('/proposals', 'test-case-design/v2 使用 historicalChanges；不要提交完整 proposals')
   if (!referenceProtocol && input.historicalChanges !== undefined) synthesisFail('/historicalChanges', `${expectedV1} 不支持 historicalChanges；请继续使用 proposals`)
-  if (!Array.isArray(input.cases) || !input.cases.length || input.cases.length > 1_000) synthesisFail('/cases', 'cases 必须包含 1 到 1000 条用例')
+  if (!Array.isArray(input.cases) || input.cases.length > 1_000 || (!referenceProtocol && !input.cases.length)) synthesisFail('/cases', referenceProtocol ? 'test-case-design/v2 的 cases 必须是最多 1000 条用例的数组；是否可为空由 Service 根据冻结历史快照判定' : 'cases 必须包含 1 到 1000 条用例')
   if (referenceProtocol && input.dimensionAssessments === undefined) synthesisFail('/dimensionAssessments', 'test-case-design/v2 必须完整提交五维 dimensionAssessments')
 
   const cases = validateCandidateCases(input.cases, '/cases')
@@ -371,7 +371,7 @@ function validateCandidateCases(value: unknown[], basePath: string): CandidateCa
         ? []
         : validateInlineScenarioClaims(coverageClaims, { ref, content }, `${path}/coverageClaims`)
       const normalizedConfidence = confidence === undefined ? undefined : synthesisConfidence(confidence, `${path}/confidence`)
-      return { ref, content, ...(claims.length ? { coverageClaims: claims } : {}), ...(changeReason === undefined ? {} : { changeReason: synthesisText(changeReason, `${path}/changeReason`, 4_000) }), ...(normalizedConfidence === undefined ? {} : { confidence: normalizedConfidence }) }
+      return { ref, content, ...(coverageClaims === undefined ? {} : { coverageClaims: claims }), ...(changeReason === undefined ? {} : { changeReason: synthesisText(changeReason, `${path}/changeReason`, 4_000) }), ...(normalizedConfidence === undefined ? {} : { confidence: normalizedConfidence }) }
     } catch (error) {
       if (error instanceof TestDesignError && error.details && typeof error.details === 'object' && 'path' in error.details) throw error
       synthesisFail(path, errorMessage(error))
@@ -654,7 +654,7 @@ function validateHistoricalSelections(value: unknown) {
 }
 
 function validateHistoricalLibrarySelection(value: unknown): HistoricalLibrarySelection {
-  if (value === undefined) return { mode: 'latest_library' }
+  if (value === undefined) return { mode: 'none' }
   const input = object(value, 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', 'historicalLibrarySelection 必须是对象')
   if (input.mode === 'latest_library' || input.mode === 'none') {
     rejectUnknown(input, ['mode'], 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID')

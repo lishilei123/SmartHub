@@ -39,7 +39,26 @@ test('创建面板明确展示绑定需求发布包并定义范围、维度和�
   assert.match(source, /排除范围/u)
   assert.match(source, /测试维度/u)
   assert.match(source, /执行入口/u)
+  assert.match(source, /不使用历史用例（默认）/u)
+  assert.match(source, /inheritsSourceAssets/u)
+  assert.match(source, /mode: 'none'/u)
+  assert.doesNotMatch(source, /默认使用项目最新用例库/u)
   assert.doesNotMatch(source, /basisMode|review_baseline|sourceTechnicalSolutionRunId/u)
+})
+
+test('历史未变化复用仅可经 Service 确认批量接受', () => {
+  const panel = read('../src/test-design/CaseChangeProposalPanel.tsx')
+  const api = read('../src/test-design/api.ts')
+  const hook = read('../src/test-design/hooks/useTestDesign.ts')
+  const service = read('../server/application/test-design-service.ts')
+  assert.match(panel, /批量接受未变化复用/u)
+  assert.match(panel, /确认接受/u)
+  assert.match(panel, /来源 Revision 语义完全一致/u)
+  assert.match(panel, /historical_unchanged/u)
+  assert.match(api, /batch-accept-unchanged-reuse/u)
+  assert.match(hook, /batchAcceptUnchangedReuseProposals/u)
+  assert.match(service, /batchAcceptUnchangedReuseProposals/u)
+  assert.match(service, /CASE_CHANGE_PROPOSAL_BATCH_TARGET_INVALID/u)
 })
 
 test('运行面板展示冻结 Release、Workspace、Agent 配置与实时轨迹', () => {

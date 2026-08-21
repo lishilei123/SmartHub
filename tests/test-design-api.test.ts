@@ -80,6 +80,7 @@ test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP �
     if (method === 'getLibraryCase' || method === 'editLibraryCase') return { id: 'case-1', etag: '"library-case:case-1:r2:new"' }
     if (method === 'createLibraryCase' || method === 'copyLibraryCase' || method === 'deprecateLibraryCase') return { id: 'case-1' }
     if (method === 'decideCaseChangeProposal') return { id: 'proposal-1', decision: 'accepted' }
+    if (method === 'batchAcceptUnchangedReuseProposals') return { acceptedCount: 1, alreadyAcceptedCount: 0, proposals: [{ id: 'proposal-1', decision: 'accepted' }] }
     if (method === 'publishLibraryVersion') return { id: 'library-v1' }
     if (method === 'getLibraryVersion') return { id: 'library-v1', members: [{ caseId: 'case-1', revision: 1, ordinal: 0, contentSha256: 'a'.repeat(64), frozenContent: { title: '冻结标题', executionSpec: { method: 'ui' } }, executionReadiness: 'needs_confirmation' }] }
     if (method === 'createSuiteDraft' || method === 'updateSuiteDraft') return { id: 'draft-1', etag: '"suite-draft:draft-1:new"' }
@@ -98,6 +99,7 @@ test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP �
   assert.equal((await routeCall('DELETE', '/api/projects/project-1/test-case-library/case-1', { changeReason: '废弃' }, { 'if-match': '"library-case:case-1:r2:new"' }, service)).status, 200)
   assert.equal((await routeCall('GET', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/case-change-proposals', undefined, {}, service)).status, 200)
   assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/case-change-proposals/proposal-1/decisions', { expectedVersion: 0, decision: 'accepted' }, {}, service)).status, 201)
+  assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/case-change-proposals/batch-accept-unchanged-reuse', { targets: [{ proposalId: 'proposal-1', expectedVersion: 0 }] }, {}, service)).status, 201)
   assert.equal((await routeCall('POST', '/api/project-versions/pv-1/test-designs/design-1/runs/run-1/test-case-library-versions', { name: 'V1', expectedAuditId: 'audit-1', expectedCaseSetSha256: 'a', expectedProposalSha256: 'b' }, {}, service)).status, 201)
   assert.equal((await routeCall('POST', '/api/projects/project-1/test-suite-drafts', { suiteKey: 'smoke', suiteType: 'smoke', name: 'Smoke', testCaseLibraryVersionId: 'library-v1', members: [] }, {}, service)).status, 201)
   assert.equal((await routeCall('PUT', '/api/projects/project-1/test-suite-drafts/draft-1', { suiteKey: 'smoke', suiteType: 'smoke', name: 'Smoke 2', testCaseLibraryVersionId: 'library-v1', members: [] }, { 'if-match': '"suite-draft:draft-1:old"' }, service)).status, 200)
@@ -110,6 +112,7 @@ test('正式用例、Proposal、用例库版本、套件和四类 Handoff HTTP �
   assert.deepEqual(calls.find(item => item.method === 'editLibraryCase')!.args[6], traceability)
   assert.deepEqual(calls.filter(item => item.method === 'createLibraryHandoff').map(item => (item.args[2] as { mode: string }).mode), ['smoke', 'regression', 'full', 'custom'])
   assert.deepEqual((calls.filter(item => item.method === 'createLibraryHandoff')[2].args[2] as { executionReadinessOverrides: unknown }).executionReadinessOverrides, [{ caseId: 'case-1', revision: 1, reason: '人工确认执行' }])
+  assert.deepEqual(calls.find(item => item.method === 'batchAcceptUnchangedReuseProposals')!.args[3], { targets: [{ proposalId: 'proposal-1', expectedVersion: 0 }] })
 })
 
 test('正式资产 HTTP 路由透传单版本、基线和 executionSpec 服务端拒绝', async () => {

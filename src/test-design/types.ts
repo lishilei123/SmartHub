@@ -8,7 +8,7 @@ export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
 export type ReviewState = 'draft' | 'in_review' | 'approved' | 'rejected' | 'needs_revision'
 
 export type TestDesignInputCandidates = {
-  projectVersion: { id: string; projectId: string; name: string; status: string }
+  projectVersion: { id: string; projectId: string; name: string; status: string; sourceProjectVersionId?: string; inheritsSourceAssets: boolean }
   requirementRelease: { id: string; analysisRunId: string; contentSha256: string; publishedAt?: string; label: string } | null
   requirementReleases: Array<{ id: string; analysisRunId: string; contentSha256: string; publishedAt?: string; label: string; active: boolean }>
   knowledgeAssets: Array<{ assetId: string; assetVersionId: string; displayName: string; logicalPath: string; assetType: string; status: string; selectable: boolean; reason?: string }>

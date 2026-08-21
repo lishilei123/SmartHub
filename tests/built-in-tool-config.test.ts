@@ -78,7 +78,7 @@ test('测试用例提交工具向模型声明 Requirement 直接追溯字段', (
   assert.equal(descriptor.version, '2.0.0')
   assert.equal(schema.additionalProperties, false)
   assert.ok(schema.required.includes('cases'))
-  assert.equal(schema.properties.cases.minItems, 1)
+  assert.equal(schema.properties.cases.minItems, 0)
   assert.equal(schema.properties.cases.items.additionalProperties, false)
   assert.ok(schema.properties.cases.items.required.includes('ref'))
   assert.ok(schema.properties.cases.items.required.includes('requirementRefs'))
@@ -98,7 +98,7 @@ test('测试用例与修复提交工具声明闭合的 test-case/v2、executionS
   const caseSchema = schema.properties.cases.items
   const dataSchema = schema.properties.dataRequirements.items
   assert.equal(schema.additionalProperties, false)
-  assert.equal(schema.properties.cases.minItems, 1)
+  assert.equal(schema.properties.cases.minItems, toolId === 'test_design_cases.submit_result' ? 0 : 1)
   assert.equal(caseSchema.additionalProperties, false)
   assert.ok(caseSchema.required.includes('preconditions'))
   assert.ok(caseSchema.required.includes('executionMethods'))

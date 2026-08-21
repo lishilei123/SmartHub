@@ -219,6 +219,13 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     await refreshAndScheduleAudit()
   }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run])
 
+  const batchAcceptUnchangedReuseProposals = useCallback(async (targets: Array<{ proposalId: string; expectedVersion: number }>) => {
+    if (!projectVersionId || !design || !run) return
+    const result = await guarded('proposal-batch-accept', () => api.batchAcceptUnchangedReuseProposals(projectVersionId, design.id, run.id, targets))
+    await refreshRun()
+    if (result) notify(`已批量接受 ${result.acceptedCount} 条未变化复用 Proposal。`, 'success')
+  }, [design, guarded, notify, projectVersionId, refreshRun, run])
+
   const publish = useCallback(async (name: string) => {
     if (!projectVersionId || !design || !run) return
     const audit = [...run.coverageAudits].reverse().find(item => item.status === 'valid')
@@ -247,5 +254,5 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const previewLegacyMigration = useCallback(async (legacyTestCaseSetVersionId: string) => { if (!inputs) return; const preview = await guarded('legacy-migration-preview', () => api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId)); if (preview) setLegacyMigrationPreview(preview); return preview }, [guarded, inputs])
   const migrateLegacyCaseSet = useCallback(async (legacyTestCaseSetVersionId: string, confirmUncertain = false) => { if (!inputs) return; const preview = legacyMigrationPreview?.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId ? legacyMigrationPreview : await api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId); await guarded('legacy-migration', () => api.migrateLegacyCaseSet(inputs.projectVersion.projectId, { legacyTestCaseSetVersionId, expectedPreviewSha256: preview.previewSha256, confirmUncertain }), '历史已发布用例集已幂等导入正式用例库。'); setLegacyMigrationPreview(null); await loadCollection() }, [guarded, inputs, legacyMigrationPreview, loadCollection])
 
-  return { inputs, designs, design, run, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
+  return { inputs, designs, design, run, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, batchAcceptUnchangedReuseProposals, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
 }

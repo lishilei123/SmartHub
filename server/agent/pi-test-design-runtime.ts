@@ -207,7 +207,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
         ]
       : [
           '当前任务只列出经过 Service 作用域判定、可安全自动修复的 agent_repair blockers；正式 Requirement 保持不变。提交 test-design-repair/v2 时，baseCandidateSha256 必须等于任务和 current-test-cases.json 对应的当前完整 Candidate；Hash 不一致时重新读取快照，不能猜测或覆盖。',
-          'Patch 的 upsertCases 是新增或替换指定 ref 的完整 test-case/v2 内容；functional/security 用例将其 coverageClaims 一并放在该 Case 内。removeCaseRefs 只可删除本轮新增 Candidate，不能删除冻结历史 reuse Case。未在 Patch 中列出的 Case、Proposal、历史来源、数据关系和维度评估由 Service 保持不变。',
+          'Patch 的 upsertCases 是新增或替换指定 ref 的完整 test-case/v2 内容；functional/security 用例将其 coverageClaims 一并放在该 Case 内。可安全修复的完整 Candidate 可以同时包含当前版本 AI Case 与未变化历史 reuse Case；Patch 只修改当前 Run Candidate，绝不修改来源冻结 Revision。removeCaseRefs 只可删除本轮新增 Candidate，不能删除冻结历史 reuse Case。未在 Patch 中列出的 Case、Proposal、历史来源、数据关系和维度评估由 Service 保持不变；Service 会同步 Candidate、ScenarioClaim、requirementRefs、diff 与 Proposal 状态。',
           'upsertDataRequirements / removeDataRequirementRefs 只处理确实受 blocker 影响的数据需求；dimensionAssessmentUpdates 只更新受影响维度。Service 会把 Patch 重新展开为完整 Candidate，执行完整 Validator 和 Coverage Audit，并保留修复前后 Diff。',
           '遇到 TEST_CASE_OVER_MERGED 时，依据 blocker.details 和 current-test-cases.json 中的 scenarioClaims 拆分 Candidate Case，并将每条 ScenarioClaim 重新指向承担该独立 Atomic Test Intent 的 caseRef。',
         ]
