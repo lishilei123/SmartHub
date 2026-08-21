@@ -9,6 +9,7 @@ import { buildRequirementDirectoryInputPlan } from '../server/agent/requirement-
 import { defaultAgentDefinitionResolver } from '../server/agent/dynamic-agent-definition-resolver.js'
 import { RequirementAnalysisValidator } from '../server/agent/result-validator.js'
 import { RequirementAnalysisService } from '../server/application/requirement-analysis-service.js'
+import { canonicalSha256 } from '../server/application/canonical-json.js'
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { PlanningWorkflowService } from '../server/application/planning-workflow-service.js'
 import type { AgentRuntime, InputDeliveryManifest, ReviewRunSnapshot } from '../server/domain/agent-types.js'
@@ -47,7 +48,7 @@ test('Requirement Release 已绑定后仍可在同一 ProjectVersion 创建新�
     projectVersion.requirementReleaseBinding = {
       releaseId: 'release-1',
       verificationRunId: 'analysis-run-1',
-      requirementsJsonSha256: 'a'.repeat(64),
+      releaseContentSha256: 'a'.repeat(64),
       boundAt: '2026-08-17T00:00:00.000Z',
     }
   })
@@ -93,7 +94,7 @@ test('目录输入包只交付工作区元数据，不把原始需求拼接进 P
   assert.match(plan.batches[0].content, /payment\.md/u, 'currentInputRefs 路径属于元数据，应突出显示')
 })
 
-test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结果与两份 Artifact', async () => {
+test('一次需求分析只执行一次 Pi Runtime，并只派生一份人类可读报告', async () => {
   const { response, store, runtimeCalls } = await successfulRun()
   assert.equal(runtimeCalls(), 1)
   assert.equal(response.result.requirementPoints.length, 2)
@@ -101,9 +102,10 @@ test('一次需求分析只执行一次 Pi Runtime，并直接持久化统一结
   response.result.artifacts.forEach(artifact => {
     assert.equal(artifact.contentSha256, createHash('sha256').update(artifact.content).digest('hex'))
   })
-  assert.equal(response.result.artifacts.length, 2)
-  assert.match(response.result.artifacts[1].content, /# 需求分析报告/u)
-  assert.match(response.result.artifacts[1].content, /## 7\. Test Focus/u)
+  assert.equal(response.result.artifacts.length, 1)
+  assert.equal(response.result.artifacts[0].fileName, 'requirement-analysis.md')
+  assert.match(response.result.artifacts[0].content, /# 需求分析报告/u)
+  assert.match(response.result.artifacts[0].content, /## 8\. Test Focus/u)
 
   const run = (await store.snapshot()).reviewRuns[0]
   assert.equal(run.status, 'succeeded')
@@ -295,16 +297,13 @@ test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人�
 
   const release = resolved.run.workflow?.release
   assert.equal(release?.status, 'published')
-  assert.equal(release!.artifacts.some(item => item.fileName === 'refined-requirements.md'), false)
-  const sourceSnapshot = release!.artifacts.find(item => item.fileName.startsWith('需求原文快照/'))
-  assert.ok(sourceSnapshot)
-  assert.equal(sourceSnapshot.contentSha256, resolved.run.snapshot.assets[0]?.assetContentHash)
-  assert.equal(release!.artifacts.filter(item => item.fileName === 'requirement-baseline.md').length, 1)
-  const requirements = JSON.parse(release!.artifacts.find(item => item.fileName === 'requirements.json')!.content) as { formalClarifications: Array<{ answer: string }>; clarificationDispositionRecords: unknown[] }
-  assert.deepEqual(requirements.formalClarifications.map(item => item.answer), ['关闭失败时保持待支付，可由用户重试。'])
-  assert.deepEqual(requirements.clarificationDispositionRecords, [])
-  assert.match(release!.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content, /Formal Business Fact/u)
-  assert.match(release!.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content, /关闭失败时保持待支付/u)
+  assert.deepEqual(release!.artifacts.map(item => item.fileName), ['requirement-analysis.md'])
+  assert.deepEqual(release!.content.clarifications.filter(item => item.status === 'answered').map(item => item.answer), ['关闭失败时保持待支付，可由用户重试。'])
+  assert.deepEqual(release!.content.clarifications.filter(item => item.status === 'dismissed'), [])
+  assert.equal(release!.contentSha256, canonicalSha256(release!.content))
+  assert.equal((await store.snapshot()).projectVersions[0].requirementReleaseBinding?.releaseContentSha256, release!.contentSha256)
+  assert.match(release!.artifacts[0].content, /Formal Clarifications/u)
+  assert.match(release!.artifacts[0].content, /关闭失败时保持待支付/u)
   assert.match(resolved.run.response!.result.artifacts.find(item => item.fileName === 'requirement-analysis.md')!.content, /formal_business_fact/u)
 
   await assert.rejects(
@@ -333,13 +332,11 @@ test('dismissed Clarification 保留处置记录和事实缺口，但不作为�
   assert.equal(unexpectedExecuteCalls, 0)
   assert.equal(resolved.run.workflow?.release?.status, 'published')
   const release = resolved.run.workflow?.release!
-  const requirements = JSON.parse(release.artifacts.find(item => item.fileName === 'requirements.json')!.content) as { formalClarifications: unknown[]; clarificationDispositionRecords: Array<{ answer: string }> }
-  assert.deepEqual(requirements.formalClarifications, [])
-  assert.deepEqual(requirements.clarificationDispositionRecords.map(item => item.answer), ['当前版本暂不定义关闭失败后的恢复范围，由人工记录风险。'])
-  const baseline = release.artifacts.find(item => item.fileName === 'requirement-baseline.md')!.content
-  assert.match(baseline, /Human Disposition Only/u)
-  assert.match(baseline, /不构成业务规则/u)
-  assert.doesNotMatch(baseline, /Formal Business Fact[\s\S]*当前版本暂不定义关闭失败后的恢复范围/u)
+  assert.deepEqual(release.content.clarifications.filter(item => item.status === 'answered'), [])
+  assert.deepEqual(release.content.clarifications.filter(item => item.status === 'dismissed').map(item => item.answer), ['当前版本暂不定义关闭失败后的恢复范围，由人工记录风险。'])
+  const report = release.artifacts[0].content
+  assert.match(report, /Human Dispositions（非业务事实）/u)
+  assert.match(report, /不作为业务规则/u)
 })
 
 test('未处理完全部 Blocking Clarification 时不发布 Requirement Release，也不执行新的 Agent 运行', async () => {

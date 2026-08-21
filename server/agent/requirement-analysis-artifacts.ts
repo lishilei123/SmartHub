@@ -8,45 +8,22 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
   const evidenceById = new Map(result.evidence.map(item => [item.clientEvidenceId, item]))
   const answeredClarifications = result.clarifications.filter(item => item.status === 'answered')
   const dismissedClarifications = result.clarifications.filter(item => item.status === 'dismissed')
-  const baseline = [
-    '# Requirement Baseline', '',
-    ...result.requirementPoints.flatMap(point => [
-      `## ${safe(point.clientRequirementPointId)} · ${safe(point.title)}`, '',
-      safe(point.description), '',
-      `- Evidence：${point.evidenceRefs.join('、') || '无'}`,
-      ...point.evidenceRefs.flatMap(id => {
-        const evidence = evidenceById.get(id)
-        return evidence ? [`  - ${id} · ${safe(evidence.quote)}`] : []
-      }),
-      '',
-    ]),
-    '## Formal Clarifications', '',
-    ...(answeredClarifications.length ? answeredClarifications.flatMap(item => [
-      `### ${safe(item.id)} · Formal Business Fact`, '',
-      `- Question：${safe(item.question)}`,
-      `- Answer：${safe(item.answer ?? '')}`,
-      `- Requirement Points：${item.requirementPointRefs.join('、') || '整体'}`,
-      `- Confirmed By：${safe(item.answeredBy ?? 'unknown')} · ${item.answeredAt ?? ''}`,
-      '',
-    ]) : ['没有额外确认的 Formal Clarification。', '']),
-    '## Known Fact Gaps / Human Dispositions', '',
-    ...(dismissedClarifications.length ? dismissedClarifications.flatMap(item => [
-      `### ${safe(item.id)} · Human Disposition Only`, '',
-      `- Question：${safe(item.question)}`,
-      `- Disposition：${safe(item.answer ?? '')}`,
-      `- Requirement Points：${item.requirementPointRefs.join('、') || '整体'}`,
-      '- 该处置不构成业务规则、权限、边界或 Expected Result；相关事实缺口必须保留。',
-      '',
-    ]) : ['没有已人工处置的事实缺口。', '']),
-  ].join('\n')
-
   const analysis = [
     '# 需求分析报告', '',
     '## 1. 需求概述', '', safe(result.summary.overview), '',
     '## 2. 业务目标', '', ...(result.summary.businessGoals.length ? result.summary.businessGoals.map(item => `- ${safe(item)}`) : ['- 未在当前需求中明确说明。']), '',
     '## 3. 核心业务流程', '', safe(result.analysisDocument || '结构化结果未附加独立流程说明；请结合 Requirement Baseline 与 Test Focus 阅读。'), '',
-    '## 4. Requirement Baseline', '',
-    ...result.requirementPoints.map(point => `- ${point.clientRequirementPointId} · ${safe(point.title)}：${safe(point.description)}`), '',
+    '## 4. 正式需求点与来源', '',
+    ...result.requirementPoints.flatMap(point => [
+      `### ${safe(point.clientRequirementPointId)} · ${safe(point.title)}`, '',
+      safe(point.description), '',
+      `- Evidence：${point.evidenceRefs.join('、') || '无'}`,
+      ...point.evidenceRefs.flatMap(id => {
+        const evidence = evidenceById.get(id)
+        return evidence ? [`  - ${id} · ${safe(evidence.quote)}（AssetVersion ${evidence.sourceRef.assetVersionId} / Chunk ${evidence.sourceRef.chunkId}）`] : []
+      }),
+      '',
+    ]),
     '## 5. 核心业务规则', '',
     ...result.requirementPoints.filter(point => point.businessRules.length).flatMap(point => point.businessRules.map(rule => `- ${point.clientRequirementPointId}：${safe(rule)}`)),
     ...(result.requirementPoints.some(point => point.businessRules.length) ? [] : ['- 统一结果采用自然语言需求点作为业务语义基线，未强制拆填独立 businessRules 字段。']), '',
@@ -58,16 +35,27 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
         ? [`- [human_disposition/${item.blocking ? 'blocking' : 'advisory'}] ${safe(item.question)}；处置：${safe(item.answer ?? '')}（不作为业务规则，事实缺口保留）`]
         : [`- [pending/${item.blocking ? 'blocking' : 'advisory'}] ${safe(item.question)}`]),
     ...(result.clarifications.length ? [] : ['- 无待确认问题。']), '',
-    '## 7. Test Focus', '',
+    '## 7. Formal Clarifications', '',
+    ...(answeredClarifications.length ? answeredClarifications.flatMap(item => [
+      `- ${safe(item.id)} · ${safe(item.question)} → ${safe(item.answer ?? '')}`,
+      `  - Requirement Points：${item.requirementPointRefs.join('、') || '整体'}`,
+      `  - Confirmed By：${safe(item.answeredBy ?? 'unknown')} · ${item.answeredAt ?? ''}`,
+    ]) : ['- 没有额外确认的 Formal Clarification。']), '',
+    ...(dismissedClarifications.length ? [
+      '### Human Dispositions（非业务事实）', '',
+      ...dismissedClarifications.map(item => `- ${safe(item.id)} · ${safe(item.question)}；处置：${safe(item.answer ?? '')}`),
+      '',
+    ] : []),
+    '## 8. Test Focus', '',
     ...result.testFocus.map(item => `- ${item.id} · ${safe(item.title)}：${safe(item.description)}`), '',
-    '## 8. Traceability', '',
+    '## 9. Traceability', '',
     ...result.testFocus.flatMap(focus => focus.requirementPointRefs.flatMap(reference => {
       const point = pointsById.get(reference)
       return point ? [`- ${focus.id} → ${reference} → ${point.evidenceRefs.join('、') || '无 Evidence'}`] : []
     })),
   ].join('\n')
 
-  return [artifact('requirement-baseline.md', baseline), artifact('requirement-analysis.md', analysis)]
+  return [artifact('requirement-analysis.md', analysis)]
 }
 
 function artifact(fileName: RequirementAnalysisArtifact['fileName'], content: string): RequirementAnalysisArtifact {

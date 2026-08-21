@@ -545,8 +545,8 @@ export class RequirementAnalysisValidator {
         if (!isStrings(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用了不存在的需求点'))
       })
     }
-    const expectedArtifactNames = new Set(['requirement-baseline.md', 'requirement-analysis.md'])
-    if (!Array.isArray(input.artifacts) || input.artifacts.length !== expectedArtifactNames.size) issues.push(issue('artifacts', '必须包含两个 Markdown Artifact'))
+    const expectedArtifactNames = new Set(['requirement-analysis.md'])
+    if (!Array.isArray(input.artifacts) || input.artifacts.length !== expectedArtifactNames.size) issues.push(issue('artifacts', '必须包含唯一的需求分析 Markdown 报告'))
     else input.artifacts.forEach((artifact, position) => {
       if (!expectedArtifactNames.delete(artifact.fileName) || artifact.mediaType !== 'text/markdown' || !artifact.content || createHash('sha256').update(artifact.content).digest('hex') !== artifact.contentSha256) issues.push(issue(`artifacts[${position}]`, 'Artifact 名称、内容或 Hash 不合法'))
     })

@@ -53,7 +53,9 @@ test('CoverageReviewer 正常执行并读取 Service 自动冻结的完整只读
   const result = await service.reviewCoverage(run.id)
   assert.equal(result.reviewerType, 'coverage')
   assert.equal(captured?.reviewerType, 'coverage')
-  assert.deepEqual(captured?.requiredReadPaths.map(path => path.split('/').at(-1)), ['requirements.json', 'test-cases.json', 'test-data-requirements.json', 'coverage-audit.json'])
+  assert.deepEqual(captured?.requiredReadPaths.map(path => path.split('/').at(-1)), ['test-cases.json', 'test-data-requirements.json', 'coverage-audit.json'])
+  assert.match(captured?.task ?? '', /Requirement Release Content/u)
+  assert.match(captured?.task ?? '', /REQ-1/u)
   const files = captured?.snapshot.workspaceFiles ?? []
   assert.ok(files.some(file => file.logicalPath.endsWith('/test-cases.json') && file.content.includes('case-current')))
   assert.ok(files.some(file => file.logicalPath.endsWith('/test-data-requirements.json') && file.content.includes('data-current')))
@@ -87,15 +89,13 @@ function coverageRun(agentDefinition: AgentDefinitionVersion, configuration: Age
   const caseSha256 = canonicalSha256(caseContent)
   const testCases = [{ id: 'case-current', runId: 'test-design-run-1', origin: 'ai' as const, candidateRef: 'TC-1', currentRevision: 1, reviewState: 'in_review' as const, revisions: [{ revision: 1, content: caseContent, contentSha256: caseSha256, semanticSha256: caseSha256, diff: [], editorId: 'agent', reason: '生成', createdAt: '2026-08-21T01:00:00.000Z' }], reviewActions: [] }]
   const caseSetSha256 = canonicalSha256([{ caseId: 'case-current', revision: 1, contentSha256: caseSha256 }])
-  const requirementsPath = 'workspace/branches/V1/requirements/requirements.json'
-  const requirementContent = '{"schemaVersion":"requirements/v1","requirements":[]}'
-  const workspaceFile = { logicalPath: requirementsPath, sourceType: 'requirement_release' as const, sourceId: 'release-1', contentSha256: canonicalSha256(requirementContent), content: requirementContent, displayName: 'requirements.json', sourceScope: 'formal_output' as const }
+  const requirementContent = { requirements: [{ clientRequirementPointId: 'REQ-1', title: '固定需求', description: '用于 Coverage Reviewer', actor: '用户', action: '操作', object: '对象', conditions: [], businessRules: [], exceptions: [], acceptanceCriteria: [], evidenceRefs: [], coverageTarget: true }], evidence: [], clarifications: [], testFocus: [] }
   return {
     id: 'test-design-run-1', testDesignId: 'design-1', projectVersionId: 'project-version-1', status: 'succeeded', stage: 'completed', progress: 100, idempotencyKey: 'reviewer-test',
-    basisSnapshot: { schemaVersion: 'test-design-basis-snapshot/v2', projectVersionId: 'project-version-1', requirementReleaseId: 'release-1', verificationRunId: 'requirement-run-1', requirementsJsonSha256: '6'.repeat(64), items: [], clarifications: [], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: '7'.repeat(64) },
+    basisSnapshot: { schemaVersion: 'test-design-basis-snapshot/v3', projectVersionId: 'project-version-1', requirementReleaseId: 'release-1', verificationRunId: 'requirement-run-1', requirementReleaseContentSha256: canonicalSha256(requirementContent), content: requirementContent, createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: '7'.repeat(64) },
     agentConfigurationSnapshot: { configurationId: configuration.id, configurationVersion: configuration.version, configurationSha256: configuration.contentSha256, agentDefinition, routing: configuration.routing, primaryModel: { sourceId: 'source-1', providerType: 'openai_compatible', modelId: 'model-1', modelName: 'reviewer-model', contextWindow: 32_768, maxOutputTokens: 4_096, supportsReasoning: false }, createdAt: configuration.createdAt, snapshotSha256: '8'.repeat(64) },
     currentInputRefs: [],
-    workspaceSnapshot: { schemaVersion: 'project-workspace-snapshot/v1', projectId: 'project-1', projectVersionId: 'project-version-1', projectVersionName: 'V1', rootLogicalPath: 'workspace', activeBranchLogicalPath: 'workspace/branches/V1', agentLogicalPath: 'workspace/agent_workspace/planning_agent', knowledgeBaseId: 'kb-1', indexVersionId: 'index-1', requirementReleaseId: 'release-1', verificationRunId: 'requirement-run-1', requirementsJsonSha256: '6'.repeat(64), files: [workspaceFile], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: '9'.repeat(64) },
+    workspaceSnapshot: { schemaVersion: 'project-workspace-snapshot/v1', projectId: 'project-1', projectVersionId: 'project-version-1', projectVersionName: 'V1', rootLogicalPath: 'workspace', activeBranchLogicalPath: 'workspace/branches/V1', agentLogicalPath: 'workspace/agent_workspace/planning_agent', knowledgeBaseId: 'kb-1', indexVersionId: 'index-1', requirementReleaseId: 'release-1', verificationRunId: 'requirement-run-1', requirementReleaseContentSha256: canonicalSha256(requirementContent), files: [], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: '9'.repeat(64) },
     formalWorkspaceFiles: [], retrievalSnapshot: { canonicalVersion: 'retrieval-snapshot/v1', mode: 'disabled', assetVersionIds: [], queryPlan: [], hits: [], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: 'a'.repeat(64) }, historicalSnapshot: { schemaVersion: 'historical-case-snapshot/v1', items: [], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: 'b'.repeat(64) },
     nodeRuns: [], artifacts: [], gateDecisions: [], testCases, scenarioClaims: [], dimensionAssessments: [], caseChangeProposals: [],
     dataSetVersions: [{ id: 'data-current', version: 1, requirements: [], contentSha256: 'c'.repeat(64), createdBy: 'agent', createdAt: '2026-08-21T01:00:00.000Z' }],

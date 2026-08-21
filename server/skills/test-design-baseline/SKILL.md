@@ -5,7 +5,7 @@ description: Establish the immutable fact and risk baseline for PlanningAgent fr
 
 # Test design baseline
 
-1. Start at `/workspace`; inspect the active branch and read `requirements/requirements.json` completely. Treat its frozen Requirement Release as the primary source of truth.
+1. Treat the Runtime-provided `requirementRelease.content` as the complete frozen Requirement Release and primary source of truth. Use `/workspace` only for user-provided project material and explicitly listed historical snapshots.
 2. Read the frozen `historical-test-cases.json` when present. It contains the selected project TestCaseLibraryVersion or historical suite with stable Case ID and Revision. Never replace that frozen selection with `latest` during a Run.
 3. Read API, UI, environment, technical, defect, and shared Knowledge material only when relevant and available. Treat it as enhancement context, never as a replacement for a released requirement.
 4. Build an internal map of business goals, actors, permissions, state transitions, inputs, outputs, interfaces, data effects, failure paths, and observable oracles. Also map requirement changes to frozen historical cases: still valid, affected, no longer applicable, reference-only, and uncovered. Do not emit a coverage-unit artifact.

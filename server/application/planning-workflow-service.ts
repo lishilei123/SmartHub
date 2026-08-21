@@ -20,7 +20,6 @@ import type {
   DatabaseState,
   ReviewRun,
 } from '../domain/types.js'
-import { activeRequirementReleaseBinding } from '../domain/requirement-release-bindings.js'
 import type { StateStore } from '../infrastructure/store.js'
 import {
   TEST_DESIGN_STAGE_BINDINGS,
@@ -41,7 +40,7 @@ export type CoverageReviewerSourceRun = Pick<
   TestDesignWorkflowRun,
   'id' | 'testCases' | 'dataSetVersions' | 'coverageAudits'
 > & {
-  basisSnapshot: Pick<TestDesignWorkflowRun['basisSnapshot'], 'requirementReleaseId' | 'requirementsJsonSha256'>
+  basisSnapshot: Pick<TestDesignWorkflowRun['basisSnapshot'], 'requirementReleaseId' | 'requirementReleaseContentSha256'>
 }
 
 const REQUIREMENT_WORKSPACE_TOOLS = [
@@ -177,9 +176,6 @@ export class PlanningWorkflowService {
     if (release.status !== 'published') throw new Error('REQUIREMENT_RELEASE_NOT_PUBLISHED')
     const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), 'PROJECT_VERSION_NOT_FOUND')
     const project = required(state.projects.find(item => item.id === projectVersion.projectId), 'PROJECT_NOT_FOUND')
-    const requirementsSha256 = release.artifacts?.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json')?.contentSha256
-      ?? activeRequirementReleaseBinding(projectVersion)?.requirementsJsonSha256
-      ?? '未提供'
     await this.runtime.appendPlanningTask({
       projectId: project.id,
       projectVersionId: projectVersion.id,
@@ -188,13 +184,13 @@ export class PlanningWorkflowService {
         '需求分析已经完成，Requirement Release 已正式发布。',
         '',
         `当前正式需求基线：Requirement Release = ${release.id}`,
-        `requirements.json SHA-256 = ${requirementsSha256}`,
+        `Requirement Release content SHA-256 = ${release.contentSha256}`,
         '',
         '接下来继续当前测试策划工作。',
         '',
-        '请基于当前 ProjectVersion 正式绑定的 Requirement Release，以及冻结 Workspace 中相关资料，开始设计测试用例。',
+        '请基于 Runtime / Service 明确提供的 Requirement Release content，以及冻结 Workspace 中的用户资料，开始设计测试用例。',
         '',
-        '如需要，可以结合之前的需求分析上下文理解业务，但正式需求事实仍以当前 Requirement Release、正式 Clarification 和 Workspace 为准。',
+        '如需要，可以结合之前的需求分析上下文理解业务，但正式需求事实只以当前 Requirement Release content 为准；Workspace 用于补充浏览用户资料。',
       ].join('\n'),
       metadata: {
         requirementReleaseId: release.id,
@@ -610,7 +606,7 @@ export function captureCoverageReviewerSource(
   )
   const dataSet = required(run.dataSetVersions.find(item => item.id === audit.dataSetVersionId), 'TEST_DATA_VERSION_NOT_FOUND')
   if (audit.caseSetSha256 !== canonicalSha256(testCases)) throw new Error('COVERAGE_AUDIT_SOURCE_DRIFT')
-  return { kind: 'test_design', testDesignRunId: run.id, requirementReleaseId: run.basisSnapshot.requirementReleaseId, requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256, testCases, dataSetVersionId: dataSet.id, dataSetContentSha256: dataSet.contentSha256, coverageAuditId: audit.id, coverageAuditInputSha256: audit.inputSha256 }
+  return { kind: 'test_design', testDesignRunId: run.id, requirementReleaseId: run.basisSnapshot.requirementReleaseId, requirementReleaseContentSha256: run.basisSnapshot.requirementReleaseContentSha256, testCases, dataSetVersionId: dataSet.id, dataSetContentSha256: dataSet.contentSha256, coverageAuditId: audit.id, coverageAuditInputSha256: audit.inputSha256 }
 }
 
 function coverageReviewerProjection(
@@ -622,7 +618,6 @@ function coverageReviewerProjection(
   const projectVersion = required(state.projectVersions.find(item => item.id === run.projectVersionId), 'PROJECT_VERSION_NOT_FOUND')
   const project = required(state.projects.find(item => item.id === projectVersion.projectId), 'PROJECT_NOT_FOUND')
   const files = new Map<string, TestDesignWorkspaceFile>([...run.workspaceSnapshot.files, ...run.formalWorkspaceFiles].map(file => [file.logicalPath, structuredClone(file)]))
-  const requirementPath = required([...files.values()].find(file => file.logicalPath === run.workspaceSnapshot.activeBranchLogicalPath + '/requirements/requirements.json')?.logicalPath, 'TEST_DESIGN_REQUIREMENTS_FILE_NOT_FOUND')
   const reviewRoot = 'workspace/agent_workspace/planning_agent/reviewer/' + run.id
   const casesPath = reviewRoot + '/test-cases.json'
   files.set(casesPath, candidateFile(casesPath, { schemaVersion: 'planning-review-test-cases/v1', cases: sourceReference.testCases.map(reference => {
@@ -636,7 +631,7 @@ function coverageReviewerProjection(
   const audit = required(run.coverageAudits.find(item => item.id === sourceReference.coverageAuditId && item.inputSha256 === sourceReference.coverageAuditInputSha256), 'COVERAGE_AUDIT_SOURCE_DRIFT')
   const auditPath = reviewRoot + '/coverage-audit.json'
   files.set(auditPath, candidateFile(auditPath, { schemaVersion: 'planning-review-coverage-audit/v1', audit, findings: run.findings, confirmationItems: run.confirmationItems }, run.id))
-  const requiredLogicalPaths = [requirementPath, casesPath, dataPath, auditPath]
+  const requiredLogicalPaths = [casesPath, dataPath, auditPath]
   const workspaceFiles = [...files.values()].map(file => ({ logicalPath: file.logicalPath, contentSha256: file.contentSha256, content: file.content, displayName: file.displayName, ...(file.assetId ? { assetId: file.assetId } : {}), ...(file.assetVersionId ? { assetVersionId: file.assetVersionId } : {}) })).sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'zh-CN'))
   const task = coverageReviewerTask(run, sourceReference, audit)
   const snapshot: PlanningReviewerSnapshot = { runId: 'review:coverage:' + run.id, projectId: project.id, projectName: project.name, projectVersionId: projectVersion.id, projectVersionName: projectVersion.name, knowledgeBaseId: run.workspaceSnapshot.knowledgeBaseId, indexVersionId: run.workspaceSnapshot.indexVersionId, assets: workspaceFiles.flatMap(file => file.assetId && file.assetVersionId ? [{ assetId: file.assetId, assetVersionId: file.assetVersionId, assetContentHash: file.contentSha256, logicalPath: file.logicalPath, displayName: file.displayName }] : []), documentWorkspace: { mode: 'agent_directory', logicalPath: run.workspaceSnapshot.rootLogicalPath, rootLogicalPath: run.workspaceSnapshot.rootLogicalPath, activeBranchLogicalPath: run.workspaceSnapshot.activeBranchLogicalPath, branchLogicalPaths: state.projectVersions.filter(item => item.projectId === project.id).map(item => 'workspace/branches/' + safeWorkspaceSegment(item.name)), agentLogicalPath: run.workspaceSnapshot.agentLogicalPath, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] }, workspaceFiles, agentDefinition: structuredClone(configuration.agentDefinition), taskSha256: canonicalSha256(task), createdAt: new Date().toISOString() }
@@ -652,7 +647,8 @@ function coverageReviewerTask(
     '审阅指定 CoverageAudit 的覆盖关系、遗漏、重复、阻塞项和修复后残留风险。',
     `Source TestDesign Run：${run.id}`,
     `Requirement Release：${run.basisSnapshot.requirementReleaseId}`,
-    `Requirements Hash：${run.basisSnapshot.requirementsJsonSha256}`,
+    `Requirement Release Content Hash：${run.basisSnapshot.requirementReleaseContentSha256}`,
+    `Requirement Release Content：${canonicalJson(run.basisSnapshot.content)}`,
     `TestCase Revisions：${JSON.stringify(sourceReference.testCases)}`,
     `DataSet Version：${sourceReference.dataSetVersionId}`,
     `CoverageAudit：${audit.id}`,

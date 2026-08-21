@@ -33,7 +33,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
       <div className="td2-progress"><span style={{ width: `${run.progress}%` }} /></div>
       <div className="td2-flow" aria-label="测试设计固定流程">{flow.map(item => <FlowStep key={item.key} node={run.nodeRuns.find(node => node.nodeKey === item.key)} label={item.label} owner={item.owner} repairState={item.key === 'test_design_repair' ? run.automaticRepair : undefined} runStatus={run.status} />)}</div>
       <div className="td2-snapshot-grid">
-        <Snapshot icon={<LockKeyhole />} title="Requirement Release" primary={run.basisSnapshot.requirementReleaseId} secondary={`verificationRunId ${run.basisSnapshot.verificationRunId}`} hash={run.basisSnapshot.requirementsJsonSha256} />
+        <Snapshot icon={<LockKeyhole />} title="Requirement Release" primary={run.basisSnapshot.requirementReleaseId} secondary={`verificationRunId ${run.basisSnapshot.verificationRunId}`} hash={run.basisSnapshot.requirementReleaseContentSha256} />
         <Snapshot icon={<Database />} title="Workspace Snapshot" primary={run.workspaceSnapshot.activeBranchLogicalPath} secondary={`${run.currentInputRefs.length} 个重点输入 · ${run.workspaceSnapshot.files.length} 个冻结文件`} hash={run.workspaceSnapshot.snapshotSha256} />
         <Snapshot icon={<Bot />} title="Agent 配置快照" primary={`V${run.agentConfigurationSnapshot.configurationVersion} · ${run.agentConfigurationSnapshot.primaryModel.modelName}`} secondary={run.agentConfigurationSnapshot.configurationId} hash={run.agentConfigurationSnapshot.configurationSha256} />
       </div>

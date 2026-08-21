@@ -10,7 +10,7 @@ import { RequirementAnalysisValidator } from '../agent/result-validator.js'
 import { defaultAgentDefinitionResolver } from '../agent/dynamic-agent-definition-resolver.js'
 import { buildRequirementDirectoryInputPlan } from '../agent/requirement-context-assembler.js'
 import { renderPlanningRequirementTask } from '../agent/planning-agent.js'
-import { buildRequirementReleaseArtifacts } from './requirement-release-artifacts.js'
+import { buildRequirementRelease } from './requirement-release-artifacts.js'
 import { buildCurrentInputRefs, buildProjectWorkspaceSnapshot } from './project-workspace-snapshot.js'
 import { renderRequirementAnalysisArtifacts } from '../agent/requirement-analysis-artifacts.js'
 
@@ -180,17 +180,18 @@ export class RequirementAnalysisService {
       if (run.workflow.release?.status === 'published') return { release: structuredClone(run.workflow.release) }
       assertRequirementInputsStable(state, run)
       const releaseId = `requirement_release_${randomUUID()}`
-      const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, generatedAt: timestamp })
+      const built = buildRequirementRelease({ verificationRun: run })
       const release: RequirementReleasePackage = {
         id: releaseId,
-        schemaVersion: 'requirement-release-package/v1',
+        schemaVersion: 'requirement-release/v1',
         status: 'published',
         projectVersionId: run.projectVersionId,
         verificationRunId: run.id,
+        content: built.content,
+        contentSha256: built.contentSha256,
         sourceAssetVersionIds: run.snapshot.assets.map(item => item.assetVersionId),
         generationExecution: { ...required(run.execution, '需求分析执行记录不存在'), workflowStage: 'analysis' },
         artifacts: built.artifacts,
-        contentSha256: built.contentSha256,
         createdAt: timestamp,
         createdBy: 'system:requirement-release-finalizer',
         publishedAt: timestamp,
@@ -199,8 +200,7 @@ export class RequirementAnalysisService {
       run.workflow.currentStage = 'release'
       run.workflow.release = release
       run.workflow.automaticTransition = { status: 'running', startedAt: timestamp }
-      const requirementsArtifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), 'Requirement Release 缺少 requirements.json')
-      activateRequirementReleaseBinding(projectVersion, { releaseId: release.id, verificationRunId: run.id, requirementsJsonSha256: requirementsArtifact.contentSha256, boundAt: timestamp })
+      activateRequirementReleaseBinding(projectVersion, { releaseId: release.id, verificationRunId: run.id, releaseContentSha256: release.contentSha256, boundAt: timestamp })
       projectVersion.updatedAt = timestamp
       return { release: structuredClone(release) }
     })

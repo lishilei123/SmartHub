@@ -4,7 +4,7 @@ export type ProjectVersionStatus = 'open' | 'locked' | 'archived'
 export type RequirementReleaseBinding = {
   releaseId: string
   verificationRunId: string
-  requirementsJsonSha256: string
+  releaseContentSha256: string
   boundAt: string
 }
 export type ProjectVersion = {

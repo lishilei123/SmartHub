@@ -1,7 +1,7 @@
 import type { AgentDefinitionVersion, AgentExecutionEvent, CurrentInputRef, InputDeliveryManifest, PlanningSubAgentRunRecord, ProjectWorkspaceSnapshot, ProjectWorkspaceSnapshotFile } from './agent-types.js'
 import type { AgentExecutionRecord } from './types.js'
 import type { AgentRoutingConfiguration } from './types.js'
-import type { PlanningClarification } from './review-types.js'
+import type { RequirementReleaseContent } from './requirement-workflow-types.js'
 
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
 export type TestExecutionMethod = 'ui' | 'api' | 'performance_tool' | 'long_running' | 'environment_matrix'
@@ -107,20 +107,19 @@ export interface FrozenContentRef {
 }
 
 export interface TestDesignBasisSnapshot {
-  schemaVersion: 'test-design-basis-snapshot/v2'
+  schemaVersion: 'test-design-basis-snapshot/v3'
   projectVersionId: string
   requirementReleaseId: string
   verificationRunId: string
-  requirementsJsonSha256: string
-  items: FrozenContentRef[]
-  clarifications: PlanningClarification[]
+  requirementReleaseContentSha256: string
+  content: RequirementReleaseContent
   createdAt: string
   snapshotSha256: string
 }
 
 export interface TestDesignWorkspaceFile extends ProjectWorkspaceSnapshotFile {
   logicalPath: string
-  sourceType: 'asset_version' | 'requirement_release' | 'test_case_set_version' | 'test_case_library_version' | 'run_candidate'
+  sourceType: 'asset_version' | 'test_case_set_version' | 'test_case_library_version' | 'run_candidate'
   sourceId: string
   contentSha256: string
   content: string
@@ -136,7 +135,7 @@ export interface TestDesignWorkspaceSnapshot extends Omit<ProjectWorkspaceSnapsh
   indexVersionId: string
   requirementReleaseId: string
   verificationRunId: string
-  requirementsJsonSha256: string
+  requirementReleaseContentSha256: string
   files: TestDesignWorkspaceFile[]
   createdAt: string
   snapshotSha256: string

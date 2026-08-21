@@ -175,14 +175,12 @@ export class TestDesignService {
       if (existing) return { run: structuredClone(existing), created: false }
       if (!this.runtime) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent 尚未完成运行时配置', 409)
       const requirement = required(boundRequirementRelease(state, projectVersionId, design.sourceRequirementReleaseId), 'TEST_DESIGN_REQUIREMENT_RELEASE_NOT_BOUND', '测试设计未绑定有效的 Requirement Release')
-      const requirements = publishedRequirements(requirement.analysisRun)
-      if (requirements.artifact.contentSha256 !== requirement.binding.requirementsJsonSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 绑定的 requirements.json Hash 与发布包不一致', 409)
       const runId = `test_design_run_${randomUUID()}`
       const createdAt = now()
-      const basisSnapshot = buildBasisSnapshot(design, requirement, requirements, createdAt)
+      const basisSnapshot = buildBasisSnapshot(design, requirement, createdAt)
       const retrievalSnapshot = await buildRetrievalSnapshot(state, design, createdAt)
       const historicalSnapshot = buildHistoricalSnapshot(state, design, createdAt)
-      const workspaceSnapshot = buildWorkspaceSnapshot(state, design, requirement, requirements, historicalSnapshot, createdAt)
+      const workspaceSnapshot = buildWorkspaceSnapshot(state, design, requirement, historicalSnapshot, createdAt)
       const run: TestDesignWorkflowRun = {
         id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey, requestedExecutionMethods: [...(design.input.executionMethods ?? [])],
         basisSnapshot, agentConfigurationSnapshot, currentInputRefs: structuredClone(requirement.analysisRun.snapshot.currentInputRefs), retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
@@ -398,7 +396,15 @@ export class TestDesignService {
   async coverageAudits(projectVersionId: string, designId: string, runId: string) { return structuredClone((await this.loadScopedRun(projectVersionId, designId, runId)).coverageAudits) }
   async coverageMatrix(projectVersionId: string, designId: string, runId: string, direction: 'basis_to_case' | 'case_to_basis') { const run = await this.loadScopedRun(projectVersionId, designId, runId); const audit = [...run.coverageAudits].reverse().find(item => item.status === 'valid'); if (!audit) throw new TestDesignError('COVERAGE_AUDIT_STALE', '没有有效覆盖审计', 409); return direction === 'basis_to_case' ? audit.relations : [...audit.relations].sort((left, right) => String(left.caseId).localeCompare(String(right.caseId))) }
 
-  async basisSource(projectVersionId: string, designId: string, runId: string, basisItemId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(required(run.basisSnapshot.items.find(item => item.id === basisItemId), 'TEST_DESIGN_BASIS_ITEM_NOT_FOUND', '固定依据不存在')) }
+  async basisSource(projectVersionId: string, designId: string, runId: string, basisItemId: string) {
+    const run = await this.loadScopedRun(projectVersionId, designId, runId)
+    const content = run.basisSnapshot.content
+    const value = content.requirements.find(item => item.clientRequirementPointId === basisItemId)
+      ?? content.evidence.find(item => item.clientEvidenceId === basisItemId)
+      ?? content.clarifications.find(item => item.id === basisItemId)
+      ?? content.testFocus.find(item => item.id === basisItemId)
+    return structuredClone(required(value, 'TEST_DESIGN_BASIS_ITEM_NOT_FOUND', '固定依据不存在'))
+  }
   async retrievalSource(projectVersionId: string, designId: string, runId: string, hitId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(required(run.retrievalSnapshot.hits.find(item => item.id === hitId), 'TEST_DESIGN_RETRIEVAL_HIT_NOT_FOUND', '固定召回结果不存在')) }
   async historicalSource(projectVersionId: string, designId: string, runId: string, itemId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(required(run.historicalSnapshot.items.find(item => item.id === itemId), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '历史用例快照不存在')) }
   async findings(projectVersionId: string, designId: string, runId: string) { return structuredClone((await this.loadScopedRun(projectVersionId, designId, runId)).findings) }
@@ -798,7 +804,7 @@ function workflowNodes(runId: string): WorkflowNodeRun[] {
 }
 
 function caseDesignInput(run: TestDesignWorkflowRun) {
-  return { workspaceSnapshotSha256: run.workspaceSnapshot.snapshotSha256, requirementReleaseId: run.workspaceSnapshot.requirementReleaseId, requirementsJsonSha256: run.workspaceSnapshot.requirementsJsonSha256 }
+  return { workspaceSnapshotSha256: run.workspaceSnapshot.snapshotSha256, requirementReleaseId: run.workspaceSnapshot.requirementReleaseId, requirementReleaseContentSha256: run.workspaceSnapshot.requirementReleaseContentSha256 }
 }
 
 function repairInput(run: TestDesignWorkflowRun) {
@@ -875,25 +881,16 @@ function materializeDesignIssues(run: TestDesignWorkflowRun, raw: unknown) {
   for (const confirmation of confirmations) if (!run.confirmationItems.some(item => item.title === confirmation.title && item.question === confirmation.question)) run.confirmationItems.push(confirmation)
 }
 
-function buildBasisSnapshot(design: TestDesign, requirement: BoundRequirementRelease, machine: ReturnType<typeof publishedRequirements>, createdAt: string): TestDesignBasisSnapshot {
-  const requirementItems = machine.requirements.map((point, index) => ({
-    id: `basis_requirement_${requirement.analysisRun.id}_${point.clientRequirementPointId}`,
-    kind: 'requirement_release' as const,
-    sourceId: `${requirement.analysisRun.id}:${point.clientRequirementPointId}`,
-    contentSha256: canonicalSha256(point),
-    content: structuredClone(point),
-    locator: { coverageTarget: point.coverageTarget !== false, ...(point.coverageRationale ? { coverageRationale: point.coverageRationale } : {}), requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementPointId: point.clientRequirementPointId, ordinal: index, evidenceRefs: point.evidenceRefs },
-  }))
-  const clarifications = structuredClone(requirement.analysisRun.result?.clarifications ?? [])
-  const clarificationItems = clarifications.map(item => ({
-    id: `basis_clarification_${item.id}`,
-    kind: 'human_clarification' as const,
-    sourceId: item.id,
-    contentSha256: canonicalSha256(item),
-    content: structuredClone(item),
-    locator: { coverageTarget: false, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, clarificationId: item.id, requirementPointRefs: item.requirementPointRefs, answeredAt: item.answeredAt, answeredBy: item.answeredBy },
-  }))
-  const base = { schemaVersion: 'test-design-basis-snapshot/v2' as const, projectVersionId: design.projectVersionId, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementsJsonSha256: machine.artifact.contentSha256, items: [...requirementItems, ...clarificationItems], clarifications, createdAt }
+function buildBasisSnapshot(design: TestDesign, requirement: BoundRequirementRelease, createdAt: string): TestDesignBasisSnapshot {
+  const base = {
+    schemaVersion: 'test-design-basis-snapshot/v3' as const,
+    projectVersionId: design.projectVersionId,
+    requirementReleaseId: requirement.release.id,
+    verificationRunId: requirement.analysisRun.id,
+    requirementReleaseContentSha256: requirement.release.contentSha256,
+    content: structuredClone(requirement.release.content),
+    createdAt,
+  }
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
@@ -1069,40 +1066,28 @@ function latestPublishedLibraryVersion(versions: TestCaseLibraryVersion[]) {
   return [...versions].sort((left, right) => right.version - left.version || right.publishedAt.localeCompare(left.publishedAt))[0]
 }
 
-function publishedRequirements(analysisRun: ReviewRun) {
+function publishedRequirementRelease(analysisRun: ReviewRun) {
   const release = required(analysisRun.workflow?.release, 'TEST_DESIGN_REQUIREMENTS_PACKAGE_REQUIRED', '需求发布包不存在')
   if (release.status !== 'published') throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_REQUIRED', '需求发布包尚未正式发布', 422)
-  if (release.projectVersionId !== analysisRun.projectVersionId || release.verificationRunId !== analysisRun.id) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', '需求发布包与固定需求分析运行不一致', 422)
-  const manifest = required(release.artifacts.find(item => item.fileName === 'manifest.json' && item.mediaType === 'application/json'), 'TEST_DESIGN_REQUIREMENTS_PACKAGE_REQUIRED', '需求发布包缺少 manifest.json')
-  if (canonicalSha256Text(manifest.content) !== release.contentSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_HASH_MISMATCH', 'manifest.json 内容 Hash 校验失败', 422)
-  const artifact = required(release.artifacts.find(item => item.fileName === 'requirements.json' && item.mediaType === 'application/json'), 'TEST_DESIGN_REQUIREMENTS_PACKAGE_REQUIRED', '需求发布包缺少 requirements.json')
-  if (canonicalSha256Text(artifact.content) !== artifact.contentSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_HASH_MISMATCH', 'requirements.json 内容 Hash 校验失败', 422)
-  let manifestValue: unknown
-  try { manifestValue = JSON.parse(manifest.content) } catch { throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'manifest.json 不是合法 JSON', 422) }
-  const manifestRecord = manifestValue && typeof manifestValue === 'object' && !Array.isArray(manifestValue)
-    ? manifestValue as { schemaVersion?: unknown; releaseId?: unknown; projectVersionId?: unknown; verificationRunId?: unknown; artifacts?: unknown; machineReadableEntryPoints?: unknown }
-    : {}
-  const entryPoints = manifestRecord.machineReadableEntryPoints && typeof manifestRecord.machineReadableEntryPoints === 'object' && !Array.isArray(manifestRecord.machineReadableEntryPoints)
-    ? manifestRecord.machineReadableEntryPoints as { requirements?: unknown }
-    : {}
-  const manifestArtifacts = Array.isArray(manifestRecord.artifacts) ? manifestRecord.artifacts : []
-  const requirementsEntry = manifestArtifacts.find(item => item && typeof item === 'object' && !Array.isArray(item) && (item as { fileName?: unknown }).fileName === 'requirements.json') as { mediaType?: unknown; contentSha256?: unknown } | undefined
-  if (manifestRecord.schemaVersion !== 'requirement-release-manifest/v1' || manifestRecord.releaseId !== release.id || manifestRecord.projectVersionId !== analysisRun.projectVersionId || manifestRecord.verificationRunId !== analysisRun.id || entryPoints.requirements !== 'requirements.json' || requirementsEntry?.mediaType !== 'application/json' || requirementsEntry.contentSha256 !== artifact.contentSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'manifest.json 未固定正确的 requirements.json 入口', 422)
-  let value: unknown
-  try { value = JSON.parse(artifact.content) } catch { throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'requirements.json 不是合法 JSON', 422) }
-  const record = value && typeof value === 'object' && !Array.isArray(value) ? value as { schemaVersion?: unknown; releaseId?: unknown; projectVersionId?: unknown; verificationRunId?: unknown; sourceAssetVersions?: unknown; requirements?: unknown } : {}
-  const sourceIds = Array.isArray(record.sourceAssetVersions) ? record.sourceAssetVersions.map(item => item && typeof item === 'object' && !Array.isArray(item) ? String((item as { assetVersionId?: unknown }).assetVersionId ?? '') : '') : []
-  const requirements = Array.isArray(record.requirements) ? record.requirements : []
-  const requirementIds = requirements.map(item => item && typeof item === 'object' && !Array.isArray(item) ? String((item as { clientRequirementPointId?: unknown }).clientRequirementPointId ?? '').trim() : '')
-  const invalidRequirement = requirements.some(item => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return true
-    const point = item as { evidenceRefs?: unknown; coverageTarget?: unknown; coverageRationale?: unknown }
-    return !Array.isArray(point.evidenceRefs)
-      || (point.coverageTarget !== undefined && typeof point.coverageTarget !== 'boolean')
-      || (point.coverageRationale !== undefined && (typeof point.coverageRationale !== 'string' || !point.coverageRationale.trim()))
-  })
-  if (record.schemaVersion !== 'requirements/v1' || record.releaseId !== release.id || record.projectVersionId !== analysisRun.projectVersionId || record.verificationRunId !== analysisRun.id || !requirements.length || requirementIds.some(id => !id) || new Set(requirementIds).size !== requirementIds.length || invalidRequirement || canonicalSha256(sourceIds) !== canonicalSha256(release.sourceAssetVersionIds)) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'requirements.json Schema、需求点或发布来源不兼容', 422)
-  return { release, manifest, artifact, requirements: record.requirements as NonNullable<ReviewRun['result']>['requirementPoints'] }
+  if (release.schemaVersion !== 'requirement-release/v1' || release.projectVersionId !== analysisRun.projectVersionId || release.verificationRunId !== analysisRun.id) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release 与固定需求分析运行不一致', 422)
+  const content = release.content
+  if (!content || !Array.isArray(content.requirements) || !Array.isArray(content.evidence) || !Array.isArray(content.clarifications) || !Array.isArray(content.testFocus)) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release content 结构无效', 422)
+  if (canonicalSha256(content) !== release.contentSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_HASH_MISMATCH', 'Requirement Release content Hash 校验失败', 422)
+  const requirementIds = content.requirements.map(item => item.clientRequirementPointId.trim())
+  const evidenceIds = content.evidence.map(item => item.clientEvidenceId.trim())
+  const requirementIdSet = new Set(requirementIds)
+  const evidenceIdSet = new Set(evidenceIds)
+  const sourceIdSet = new Set(release.sourceAssetVersionIds)
+  const invalidRequirement = content.requirements.some(point => !point.clientRequirementPointId.trim()
+    || !Array.isArray(point.evidenceRefs)
+    || point.evidenceRefs.some(reference => !evidenceIdSet.has(reference))
+    || typeof point.coverageTarget !== 'boolean'
+    || (point.coverageRationale !== undefined && !point.coverageRationale.trim()))
+  const invalidEvidence = content.evidence.some(item => !item.clientEvidenceId.trim() || !sourceIdSet.has(item.sourceRef.assetVersionId))
+  const invalidClarification = content.clarifications.some(item => !item.id.trim() || item.requirementPointRefs.some(reference => !requirementIdSet.has(reference)) || (item.blocking && item.status === 'pending'))
+  const invalidTestFocus = content.testFocus.some(item => !item.id.trim() || item.requirementPointRefs.some(reference => !requirementIdSet.has(reference)))
+  if (!requirementIds.length || requirementIds.some(id => !id) || requirementIdSet.size !== requirementIds.length || evidenceIdSet.size !== evidenceIds.length || invalidRequirement || invalidEvidence || invalidClarification || invalidTestFocus) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release content Schema、引用或发布来源无效', 422)
+  return release
 }
 
 function canonicalSha256Text(value: string) { return createHash('sha256').update(value).digest('hex') }
@@ -1131,12 +1116,12 @@ function boundRequirementRelease(state: DatabaseState, projectVersionId: string,
   if (!projectVersion || !binding) return undefined
   const analysisRun = state.reviewRuns.find(item => item.id === binding.verificationRunId && item.projectVersionId === projectVersionId && item.status === 'succeeded' && item.workflow?.release?.id === binding.releaseId)
   if (!analysisRun?.workflow?.release) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 绑定的 Requirement Release 不存在', 409)
-  const machine = publishedRequirements(analysisRun)
-  if (machine.release.verificationRunId !== binding.verificationRunId || machine.artifact.contentSha256 !== binding.requirementsJsonSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 的 Requirement Release 绑定与发布包不一致', 409)
-  return { binding, analysisRun, release: machine.release }
+  const release = publishedRequirementRelease(analysisRun)
+  if (release.verificationRunId !== binding.verificationRunId || release.contentSha256 !== binding.releaseContentSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENT_RELEASE_BINDING_INVALID', 'ProjectVersion 的 Requirement Release content Hash 与绑定不一致', 409)
+  return { binding, analysisRun, release }
 }
 
-function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requirement: BoundRequirementRelease, machine: ReturnType<typeof publishedRequirements>, historical: HistoricalCaseSnapshot, createdAt: string): TestDesignWorkspaceSnapshot {
+function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requirement: BoundRequirementRelease, historical: HistoricalCaseSnapshot, createdAt: string): TestDesignWorkspaceSnapshot {
   const projectVersion = required(state.projectVersions.find(item => item.id === design.projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
   const knowledgeBase = required(state.knowledgeBases.find(item => item.projectId === design.projectId), 'TEST_DESIGN_WORKSPACE_REQUIRED', '项目知识库不存在')
   const index = required(state.indexes.find(item => item.id === knowledgeBase.activeIndexVersionId && item.status === 'active'), 'TEST_DESIGN_WORKSPACE_REQUIRED', '项目 Workspace 没有活动索引')
@@ -1148,11 +1133,9 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
     const version = state.versions.find(item => item.id === asset.activeVersionId && item.assetId === asset.id && item.status === 'ready')
     if (!version) continue
     const logicalPath = normalizeWorkspacePath(asset.logicalPath)
-    files.set(logicalPath, { logicalPath, sourceType: 'asset_version', sourceId: version.id, assetId: asset.id, assetVersionId: version.id, contentSha256: version.contentHash, content: version.content, displayName: asset.displayName, sourceScope: classifyWorkspaceSourceScope(logicalPath, branch, currentInputVersionIds.has(version.id)) })
-  }
-  for (const releaseArtifact of requirement.release.artifacts) {
-    const logicalPath = `${branch}/requirements/${releaseArtifact.fileName}`
-    files.set(logicalPath, { logicalPath, sourceType: 'requirement_release', sourceId: `${requirement.release.id}:${releaseArtifact.fileName}`, contentSha256: releaseArtifact.contentSha256, content: releaseArtifact.content, displayName: releaseArtifact.fileName, sourceScope: 'current_input' })
+    const sourceScope = classifyWorkspaceSourceScope(logicalPath, branch, currentInputVersionIds.has(version.id))
+    if (sourceScope === 'formal_output') continue
+    files.set(logicalPath, { logicalPath, sourceType: 'asset_version', sourceId: version.id, assetId: asset.id, assetVersionId: version.id, contentSha256: version.contentHash, content: version.content, displayName: asset.displayName, sourceScope })
   }
   if (historical.items.length) {
     const content = `${canonicalJson({ schemaVersion: historical.schemaVersion, snapshotSha256: historical.snapshotSha256, items: historical.items })}\n`
@@ -1160,7 +1143,7 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
     files.set(logicalPath, { logicalPath, sourceType: 'run_candidate', sourceId: historical.snapshotSha256, contentSha256: canonicalSha256Text(content), content, displayName: 'historical-test-cases.json', sourceScope: 'historical_branch' })
   }
   const ordered = [...files.values()].sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'zh-CN'))
-  const base = { schemaVersion: 'project-workspace-snapshot/v1' as const, projectId: design.projectId, rootLogicalPath: 'workspace' as const, activeBranchLogicalPath: branch, agentLogicalPath: 'workspace/agent_workspace/planning_agent' as const, projectVersionId: projectVersion.id, projectVersionName: projectVersion.name, knowledgeBaseId: knowledgeBase.id, indexVersionId: index.id, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementsJsonSha256: machine.artifact.contentSha256, files: ordered, createdAt }
+  const base = { schemaVersion: 'project-workspace-snapshot/v1' as const, projectId: design.projectId, rootLogicalPath: 'workspace' as const, activeBranchLogicalPath: branch, agentLogicalPath: 'workspace/agent_workspace/planning_agent' as const, projectVersionId: projectVersion.id, projectVersionName: projectVersion.name, knowledgeBaseId: knowledgeBase.id, indexVersionId: index.id, requirementReleaseId: requirement.release.id, verificationRunId: requirement.analysisRun.id, requirementReleaseContentSha256: requirement.release.contentSha256, files: ordered, createdAt }
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
@@ -1426,7 +1409,7 @@ function repairBlockerCanRunIndependently(run: TestDesignWorkflowRun, audit: Cov
   if (blocker.code !== 'COVERAGE_REQUIREMENT_UNCOVERED' || !blocker.subjectId) return false
   const requirementId = blocker.subjectId
   const relatedCaseIds = new Set(run.testCases.filter(item => !item.tombstonedAt && currentCaseRevision(item).content.requirementRefs.includes(requirementId)).map(item => item.id))
-  const relatedClarification = (run.basisSnapshot.clarifications ?? []).some(item => item.blocking && item.status === 'pending' && item.requirementPointRefs.includes(requirementId))
+  const relatedClarification = run.basisSnapshot.content.clarifications.some(item => item.blocking && item.status === 'pending' && item.requirementPointRefs.includes(requirementId))
   if (relatedClarification) return false
   return !audit.blockers.some(item => {
     if (item.resolution !== 'human_decision' && item.resolution !== 'manual_edit') return false
@@ -1435,7 +1418,7 @@ function repairBlockerCanRunIndependently(run: TestDesignWorkflowRun, audit: Cov
     if (confirmation?.affectedRefs.includes(requirementId) || confirmation?.affectedRefs.some(ref => relatedCaseIds.has(ref))) return true
     const finding = run.findings.find(candidate => candidate.id === item.subjectId)
     if (finding?.basisRefs.includes(requirementId)) return true
-    const clarification = (run.basisSnapshot.clarifications ?? []).find(candidate => candidate.id === item.subjectId)
+    const clarification = run.basisSnapshot.content.clarifications.find(candidate => candidate.id === item.subjectId)
     return clarification?.requirementPointRefs.includes(requirementId) ?? false
   })
 }
@@ -1655,10 +1638,9 @@ function validateProposalDecision(proposal: CaseChangeProposal, decision: Exclud
 function traceabilityForProposal(run: TestDesignWorkflowRun, proposal: CaseChangeProposal, content: TestCaseContent): TestCaseTraceability {
   const releaseId = run.basisSnapshot.requirementReleaseId
   const referencedBasis = new Set([...(proposal.requirementRefs ?? []), ...requirementRefsForCase(run, content)])
-  const requirementRefs = run.basisSnapshot.items.flatMap(item => {
-    const locator = item.locator as { requirementReleaseId?: unknown; requirementPointId?: unknown } | undefined
-    if (item.kind !== 'requirement_release' || (!referencedBasis.has(item.id) && !referencedBasis.has(String(locator?.requirementPointId ?? '')))) return []
-    const requirementId = String(locator?.requirementPointId ?? '').trim()
+  const requirementRefs = run.basisSnapshot.content.requirements.flatMap(item => {
+    const requirementId = item.clientRequirementPointId.trim()
+    if (!referencedBasis.has(requirementId)) return []
     return requirementId ? [{ requirementReleaseId: releaseId, requirementId }] : []
   })
   return {

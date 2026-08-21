@@ -18,11 +18,10 @@ export function auditTestDesignCoverage(input: {
   findings: Array<{ id: string; title: string; severity: string; state: string }>
   confirmationItems: ConfirmationItem[]
 }): CoverageAudit {
-  const basisItems = input.basis.items.filter(item => item.kind === 'requirement_release' && item.locator?.coverageTarget !== false)
+  const basisItems = input.basis.content.requirements.filter(item => item.coverageTarget)
   const requirementByRef = new Map<string, string>()
   for (const item of basisItems) {
-    const requirementId = String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id).trim()
-    requirementByRef.set(item.id, requirementId)
+    const requirementId = item.clientRequirementPointId.trim()
     requirementByRef.set(requirementId, requirementId)
   }
   const cases = input.cases.filter(item => !item.tombstonedAt)
@@ -40,7 +39,7 @@ export function auditTestDesignCoverage(input: {
   const advisories: CoverageAudit['advisories'] = []
   const relations: CoverageAudit['relations'] = []
   const coveredRequirements = new Set<string>()
-  for (const clarification of input.basis.clarifications ?? []) if (clarification.blocking && clarification.status === 'pending') blockers.push({ code: 'PLANNING_CLARIFICATION_UNRESOLVED', message: `阻断问题 ${clarification.question} 尚未获得正式回答`, subjectId: clarification.id })
+  for (const clarification of input.basis.content.clarifications) if (clarification.blocking && clarification.status === 'pending') blockers.push({ code: 'PLANNING_CLARIFICATION_UNRESOLVED', message: `阻断问题 ${clarification.question} 尚未获得正式回答`, subjectId: clarification.id })
   const allowedHistoricalRefs = new Set(input.historical.items.map(item => item.id))
   for (const item of current) {
     const content = item.revision.content
@@ -100,10 +99,10 @@ export function auditTestDesignCoverage(input: {
     }
   }
   for (const item of basisItems) {
-    const requirementId = String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id)
+    const requirementId = item.clientRequirementPointId
     if (!coveredRequirements.has(requirementId)) {
       blockers.push({ code: 'COVERAGE_REQUIREMENT_UNCOVERED', message: `Requirement ${requirementId} 没有直接关联的测试用例`, subjectId: requirementId })
-      relations.push({ basisRef: item.id, requirementId, status: 'not_covered', reason: '当前没有引用该 Requirement 的测试用例' })
+      relations.push({ basisRef: requirementId, requirementId, status: 'not_covered', reason: '当前没有引用该 Requirement 的测试用例' })
     }
   }
   const duplicateGroups = new Map<string, string[]>()
@@ -112,9 +111,9 @@ export function auditTestDesignCoverage(input: {
   for (const item of input.findings) if (item.state === 'open' && item.severity === 'blocker') blockers.push({ code: 'TEST_DESIGN_FINDING_UNRESOLVED', message: `阻断 Finding ${item.title} 尚未处置`, subjectId: item.id })
   for (const item of input.confirmationItems) if (item.impactStage !== 'handoff' && item.state === 'open' && item.blocker) blockers.push({ code: 'TEST_DESIGN_CONFIRMATION_UNRESOLVED', message: `阻断待确认项 ${item.title} 尚未处置`, subjectId: item.id })
   for (const item of basisItems) {
-    const text = String(item.content && typeof item.content === 'object' ? JSON.stringify(item.content) : item.content ?? '')
+    const text = JSON.stringify(item)
     const cues = ['正常', '异常', '边界', '权限', '状态'].filter(cue => text.includes(cue)).length
-    const requirementId = String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id)
+    const requirementId = item.clientRequirementPointId
     const linked = current.filter(candidate => (candidate.revision.content.requirementRefs ?? []).some(ref => requirementByRef.get(ref) === requirementId))
     if (cues >= 2 && linked.length === 1 && linked[0].revision.content.objective.length < 80) blockers.push({ code: 'TEST_CASE_COVERAGE_TOO_SHALLOW', message: `Requirement ${requirementId} 同时包含多个测试维度，但只有一条过于宽泛的用例`, subjectId: linked[0].testCase.id })
   }
@@ -132,7 +131,7 @@ export function auditTestDesignCoverage(input: {
 
   const fullyCoveredRequirements = new Set(relations.filter(item => item.status === 'covered').map(item => item.requirementId))
   const inputSha256 = canonicalSha256({ basisSnapshotSha256: input.basis.snapshotSha256, retrievalSnapshotSha256: input.retrieval.snapshotSha256, historicalSnapshotSha256: input.historical.snapshotSha256, requirementReleaseId: input.basis.requirementReleaseId, caseSetSha256, dimensionAssessmentsSha256: canonicalSha256([...dimensionAssessments].sort((left, right) => left.dimension.localeCompare(right.dimension))), scenarioClaimsSha256: canonicalSha256([...input.scenarioClaims].sort((left, right) => left.ref.localeCompare(right.ref))), dataSetVersionId: input.dataSet.id, dataSetSha256: input.dataSet.contentSha256, findingStateSha256: canonicalSha256(input.findings.map(item => ({ id: item.id, state: item.state }))), confirmationStateSha256: canonicalSha256(input.confirmationItems.map(item => ({ id: item.id, impactStage: item.impactStage, state: item.state, actions: item.actions.length }))) })
-  return { id: `coverage_audit_${randomUUID()}`, runId: input.runId, requirementReleaseId: input.basis.requirementReleaseId, dataSetVersionId: input.dataSet.id, caseSetSha256, inputSha256, status: 'valid', statistics: { totalBasis: basisItems.length, coveredBasis: basisItems.filter(item => fullyCoveredRequirements.has(String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id))).length, totalCases: current.length }, relations, blockers: blockers.map(item => ({ ...item, resolution: blockerResolution(item.code) })), advisories, createdAt: new Date().toISOString() }
+  return { id: `coverage_audit_${randomUUID()}`, runId: input.runId, requirementReleaseId: input.basis.requirementReleaseId, dataSetVersionId: input.dataSet.id, caseSetSha256, inputSha256, status: 'valid', statistics: { totalBasis: basisItems.length, coveredBasis: basisItems.filter(item => fullyCoveredRequirements.has(item.clientRequirementPointId)).length, totalCases: current.length }, relations, blockers: blockers.map(item => ({ ...item, resolution: blockerResolution(item.code) })), advisories, createdAt: new Date().toISOString() }
 }
 
 function atomicityBlocker(caseId: string, title: string, claims: ScenarioClaim[]): Omit<CoverageAudit['blockers'][number], 'resolution'> | undefined {

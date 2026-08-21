@@ -3,7 +3,7 @@ import type { ProjectVersion, RequirementReleaseBinding } from './types.js'
 export function requirementReleaseBindings(version: Pick<ProjectVersion, 'requirementReleaseBinding' | 'requirementReleaseBindings'>): RequirementReleaseBinding[] {
   const unique = new Map<string, RequirementReleaseBinding>()
   for (const binding of [...(version.requirementReleaseBindings ?? []), ...(version.requirementReleaseBinding ? [version.requirementReleaseBinding] : [])]) {
-    if (!binding.releaseId || !binding.verificationRunId || !binding.requirementsJsonSha256 || !binding.boundAt) continue
+    if (!binding.releaseId || !binding.verificationRunId || !binding.releaseContentSha256 || !binding.boundAt) continue
     unique.set(binding.releaseId, { ...binding })
   }
   return [...unique.values()].sort((left, right) => left.boundAt.localeCompare(right.boundAt) || left.releaseId.localeCompare(right.releaseId))

@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
 import { materializeCaseDesign, repairCandidateContent, TestDesignService, type PlanningAgentRuntime } from '../server/application/test-design-service.js'
@@ -294,7 +293,7 @@ test('Patch 修改复用历史 Candidate 时仅创建当前 Run Revision，Propo
   const sourceBefore = structuredClone((await store.snapshot()).testDesignState!.libraryCases.find(item => item.id === reuse.sourceCaseId)!.revisions)
   const sourceClaim = run.scenarioClaims.find(item => item.caseRef === historical.candidateRef)!
   const { caseRef: _caseRef, requirementRefs: _requirementRefs, ...inlineClaim } = sourceClaim
-  run.basisSnapshot.items.push({ id: 'requirement-rp-alt', kind: 'requirement_release', sourceId: 'release-1:RP-ALT', contentSha256: 'b'.repeat(64), content: '{"clientRequirementPointId":"RP-ALT"}', locator: { requirementReleaseId: 'release-1', requirementPointId: 'RP-ALT' } })
+  run.basisSnapshot.content.requirements.push({ clientRequirementPointId: 'RP-ALT', title: '补充需求', description: '补充覆盖', actor: '用户', action: '操作', object: '任务', conditions: [], businessRules: [], exceptions: [], acceptanceCriteria: [], evidenceRefs: [], coverageTarget: true })
   const changedContent = { ...historical.revisions[historical.currentRevision].content, title: '来源用例的当前 Run Repair Revision', requirementRefs: ['RP-STATE', 'RP-ALT'] }
   const patch = (baseCandidateSha256: string) => ({ schemaVersion: 'test-design-repair/v2' as const, baseCandidateSha256, upsertCases: [{ ref: historical.candidateRef!, ...changedContent, changeReason: 'Coverage Audit 修复历史复用 Candidate', confidence: 0.93, coverageClaims: [inlineClaim] }], removeCaseRefs: [], upsertDataRequirements: [], removeDataRequirementRefs: [], dimensionAssessmentUpdates: [] })
   materializeCaseDesign(run, patch(canonicalSha256(repairCandidateContent(run))), principal.subjectId, true)
@@ -559,21 +558,18 @@ async function addHistoricalLibraryVersion(store: JsonStore, version: number, pu
 async function storeWithPublishedRequirement() {
   const store = new JsonStore(null)
   await store.load()
-  const requirementsContent = json({ schemaVersion: 'requirements/v1', releaseId: 'release-1', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', sourceAssetVersions: [{ assetVersionId: 'version-fixed' }], requirements: [{ clientRequirementPointId: 'RP-STATE', title: '任务状态转换', description: '任务状态具有正常、异常、边界、权限和状态规则。', evidenceRefs: [] }] })
-  const requirementsHash = sha256(requirementsContent)
-  const manifestContent = json({ schemaVersion: 'requirement-release-manifest/v1', releaseId: 'release-1', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', artifacts: [{ fileName: 'requirements.json', mediaType: 'application/json', contentSha256: requirementsHash }], machineReadableEntryPoints: { requirements: 'requirements.json' } })
+  const releaseContent = { requirements: [{ clientRequirementPointId: 'RP-STATE', title: '任务状态转换', description: '任务状态具有正常、异常、边界、权限和状态规则。', actor: '用户', action: '转换', object: '任务状态', conditions: [], businessRules: [], exceptions: [], acceptanceCriteria: [], evidenceRefs: [], coverageTarget: true }], evidence: [], clarifications: [], testFocus: [] }
+  const releaseContentSha256 = canonicalSha256(releaseContent)
   await store.transaction(state => {
     state.projects.push({ id: 'project-1', name: '任务项目', createdAt: '2026-08-20T00:00:00.000Z' })
-    state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1', status: 'open', requirementReleaseBinding: { releaseId: 'release-1', verificationRunId: 'review-run-1', requirementsJsonSha256: requirementsHash, boundAt: '2026-08-20T00:03:00.000Z' }, activeRequirementReleaseId: 'release-1', createdAt: '2026-08-20T00:00:00.000Z', updatedAt: '2026-08-20T00:03:00.000Z' } as never)
+    state.projectVersions.push({ id: 'project-version-1', projectId: 'project-1', name: 'V1', status: 'open', requirementReleaseBinding: { releaseId: 'release-1', verificationRunId: 'review-run-1', releaseContentSha256, boundAt: '2026-08-20T00:03:00.000Z' }, activeRequirementReleaseId: 'release-1', createdAt: '2026-08-20T00:00:00.000Z', updatedAt: '2026-08-20T00:03:00.000Z' } as never)
     state.knowledgeBases.push({ id: 'kb-1', projectId: 'project-1', name: '项目知识库', createdAt: '2026-08-20T00:00:00.000Z', activeIndexVersionId: 'index-1', activeConfigVersionId: 'config-1' })
     state.indexes.push({ id: 'index-1', knowledgeBaseId: 'kb-1', number: 1, status: 'active', configVersionId: 'config-1', assetVersionIds: [], indexedChunks: [], createdAt: '2026-08-20T00:00:00.000Z' } as never)
-    state.reviewRuns.push({ id: 'review-run-1', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-fixed', documentTitle: '已发布需求', documentVersion: 1, logicalPath: 'workspace/branches/V1/input/requirements', sourceId: 'source-1', modelId: 'model-1', modelLabel: 'model', status: 'succeeded', step: 'completed', progress: 100, createdAt: '2026-08-20T00:00:00.000Z', finishedAt: '2026-08-20T00:01:00.000Z', snapshot: { currentInputRefs: [] } as never, result: {} as never, workflow: { currentStage: 'release', release: { id: 'release-1', schemaVersion: 'requirement-release-package/v1', status: 'published', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', sourceAssetVersionIds: ['version-fixed'], generationExecution: {} as never, artifacts: [{ fileName: 'requirements.json', mediaType: 'application/json', content: requirementsContent, contentSha256: requirementsHash }, { fileName: 'manifest.json', mediaType: 'application/json', content: manifestContent, contentSha256: sha256(manifestContent) }], contentSha256: sha256(manifestContent), createdAt: '2026-08-20T00:02:00.000Z', createdBy: 'owner', publishedAt: '2026-08-20T00:03:00.000Z', publishedBy: 'owner' } } } as never)
+    state.reviewRuns.push({ id: 'review-run-1', projectVersionId: 'project-version-1', assetId: 'asset-1', assetVersionId: 'version-fixed', documentTitle: '已发布需求', documentVersion: 1, logicalPath: 'workspace/branches/V1/input/requirements', sourceId: 'source-1', modelId: 'model-1', modelLabel: 'model', status: 'succeeded', step: 'completed', progress: 100, createdAt: '2026-08-20T00:00:00.000Z', finishedAt: '2026-08-20T00:01:00.000Z', snapshot: { currentInputRefs: [] } as never, result: {} as never, workflow: { currentStage: 'release', release: { id: 'release-1', schemaVersion: 'requirement-release/v1', status: 'published', projectVersionId: 'project-version-1', verificationRunId: 'review-run-1', content: releaseContent, contentSha256: releaseContentSha256, sourceAssetVersionIds: ['version-fixed'], generationExecution: {} as never, artifacts: [], createdAt: '2026-08-20T00:02:00.000Z', createdBy: 'owner', publishedAt: '2026-08-20T00:03:00.000Z', publishedBy: 'owner' } } } as never)
   })
   return store
 }
 
-function json(value: unknown) { return `${JSON.stringify(value, null, 2)}\n` }
-function sha256(value: string) { return createHash('sha256').update(value).digest('hex') }
 function frozenConfiguration() { return { configurationId: 'config-version-1', configurationVersion: 1, configurationSha256: 'c'.repeat(64), agentDefinition: {} as never, routing: {} as never, primaryModel: { sourceId: 'source-1', modelId: 'model-1', modelName: '模型' }, createdAt: '2026-08-20T00:00:00.000Z', snapshotSha256: 'd'.repeat(64) } }
 async function waitForCompletedRun(service: TestDesignService, projectVersionId: string, designId: string, runId: string) {
   for (let attempt = 0; attempt < 50; attempt += 1) {

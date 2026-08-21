@@ -73,8 +73,6 @@ const detailTabs: Array<{ key: DetailViewKey; label: string }> = [
   { key: 'artifacts', label: '正式产物' },
   { key: 'diff', label: '版本差异' },
 ]
-const machineReadableArtifactNames = new Set(['requirements.json', 'clarifications.json', 'test-focus.json', 'traceability.json', 'manifest.json'])
-
 function Badge({ children, tone = 'gray' }: { children: React.ReactNode; tone?: string }) { return <span className={`rav2-badge ${tone}`}>{children}</span> }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
 function assessmentLabel(value?: string) { return value === 'blocked' ? '存在阻断问题' : value === 'needs_revision' ? '建议修改后确认' : value === 'pass_with_notes' ? '附带关注项通过' : value === 'pass' ? '可以进入下一阶段' : '等待分析' }
@@ -452,7 +450,7 @@ function Artifacts({ result, release, runId }: { result?: RequirementAnalysisRes
   const [previewError, setPreviewError] = useState('')
   const openArtifactPreview = async (artifact: ArtifactPreviewValue | RequirementReleasePackage['artifacts'][number]) => {
     setPreviewError('')
-    if (typeof artifact.content === 'string') { setPreview(artifact); return }
+    if (typeof artifact.content === 'string') { setPreview({ fileName: artifact.fileName, mediaType: artifact.mediaType, content: artifact.content }); return }
     if (!runId) { setPreviewError('当前运行信息不完整，无法读取正式产物。'); return }
     setPreviewLoading(artifact.fileName)
     try { setPreview({ ...artifact, content: await loadRequirementReleaseArtifact(runId, artifact.fileName) }) }
@@ -460,18 +458,10 @@ function Artifacts({ result, release, runId }: { result?: RequirementAnalysisRes
     finally { setPreviewLoading('') }
   }
   if (!result) return <div className="rav2-empty"><FileText /><h2>暂无需求分析候选</h2></div>
-  const baseline = release?.artifacts.find(item => item.fileName === 'requirement-baseline.md')
-  const releaseArtifacts = release?.artifacts.filter(item => {
-    if (isRequirementSourceSnapshotArtifact(item.fileName)) return false
-    return item.fileName !== 'refined-requirements.md'
-      || !baseline
-      || typeof item.content !== 'string'
-      || typeof baseline.content !== 'string'
-      || item.content.trimEnd() !== baseline.content.trimEnd()
-  }) ?? []
+  const report = release?.artifacts.find(item => item.fileName === 'requirement-analysis.md')
   const formalContentHashes = new Set((release?.artifacts ?? []).map(item => item.contentSha256))
   const candidateArtifacts = result.artifacts.filter(item => !formalContentHashes.has(item.contentSha256))
-  return <div className="rav2-artifacts"><header><div><FileText /><span><h2>Requirement Release</h2><p>Service 在需求分析和必要澄清完成后原子发布，测试设计只读取该正式版本。</p></span></div><Badge tone={release?.status === 'published' ? 'green' : 'gray'}>{release?.status === 'published' ? '已发布' : '等待发布'}</Badge></header>{release ? <div className="rav2-snapshot-facts"><span><small>Release</small><b>{release.id}</b></span><span><small>发布时间</small><b>{formatTime(release.publishedAt ?? release.createdAt)}</b></span><span><small>固定 Run</small><b>{release.verificationRunId}</b></span><span><small>内容 Hash</small><b>{release.contentSha256}</b></span></div> : <div className="rav2-warning"><Clock3 />当前尚未发布 Requirement Release；系统会在 blocking clarification 全部解决后继续。</div>}{previewError&&<div className="rav2-warning"><AlertTriangle />{previewError}</div>}{release&&<details><summary>服务端生成的下游产物</summary><div className="rav2-artifact-list">{releaseArtifacts.map(artifact=><article key={artifact.fileName}><b>{artifact.fileName}</b><small>{artifact.mediaType} · {releaseArtifactDescription(artifact)} · {artifact.contentSha256}</small><button type="button" disabled={Boolean(previewLoading)} onClick={() => void openArtifactPreview(artifact)}>{previewLoading===artifact.fileName?<LoaderCircle className="rotating"/>:<Eye />}预览</button></article>)}</div></details>}{candidateArtifacts.length>0&&<details><summary>分析期候选（非正式产物）</summary><div className="rav2-artifact-list">{candidateArtifacts.map(item=><article key={item.fileName}><b>{item.fileName}</b><small>{item.contentSha256}</small><button type="button" onClick={() => void openArtifactPreview(item)}><Eye />预览</button></article>)}</div></details>}{preview&&<ArtifactPreview value={preview} onClose={() => setPreview(undefined)} />}</div>
+  return <div className="rav2-artifacts"><header><div><FileText /><span><h2>Requirement Release</h2><p>PostgreSQL 中的不可变结构化 content 是唯一正式机器事实；Markdown 仅供人工查看。</p></span></div><Badge tone={release?.status === 'published' ? 'green' : 'gray'}>{release?.status === 'published' ? '已发布' : '等待发布'}</Badge></header>{release ? <><div className="rav2-snapshot-facts"><span><small>Release</small><b>{release.id}</b></span><span><small>发布时间</small><b>{formatTime(release.publishedAt)}</b></span><span><small>固定 Run</small><b>{release.verificationRunId}</b></span><span><small>Content Hash</small><b>{release.contentSha256}</b></span></div><div className="rav2-snapshot-facts"><span><small>正式需求点</small><b>{release.content?.requirements.length ?? result.requirementPoints.length}</b></span><span><small>Clarification</small><b>{release.content?.clarifications.length ?? result.clarifications.length}</b></span><span><small>Test Focus</small><b>{release.content?.testFocus.length ?? result.testFocus.length}</b></span><span><small>Evidence</small><b>{release.content?.evidence.length ?? result.evidence.length}</b></span></div>{report&&<div className="rav2-artifact-list"><article><b>需求分析报告</b><small>人工查看 / 下载的派生 Markdown，不参与 Content Hash 或 TestDesign 输入</small><button type="button" disabled={Boolean(previewLoading)} onClick={() => void openArtifactPreview(report)}>{previewLoading===report.fileName?<LoaderCircle className="rotating"/>:<Eye />}查看报告</button></article></div>}<details><summary>详细信息</summary><div className="rav2-snapshot-facts"><span><small>Schema</small><b>{release.schemaVersion}</b></span><span><small>ProjectVersion</small><b>{release.projectVersionId}</b></span><span><small>来源 AssetVersion</small><b>{release.sourceAssetVersionIds.length}</b></span><span><small>发布者</small><b>{release.publishedBy}</b></span></div></details></> : <div className="rav2-warning"><Clock3 />当前尚未发布 Requirement Release；系统会在 blocking clarification 全部解决后继续。</div>}{previewError&&<div className="rav2-warning"><AlertTriangle />{previewError}</div>}{candidateArtifacts.length>0&&<details><summary>分析期候选（非正式产物）</summary><div className="rav2-artifact-list">{candidateArtifacts.map(item=><article key={item.fileName}><b>{item.fileName}</b><small>{item.contentSha256}</small><button type="button" onClick={() => void openArtifactPreview(item)}><Eye />预览</button></article>)}</div></details>}{preview&&<ArtifactPreview value={preview} onClose={() => setPreview(undefined)} />}</div>
 }
 
 function ArtifactPreview({ value, onClose }: { value: ArtifactPreviewValue; onClose: () => void }) {
@@ -480,17 +470,6 @@ function ArtifactPreview({ value, onClose }: { value: ArtifactPreviewValue; onCl
     try { text = JSON.stringify(JSON.parse(value.content), null, 2) } catch { /* 保留服务端原文，便于排查非法历史产物。 */ }
   }
   return <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) onClose() }}><section className="rav2-source-modal rav2-artifact-preview" role="dialog" aria-modal="true" aria-label={`预览 ${value.fileName}`}><header><span><Eye /><b>{value.fileName}</b><small>{value.mediaType}</small></span><button type="button" aria-label="关闭产物预览" onClick={onClose}><XCircle /></button></header><div className="rav2-source-body">{value.mediaType === 'text/markdown' ? <MarkdownDocument source={value.content} format="markdown" /> : <pre>{text}</pre>}</div></section></div>
-}
-
-function releaseArtifactDescription(artifact: RequirementReleasePackage['artifacts'][number]) {
-  if (artifact.fileName === 'requirements.json') return '测试设计的正式需求输入'
-  if (artifact.fileName === 'manifest.json') return '发布包清单与机器可读入口'
-  if (machineReadableArtifactNames.has(artifact.fileName)) return '机器可读 · 服务端按 Schema 生成'
-  return '服务端生成的正式 Release 文件'
-}
-
-function isRequirementSourceSnapshotArtifact(fileName: string) {
-  return fileName.startsWith('修复后的需求原文/') || fileName.startsWith('需求原文快照/')
 }
 
 function Diff({ versions,value,onChange,loading,removed,added }:{ versions:NonNullable<KnowledgeDocument['versions']>; value:[string,string]; onChange:(v:[string,string])=>void; loading:boolean; removed:string[]; added:string[] }) {

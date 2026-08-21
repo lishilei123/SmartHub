@@ -218,7 +218,7 @@ export type ProjectVersionStatus = 'open' | 'locked' | 'archived'
 export interface RequirementReleaseBinding {
   releaseId: string
   verificationRunId: string
-  requirementsJsonSha256: string
+  releaseContentSha256: string
   boundAt: string
 }
 export interface ProjectVersion {
@@ -230,7 +230,7 @@ export interface ProjectVersion {
   sourceProjectVersionId?: string
   /** 创建版本时由用户明确提交；后续 Requirement Binding 变化不得改写该意图。 */
   inheritRequirementBindings: boolean
-  /** 当前默认的 Requirement Release；保留以兼容已有数据和调用方。 */
+  /** 当前默认的 Requirement Release。 */
   requirementReleaseBinding?: RequirementReleaseBinding
   /** 当前 ProjectVersion 的全部已发布 Requirement Release 绑定，按 boundAt 保留历史。 */
   requirementReleaseBindings?: RequirementReleaseBinding[]

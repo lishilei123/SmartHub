@@ -69,7 +69,7 @@ export type RequirementAnalysisResult = {
     limitations: string[]
   }
   analysisDocument?: string
-  artifacts: Array<{ fileName: 'requirement-baseline.md' | 'requirement-analysis.md'; mediaType: 'text/markdown'; content: string; contentSha256: string }>
+  artifacts: Array<{ fileName: 'requirement-analysis.md'; mediaType: 'text/markdown'; content: string; contentSha256: string }>
 }
 
 export type AgentExecutionEvent = {
@@ -106,18 +106,24 @@ export type AgentExecutionRecord = {
 
 export type RequirementReleasePackage = {
   id: string
-  schemaVersion: 'requirement-release-package/v1'
+  schemaVersion: 'requirement-release/v1'
   status: 'published'
   projectVersionId: string
   verificationRunId: string
+  content?: {
+    requirements: RequirementPoint[]
+    evidence: AnalysisEvidence[]
+    clarifications: PlanningClarification[]
+    testFocus: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
+  }
   sourceAssetVersionIds: string[]
   generationExecution: AgentExecutionRecord
-  artifacts: Array<{ fileName: string; mediaType: 'text/markdown' | 'application/json' | 'text/plain'; content: string; contentSha256: string }>
+  artifacts: Array<{ fileName: 'requirement-analysis.md'; mediaType: 'text/markdown'; content?: string; contentSha256: string }>
   contentSha256: string
   createdAt: string
   createdBy: string
-  publishedAt?: string
-  publishedBy?: string
+  publishedAt: string
+  publishedBy: string
 }
 
 export type AgentDefinitionSnapshot = {

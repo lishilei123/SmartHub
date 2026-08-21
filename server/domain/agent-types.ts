@@ -342,7 +342,7 @@ export type PlanningReviewerSourceReference =
       kind: 'test_design'
       testDesignRunId: string
       requirementReleaseId: string
-      requirementsJsonSha256: string
+      requirementReleaseContentSha256: string
       testCases: Array<{
         caseId: string
         revision: number

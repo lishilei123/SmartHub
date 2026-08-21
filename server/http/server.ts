@@ -216,7 +216,7 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   if (method === 'GET' && releaseArtifact) {
     await requireRun(releaseArtifact[1], 'requirement-analysis:read')
     const artifact = await requirementAnalysisService.releaseArtifact(releaseArtifact[1], decodeURIComponent(releaseArtifact[2]))
-    return sendText(response, 200, artifact.content, artifact.mediaType === 'application/json' ? 'application/json; charset=utf-8' : `${artifact.mediaType}; charset=utf-8`, artifact.fileName.split('/').at(-1))
+    return sendText(response, 200, artifact.content, `${artifact.mediaType}; charset=utf-8`, artifact.fileName)
   }
   const runApprovals = /^\/api\/requirement-analysis-runs\/([^/]+)\/approvals$/.exec(url.pathname)
   if (method === 'GET' && runApprovals) { await requireRun(runApprovals[1], 'requirement-analysis:read'); return send(response, 200, await reviewGovernanceService.listApprovals(runApprovals[1])) }

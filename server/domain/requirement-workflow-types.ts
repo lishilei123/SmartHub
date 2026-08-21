@@ -1,5 +1,5 @@
 import type { AgentExecutionRecord } from './types.js'
-import type { PlanningClarification } from './review-types.js'
+import type { CandidateEvidence, CandidateRequirementPoint, PlanningClarification, RequirementTestFocus } from './review-types.js'
 
 export type RequirementWorkflowStage = 'analysis' | 'clarification' | 'release'
 
@@ -13,26 +13,36 @@ export interface RequirementAutomaticTransitionState {
 }
 
 export interface RequirementReleaseArtifact {
-  fileName: string
-  mediaType: 'text/markdown' | 'application/json' | 'text/plain'
+  fileName: 'requirement-analysis.md'
+  mediaType: 'text/markdown'
   content: string
   contentSha256: string
 }
 
+/** Immutable, authoritative machine-readable Requirement Release facts. */
+export interface RequirementReleaseContent {
+  requirements: CandidateRequirementPoint[]
+  evidence: CandidateEvidence[]
+  clarifications: PlanningClarification[]
+  testFocus: RequirementTestFocus[]
+}
+
 export interface RequirementReleasePackage {
   id: string
-  schemaVersion: 'requirement-release-package/v1'
+  schemaVersion: 'requirement-release/v1'
   status: 'published'
   projectVersionId: string
   verificationRunId: string
+  content: RequirementReleaseContent
+  /** SHA-256 of canonical JSON for content only; artifacts never participate. */
+  contentSha256: string
   sourceAssetVersionIds: string[]
   generationExecution: AgentExecutionRecord
   artifacts: RequirementReleaseArtifact[]
-  contentSha256: string
   createdAt: string
   createdBy: string
-  publishedAt?: string
-  publishedBy?: string
+  publishedAt: string
+  publishedBy: string
 }
 
 export interface RequirementWorkflowState {

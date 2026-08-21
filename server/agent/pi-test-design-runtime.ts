@@ -157,7 +157,12 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     currentBusinessState: stage,
     runId: run.id,
     projectVersionId: run.projectVersionId,
-    requirementRelease: { releaseId: run.basisSnapshot.requirementReleaseId, verificationRunId: run.basisSnapshot.verificationRunId, requirementsJsonSha256: run.basisSnapshot.requirementsJsonSha256, clarificationCount: run.basisSnapshot.clarifications?.length ?? 0 },
+    requirementRelease: {
+      releaseId: run.basisSnapshot.requirementReleaseId,
+      verificationRunId: run.basisSnapshot.verificationRunId,
+      contentSha256: run.basisSnapshot.requirementReleaseContentSha256,
+      content: run.basisSnapshot.content,
+    },
     workspace: { root: '/workspace', activeBranch: `/${workspace.activeBranchLogicalPath}`, agentDirectory: `/${workspace.agentLogicalPath}`, snapshotSha256: workspace.snapshotSha256 },
     currentInputRefs: run.currentInputRefs.map(item => ({ logicalPath: item.logicalPath.replace(/^workspace\//u, ''), assetVersionId: item.assetVersionId, contentSha256: item.contentSha256 })),
     design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
@@ -171,7 +176,7 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
 
 function testDesignTaskMessage(stage: TestDesignStage) {
   if (stage === 'test_case_design') {
-    return 'Requirement Release 已正式发布。请继续当前测试策划工作，先按 Workspace Manifest 中的 coreFactPaths 建立一次非重叠读取计划，再直接基于正式 Requirement、Clarification 和冻结历史快照设计完整测试用例。'
+    return 'Requirement Release 已正式发布。请直接基于任务中明确提供的结构化 Requirement Release content，并按需读取冻结 Workspace 中的用户资料与历史用例快照，设计完整测试用例。'
   }
   return 'Coverage Audit 已识别可由 Agent 修复的候选问题。请继续当前测试策划工作，修复任务中列出的 agent_repair blockers，并保持其他候选语义稳定。'
 }
@@ -196,7 +201,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
         ]
   const readingRules = stage === 'test_case_design'
     ? [
-        'coreFactPaths 列出本轮正式 Requirement Release、Clarification、Test Focus 和冻结历史快照的精确路径与 Hash。先按这些路径形成一次连续、非重叠的读取计划；完整冻结 Workspace 是授权边界，不是遍历任务。',
+        '正式 Requirement、Evidence、Clarification 和 Test Focus 已由 Runtime 在 requirementRelease.content 中完整提供，不要到 Workspace 寻找其 JSON 或 Markdown 镜像。coreFactPaths 只列出需要自主读取的冻结历史资料。',
         '若 coreFactPaths 中存在 historical-test-cases.json，它是本轮唯一的历史用例库基线，必须读取并判断复用、修改、新增或废弃；不得用 branches/*/test-case-library/v*/ 下的 manifest、test-cases 或其他正式投影重复建立历史基线。历史资料不能覆盖当前 Requirement Release。',
         '补充 Workspace 或共享知识只可用于已命名的事实缺口或风险：先用受限路径的 ls/find/grep 或 knowledge.search 定位，再读取最小必要范围。相同 contentHash 和所需行范围仍在当前 Context 时直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。',
       ]
@@ -209,7 +214,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
     '提交 cases[] 时，每一项必须是扁平的 test-case/v2 对象：ref、schemaVersion、title、requirementRefs、executionMethods、executionSpec 等字段同级。禁止使用 { ref, content: {...} } 包装。',
     'Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 是本轮执行权限边界。',
     'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 查看 Enabled Skill Catalog，并只在当前 Stage 确有方法缺口时自主决定是否通过 skill.read 读取正文。已有 TRUSTED_SKILL 正文仍在 Context 时直接复用。',
-    'requirements/clarifications.json 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
+    'requirementRelease.content.clarifications 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
     '不得编造阈值、时长、兼容矩阵、接口、定位器、账号、环境或 Expected Result。',
     'PlanningAgent 只生成语义候选；正式 ID、Revision、Version、Hash 和数据库状态由 Service / Validator 管理。',
     stage === 'test_design_repair'
@@ -245,7 +250,7 @@ function stageWorkspace(run: TestDesignWorkflowRun, stage: TestDesignStage): Tes
     indexVersionId: run.workspaceSnapshot.indexVersionId,
     requirementReleaseId: run.workspaceSnapshot.requirementReleaseId,
     verificationRunId: run.workspaceSnapshot.verificationRunId,
-    requirementsJsonSha256: run.workspaceSnapshot.requirementsJsonSha256,
+    requirementReleaseContentSha256: run.workspaceSnapshot.requirementReleaseContentSha256,
     files,
     createdAt: run.workspaceSnapshot.createdAt,
   } satisfies Omit<TestDesignWorkspaceSnapshot, 'snapshotSha256'>

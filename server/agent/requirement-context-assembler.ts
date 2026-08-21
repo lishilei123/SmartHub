@@ -93,7 +93,7 @@ export function buildTestDesignDirectoryInputPlan(input: {
       requirementReleaseId: input.workspace.requirementReleaseId,
       currentInputRefs: input.workspace.files.filter(file => file.sourceScope === 'current_input').map(file => ({ logicalPath: file.logicalPath.replace(/^workspace\//u, ''), assetVersionId: file.assetVersionId, contentSha256: file.contentSha256 })),
       coreFactPaths,
-      instructions: 'Requirement Release 是当前正式需求基线；currentInputRefs 是上传资料重点。完整冻结 Workspace 是授权边界，不是根目录枚举要求。先读取 coreFactPaths：同一 Hash 的大文件使用连续、非重叠 offset 范围；正文仍在当前 Context 时直接复用。historical-test-cases.json 是唯一历史用例库基线；test-case-library/v*/ 下的正式投影不能用于重复建立历史基线。其他 Workspace 或共享知识仅为已命名的当前事实缺口或风险使用最窄范围的 ls/find/grep/read 或 Knowledge；禁止为发现已列明文件执行根目录 find("**") 或批量读取。不得调用 Shell、write、edit 或越过工作区。',
+      instructions: 'Requirement Release content 已由 Runtime 直接提供；Workspace 不保存它的文件镜像。currentInputRefs 是上传资料重点，完整冻结 Workspace 是授权边界，不是根目录枚举要求。仅按需读取 coreFactPaths 中的历史快照：同一 Hash 的大文件使用连续、非重叠 offset 范围；正文仍在当前 Context 时直接复用。historical-test-cases.json 是唯一历史用例库基线；test-case-library/v*/ 下的正式投影不能用于重复建立历史基线。其他 Workspace 或共享知识仅为已命名的当前事实缺口或风险使用最窄范围的 ls/find/grep/read 或 Knowledge；禁止为发现已列明文件执行根目录 find("**") 或批量读取。不得调用 Shell、write、edit 或越过工作区。',
     }),
     '<<<SMARTHUB_PI_TEST_DESIGN_WORKSPACE_END>>>',
   ].join('\n')
@@ -117,11 +117,7 @@ export function buildTestDesignDirectoryInputPlan(input: {
 }
 
 function coreTestDesignFactPaths(workspace: TestDesignWorkspaceSnapshot) {
-  const releaseRoot = `${workspace.activeBranchLogicalPath}/requirements/`
   const roles = new Map([
-    [`${releaseRoot}requirements.json`, 'requirement_release'],
-    [`${releaseRoot}clarifications.json`, 'formal_clarifications'],
-    [`${releaseRoot}test-focus.json`, 'test_focus'],
     [`${workspace.agentLogicalPath}/historical-test-cases.json`, 'historical_cases'],
   ])
   return workspace.files.flatMap(file => {

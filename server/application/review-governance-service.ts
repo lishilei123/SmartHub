@@ -114,34 +114,8 @@ export class ReviewGovernanceService implements ToolApprovalGate {
   async exportMarkdown(runId: string, projectVersionId: string) {
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId && item.projectVersionId === projectVersionId), '指定项目版本下不存在该需求分析运行')
-    if (run.status !== 'succeeded' || !run.result) throw new Error('只有成功完成的需求分析结果可以导出')
-    const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), '项目版本不存在')
-    const lines = [
-      `# ${projectVersion.name} · 需求分析报告`, '',
-      `- 运行 ID：${run.id}`,
-      `- 项目版本 ID：${projectVersion.id}`,
-      `- 固定输入文档：${run.snapshot.assets.length} 份`,
-      ...run.snapshot.assets.map(item => `  - ${item.displayName}：${item.assetVersionId}（SHA-256 ${item.assetContentHash}）`),
-      `- 固定索引版本：${run.snapshot.indexVersionId}`,
-      `- 实际模型路由：${run.modelLabel}`,
-      `- 运行状态：${run.status}`,
-      `- 生成时间：${new Date().toISOString()}`, '',
-      '## 分析摘要', '',
-      `- 需求概述：${safeMarkdown(run.result.summary.overview)}`,
-      ...run.result.summary.businessGoals.map(item => `- 业务目标：${safeMarkdown(item)}`),
-      `- 总体结论：${run.result.summary.overallAssessment}`,
-      `- 综合评分：${run.result.summary.score}`,
-      ...run.result.summary.risks.map(item => `- 风险：${safeMarkdown(item)}`), '',
-      '## 需求点', '',
-      ...run.result.requirementPoints.flatMap(point => [`### ${safeMarkdown(point.clientRequirementPointId)} · ${safeMarkdown(point.title)}`, '', safeMarkdown(point.description), '', `- Evidence：${point.evidenceRefs.join('、')}`, '']),
-      '## Test Focus', '',
-      ...(run.result.testFocus.length ? run.result.testFocus.flatMap(item => [`### ${safeMarkdown(item.id)} · ${safeMarkdown(item.title)}`, '', safeMarkdown(item.description), '', `- 关联需求点：${item.requirementPointRefs.join('、') || '整体关注项'}`, '']) : ['本次没有单独的测试关注项。', '']),
-      '## 降级与执行摘要', '',
-      `- 覆盖限制：${run.result.coverage.limitations.length ? run.result.coverage.limitations.map(safeMarkdown).join('；') : '无'}`,
-      ...(run.degradations?.length ? run.degradations.map(item => `- ${item.agentKey} 模型降级：${item.fromSourceId}/${item.fromModelId} → ${item.toSourceId}/${item.toModelId}；原因：${safeMarkdown(item.reason)}`) : ['- 模型降级：无']),
-      ...Object.values(run.executions ?? {}).filter(Boolean).map(execution => `- ${execution!.agentKey}：${execution!.turns} Turn，${execution!.toolCalls} 次工具调用，${execution!.toolErrors ?? 0} 次工具错误`),
-    ]
-    return lines.join('\n')
+    const release = required(run.workflow?.release, '只有正式发布的 Requirement Release 可以导出需求分析报告')
+    return required(release.artifacts.find(item => item.fileName === 'requirement-analysis.md'), 'Requirement Release 缺少需求分析报告').content
   }
 }
 
@@ -159,7 +133,6 @@ function hashParameters(value: unknown) { return createHash('sha256').update(sta
 function summarizeParameters(value: unknown) { const text = stableStringify(value); return text.length <= 500 ? text : `${text.slice(0, 497)}...` }
 function principalId(principal: Principal | undefined) { return String(principal?.subjectId ?? '').trim().slice(0, 200) || 'system' }
 function principalName(principal: Principal | undefined) { return String(principal?.displayName ?? '').trim().slice(0, 200) || '系统' }
-function safeMarkdown(value: string) { return String(value).replace(/[\r\n]+/gu, ' ').replace(/([*_`])/gu, '\\$1').trim() }
 function waitForDecision(milliseconds: number, signal: AbortSignal) {
   if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('AGENT_CANCELLED'))
   return new Promise<void>((resolve, reject) => {
