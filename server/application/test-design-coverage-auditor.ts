@@ -54,7 +54,7 @@ export function auditTestDesignCoverage(input: {
     if (caseIds.length < 2) continue
     advisories.push({ code: 'POSSIBLE_DUPLICATE_TEST_CASE', message: `存在 ${caseIds.length} 条标题、步骤、预期结果与测试类型几乎完全一致的用例，请人工确认是否需要合并`, subjectId: caseIds[0], details: { reasons: caseIds } })
   }
-  const extendedCount = current.filter(item => item.effectiveRequirementRefs.length === 0).length
+  const extendedCount = current.filter(item => item.content.requirementRefs.length === 0).length
   if (extendedCount) advisories.push({ code: 'EXTENDED_RISK_TEST_CASES_PRESENT', message: `存在 ${extendedCount} 条未关联 Requirement 的扩展风险测试；这是合法状态，不计入正式 Requirement Coverage` })
   for (const historical of input.historical.items) {
     const locator = historical.locator as { caseId?: unknown } | undefined

@@ -20,6 +20,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
   const eventErrors = executions.flatMap(({ node, execution }) => execution.events.filter(event => event.isError).map(event => ({ node, event })))
   const diagnosticCount = Number(Boolean(run.error)) + nodeErrors.length + eventErrors.length + Number(Boolean(reviewError))
   const hasValidCoverageAudit = run.coverageAudits.some(item => item.status === 'valid')
+  const historicalBaseline = historicalBaselinePresentation(run.historicalSnapshot)
   const reviewCoverage = async () => {
     if (reviewingCoverage || !hasValidCoverageAudit) return
     setReviewingCoverage(true); setReviewError('')
@@ -35,7 +36,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
       <div className="td2-snapshot-grid">
         <Snapshot icon={<LockKeyhole />} title="Requirement Release" primary={run.basisSnapshot.requirementReleaseId} secondary={`verificationRunId ${run.basisSnapshot.verificationRunId}`} hash={run.basisSnapshot.requirementReleaseContentSha256} />
         <Snapshot icon={<Database />} title="Workspace Snapshot" primary={run.workspaceSnapshot.activeBranchLogicalPath} secondary={`${run.currentInputRefs.length} 个重点输入 · ${run.workspaceSnapshot.files.length} 个冻结文件`} hash={run.workspaceSnapshot.snapshotSha256} />
-        <Snapshot icon={<Database />} title="Historical Baseline" primary={run.historicalSnapshot.sourceTestCaseLibraryVersionId ?? '无历史基线'} secondary={run.historicalSnapshot.sourceProjectVersionId ? `来源版本 ${run.historicalSnapshot.sourceProjectVersionId} · Requirement Release ${run.historicalSnapshot.sourceRequirementReleaseId} · ${run.historicalSnapshot.items.length} 条` : '当前 ProjectVersion 未启用继承，或来源版本暂无正式 Library'} hash={run.historicalSnapshot.snapshotSha256} />
+        <Snapshot icon={<Database />} title="Historical Baseline" primary={historicalBaseline.primary} secondary={historicalBaseline.secondary} hash={run.historicalSnapshot.snapshotSha256} />
         <Snapshot icon={<Bot />} title="Agent 配置快照" primary={`V${run.agentConfigurationSnapshot.configurationVersion} · ${run.agentConfigurationSnapshot.primaryModel.modelName}`} secondary={run.agentConfigurationSnapshot.configurationId} hash={run.agentConfigurationSnapshot.configurationSha256} />
       </div>
       <PlanningContextMetrics context={context} />
@@ -44,6 +45,13 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
       <details className={`td2-technical-diagnostics ${diagnosticCount ? 'has-errors' : ''}`}><summary><AlertTriangle /><span><b>技术诊断</b><small>{diagnosticCount ? `${diagnosticCount} 条异常记录，仅用于失败排查` : '当前没有运行异常'}</small></span></summary><div><dl><span><dt>Run ID</dt><dd>{run.id}</dd></span><span><dt>状态 / 阶段</dt><dd>{run.status} · {run.stage}</dd></span><span><dt>Node</dt><dd>{run.nodeRuns.length}</dd></span></dl>{run.error && <article><b>{run.errorCode ?? 'TEST_DESIGN_RUN_FAILED'}</b><p>{run.error}</p></article>}{nodeErrors.map(node => <article key={`node-${node.id}`}><b>{node.nodeKey} · {node.errorCode ?? 'TEST_DESIGN_NODE_FAILED'}</b><p>{node.error}</p><small>{node.id} · attempt {node.attempt}</small></article>)}{eventErrors.map(({ node, event }) => <article key={`event-${node.id}-${event.sequence}`}><b>{node.nodeKey} · {event.toolId ?? event.type}</b><p>{event.content ?? 'Agent 工具调用返回异常；完整事件请在主界面 Agent 协作中查看。'}</p><small>#{event.sequence} · {new Date(event.occurredAt).toLocaleString('zh-CN')}</small></article>)}{reviewError && <article><b>Reviewer 未完成</b><p>{reviewError}</p></article>}{!diagnosticCount && <p className="td2-diagnostic-empty">本次运行没有记录 Run、Node 或 Agent Tool 异常。</p>}</div></details>
     </div>
   </section>
+}
+
+function historicalBaselinePresentation(snapshot: TestDesignWorkflowRun['historicalSnapshot']) {
+  if (!snapshot.sourceProjectVersionId) return { primary: '未开启继承', secondary: '当前 ProjectVersion 未启用版本继承' }
+  if (!snapshot.sourceTestCaseLibraryVersionId) return { primary: `来源版本：${snapshot.sourceProjectVersionId}`, secondary: '来源版本暂无正式 TestCase Library · 本次 Run 按空 Historical Baseline 执行' }
+  const requirementRelease = snapshot.sourceRequirementReleaseId ? ` · 来源 Requirement Release：${snapshot.sourceRequirementReleaseId}` : ''
+  return { primary: `来源版本：${snapshot.sourceProjectVersionId}`, secondary: `正式用例库：${snapshot.sourceTestCaseLibraryVersionId} · 历史用例：${snapshot.items.length} 条${requirementRelease}` }
 }
 
 function FlowStep({ node, label, owner, repairState, runStatus }: { node?: TestDesignNodeRun; label: string; owner: string; repairState?: TestDesignWorkflowRun['automaticRepair']; runStatus: TestDesignWorkflowRun['status'] }) {

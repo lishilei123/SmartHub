@@ -724,8 +724,8 @@ export function buildHistoricalSnapshot(state: DatabaseState, design: TestDesign
   const base = {
     schemaVersion: 'historical-case-snapshot/v2' as const,
     items,
-    ...(inheritedSource && libraryVersion && sourceRun ? {
-      sourceProjectVersionId: inheritedSource.id,
+    ...(inheritedSource ? { sourceProjectVersionId: inheritedSource.id } : {}),
+    ...(libraryVersion && sourceRun ? {
       sourceTestCaseLibraryVersionId: libraryVersion.id,
       sourceTestCaseLibraryVersionSha256: libraryVersion.contentSha256,
       sourceRequirementReleaseId: sourceRun.basisSnapshot.requirementReleaseId,

@@ -147,7 +147,9 @@ export interface HistoricalCaseSnapshotItem extends Omit<FrozenContentRef, 'kind
 export interface HistoricalCaseSnapshot {
   schemaVersion: 'historical-case-snapshot/v2'
   items: HistoricalCaseSnapshotItem[]
+  /** Frozen whenever ProjectVersion inheritance is explicit, even if the source has no formal Library. */
   sourceProjectVersionId?: string
+  /** Present only when this Run actually froze a formal source Library. */
   sourceTestCaseLibraryVersionId?: string
   sourceTestCaseLibraryVersionSha256?: string
   sourceRequirementReleaseId?: string

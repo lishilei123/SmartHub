@@ -109,6 +109,7 @@ test('一个来源 Requirement 对应多个当前语义候选时不映射并生�
   assert.ok(run.historicalSnapshot.requirementMappings.some(item => item.status === 'ambiguous'))
   assert.equal(audit.statistics.coveredBasis, 0)
   assert.ok(audit.advisories.some(item => item.code === 'HISTORICAL_REQUIREMENT_MAPPING_AMBIGUOUS'))
+  assert.equal(audit.advisories.filter(item => item.code === 'EXTENDED_RISK_TEST_CASES_PRESENT').length, 0)
 })
 
 test('无法映射的历史 Requirement 保留 Case 且不计入当前 Coverage', () => {
@@ -120,6 +121,16 @@ test('无法映射的历史 Requirement 保留 Case 且不计入当前 Coverage'
   assert.ok(run.historicalSnapshot.requirementMappings.some(item => item.status === 'unmapped'))
   const audit = auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: effective })
   assert.ok(audit.advisories.some(item => item.code === 'HISTORICAL_REQUIREMENT_UNMAPPED'))
+  assert.equal(audit.advisories.filter(item => item.code === 'EXTENDED_RISK_TEST_CASES_PRESENT').length, 0)
+})
+
+test('原始 requirementRefs 为空的 Case 才作为扩展风险测试统计', () => {
+  const run = runFixture([historicalItem('CASE-RISK', 1, caseContent('超长输入下系统保持稳定', []))])
+  materializeCaseDesign(run, { schemaVersion: 'test-case-design/v3', cases: [] }, principal.subjectId, false)
+  const audit = auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: buildEffectiveCaseSet(run) })
+  const advisory = audit.advisories.find(item => item.code === 'EXTENDED_RISK_TEST_CASES_PRESENT')
+  assert.ok(advisory)
+  assert.match(advisory.message, /1 条/u)
 })
 
 test('requirementRefs 单独变化不改变 Test Intent Hash，也不创建新 Revision', () => {
@@ -281,6 +292,7 @@ test('未开启 ProjectVersion 继承时即使项目有正式 Library，Historic
   const fixture = historicalBaselineFixture(false, true)
   const snapshot = buildHistoricalSnapshot(fixture.state, fixture.design, fixture.currentBasis, now)
   assert.equal(snapshot.items.length, 0)
+  assert.equal(snapshot.sourceProjectVersionId, undefined)
   assert.equal(snapshot.sourceTestCaseLibraryVersionId, undefined)
 })
 
@@ -288,8 +300,22 @@ test('来源版本没有正式 Library 时按空 Historical Baseline 正常构�
   const fixture = historicalBaselineFixture(true, false)
   const snapshot = buildHistoricalSnapshot(fixture.state, fixture.design, fixture.currentBasis, now)
   assert.equal(snapshot.items.length, 0)
-  assert.equal(snapshot.sourceProjectVersionId, undefined)
+  assert.equal(snapshot.sourceProjectVersionId, 'project-version-v1')
+  assert.equal(snapshot.sourceTestCaseLibraryVersionId, undefined)
+  assert.equal(snapshot.sourceRequirementReleaseId, undefined)
   assert.deepEqual(snapshot.requirementMappings, [])
+})
+
+test('Run 创建后来源版本发布新 Library 不会改变已冻结 Historical Snapshot', () => {
+  const fixture = historicalBaselineFixture(true, true)
+  const frozen = buildHistoricalSnapshot(fixture.state, fixture.design, fixture.currentBasis, now)
+  const aggregate = fixture.state.testDesignState!
+  const libraryV3 = aggregate.libraryVersions.find(item => item.id === 'library-v3')!
+  aggregate.libraryVersions.push({ ...structuredClone(libraryV3), id: 'library-v4', version: 4, name: '正式库 V4', contentSha256: '4'.repeat(64), publishedAt: '2026-08-24T00:00:00.000Z' })
+  const later = buildHistoricalSnapshot(fixture.state, fixture.design, fixture.currentBasis, '2026-08-24T00:00:01.000Z')
+  assert.equal(frozen.sourceTestCaseLibraryVersionId, 'library-v3')
+  assert.equal(frozen.sourceTestCaseLibraryVersionSha256, libraryV3.contentSha256)
+  assert.equal(later.sourceTestCaseLibraryVersionId, 'library-v4')
 })
 
 function historicalBaselineFixture(inheritRequirementBindings: boolean, includeSourceLibrary: boolean) {
