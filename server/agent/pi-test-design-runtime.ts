@@ -165,7 +165,7 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     },
     workspace: { root: '/workspace', activeBranch: `/${workspace.activeBranchLogicalPath}`, agentDirectory: `/${workspace.agentLogicalPath}`, snapshotSha256: workspace.snapshotSha256 },
     currentInputRefs: run.currentInputRefs.map(item => ({ logicalPath: item.logicalPath.replace(/^workspace\//u, ''), assetVersionId: item.assetVersionId, contentSha256: item.contentSha256 })),
-    design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], historicalLibrarySelection: design.input.historicalLibrarySelection ?? { mode: 'latest_library' }, frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
+    design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     runtimeBoundary: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
     task: testDesignTaskMessage(stage),
@@ -191,11 +191,13 @@ function testDesignStageInstructions(stage: TestDesignStage) {
           '从 functional、performance、stability、compatibility、security 五个方向思考，只生成有价值的场景；不要求每个维度都有 Case，也不提交适用性表。一个 Case 应有清晰可审核的测试目标；自然完整业务闭环可以合并，明显不同且可独立失败的测试意图可以拆分，这不是 Validator Gate。',
           '每条 Case 只提交一份自然语言 preconditions、steps、expectedResults。executionMethods 只选择 ui、api 或二者；不要区分 UI/API 两套步骤，也不要提交执行配置、数据需求、Coverage 内部模型、Finding、Confirmation 或历史 Proposal。',
           'cases[] 是本轮 Candidate Delta，不是当前版本完整用例库。历史用例完全未变化时允许提交 cases: []；不要为表达 reuse 而重新输出历史 Case，也不要输出 reuse、update、create、deprecate 等生命周期动作。',
+          'historical-test-cases.json 中的 requirementRefs 属于其来源 Requirement Release，只用于理解历史测试意图；不得假设相同 RP 编号在当前 Release 中代表相同 Requirement。当前 Requirement direct trace 只能使用 Runtime 提供的当前 Requirement Release ID，跨版本 Requirement Mapping 由 Service 负责。',
         ]
       : [
           '当前任务只列出可安全自动修复的 Coverage blockers；正式 Requirement 保持不变。提交 test-design-repair/v3 时，baseCandidateSha256 必须等于任务与 current-test-cases.json 对应的当前完整 Candidate。',
           'upsertCases 只包含新增或完整替换的扁平 test-case/v3；removeCaseRefs 只删除本轮 Candidate。未在 Patch 中出现的 Case 保持不变。',
           'Requirement 未覆盖时，应新增真正验证该 Requirement 的 Case；不得把已有扩展风险 Case 强行增加 requirementRefs 只为让 Coverage 变绿。',
+          '不得映射旧 Requirement、修改 Historical requirementRefs 或补写历史 Traceability；跨版本 Requirement Mapping 完全由 Service 负责。',
         ]
   const readingRules = stage === 'test_case_design'
     ? [

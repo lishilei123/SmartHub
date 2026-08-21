@@ -12,12 +12,6 @@ export type TestCaseReviewState = 'draft' | 'in_review' | 'approved' | 'rejected
 export type ExecutionReadiness = 'ready' | 'blocked' | 'needs_confirmation'
 
 export interface ScopeRule { kind: string; value: string }
-export type HistoricalLibrarySelection =
-  | { mode: 'latest_library' }
-  | { mode: 'library_version'; testCaseLibraryVersionId: string }
-  | { mode: 'suite_version'; suiteVersionId: string }
-  | { mode: 'none' }
-
 export type KnowledgeAugmentation =
   | { mode: 'disabled' }
   | { mode: 'selected_assets'; assetVersionIds: string[] }
@@ -34,7 +28,6 @@ export interface CreateTestDesignCommon {
   executionMethods?: Array<'ui' | 'api'>
   userCoverageObjectives?: string[]
   knowledgeAugmentation: KnowledgeAugmentation
-  historicalLibrarySelection?: HistoricalLibrarySelection
 }
 
 export type CreateTestDesignInput = CreateTestDesignCommon
@@ -128,11 +121,39 @@ export interface RetrievalSnapshot {
   snapshotSha256: string
 }
 
+export type HistoricalRequirementMappingStatus = 'exact' | 'high_confidence' | 'ambiguous' | 'unmapped'
+
+export interface HistoricalRequirementMapping {
+  sourceRequirementId: string
+  sourceSemanticSha256: string
+  status: HistoricalRequirementMappingStatus
+  targetRequirementId?: string
+  targetSemanticSha256?: string
+  candidateRequirementIds?: string[]
+  confidence?: number
+}
+
+export interface HistoricalCaseSnapshotItem extends Omit<FrozenContentRef, 'kind' | 'content'> {
+  kind: 'test_case_library'
+  content: TestCaseContent
+  /** Full TestCase content integrity Hash, including revision-time requirementRefs. */
+  contentSha256: string
+  /** Test Intent identity Hash; deliberately excludes requirementRefs. */
+  semanticSha256: string
+  sourceRequirementReleaseId: string
+  sourceRequirementRefs: string[]
+}
+
 export interface HistoricalCaseSnapshot {
-  schemaVersion: 'historical-case-snapshot/v1'
-  items: FrozenContentRef[]
-  baseTestCaseLibraryVersionId?: string
-  baseTestCaseLibraryVersionSha256?: string
+  schemaVersion: 'historical-case-snapshot/v2'
+  items: HistoricalCaseSnapshotItem[]
+  sourceProjectVersionId?: string
+  sourceTestCaseLibraryVersionId?: string
+  sourceTestCaseLibraryVersionSha256?: string
+  sourceRequirementReleaseId?: string
+  sourceRequirementReleaseContentSha256?: string
+  sourceRequirementReleaseContent?: RequirementReleaseContent
+  requirementMappings: HistoricalRequirementMapping[]
   createdAt: string
   snapshotSha256: string
 }
@@ -305,6 +326,8 @@ export interface EffectiveTestCase {
   revision: number
   content: TestCaseContent
   contentSha256: string
+  /** Current Requirement Release projection. Historical revision refs remain unchanged. */
+  effectiveRequirementRefs: string[]
   source: 'historical_reuse' | 'historical_update' | 'candidate_create'
   sourceCaseId?: string
   candidateCaseId?: string

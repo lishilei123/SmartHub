@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
 import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
-import { validateTestCaseContent, validateTestCaseDesignCandidate } from '../server/application/test-design-validation.js'
+import { validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate } from '../server/application/test-design-validation.js'
 import type { EffectiveTestCase, TestCaseContent } from '../server/domain/test-design-types.js'
 
 function content(overrides: Partial<TestCaseContent> = {}): TestCaseContent {
@@ -24,7 +24,7 @@ function candidateCase(ref: string, value = content()) { return { ref, ...value 
 
 function effectiveCase(id: string, value: TestCaseContent): EffectiveTestCase {
   const hash = canonicalSha256(value)
-  return { caseId: id, revision: 1, content: value, contentSha256: hash, source: 'candidate_create', candidateCaseId: id }
+  return { caseId: id, revision: 1, content: value, contentSha256: hash, effectiveRequirementRefs: [...value.requirementRefs], source: 'candidate_create', candidateCaseId: id }
 }
 
 test('TestCase v3 只接受统一语义字段，且扩展测试允许空 requirementRefs', () => {
@@ -48,6 +48,12 @@ test('test-design-repair/v3 只接受 base hash、upsert 和 remove', () => {
   assert.equal(result.schemaVersion, 'test-design-repair/v3')
   assert.deepEqual(validateTestCaseDesignCandidate({ schemaVersion: 'test-design-repair/v3', baseCandidateSha256: 'a'.repeat(64), upsertCases: [], removeCaseRefs: ['TC-2'] }, true), { schemaVersion: 'test-design-repair/v3', baseCandidateSha256: 'a'.repeat(64), upsertCases: [], removeCaseRefs: ['TC-2'] })
   assert.throws(() => validateTestCaseDesignCandidate({ schemaVersion: 'test-design-repair/v3', baseCandidateSha256: 'a'.repeat(64), upsertCases: [candidateCase('TC-1')], removeCaseRefs: [], proposals: [] }, true), /不允许的字段/u)
+})
+
+test('CreateTestDesignInput 已完全移除 historicalLibrarySelection', () => {
+  const valid = { name: '测试设计', objective: '验证当前需求', knowledgeAugmentation: { mode: 'disabled' } }
+  assert.equal(validateCreateTestDesignInput(valid).name, '测试设计')
+  assert.throws(() => validateCreateTestDesignInput({ ...valid, historicalLibrarySelection: { mode: 'none' } }), /包含不允许的字段：historicalLibrarySelection/u)
 })
 
 test('Coverage 只统计显式 Requirement 引用，扩展测试既不覆盖也不阻断', () => {

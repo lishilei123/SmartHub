@@ -1091,12 +1091,11 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
       // TestCase v3 has no dependency graph in formal content.
     }
     await client.query('DELETE FROM smarthub.test_design_basis_relations WHERE workflow_run_id=$1', [run.id])
-    for (const testCase of run.testCases.filter(item => !item.tombstonedAt)) {
-      const content = testCase.revisions.find(item => item.revision === testCase.currentRevision)?.content
-      for (const requirementId of content?.requirementRefs ?? []) {
-        const relationId = `basis_relation_${createHash('sha256').update(`${run.id}:${testCase.id}:${requirementId}`).digest('hex').slice(0, 24)}`
-        await client.query('INSERT INTO smarthub.test_design_basis_relations (id,workflow_run_id,subject_kind,subject_id,basis_type,basis_ref,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data', [relationId,run.id,'test_case',testCase.id,'requirement_release',requirementId,JSON.stringify({ requirementReleaseId:run.basisSnapshot.requirementReleaseId, requirementId, testCaseId:testCase.id })])
-      }
+    const latestCoverageAudit = [...run.coverageAudits].reverse().find(item => item.status === 'valid')
+    for (const relation of latestCoverageAudit?.relations ?? []) {
+      if (relation.status !== 'covered' || !relation.caseId) continue
+      const relationId = `basis_relation_${createHash('sha256').update(`${run.id}:${relation.caseId}:${relation.requirementId}`).digest('hex').slice(0, 24)}`
+      await client.query('INSERT INTO smarthub.test_design_basis_relations (id,workflow_run_id,subject_kind,subject_id,basis_type,basis_ref,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data', [relationId,run.id,'test_case',relation.caseId,'requirement_release',relation.requirementId,JSON.stringify({ requirementReleaseId:run.basisSnapshot.requirementReleaseId, requirementId:relation.requirementId, testCaseId:relation.caseId, projection:'effective_current_release', coverageAuditId:latestCoverageAudit!.id })])
     }
     for (const audit of run.coverageAudits) {
       await client.query('INSERT INTO smarthub.test_design_coverage_audits (id,workflow_run_id,input_sha256,case_set_sha256,status,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,data=EXCLUDED.data', [audit.id,run.id,audit.inputSha256,audit.caseSetSha256,audit.status,audit.createdAt,JSON.stringify(audit)])

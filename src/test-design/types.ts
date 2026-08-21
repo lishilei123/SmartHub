@@ -7,13 +7,15 @@ export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
 export type ReviewState = 'draft' | 'in_review' | 'approved' | 'rejected' | 'needs_revision'
 
 export type TestDesignInputCandidates = {
-  projectVersion: { id: string; projectId: string; name: string; status: string; sourceProjectVersionId?: string; sourceProjectVersionName?: string; inheritsSourceAssets: boolean }
+  projectVersion: { id: string; projectId: string; name: string; status: string; sourceProjectVersionId?: string; sourceProjectVersionName?: string; inheritRequirementBindings: boolean }
   requirementRelease: { id: string; analysisRunId: string; contentSha256: string; publishedAt?: string; label: string } | null
   requirementReleases: Array<{ id: string; analysisRunId: string; contentSha256: string; publishedAt?: string; label: string; active: boolean }>
   knowledgeAssets: Array<{ assetId: string; assetVersionId: string; displayName: string; logicalPath: string; assetType: string; status: string; selectable: boolean; reason?: string }>
   fixedIndexes: Array<{ id: string; selectable: boolean }>
-  testCaseLibraryVersions: Array<{ id: string; name: string; version: number; memberCount: number; contentSha256: string; publishedAt: string }>
-  historicalTestSuites: Array<{ id: string; name: string; suiteKey: string; suiteType: string; version: number; memberCount: number; contentSha256: string }>
+  historicalBaseline:
+    | { status: 'not_inherited' }
+    | { status: 'source_library_missing'; sourceProjectVersionId: string; sourceProjectVersionName: string; testCaseLibraryVersion: null }
+    | { status: 'source_library_available'; sourceProjectVersionId: string; sourceProjectVersionName: string; testCaseLibraryVersion: { id: string; name: string; version: number; memberCount: number; contentSha256: string; publishedAt: string } }
   agentReadiness: { ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }
 }
 
@@ -27,7 +29,6 @@ export type CreateTestDesignInput = {
   executionMethods: ExecutionMethod[]
   userCoverageObjectives: string[]
   knowledgeAugmentation: { mode: 'disabled' } | { mode: 'selected_assets'; assetVersionIds: string[] } | { mode: 'fixed_index'; indexVersionId: string }
-  historicalLibrarySelection: { mode: 'latest_library' } | { mode: 'library_version'; testCaseLibraryVersionId: string } | { mode: 'suite_version'; suiteVersionId: string } | { mode: 'none' }
 }
 
 export type TestDesign = {
@@ -150,6 +151,7 @@ export type TestDesignWorkflowRun = TestDesignRunSummary & {
   agentConfigurationSnapshot: { configurationId: string; configurationVersion: number; configurationSha256: string; primaryModel: { modelName: string }; snapshotSha256: string }
   currentInputRefs: Array<{ assetId: string; assetVersionId: string; logicalPath: string; contentSha256: string }>
   workspaceSnapshot: { schemaVersion: 'project-workspace-snapshot/v1'; projectId: string; projectVersionId: string; rootLogicalPath: 'workspace'; activeBranchLogicalPath: string; requirementReleaseId: string; verificationRunId: string; requirementReleaseContentSha256: string; files: Array<{ logicalPath: string; displayName: string; contentSha256: string; assetId?: string; assetVersionId?: string; sourceScope: 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output' }>; snapshotSha256: string; createdAt: string }
+  historicalSnapshot: { schemaVersion: 'historical-case-snapshot/v2'; sourceProjectVersionId?: string; sourceTestCaseLibraryVersionId?: string; sourceTestCaseLibraryVersionSha256?: string; sourceRequirementReleaseId?: string; sourceRequirementReleaseContentSha256?: string; items: Array<{ id: string; contentSha256: string; semanticSha256: string; sourceRequirementReleaseId: string; sourceRequirementRefs: string[] }>; requirementMappings: Array<{ sourceRequirementId: string; status: 'exact' | 'high_confidence' | 'ambiguous' | 'unmapped'; targetRequirementId?: string }>; snapshotSha256: string; createdAt: string }
   formalWorkspaceFiles: Array<{ logicalPath: string; displayName: string; contentSha256: string; assetVersionId?: string; sourceScope: 'formal_output' }>
   nodeRuns: TestDesignNodeRun[]
   testCases: TestDesignCase[]

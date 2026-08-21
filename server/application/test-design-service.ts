@@ -63,17 +63,19 @@ export class TestDesignService {
     const knowledgeAssets = projectBases.flatMap(base => state.assets.filter(asset => asset.knowledgeBaseId === base.id).flatMap(asset => state.versions.filter(version => version.assetId === asset.id).map(version => ({ assetId: asset.id, assetVersionId: version.id, version: version.number, contentHash: version.contentHash, displayName: asset.displayName, logicalPath: asset.logicalPath, assetType: asset.assetType, status: version.status, selectable: version.status === 'ready', reason: version.status === 'ready' ? undefined : '资产版本未就绪' }))))
     const designState = readDesignState(state)
     const inheritedSource = explicitlyInheritedSourceVersion(state, projectVersion)
-    const inheritedLibraryVersions = inheritedSource ? inheritedLibraryVersionsForSource(designState, inheritedSource.id) : []
-    const inheritedLibraryVersionIds = new Set(inheritedLibraryVersions.map(item => item.id))
+    const inheritedLibraryVersion = inheritedSource ? latestPublishedLibraryVersion(inheritedLibraryVersionsForSource(designState, inheritedSource.id)) : undefined
     const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness() : { ready: Boolean(this.runtime), agents: [{ agentKey: 'planning', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'PlanningAgent Runtime 未配置' }] }
     return {
-      projectVersion: { id: projectVersion.id, projectId: projectVersion.projectId, name: projectVersion.name, status: projectVersion.status, ...(projectVersion.sourceProjectVersionId ? { sourceProjectVersionId: projectVersion.sourceProjectVersionId } : {}), ...(inheritedSource ? { sourceProjectVersionName: inheritedSource.name } : {}), inheritsSourceAssets: Boolean(inheritedSource) },
+      projectVersion: { id: projectVersion.id, projectId: projectVersion.projectId, name: projectVersion.name, status: projectVersion.status, ...(projectVersion.sourceProjectVersionId ? { sourceProjectVersionId: projectVersion.sourceProjectVersionId } : {}), ...(projectVersion.sourceProjectVersionId ? { sourceProjectVersionName: state.projectVersions.find(item => item.id === projectVersion.sourceProjectVersionId)?.name } : {}), inheritRequirementBindings: Boolean(inheritedSource) },
       requirementRelease: requirementRelease ? presentRequirementRelease(requirementRelease, true) : null,
       requirementReleases: requirementReleases.map(item => presentRequirementRelease(item, item.binding.releaseId === requirementRelease?.binding.releaseId)),
       knowledgeAssets,
       fixedIndexes: projectBases.flatMap(base => state.indexes.filter(index => index.knowledgeBaseId === base.id && index.status === 'active').map(index => ({ id: index.id, selectable: true }))),
-      testCaseLibraryVersions: inheritedLibraryVersions.sort((left, right) => right.version - left.version).map(item => ({ id: item.id, name: item.name, version: item.version, memberCount: item.members.length, contentSha256: item.contentSha256, publishedAt: item.publishedAt })),
-      historicalTestSuites: designState.suiteVersions.filter(item => item.projectId === projectVersion.projectId && item.status !== 'deprecated' && Boolean(item.testCaseLibraryVersionId && inheritedLibraryVersionIds.has(item.testCaseLibraryVersionId))).sort(newest).map(item => ({ id: item.id, name: item.name, suiteKey: item.suiteKey, suiteType: item.suiteType, version: item.version, memberCount: item.members.length, contentSha256: item.contentSha256 })),
+      historicalBaseline: !inheritedSource
+        ? { status: 'not_inherited' as const }
+        : inheritedLibraryVersion
+          ? { status: 'source_library_available' as const, sourceProjectVersionId: inheritedSource.id, sourceProjectVersionName: inheritedSource.name, testCaseLibraryVersion: { id: inheritedLibraryVersion.id, name: inheritedLibraryVersion.name, version: inheritedLibraryVersion.version, memberCount: inheritedLibraryVersion.members.length, contentSha256: inheritedLibraryVersion.contentSha256, publishedAt: inheritedLibraryVersion.publishedAt } }
+          : { status: 'source_library_missing' as const, sourceProjectVersionId: inheritedSource.id, sourceProjectVersionName: inheritedSource.name, testCaseLibraryVersion: null },
       agentReadiness,
     }
   }
@@ -103,8 +105,6 @@ export class TestDesignService {
       if (existing) return { design: structuredClone(existing), created: false }
       const result = required(analysisRun.result, 'REQUIREMENT_RESULT_NOT_FOUND', '需求理解结果不存在')
       const activeIndex = state.indexes.find(item => item.id === analysisRun.snapshot.indexVersionId && item.status === 'active')
-      const inheritedSource = explicitlyInheritedSourceVersion(state, projectVersion)
-      const latestInheritedLibrary = inheritedSource ? latestPublishedLibraryVersion(inheritedLibraryVersionsForSource(aggregate, inheritedSource.id)) : undefined
       const rawInput: CreateTestDesignInput = {
         name: `${projectVersion.name} · 自动测试设计`,
         objective: result.summary.overview.trim() || '依据已冻结的需求理解生成可追溯测试用例。',
@@ -114,9 +114,6 @@ export class TestDesignService {
         executionMethods: ['ui', 'api'],
         userCoverageObjectives: result.testFocus.map(item => `${item.title}：${item.description}`),
         knowledgeAugmentation: activeIndex ? { mode: 'fixed_index', indexVersionId: activeIndex.id } : { mode: 'disabled' },
-        historicalLibrarySelection: latestInheritedLibrary
-          ? { mode: 'latest_library' }
-          : { mode: 'none' },
       }
       const input = validateCreateTestDesignInput(rawInput)
       validateDesignSources(state, projectVersion, input)
@@ -169,12 +166,12 @@ export class TestDesignService {
       const createdAt = now()
       const basisSnapshot = buildBasisSnapshot(design, requirement, createdAt)
       const retrievalSnapshot = await buildRetrievalSnapshot(state, design, createdAt)
-      const historicalSnapshot = buildHistoricalSnapshot(state, design, createdAt)
+      const historicalSnapshot = buildHistoricalSnapshot(state, design, basisSnapshot, createdAt)
       const workspaceSnapshot = buildWorkspaceSnapshot(state, design, requirement, historicalSnapshot, createdAt)
       const run: TestDesignWorkflowRun = {
         id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey, requestedExecutionMethods: [...(design.input.executionMethods ?? [])],
         basisSnapshot, agentConfigurationSnapshot, currentInputRefs: structuredClone(requirement.analysisRun.snapshot.currentInputRefs), retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
-        ...(historicalSnapshot.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: historicalSnapshot.baseTestCaseLibraryVersionId, baseTestCaseLibraryVersionSha256: historicalSnapshot.baseTestCaseLibraryVersionSha256 } : {}),
+        ...(historicalSnapshot.sourceTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: historicalSnapshot.sourceTestCaseLibraryVersionId, baseTestCaseLibraryVersionSha256: historicalSnapshot.sourceTestCaseLibraryVersionSha256 } : {}),
         nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], caseChangeProposals: [], coverageAudits: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
       }
       aggregate.runs.push(run)
@@ -468,7 +465,7 @@ export class TestDesignService {
       assertProposalSourcesCurrent(aggregate, design.projectId, run, baseline)
       const members = new Map((baseline?.members ?? []).map(item => [item.caseId, { ...item }]))
       for (const proposal of run.caseChangeProposals) applyProposalToLibrary(aggregate, design.projectId, run, proposal, members, principal.subjectId)
-      const orderedMembers = [...members.values()].sort((left, right) => left.caseId.localeCompare(right.caseId)).map((member, ordinal) => freezeLibraryVersionMember(aggregate, design.projectId, { ...member, ordinal }))
+      const orderedMembers = [...members.values()].sort((left, right) => left.caseId.localeCompare(right.caseId)).map((member, ordinal) => freezeLibraryVersionMember(aggregate, design.projectId, { ...member, ordinal, traceability: effectiveTraceabilityForPublishedMember(run, member.caseId) }))
       const canonicalContent = { schemaVersion: 'test-case-library/v3', projectId: design.projectId, sourceRunId: runId, members: orderedMembers }
       const contentSha256 = canonicalSha256(canonicalContent)
       const proposalStatistics = Object.fromEntries((['reuse', 'update', 'create', 'deprecate', 'reference'] as const).map(operation => [operation, run.caseChangeProposals.filter(item => item.operation === operation && item.decision !== 'rejected').length])) as Record<CaseChangeProposal['operation'], number>
@@ -700,39 +697,42 @@ async function buildRetrievalSnapshot(state: DatabaseState, design: TestDesign, 
   const base = { canonicalVersion: 'retrieval-snapshot/v1' as const, mode: augmentation.mode, assetVersionIds, ...(index ? { indexVersionId: index.id, ...(augmentation.mode === 'fixed_index' && augmentation.filters ? { filters: augmentation.filters } : {}) } : {}), queryPlan, hits, createdAt }
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
-function buildHistoricalSnapshot(state: DatabaseState, design: TestDesign, createdAt: string): HistoricalCaseSnapshot {
+export function buildHistoricalSnapshot(state: DatabaseState, design: TestDesign, currentBasis: TestDesignBasisSnapshot, createdAt: string): HistoricalCaseSnapshot {
   const aggregate = readDesignState(state)
   const projectVersion = required(state.projectVersions.find(item => item.id === design.projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
   const inheritedSource = explicitlyInheritedSourceVersion(state, projectVersion)
-  const eligibleLibraryVersions = inheritedSource ? inheritedLibraryVersionsForSource(aggregate, inheritedSource.id) : []
-  const eligibleLibraryVersionIds = new Set(eligibleLibraryVersions.map(item => item.id))
+  const libraryVersion = inheritedSource ? latestPublishedLibraryVersion(inheritedLibraryVersionsForSource(aggregate, inheritedSource.id)) : undefined
+  const sourceRun = libraryVersion?.sourceRunId
+    ? required(aggregate.runs.find(item => item.id === libraryVersion.sourceRunId && item.projectVersionId === inheritedSource?.id), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本正式用例库缺少固定的 TestDesign Run')
+    : undefined
+  if (sourceRun && canonicalSha256(sourceRun.basisSnapshot.content) !== sourceRun.basisSnapshot.requirementReleaseContentSha256) throw new TestDesignError('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本 Requirement Release 内容或 Hash 已损坏', 409, { sourceRunId: sourceRun.id, requirementReleaseId: sourceRun.basisSnapshot.requirementReleaseId })
+  const mappings = sourceRun ? mapRequirementsAcrossReleases(sourceRun.basisSnapshot.content.requirements, currentBasis.content.requirements) : []
+  const sourceRequirementIds = new Set(sourceRun?.basisSnapshot.content.requirements.map(item => item.clientRequirementPointId.trim()) ?? [])
   const items: HistoricalCaseSnapshot['items'] = []
-  const selection = design.input.historicalLibrarySelection ?? { mode: 'none' as const }
-  let libraryVersion: TestCaseLibraryVersion | undefined
-  let memberFilter: Set<string> | undefined
-  let kind: 'test_case_library' | 'historical_test_suite' = 'test_case_library'
-  if (selection.mode !== 'none' && !inheritedSource) throw new TestDesignError('TEST_DESIGN_SOURCE_INHERITANCE_REQUIRED', '当前版本未明确继承来源版本，不能加载历史测试资产', 422)
-  if (selection.mode === 'latest_library') libraryVersion = eligibleLibraryVersions.sort((left, right) => right.version - left.version)[0]
-  if (selection.mode === 'library_version') libraryVersion = eligibleLibraryVersions.find(item => item.id === selection.testCaseLibraryVersionId)
-  if (selection.mode === 'suite_version') {
-    const suite = required(aggregate.suiteVersions.find(item => item.id === selection.suiteVersionId && item.projectId === design.projectId && item.status !== 'deprecated' && Boolean(item.testCaseLibraryVersionId && eligibleLibraryVersionIds.has(item.testCaseLibraryVersionId))), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '历史测试套件版本不属于明确继承的来源版本')
-    if (!suite.testCaseLibraryVersionId || suite.compatibilityStatus === 'migration_required' || suite.members.some(item => item.testCaseLibraryVersionId !== suite.testCaseLibraryVersionId)) throw new TestDesignError('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '历史测试套件没有固定唯一用例库版本，需要人工迁移', 422)
-    libraryVersion = aggregate.libraryVersions.find(item => item.id === suite.testCaseLibraryVersionId && item.projectId === design.projectId)
-    memberFilter = new Set(suite.members.map(item => `${item.caseId}:${item.revision}`))
-    kind = 'historical_test_suite'
-  }
-  if (selection.mode !== 'none') required(libraryVersion, 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '指定的历史用例库版本不存在或不属于来源版本')
   for (const member of libraryVersion?.members ?? []) {
-    if (memberFilter && !memberFilter.has(`${member.caseId}:${member.revision}`)) continue
     const sourceCase = required(aggregate.libraryCases.find(item => item.id === member.caseId && item.projectId === design.projectId), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '正式历史用例不存在')
     const revision = required(sourceCase.revisions.find(item => item.revision === member.revision), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '正式历史用例 Revision 不存在')
-    items.push({ id: `history_${libraryVersion!.id}_${sourceCase.id}_${revision.revision}`, kind, sourceId: `${libraryVersion!.id}:${sourceCase.id}:${revision.revision}`, contentSha256: revision.semanticSha256, content: structuredClone(revision.content), locator: { testCaseLibraryVersionId: libraryVersion!.id, caseId: sourceCase.id, revision: revision.revision, status: sourceCase.status } })
+    const content = required(member.frozenContent, 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本正式用例库成员缺少冻结 TestCase 内容')
+    if (member.contentSha256 !== revision.contentSha256 || canonicalSha256(content) !== member.contentSha256 || testCaseSemanticSha256(content) !== revision.semanticSha256) throw new TestDesignError('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本正式用例库成员内容或 Hash 已损坏', 409, { libraryVersionId: libraryVersion!.id, caseId: member.caseId, revision: member.revision })
+    const traceability = required(member.traceability, 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本正式用例库成员缺少 Requirement Release 追溯')
+    assertFixedTraceability(traceability)
+    if (traceability.sourceRequirementReleaseId !== sourceRun?.basisSnapshot.requirementReleaseId) throw new TestDesignError('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本用例库成员追溯与其固定 Requirement Release 不一致', 409, { libraryVersionId: libraryVersion!.id, caseId: member.caseId, expectedRequirementReleaseId: sourceRun?.basisSnapshot.requirementReleaseId, actualRequirementReleaseId: traceability.sourceRequirementReleaseId })
+    const sourceRequirementRefs = traceability.requirementRefs.map(item => item.requirementId)
+    if (sourceRequirementRefs.some(requirementId => !sourceRequirementIds.has(requirementId))) throw new TestDesignError('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本用例库成员引用了固定 Requirement Release 之外的 Requirement', 409, { libraryVersionId: libraryVersion!.id, caseId: member.caseId, sourceRequirementRefs })
+    items.push({ id: `history_${libraryVersion!.id}_${sourceCase.id}_${revision.revision}`, kind: 'test_case_library', sourceId: `${libraryVersion!.id}:${sourceCase.id}:${revision.revision}`, contentSha256: member.contentSha256, semanticSha256: revision.semanticSha256, content: structuredClone(content), sourceRequirementReleaseId: traceability.sourceRequirementReleaseId, sourceRequirementRefs, locator: { sourceProjectVersionId: inheritedSource!.id, testCaseLibraryVersionId: libraryVersion!.id, caseId: sourceCase.id, revision: revision.revision, status: sourceCase.status } })
   }
-  const baseline = libraryVersion
   const base = {
-    schemaVersion: 'historical-case-snapshot/v1' as const,
+    schemaVersion: 'historical-case-snapshot/v2' as const,
     items,
-    ...(baseline ? { baseTestCaseLibraryVersionId: baseline.id, baseTestCaseLibraryVersionSha256: baseline.contentSha256 } : {}),
+    ...(inheritedSource && libraryVersion && sourceRun ? {
+      sourceProjectVersionId: inheritedSource.id,
+      sourceTestCaseLibraryVersionId: libraryVersion.id,
+      sourceTestCaseLibraryVersionSha256: libraryVersion.contentSha256,
+      sourceRequirementReleaseId: sourceRun.basisSnapshot.requirementReleaseId,
+      sourceRequirementReleaseContentSha256: sourceRun.basisSnapshot.requirementReleaseContentSha256,
+      sourceRequirementReleaseContent: structuredClone(sourceRun.basisSnapshot.content),
+    } : {}),
+    requirementMappings: mappings,
     createdAt,
   }
   return { ...base, snapshotSha256: canonicalSha256(base) }
@@ -803,25 +803,12 @@ function validateDesignSources(state: DatabaseState, projectVersion: ProjectVers
     const base = required(state.knowledgeBases.find(item => item.id === index.knowledgeBaseId), 'TEST_DESIGN_AUGMENTATION_INVALID', '固定索引知识库不存在')
     if (base.projectId !== projectId) throw new TestDesignError('TEST_DESIGN_AUGMENTATION_INVALID', '固定索引不属于当前项目')
   }
-  const historical = input.historicalLibrarySelection ?? { mode: 'none' as const }
-  if (historical.mode === 'none') return
-  const source = required(explicitlyInheritedSourceVersion(state, projectVersion), 'TEST_DESIGN_SOURCE_INHERITANCE_REQUIRED', '当前版本未明确继承来源版本，不能加载历史测试资产')
-  const aggregate = readDesignState(state)
-  const libraryVersions = inheritedLibraryVersionsForSource(aggregate, source.id)
-  const libraryVersionIds = new Set(libraryVersions.map(item => item.id))
-  if (historical.mode === 'latest_library' && !libraryVersions.length) throw new TestDesignError('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '来源版本没有可继承的冻结用例库版本', 422)
-  if (historical.mode === 'library_version') required(libraryVersions.find(item => item.id === historical.testCaseLibraryVersionId), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '历史用例库版本不存在或不属于来源版本')
-  if (historical.mode === 'suite_version') required(aggregate.suiteVersions.find(item => item.id === historical.suiteVersionId && item.projectId === projectId && item.status !== 'deprecated' && Boolean(item.testCaseLibraryVersionId && libraryVersionIds.has(item.testCaseLibraryVersionId))), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '历史测试套件版本不存在或不属于来源版本')
 }
 
 function explicitlyInheritedSourceVersion(state: DatabaseState, projectVersion: ProjectVersion) {
   if (!projectVersion.inheritRequirementBindings) return undefined
   const source = projectVersion.sourceProjectVersionId ? state.projectVersions.find(item => item.id === projectVersion.sourceProjectVersionId && item.projectId === projectVersion.projectId) : undefined
   return source
-}
-
-function sourceVersionHasAssetVersion(state: DatabaseState, sourceProjectVersionId: string, assetVersionId: string) {
-  return state.projectVersionRequirementBindings.some(item => item.projectVersionId === sourceProjectVersionId && item.assetVersionId === assetVersionId)
 }
 
 function inheritedLibraryVersionsForSource(aggregate: TestDesignState, sourceProjectVersionId: string) {
@@ -1001,7 +988,7 @@ function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestC
     const source = candidate.sourceCaseId && candidate.sourceRevision !== undefined ? required(frozenByCase.get(`${candidate.sourceCaseId}:${candidate.sourceRevision}`), 'CASE_CHANGE_PROPOSAL_SOURCE_INVALID', 'Proposal 来源不属于冻结历史用例') : undefined
     const testCase = candidate.candidateRef ? required(byRef.get(candidate.candidateRef), 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', 'Proposal 候选用例不存在') : undefined
     const content = testCase ? currentCaseRevision(testCase).content : undefined
-    const operation = source && content && ['reuse', 'update'].includes(candidate.operation) && semanticContentSha256(content) === source.contentSha256 ? 'reuse' : candidate.operation
+    const operation = source && content && ['reuse', 'update'].includes(candidate.operation) && semanticContentSha256(content) === source.semanticSha256 ? 'reuse' : candidate.operation
     const retained = existing.get(proposalAssociation(candidate.sourceCaseId, candidate.sourceRevision, candidate.candidateRef))
     const candidateChanged = Boolean(retained?.candidateContent && content && semanticContentSha256(retained.candidateContent) !== semanticContentSha256(content))
     const resetDecision = Boolean(retained && (candidateChanged || retained.operation !== operation))
@@ -1034,20 +1021,24 @@ type HistoricalCandidateMatch = { kind: 'exact' | 'update' | 'ambiguous' | 'none
 function matchHistoricalCandidate(run: TestDesignWorkflowRun, content: TestCaseContent, usedHistorical: Set<string>): HistoricalCandidateMatch {
   const available = run.historicalSnapshot.items.filter(item => !usedHistorical.has(item.id) && isHistoricalTestCaseContent(item.content))
   const hash = semanticContentSha256(content)
-  const exact = available.filter(item => item.contentSha256 === hash)
+  const exact = available.filter(item => item.semanticSha256 === hash)
   if (exact.length === 1) return { kind: 'exact', item: exact[0] }
   if (exact.length > 1) return { kind: 'ambiguous' }
-  const update = available.filter(item => highConfidenceHistoricalIntent(item.content as TestCaseContent, content))
+  const update = available.filter(item => highConfidenceHistoricalIntent(item.content as TestCaseContent, content, sameMappedRequirements(run, item, content)))
   if (update.length === 1) return { kind: 'update', item: update[0] }
   return { kind: update.length > 1 ? 'ambiguous' : 'none' }
 }
 
-function highConfidenceHistoricalIntent(historical: TestCaseContent, candidate: TestCaseContent) {
+function sameMappedRequirements(run: TestDesignWorkflowRun, historical: HistoricalCaseSnapshot['items'][number], candidate: TestCaseContent) {
+  const mapped = effectiveHistoricalRequirementRefs(run, historical)
+  return mapped.length > 0 && candidate.requirementRefs.length > 0 && sameStringSet(mapped, candidate.requirementRefs)
+}
+
+function highConfidenceHistoricalIntent(historical: TestCaseContent, candidate: TestCaseContent, sameCurrentRequirements: boolean) {
   if (normalizeSemanticText(historical.title) !== normalizeSemanticText(candidate.title) || historical.dimension !== candidate.dimension) return false
   if (!sameStringSet(historical.executionMethods, candidate.executionMethods)) return false
-  const sameRequirements = historical.requirementRefs.length > 0 && candidate.requirementRefs.length > 0 && sameStringSet(historical.requirementRefs, candidate.requirementRefs)
   const behaviorSimilarity = tokenSimilarity([...historical.preconditions, ...historical.steps, ...historical.expectedResults], [...candidate.preconditions, ...candidate.steps, ...candidate.expectedResults])
-  return sameRequirements || behaviorSimilarity >= 0.6
+  return sameCurrentRequirements || behaviorSimilarity >= 0.6
 }
 
 function isHistoricalTestCaseContent(value: unknown): value is TestCaseContent {
@@ -1058,8 +1049,90 @@ function isHistoricalTestCaseContent(value: unknown): value is TestCaseContent {
 
 function sameStringSet(left: readonly string[], right: readonly string[]) { return left.length === right.length && [...new Set(left)].every(item => new Set(right).has(item)) }
 function normalizeSemanticText(value: string) { return value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('zh-CN') }
-function semanticTokens(values: readonly string[]) { return new Set(values.flatMap(value => normalizeSemanticText(value).split(/[^\p{L}\p{N}]+/gu).filter(token => token.length >= 2))) }
+function semanticTokens(values: readonly string[]) {
+  const tokens = new Set<string>()
+  for (const value of values) {
+    const normalized = normalizeSemanticText(value)
+    normalized.split(/[^\p{L}\p{N}]+/gu).filter(token => token.length >= 2).forEach(token => tokens.add(token))
+    const han = [...normalized.replace(/[^\p{Script=Han}]/gu, '')]
+    for (let index = 0; index < han.length - 1; index += 1) tokens.add(`${han[index]}${han[index + 1]}`)
+  }
+  return tokens
+}
 function tokenSimilarity(left: readonly string[], right: readonly string[]) { const a = semanticTokens(left); const b = semanticTokens(right); if (!a.size || !b.size) return 0; const intersection = [...a].filter(token => b.has(token)).length; return intersection / Math.max(a.size, b.size) }
+
+type RequirementSemantic = TestDesignBasisSnapshot['content']['requirements'][number]
+
+function normalizedRequirementSemantic(requirement: RequirementSemantic) {
+  const values = (items: string[]) => items.map(normalizeSemanticText).filter(Boolean).sort((left, right) => left.localeCompare(right, 'zh-CN'))
+  return {
+    title: normalizeSemanticText(requirement.title),
+    description: normalizeSemanticText(requirement.description),
+    actor: normalizeSemanticText(requirement.actor),
+    action: normalizeSemanticText(requirement.action),
+    object: normalizeSemanticText(requirement.object),
+    conditions: values(requirement.conditions),
+    businessRules: values(requirement.businessRules),
+    exceptions: values(requirement.exceptions),
+    acceptanceCriteria: values(requirement.acceptanceCriteria),
+    coverageTarget: requirement.coverageTarget,
+  }
+}
+
+export function requirementSemanticSha256(requirement: RequirementSemantic) { return canonicalSha256(normalizedRequirementSemantic(requirement)) }
+
+function semanticFieldSimilarity(left: string | string[], right: string | string[]) {
+  const leftValues = Array.isArray(left) ? left : [left]
+  const rightValues = Array.isArray(right) ? right : [right]
+  if (canonicalSha256(leftValues) === canonicalSha256(rightValues)) return 1
+  return tokenSimilarity(leftValues, rightValues)
+}
+
+function requirementSimilarity(left: RequirementSemantic, right: RequirementSemantic) {
+  if (left.coverageTarget !== right.coverageTarget) return 0
+  const a = normalizedRequirementSemantic(left)
+  const b = normalizedRequirementSemantic(right)
+  const title = semanticFieldSimilarity(a.title, b.title)
+  const actor = semanticFieldSimilarity(a.actor, b.actor)
+  const action = semanticFieldSimilarity(a.action, b.action)
+  const object = semanticFieldSimilarity(a.object, b.object)
+  const anchors = [actor, action, object].filter(score => score >= 0.85).length
+  if (title < 0.8 || anchors < 2) return 0
+  return title * 0.25
+    + semanticFieldSimilarity(a.description, b.description) * 0.15
+    + actor * 0.1
+    + action * 0.15
+    + object * 0.15
+    + semanticFieldSimilarity(a.conditions, b.conditions) * 0.05
+    + semanticFieldSimilarity(a.businessRules, b.businessRules) * 0.05
+    + semanticFieldSimilarity(a.exceptions, b.exceptions) * 0.05
+    + semanticFieldSimilarity(a.acceptanceCriteria, b.acceptanceCriteria) * 0.05
+}
+
+export function mapRequirementsAcrossReleases(source: RequirementSemantic[], current: RequirementSemantic[]): HistoricalCaseSnapshot['requirementMappings'] {
+  return source.map(sourceRequirement => {
+    const sourceRequirementId = sourceRequirement.clientRequirementPointId.trim()
+    const sourceSemanticSha256 = requirementSemanticSha256(sourceRequirement)
+    const exact = current.filter(candidate => requirementSemanticSha256(candidate) === sourceSemanticSha256)
+    if (exact.length === 1) return { sourceRequirementId, sourceSemanticSha256, status: 'exact' as const, targetRequirementId: exact[0]!.clientRequirementPointId.trim(), targetSemanticSha256: requirementSemanticSha256(exact[0]!), confidence: 1 }
+    if (exact.length > 1) return { sourceRequirementId, sourceSemanticSha256, status: 'ambiguous' as const, candidateRequirementIds: exact.map(item => item.clientRequirementPointId.trim()).sort(), confidence: 1 }
+    const highConfidence = current.map(candidate => ({ candidate, score: requirementSimilarity(sourceRequirement, candidate) })).filter(item => item.score >= 0.88).sort((left, right) => right.score - left.score || left.candidate.clientRequirementPointId.localeCompare(right.candidate.clientRequirementPointId))
+    if (highConfidence.length === 1) {
+      const target = highConfidence[0]!
+      return { sourceRequirementId, sourceSemanticSha256, status: 'high_confidence' as const, targetRequirementId: target.candidate.clientRequirementPointId.trim(), targetSemanticSha256: requirementSemanticSha256(target.candidate), confidence: Number(target.score.toFixed(6)) }
+    }
+    if (highConfidence.length > 1) return { sourceRequirementId, sourceSemanticSha256, status: 'ambiguous' as const, candidateRequirementIds: highConfidence.map(item => item.candidate.clientRequirementPointId.trim()).sort(), confidence: Number(highConfidence[0]!.score.toFixed(6)) }
+    return { sourceRequirementId, sourceSemanticSha256, status: 'unmapped' as const }
+  })
+}
+
+function effectiveHistoricalRequirementRefs(run: TestDesignWorkflowRun, historical: HistoricalCaseSnapshot['items'][number]) {
+  const currentRequirementIds = new Set(run.basisSnapshot.content.requirements.map(item => item.clientRequirementPointId.trim()))
+  return [...new Set(historical.sourceRequirementRefs.flatMap(sourceRequirementId => {
+    const mapping = run.historicalSnapshot.requirementMappings.find(item => item.sourceRequirementId === sourceRequirementId)
+    return mapping?.targetRequirementId && currentRequirementIds.has(mapping.targetRequirementId) && (mapping.status === 'exact' || mapping.status === 'high_confidence') ? [mapping.targetRequirementId] : []
+  }))]
+}
 
 function requirementRefsForCase(_run: TestDesignWorkflowRun, content: TestCaseContent) { return [...new Set(content.requirementRefs ?? [])] }
 function proposalAssociation(sourceCaseId?: string, sourceRevision?: number, candidateRef?: string) { return `${sourceCaseId ?? ''}:${sourceRevision ?? ''}:${candidateRef ?? ''}` }
@@ -1070,8 +1143,8 @@ function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, ac
   const value = materializeCaseDesign(run, raw, actorId, repair)
   const after = completeCandidateSnapshot(value)
   const artifact = repair
-    ? { schemaVersion: 'test-design-repair-snapshot/v2', content: { baseCandidateSha256: canonicalSha256(beforeCandidate!), before, after, diff: structuralDiff(before, after) } }
-    : { schemaVersion: 'test-case-design-candidate-snapshot/v2', content: after }
+    ? { schemaVersion: 'test-design-repair-snapshot/v3', content: { baseCandidateSha256: canonicalSha256(beforeCandidate!), before, after, diff: structuralDiff(before, after) } }
+    : { schemaVersion: 'test-case-design-candidate-snapshot/v3', content: after }
   const auditNode = node(run, 'coverage_audit')
   Object.assign(auditNode, { status: 'running', attempt: auditNode.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined })
   const audit = runCoverageAudit(run)
@@ -1125,7 +1198,7 @@ function selectedRepairBlockers(audit: CoverageAudit, state: NonNullable<TestDes
   return agentRepair.filter(item => scopes.some(scope => scope.code === item.code && scope.subjectId === item.subjectId))
 }
 function repairBlockerCanRunIndependently(run: TestDesignWorkflowRun, audit: CoverageAudit, blocker: CoverageAudit['blockers'][number]) {
-  if (['TEST_CASE_OVER_MERGED', 'TEST_CASE_DUPLICATE', 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID'].includes(blocker.code)) return true
+  if (blocker.code === 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID') return true
   if (blocker.code !== 'COVERAGE_REQUIREMENT_UNCOVERED' || !blocker.subjectId) return false
   const requirementId = blocker.subjectId
   const relatedCaseIds = new Set(run.testCases.filter(item => !item.tombstonedAt && currentCaseRevision(item).content.requirementRefs.includes(requirementId)).map(item => item.id))
@@ -1142,10 +1215,6 @@ function repairBlockerCandidateIsSafe(run: TestDesignWorkflowRun, blocker: Cover
   const activeCases = run.testCases.filter(item => !item.tombstonedAt)
   const relatedIds = new Set<string>()
   if (blocker.subjectId && activeCases.some(item => item.id === blocker.subjectId)) relatedIds.add(blocker.subjectId)
-  if (blocker.code === 'TEST_CASE_DUPLICATE' && blocker.subjectId) {
-    const source = activeCases.find(item => item.id === blocker.subjectId)
-    if (source) activeCases.filter(item => currentCaseRevision(item).semanticSha256 === currentCaseRevision(source).semanticSha256).forEach(item => relatedIds.add(item.id))
-  }
   if (blocker.code === 'COVERAGE_REQUIREMENT_UNCOVERED' && blocker.subjectId) activeCases.filter(item => currentCaseRevision(item).content.requirementRefs.includes(blocker.subjectId!)).forEach(item => relatedIds.add(item.id))
   return [...relatedIds].every(caseId => {
     const candidate = activeCases.find(item => item.id === caseId)!
@@ -1160,16 +1229,16 @@ export function buildEffectiveCaseSet(run: TestDesignWorkflowRun): EffectiveTest
     const locator = historical.locator as { caseId?: unknown; revision?: unknown } | undefined
     if (typeof locator?.caseId !== 'string' || !Number.isInteger(locator.revision)) continue
     const revision = locator.revision as number
-    effective.set(locator.caseId, { caseId: locator.caseId, revision, content: structuredClone(historical.content), contentSha256: semanticContentSha256(historical.content), source: 'historical_reuse', sourceCaseId: locator.caseId })
+    effective.set(locator.caseId, { caseId: locator.caseId, revision, content: structuredClone(historical.content), contentSha256: historical.contentSha256, effectiveRequirementRefs: effectiveHistoricalRequirementRefs(run, historical), source: 'historical_reuse', sourceCaseId: locator.caseId })
   }
   for (const proposal of run.caseChangeProposals) {
     const candidate = proposal.candidateCaseId ? run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt) : undefined
     const candidateRevision = candidate ? currentCaseRevision(candidate) : undefined
     if (proposal.operation === 'update' && proposal.sourceCaseId && proposal.sourceRevision !== undefined && candidateRevision) {
-      effective.set(proposal.sourceCaseId, { caseId: proposal.sourceCaseId, revision: proposal.sourceRevision + 1, content: structuredClone(candidateRevision.content), contentSha256: candidateRevision.contentSha256, source: 'historical_update', sourceCaseId: proposal.sourceCaseId, candidateCaseId: candidate!.id })
+      effective.set(proposal.sourceCaseId, { caseId: proposal.sourceCaseId, revision: proposal.sourceRevision + 1, content: structuredClone(candidateRevision.content), contentSha256: candidateRevision.contentSha256, effectiveRequirementRefs: requirementRefsForCase(run, candidateRevision.content), source: 'historical_update', sourceCaseId: proposal.sourceCaseId, candidateCaseId: candidate!.id })
     }
     if (proposal.operation === 'create' && candidateRevision) {
-      effective.set(candidate!.id, { caseId: candidate!.id, revision: 1, content: structuredClone(candidateRevision.content), contentSha256: candidateRevision.contentSha256, source: 'candidate_create', candidateCaseId: candidate!.id })
+      effective.set(candidate!.id, { caseId: candidate!.id, revision: 1, content: structuredClone(candidateRevision.content), contentSha256: candidateRevision.contentSha256, effectiveRequirementRefs: requirementRefsForCase(run, candidateRevision.content), source: 'candidate_create', candidateCaseId: candidate!.id })
     }
   }
   return [...effective.values()].sort((left, right) => left.caseId.localeCompare(right.caseId))
@@ -1188,10 +1257,13 @@ function normalizeWorkspacePath(value: string) { return value.replaceAll('\\', '
 function isWithinWorkspace(value: string) { const normalized = normalizeWorkspacePath(value); return normalized === 'workspace' || normalized.startsWith('workspace/') }
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 
-function semanticContentSha256(content: TestCaseContent) { return canonicalSha256(content) }
+export function testCaseSemanticSha256(content: TestCaseContent) {
+  return canonicalSha256({ title: content.title, dimension: content.dimension, priority: content.priority, executionMethods: content.executionMethods, preconditions: content.preconditions, steps: content.steps, expectedResults: content.expectedResults })
+}
+function semanticContentSha256(content: TestCaseContent) { return testCaseSemanticSha256(content) }
 function newCase(runId: string, content: TestCaseContent, origin: TestCase['origin'], actorId: string, reason: string, id = `test_case_${randomUUID()}`): TestCase { const revision = createCaseRevision(0, content, actorId, reason); return { id, runId, origin, currentRevision: 0, reviewState: 'in_review', revisions: [revision], reviewActions: [] } }
 function createCaseRevision(revision: number, content: TestCaseContent, actorId: string, reason: string, previous?: TestCaseContent) { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: semanticContentSha256(content), diff: previous ? structuralDiff(previous, content) : [], editorId: actorId, reason: cleanRequired(reason, '保存说明', 2_000), createdAt: now() } }
-function createLibraryRevision(revision: number, content: TestCaseContent, actorId: string, changeReason: string, sourceRunId?: string, sourceProposalId?: string, traceability?: TestCaseTraceability): LibraryTestCaseRevision { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: canonicalSha256(content), ...(sourceRunId ? { sourceRunId } : {}), ...(sourceProposalId ? { sourceProposalId } : {}), ...(traceability ? { traceability: structuredClone(traceability) } : {}), changeReason, createdBy: actorId, createdAt: now() } }
+function createLibraryRevision(revision: number, content: TestCaseContent, actorId: string, changeReason: string, sourceRunId?: string, sourceProposalId?: string, traceability?: TestCaseTraceability): LibraryTestCaseRevision { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: semanticContentSha256(content), ...(sourceRunId ? { sourceRunId } : {}), ...(sourceProposalId ? { sourceProposalId } : {}), ...(traceability ? { traceability: structuredClone(traceability) } : {}), changeReason, createdBy: actorId, createdAt: now() } }
 function currentLibraryRevision(testCase: LibraryTestCase) { return required(testCase.revisions.find(item => item.revision === testCase.currentRevision), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '正式用例当前 Revision 不存在') }
 function libraryCaseEtag(testCase: LibraryTestCase, revision = currentLibraryRevision(testCase)) { return `"library-case:${testCase.id}:r${revision.revision}:${canonicalSha256({ contentSha256: revision.contentSha256, status: testCase.status, updatedAt: testCase.updatedAt })}"` }
 function presentLibraryCase(testCase: LibraryTestCase, detail = false) { const revision = currentLibraryRevision(testCase); return { id: testCase.id, projectId: testCase.projectId, currentRevision: testCase.currentRevision, status: testCase.status, content: structuredClone(revision.content), contentSha256: revision.contentSha256, semanticSha256: revision.semanticSha256, createdAt: testCase.createdAt, updatedAt: testCase.updatedAt, etag: libraryCaseEtag(testCase, revision), ...(detail ? { revisions: structuredClone(testCase.revisions) } : {}) } }
@@ -1209,12 +1281,13 @@ function executionConfiguration(content: TestCaseContent): { status: 'ready' | '
   const status = configurations.some(item => item.configuration.status === 'blocked') ? 'blocked' : configurations.some(item => item.configuration.status === 'needs_confirmation') ? 'needs_confirmation' : 'ready'
   return { status, issues: configurations.flatMap(item => item.configuration.issues.map(issue => `${item.method}: ${issue}`)) }
 }
-function freezeLibraryVersionMember(aggregate: TestDesignState, projectId: string, member: { caseId: string; revision: number; ordinal: number; contentSha256: string }) {
+function freezeLibraryVersionMember(aggregate: TestDesignState, projectId: string, member: { caseId: string; revision: number; ordinal: number; contentSha256: string; traceability?: TestCaseTraceability }) {
   const testCase = required(aggregate.libraryCases.find(item => item.id === member.caseId && item.projectId === projectId), 'LIBRARY_TEST_CASE_NOT_FOUND', '正式用例库成员不存在')
   const revision = required(testCase.revisions.find(item => item.revision === member.revision), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '正式用例库成员 Revision 不存在')
   if (revision.contentSha256 !== member.contentSha256 || canonicalSha256(revision.content) !== member.contentSha256) throw new TestDesignError('TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH', '用例库成员冻结内容 Hash 与成员记录不一致', 409, { caseId: member.caseId, revision: member.revision, expectedSha256: member.contentSha256, actualSha256: revision.contentSha256 })
-  if (revision.traceability) assertTraceabilityMatchesContent(revision.content, revision.traceability)
-  return { ...member, frozenContent: structuredClone(revision.content), frozenExecutionMethods: executionMethodsForContent(revision.content).filter((method): method is 'ui' | 'api' => method === 'ui' || method === 'api'), ...(revision.traceability ? { traceability: structuredClone(revision.traceability) } : {}), executionReadiness: executionConfiguration(revision.content).status }
+  const traceability = member.traceability ?? revision.traceability
+  if (traceability) assertFixedTraceability(traceability)
+  return { ...member, frozenContent: structuredClone(revision.content), frozenExecutionMethods: executionMethodsForContent(revision.content).filter((method): method is 'ui' | 'api' => method === 'ui' || method === 'api'), ...(traceability ? { traceability: structuredClone(traceability) } : {}), executionReadiness: executionConfiguration(revision.content).status }
 }
 function presentLibraryVersion(aggregate: TestDesignState, version: TestCaseLibraryVersion): TestCaseLibraryVersionDetail {
   const members = version.members.map(member => {
@@ -1228,8 +1301,12 @@ function presentLibraryVersion(aggregate: TestDesignState, version: TestCaseLibr
 }
 function traceabilityRelevantContentChanged(before: TestCaseContent, after: TestCaseContent) { return canonicalSha256(before.requirementRefs) !== canonicalSha256(after.requirementRefs) }
 function dynamicTraceabilityReference(value: string) { return /^(?:latest|active|current)(?:$|[:/@_-])/iu.test(value) }
-function assertTraceabilityMatchesContent(content: TestCaseContent, traceability: TestCaseTraceability) {
+function assertFixedTraceability(traceability: TestCaseTraceability) {
   if (!traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(traceability.sourceRequirementReleaseId) || traceability.requirementRefs.some(item => item.requirementReleaseId !== traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(item.requirementReleaseId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 'requirementRefs 必须引用同一个固定 Requirement Release ID，禁止 latest、active、current 等动态引用', 422)
+  if (new Set(traceability.requirementRefs.map(item => `${item.requirementReleaseId}\u0000${item.requirementId}`)).size !== traceability.requirementRefs.length) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', '同一 Requirement 引用不得重复', 422)
+}
+function assertTraceabilityMatchesContent(content: TestCaseContent, traceability: TestCaseTraceability) {
+  assertFixedTraceability(traceability)
   const contentRefs = new Set(content.requirementRefs)
   if (contentRefs.size !== traceability.requirementRefs.length || traceability.requirementRefs.some(item => !contentRefs.has(item.requirementId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', '测试用例 Requirement 引用必须与正式追溯一致', 422)
 }
@@ -1314,6 +1391,26 @@ function traceabilityForProposal(run: TestDesignWorkflowRun, proposal: CaseChang
     sourceRequirementReleaseId: releaseId,
     requirementRefs: [...new Map(requirementRefs.map(item => [`${item.requirementReleaseId}:${item.requirementId}`, item])).values()],
   }
+}
+function effectiveTraceabilityForPublishedMember(run: TestDesignWorkflowRun, caseId: string): TestCaseTraceability {
+  const proposal = run.caseChangeProposals.find(item => item.appliedCaseId === caseId)
+  let requirementRefs: string[] | undefined
+  if (proposal?.operation === 'create' || proposal?.operation === 'update') {
+    const candidate = proposal.candidateCaseId ? run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt) : undefined
+    requirementRefs = candidate ? requirementRefsForCase(run, currentCaseRevision(candidate).content) : undefined
+  } else if (proposal?.sourceCaseId) {
+    const historical = run.historicalSnapshot.items.find(item => {
+      const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
+      return locator?.caseId === proposal.sourceCaseId && locator?.revision === proposal.sourceRevision
+    })
+    requirementRefs = historical ? effectiveHistoricalRequirementRefs(run, historical) : undefined
+  }
+  requirementRefs ??= buildEffectiveCaseSet(run).find(item => item.caseId === caseId)?.effectiveRequirementRefs
+  if (!requirementRefs) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', '无法为发布成员建立当前 Requirement Release 追溯', 409, { caseId })
+  const allowed = new Set(run.basisSnapshot.content.requirements.map(item => item.clientRequirementPointId.trim()))
+  if (requirementRefs.some(item => !allowed.has(item))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', '发布成员包含当前 Requirement Release 之外的有效追溯', 409, { caseId, requirementRefs })
+  const releaseId = run.basisSnapshot.requirementReleaseId
+  return { sourceRequirementReleaseId: releaseId, requirementRefs: requirementRefs.map(requirementId => ({ requirementReleaseId: releaseId, requirementId })) }
 }
 function assertLibraryPublicationGates(aggregate: TestDesignState, projectId: string, run: TestDesignWorkflowRun) {
   const unreviewed = run.testCases.filter(item => !item.tombstonedAt && item.reviewState !== 'approved')
@@ -1427,7 +1524,7 @@ function libraryProjectionFiles(projectVersionName: string, version: TestCaseLib
     const content = member.frozenContent ?? revision.content
     if (canonicalSha256(content) !== member.contentSha256 || revision.contentSha256 !== member.contentSha256) throw new TestDesignError('TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH', 'Workspace 投影前发现冻结内容 Hash 不一致', 409, { versionId: version.id, caseId: member.caseId, revision: member.revision })
     const traceability = member.traceability ?? revision.traceability
-    if (traceability) assertTraceabilityMatchesContent(content, traceability)
+    if (traceability) assertFixedTraceability(traceability)
     return { caseId: testCase.id, revision: revision.revision, contentSha256: member.contentSha256, content: structuredClone(content), ...(traceability ? { traceability: structuredClone(traceability) } : {}), executionReadiness: member.executionReadiness ?? executionConfiguration(content).status }
   })
   const canonicalContent = { schemaVersion: 'test-case-library/v3', versionId: version.id, projectId: version.projectId, version: version.version, name: version.name, contentSha256: version.contentSha256, cases: entries }

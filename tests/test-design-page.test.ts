@@ -64,7 +64,7 @@ test('需求分析页面只在当前选择的成功 Requirement Release Run 上�
   assert.match(styles, /\.rav2-artifact-preview \.rav2-source-body>pre/u)
 })
 
-test('创建面板明确展示绑定需求发布包并定义范围、维度和执行入口', () => {
+test('创建面板展示绑定需求发布包，并只读展示 ProjectVersion 自动历史基线', () => {
   const source = read('../src/test-design/TestDesignCreatePanel.tsx')
   assert.match(source, /Requirement Release/u)
   assert.match(source, /requirementReleases/u)
@@ -74,12 +74,13 @@ test('创建面板明确展示绑定需求发布包并定义范围、维度和�
   assert.match(source, /排除范围/u)
   assert.match(source, /测试维度/u)
   assert.match(source, /执行入口/u)
-  assert.match(source, /latestInheritedLibrary \? 'latest_library' : 'none'/u)
-  assert.match(source, /来源版本最新正式用例库（默认）/u)
-  assert.match(source, /默认继承来源版本/u)
-  assert.match(source, /正式用例库：V/u)
-  assert.match(source, /inheritsSourceAssets/u)
-  assert.match(source, /mode: 'none'/u)
+  assert.match(source, /historicalBaseline\.status === 'source_library_available'/u)
+  assert.match(source, /继承用例库：正式用例库 V/u)
+  assert.match(source, /该基线由版本继承关系自动确定/u)
+  assert.match(source, /来源版本暂无正式测试用例库，本次将按无历史基线生成/u)
+  assert.match(source, /当前版本未继承来源版本，本次测试设计不加载历史用例/u)
+  assert.doesNotMatch(source, /历史用例策略|historyMode|historyVersionId|指定来源用例库版本|指定来源测试套件|不使用历史用例/u)
+  assert.doesNotMatch(read('../src/test-design/types.ts'), /historicalLibrarySelection/u)
   assert.doesNotMatch(source, /默认选择当前项目版本其他 Run/u)
   assert.doesNotMatch(source, /basisMode|review_baseline|sourceTechnicalSolutionRunId/u)
 })

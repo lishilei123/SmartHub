@@ -35,6 +35,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
       <div className="td2-snapshot-grid">
         <Snapshot icon={<LockKeyhole />} title="Requirement Release" primary={run.basisSnapshot.requirementReleaseId} secondary={`verificationRunId ${run.basisSnapshot.verificationRunId}`} hash={run.basisSnapshot.requirementReleaseContentSha256} />
         <Snapshot icon={<Database />} title="Workspace Snapshot" primary={run.workspaceSnapshot.activeBranchLogicalPath} secondary={`${run.currentInputRefs.length} 个重点输入 · ${run.workspaceSnapshot.files.length} 个冻结文件`} hash={run.workspaceSnapshot.snapshotSha256} />
+        <Snapshot icon={<Database />} title="Historical Baseline" primary={run.historicalSnapshot.sourceTestCaseLibraryVersionId ?? '无历史基线'} secondary={run.historicalSnapshot.sourceProjectVersionId ? `来源版本 ${run.historicalSnapshot.sourceProjectVersionId} · Requirement Release ${run.historicalSnapshot.sourceRequirementReleaseId} · ${run.historicalSnapshot.items.length} 条` : '当前 ProjectVersion 未启用继承，或来源版本暂无正式 Library'} hash={run.historicalSnapshot.snapshotSha256} />
         <Snapshot icon={<Bot />} title="Agent 配置快照" primary={`V${run.agentConfigurationSnapshot.configurationVersion} · ${run.agentConfigurationSnapshot.primaryModel.modelName}`} secondary={run.agentConfigurationSnapshot.configurationId} hash={run.agentConfigurationSnapshot.configurationSha256} />
       </div>
       <PlanningContextMetrics context={context} />

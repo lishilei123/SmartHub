@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, HistoricalLibrarySelection, TestCaseContent, TestDimension } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, TestCaseContent, TestDimension } from '../domain/test-design-types.js'
 
 export class TestDesignError extends Error {
   constructor(public readonly code: string, message: string, public readonly status = 400, public readonly details?: unknown) {
@@ -9,7 +9,7 @@ export class TestDesignError extends Error {
 
 export function validateCreateTestDesignInput(value: unknown): CreateTestDesignInput {
   const input = object(value, 'TEST_DESIGN_INPUT_INVALID', '创建参数必须是对象')
-  rejectUnknown(input, ['name', 'objective', 'requirementReleaseId', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation', 'historicalLibrarySelection'], 'TEST_DESIGN_INPUT_INVALID')
+  rejectUnknown(input, ['name', 'objective', 'requirementReleaseId', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation'], 'TEST_DESIGN_INPUT_INVALID')
   return {
     name: requiredText(input.name, 'name', 200, 'TEST_DESIGN_INPUT_INVALID'),
     objective: requiredText(input.objective, 'objective', 4_000, 'TEST_DESIGN_INPUT_INVALID'),
@@ -20,7 +20,6 @@ export function validateCreateTestDesignInput(value: unknown): CreateTestDesignI
     executionMethods: optionalExecutionMethods(input.executionMethods, ['ui', 'api']),
     userCoverageObjectives: optionalTexts(input.userCoverageObjectives, 'userCoverageObjectives', 100, 2_000, 'TEST_DESIGN_INPUT_INVALID'),
     knowledgeAugmentation: validateAugmentation(input.knowledgeAugmentation ?? { mode: 'disabled' }),
-    historicalLibrarySelection: validateHistoricalLibrarySelection(input.historicalLibrarySelection),
   }
 }
 
@@ -102,14 +101,6 @@ function validateAugmentation(value: unknown): CreateTestDesignInput['knowledgeA
   if (input.mode === 'selected_assets') { rejectUnknown(input, ['mode', 'assetVersionIds'], 'TEST_DESIGN_AUGMENTATION_INVALID'); return { mode: 'selected_assets', assetVersionIds: uniqueTexts(input.assetVersionIds, 'assetVersionIds', 1_000, 500, 'TEST_DESIGN_AUGMENTATION_INVALID') } }
   if (input.mode === 'fixed_index') { rejectUnknown(input, ['mode', 'indexVersionId', 'filters'], 'TEST_DESIGN_AUGMENTATION_INVALID'); return { mode: 'fixed_index', indexVersionId: requiredText(input.indexVersionId, 'indexVersionId', 500, 'TEST_DESIGN_AUGMENTATION_INVALID'), ...(input.filters === undefined ? {} : { filters: stringFilters(input.filters) }) } }
   fail('TEST_DESIGN_AUGMENTATION_INVALID', 'knowledgeAugmentation.mode 无效')
-}
-function validateHistoricalLibrarySelection(value: unknown): HistoricalLibrarySelection {
-  if (value === undefined) return { mode: 'none' }
-  const input = object(value, 'TEST_DESIGN_INPUT_INVALID', 'historicalLibrarySelection 必须是对象')
-  if (input.mode === 'none' || input.mode === 'latest_library') { rejectUnknown(input, ['mode'], 'TEST_DESIGN_INPUT_INVALID'); return { mode: input.mode } as HistoricalLibrarySelection }
-  if (input.mode === 'library_version') { rejectUnknown(input, ['mode', 'testCaseLibraryVersionId'], 'TEST_DESIGN_INPUT_INVALID'); return { mode: 'library_version', testCaseLibraryVersionId: requiredText(input.testCaseLibraryVersionId, 'testCaseLibraryVersionId', 500, 'TEST_DESIGN_INPUT_INVALID') } }
-  if (input.mode === 'suite_version') { rejectUnknown(input, ['mode', 'suiteVersionId'], 'TEST_DESIGN_INPUT_INVALID'); return { mode: 'suite_version', suiteVersionId: requiredText(input.suiteVersionId, 'suiteVersionId', 500, 'TEST_DESIGN_INPUT_INVALID') } }
-  fail('TEST_DESIGN_INPUT_INVALID', 'historicalLibrarySelection.mode 无效')
 }
 function optionalDimensions(value: unknown, fallback: TestDimension[]): TestDimension[] { if (value === undefined) return [...fallback]; if (!Array.isArray(value)) fail('TEST_DESIGN_INPUT_INVALID', 'focusDimensions 必须是数组'); return [...new Set(value.map(dimension))] }
 function optionalScopeRules(value: unknown) { if (value === undefined) return []; if (!Array.isArray(value) || value.length > 100) fail('TEST_DESIGN_INPUT_INVALID', '范围规则必须是数组'); return value.map(candidate => { const input = object(candidate, 'TEST_DESIGN_INPUT_INVALID', '范围规则必须是对象'); rejectUnknown(input, ['kind', 'value'], 'TEST_DESIGN_INPUT_INVALID'); return { kind: requiredText(input.kind, 'scope.kind', 100, 'TEST_DESIGN_INPUT_INVALID'), value: requiredText(input.value, 'scope.value', 1_000, 'TEST_DESIGN_INPUT_INVALID') } }) }
