@@ -53,19 +53,19 @@ export function TestDesignPage({ projectVersion, onManageVersions, notify, embed
 function DesignWorkspace({ creating, tab, setTab, model, onCreateDone }: { creating: boolean; tab: DesignTab; setTab: (tab: DesignTab) => void; model: ReturnType<typeof useTestDesign>; onCreateDone: () => void }) {
   const [handoffFocusRequest, setHandoffFocusRequest] = useState(0)
   const [createRequest, setCreateRequest] = useState(0)
+  const [caseFocusRequest, setCaseFocusRequest] = useState<{ caseId?: string; requestId: number }>({ requestId: 0 })
   const [publishOpen, setPublishOpen] = useState(false)
   const openHandoff = () => { setPublishOpen(true); setHandoffFocusRequest(current => current + 1) }
   if (creating) return <div className="tdw-content"><TestDesignCreatePanel inputs={model.inputs!} busy={Boolean(model.busy)} onCancel={onCreateDone} onCreate={async input => { await model.create(input); onCreateDone() }} /></div>
   if (!model.design) return <div className="tdw-content"><section className="tdw-welcome"><div><Bot /><span><p>PlanningAgent</p><h2>等待正式需求</h2><p>正式需求版本发布后，Service 会自动创建测试设计并直接生成多场景测试用例与覆盖检查。</p></span></div><div className="tdw-pipeline">{['需求基线', '必要时人工澄清', 'AI 测试用例生成', '覆盖检查', '最终人工审核', '发布 / 执行交接'].map((item, index) => <span key={item}><i>{index + 1}</i>{item}</span>)}</div></section></div>
   const run = model.run
-  if (!run) return <div className="tdw-content tdw-review-workspace"><DesignProgress run={null} versions={model.libraryVersions} /><section className="td2-card td2-empty"><Bot /><h2>尚未开始 AI 生成</h2><p>启动后，PlanningAgent 会基于已绑定的正式需求生成本次测试用例。</p><button className="td2-button primary" disabled={Boolean(model.busy)} onClick={() => void model.startRun().catch(() => undefined)}>启动 AI 生成</button></section><AdvancedInformation tab={tab} setTab={setTab} model={model} run={null} onOpenHandoff={openHandoff} /></div>
+  if (!run) return <div className="tdw-content tdw-review-workspace"><section className="td2-card td2-empty"><Bot /><h2>尚未开始 AI 生成</h2><p>启动后，PlanningAgent 会基于已绑定的正式需求生成本次测试用例。</p><button className="td2-button primary" disabled={Boolean(model.busy)} onClick={() => void model.startRun().catch(() => undefined)}>启动 AI 生成</button></section><AdvancedInformation tab={tab} setTab={setTab} model={model} run={null} onOpenHandoff={openHandoff} /></div>
   const publicationBlockers = getPublicationBlockers(run)
   return <div className="tdw-content tdw-review-workspace">
     <RunHistoryPanel model={model} />
-    <DesignProgress run={run} versions={model.libraryVersions} />
     {model.auditRetryError && <section className="tdw-audit-retry"><AlertTriangle /><span><b>覆盖检查需要重新执行</b><small>{model.auditRetryError}</small></span><button className="td2-button primary" disabled={Boolean(model.busy)} onClick={() => void model.reAudit()}>重新检查</button></section>}
-    <PendingWorkPanel run={run} busy={Boolean(model.busy)} onReAudit={() => model.reAudit()} onCreate={() => setCreateRequest(current => current + 1)} />
-    <TestCasePanel run={run} busy={Boolean(model.busy)} createRequest={createRequest} onBatchApprove={() => model.reviewCases()} onResynthesize={() => model.resynthesize()} onCreate={content => model.createCase(content)} onEdit={(caseId, content, reason) => model.editCase(caseId, content, reason)} onDelete={caseId => model.removeCase(caseId)} onReview={(caseId, decision, revision, comment) => model.reviewCase(caseId, decision, revision, comment)} />
+    <PendingWorkPanel run={run} busy={Boolean(model.busy)} onReAudit={() => model.reAudit()} onCreate={() => setCreateRequest(current => current + 1)} onOpenCase={caseId => setCaseFocusRequest(current => ({ caseId, requestId: current.requestId + 1 }))} />
+    <TestCasePanel run={run} busy={Boolean(model.busy)} createRequest={createRequest} focusRequest={caseFocusRequest} onBatchApprove={() => model.reviewCases()} onResynthesize={() => model.resynthesize()} onCreate={content => model.createCase(content)} onEdit={(caseId, content, reason) => model.editCase(caseId, content, reason)} onDelete={caseId => model.removeCase(caseId)} onReview={(caseId, decision, revision, comment) => model.reviewCase(caseId, decision, revision, comment)} />
     <ReviewAndPublishBar run={run} versions={model.libraryVersions} busy={Boolean(model.busy)} blockers={publicationBlockers} onOpenPublish={() => setPublishOpen(true)} />
     <AdvancedInformation tab={tab} setTab={setTab} model={model} run={run} onOpenHandoff={openHandoff} />
     {publishOpen && <div className="tdw-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPublishOpen(false) }}><section className="tdw-modal wide tdw-workspace-modal" role="dialog" aria-modal="true" aria-label="确认并发布"><header><div><Rocket /><span><b>确认并发布</b><small>发布成功后可直接创建执行交接。</small></span></div><button aria-label="关闭" onClick={() => setPublishOpen(false)}><X /></button></header><TestDesignPublicationPanel projectId={model.inputs!.projectVersion.projectId} run={run} cases={model.libraryCases} versions={model.libraryVersions} suites={model.suiteVersions} handoffs={model.handoffs} busy={Boolean(model.busy)} handoffFocusRequest={handoffFocusRequest} onPublish={name => model.publish(name)} onHandoff={(version, mode, suiteId, impacted, overrides) => void model.handoff(version, mode, suiteId, impacted, overrides)} /></section></div>}
@@ -78,16 +78,10 @@ function RunHistoryPanel({ model }: { model: ReturnType<typeof useTestDesign> })
   return <section className="tdw-run-history" aria-label="TestDesign 运行历史"><header><div><p>当前运行</p><h2>{current?.id ?? '尚未选择'}<small>{current ? `${runStatusLabel(current.status)} · ${stageLabel(current.stage)} · ${new Date(current.createdAt).toLocaleString('zh-CN')}` : '选择或新建一个运行'}</small></h2></div><aside><button className="td2-button ghost" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>运行历史（{model.runs.length}）</button><button className="td2-button primary" disabled={Boolean(model.busy)} onClick={() => void model.startRun().catch(() => undefined)}>新建运行</button></aside></header>{expanded && <div>{model.runs.map(item => <button key={item.id} className={model.run?.id === item.id ? 'active' : ''} onClick={() => { setExpanded(false); void model.openRun(item.id).catch(() => undefined) }}><span><b>{item.id}</b><small>{new Date(item.createdAt).toLocaleString('zh-CN')}</small></span><span><small>状态 / 阶段</small><b>{runStatusLabel(item.status)} · {stageLabel(item.stage)}</b></span><span><small>历史基线</small><b>{item.baseTestCaseLibraryVersion ? `V${item.baseTestCaseLibraryVersion.version} · ${item.baseTestCaseLibraryVersion.name}` : '首次生成'}</b></span><span><small>Candidate Delta / Effective</small><b>{item.candidateCaseCount ?? item.caseCount ?? 0} / {item.effectiveCaseCount ?? item.caseCount ?? 0}</b></span><em>{item.published ? '已发布' : '未发布'}</em></button>)}</div>}</section>
 }
 
-function DesignProgress({ run, versions }: { run: TestDesignWorkflowRun | null; versions: ReturnType<typeof useTestDesign>['libraryVersions'] }) {
-  const stages = deriveStages(run, versions)
-  return <section className="tdw-design-progress" aria-label="本次测试设计进度"><header><div><p>本次测试设计工作区</p><h2>从 AI 生成到人工确认发布</h2></div>{run && <span className={`td2-status ${run.status}`}>{runStatusLabel(run.status)}</span>}</header><div>{stages.map((stage, index) => <article key={stage.label} className={stage.state}><i>{stage.state === 'complete' ? <CheckCircle2 /> : index + 1}</i><span><b>{stage.label}</b><small>{stage.detail}</small></span></article>)}</div></section>
-}
-
-function PendingWorkPanel({ run, busy, onReAudit, onCreate }: { run: TestDesignWorkflowRun; busy: boolean; onReAudit: () => Promise<void>; onCreate: () => void }) {
+function PendingWorkPanel({ run, busy, onReAudit, onCreate, onOpenCase }: { run: TestDesignWorkflowRun; busy: boolean; onReAudit: () => Promise<void>; onCreate: () => void; onOpenCase: (caseId?: string) => void }) {
   const issues = buildPendingIssues(run)
-  const goToCase = (caseId?: string) => document.getElementById(caseId ? `test-case-${caseId}` : 'test-case-list')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  if (!issues.length) return <section className="tdw-pending-clear" id="pending-work"><CheckCircle2 /><span><b>当前没有待处理问题</b><small>可以继续审核并发布；服务端提交时仍会执行最终门禁。</small></span></section>
-  return <section className="tdw-pending-work" id="pending-work"><header><div><span><ClipboardCheck /></span><div><h2>待处理问题</h2><p>只展示确定性 Coverage 或 TestCase v3 语义问题。</p></div></div><b>{issues.length} 项</b></header><div className="tdw-pending-list">{issues.map(issue => <article key={issue.key} className={issue.severity}><span className="tdw-pending-icon">{issue.severity === 'blocker' ? <ShieldAlert /> : <AlertTriangle />}</span><div><small>{issue.category}</small><b>{issue.title}</b><p>{issue.description}</p>{issue.affected && <em>{issue.affected}</em>}</div><footer>{issue.action === 'audit' && <button className="td2-button primary" disabled={busy} onClick={() => void onReAudit().catch(() => undefined)}><RefreshCw />重新检查</button>}{issue.action === 'create' && <button className="td2-button primary" disabled={busy} onClick={onCreate}>新增用例</button>}{issue.action === 'case' && <button className="td2-button ghost" onClick={() => goToCase(issue.caseId)}>查看用例</button>}</footer></article>)}</div></section>
+  if (!issues.length) return null
+  return <section className="tdw-pending-work" id="pending-work"><header><div><span><ClipboardCheck /></span><div><h2>待处理问题</h2><p>只展示确定性 Coverage 或 TestCase v3 语义问题。</p></div></div><b>{issues.length} 项</b></header><div className="tdw-pending-list">{issues.map(issue => <article key={issue.key} className={issue.severity}><span className="tdw-pending-icon">{issue.severity === 'blocker' ? <ShieldAlert /> : <AlertTriangle />}</span><div><small>{issue.category}</small><b>{issue.title}</b><p>{issue.description}</p>{issue.affected && <em>{issue.affected}</em>}</div><footer>{issue.action === 'audit' && <button className="td2-button primary" disabled={busy} onClick={() => void onReAudit().catch(() => undefined)}><RefreshCw />重新检查</button>}{issue.action === 'create' && <button className="td2-button primary" disabled={busy} onClick={onCreate}>新增用例</button>}{issue.action === 'case' && <button className="td2-button ghost" onClick={() => onOpenCase(issue.caseId)}>查看用例</button>}</footer></article>)}</div></section>
 }
 
 function ReviewAndPublishBar({ run, versions, busy, blockers, onOpenPublish }: { run: TestDesignWorkflowRun; versions: ReturnType<typeof useTestDesign>['libraryVersions']; busy: boolean; blockers: string[]; onOpenPublish: () => void }) {
@@ -128,22 +122,6 @@ function getPublicationBlockers(run: TestDesignWorkflowRun) {
     run.testCases.some(item => !item.tombstonedAt && item.reviewState !== 'approved') ? '候选用例未全部审核通过' : '',
     audit?.blockers.some(item => item.resolution !== 'execution_handoff') ? '覆盖检查存在发布阻断项' : '',
   ].filter((item): item is string => Boolean(item))
-}
-
-function deriveStages(run: TestDesignWorkflowRun | null, versions: ReturnType<typeof useTestDesign>['libraryVersions']) {
-  if (!run) return [{ label: 'AI 生成', detail: '等待启动', state: 'active' }, { label: '覆盖检查', detail: '等待 AI 生成', state: 'pending' }, { label: '用例审核', detail: '等待覆盖检查', state: 'pending' }, { label: '发布完成', detail: '等待确认发布', state: 'pending' }] as const
-  const activeCases = run.testCases.filter(item => !item.tombstonedAt)
-  const generation = run.nodeRuns.find(item => item.nodeKey === 'test_case_design')
-  const audit = run.coverageAudits.at(-1)
-  const reviewDone = activeCases.every(item => item.reviewState === 'approved')
-  const coverageDone = audit?.status === 'valid' && !audit.blockers.some(item => item.resolution !== 'execution_handoff')
-  const published = versions.find(item => item.sourceRunId === run.id)
-  return [
-    { label: 'AI 生成', detail: generation?.status === 'succeeded' ? `本轮 Candidate Delta ${activeCases.length} 条，Effective ${run.effectiveCaseCount ?? audit?.statistics.totalCases ?? activeCases.length} 条` : ['failed', 'cancelled'].includes(run.status) ? runStatusLabel(run.status) : 'PlanningAgent 正在生成 Candidate Delta', state: generation?.status === 'succeeded' ? 'complete' : ['failed', 'cancelled'].includes(run.status) ? 'blocked' : 'active' },
-    { label: '覆盖检查', detail: coverageDone ? '当前结果有效' : audit?.status === 'stale' ? '等待重新检查' : '系统检查中', state: coverageDone ? 'complete' : generation?.status === 'succeeded' ? 'active' : 'pending' },
-    { label: '用例审核', detail: reviewDone ? '全部用例已审核通过' : `${activeCases.filter(item => item.reviewState === 'approved').length}/${activeCases.length} 已审核`, state: reviewDone ? 'complete' : coverageDone ? 'active' : 'pending' },
-    { label: '发布完成', detail: published ? `${published.name} · V${published.version}` : coverageDone ? '等待确认并发布' : '等待覆盖检查', state: published ? 'complete' : coverageDone ? 'active' : 'pending' },
-  ] as const
 }
 
 function caseContent(testCase: TestDesignCase) { return testCase.revisions.find(item => item.revision === testCase.currentRevision)!.content }

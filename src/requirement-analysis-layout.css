@@ -786,13 +786,44 @@
 .rav2-session-body.cases {
   display: flex;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
   background: #f7f8fa;
 }
 
 .rav2-session-body.cases > .tdw-embedded {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
+}
+
+.rav2-session-body.cases > .tdw-embedded > .tdw-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .rav2-session-body.cases {
+    align-items: flex-start;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .rav2-session-body.cases > .tdw-embedded {
+    width: 100%;
+    min-height: 100%;
+    flex: 0 0 auto;
+  }
+
+  .rav2-session-body.cases > .tdw-embedded > .tdw-content {
+    width: 100%;
+    min-height: 100%;
+    flex: 0 0 auto;
+    overflow: visible;
+  }
 }
 
 .rav2-session-body.conversation .rav2-conversation {
