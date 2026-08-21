@@ -6,10 +6,9 @@ export function buildRequirementReleaseArtifacts(input: {
   state: DatabaseState
   releaseId: string
   verificationRun: ReviewRun
-  refinedRequirementsMarkdown: string
   generatedAt: string
 }): { artifacts: RequirementReleaseArtifact[]; contentSha256: string } {
-  const { state, releaseId, verificationRun, refinedRequirementsMarkdown, generatedAt } = input
+  const { state, releaseId, verificationRun, generatedAt } = input
   const result = required(verificationRun.result, '复验结果不存在')
   const sourceAssets = verificationRun.snapshot.assets.map(reference => {
     const version = required(state.versions.find(item => item.id === reference.assetVersionId), `固定需求版本不存在：${reference.assetVersionId}`)
@@ -25,9 +24,8 @@ export function buildRequirementReleaseArtifacts(input: {
 
   const artifacts: RequirementReleaseArtifact[] = []
   for (const item of sourceAssets) {
-    artifacts.push(artifact(`修复后的需求原文/${safeArtifactPath(item.reference.logicalPath, item.asset.displayName)}`, item.asset.displayName.toLocaleLowerCase().endsWith('.txt') ? 'text/plain' : 'text/markdown', item.version.content))
+    artifacts.push(artifact(`需求原文快照/${safeArtifactPath(item.reference.logicalPath, item.asset.displayName)}`, item.asset.displayName.toLocaleLowerCase().endsWith('.txt') ? 'text/plain' : 'text/markdown', item.version.content))
   }
-  artifacts.push(artifact('refined-requirements.md', 'text/markdown', refinedRequirementsMarkdown.trim()))
   artifacts.push(artifact('requirement-baseline.md', 'text/markdown', artifactContent(result.artifacts, 'requirement-baseline.md')))
   artifacts.push(artifact('requirements.json', 'application/json', json({
     schemaVersion: 'requirements/v1',

@@ -499,7 +499,7 @@ export class TestDesignService {
     return this.getLibraryVersion(published.projectId, published.id)
   }
 
-  async listLibraryVersions(projectId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return aggregate.libraryVersions.filter(item => item.projectId === projectId).sort((left, right) => right.version - left.version).map(item => presentLibraryVersion(aggregate, item)) }
+  async listLibraryVersions(projectId: string, sourceRunId?: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return aggregate.libraryVersions.filter(item => item.projectId === projectId && (!sourceRunId || item.sourceRunId === sourceRunId)).sort((left, right) => right.version - left.version).map(item => presentLibraryVersion(aggregate, item)) }
   async getLibraryVersion(projectId: string, versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return presentLibraryVersion(aggregate, required(aggregate.libraryVersions.find(item => item.id === versionId && item.projectId === projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在')) }
   async compareLibraryVersions(projectId: string, fromId: string, toId: string) { const left = await this.getLibraryVersion(projectId, fromId); const right = await this.getLibraryVersion(projectId, toId); return versionMemberDiff(left.members, right.members) }
 

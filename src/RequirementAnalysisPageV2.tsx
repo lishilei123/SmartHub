@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, BookOpen, Bot, CheckCircle2, Clock3, Download, FileDiff, FileText,
+  Activity, AlertTriangle, BookOpen, Bot, CheckCircle2, Clock3, Download, Eye, FileDiff, FileText,
   FolderOpen, GitBranch, LoaderCircle, Play, Quote, RefreshCw, ShieldCheck, Sparkles, TestTube2, Trash2, Wrench, XCircle,
 } from 'lucide-react'
 import type { KnowledgeDocument } from './prototype-data'
@@ -16,7 +16,7 @@ import {
   loadRequirementAnalysisRuns,
   retryRequirementAnalysisRun,
   retryAutomaticTestDesign,
-  requirementReleaseArtifactUrl,
+  loadRequirementReleaseArtifact,
   startRequirementAnalysis,
   type AgentExecutionEvent,
   type AgentExecutionRecord,
@@ -29,8 +29,8 @@ import {
 import { requirementAnalysisInputTypeForDocument, requirementWorkspaceDirectory } from './version-document-path'
 import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
 import type { ProjectVersion } from './project-version-api'
-import { loadRun as loadTestDesignRun } from './test-design/api'
-import type { TestDesignNodeRun, TestDesignWorkflowRun } from './test-design/types'
+import { loadLibraryHandoffs, loadLibraryVersions, loadRun as loadTestDesignRun } from './test-design/api'
+import type { LibraryExecutionHandoff, TestCaseLibraryVersion, TestDesignNodeRun, TestDesignWorkflowRun } from './test-design/types'
 import './requirement-analysis-v2.css'
 import './requirement-analysis-review-flow.css'
 import './requirement-analysis-prerequisite.css'
@@ -43,6 +43,8 @@ type DetailViewKey = 'baseline' | 'artifacts' | 'diff'
 type ClarificationAction = 'answer' | 'dismiss'
 type RunRecord = RequirementAnalysisRun & { content?: string }
 type RequirementStageState = 'complete' | 'current' | 'waiting' | 'blocked'
+type LinkedFormalOutput = { libraryVersion?: TestCaseLibraryVersion; handoffs: LibraryExecutionHandoff[] }
+type ArtifactPreviewValue = { fileName: string; mediaType: 'text/markdown' | 'application/json' | 'text/plain'; content: string }
 
 type Props = {
   projectVersion: ProjectVersion | null
@@ -71,6 +73,7 @@ const detailTabs: Array<{ key: DetailViewKey; label: string }> = [
   { key: 'artifacts', label: '正式产物' },
   { key: 'diff', label: '版本差异' },
 ]
+const machineReadableArtifactNames = new Set(['requirements.json', 'clarifications.json', 'test-focus.json', 'traceability.json', 'manifest.json'])
 
 function Badge({ children, tone = 'gray' }: { children: React.ReactNode; tone?: string }) { return <span className={`rav2-badge ${tone}`}>{children}</span> }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
@@ -174,6 +177,8 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [diffVersionIds, setDiffVersionIds] = useState<[string, string]>(['', ''])
   const [diffContents, setDiffContents] = useState<Record<string, string>>({})
   const [diffLoading, setDiffLoading] = useState(false)
+  const [linkedFormalOutput, setLinkedFormalOutput] = useState<LinkedFormalOutput>()
+  const [linkedFormalOutputError, setLinkedFormalOutputError] = useState('')
   const openDetails = (next: DetailViewKey) => { setDetailView(next); setView('details') }
 
   const projectVersionName = projectVersion?.name ?? ''
@@ -322,6 +327,33 @@ export function RequirementAnalysisPageV2(props: Props) {
   const linkedTestDesign = automaticTransition?.testDesignId && automaticTransition.testDesignRunId
     ? { designId: automaticTransition.testDesignId, runId: automaticTransition.testDesignRunId }
     : undefined
+  useEffect(() => {
+    if (!projectVersion || !linkedTestDesign) { setLinkedFormalOutput(undefined); setLinkedFormalOutputError(''); return }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const versions = await loadLibraryVersions(projectVersion.projectId, linkedTestDesign.runId)
+        if (cancelled) return
+        const libraryVersion = versions.items
+          .filter(item => item.sourceRunId === linkedTestDesign.runId)
+          .sort((left, right) => right.version - left.version || right.publishedAt.localeCompare(left.publishedAt))[0]
+        const handoffs = libraryVersion ? await loadLibraryHandoffs(projectVersion.id, libraryVersion.id) : { items: [] }
+        if (cancelled) return
+        setLinkedFormalOutput({
+          ...(libraryVersion ? { libraryVersion } : {}),
+          handoffs: libraryVersion ? handoffs.items.filter(item => item.testCaseLibraryVersionId === libraryVersion.id) : [],
+        })
+        setLinkedFormalOutputError('')
+      } catch (error) {
+        if (!cancelled) setLinkedFormalOutputError(error instanceof Error ? error.message : '正式测试产物状态读取失败')
+      } finally {
+        if (!cancelled) timer = setTimeout(() => void poll(), 3_000)
+      }
+    }
+    void poll()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [projectVersion?.id, projectVersion?.projectId, linkedTestDesign?.designId, linkedTestDesign?.runId])
   const currentProjectVersionId = projectVersion?.id
   const selectedReleaseBinding = selectedRun ? releaseBindings.find(binding => binding.verificationRunId === selectedRun.id && binding.releaseId === selectedRun.workflow?.release?.id) : undefined
   const testDesignReady = Boolean(selectedRun && selectedReleaseBinding
@@ -329,11 +361,13 @@ export function RequirementAnalysisPageV2(props: Props) {
     && selectedRun.status === 'succeeded'
     && selectedRun.workflow?.release?.id === selectedReleaseBinding.releaseId
     && selectedRun.workflow.release.status === 'published')
+  const formalLibraryVersion = linkedFormalOutput?.libraryVersion
+  const formalHandoffs = linkedFormalOutput?.handoffs ?? []
   const stages: Array<{ label: string; detail: string; state: RequirementStageState }> = [
     { label: '资料输入', detail: analysisInputDocuments.length ? `${analysisInputDocuments.length} 份已就绪` : '待上传', state: analysisInputDocuments.length ? 'complete' : 'current' },
     { label: '需求分析与发布', detail: !selectedRun ? '当前对话未开始' : selectedRun.status === 'running' ? `${selectedRun.progress}%` : blockingClarifications.length ? `等待 ${blockingClarifications.length} 个业务事实` : testDesignReady ? 'Requirement Release 已发布' : selectedRun.status === 'failed' ? '执行失败' : '正在发布', state: !selectedRun ? 'waiting' : selectedRun.status === 'running' || blockingClarifications.length ? 'current' : testDesignReady ? 'complete' : selectedRun.status === 'failed' ? 'blocked' : 'waiting' },
     { label: 'Agent 自动设计测试', detail: automaticTransition?.status === 'succeeded' ? '测试设计运行已创建，请查看实时进度' : automaticTransition?.status === 'failed' ? '自动衔接失败' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : testDesignReady ? '可基于本次发布的 Release 设计测试' : '等待 Requirement Release', state: automaticTransition?.status === 'succeeded' ? 'complete' : automaticTransition?.status === 'failed' ? 'blocked' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' || testDesignReady ? 'current' : 'waiting' },
-    { label: '最终用例审核与发布', detail: automaticTransition?.status === 'succeeded' ? '在测试设计运行完成后审核 TestCase / Proposal' : '等待 Agent 完成', state: automaticTransition?.status === 'succeeded' ? 'current' : 'waiting' },
+    { label: '最终用例审核与发布', detail: formalLibraryVersion ? `正式用例库 V${formalLibraryVersion.version} 已发布` : automaticTransition?.status === 'succeeded' ? '测试用例候选待审核与发布' : '等待 Agent 完成', state: formalLibraryVersion ? 'complete' : automaticTransition?.status === 'succeeded' ? 'current' : 'waiting' },
   ]
   const activityExecution = planningExecutionGroups(selectedRun).at(-1)?.execution
   const activityEvents = activityExecution?.events ?? []
@@ -367,10 +401,10 @@ export function RequirementAnalysisPageV2(props: Props) {
       </main>
 
       <aside className="rav2-status-panel">
-        <header><span><b>当前任务 / 正式产物</b><small>{selectedRun?.id ? `Run ${selectedRun.id.replace('analysis_run_', '').slice(0, 10)}` : '新建对话（未创建 Run）'}</small></span><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{selectedRun ? runLabel(selectedRun) : '新建对话'}</Badge></header>
+        <header><span><b>当前任务 / 产物状态</b><small>{selectedRun?.id ? `Run ${selectedRun.id.replace('analysis_run_', '').slice(0, 10)}` : '新建对话（未创建 Run）'}</small></span><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{selectedRun ? runLabel(selectedRun) : '新建对话'}</Badge></header>
         <div className="rav2-status-scroll">
           <section className="rav2-status-card"><header><i>①</i><b>当前业务阶段</b></header><div className="rav2-stage-list">{stages.map(stage => <article className={stage.state} key={stage.label}><span /><b>{stage.label}</b><small>{stage.detail}</small></article>)}</div></section>
-          <section className="rav2-status-card"><header><i>②</i><b>正式产物</b></header><div className="rav2-formal-list"><button onClick={() => openDetails('artifacts')} disabled={!result}><span><b>Requirement Release</b><small>{release?.status === 'published' ? `已由服务端发布 · ${formatTime(release.publishedAt ?? release.createdAt)}` : '等待需求分析和必要澄清完成'}</small></span><em className={release?.status === 'published' ? 'published' : 'empty'}>{release?.status === 'published' ? '已发布' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>测试用例</b><small>{linkedTestDesign ? '查看本次测试设计运行与候选用例' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : '等待 Requirement Release'}</small></span><em>{linkedTestDesign ? '可查看' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>Execution Handoff</b><small>由正式测试设计发布后生成</small></span><em>—</em></button></div></section>
+          <section className="rav2-status-card"><header><i>②</i><b>产物状态</b></header><div className="rav2-formal-list"><button onClick={() => openDetails('artifacts')} disabled={!result}><span><b>Requirement Release</b><small>{release?.status === 'published' ? `已由服务端发布 · ${formatTime(release.publishedAt ?? release.createdAt)}` : '等待需求分析和必要澄清完成'}</small></span><em className={release?.status === 'published' ? 'published' : 'empty'}>{release?.status === 'published' ? '已发布' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>{formalLibraryVersion ? '正式测试用例库' : '测试用例候选'}</b><small>{formalLibraryVersion ? `V${formalLibraryVersion.version} · ${formalLibraryVersion.members.length} 条冻结用例` : linkedFormalOutputError ? '正式发布状态暂时无法读取' : linkedTestDesign ? 'Test Design Run 已创建，尚未发布正式用例库' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : '等待 Requirement Release'}</small></span><em className={formalLibraryVersion ? 'published' : 'empty'}>{formalLibraryVersion ? '已发布' : linkedTestDesign ? '非正式' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>Execution Handoff</b><small>{formalHandoffs.length ? `${formalHandoffs.length} 个冻结交接记录` : formalLibraryVersion ? '正式用例库已发布，尚未创建执行交接' : '由正式测试用例库生成'}</small></span><em className={formalHandoffs.length ? 'published' : 'empty'}>{formalHandoffs.length ? '已生成' : '—'}</em></button></div></section>
           <details className="rav2-status-card rav2-technical-status"><summary><Activity /><span><b>运行记录</b><small>Turn、工具调用、事件与异常</small></span></summary><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></details>
         </div>
         <footer className="rav2-status-action">
@@ -413,10 +447,50 @@ function Baseline({ result, onEvidence }: { result?: RequirementAnalysisResponse
 }
 
 function Artifacts({ result, release, runId }: { result?: RequirementAnalysisResponse['result']; release?: RequirementReleasePackage; runId?: string }) {
+  const [preview, setPreview] = useState<ArtifactPreviewValue>()
+  const [previewLoading, setPreviewLoading] = useState('')
+  const [previewError, setPreviewError] = useState('')
+  const openArtifactPreview = async (artifact: ArtifactPreviewValue | RequirementReleasePackage['artifacts'][number]) => {
+    setPreviewError('')
+    if (typeof artifact.content === 'string') { setPreview(artifact); return }
+    if (!runId) { setPreviewError('当前运行信息不完整，无法读取正式产物。'); return }
+    setPreviewLoading(artifact.fileName)
+    try { setPreview({ ...artifact, content: await loadRequirementReleaseArtifact(runId, artifact.fileName) }) }
+    catch (error) { setPreviewError(error instanceof Error ? error.message : '正式产物读取失败') }
+    finally { setPreviewLoading('') }
+  }
   if (!result) return <div className="rav2-empty"><FileText /><h2>暂无需求分析候选</h2></div>
-  const machineNames = new Set(['requirements.json', 'test-focus.json', 'traceability.json', 'manifest.json'])
-  const refined = release?.artifacts.find(item => item.fileName === 'refined-requirements.md')?.content
-  return <div className="rav2-artifacts"><header><div><FileText /><span><h2>Requirement Release</h2><p>Service 在需求分析和必要澄清完成后原子发布，测试设计只读取该正式版本。</p></span></div><Badge tone={release?.status === 'published' ? 'green' : 'gray'}>{release?.status === 'published' ? '已发布' : '等待发布'}</Badge></header>{release ? <div className="rav2-snapshot-facts"><span><small>Release</small><b>{release.id}</b></span><span><small>发布时间</small><b>{formatTime(release.publishedAt ?? release.createdAt)}</b></span><span><small>固定 Run</small><b>{release.verificationRunId}</b></span><span><small>内容 Hash</small><b>{release.contentSha256}</b></span></div> : <div className="rav2-warning"><Clock3 />当前尚未发布 Requirement Release；系统会在 blocking clarification 全部解决后继续。</div>}{refined&&<details><summary>可读需求基线</summary><div className="rav2-markdown"><MarkdownDocument source={refined} format="markdown" /></div></details>}{release&&<details><summary>服务端生成的下游产物</summary><div className="rav2-artifact-list">{release.artifacts.map(artifact=><article key={artifact.fileName}><b>{artifact.fileName}</b><small>{artifact.mediaType} · {artifact.contentSha256}</small>{release.status==='published'&&runId?<a className="btn ghost" href={requirementReleaseArtifactUrl(runId,artifact.fileName)} download={artifact.fileName.split('/').at(-1)}><Download />下载</a>:null}</article>)}</div><div className="rav2-artifact-list">{release.artifacts.filter(item=>machineNames.has(item.fileName)).map(item=><article key={item.fileName}><b>{item.fileName}</b><small>{item.fileName==='requirements.json'?'测试设计的正式需求输入':'服务端生成并按 Schema 校验'} · {item.contentSha256}</small></article>)}</div></details>}<details><summary>分析期候选（非正式产物）</summary><div className="rav2-artifact-list">{result.artifacts.map(item=><article key={item.fileName}><b>{item.fileName}</b><small>{item.contentSha256}</small></article>)}</div></details></div>
+  const baseline = release?.artifacts.find(item => item.fileName === 'requirement-baseline.md')
+  const releaseArtifacts = release?.artifacts.filter(item => {
+    if (isRequirementSourceSnapshotArtifact(item.fileName)) return false
+    return item.fileName !== 'refined-requirements.md'
+      || !baseline
+      || typeof item.content !== 'string'
+      || typeof baseline.content !== 'string'
+      || item.content.trimEnd() !== baseline.content.trimEnd()
+  }) ?? []
+  const formalContentHashes = new Set((release?.artifacts ?? []).map(item => item.contentSha256))
+  const candidateArtifacts = result.artifacts.filter(item => !formalContentHashes.has(item.contentSha256))
+  return <div className="rav2-artifacts"><header><div><FileText /><span><h2>Requirement Release</h2><p>Service 在需求分析和必要澄清完成后原子发布，测试设计只读取该正式版本。</p></span></div><Badge tone={release?.status === 'published' ? 'green' : 'gray'}>{release?.status === 'published' ? '已发布' : '等待发布'}</Badge></header>{release ? <div className="rav2-snapshot-facts"><span><small>Release</small><b>{release.id}</b></span><span><small>发布时间</small><b>{formatTime(release.publishedAt ?? release.createdAt)}</b></span><span><small>固定 Run</small><b>{release.verificationRunId}</b></span><span><small>内容 Hash</small><b>{release.contentSha256}</b></span></div> : <div className="rav2-warning"><Clock3 />当前尚未发布 Requirement Release；系统会在 blocking clarification 全部解决后继续。</div>}{previewError&&<div className="rav2-warning"><AlertTriangle />{previewError}</div>}{release&&<details><summary>服务端生成的下游产物</summary><div className="rav2-artifact-list">{releaseArtifacts.map(artifact=><article key={artifact.fileName}><b>{artifact.fileName}</b><small>{artifact.mediaType} · {releaseArtifactDescription(artifact)} · {artifact.contentSha256}</small><button type="button" disabled={Boolean(previewLoading)} onClick={() => void openArtifactPreview(artifact)}>{previewLoading===artifact.fileName?<LoaderCircle className="rotating"/>:<Eye />}预览</button></article>)}</div></details>}{candidateArtifacts.length>0&&<details><summary>分析期候选（非正式产物）</summary><div className="rav2-artifact-list">{candidateArtifacts.map(item=><article key={item.fileName}><b>{item.fileName}</b><small>{item.contentSha256}</small><button type="button" onClick={() => void openArtifactPreview(item)}><Eye />预览</button></article>)}</div></details>}{preview&&<ArtifactPreview value={preview} onClose={() => setPreview(undefined)} />}</div>
+}
+
+function ArtifactPreview({ value, onClose }: { value: ArtifactPreviewValue; onClose: () => void }) {
+  let text = value.content
+  if (value.mediaType === 'application/json') {
+    try { text = JSON.stringify(JSON.parse(value.content), null, 2) } catch { /* 保留服务端原文，便于排查非法历史产物。 */ }
+  }
+  return <div className="rav2-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) onClose() }}><section className="rav2-source-modal rav2-artifact-preview" role="dialog" aria-modal="true" aria-label={`预览 ${value.fileName}`}><header><span><Eye /><b>{value.fileName}</b><small>{value.mediaType}</small></span><button type="button" aria-label="关闭产物预览" onClick={onClose}><XCircle /></button></header><div className="rav2-source-body">{value.mediaType === 'text/markdown' ? <MarkdownDocument source={value.content} format="markdown" /> : <pre>{text}</pre>}</div></section></div>
+}
+
+function releaseArtifactDescription(artifact: RequirementReleasePackage['artifacts'][number]) {
+  if (artifact.fileName === 'requirements.json') return '测试设计的正式需求输入'
+  if (artifact.fileName === 'manifest.json') return '发布包清单与机器可读入口'
+  if (machineReadableArtifactNames.has(artifact.fileName)) return '机器可读 · 服务端按 Schema 生成'
+  return '服务端生成的正式 Release 文件'
+}
+
+function isRequirementSourceSnapshotArtifact(fileName: string) {
+  return fileName.startsWith('修复后的需求原文/') || fileName.startsWith('需求原文快照/')
 }
 
 function Diff({ versions,value,onChange,loading,removed,added }:{ versions:NonNullable<KnowledgeDocument['versions']>; value:[string,string]; onChange:(v:[string,string])=>void; loading:boolean; removed:string[]; added:string[] }) {

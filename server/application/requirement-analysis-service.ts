@@ -180,8 +180,7 @@ export class RequirementAnalysisService {
       if (run.workflow.release?.status === 'published') return { release: structuredClone(run.workflow.release) }
       assertRequirementInputsStable(state, run)
       const releaseId = `requirement_release_${randomUUID()}`
-      const refinedRequirementsMarkdown = required(result.artifacts.find(item => item.fileName === 'requirement-baseline.md'), 'Requirement Baseline 不存在').content
-      const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, refinedRequirementsMarkdown, generatedAt: timestamp })
+      const built = buildRequirementReleaseArtifacts({ state, releaseId, verificationRun: run, generatedAt: timestamp })
       const release: RequirementReleasePackage = {
         id: releaseId,
         schemaVersion: 'requirement-release-package/v1',

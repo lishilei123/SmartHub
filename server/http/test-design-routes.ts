@@ -103,7 +103,7 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (libraryHandoffs && method === 'POST') { await authorize(libraryHandoffs[1], 'test-design:publish'); return send(response, 201, await service.createLibraryHandoff(libraryHandoffs[1], libraryHandoffs[2], await json(request) as never, principal)) }
   if (libraryHandoffs && method === 'GET') { await authorize(libraryHandoffs[1], 'test-design:read'); return send(response, 200, { items: await service.listLibraryHandoffs(libraryHandoffs[1], libraryHandoffs[2]) }) }
   const projectLibraryHandoffs = /^\/api\/project-versions\/([^/]+)\/test-case-library-handoffs$/.exec(url.pathname)
-  if (projectLibraryHandoffs && method === 'GET') { await authorize(projectLibraryHandoffs[1], 'test-design:read'); return send(response, 200, { items: await service.listLibraryHandoffs(projectLibraryHandoffs[1]) }) }
+  if (projectLibraryHandoffs && method === 'GET') { await authorize(projectLibraryHandoffs[1], 'test-design:read'); return send(response, 200, { items: await service.listLibraryHandoffs(projectLibraryHandoffs[1], url.searchParams.get('libraryVersionId') ?? undefined) }) }
 
   const catalog = /^\/api\/projects\/([^/]+)\/test-case-catalog$/.exec(url.pathname)
   if (catalog && method === 'GET') { await authorizeProject(catalog[1], principal, controls, store); return send(response, 200, await service.projectCatalog(catalog[1], { domain: url.searchParams.get('domain') ?? undefined, executionMethod: url.searchParams.get('executionMethod') ?? undefined, suiteVersionId: url.searchParams.get('suiteVersionId') ?? undefined })) }
@@ -123,7 +123,7 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   const libraryCaseDiff = /^\/api\/projects\/([^/]+)\/test-case-library\/([^/]+)\/diff$/.exec(url.pathname)
   if (libraryCaseDiff && method === 'GET') { await authorizeProjectPermission(libraryCaseDiff[1], 'test-design:read', principal, controls, store); return send(response, 200, { changes: await service.libraryCaseDiff(libraryCaseDiff[1], libraryCaseDiff[2], Number(url.searchParams.get('from')), Number(url.searchParams.get('to'))) }) }
   const libraryVersions = /^\/api\/projects\/([^/]+)\/test-case-library-versions$/.exec(url.pathname)
-  if (libraryVersions && method === 'GET') { await authorizeProjectPermission(libraryVersions[1], 'test-design:read', principal, controls, store); return send(response, 200, { items: await service.listLibraryVersions(libraryVersions[1]) }) }
+  if (libraryVersions && method === 'GET') { await authorizeProjectPermission(libraryVersions[1], 'test-design:read', principal, controls, store); return send(response, 200, { items: await service.listLibraryVersions(libraryVersions[1], url.searchParams.get('sourceRunId') ?? undefined) }) }
   const libraryVersion = /^\/api\/projects\/([^/]+)\/test-case-library-versions\/([^/]+)$/.exec(url.pathname)
   if (libraryVersion && method === 'GET' && libraryVersion[2] !== 'diff') { await authorizeProjectPermission(libraryVersion[1], 'test-design:read', principal, controls, store); return send(response, 200, await service.getLibraryVersion(libraryVersion[1], libraryVersion[2])) }
   const libraryVersionDiff = /^\/api\/projects\/([^/]+)\/test-case-library-versions\/diff$/.exec(url.pathname)

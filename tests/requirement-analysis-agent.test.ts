@@ -295,6 +295,11 @@ test('首轮存在 Blocking Clarification 时保持 waiting_clarification，人�
 
   const release = resolved.run.workflow?.release
   assert.equal(release?.status, 'published')
+  assert.equal(release!.artifacts.some(item => item.fileName === 'refined-requirements.md'), false)
+  const sourceSnapshot = release!.artifacts.find(item => item.fileName.startsWith('需求原文快照/'))
+  assert.ok(sourceSnapshot)
+  assert.equal(sourceSnapshot.contentSha256, resolved.run.snapshot.assets[0]?.assetContentHash)
+  assert.equal(release!.artifacts.filter(item => item.fileName === 'requirement-baseline.md').length, 1)
   const requirements = JSON.parse(release!.artifacts.find(item => item.fileName === 'requirements.json')!.content) as { formalClarifications: Array<{ answer: string }>; clarificationDispositionRecords: unknown[] }
   assert.deepEqual(requirements.formalClarifications.map(item => item.answer), ['关闭失败时保持待支付，可由用户重试。'])
   assert.deepEqual(requirements.clarificationDispositionRecords, [])

@@ -326,6 +326,15 @@ export function requirementReleaseArtifactUrl(runId: string, fileName: string) {
   return `${apiBase}/requirement-analysis-runs/${encodeURIComponent(runId)}/release/artifacts/${encodeURIComponent(fileName)}`
 }
 
+export async function loadRequirementReleaseArtifact(runId: string, fileName: string) {
+  const response = await fetch(requirementReleaseArtifactUrl(runId, fileName))
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(body.error || '正式产物读取失败')
+  }
+  return response.text()
+}
+
 export async function downloadRequirementAnalysisReport(projectVersionId: string, runId: string) {
   const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/requirement-analysis-runs/${encodeURIComponent(runId)}/report.md`)
   if (!response.ok) {
