@@ -200,6 +200,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
           'Requirement Release 是本轮唯一正式覆盖基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。每条用例必须使用 requirementRefs 直接关联至少一个 Requirement。',
           'cases[] 是本轮完整候选集合，不是仅新增或修改的差量。每条冻结历史用例必须恰有一个 reuse、update、deprecate 或 reference Proposal。reuse 与 update 都必须让 Proposal.candidateRef 指向本次 cases[] 中完整、扁平的临时 Candidate Case；reuse 的内容必须与冻结历史语义一致，update 才表示内容变化。所谓 reuse 不复制的是正式 Case ID/Revision，不是省略 Candidate Case 正文。不得通过删除 reuse Proposal 来修复 candidateRef 校验错误。',
           '每个 functional/security Candidate Case 都必须提供至少一条根级 scenarioClaims。ScenarioClaim 只说明一个可独立判定的 Atomic Test Intent：使用临时 caseRef、Requirement 子集、kind、subject、variant、polarity、明确且可独立判定的 oracle，以及可选 knowledgeRefs。kind=state_transition 时必须额外声明 transition:{from,to}，一条 Claim 只允许一个明确状态边；它不是 TestPoint，不会获得正式 ID、Revision、Version 或发布。',
+          '提交前必须提供根级 dimensionAssessments，且恰好覆盖 functional、performance、stability、compatibility、security 五个维度。每项包含 dimension、applicable、reason、requirementRefs、risks、scenarioClaims；不适用必须用当前冻结 Requirement 的 requirementRefs 说明依据，适用维度必须列出待覆盖场景族并生成对应维度用例。它是候选覆盖地图，不会创建新的人工审核阶段。',
           '功能和安全用例的执行步骤、检查点、就绪状态及自动化提示只在 executionMethods 的对应 UI/API 方式中完整填写。executionSpec 对此类用例只提交 kind=functional 与同一 method；服务端会从 executionMethods 和用例根字段投影正式 executionSpec。不要提交第二份重复步骤。',
           '非功能 executionSpec 必须使用精确字段：performance 为 kind=performance、method=performance_tool、target、scenario、virtualUsers、duration、rampUp、thresholds、dataStrategy、environmentRequirements、executionReadiness；stability 为 kind=stability、method=long_running、workload、duration、interval、observations、recoveryPolicy、checkpointPolicy、environmentRequirements、executionReadiness；compatibility 为 kind=compatibility、method=environment_matrix、baseMethod、baseCaseRefs、browserMatrix、operatingSystemMatrix、viewportMatrix、versionMatrix、expectedConsistency、executionReadiness。cases[] 根对象和 executionSpec 都不得添加这些列表之外的自定义字段。',
           '性能 thresholds 必须是数组；每一项严格且仅为 { metric, target, sourceRef }，三者都是非空字符串。把比较符、数值、单位和适用范围合并写进 target；不得使用 operator、value、unit，也不得提交缺少其中任一字段的半成品阈值。若没有正式阈值，提交 thresholds: []、executionReadiness: needs_confirmation，并建立 blocker Confirmation Item。',
@@ -271,6 +272,7 @@ function repairCandidateContent(run: TestDesignWorkflowRun) {
       const revision = testCase.revisions.find(item => item.revision === testCase.currentRevision)!
       return { ref: requiredRepairCaseRef(refById, testCase.id), ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] }
     }),
+    dimensionAssessments: structuredClone(run.dimensionAssessments ?? []),
     scenarioClaims: structuredClone(run.scenarioClaims ?? []),
     dataRequirements: (dataSet?.requirements ?? []).map((item, index): TestDataRequirementCandidate => ({
       ref: `data-${index + 1}`,
@@ -351,6 +353,7 @@ export function projectTestCaseCandidateSubmission(
       ref,
       ...structuredClone(content),
     })),
+    dimensionAssessments: structuredClone(candidate.dimensionAssessments),
     scenarioClaims: structuredClone(candidate.scenarioClaims),
     dataRequirements: structuredClone(candidate.dataRequirements),
     findings: structuredClone(candidate.findings),

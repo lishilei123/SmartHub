@@ -29,6 +29,7 @@ export function CoverageAuditPanel({ run, busy, onAudit, onResolve, onOpenHandof
       {isStale && <div className="td2-audit-recheck-hint"><RefreshCw /><div><b>当前内容已发生变动</b><small>用例增删改、审核、数据需求或业务确认变化后，服务端会将旧 Audit 标记为失效。下方仅保留上次检查快照，不能用于发布。</small></div></div>}
       <AuditSnapshot audit={audit} publicationBlockerCount={publicationBlockers.length} handoffBlockerCount={handoffBlockers.length} stale={isStale} />
       {audit.blockers.length > 0 && <BlockerCategories audit={audit} stale={isStale} />}
+      {audit.advisories?.length > 0 && <section className="td2-audit-categories"><header><div><h3>覆盖优化建议</h3><p>建议用于补充风险场景或拆分过宽的维度覆盖，不参与发布门禁。</p></div></header><div className="td2-audit-category-grid"><section className="td2-audit-category"><header><AlertTriangle /><div><b>Advisories</b><small>{audit.advisories.length} 项</small></div></header><div className="td2-audit-category-list">{audit.advisories.map((item, index) => <article key={`${item.code}-${item.subjectId ?? index}`}><code>{item.code}</code><p>{item.message}</p>{item.subjectId && <small>{item.subjectId}</small>}</article>)}</div></section></div></section>}
       <div className="td2-repair-state"><Bot /><div><b>Agent Repair</b><small>仅处理 resolution=agent_repair；最多 {run.automaticRepair?.maxAttempts ?? 2} 轮</small></div><span>{run.automaticRepair?.status ?? 'idle'} · {run.automaticRepair?.attempt ?? 0}/{run.automaticRepair?.maxAttempts ?? 2}</span></div>
     </>}
 
@@ -56,6 +57,7 @@ function AuditSnapshot({ audit, publicationBlockerCount, handoffBlockerCount, st
       <Metric label="用例审核" value={`${audit.statistics.approvedCases}/${audit.statistics.totalCases}`} detail="当前 Revision 已批准" />
       <Metric label="发布门禁" value={`${publicationBlockerCount}`} detail="不含 Execution Handoff" tone={publicationBlockerCount ? 'warning' : 'success'} />
       <Metric label="执行交接" value={`${handoffBlockerCount}`} detail="仅在 Handoff / 执行前处理" tone={handoffBlockerCount ? 'warning' : 'success'} />
+      <Metric label="优化建议" value={`${audit.advisories?.length ?? 0}`} detail="不阻止发布" tone={audit.advisories?.length ? 'warning' : 'success'} />
     </div>
     <details className="td2-audit-provenance"><summary>查看审计依据与 Hash</summary><div><span>Requirement Release <code>{audit.requirementReleaseId}</code></span><span>DataSet Version <code>{audit.dataSetVersionId}</code></span><span>Input Hash <code>{audit.inputSha256}</code></span></div></details>
   </section>

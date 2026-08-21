@@ -14,6 +14,22 @@ export type ScenarioClaimKind = 'crud_lifecycle' | 'state_transition' | 'enum' |
 export type ScenarioClaimPolarity = 'positive' | 'negative' | 'neutral'
 
 /**
+ * Candidate-only reasoning record. It makes the PlanningAgent account for
+ * every selected test dimension without turning dimension selection into a
+ * new human gate or a one-case-per-dimension rule.
+ */
+export interface DimensionAssessment {
+  dimension: TestDimension
+  applicable: boolean
+  reason: string
+  /** Direct frozen Requirement Release references supporting the judgement. */
+  requirementRefs: string[]
+  risks: string[]
+  /** Scenario-family descriptions; they are a coverage map, not TestCase IDs. */
+  scenarioClaims: string[]
+}
+
+/**
  * Run-scoped candidate metadata used to audit one Case's atomic test intent.
  * It is deliberately not a formal TestCase, Version, Revision, or Workspace asset.
  */
@@ -436,6 +452,13 @@ export interface CoverageAudit {
     resolution: 'agent_repair' | 'human_review' | 'human_decision' | 'manual_edit' | 'execution_handoff'
     details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number }
   }>
+  /** Optimization suggestions never participate in publication gates. */
+  advisories: Array<{
+    code: string
+    message: string
+    subjectId?: string
+    details?: { scenarioRefs?: string[]; reasons?: string[]; suggestedSplitCount?: number }
+  }>
   createdAt: string
 }
 
@@ -477,6 +500,8 @@ export interface TestCaseLibraryVersionMember {
   ordinal: number
   contentSha256: string
   frozenContent?: TestCaseContent
+  /** Query-friendly projection of the methods already present in frozenContent. */
+  frozenExecutionMethods?: Array<'ui' | 'api'>
   traceability?: TestCaseTraceability
   executionReadiness?: ExecutionReadiness
 }
@@ -560,6 +585,8 @@ export interface TestDesignWorkflowRun {
   testCases: TestCase[]
   /** Current candidate-only audit metadata; never promoted into the formal library. */
   scenarioClaims: ScenarioClaim[]
+  /** Current candidate-only dimension coverage map; never promoted into the formal library. */
+  dimensionAssessments: DimensionAssessment[]
   caseChangeProposals: CaseChangeProposal[]
   dataSetVersions: TestDataRequirementSetVersion[]
   coverageAudits: CoverageAudit[]

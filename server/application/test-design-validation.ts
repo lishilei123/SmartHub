@@ -1,4 +1,4 @@
-import type { CreateTestDesignInput, ExecutionMethodSpec, ExecutionReadiness, HistoricalCaseSnapshot, HistoricalLibrarySelection, ScenarioClaim, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension } from '../domain/test-design-types.js'
+import type { CreateTestDesignInput, DimensionAssessment, ExecutionMethodSpec, ExecutionReadiness, HistoricalCaseSnapshot, HistoricalLibrarySelection, ScenarioClaim, TestCaseContent, TestCaseExecutionSpec, TestDataRequirement, TestDimension } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 
 export class TestDesignError extends Error {
@@ -17,8 +17,8 @@ export function validateCreateTestDesignInput(value: unknown): CreateTestDesignI
     ...(input.requirementReleaseId === undefined ? {} : { requirementReleaseId: requiredText(input.requirementReleaseId, 'requirementReleaseId', 200) }),
     includedScopes: optionalScopeRules(input.includedScopes),
     excludedScopes: optionalScopeRules(input.excludedScopes),
-    focusDimensions: optionalDimensions(input.focusDimensions),
-    executionMethods: optionalExecutionMethods(input.executionMethods),
+    focusDimensions: optionalDimensions(input.focusDimensions, ['functional', 'performance', 'stability', 'compatibility', 'security']),
+    executionMethods: optionalExecutionMethods(input.executionMethods, ['ui', 'api']),
     userCoverageObjectives: optionalTexts(input.userCoverageObjectives, 'userCoverageObjectives', 100, 2_000),
     knowledgeAugmentation: validateAugmentation(input.knowledgeAugmentation ?? { mode: 'disabled' }),
     historicalCaseSelections: validateHistoricalSelections(input.historicalCaseSelections),
@@ -26,8 +26,8 @@ export function validateCreateTestDesignInput(value: unknown): CreateTestDesignI
   }
 }
 
-function optionalExecutionMethods(value: unknown): Array<'ui' | 'api'> {
-  if (value === undefined) return []
+function optionalExecutionMethods(value: unknown, fallback: Array<'ui' | 'api'> = []): Array<'ui' | 'api'> {
+  if (value === undefined) return [...fallback]
   if (!Array.isArray(value) || value.some(item => item !== 'ui' && item !== 'api')) fail('TEST_DESIGN_INPUT_INVALID', 'executionMethods 只能包含 ui、api', 422)
   return [...new Set(value)] as Array<'ui' | 'api'>
 }
@@ -40,13 +40,12 @@ export function validateTestCaseContent(value: unknown): TestCaseContent {
   if (!requirementRefs.length) fail('TEST_CASE_BASIS_REFERENCE_INVALID', '用例至少引用一个正式 Requirement', 422)
   const testDimension = dimension(input.dimension)
   const nonFunctionalSpec = input.executionSpec !== undefined && ['performance', 'stability', 'compatibility'].includes(testDimension)
-  const methods = executionMethods(input.executionMethods, nonFunctionalSpec)
+  const methods = normalizedExecutionMethods(input.executionMethods, input.executionSpec, testDimension, nonFunctionalSpec)
   const dependencies = uniqueIds(input.dependencies ?? [], 'dependencies')
   const preconditions = texts(input.preconditions, 'preconditions', 100, 2_000)
   const dataRequirementIds = uniqueIds(input.dataRequirementIds ?? [], 'dataRequirementIds')
-  const executionSpec = validateExecutionSpec(input.executionSpec, testDimension, methods, preconditions, dataRequirementIds)
+  const executionSpec = validateExecutionSpec(input.executionSpec, testDimension, methods, preconditions, dataRequirementIds, input.executionMethods === undefined && (testDimension === 'functional' || testDimension === 'security'))
   const synchronizedSpec = executionSpec.kind === 'functional' ? { ...executionSpec, preconditions, testDataRequirements: dataRequirementIds } : executionSpec
-  const synchronizedMethods = synchronizedSpec.kind === 'functional' ? methods.map(method => method.method === synchronizedSpec.method ? { ...method, steps: synchronizedSpec.steps, verificationChecks: synchronizedSpec.verificationChecks, executionReadiness: synchronizedSpec.executionReadiness, automationHint: synchronizedSpec.automationHint } : method) : methods
   return {
     schemaVersion: input.schemaVersion,
     title: requiredText(input.title, 'title', 500),
@@ -58,7 +57,9 @@ export function validateTestCaseContent(value: unknown): TestCaseContent {
     dataRequirementIds,
     cleanup: texts(input.cleanup, 'cleanup', 100, 2_000),
     dependencies,
-    executionMethods: synchronizedMethods,
+    // executionMethods is the formal UI/API source. executionSpec remains a
+    // single-method compatibility projection for older consumers only.
+    executionMethods: methods,
     executionSpec: synchronizedSpec,
     sharedVerificationChecks: checks(input.sharedVerificationChecks, 'sharedVerificationChecks'),
     tags: texts(input.tags, 'tags', 100, 100),
@@ -75,6 +76,7 @@ export type TestDataRequirementCandidate = Omit<TestDataRequirement, 'id' | 'cas
 export interface TestCaseDesignCandidateSubmission extends Record<string, unknown> {
   schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1'
   cases: Array<{ ref: string } & TestCaseContent>
+  dimensionAssessments: DimensionAssessment[]
   scenarioClaims: ScenarioClaim[]
   dataRequirements: TestDataRequirementCandidate[]
   findings: Record<string, unknown>[]
@@ -86,6 +88,7 @@ export interface TestCaseDesignCandidateSubmission extends Record<string, unknow
 export interface TestCaseDesignCandidate extends Record<string, unknown> {
   schemaVersion: 'test-case-design/v1' | 'test-design-repair/v1'
   cases: Array<{ ref: string; content: TestCaseContent }>
+  dimensionAssessments: DimensionAssessment[]
   scenarioClaims: ScenarioClaim[]
   dataRequirements: TestDataRequirementCandidate[]
   findings: Record<string, unknown>[]
@@ -106,7 +109,7 @@ const legacySynthesisFieldGuidance: Record<string, string> = {
 
 export function validateTestCaseDesignCandidate(value: unknown, repair = false): TestCaseDesignCandidate {
   const input = synthesisObject(value, '/', '提交结果必须是对象')
-  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'scenarioClaims', 'dataRequirements', 'findings', 'confirmationItems', 'proposals'], '/')
+  synthesisRejectUnknown(input, ['schemaVersion', 'cases', 'dimensionAssessments', 'scenarioClaims', 'dataRequirements', 'findings', 'confirmationItems', 'proposals'], '/')
   const schemaVersion = repair ? 'test-design-repair/v1' : 'test-case-design/v1'
   if (input.schemaVersion !== schemaVersion) synthesisFail('/schemaVersion', `schemaVersion 必须为 ${schemaVersion}`)
   if (!Array.isArray(input.cases) || !input.cases.length || input.cases.length > 1_000) synthesisFail('/cases', 'cases 必须包含 1 到 1000 条用例')
@@ -134,6 +137,7 @@ export function validateTestCaseDesignCandidate(value: unknown, repair = false):
       synthesisFail(path, errorMessage(error))
     }
   })
+  const dimensionAssessments = validateDimensionAssessments(input.dimensionAssessments)
   const scenarioClaims = validateScenarioClaims(input.scenarioClaims, cases)
   const refs = new Set<string>()
   const dataRequirements = input.dataRequirements.map((candidate, index): TestDataRequirementCandidate => {
@@ -177,7 +181,7 @@ export function validateTestCaseDesignCandidate(value: unknown, repair = false):
     const missing = [...caseRefs].filter(ref => !proposedCaseRefs.has(ref))
     if (missing.length) synthesisFail('/proposals', `每条候选用例都必须由 Proposal 覆盖，缺少：${missing.join('、')}`)
   }
-  return { schemaVersion, cases, scenarioClaims, dataRequirements, findings, confirmationItems, proposals }
+  return { schemaVersion, cases, dimensionAssessments, scenarioClaims, dataRequirements, findings, confirmationItems, proposals }
 }
 
 /**
@@ -273,6 +277,30 @@ function validateScenarioClaims(value: unknown, cases: TestCaseDesignCandidate['
   for (const claim of claims) claimsByCaseRef.set(claim.caseRef, [...(claimsByCaseRef.get(claim.caseRef) ?? []), claim])
   for (const testCase of cases) if ((testCase.content.dimension === 'functional' || testCase.content.dimension === 'security') && !claimsByCaseRef.get(testCase.ref)?.length) synthesisFail('/scenarioClaims', `functional/security 用例 ${testCase.ref} 必须至少拥有一条 ScenarioClaim`)
   return claims
+}
+
+function validateDimensionAssessments(value: unknown): DimensionAssessment[] {
+  // Stored historical candidates predate this candidate-only coverage map.
+  // Keep them readable and auditable (with an advisory) while all current
+  // PlanningAgent submit tools require the complete five-dimension record.
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length !== 5) synthesisFail('/dimensionAssessments', 'dimensionAssessments 必须完整包含五个测试维度')
+  const seen = new Set<string>()
+  return value.map((candidate, index): DimensionAssessment => {
+    const path = `/dimensionAssessments/${index}`
+    const input = synthesisObject(candidate, path, 'DimensionAssessment 必须是对象')
+    synthesisRejectUnknown(input, ['dimension', 'applicable', 'reason', 'requirementRefs', 'risks', 'scenarioClaims'], path)
+    const testDimension = synthesisEnum(input.dimension, `${path}/dimension`, ['functional', 'performance', 'stability', 'compatibility', 'security'] as const)
+    if (seen.has(testDimension)) synthesisFail(`${path}/dimension`, `测试维度 ${testDimension} 重复`)
+    seen.add(testDimension)
+    if (typeof input.applicable !== 'boolean') synthesisFail(`${path}/applicable`, 'applicable 必须是 boolean')
+    const requirementRefs = synthesisIds(input.requirementRefs, `${path}/requirementRefs`)
+    const risks = synthesisTexts(input.risks, `${path}/risks`, 100, 2_000)
+    const scenarioClaims = synthesisTexts(input.scenarioClaims, `${path}/scenarioClaims`, 200, 2_000)
+    if (!input.applicable && !requirementRefs.length) synthesisFail(`${path}/requirementRefs`, '不适用维度必须引用至少一个支持该判断的 Requirement')
+    if (input.applicable && !scenarioClaims.length) synthesisFail(`${path}/scenarioClaims`, '适用维度必须说明至少一个待覆盖场景族')
+    return { dimension: testDimension, applicable: input.applicable, reason: synthesisText(input.reason, `${path}/reason`, 4_000), requirementRefs, risks, scenarioClaims }
+  })
 }
 
 function synthesisTransition(value: unknown, path: string) {
@@ -416,7 +444,32 @@ function executionMethods(value: unknown, allowEmpty = false): ExecutionMethodSp
   })
 }
 
-function validateExecutionSpec(value: unknown, testDimension: TestDimension, methods: ExecutionMethodSpec[], preconditions: string[], dataRequirementIds: string[]): TestCaseExecutionSpec {
+function normalizedExecutionMethods(value: unknown, legacyExecutionSpec: unknown, testDimension: TestDimension, allowEmpty: boolean): ExecutionMethodSpec[] {
+  if (value !== undefined) return executionMethods(value, allowEmpty)
+  if (testDimension !== 'functional' && testDimension !== 'security') return executionMethods(value, allowEmpty)
+  return [legacyFunctionalExecutionMethod(legacyExecutionSpec)]
+}
+
+/**
+ * Older revisions stored only FunctionalExecutionSpec. Preserve their steps
+ * and declared method, while making unavailable UI/API locator facts explicit
+ * and non-ready instead of inventing a real endpoint or selector.
+ */
+function legacyFunctionalExecutionMethod(value: unknown): ExecutionMethodSpec {
+  const input = object(value, 'TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '历史功能用例缺少 executionMethods 和 executionSpec')
+  if (input.kind !== 'functional' || (input.method !== 'ui' && input.method !== 'api')) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '历史功能 executionSpec.kind/method 无效', 422)
+  const common = {
+    steps: steps(input.steps, 'executionSpec.steps'),
+    verificationChecks: checks(input.verificationChecks, 'executionSpec.verificationChecks'),
+    executionReadiness: 'needs_confirmation' as const,
+    automationHint: typeof input.automationHint === 'string' ? input.automationHint.trim() : '历史用例缺少独立执行入口，待人工补充',
+  }
+  return input.method === 'ui'
+    ? { method: 'ui', uiSpec: { entry: 'legacy-untraced' }, ...common }
+    : { method: 'api', apiSpec: { method: 'GET', path: 'legacy-untraced' }, ...common }
+}
+
+function validateExecutionSpec(value: unknown, testDimension: TestDimension, methods: ExecutionMethodSpec[], preconditions: string[], dataRequirementIds: string[], legacyFunctionalProjection = false): TestCaseExecutionSpec {
   if (value === undefined) {
     const primary = methods[0]
     if (testDimension === 'functional' || testDimension === 'security') return functionalExecutionSpec(primary, preconditions, dataRequirementIds)
@@ -443,7 +496,7 @@ function validateExecutionSpec(value: unknown, testDimension: TestDimension, met
       executionReadiness: readiness(input.executionReadiness),
       automationHint: text(input.automationHint, 'executionSpec.automationHint', 2_000),
     }
-    if (canonicalSha256(supplied) !== canonicalSha256(projected)) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能 executionSpec 的重复字段必须与 executionMethods 和用例根字段一致；可仅提交 kind 与 method', 422)
+    if (!legacyFunctionalProjection && canonicalSha256(supplied) !== canonicalSha256(projected)) fail('TEST_CASE_EXECUTION_SPEC_INVALID', '功能 executionSpec 的重复字段必须与 executionMethods 和用例根字段一致；可仅提交 kind 与 method', 422)
     return projected
   }
   if (testDimension === 'performance') {
@@ -496,7 +549,7 @@ function checks(value: unknown, field: string) { if (!Array.isArray(value) || va
 function readiness(value: unknown): ExecutionReadiness { if (value !== 'ready' && value !== 'blocked' && value !== 'needs_confirmation') fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'executionReadiness 无效', 422); return value }
 function dimension(value: unknown) { if (!['functional', 'performance', 'stability', 'compatibility', 'security'].includes(String(value))) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'dimension 无效', 422); return value as TestCaseContent['dimension'] }
 function priority(value: unknown) { if (!['P0', 'P1', 'P2', 'P3'].includes(String(value))) fail('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', 'priority 无效', 422); return value as TestCaseContent['priority'] }
-function optionalDimensions(value: unknown) { if (value === undefined) return []; if (!Array.isArray(value)) fail('TEST_DESIGN_INPUT_INVALID', 'focusDimensions 必须是数组'); return [...new Set(value.map(dimension))] }
+function optionalDimensions(value: unknown, fallback: TestDimension[] = []) { if (value === undefined) return [...fallback]; if (!Array.isArray(value)) fail('TEST_DESIGN_INPUT_INVALID', 'focusDimensions 必须是数组'); return [...new Set(value.map(dimension))] }
 function optionalScopeRules(value: unknown) { if (value === undefined) return []; if (!Array.isArray(value) || value.length > 100) fail('TEST_DESIGN_INPUT_INVALID', '范围规则必须是数组'); return value.map(candidate => { const input = object(candidate, 'TEST_DESIGN_INPUT_INVALID', '范围规则必须是对象'); rejectUnknown(input, ['kind', 'value'], 'TEST_DESIGN_INPUT_INVALID'); return { kind: requiredText(input.kind, 'scope.kind', 100), value: requiredText(input.value, 'scope.value', 1_000) } }) }
 function optionalTexts(value: unknown, field: string, max: number, length: number) { return value === undefined ? [] : texts(value, field, max, length) }
 function texts(value: unknown, field: string, max: number, length: number) { if (!Array.isArray(value) || value.length > max) fail('TEST_DESIGN_BASIS_MODE_INVALID', `${field} 必须是数组`); return value.map((item, index) => requiredText(item, `${field}[${index}]`, length)) }

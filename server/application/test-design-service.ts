@@ -100,8 +100,8 @@ export class TestDesignService {
         objective: result.summary.overview.trim() || '依据已冻结的需求理解生成可追溯测试用例。',
         includedScopes: [],
         excludedScopes: [],
-        focusDimensions: [],
-        executionMethods: [],
+        focusDimensions: ['functional', 'performance', 'stability', 'compatibility', 'security'],
+        executionMethods: ['ui', 'api'],
         userCoverageObjectives: result.testFocus.map(item => `${item.title}：${item.description}`),
         knowledgeAugmentation: activeIndex ? { mode: 'fixed_index', indexVersionId: activeIndex.id } : { mode: 'disabled' },
         historicalCaseSelections: [],
@@ -167,7 +167,7 @@ export class TestDesignService {
         id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey,
         basisSnapshot, agentConfigurationSnapshot, currentInputRefs: structuredClone(requirement.analysisRun.snapshot.currentInputRefs), retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
         ...(historicalSnapshot.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: historicalSnapshot.baseTestCaseLibraryVersionId, baseTestCaseLibraryVersionSha256: historicalSnapshot.baseTestCaseLibraryVersionSha256 } : {}),
-        nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], scenarioClaims: [], caseChangeProposals: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
+        nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], scenarioClaims: [], dimensionAssessments: [], caseChangeProposals: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
       }
       aggregate.runs.push(run)
       return { run: structuredClone(run), created: true }
@@ -316,6 +316,7 @@ export class TestDesignService {
       advanceNodeGeneration(run, node(run, 'test_design_repair'), 'pending')
       run.testCases = []
       run.scenarioClaims = []
+      run.dimensionAssessments = []
       run.caseChangeProposals = []
       run.dataSetVersions = []
       run.automaticRepair = initialAutomaticRepairState()
@@ -328,7 +329,7 @@ export class TestDesignService {
 
   async listCases(projectVersionId: string, designId: string, runId: string, filters: { dimension?: string; executionMethod?: string; status?: string } = {}) {
     const run = await this.loadScopedRun(projectVersionId, designId, runId)
-    return run.testCases.filter(item => !item.tombstonedAt).filter(item => { const content = currentCaseRevision(item).content; return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || executionMethodForContent(content) === filters.executionMethod || content.executionMethods.some(method => method.method === filters.executionMethod)) && (!filters.status || item.reviewState === filters.status) }).map(testCase => presentCase(testCase))
+    return run.testCases.filter(item => !item.tombstonedAt).filter(item => { const content = currentCaseRevision(item).content; return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || executionMethodForContent(content) === filters.executionMethod || (content.executionMethods ?? []).some(method => method.method === filters.executionMethod)) && (!filters.status || item.reviewState === filters.status) }).map(testCase => presentCase(testCase))
   }
 
   async createCase(projectVersionId: string, designId: string, runId: string, rawContent: unknown, principal: Principal) {
@@ -409,7 +410,7 @@ export class TestDesignService {
     const state = await this.store.snapshot(); const aggregate = readDesignState(state)
     return aggregate.libraryCases.filter(item => item.projectId === projectId).filter(item => {
       const content = currentLibraryRevision(item).content
-      return (!filters.domain || content.domain === filters.domain) && (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || executionMethodForContent(content) === filters.executionMethod || content.executionMethods.some(method => method.method === filters.executionMethod)) && (!filters.priority || content.priority === filters.priority) && (!filters.status || item.status === filters.status) && (!filters.tag || content.tags.includes(filters.tag))
+      return (!filters.domain || content.domain === filters.domain) && (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || executionMethodForContent(content) === filters.executionMethod || (content.executionMethods ?? []).some(method => method.method === filters.executionMethod)) && (!filters.priority || content.priority === filters.priority) && (!filters.status || item.status === filters.status) && (!filters.tag || content.tags.includes(filters.tag))
     }).sort(newest).map(item => presentLibraryCase(item))
   }
 
@@ -590,7 +591,7 @@ export class TestDesignService {
   async compareSuiteVersions(projectId: string, fromId: string, toId: string) { const left = await this.getSuite(projectId, fromId); const right = await this.getSuite(projectId, toId); return versionMemberDiff(left.members, right.members) }
   async deprecateSuiteVersion(projectId: string, suiteVersionId: string, principal: Principal) { return this.store.transaction(state => { const suite = required(designState(state).suiteVersions.find(item => item.id === suiteVersionId && item.projectId === projectId), 'TEST_SUITE_VERSION_NOT_FOUND', '测试套件版本不存在'); suite.status = 'deprecated'; suite.deprecatedBy = principal.subjectId; suite.deprecatedAt = now(); return structuredClone(suite) }) }
 
-  async createLibraryHandoff(projectVersionId: string, libraryVersionId: string, input: { mode: 'smoke' | 'regression' | 'full' | 'custom'; suiteVersionId?: string; impactedCaseIds?: string[]; expectedLibrarySha256: string; executionReadinessOverrides?: Array<{ caseId: string; revision: number; reason: string }> }, principal: Principal) {
+  async createLibraryHandoff(projectVersionId: string, libraryVersionId: string, input: { mode: 'smoke' | 'regression' | 'full' | 'custom'; suiteVersionId?: string; impactedCaseIds?: string[]; expectedLibrarySha256: string; executionReadinessOverrides?: Array<{ caseId: string; revision: number; method?: TestExecutionMethod; reason: string }> }, principal: Principal) {
     return this.store.transaction(state => {
       assertOpenVersion(state, projectVersionId); const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在'); const aggregate = designState(state); const libraryVersion = required(aggregate.libraryVersions.find(item => item.id === libraryVersionId && item.projectId === projectVersion.projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); if (libraryVersion.contentSha256 !== input.expectedLibrarySha256) throw new TestDesignError('TEST_CASE_LIBRARY_HASH_MISMATCH', '用例库版本 Hash 不一致', 409)
       const detailedLibraryVersion = presentLibraryVersion(aggregate, libraryVersion)
@@ -600,33 +601,38 @@ export class TestDesignService {
       if (input.mode === 'full' && input.suiteVersionId) throw new TestDesignError('TEST_EXECUTION_HANDOFF_SUITE_FORBIDDEN', 'Full Handoff 不使用测试套件', 422)
       const libraryMembers = new Map(detailedLibraryVersion.members.map(item => [item.caseId, item]))
       const selections = input.mode === 'full'
-        ? detailedLibraryVersion.members.map(item => ({ ...item, executionMethod: undefined as TestExecutionMethod | undefined, reason: '指定用例库版本的全部冻结用例' }))
-        : suite!.members.map(item => { if (item.testCaseLibraryVersionId !== libraryVersion.id) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员不属于指定用例库版本', 422); const libraryMember = required(libraryMembers.get(item.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '套件成员不属于指定用例库版本'); if (item.revision !== libraryMember.revision) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员 Revision 与用例库版本冻结 Revision 不一致', 422, { caseId: item.caseId, suiteRevision: item.revision, libraryRevision: libraryMember.revision }); return { ...libraryMember, executionMethod: item.executionMethod, reason: item.reason } })
-      if (input.mode === 'regression') for (const caseId of [...new Set(input.impactedCaseIds ?? [])]) { const member = required(libraryMembers.get(caseId), 'TEST_CASE_LIBRARY_MEMBER_NOT_FOUND', '变更影响用例不属于指定用例库版本'); if (!selections.some(item => item.caseId === caseId)) selections.push({ ...member, executionMethod: undefined, reason: '需求变更影响分析补充' }) }
+        ? detailedLibraryVersion.members.map(item => ({ ...item, executionMethods: executionMethodsForContent(item.frozenContent), reason: '指定用例库版本的全部冻结用例' }))
+        : suite!.members.map(item => { if (item.testCaseLibraryVersionId !== libraryVersion.id) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员不属于指定用例库版本', 422); const libraryMember = required(libraryMembers.get(item.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '套件成员不属于指定用例库版本'); if (item.revision !== libraryMember.revision) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员 Revision 与用例库版本冻结 Revision 不一致', 422, { caseId: item.caseId, suiteRevision: item.revision, libraryRevision: libraryMember.revision }); const methods = item.executionMethods.length ? item.executionMethods : item.executionMethod ? [item.executionMethod] : executionMethodsForContent(libraryMember.frozenContent); return { ...libraryMember, executionMethods: methods, reason: item.reason } })
+      if (input.mode === 'regression') for (const caseId of [...new Set(input.impactedCaseIds ?? [])]) { const member = required(libraryMembers.get(caseId), 'TEST_CASE_LIBRARY_MEMBER_NOT_FOUND', '变更影响用例不属于指定用例库版本'); if (!selections.some(item => item.caseId === caseId)) selections.push({ ...member, executionMethods: executionMethodsForContent(member.frozenContent), reason: '需求变更影响分析补充' }) }
       if (input.executionReadinessOverrides !== undefined && !Array.isArray(input.executionReadinessOverrides)) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', 'executionReadinessOverrides 必须是数组', 422)
       const overrides = new Map<string, { reason: string; actorId: string; createdAt: string }>()
       for (const [index, override] of (input.executionReadinessOverrides ?? []).entries()) {
         if (!override || typeof override !== 'object' || !Number.isInteger(override.revision) || override.revision < 1) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', `executionReadinessOverrides[${index}] 无效`, 422)
         const caseId = cleanRequired(override.caseId, `executionReadinessOverrides[${index}].caseId`, 500)
-        const key = `${caseId}:${override.revision}`
-        if (overrides.has(key)) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', '同一 Case Revision 的人工覆盖决定不得重复', 422, { caseId, revision: override.revision })
+        const method = override.method === undefined ? undefined : testExecutionMethod(override.method, `executionReadinessOverrides[${index}].method`)
+        const key = `${caseId}:${override.revision}:${method ?? ''}`
+        if (overrides.has(key)) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', '同一 Case Revision / 执行方式的人工覆盖决定不得重复', 422, { caseId, revision: override.revision, method })
         overrides.set(key, { reason: cleanRequired(override.reason, `executionReadinessOverrides[${index}].reason`, 2_000), actorId: principal.subjectId, createdAt: now() })
       }
       const usedOverrides = new Set<string>()
-      const members = selections.map((selection, ordinal) => {
+      const members = selections.flatMap(selection => {
         const content = required(selection.frozenContent, 'TEST_EXECUTION_CASE_NOT_READY', '正式用例库版本缺少冻结内容')
-        const executionSpec = required(content.executionSpec, 'TEST_EXECUTION_CASE_NOT_READY', '正式用例缺少 executionSpec')
-        const configuration = executionConfiguration(content)
-        const overrideKey = `${selection.caseId}:${selection.revision}`
-        const readinessOverride = overrides.get(overrideKey)
-        if (configuration.status === 'blocked') throw new TestDesignError('TEST_EXECUTION_CASE_BLOCKED', 'blocked 用例禁止进入 Execution Handoff，人工覆盖不能绕过', 422, { caseId: selection.caseId, revision: selection.revision, issues: configuration.issues })
-        if (configuration.status === 'needs_confirmation' && !readinessOverride) throw new TestDesignError('TEST_EXECUTION_READINESS_OVERRIDE_REQUIRED', 'needs_confirmation 用例需要明确的人工覆盖决定和原因', 422, { caseId: selection.caseId, revision: selection.revision, issues: configuration.issues })
-        if (readinessOverride) usedOverrides.add(overrideKey)
-        const method = selection.executionMethod ?? executionMethodForContent(content)
-        if (selection.executionMethod && selection.executionMethod !== executionMethodForContent(content)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式与冻结 Revision 的 executionSpec 不一致', 422)
         const reason = cleanRequired(selection.reason, '选择原因', 2_000)
-        return { stage: input.mode, ordinal, sourceVersionId: suite?.id ?? libraryVersion.id, caseId: selection.caseId, revision: selection.revision, method, reason, dedupKey: `${selection.caseId}:${selection.revision}:${method}`, dimension: content.dimension, executionSpec: structuredClone(executionSpec), ...(selection.traceability ? { traceability: structuredClone(selection.traceability) } : {}), selectionReason: reason, contentSha256: selection.contentSha256, ...(readinessOverride ? { readinessOverride } : {}) }
+        return selection.executionMethods.map(method => {
+          const available = executionMethodsForContent(content)
+          if (!available.includes(method)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式不属于冻结 Revision 的 executionMethods', 422, { caseId: selection.caseId, revision: selection.revision, method })
+          const executionSpec = executionSpecForMethod(content, method)
+          const configuration = executionConfigurationForMethod(content, method)
+          const exactOverrideKey = `${selection.caseId}:${selection.revision}:${method}`
+          const legacyOverrideKey = `${selection.caseId}:${selection.revision}:`
+          const readinessOverride = overrides.get(exactOverrideKey) ?? (selection.executionMethods.length === 1 ? overrides.get(legacyOverrideKey) : undefined)
+          if (configuration.status === 'blocked') throw new TestDesignError('TEST_EXECUTION_CASE_BLOCKED', 'blocked 执行方式禁止进入 Execution Handoff，人工覆盖不能绕过', 422, { caseId: selection.caseId, revision: selection.revision, method, issues: configuration.issues })
+          if (configuration.status === 'needs_confirmation' && !readinessOverride) throw new TestDesignError('TEST_EXECUTION_READINESS_OVERRIDE_REQUIRED', 'needs_confirmation 执行方式需要明确的人工覆盖决定和原因', 422, { caseId: selection.caseId, revision: selection.revision, method, issues: configuration.issues })
+          if (readinessOverride) usedOverrides.add(overrides.has(exactOverrideKey) ? exactOverrideKey : legacyOverrideKey)
+          return { stage: input.mode, ordinal: 0, sourceVersionId: suite?.id ?? libraryVersion.id, caseId: selection.caseId, revision: selection.revision, method, reason, dedupKey: `${selection.caseId}:${selection.revision}:${method}`, dimension: content.dimension, executionSpec, ...(selection.traceability ? { traceability: structuredClone(selection.traceability) } : {}), selectionReason: reason, contentSha256: selection.contentSha256, ...(readinessOverride ? { readinessOverride } : {}) }
+        })
       })
+      members.forEach((member, ordinal) => { member.ordinal = ordinal })
       const unusedOverrides = [...overrides.keys()].filter(key => !usedOverrides.has(key))
       if (unusedOverrides.length) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', '人工覆盖只能引用本次选择中 needs_confirmation 的冻结 Case Revision', 422, { overrides: unusedOverrides })
       const testDataSnapshot = freezeHandoffDataRequirementSnapshot(aggregate, libraryVersion, selections)
@@ -1061,6 +1067,7 @@ function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId
   })
   if (repair) for (const removed of run.testCases.filter(item => item.candidateRef && !idByRef.has(item.candidateRef))) removed.tombstonedAt = now()
   run.testCases = repair ? [...run.testCases.filter(item => !item.candidateRef), ...nextCases] : nextCases
+  run.dimensionAssessments = structuredClone(value.dimensionAssessments)
   run.scenarioClaims = structuredClone(value.scenarioClaims)
   const requirements: TestDataRequirement[] = value.dataRequirements.map(candidate => ({
     id: dataIdByRef.get(candidate.ref)!, name: candidate.name, entityType: candidate.entityType, featureTags: candidate.featureTags, requirementRefs: candidate.requirementRefs,
@@ -1235,7 +1242,7 @@ function repairBlockerCanRunIndependently(run: TestDesignWorkflowRun, audit: Cov
     return clarification?.requirementPointRefs.includes(requirementId) ?? false
   })
 }
-function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在'); return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: run.testCases, scenarioClaims: run.scenarioClaims ?? [], dataSet, findings: run.findings, confirmationItems: run.confirmationItems }) }
+function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在'); return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: run.testCases, dimensionAssessments: run.dimensionAssessments ?? [], scenarioClaims: run.scenarioClaims ?? [], dataSet, findings: run.findings, confirmationItems: run.confirmationItems }) }
 function initialAutomaticRepairState(): NonNullable<TestDesignWorkflowRun['automaticRepair']> { return { status: 'idle', attempt: 0, maxAttempts: AUTOMATIC_REPAIR_MAX_ATTEMPTS, blockerCodes: [] } }
 
 function testCaseProjectionFiles(projectVersionName: string, version: TestCaseSetVersion, dataSet: TestDataRequirementSetVersion): TestDesignWorkspaceFile[] {
@@ -1288,15 +1295,29 @@ function libraryCaseEtag(testCase: LibraryTestCase, revision = currentLibraryRev
 function presentLibraryCase(testCase: LibraryTestCase, detail = false) { const revision = currentLibraryRevision(testCase); return { id: testCase.id, projectId: testCase.projectId, currentRevision: testCase.currentRevision, status: testCase.status, content: structuredClone(revision.content), contentSha256: revision.contentSha256, semanticSha256: revision.semanticSha256, createdAt: testCase.createdAt, updatedAt: testCase.updatedAt, etag: libraryCaseEtag(testCase, revision), ...(detail ? { revisions: structuredClone(testCase.revisions) } : {}) } }
 function findLibraryCase(state: DatabaseState, projectId: string, caseId: string) { return required(designState(state).libraryCases.find(item => item.id === caseId && item.projectId === projectId), 'LIBRARY_TEST_CASE_NOT_FOUND', '正式测试用例不存在') }
 function assertProjectExists(state: DatabaseState, projectId: string) { required(state.projects.find(item => item.id === projectId), 'PROJECT_NOT_FOUND', '项目不存在') }
-function executionMethodForContent(content: TestCaseContent): TestExecutionMethod { if (content.executionSpec) return content.executionSpec.method; if (content.dimension === 'performance') return 'performance_tool'; if (content.dimension === 'stability') return 'long_running'; if (content.dimension === 'compatibility') return 'environment_matrix'; return content.executionMethods[0]?.method ?? 'ui' }
+function executionMethodForContent(content: TestCaseContent): TestExecutionMethod { if (content.dimension === 'functional' || content.dimension === 'security') return content.executionMethods?.[0]?.method ?? content.executionSpec?.method ?? 'ui'; if (content.executionSpec) return content.executionSpec.method; if (content.dimension === 'performance') return 'performance_tool'; if (content.dimension === 'stability') return 'long_running'; if (content.dimension === 'compatibility') return 'environment_matrix'; return 'ui' }
+function executionMethodsForContent(content: TestCaseContent): TestExecutionMethod[] { if (content.dimension !== 'functional' && content.dimension !== 'security') return [executionMethodForContent(content)]; if (content.executionMethods?.length) return content.executionMethods.map(item => item.method); return content.executionSpec?.kind === 'functional' ? [content.executionSpec.method] : [] }
+function executionSpecForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod) {
+  if (content.dimension !== 'functional' && content.dimension !== 'security') {
+    const spec = required(content.executionSpec, 'TEST_EXECUTION_CASE_NOT_READY', '正式用例缺少 executionSpec')
+    if (spec.method !== executionMethod) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式与冻结 Revision 的执行配置不一致', 422)
+    return structuredClone(spec)
+  }
+  if (executionMethod !== 'ui' && executionMethod !== 'api') throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '功能或安全用例只支持 UI/API 执行方式', 422)
+  const method = content.executionMethods?.find(item => item.method === executionMethod)
+  if (!method) {
+    const legacy = required(content.executionSpec && content.executionSpec.kind === 'functional' && content.executionSpec.method === executionMethod ? content.executionSpec : undefined, 'TEST_SUITE_EXECUTION_METHOD_INVALID', '冻结 Revision 未选择该执行方式')
+    return { ...structuredClone(legacy), preconditions: structuredClone(content.preconditions), testDataRequirements: structuredClone(content.dataRequirementIds), executionReadiness: 'needs_confirmation' as const, automationHint: legacy.automationHint || '历史用例缺少独立执行入口，待人工补充' }
+  }
+  return { kind: 'functional' as const, method: method.method, steps: structuredClone(method.steps), verificationChecks: structuredClone(method.verificationChecks), preconditions: structuredClone(content.preconditions), testDataRequirements: structuredClone(content.dataRequirementIds), executionReadiness: method.executionReadiness, automationHint: method.automationHint }
+}
 function concreteExecutionValue(value: unknown) { return typeof value === 'string' && Boolean(value.trim()) && !/(?:待确认|待补充|未提供|未知|legacy-untraced)/iu.test(value) }
-function executionConfiguration(content: TestCaseContent): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } {
-  const spec = content.executionSpec
-  if (!spec) return { status: 'needs_confirmation', issues: ['缺少 executionSpec'] }
+function executionConfigurationForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } {
+  const spec = executionSpecForMethod(content, executionMethod)
   const issues: string[] = []
   if (spec.kind === 'functional') {
     if (!spec.steps.length || spec.steps.some(step => !concreteExecutionValue(step.action) || !concreteExecutionValue(step.expected))) issues.push('功能用例缺少完整执行步骤和预期结果')
-    const method = content.executionMethods.find(item => item.method === spec.method)
+    const method = content.executionMethods?.find(item => item.method === spec.method)
     if (!method) issues.push('功能用例 executionSpec.method 没有对应执行入口')
     else if (method.method === 'ui' && !concreteExecutionValue(method.uiSpec.entry)) issues.push('功能 UI 用例缺少明确 UI 入口')
     else if (method.method === 'ui' && !method.uiSpec.selectors?.some(concreteExecutionValue)) issues.push('功能 UI 用例缺少可执行 selector')
@@ -1309,12 +1330,17 @@ function executionConfiguration(content: TestCaseContent): { status: 'ready' | '
   const status = spec.executionReadiness === 'blocked' ? 'blocked' : issues.length || spec.executionReadiness === 'needs_confirmation' ? 'needs_confirmation' : 'ready'
   return { status, issues }
 }
+function executionConfiguration(content: TestCaseContent): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } {
+  const configurations = executionMethodsForContent(content).map(method => ({ method, configuration: executionConfigurationForMethod(content, method) }))
+  const status = configurations.some(item => item.configuration.status === 'blocked') ? 'blocked' : configurations.some(item => item.configuration.status === 'needs_confirmation') ? 'needs_confirmation' : 'ready'
+  return { status, issues: configurations.flatMap(item => item.configuration.issues.map(issue => `${item.method}: ${issue}`)) }
+}
 function freezeLibraryVersionMember(aggregate: TestDesignState, projectId: string, member: { caseId: string; revision: number; ordinal: number; contentSha256: string }) {
   const testCase = required(aggregate.libraryCases.find(item => item.id === member.caseId && item.projectId === projectId), 'LIBRARY_TEST_CASE_NOT_FOUND', '正式用例库成员不存在')
   const revision = required(testCase.revisions.find(item => item.revision === member.revision), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '正式用例库成员 Revision 不存在')
   if (revision.contentSha256 !== member.contentSha256 || canonicalSha256(revision.content) !== member.contentSha256) throw new TestDesignError('TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH', '用例库成员冻结内容 Hash 与成员记录不一致', 409, { caseId: member.caseId, revision: member.revision, expectedSha256: member.contentSha256, actualSha256: revision.contentSha256 })
   if (revision.traceability) assertTraceabilityMatchesContent(revision.content, revision.traceability)
-  return { ...member, frozenContent: structuredClone(revision.content), ...(revision.traceability ? { traceability: structuredClone(revision.traceability) } : {}), executionReadiness: executionConfiguration(revision.content).status }
+  return { ...member, frozenContent: structuredClone(revision.content), frozenExecutionMethods: executionMethodsForContent(revision.content).filter((method): method is 'ui' | 'api' => method === 'ui' || method === 'api'), ...(revision.traceability ? { traceability: structuredClone(revision.traceability) } : {}), executionReadiness: executionConfiguration(revision.content).status }
 }
 function presentLibraryVersion(aggregate: TestDesignState, version: TestCaseLibraryVersion): TestCaseLibraryVersionDetail {
   const members = version.members.map(member => {
@@ -1598,6 +1624,7 @@ function safeSpreadsheetText(value: string) { return /^[=+\-@]/u.test(value) ? `
 function xml(value: string) { return value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;') }
 function required<T>(value: T | null | undefined, code: string, message: string): T { if (value == null) throw new TestDesignError(code, message, code.endsWith('_NOT_FOUND') ? 404 : 409); return value }
 function cleanRequired(value: unknown, label: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) throw new TestDesignError('TEST_DESIGN_INPUT_INVALID', `${label} 不能为空且不能超过 ${max} 个字符`, 422); return value.trim() }
+function testExecutionMethod(value: unknown, label: string): TestExecutionMethod { if (!['ui', 'api', 'performance_tool', 'long_running', 'environment_matrix'].includes(String(value))) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', `${label} 无效`, 422); return value as TestExecutionMethod }
 function positive(value: unknown, label: string) { const number = Number(value); if (!Number.isFinite(number) || number <= 0) throw new TestDesignError('TEST_DESIGN_INPUT_INVALID', `${label} 必须是正数`, 422); return number }
 function newest(left: { createdAt?: string; publishedAt?: string }, right: { createdAt?: string; publishedAt?: string }) { return String(right.createdAt ?? right.publishedAt).localeCompare(String(left.createdAt ?? left.publishedAt)) }
 function now() { return new Date().toISOString() }

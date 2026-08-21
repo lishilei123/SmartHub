@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { ConfirmationItem, CoverageAudit, HistoricalCaseSnapshot, RetrievalSnapshot, ScenarioClaim, TestCase, TestDataRequirementSetVersion, TestDesignBasisSnapshot } from '../domain/test-design-types.js'
+import type { ConfirmationItem, CoverageAudit, DimensionAssessment, HistoricalCaseSnapshot, RetrievalSnapshot, ScenarioClaim, TestCase, TestDataRequirementSetVersion, TestDesignBasisSnapshot } from '../domain/test-design-types.js'
 import { canonicalSha256 } from './canonical-json.js'
 import { validateCaseDependencyGraph } from './test-design-validation.js'
 
@@ -10,6 +10,8 @@ export function auditTestDesignCoverage(input: {
   retrieval: RetrievalSnapshot
   historical: HistoricalCaseSnapshot
   cases: TestCase[]
+  /** Candidate-only PlanningAgent assessment for all five dimensions. */
+  dimensionAssessments?: DimensionAssessment[]
   /** Candidate-only metadata; it never becomes a formal TestCase asset. */
   scenarioClaims: ScenarioClaim[]
   dataSet: TestDataRequirementSetVersion
@@ -35,6 +37,7 @@ export function auditTestDesignCoverage(input: {
   }
   const caseSetSha256 = canonicalSha256(current.map(item => ({ caseId: item.testCase.id, revision: item.revision.revision, contentSha256: item.revision.contentSha256 })).sort((left, right) => left.caseId.localeCompare(right.caseId)))
   const blockers: Array<Omit<CoverageAudit['blockers'][number], 'resolution'>> = []
+  const advisories: CoverageAudit['advisories'] = []
   const relations: CoverageAudit['relations'] = []
   const coveredRequirements = new Set<string>()
   for (const clarification of input.basis.clarifications ?? []) if (clarification.blocking && clarification.status === 'pending') blockers.push({ code: 'PLANNING_CLARIFICATION_UNRESOLVED', message: `阻断问题 ${clarification.question} 尚未获得正式回答`, subjectId: clarification.id })
@@ -70,6 +73,33 @@ export function auditTestDesignCoverage(input: {
     const missingData = content.dataRequirementIds.filter(id => !input.dataSet.requirements.some(requirement => requirement.id === id && requirement.readiness === 'ready'))
     if (missingData.length) blockers.push({ code: 'TEST_CASE_NOT_READY', message: `用例 ${content.title} 的数据需求未就绪`, subjectId: item.testCase.id })
   }
+  // Legacy Runs have no candidate-only assessment map. Preserve their prior
+  // audit projection unchanged; current submit tools always provide it.
+  const dimensionAssessments = input.dimensionAssessments ?? []
+  if (dimensionAssessments.length) {
+    const assessmentByDimension = new Map(dimensionAssessments.map(item => [item.dimension, item]))
+    for (const dimension of ['functional', 'performance', 'stability', 'compatibility', 'security'] as const) {
+    const assessment = assessmentByDimension.get(dimension)
+    if (!assessment) {
+      advisories.push({ code: 'COVERAGE_DIMENSION_ASSESSMENT_MISSING', message: `历史候选缺少 ${dimension} 维度适用性分析；重新生成时应补充完整五维评估`, subjectId: dimension })
+      continue
+    }
+    const invalidEvidence = assessment.requirementRefs.filter(ref => !requirementByRef.has(ref))
+    if (invalidEvidence.length) blockers.push({ code: 'COVERAGE_DIMENSION_EVIDENCE_INVALID', message: `${dimension} 维度适用性判断引用了当前 Requirement Release 之外的依据`, subjectId: dimension })
+    if (!assessment.applicable) continue
+    const linked = current.filter(item => item.revision.content.dimension === dimension)
+    if (!linked.length) {
+      blockers.push({ code: 'COVERAGE_DIMENSION_UNCOVERED', message: `适用的 ${dimension} 测试维度尚未生成对应测试用例`, subjectId: dimension })
+      continue
+    }
+    if (assessment.risks.length && assessment.scenarioClaims.length && linked.length === 1) advisories.push({
+      code: 'COVERAGE_SCENARIO_FAMILY_REVIEW_REQUIRED',
+      message: `${dimension} 维度识别到 ${assessment.scenarioClaims.length} 个场景族和 ${assessment.risks.length} 项风险；请确认单条用例是否足以覆盖这些独立风险`,
+      subjectId: linked[0].testCase.id,
+      details: { reasons: [...assessment.risks], scenarioRefs: [...assessment.scenarioClaims] },
+    })
+    }
+  }
   for (const item of basisItems) {
     const requirementId = String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id)
     if (!coveredRequirements.has(requirementId)) {
@@ -102,8 +132,8 @@ export function auditTestDesignCoverage(input: {
   }
 
   const fullyCoveredRequirements = new Set(relations.filter(item => item.status === 'covered').map(item => item.requirementId))
-  const inputSha256 = canonicalSha256({ basisSnapshotSha256: input.basis.snapshotSha256, retrievalSnapshotSha256: input.retrieval.snapshotSha256, historicalSnapshotSha256: input.historical.snapshotSha256, requirementReleaseId: input.basis.requirementReleaseId, caseSetSha256, scenarioClaimsSha256: canonicalSha256([...input.scenarioClaims].sort((left, right) => left.ref.localeCompare(right.ref))), dataSetVersionId: input.dataSet.id, dataSetSha256: input.dataSet.contentSha256, findingStateSha256: canonicalSha256(input.findings.map(item => ({ id: item.id, state: item.state }))), confirmationStateSha256: canonicalSha256(input.confirmationItems.map(item => ({ id: item.id, impactStage: item.impactStage, state: item.state, actions: item.actions.length }))) })
-  return { id: `coverage_audit_${randomUUID()}`, runId: input.runId, requirementReleaseId: input.basis.requirementReleaseId, dataSetVersionId: input.dataSet.id, caseSetSha256, inputSha256, status: 'valid', statistics: { totalBasis: basisItems.length, coveredBasis: basisItems.filter(item => fullyCoveredRequirements.has(String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id))).length, totalCases: current.length, approvedCases: current.filter(item => item.testCase.reviewState === 'approved').length }, relations, blockers: blockers.map(item => ({ ...item, resolution: blockerResolution(item.code) })), createdAt: new Date().toISOString() }
+  const inputSha256 = canonicalSha256({ basisSnapshotSha256: input.basis.snapshotSha256, retrievalSnapshotSha256: input.retrieval.snapshotSha256, historicalSnapshotSha256: input.historical.snapshotSha256, requirementReleaseId: input.basis.requirementReleaseId, caseSetSha256, dimensionAssessmentsSha256: canonicalSha256([...dimensionAssessments].sort((left, right) => left.dimension.localeCompare(right.dimension))), scenarioClaimsSha256: canonicalSha256([...input.scenarioClaims].sort((left, right) => left.ref.localeCompare(right.ref))), dataSetVersionId: input.dataSet.id, dataSetSha256: input.dataSet.contentSha256, findingStateSha256: canonicalSha256(input.findings.map(item => ({ id: item.id, state: item.state }))), confirmationStateSha256: canonicalSha256(input.confirmationItems.map(item => ({ id: item.id, impactStage: item.impactStage, state: item.state, actions: item.actions.length }))) })
+  return { id: `coverage_audit_${randomUUID()}`, runId: input.runId, requirementReleaseId: input.basis.requirementReleaseId, dataSetVersionId: input.dataSet.id, caseSetSha256, inputSha256, status: 'valid', statistics: { totalBasis: basisItems.length, coveredBasis: basisItems.filter(item => fullyCoveredRequirements.has(String((item.locator as { requirementPointId?: unknown } | undefined)?.requirementPointId ?? item.id))).length, totalCases: current.length, approvedCases: current.filter(item => item.testCase.reviewState === 'approved').length }, relations, blockers: blockers.map(item => ({ ...item, resolution: blockerResolution(item.code) })), advisories, createdAt: new Date().toISOString() }
 }
 
 function atomicityBlocker(caseId: string, title: string, claims: ScenarioClaim[]): Omit<CoverageAudit['blockers'][number], 'resolution'> | undefined {
@@ -143,7 +173,7 @@ function semanticOracleUnclear(value: string) {
 }
 
 function blockerResolution(code: string): CoverageAudit['blockers'][number]['resolution'] {
-  if (code === 'COVERAGE_REQUIREMENT_UNCOVERED' || code === 'TEST_CASE_DUPLICATE' || code === 'TEST_CASE_COVERAGE_TOO_SHALLOW' || code === 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID' || code === 'TEST_CASE_OVER_MERGED') return 'agent_repair'
+  if (code === 'COVERAGE_REQUIREMENT_UNCOVERED' || code === 'COVERAGE_DIMENSION_UNCOVERED' || code === 'TEST_CASE_DUPLICATE' || code === 'TEST_CASE_COVERAGE_TOO_SHALLOW' || code === 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID' || code === 'TEST_CASE_OVER_MERGED') return 'agent_repair'
   if (code === 'TEST_CASE_REVIEW_REQUIRED') return 'human_review'
   if (code === 'TEST_CASE_NOT_READY') return 'execution_handoff'
   if (code === 'TEST_DESIGN_FINDING_UNRESOLVED' || code === 'TEST_DESIGN_CONFIRMATION_UNRESOLVED' || code === 'PLANNING_CLARIFICATION_UNRESOLVED' || code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR') return 'human_decision'

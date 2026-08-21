@@ -12,7 +12,7 @@ export function TestDesignCreatePanel({ inputs, busy, onCreate, onCancel }: { in
   const [included, setIncluded] = useState('')
   const [excluded, setExcluded] = useState('')
   const [coverage, setCoverage] = useState('')
-  const [selectedDimensions, setSelectedDimensions] = useState<TestDimension[]>(['functional'])
+  const [selectedDimensions, setSelectedDimensions] = useState<TestDimension[]>(['functional', 'performance', 'stability', 'compatibility', 'security'])
   const [methods, setMethods] = useState<ExecutionMethod[]>(['ui', 'api'])
   const [knowledgeAssets, setKnowledgeAssets] = useState<string[]>([])
   const [historyMode, setHistoryMode] = useState<'latest_library' | 'library_version' | 'suite_version' | 'none'>('latest_library')

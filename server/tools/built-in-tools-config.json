@@ -763,6 +763,25 @@
               "additionalProperties": false
             }
           },
+          "dimensionAssessments": {
+            "type": "array",
+            "minItems": 5,
+            "maxItems": 5,
+            "description": "五维适用性与风险覆盖地图；不适用维度必须关联当前 Requirement 依据，适用维度必须列出场景族。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
+                "applicable": { "type": "boolean" },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "requirementRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "scenarioClaims": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+              },
+              "required": ["dimension", "applicable", "reason", "requirementRefs", "risks", "scenarioClaims"],
+              "additionalProperties": false
+            }
+          },
           "scenarioClaims": {
             "type": "array",
             "maxItems": 10000,
@@ -1093,6 +1112,7 @@
         "required": [
           "schemaVersion",
           "cases",
+          "dimensionAssessments",
           "scenarioClaims",
           "dataRequirements",
           "findings",
@@ -1427,6 +1447,25 @@
               "additionalProperties": false
             }
           },
+          "dimensionAssessments": {
+            "type": "array",
+            "minItems": 5,
+            "maxItems": 5,
+            "description": "五维适用性与风险覆盖地图；不适用维度必须关联当前 Requirement 依据，适用维度必须列出场景族。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
+                "applicable": { "type": "boolean" },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "requirementRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "risks": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                "scenarioClaims": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+              },
+              "required": ["dimension", "applicable", "reason", "requirementRefs", "risks", "scenarioClaims"],
+              "additionalProperties": false
+            }
+          },
           "scenarioClaims": {
             "type": "array",
             "maxItems": 10000,
@@ -1757,6 +1796,7 @@
         "required": [
           "schemaVersion",
           "cases",
+          "dimensionAssessments",
           "scenarioClaims",
           "dataRequirements",
           "findings",
