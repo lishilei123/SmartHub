@@ -46,13 +46,13 @@
 ## 当前已实现的统一 PlanningAgent 测试设计流程
 
 - `PlanningAgent` 发布配置决定启用哪些 Skill；运行开始时只加载 Enabled Skill Catalog，Agent 自主判断何时通过 `skill.read` 读取正文。Workflow 只推进业务 Stage、收窄 Tool/提交协议和执行 Gate，不调度或激活 Skill。
-- `test_case_design` 阶段由 Runtime 直接提供完整冻结的 `RequirementRelease.content`，并从 `currentInputRefs` 识别本次任务重点；Agent 可在 Project Workspace Snapshot 内按需读取用户资料和明确列出的历史快照，最终只提交根字段为 `schemaVersion`、`cases` 的 `test-case-design/v3` Candidate Delta。未变化历史用例无需重新输出；存在冻结历史基线时 `cases: []` 合法。
-- 每条 AI 提交的 `test-case/v3` 只包含 `ref`、`schemaVersion`、`title`、`dimension`、`priority`、`requirementRefs`、`executionMethods`、`preconditions`、`steps`、`expectedResults`。Service 将 `ref` 作为本轮候选身份处理，正式 Library 内容只冻结其余九个测试语义字段。`requirementRefs` 必须存在但允许为空；空数组表示扩展风险测试，不计入正式 Requirement Coverage。非空引用必须属于当前冻结 Requirement Release。
+- `test_case_design` 阶段由 Runtime 直接提供冻结 Requirement Release 的 Requirement、Evidence 与 Clarification 投影，并把本 Run 已冻结的 `retrievalSnapshot.hits` 经 Service 去重、优先历史缺陷并限制数量后作为 `knowledgeReferences` 直接注入；历史 `testFocus` 不参与 Test Design 输入。Agent 可从 `currentInputRefs` 识别本次任务重点，在 Project Workspace Snapshot 内按需读取用户资料和明确列出的历史快照，最终只提交根字段为 `schemaVersion`、`cases` 的 `test-case-design/v3` Candidate Delta。未变化历史用例无需重新输出；存在冻结历史基线时 `cases: []` 合法。
+- 每条 AI 提交的 `test-case/v3` 只包含 `ref`、`schemaVersion`、`title`、`dimension`、`priority`、`requirementRefs`、`executionMethods`、`preconditions`、`steps`、`expectedResults`。Service 将 `ref` 作为本轮候选身份处理，正式 Library 内容只冻结其余九个测试语义字段。`requirementRefs` 必须存在但允许为空；空数组表示扩展风险测试，不计入正式 Requirement Trace Coverage。非空引用必须属于当前冻结 Requirement Release。
 - Historical Baseline 只由 ProjectVersion 的显式继承决定：`sourceProjectVersionId + inheritRequirementBindings=true` 时固定使用来源版本最新正式 TestCase Library；来源版本尚无正式 Library 时仍在不可变 Run Snapshot 中冻结 `sourceProjectVersionId`，但不伪造 Library 或 Requirement Release 字段，并按空 Historical Baseline 继续。未开启继承时不记录来源版本。创建协议和页面不再提供 `none/latest/library/suite` 第二套历史来源选择，也不会从其他版本、Suite、Workspace 投影或 Knowledge 搜索补充历史基线。
 - Service/Validator 校验严格字段白名单、语义内容与 Requirement 引用；Service 冻结来源 ProjectVersion、Library Version、来源 Requirement Release、来源 Case Traceability，再把 Candidate Delta 按唯一 Test Intent 精确匹配 `reuse`、唯一高置信同意图变更 `update`、无可靠匹配 `create` 合并为 Effective Case Set。未命中的历史项一律保留，歧义匹配安全降级为 `create` 并给出 Advisory，绝不从 AI 省略推导 `deprecate`。正式废弃只通过用例库人工管理入口触发。
 - `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；人工审核只针对 create/update 或人工修改，未变化的历史复用无需重新审核，发布仍由 Service 门禁控制。
 - `semanticSha256` 只对标题、维度、优先级、执行方式、前置条件、步骤和预期结果这些 Test Intent 字段求 Hash，不包含 `requirementRefs`；`contentSha256` 仍覆盖完整 TestCase v3 内容。Requirement 编号变化本身不会创建新 Revision。
-- Coverage Audit 是服务端确定性步骤，不是 Agent Stage。Service 使用规范化业务语义 Fingerprint 与唯一高置信规则，把来源 Release Requirement 保守映射到当前 Release；相同 `RP-xxx` 字符串从不作为跨版本证明。Coverage 只消费 Effective Case Set 的 `effectiveRequirementRefs`，并且只对 `coverageTarget=true` 的 Requirement 计算总数、覆盖数和未覆盖 Repair。歧义或无法映射只产生 Advisory，历史 Case 继续保留但不虚增 Coverage；`requirementRefs=[]` 的扩展测试仍进入最终资产。
+- Coverage Audit 是服务端确定性步骤，不是 Agent Stage。Service 使用规范化业务语义 Fingerprint 与唯一高置信规则，把来源 Release Requirement 保守映射到当前 Release；相同 `RP-xxx` 字符串从不作为跨版本证明。Requirement Trace Coverage 只消费 Effective Case Set 的 `effectiveRequirementRefs`，并且只对 `coverageTarget=true` 的 Requirement 计算总数、追溯数和未追溯 Repair。它不表示异常、边界、状态或组合场景已完整覆盖。歧义或无法映射只产生 Advisory，历史 Case 继续保留但不虚增追溯覆盖率；`requirementRefs=[]` 的扩展测试仍进入最终资产。
 - `test_design_repair` 只接受 `test-design-repair/v3` 的 `baseCandidateSha256`、`upsertCases` 与 `removeCaseRefs`，且只修改本轮 Candidate Delta。移除历史 update Candidate 会回退为冻结历史 Revision，不会删除或废弃正式 Historical Case。
 - 发布后的正式用例库是 Historical Baseline + accepted Update + accepted Create 的完整合集，并保存完整 TestCase v3 语义。Library Member 另外冻结当前 ProjectVersion 的 Requirement Release Traceability：历史复用保持原 Case Revision 与其原始追溯不变，但成员使用映射后的当前 Requirement refs。项目级 Case 详情分别展示 Revision 原始追溯与各 Library Version Member 当前版本追溯。Execution Handoff 只消费该不可变完整 Library，并按 `executionMethods` 展开 UI/API 方法级成员。Selector、Endpoint、账号、环境和测试数据属于 Execution Run 的 Execution Context，不进入 TestDesign Candidate。
 - 自动校验后的用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
@@ -188,7 +188,7 @@ npm test
 npm run build
 ```
 
-测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、统一 PlanningAgent 配置发布、只读 Workspace、Requirement Release 冻结、TestCase v3/Repair v3、显式 Requirement Coverage、正式资产投影、用例库发布、UI/API 执行交接、确定性单 Run 报告指标与导出、PostgreSQL 只读报告快照、检索降级、FindingAction 并发控制和参数 Hash 审批。
+测试覆盖项目版本需求绑定隔离、显式继承和只读状态门禁，以及真实 Token 计数、上传/Worker 队列、索引切换、远程 Embedding、模型质量门禁、统一 PlanningAgent 配置发布、只读 Workspace、Requirement Release 冻结、TestCase v3/Repair v3、显式 Requirement Trace Coverage、正式资产投影、用例库发布、UI/API 执行交接、确定性单 Run 报告指标与导出、PostgreSQL 只读报告快照、检索降级、FindingAction 并发控制和参数 Hash 审批。
 
 ## 接口摘要
 

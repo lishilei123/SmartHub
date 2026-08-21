@@ -55,14 +55,14 @@ export function auditTestDesignCoverage(input: {
     advisories.push({ code: 'POSSIBLE_DUPLICATE_TEST_CASE', message: `存在 ${caseIds.length} 条标题、步骤、预期结果与测试类型几乎完全一致的用例，请人工确认是否需要合并`, subjectId: caseIds[0], details: { reasons: caseIds } })
   }
   const extendedCount = current.filter(item => item.content.requirementRefs.length === 0).length
-  if (extendedCount) advisories.push({ code: 'EXTENDED_RISK_TEST_CASES_PRESENT', message: `存在 ${extendedCount} 条未关联 Requirement 的扩展风险测试；这是合法状态，不计入正式 Requirement Coverage` })
+  if (extendedCount) advisories.push({ code: 'EXTENDED_RISK_TEST_CASES_PRESENT', message: `存在 ${extendedCount} 条未关联 Requirement 的扩展风险测试；这是合法状态，不计入 Requirement Trace Coverage` })
   for (const historical of input.historical.items) {
     const locator = historical.locator as { caseId?: unknown } | undefined
     const subjectId = typeof locator?.caseId === 'string' ? locator.caseId : historical.id
     for (const sourceRequirementId of historical.sourceRequirementRefs) {
       const mapping = input.historical.requirementMappings.find(item => item.sourceRequirementId === sourceRequirementId)
       if (mapping?.status === 'ambiguous') advisories.push({ code: 'HISTORICAL_REQUIREMENT_MAPPING_AMBIGUOUS', message: `历史用例 ${subjectId} 的来源 Requirement ${sourceRequirementId} 存在多个当前版本候选，Service 未进行猜测映射。`, subjectId, details: { reasons: mapping.candidateRequirementIds ?? [] } })
-      if (!mapping || mapping.status === 'unmapped') advisories.push({ code: 'HISTORICAL_REQUIREMENT_UNMAPPED', message: `历史用例 ${subjectId} 的来源 Requirement ${sourceRequirementId} 无法安全映射到当前 Requirement Release；用例继续保留但不证明当前 Coverage。`, subjectId, details: { reasons: [sourceRequirementId] } })
+      if (!mapping || mapping.status === 'unmapped') advisories.push({ code: 'HISTORICAL_REQUIREMENT_UNMAPPED', message: `历史用例 ${subjectId} 的来源 Requirement ${sourceRequirementId} 无法安全映射到当前 Requirement Release；用例继续保留但不证明当前 Requirement Trace Coverage。`, subjectId, details: { reasons: [sourceRequirementId] } })
     }
   }
 

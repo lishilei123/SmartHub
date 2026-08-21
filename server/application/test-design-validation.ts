@@ -9,7 +9,7 @@ export class TestDesignError extends Error {
 
 export function validateCreateTestDesignInput(value: unknown): CreateTestDesignInput {
   const input = object(value, 'TEST_DESIGN_INPUT_INVALID', '创建参数必须是对象')
-  rejectUnknown(input, ['name', 'objective', 'requirementReleaseId', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'userCoverageObjectives', 'knowledgeAugmentation'], 'TEST_DESIGN_INPUT_INVALID')
+  rejectUnknown(input, ['name', 'objective', 'requirementReleaseId', 'includedScopes', 'excludedScopes', 'focusDimensions', 'executionMethods', 'knowledgeAugmentation'], 'TEST_DESIGN_INPUT_INVALID')
   return {
     name: requiredText(input.name, 'name', 200, 'TEST_DESIGN_INPUT_INVALID'),
     objective: requiredText(input.objective, 'objective', 4_000, 'TEST_DESIGN_INPUT_INVALID'),
@@ -18,7 +18,6 @@ export function validateCreateTestDesignInput(value: unknown): CreateTestDesignI
     excludedScopes: optionalScopeRules(input.excludedScopes),
     focusDimensions: optionalDimensions(input.focusDimensions, ['functional', 'performance', 'stability', 'compatibility', 'security']),
     executionMethods: optionalExecutionMethods(input.executionMethods, ['ui', 'api']),
-    userCoverageObjectives: optionalTexts(input.userCoverageObjectives, 'userCoverageObjectives', 100, 2_000, 'TEST_DESIGN_INPUT_INVALID'),
     knowledgeAugmentation: validateAugmentation(input.knowledgeAugmentation ?? { mode: 'disabled' }),
   }
 }

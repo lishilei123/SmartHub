@@ -26,7 +26,6 @@ export interface CreateTestDesignCommon {
   excludedScopes?: ScopeRule[]
   focusDimensions?: TestDimension[]
   executionMethods?: Array<'ui' | 'api'>
-  userCoverageObjectives?: string[]
   knowledgeAugmentation: KnowledgeAugmentation
 }
 

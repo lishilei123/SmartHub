@@ -3,7 +3,7 @@ import type { AgentConfigurationService } from '../application/agent-configurati
 import { builtInToolBindingToken, toolBindingToken, toolsetContentHash } from '../application/ai-resource-hash.js'
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
-import { repairCandidateContent, type PlanningAgentRuntime } from '../application/test-design-service.js'
+import { repairCandidateContent, selectRuntimeKnowledgeReferences, TEST_DESIGN_RUNTIME_KNOWLEDGE_REFERENCE_LIMIT, type PlanningAgentRuntime } from '../application/test-design-service.js'
 import { isTestDesignRepairPatch, TestDesignError, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDesignRepairPatch } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
@@ -150,6 +150,7 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
   const repairBlockers = repairAudit
     ? repairAudit.blockers.filter(item => item.resolution === 'agent_repair' && (!repairState?.blockerScopes?.length || repairState.blockerScopes.some(scope => scope.code === item.code && scope.subjectId === item.subjectId)))
     : []
+  const knowledgeReferences = stage === 'test_case_design' ? selectRuntimeKnowledgeReferences(run.retrievalSnapshot) : []
   if (stage === 'test_design_repair' && (!repairState || !repairAudit)) throw new TestDesignError('TEST_DESIGN_REPAIR_CONTEXT_INVALID', '自动修复任务缺少固定的修复状态或 Coverage Audit', 409)
   return canonicalJson({
     schemaVersion: 'test-design-agent-task/v1',
@@ -161,11 +162,16 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
       releaseId: run.basisSnapshot.requirementReleaseId,
       verificationRunId: run.basisSnapshot.verificationRunId,
       contentSha256: run.basisSnapshot.requirementReleaseContentSha256,
-      content: run.basisSnapshot.content,
+      content: {
+        requirements: run.basisSnapshot.content.requirements,
+        evidence: run.basisSnapshot.content.evidence,
+        clarifications: run.basisSnapshot.content.clarifications,
+      },
     },
     workspace: { root: '/workspace', activeBranch: `/${workspace.activeBranchLogicalPath}`, agentDirectory: `/${workspace.agentLogicalPath}`, snapshotSha256: workspace.snapshotSha256 },
     currentInputRefs: run.currentInputRefs.map(item => ({ logicalPath: item.logicalPath.replace(/^workspace\//u, ''), assetVersionId: item.assetVersionId, contentSha256: item.contentSha256 })),
-    design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], userCoverageObjectives: design.input.userCoverageObjectives ?? [], frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
+    design: { name: design.name, objective: design.objective, includedScopes: design.input.includedScopes ?? [], excludedScopes: design.input.excludedScopes ?? [], focusDimensions: design.input.focusDimensions ?? [], executionMethods: design.input.executionMethods ?? [], frozenHistoricalCaseCount: run.historicalSnapshot.items.length },
+    ...(stage === 'test_case_design' ? { knowledgeReferences: { source: 'retrievalSnapshot.hits', maxHits: TEST_DESIGN_RUNTIME_KNOWLEDGE_REFERENCE_LIMIT, availableHitCount: run.retrievalSnapshot.hits.length, selectedHitCount: knowledgeReferences.length, hits: knowledgeReferences } } : {}),
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     runtimeBoundary: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
     task: testDesignTaskMessage(stage),
@@ -186,6 +192,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const stageRules = stage === 'test_case_design'
     ? [
           'Requirement 是正式业务事实来源，但不是测试设计的场景边界。先保证正式 Requirement 的核心业务行为得到直接测试覆盖，再主动扩展异常、边界、权限、状态、并发、一致性、重复操作、恢复、性能、稳定性、兼容性、安全、历史缺陷与 Knowledge 风险场景。',
+          'Knowledge Reference 只提示风险，不是正式业务事实，也不强制 Case 粒度。Requirement 与一个自然测试目标共同决定是否合并正常闭环；可独立失败的异常、非法、边界和一致性风险再主动拆分。',
           'requirementRefs 仅表示 TestCase 对正式 Requirement 的直接追溯。Expected Result 直接来源于 Requirement 时填写对应 ID；风险或边界探索没有直接 Requirement 行为依据时必须使用 requirementRefs: []，不得为了 Coverage 强行绑定不相关 Requirement。',
           '允许发散但禁止编造产品业务规则、权限矩阵、性能阈值、错误码、错误文案、接口、URL、Selector、账号、环境或状态机。信息不足时只写安全、稳定、一致、无越权、无不可恢复错误等可确定底线，或把技术事实留到 TestExecution 配置。',
           '从 functional、performance、stability、compatibility、security 五个方向思考，只生成有价值的场景；不要求每个维度都有 Case，也不提交适用性表。一个 Case 应有清晰可审核的测试目标；自然完整业务闭环可以合并，明显不同且可独立失败的测试意图可以拆分，这不是 Validator Gate。',
@@ -201,9 +208,9 @@ function testDesignStageInstructions(stage: TestDesignStage) {
         ]
   const readingRules = stage === 'test_case_design'
     ? [
-        '正式 Requirement、Evidence、Clarification 和 Test Focus 已由 Runtime 在 requirementRelease.content 中完整提供，不要到 Workspace 寻找其 JSON 或 Markdown 镜像。coreFactPaths 只列出需要自主读取的冻结历史资料。',
+        '正式 Requirement、Evidence 和 Clarification 已由 Runtime 在 requirementRelease.content 中直接提供；历史 Requirement Release 中的 Test Focus 不参与测试设计输入。不要到 Workspace 寻找其 JSON 或 Markdown 镜像。coreFactPaths 只列出需要自主读取的冻结历史资料。',
         '若 coreFactPaths 中存在 historical-test-cases.json，它是本轮唯一的冻结历史用例库基线。可按需读取它来理解已有覆盖、避免无意义重复，并识别当前 Requirement 变化可能影响的既有场景；只输出新增或确实需要调整的 TestCase。未输出的历史 Case 默认继续保留，禁止用省略表达删除或废弃。不得用 branches/*/test-case-library/v*/ 下的其他正式投影重复建立历史基线。',
-        '补充 Workspace 或共享知识只可用于已命名的事实缺口或风险：先用受限路径的 ls/find/grep 或 knowledge.search 定位，再读取最小必要范围。相同 contentHash 和所需行范围仍在当前 Context 时直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。',
+        'knowledgeReferences.hits 是 Service 从本 Run 已冻结 retrievalSnapshot.hits 中去重、裁剪后的直接输入；必须先使用这些内容，无需再次调用 knowledge.search 才能获得既有 Retrieval。只有存在已命名且这些引用未覆盖的事实缺口或风险时，才用受限路径的 ls/find/grep 或 knowledge.search 定位最小必要范围。相同 contentHash 和所需行范围仍在当前 Context 时直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。',
       ]
     : [
         '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。current-test-cases.json 只包含本轮 Candidate Delta；removeCaseRefs 只撤销本轮 Candidate，绝不删除或废弃 Historical Baseline。除 blocker 直接引用外，不回读历史用例库或共享知识。',

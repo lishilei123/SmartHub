@@ -11,7 +11,6 @@ export function TestDesignCreatePanel({ inputs, busy, onCreate, onCancel }: { in
   const [objective, setObjective] = useState('')
   const [included, setIncluded] = useState('')
   const [excluded, setExcluded] = useState('')
-  const [coverage, setCoverage] = useState('')
   const [selectedDimensions, setSelectedDimensions] = useState<TestDimension[]>(['functional', 'performance', 'stability', 'compatibility', 'security'])
   const [methods, setMethods] = useState<ExecutionMethod[]>(['ui', 'api'])
   const [knowledgeAssets, setKnowledgeAssets] = useState<string[]>([])
@@ -24,7 +23,7 @@ export function TestDesignCreatePanel({ inputs, busy, onCreate, onCancel }: { in
     name: name.trim(), objective: objective.trim(), requirementReleaseId: selectedRelease?.id,
     includedScopes: lines(included).map(value => ({ kind: 'scope', value })),
     excludedScopes: lines(excluded).map(value => ({ kind: 'scope', value })),
-    focusDimensions: selectedDimensions, executionMethods: methods, userCoverageObjectives: lines(coverage),
+    focusDimensions: selectedDimensions, executionMethods: methods,
     knowledgeAugmentation: knowledgeAssets.length ? { mode: 'selected_assets', assetVersionIds: knowledgeAssets } : { mode: 'disabled' },
   })
 
@@ -40,7 +39,6 @@ export function TestDesignCreatePanel({ inputs, busy, onCreate, onCancel }: { in
       <label className="wide"><span>测试目标</span><textarea value={objective} onChange={event => setObjective(event.target.value)} placeholder="说明这次测试要验证什么，以及成功标准。" /></label>
       <label><span>纳入范围（每行一项）</span><textarea value={included} onChange={event => setIncluded(event.target.value)} placeholder="创建订单&#10;支付回调" /></label>
       <label><span>排除范围（每行一项）</span><textarea value={excluded} onChange={event => setExcluded(event.target.value)} placeholder="线下退款&#10;旧版客户端" /></label>
-      <label className="wide"><span>覆盖目标（每行一项）</span><textarea value={coverage} onChange={event => setCoverage(event.target.value)} placeholder="主流程与异常恢复&#10;权限与接口幂等" /></label>
     </div>
     <div className="td2-choice-row"><div><b>测试维度</b><small>非功能维度只在 Workspace 有依据且适用时生成。</small></div><div>{dimensions.map(item => <button key={item.key} className={selectedDimensions.includes(item.key) ? 'active' : ''} onClick={() => toggle(item.key, selectedDimensions, setSelectedDimensions)}>{item.label}</button>)}</div></div>
     <div className="td2-choice-row"><div><b>执行入口</b><small>首期重点支持 UI 与 API。</small></div><div>{(['ui', 'api'] as const).map(item => <button key={item} className={methods.includes(item) ? 'active' : ''} onClick={() => toggle(item, methods, setMethods)}>{item.toUpperCase()}</button>)}</div></div>

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { Principal } from '../domain/access-control.js'
 import type { AgentExecutionEvent } from '../domain/agent-types.js'
+import type { RequirementReleaseContent } from '../domain/requirement-workflow-types.js'
 import type { DatabaseState, ProjectVersion, ReviewRun } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type {
@@ -18,6 +19,7 @@ import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
 const PLANNING_AGENT_EDITOR_ID = 'planning-agent'
 const TEST_DESIGN_SERVICE_ACTOR_ID = 'system:test-design-service'
+export const TEST_DESIGN_RUNTIME_KNOWLEDGE_REFERENCE_LIMIT = 16
 
 type RepairCandidateCase = { ref: string } & TestCaseContent
 type RepairCandidateSnapshot = {
@@ -112,7 +114,6 @@ export class TestDesignService {
         excludedScopes: [],
         focusDimensions: ['functional', 'performance', 'stability', 'compatibility', 'security'],
         executionMethods: ['ui', 'api'],
-        userCoverageObjectives: result.testFocus.map(item => `${item.title}：${item.description}`),
         knowledgeAugmentation: activeIndex ? { mode: 'fixed_index', indexVersionId: activeIndex.id } : { mode: 'disabled' },
       }
       const input = validateCreateTestDesignInput(rawInput)
@@ -165,7 +166,7 @@ export class TestDesignService {
       const runId = `test_design_run_${randomUUID()}`
       const createdAt = now()
       const basisSnapshot = buildBasisSnapshot(design, requirement, createdAt)
-      const retrievalSnapshot = await buildRetrievalSnapshot(state, design, createdAt)
+      const retrievalSnapshot = await buildRetrievalSnapshot(state, design, basisSnapshot.content, createdAt)
       const historicalSnapshot = buildHistoricalSnapshot(state, design, basisSnapshot, createdAt)
       const workspaceSnapshot = buildWorkspaceSnapshot(state, design, requirement, historicalSnapshot, createdAt)
       const run: TestDesignWorkflowRun = {
@@ -677,12 +678,12 @@ function buildBasisSnapshot(design: TestDesign, requirement: BoundRequirementRel
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
-async function buildRetrievalSnapshot(state: DatabaseState, design: TestDesign, createdAt: string): Promise<RetrievalSnapshot> {
+async function buildRetrievalSnapshot(state: DatabaseState, design: TestDesign, requirementContent: RequirementReleaseContent, createdAt: string): Promise<RetrievalSnapshot> {
   const augmentation = design.input.knowledgeAugmentation
   const index = augmentation.mode === 'fixed_index' ? required(state.indexes.find(item => item.id === augmentation.indexVersionId && item.status === 'active'), 'TEST_DESIGN_AUGMENTATION_INVALID', '固定索引不存在或未激活') : undefined
   const assetVersionIds = augmentation.mode === 'selected_assets' ? augmentation.assetVersionIds : index?.assetVersionIds ?? []
   assetVersionIds.forEach(id => assetContentRef(state, design.projectId, id, 'knowledge_asset'))
-  const queryPlan = augmentation.mode === 'disabled' ? [] : retrievalQueries(design.input)
+  const queryPlan = augmentation.mode === 'disabled' ? [] : buildTestDesignRetrievalQueries(design.input, requirementContent)
   const candidates = augmentation.mode === 'disabled' ? [] : assetVersionIds.flatMap(id => retrievalCandidates(state, design.projectId, id, augmentation.mode === 'fixed_index' ? augmentation.filters : undefined))
   const ranked = new Map<string, RetrievalSnapshot['hits'][number]>()
   for (const [queryIndex, plan] of queryPlan.entries()) {
@@ -765,9 +766,55 @@ function fixedContentUnits(content: { content: string; chunks?: Array<{ id: stri
   return (units.length ? units : [content.content]).slice(0, 500).map((value, index) => ({ id: `paragraph-${index + 1}`, content: value, headingPath: [] as string[], startLine: undefined, endLine: undefined }))
 }
 
-function retrievalQueries(input: CreateTestDesignInput) {
-  const values = [input.objective, ...(input.userCoverageObjectives ?? []), ...(input.includedScopes ?? []).map(item => `${item.kind} ${item.value}`), ...(input.focusDimensions ?? []).map(item => `${item} 测试风险`)]
-  return [...new Set(values.map(item => item.trim()).filter(Boolean))].slice(0, 20).map((query, index) => ({ query, intent: index === 0 ? 'test_objective' : 'coverage_context' }))
+export function buildTestDesignRetrievalQueries(input: CreateTestDesignInput, content: RequirementReleaseContent): RetrievalSnapshot['queryPlan'] {
+  const requirementFacts = content.requirements.map(item => [
+    item.title, item.description, item.actor, item.action, item.object,
+    ...item.conditions, ...item.businessRules, ...item.exceptions, ...item.acceptanceCriteria,
+  ].map(value => value.trim()).filter(Boolean).join(' '))
+  const answeredClarifications = content.clarifications
+    .filter(item => item.status === 'answered' && item.answer?.trim())
+    .map(item => `${item.question.trim()} ${item.answer!.trim()}`)
+  const scopedFacts = (input.includedScopes ?? []).map(item => `${item.kind} ${item.value}`)
+  const dimensionQuery = (input.focusDimensions ?? []).length ? `${input.focusDimensions!.join(' ')} 测试风险` : ''
+  const entries = [
+    { query: input.objective, intent: 'test_objective' },
+    ...requirementFacts.map(query => ({ query: `${query} 异常 边界 非法 状态 回退 重复操作 组合查询 一致性 历史缺陷`, intent: 'requirement_risk' })),
+    ...answeredClarifications.map(query => ({ query, intent: 'answered_clarification' })),
+    ...scopedFacts.map(query => ({ query, intent: 'included_scope' })),
+    { query: dimensionQuery, intent: 'test_dimension' },
+  ]
+  const seen = new Set<string>()
+  return entries.flatMap(item => {
+    const query = item.query.trim()
+    const key = query.toLocaleLowerCase()
+    if (!query || seen.has(key)) return []
+    seen.add(key)
+    return [{ query, intent: item.intent }]
+  }).slice(0, 20)
+}
+
+export function selectRuntimeKnowledgeReferences(retrieval: RetrievalSnapshot) {
+  const classificationPriority: Record<RetrievalSnapshot['hits'][number]['classification'], number> = {
+    historical_defect: 0,
+    normative_reference: 1,
+    domain_practice: 2,
+    context_only: 3,
+  }
+  const selectedByContent = new Map<string, RetrievalSnapshot['hits'][number]>()
+  for (const hit of [...retrieval.hits].sort((left, right) => classificationPriority[left.classification] - classificationPriority[right.classification]
+    || right.score - left.score
+    || left.rank - right.rank
+    || left.id.localeCompare(right.id))) {
+    if (!selectedByContent.has(hit.contentSha256)) selectedByContent.set(hit.contentSha256, hit)
+  }
+  return [...selectedByContent.values()].slice(0, TEST_DESIGN_RUNTIME_KNOWLEDGE_REFERENCE_LIMIT).map(hit => ({
+    id: hit.id,
+    classification: hit.classification,
+    content: hit.content,
+    locator: structuredClone(hit.locator),
+    assetVersionId: hit.assetVersionId,
+    chunkId: hit.chunkId,
+  }))
 }
 
 function searchTokens(value: string) {

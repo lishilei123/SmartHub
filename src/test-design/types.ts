@@ -27,7 +27,6 @@ export type CreateTestDesignInput = {
   excludedScopes: Array<{ kind: string; value: string }>
   focusDimensions: TestDimension[]
   executionMethods: ExecutionMethod[]
-  userCoverageObjectives: string[]
   knowledgeAugmentation: { mode: 'disabled' } | { mode: 'selected_assets'; assetVersionIds: string[] } | { mode: 'fixed_index'; indexVersionId: string }
 }
 
