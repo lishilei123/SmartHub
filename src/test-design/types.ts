@@ -135,7 +135,7 @@ export type TestCaseTraceability = {
 export type TestDesignCase = {
   id: string
   candidateRef?: string
-  origin: string
+  origin: 'ai' | 'manual' | 'historical_unchanged' | 'historical_modified' | 'historical_reference'
   currentRevision: number
   reviewState: ReviewState
   revisions: Array<{ revision: number; content: TestCaseContent; contentSha256: string; createdAt: string }>
