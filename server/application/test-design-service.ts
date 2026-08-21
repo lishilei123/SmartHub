@@ -32,8 +32,8 @@ type RepairCandidateSnapshot = {
 }
 
 export interface PlanningAgentRuntime {
-  readiness?(projectVersionId?: string, requirementReleaseId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
-  freezeConfiguration?(projectVersionId: string, requirementReleaseId?: string): Promise<TestDesignRunAgentConfigurationSnapshot>
+  readiness?(): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
+  freezeConfiguration?(): Promise<TestDesignRunAgentConfigurationSnapshot>
   appendTask?(input: { projectVersionId: string; taskType: string; task: string; metadata?: Record<string, unknown> }): Promise<unknown>
   execute(input: {
     stage: 'test_case_design' | 'test_design_repair'
@@ -71,7 +71,7 @@ export class TestDesignService {
     const inheritedSource = explicitlyInheritedSourceVersion(state, projectVersion)
     const inheritedLibraryVersions = inheritedSource ? inheritedLibraryVersionsForSource(designState, inheritedSource.id) : []
     const inheritedLibraryVersionIds = new Set(inheritedLibraryVersions.map(item => item.id))
-    const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId) : { ready: Boolean(this.runtime), agents: [{ agentKey: 'planning', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'PlanningAgent Runtime 未配置' }] }
+    const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness() : { ready: Boolean(this.runtime), agents: [{ agentKey: 'planning', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'PlanningAgent Runtime 未配置' }] }
     return {
       projectVersion: { id: projectVersion.id, projectId: projectVersion.projectId, name: projectVersion.name, status: projectVersion.status, ...(projectVersion.sourceProjectVersionId ? { sourceProjectVersionId: projectVersion.sourceProjectVersionId } : {}), ...(inheritedSource ? { sourceProjectVersionName: inheritedSource.name } : {}), inheritsSourceAssets: Boolean(inheritedSource) },
       requirementRelease: requirementRelease ? presentRequirementRelease(requirementRelease, true) : null,
@@ -160,11 +160,10 @@ export class TestDesignService {
 
   async createRun(projectVersionId: string, designId: string, idempotencyKey: string, principal: Principal) {
     if (!idempotencyKey?.trim()) throw new TestDesignError('IDEMPOTENCY_KEY_REQUIRED', '创建运行必须提供 Idempotency-Key', 400)
-    const preflight = await this.store.snapshot()
-    const sourceReleaseId = findDesign(preflight, projectVersionId, designId).sourceRequirementReleaseId
-    const readiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId, sourceReleaseId) : { ready: Boolean(this.runtime) }
+    findDesign(await this.store.snapshot(), projectVersionId, designId)
+    const readiness = this.runtime?.readiness ? await this.runtime.readiness() : { ready: Boolean(this.runtime) }
     if (!readiness.ready) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent 尚未发布或未通过模型门禁', 409, readiness)
-    const agentConfigurationSnapshot = this.runtime?.freezeConfiguration ? await this.runtime.freezeConfiguration(projectVersionId, sourceReleaseId) : undefined
+    const agentConfigurationSnapshot = this.runtime?.freezeConfiguration ? await this.runtime.freezeConfiguration() : undefined
     if (!agentConfigurationSnapshot) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent Runtime 无法冻结配置版本', 409)
     const created = await this.store.transaction(async state => {
       const design = findDesign(state, projectVersionId, designId)

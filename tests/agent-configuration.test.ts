@@ -161,7 +161,7 @@ test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用�
   await assert.rejects(() => service.publish('planning', { agentKey: 'planning', revision: saved.revision }), /尚未通过健康探测/)
 })
 
-test('测试设计复用已发布 PlanningAgent 并保持 Runtime 就绪', async () => {
+test('测试设计始终冻结最新发布的 PlanningAgent 并保持 Runtime 就绪', async () => {
   const { store, service } = await fixture()
   const initial = (await service.get('planning')).agents.planning!.draft
   const saved = await service.save('planning', {
@@ -170,14 +170,26 @@ test('测试设计复用已发布 PlanningAgent 并保持 Runtime 就绪', async
     routing: { ...initial.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
     definition: initial.definition,
   })
-  await service.publish('planning', { agentKey: 'planning', revision: saved.revision })
+  const first = await service.publish('planning', { agentKey: 'planning', revision: saved.revision })
+  const nextDraft = await service.save('planning', {
+    agentKey: 'planning',
+    revision: saved.revision,
+    routing: saved.routing,
+    definition: { ...saved.definition, systemPrompt: `${saved.definition.systemPrompt}\n最新测试设计配置。` },
+  })
+  const latest = await service.publish('planning', { agentKey: 'planning', revision: nextDraft.revision })
 
   const runtime = new PiTestDesignRuntimeAdapter(store, null as never, service)
   const readiness = await runtime.readiness()
+  const frozen = await runtime.freezeConfiguration()
   const planning = readiness.agents.find(item => item.agentKey === 'planning')
 
   assert.equal(planning?.ready, true)
   assert.equal(planning?.reason, undefined)
+  assert.notEqual(frozen.configurationId, first.id)
+  assert.equal(frozen.configurationId, latest.id)
+  assert.equal(frozen.configurationVersion, latest.version)
+  assert.equal(frozen.configurationSha256, latest.contentSha256)
 })
 
 test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同版本', async () => {

@@ -6,7 +6,6 @@ import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembl
 import { repairCandidateContent, type PlanningAgentRuntime } from '../application/test-design-service.js'
 import { isTestDesignRepairPatch, TestDesignError, validateHistoricalProposalPlan, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDesignRepairPatch } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
-import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
 import type { TestDesign, TestDesignRunAgentConfigurationSnapshot, TestDesignWorkflowRun, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
 import type { StateStore } from '../infrastructure/store.js'
@@ -46,20 +45,10 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
     })
   }
 
-  async readiness(projectVersionId?: string, requirementReleaseId?: string) {
+  async readiness() {
     const agentKey = 'planning'
     const state = await this.store.snapshot()
-    const projectVersion = projectVersionId ? state.projectVersions.find(item => item.id === projectVersionId) : undefined
-    const binding = projectVersion
-      ? requirementReleaseId ? requirementReleaseBindings(projectVersion).find(item => item.releaseId === requirementReleaseId) : activeRequirementReleaseBinding(projectVersion)
-      : undefined
-    const verificationRun = binding
-      ? state.reviewRuns.find(item => item.id === binding.verificationRunId)
-      : undefined
-    const configurationId = verificationRun?.snapshot.agentConfigurationRef?.id
-    const configuration = configurationId
-      ? await this.configurations.resolveVersion(configurationId)
-      : await this.configurations.resolveActive(agentKey)
+    const configuration = await this.configurations.resolveActive(agentKey)
     if (!configuration) return { ready: false, agents: [{ agentKey, ready: false, reason: '未发布 PlanningAgent 配置' }] }
     try {
       validateConfiguration(configuration, state)
@@ -69,16 +58,10 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
     }
   }
 
-  async freezeConfiguration(projectVersionId: string, requirementReleaseId?: string): Promise<TestDesignRunAgentConfigurationSnapshot> {
+  async freezeConfiguration(): Promise<TestDesignRunAgentConfigurationSnapshot> {
     const state = await this.store.snapshot()
-    const projectVersion = state.projectVersions.find(item => item.id === projectVersionId)
-    const binding = projectVersion
-      ? requirementReleaseId ? requirementReleaseBindings(projectVersion).find(item => item.releaseId === requirementReleaseId) : activeRequirementReleaseBinding(projectVersion)
-      : undefined
-    const verificationRun = state.reviewRuns.find(item => item.id === binding?.verificationRunId)
-    const configurationId = verificationRun?.snapshot.agentConfigurationRef?.id
-    if (!configurationId) throw new Error('TEST_DESIGN_AGENT_NOT_READY: Requirement Release 未绑定固定 PlanningAgent 配置')
-    const configuration = await this.configurations.resolveVersion(configurationId)
+    const configuration = await this.configurations.resolveActive('planning')
+    if (!configuration) throw new Error('TEST_DESIGN_AGENT_NOT_READY: 未发布 PlanningAgent 配置')
     validateConfiguration(configuration, state)
     const model = resolveModel(state, configuration)
     const createdAt = new Date().toISOString()
@@ -384,7 +367,7 @@ function validateConfiguration(configuration: AgentConfigurationVersion, state: 
       : defaultBuiltInToolConfigResolver.has(toolId) ? builtInToolBindingToken(toolId) : `${toolId}@missing`
   })
   if (toolsetContentHash(toolTokens) !== definition.toolsetContentSha256) {
-    throw new Error('PlanningAgent Toolset 目录内容与固定 Agent 配置不一致；此 Requirement Release 仍引用历史配置，请重新发布 PlanningAgent、重新发布 Requirement Release 后再新建测试设计')
+    throw new Error('当前已发布 PlanningAgent 配置与 Toolset 目录内容不一致；请重新发布 PlanningAgent 后再新建测试设计')
   }
   const allowedTools = new Set<string>([...WORKSPACE_TOOL_IDS, ...ALL_SUBMISSION_TOOLS])
   const missingTools = [...allowedTools].filter(toolId => !definition.toolIds.includes(toolId))
