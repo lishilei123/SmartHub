@@ -12,7 +12,6 @@ import type {
   ExecutionRunnerSnapshot,
 } from '../server/domain/test-execution-types.js'
 import type {
-  FunctionalExecutionSpec,
   TestCaseContent,
   TestCaseLibraryVersionMemberDetail,
   TestExecutionHandoffMember,
@@ -25,41 +24,19 @@ import {
   OciPlaywrightRunner,
 } from '../server/runner/playwright-runner.js'
 
-const spec: FunctionalExecutionSpec = {
-  kind: 'functional',
-  method: 'ui',
-  steps: [{ key: 'open', action: '打开状态页', expected: '页面已加载' }],
-  verificationChecks: [{ key: 'status', description: '状态显示 Ready' }],
-  preconditions: [],
-  testDataRequirements: [],
-  executionReadiness: 'ready',
-  automationHint: '使用 data-testid',
-}
-
 const content: TestCaseContent = {
-  schemaVersion: 'test-case/v2',
+  schemaVersion: 'test-case/v3',
   title: '状态检查',
-  objective: '验证状态页显示 Ready',
   dimension: 'functional',
   requirementRefs: ['point-status'],
   priority: 'P0',
   preconditions: [],
-  dataRequirementIds: [],
-  cleanup: [],
-  dependencies: [],
-  executionMethods: [{
-    method: 'ui',
-    uiSpec: { entry: '/status' },
-    steps: spec.steps,
-    verificationChecks: spec.verificationChecks,
-    executionReadiness: 'ready',
-    automationHint: spec.automationHint,
-  }],
-  executionSpec: spec,
-  sharedVerificationChecks: spec.verificationChecks,
-  tags: ['smoke'],
-  domain: 'system',
+  executionMethods: ['ui'],
+  steps: ['打开状态页'],
+  expectedResults: ['状态显示 Ready'],
 }
+
+const spec = { schemaVersion: 'test-script-input/v1' as const, method: 'ui' as const, testCase: content }
 
 const contentSha256 = canonicalSha256(content)
 const libraryMember: TestCaseLibraryVersionMemberDetail = {
@@ -91,7 +68,7 @@ const source = `import { test, expect } from '@playwright/test'
 
 test('status', async ({ page }) => {
   await page.goto('/status')
-  // smarthub:assert status
+  // smarthub:assert expected-1
   await expect(page.locator('[data-testid="status"]')).toHaveText('Ready')
 })
 `

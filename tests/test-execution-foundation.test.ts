@@ -28,7 +28,6 @@ import type {
   FrozenExecutionTaskInput,
 } from '../server/domain/test-execution-types.js'
 import type {
-  FunctionalExecutionSpec,
   TestCaseContent,
   TestCaseLibraryVersionMemberDetail,
   TestExecutionHandoffMember,
@@ -38,41 +37,19 @@ import {
   LocalExecutionArtifactStore,
 } from '../server/infrastructure/execution-artifact-store.js'
 
-const functionalSpec: FunctionalExecutionSpec = {
-  kind: 'functional',
-  method: 'ui',
-  steps: [{ key: 'open', action: '打开状态页', expected: '页面已加载' }],
-  verificationChecks: [{ key: 'status', description: '状态显示 Ready' }],
-  preconditions: [],
-  testDataRequirements: [],
-  executionReadiness: 'ready',
-  automationHint: '使用 data-testid',
-}
-
 const caseContent: TestCaseContent = {
-  schemaVersion: 'test-case/v2',
+  schemaVersion: 'test-case/v3',
   title: '状态检查',
-  objective: '验证状态页显示 Ready',
   dimension: 'functional',
   requirementRefs: ['point-status'],
   priority: 'P0',
   preconditions: [],
-  dataRequirementIds: [],
-  cleanup: [],
-  dependencies: [],
-  executionMethods: [{
-    method: 'ui',
-    uiSpec: { entry: '/status' },
-    steps: functionalSpec.steps,
-    verificationChecks: functionalSpec.verificationChecks,
-    executionReadiness: 'ready',
-    automationHint: functionalSpec.automationHint,
-  }],
-  executionSpec: functionalSpec,
-  sharedVerificationChecks: functionalSpec.verificationChecks,
-  tags: ['smoke'],
-  domain: 'system',
+  executionMethods: ['ui'],
+  steps: ['打开状态页'],
+  expectedResults: ['状态显示 Ready'],
 }
+
+const functionalSpec = { schemaVersion: 'test-script-input/v1' as const, method: 'ui' as const, testCase: caseContent }
 
 const contentSha256 = canonicalSha256(caseContent)
 const libraryMember: TestCaseLibraryVersionMemberDetail = {
@@ -83,8 +60,7 @@ const libraryMember: TestCaseLibraryVersionMemberDetail = {
   frozenContent: caseContent,
   traceability: {
     sourceRequirementReleaseId: 'release-1',
-    requirementRefs: [{ requirementReleaseId: 'release-1', requirementId: 'requirement-status' }],
-    requirementRefs: ['REQ-status'],
+    requirementRefs: [{ requirementReleaseId: 'release-1', requirementId: 'point-status' }],
   },
   executionReadiness: 'ready',
 }
@@ -107,7 +83,7 @@ const validSource = `import { test, expect } from '@playwright/test'
 
 test('status', async ({ page }) => {
   await page.goto('/status')
-  // smarthub:assert status
+  // smarthub:assert expected-1
   await expect(page.locator('[data-testid="status"]')).toHaveText('Ready')
 })
 `
@@ -222,12 +198,6 @@ test('任务冻结只接受同一正式用例库成员，并逐项冻结本次 R
     resetAndCleanup: '运行后删除',
     readiness: 'ready' as const,
   }
-  const dataContent = { ...caseContent, dataRequirementIds: [requirement.id] }
-  const dataMember = {
-    ...libraryMember,
-    contentSha256: canonicalSha256(dataContent),
-    frozenContent: dataContent,
-  }
   const testDataBase = {
     sourceSetId: 'data-set-status',
     sourceSetVersion: 2,
@@ -240,13 +210,9 @@ test('任务冻结只接受同一正式用例库成员，并逐项冻结本次 R
     ...testDataBase,
     contentSha256: canonicalSha256(testDataBase),
   }
-  const dataFrozen = freezeExecutionTaskInput({ handoffMember: { ...handoffMember, contentSha256: dataMember.contentSha256 }, libraryMember: dataMember, testData })
-  assert.deepEqual(dataFrozen.testDataBindings, [{ requirement, binding: testData.bindings[0] }])
-  assert.notEqual(dataFrozen.inputSha256, frozen.inputSha256)
-  assert.throws(
-    () => freezeExecutionTaskInput({ handoffMember: { ...handoffMember, contentSha256: dataMember.contentSha256 }, libraryMember: dataMember }),
-    error => validationCode(error, 'TEST_EXECUTION_TEST_DATA_REQUIRED'),
-  )
+  const dataFrozen = freezeExecutionTaskInput({ handoffMember, libraryMember, testData })
+  assert.equal(dataFrozen.testDataBindings, undefined)
+  assert.equal(dataFrozen.inputSha256, frozen.inputSha256)
 })
 
 test('任务冻结拒绝损坏的内容 Hash 与 Handoff 执行规范漂移', () => {
@@ -254,7 +220,7 @@ test('任务冻结拒绝损坏的内容 Hash 与 Handoff 执行规范漂移', ()
     () => freezeExecutionTaskInput({ handoffMember: { ...handoffMember, contentSha256: 'a'.repeat(64) }, libraryMember }),
     error => validationCode(error, 'TEST_EXECUTION_HANDOFF_CONTENT_HASH_MISMATCH'),
   )
-  const changedSpec: FunctionalExecutionSpec = { ...functionalSpec, automationHint: '已漂移' }
+  const changedSpec = { ...functionalSpec, testCase: { ...caseContent, expectedResults: ['已漂移'] } }
   assert.throws(
     () => freezeExecutionTaskInput({ handoffMember: { ...handoffMember, executionSpec: changedSpec }, libraryMember }),
     error => validationCode(error, 'TEST_EXECUTION_SPEC_HASH_MISMATCH'),
@@ -267,7 +233,7 @@ test('ExecutionPackage 使用固定入口、内容 Hash、断言契约与规范�
   const second = buildExecutionPackage({ candidate: candidate(), task, environmentSignature: 'environment-signature-1' })
   assert.equal(first.manifest.entrypoint, 'tests/task-status.spec.ts')
   assert.equal(first.manifest.packageSha256, second.manifest.packageSha256)
-  assert.equal(first.manifest.assertions[0].verificationCheckKey, 'status')
+  assert.equal(first.manifest.assertions[0].verificationCheckKey, 'expected-1')
   assert.equal(first.files[0].contentSha256, createHash('sha256').update(validSource).digest('hex'))
   assert.notEqual(
     scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, environmentSignature: 'one', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),

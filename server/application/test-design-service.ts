@@ -1,35 +1,28 @@
 import { createHash, randomUUID } from 'node:crypto'
-import JSZip from 'jszip'
 import type { Principal } from '../domain/access-control.js'
 import type { AgentExecutionEvent } from '../domain/agent-types.js'
 import type { DatabaseState, ProjectVersion, ReviewRun } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type {
-  CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, CoverageAudit, HistoricalCaseSnapshot, ImpactedRegressionReference, LegacyTestCaseMigrationRecord, LibraryTestCase, LibraryTestCaseRevision, RetrievalSnapshot, SmokeCandidateRelation, TestCase,
-  TestCaseContent, TestCaseLibraryVersion, TestCaseLibraryVersionDetail, TestCaseSetVersion, TestDataRequirement, TestDataRequirementSetVersion, TestDesign, TestDesignBasisSnapshot, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot,
+  CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, CoverageAudit, HistoricalCaseSnapshot, LibraryTestCase, LibraryTestCaseRevision, RetrievalSnapshot, TestCase,
+  TestCaseContent, TestCaseLibraryVersion, TestCaseLibraryVersionDetail, TestDesign, TestDesignBasisSnapshot, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot,
   TestCaseTraceability, TestDesignNodeKey, TestDesignRunAgentConfigurationSnapshot, TestDesignState, TestDesignWorkflowRun, TestExecutionHandoff, TestExecutionMethod,
   TestSuiteDraft, TestSuiteVersion, TestSuiteVersionMember, WorkflowArtifact, WorkflowNodeRun,
 } from '../domain/test-design-types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { auditTestDesignCoverage } from './test-design-coverage-auditor.js'
-import { assertEtag, etag, isTestDesignRepairPatch, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateHistoricalProposalPlan, validateTestCaseContent, validateTestCaseDesignCandidate, type CandidateCase, type TestCaseDesignCandidate, type TestDataRequirementCandidate, type TestDesignRepairPatch } from './test-design-validation.js'
+import { assertEtag, etag, isTestDesignRepairPatch, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate, type CandidateCase, type TestCaseDesignCandidate, type TestDesignRepairPatch } from './test-design-validation.js'
 import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
 const PLANNING_AGENT_EDITOR_ID = 'planning-agent'
 const TEST_DESIGN_SERVICE_ACTOR_ID = 'system:test-design-service'
 
-type RepairCandidateCase = { ref: string } & TestCaseContent & { changeReason?: string; confidence?: number }
+type RepairCandidateCase = { ref: string } & TestCaseContent
 type RepairCandidateSnapshot = {
-  schemaVersion: 'test-design-repair/v1'
+  schemaVersion: 'test-case-design/v3'
   cases: RepairCandidateCase[]
-  dimensionAssessments: TestCaseDesignCandidate['dimensionAssessments']
-  scenarioClaims: TestCaseDesignCandidate['scenarioClaims']
-  dataRequirements: TestDataRequirementCandidate[]
-  findings: Record<string, unknown>[]
-  confirmationItems: Record<string, unknown>[]
-  proposals: TestCaseDesignCandidate['proposals']
 }
 
 export interface PlanningAgentRuntime {
@@ -79,10 +72,8 @@ export class TestDesignService {
       requirementReleases: requirementReleases.map(item => presentRequirementRelease(item, item.binding.releaseId === requirementRelease?.binding.releaseId)),
       knowledgeAssets,
       fixedIndexes: projectBases.flatMap(base => state.indexes.filter(index => index.knowledgeBaseId === base.id && index.status === 'active').map(index => ({ id: index.id, selectable: true }))),
-      historicalCaseSets: designState.caseSetVersions.filter(item => item.projectId === projectVersion.projectId).map(item => ({ id: item.id, name: item.name, version: item.version, memberCount: item.members.length, contentSha256: item.contentSha256 })),
       testCaseLibraryVersions: inheritedLibraryVersions.sort((left, right) => right.version - left.version).map(item => ({ id: item.id, name: item.name, version: item.version, memberCount: item.members.length, contentSha256: item.contentSha256, publishedAt: item.publishedAt })),
       historicalTestSuites: designState.suiteVersions.filter(item => item.projectId === projectVersion.projectId && item.status !== 'deprecated' && Boolean(item.testCaseLibraryVersionId && inheritedLibraryVersionIds.has(item.testCaseLibraryVersionId))).sort(newest).map(item => ({ id: item.id, name: item.name, suiteKey: item.suiteKey, suiteType: item.suiteType, version: item.version, memberCount: item.members.length, contentSha256: item.contentSha256 })),
-      historicalCaseAssets: knowledgeAssets.filter(item => item.assetType === 'test_case' && item.selectable),
       agentReadiness,
     }
   }
@@ -123,7 +114,6 @@ export class TestDesignService {
         executionMethods: ['ui', 'api'],
         userCoverageObjectives: result.testFocus.map(item => `${item.title}：${item.description}`),
         knowledgeAugmentation: activeIndex ? { mode: 'fixed_index', indexVersionId: activeIndex.id } : { mode: 'disabled' },
-        historicalCaseSelections: [],
         historicalLibrarySelection: latestInheritedLibrary
           ? { mode: 'latest_library' }
           : { mode: 'none' },
@@ -185,7 +175,7 @@ export class TestDesignService {
         id: runId, testDesignId: design.id, projectVersionId, status: 'queued', stage: 'test_case_design', progress: 0, idempotencyKey, requestedExecutionMethods: [...(design.input.executionMethods ?? [])],
         basisSnapshot, agentConfigurationSnapshot, currentInputRefs: structuredClone(requirement.analysisRun.snapshot.currentInputRefs), retrievalSnapshot, historicalSnapshot, workspaceSnapshot, formalWorkspaceFiles: [],
         ...(historicalSnapshot.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: historicalSnapshot.baseTestCaseLibraryVersionId, baseTestCaseLibraryVersionSha256: historicalSnapshot.baseTestCaseLibraryVersionSha256 } : {}),
-        nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], scenarioClaims: [], dimensionAssessments: [], caseChangeProposals: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
+        nodeRuns: workflowNodes(runId), artifacts: [], gateDecisions: [], testCases: [], caseChangeProposals: [], coverageAudits: [], automaticRepair: initialAutomaticRepairState(), events: [], createdBy: principal.subjectId, createdAt,
       }
       aggregate.runs.push(run)
       return { run: structuredClone(run), created: true }
@@ -341,10 +331,7 @@ export class TestDesignService {
       advanceNodeGeneration(run, node(run, 'coverage_audit'), 'pending')
       advanceNodeGeneration(run, node(run, 'test_design_repair'), 'pending')
       run.testCases = []
-      run.scenarioClaims = []
-      run.dimensionAssessments = []
       run.caseChangeProposals = []
-      run.dataSetVersions = []
       run.automaticRepair = initialAutomaticRepairState()
       invalidateAudit(run)
       Object.assign(run, { status: 'queued', stage: 'test_case_design', progress: 55, error: undefined, errorCode: undefined, finishedAt: undefined })
@@ -355,7 +342,7 @@ export class TestDesignService {
 
   async listCases(projectVersionId: string, designId: string, runId: string, filters: { dimension?: string; executionMethod?: string; status?: string } = {}) {
     const run = await this.loadScopedRun(projectVersionId, designId, runId)
-    return run.testCases.filter(item => !item.tombstonedAt).filter(item => { const content = currentCaseRevision(item).content; return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || executionMethodForContent(content) === filters.executionMethod || (content.executionMethods ?? []).some(method => method.method === filters.executionMethod)) && (!filters.status || item.reviewState === filters.status) }).map(testCase => presentCase(testCase))
+    return run.testCases.filter(item => !item.tombstonedAt).filter(item => { const content = currentCaseRevision(item).content; return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || content.executionMethods.includes(filters.executionMethod as 'ui' | 'api')) && (!filters.status || item.reviewState === filters.status) }).map(testCase => presentCase(testCase))
   }
 
   async createCase(projectVersionId: string, designId: string, runId: string, rawContent: unknown, principal: Principal) {
@@ -386,12 +373,6 @@ export class TestDesignService {
     return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const targets = input.targets.map(target => ({ target, testCase: findCase(run, target.caseId) })); targets.forEach(({ target, testCase }) => { if (testCase.currentRevision !== target.targetRevision) throw new TestDesignError('TEST_CASE_REVISION_CONFLICT', `用例 ${testCase.id} revision 已变化`, 412) }); targets.forEach(({ target, testCase }) => applyReviewAction(testCase, { ...input, targetRevision: target.targetRevision }, principal.subjectId)); reconcileAutomaticProposalDecisions(run); return targets.map(item => presentCase(item.testCase)) })
   }
 
-  async getDataRequirements(projectVersionId: string, designId: string, runId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(run.dataSetVersions) }
-
-  async replaceDataRequirements(projectVersionId: string, designId: string, runId: string, requirements: TestDataRequirement[], principal: Principal) {
-    return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const normalized = validateDataRequirements(run, requirements); const version = dataSetVersion(run.dataSetVersions.length + 1, normalized, principal.subjectId); run.dataSetVersions.push(version); invalidateAudit(run); return structuredClone(version) })
-  }
-
   async reAudit(projectVersionId: string, designId: string, runId: string) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const audit = runCoverageAudit(run); run.coverageAudits.forEach(item => { item.status = 'stale' }); run.coverageAudits.push(audit); return structuredClone(audit) }) }
   async coverageAudits(projectVersionId: string, designId: string, runId: string) { return structuredClone((await this.loadScopedRun(projectVersionId, designId, runId)).coverageAudits) }
   async coverageMatrix(projectVersionId: string, designId: string, runId: string, direction: 'basis_to_case' | 'case_to_basis') { const run = await this.loadScopedRun(projectVersionId, designId, runId); const audit = [...run.coverageAudits].reverse().find(item => item.status === 'valid'); if (!audit) throw new TestDesignError('COVERAGE_AUDIT_STALE', '没有有效覆盖审计', 409); return direction === 'basis_to_case' ? audit.relations : [...audit.relations].sort((left, right) => String(left.caseId).localeCompare(String(right.caseId))) }
@@ -407,10 +388,6 @@ export class TestDesignService {
   }
   async retrievalSource(projectVersionId: string, designId: string, runId: string, hitId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(required(run.retrievalSnapshot.hits.find(item => item.id === hitId), 'TEST_DESIGN_RETRIEVAL_HIT_NOT_FOUND', '固定召回结果不存在')) }
   async historicalSource(projectVersionId: string, designId: string, runId: string, itemId: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone(required(run.historicalSnapshot.items.find(item => item.id === itemId), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '历史用例快照不存在')) }
-  async findings(projectVersionId: string, designId: string, runId: string) { return structuredClone((await this.loadScopedRun(projectVersionId, designId, runId)).findings) }
-  async confirmationItems(projectVersionId: string, designId: string, runId: string) { return structuredClone((await this.loadScopedRun(projectVersionId, designId, runId)).confirmationItems) }
-  async actOnFinding(projectVersionId: string, designId: string, runId: string, findingId: string, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string }, principal: Principal) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const finding = required(run.findings.find(item => item.id === findingId), 'TEST_DESIGN_FINDING_NOT_FOUND', '测试设计 Finding 不存在'); applyDisposition(finding, input, principal.subjectId); invalidateAudit(run); return structuredClone(finding) }) }
-  async actOnConfirmation(projectVersionId: string, designId: string, runId: string, itemId: string, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string; structuredDecision?: unknown }, principal: Principal) { return this.store.transaction(state => { assertOpenVersion(state, projectVersionId); const run = findRun(state, projectVersionId, designId, runId); const item = required(run.confirmationItems.find(candidate => candidate.id === itemId), 'TEST_DESIGN_CONFIRMATION_NOT_FOUND', '待确认项不存在'); applyDisposition(item, input, principal.subjectId); invalidateAudit(run); const requiredAction = item.impactStage === 'publication' ? 're_audit' : 'resynthesize'; return { item: structuredClone(item), requiredAction } }) }
 
   async listCaseChangeProposals(projectVersionId: string, designId: string, runId: string, operation?: string) { const run = await this.loadScopedRun(projectVersionId, designId, runId); return structuredClone((run.caseChangeProposals ?? []).filter(item => !operation || item.operation === operation)) }
 
@@ -433,7 +410,7 @@ export class TestDesignService {
     const state = await this.store.snapshot(); const aggregate = readDesignState(state)
     return aggregate.libraryCases.filter(item => item.projectId === projectId).filter(item => {
       const content = currentLibraryRevision(item).content
-      return (!filters.domain || content.domain === filters.domain) && (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || executionMethodForContent(content) === filters.executionMethod || (content.executionMethods ?? []).some(method => method.method === filters.executionMethod)) && (!filters.priority || content.priority === filters.priority) && (!filters.status || item.status === filters.status) && (!filters.tag || content.tags.includes(filters.tag))
+      return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || content.executionMethods.includes(filters.executionMethod as 'ui' | 'api')) && (!filters.priority || content.priority === filters.priority) && (!filters.status || item.status === filters.status)
     }).sort(newest).map(item => presentLibraryCase(item))
   }
 
@@ -479,8 +456,6 @@ export class TestDesignService {
         : undefined
       reconcileAutomaticProposalDecisions(run)
       const audit = required(run.coverageAudits.find(item => item.id === input.expectedAuditId && item.status === 'valid'), 'COVERAGE_AUDIT_STALE', '覆盖审计不存在或已失效')
-      const dataRequirementSet = required(run.dataSetVersions.find(item => item.id === audit.dataSetVersionId), 'TEST_DATA_REQUIREMENT_SET_NOT_FOUND', 'Coverage Audit 固定的测试数据需求版本不存在')
-      if (canonicalSha256(dataRequirementSet.requirements) !== dataRequirementSet.contentSha256) throw new TestDesignError('TEST_DATA_REQUIREMENT_SET_HASH_MISMATCH', '测试数据需求版本 Hash 不一致', 409)
       const publicationBlockers = audit.blockers.filter(item => item.resolution !== 'execution_handoff')
       if (publicationBlockers.length) throw new TestDesignError('TEST_CASE_LIBRARY_PUBLICATION_BLOCKED', 'Coverage Audit 存在发布阻断项', 409, { blockers: publicationBlockers })
       if (audit.caseSetSha256 !== input.expectedCaseSetSha256) throw new TestDesignError('TEST_CASE_LIBRARY_HASH_MISMATCH', '候选用例 Hash 与审计不一致', 409)
@@ -494,11 +469,11 @@ export class TestDesignService {
       const members = new Map((baseline?.members ?? []).map(item => [item.caseId, { ...item }]))
       for (const proposal of run.caseChangeProposals) applyProposalToLibrary(aggregate, design.projectId, run, proposal, members, principal.subjectId)
       const orderedMembers = [...members.values()].sort((left, right) => left.caseId.localeCompare(right.caseId)).map((member, ordinal) => freezeLibraryVersionMember(aggregate, design.projectId, { ...member, ordinal }))
-      const canonicalContent = { schemaVersion: 'test-case-library/v1', projectId: design.projectId, sourceRunId: runId, dataRequirementSet: { id: dataRequirementSet.id, version: dataRequirementSet.version, contentSha256: dataRequirementSet.contentSha256 }, members: orderedMembers }
+      const canonicalContent = { schemaVersion: 'test-case-library/v3', projectId: design.projectId, sourceRunId: runId, members: orderedMembers }
       const contentSha256 = canonicalSha256(canonicalContent)
       const proposalStatistics = Object.fromEntries((['reuse', 'update', 'create', 'deprecate', 'reference'] as const).map(operation => [operation, run.caseChangeProposals.filter(item => item.operation === operation && item.decision !== 'rejected').length])) as Record<CaseChangeProposal['operation'], number>
       const dimensionStatistics = orderedMembers.reduce<Partial<Record<TestCaseContent['dimension'], number>>>((result, member) => { const content = required(aggregate.libraryCases.find(item => item.id === member.caseId)?.revisions.find(item => item.revision === member.revision)?.content, 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '发布成员 Revision 不存在'); result[content.dimension] = (result[content.dimension] ?? 0) + 1; return result }, {})
-      const version: TestCaseLibraryVersion = { id: `test_case_library_version_${randomUUID()}`, projectId: design.projectId, version: Math.max(0, ...aggregate.libraryVersions.filter(item => item.projectId === design.projectId).map(item => item.version)) + 1, name: cleanRequired(input.name, '用例库版本名称', 200), sourceRunId: runId, dataRequirementSet: structuredClone(dataRequirementSet), members: orderedMembers, contentSha256, publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics, dimensionStatistics, coverageAudit: { id: audit.id, statistics: structuredClone(audit.statistics), blockerCount: audit.blockers.length } } }
+      const version: TestCaseLibraryVersion = { id: `test_case_library_version_${randomUUID()}`, projectId: design.projectId, version: Math.max(0, ...aggregate.libraryVersions.filter(item => item.projectId === design.projectId).map(item => item.version)) + 1, name: cleanRequired(input.name, '用例库版本名称', 200), sourceRunId: runId, members: orderedMembers, contentSha256, publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics, dimensionStatistics, coverageAudit: { id: audit.id, statistics: structuredClone(audit.statistics), blockerCount: audit.blockers.length } } }
       aggregate.libraryVersions.push(version); return structuredClone(version)
     })
     if (published.projection.status === 'pending' && !published.projection.files.length) await this.projectLibraryVersion(published.id)
@@ -508,91 +483,6 @@ export class TestDesignService {
   async listLibraryVersions(projectId: string, sourceRunId?: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return aggregate.libraryVersions.filter(item => item.projectId === projectId && (!sourceRunId || item.sourceRunId === sourceRunId)).sort((left, right) => right.version - left.version).map(item => presentLibraryVersion(aggregate, item)) }
   async getLibraryVersion(projectId: string, versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return presentLibraryVersion(aggregate, required(aggregate.libraryVersions.find(item => item.id === versionId && item.projectId === projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在')) }
   async compareLibraryVersions(projectId: string, fromId: string, toId: string) { const left = await this.getLibraryVersion(projectId, fromId); const right = await this.getLibraryVersion(projectId, toId); return versionMemberDiff(left.members, right.members) }
-
-  async previewLegacyCaseMigration(projectId: string, legacyTestCaseSetVersionId: string) {
-    const state = await this.store.snapshot()
-    assertProjectExists(state, projectId)
-    return structuredClone(buildLegacyMigrationPreview(readDesignState(state), projectId, legacyTestCaseSetVersionId))
-  }
-
-  async migrateLegacyCaseSet(projectId: string, input: { legacyTestCaseSetVersionId: string; expectedPreviewSha256: string; confirmUncertain?: boolean }, principal: Principal) {
-    const result = await this.store.transaction(state => {
-      assertProjectExists(state, projectId)
-      const aggregate = designState(state)
-      const existingRecord = aggregate.legacyMigrations.find(item => item.projectId === projectId && item.legacyTestCaseSetVersionId === input.legacyTestCaseSetVersionId)
-      if (existingRecord) return { version: required(aggregate.libraryVersions.find(item => item.id === existingRecord.testCaseLibraryVersionId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '已迁移用例库版本不存在'), record: existingRecord }
-      const preview = buildLegacyMigrationPreview(aggregate, projectId, cleanRequired(input.legacyTestCaseSetVersionId, 'legacyTestCaseSetVersionId', 500))
-      if (preview.previewSha256 !== input.expectedPreviewSha256) throw new TestDesignError('LEGACY_TEST_CASE_MIGRATION_PREVIEW_STALE', '迁移预览已变化，请重新查看后确认', 409, { currentPreviewSha256: preview.previewSha256 })
-      if (preview.status === 'needs_confirmation' && !input.confirmUncertain) throw new TestDesignError('LEGACY_TEST_CASE_MIGRATION_CONFIRMATION_REQUIRED', '迁移预览存在重复冲突或执行配置不完整的历史用例，必须人工确认后导入', 409, { items: preview.items.filter(item => item.resolution === 'needs_confirmation' || item.executionConfigurationStatus !== 'ready') })
-      const legacy = required(aggregate.caseSetVersions.find(item => item.id === input.legacyTestCaseSetVersionId && item.projectId === projectId), 'TEST_CASE_SET_NOT_FOUND', '历史已发布用例集不存在')
-      const mappings: LegacyTestCaseMigrationRecord['mappings'] = []
-      const members = new Map((aggregate.libraryVersions.filter(item => item.projectId === projectId).sort((left, right) => right.version - left.version)[0]?.members ?? []).map(item => [item.caseId, { ...item }]))
-      for (const item of preview.items) {
-        const normalized = normalizeLegacyCaseContent(item.content)
-        const priorMapping = aggregate.legacyMigrations.flatMap(record => record.mappings).find(mapping => mapping.legacyCaseId === item.legacyCaseId)
-        let target = priorMapping ? aggregate.libraryCases.find(candidate => candidate.id === priorMapping.libraryCaseId && candidate.projectId === projectId) : aggregate.libraryCases.find(candidate => candidate.id === item.suggestedLibraryCaseId && candidate.projectId === projectId)
-        if (!target && item.resolution === 'needs_confirmation') target = aggregate.libraryCases.find(candidate => candidate.id === item.legacyCaseId && candidate.projectId === projectId)
-        if (!target) {
-          const createdAt = now()
-          const revision = createLibraryRevision(1, normalized, principal.subjectId, `从历史用例集 ${legacy.id} 迁移`)
-          target = { id: item.suggestedLibraryCaseId, projectId, currentRevision: 1, status: 'active', createdAt, updatedAt: createdAt, revisions: [revision] }
-          aggregate.libraryCases.push(target)
-        }
-        let revision = target.revisions.find(candidate => candidate.contentSha256 === canonicalSha256(normalized))
-        if (!revision) {
-          revision = createLibraryRevision(Math.max(0, ...target.revisions.map(candidate => candidate.revision)) + 1, normalized, principal.subjectId, `从历史用例集 ${legacy.id} 迁移`)
-          target.revisions.push(revision)
-          target.currentRevision = revision.revision
-          target.updatedAt = revision.createdAt
-          target.status = 'active'
-        }
-        members.set(target.id, { caseId: target.id, revision: revision.revision, ordinal: 0, contentSha256: revision.contentSha256 })
-        mappings.push({ legacyCaseId: item.legacyCaseId, legacyRevision: item.legacyRevision, libraryCaseId: target.id, libraryRevision: revision.revision, resolution: item.resolution === 'needs_confirmation' ? 'created_after_confirmation' : item.resolution === 'reuse_identical' ? 'reused_identical' : 'created' })
-      }
-      const orderedMembers = [...members.values()].sort((left, right) => left.caseId.localeCompare(right.caseId)).map((member, ordinal) => freezeLibraryVersionMember(aggregate, projectId, { ...member, ordinal }))
-      const canonicalContent = { schemaVersion: 'test-case-library/v1', projectId, legacyTestCaseSetVersionId: legacy.id, members: orderedMembers }
-      const version: TestCaseLibraryVersion = { id: `test_case_library_version_${randomUUID()}`, projectId, version: Math.max(0, ...aggregate.libraryVersions.filter(item => item.projectId === projectId).map(item => item.version)) + 1, name: `历史用例迁移 · ${legacy.name}`, legacyTestCaseSetVersionId: legacy.id, members: orderedMembers, contentSha256: canonicalSha256(canonicalContent), publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] } }
-      aggregate.libraryVersions.push(version)
-      const record: LegacyTestCaseMigrationRecord = { id: `legacy_test_case_migration_${randomUUID()}`, projectId, legacyTestCaseSetVersionId: legacy.id, previewSha256: preview.previewSha256, status: 'migrated', mappings, testCaseLibraryVersionId: version.id, migratedBy: principal.subjectId, migratedAt: version.publishedAt }
-      aggregate.legacyMigrations.push(record)
-      return { version, record }
-    })
-    if (result.version.projection.status === 'pending' && !result.version.projection.files.length) await this.projectLibraryVersion(result.version.id)
-    return { version: await this.getLibraryVersion(projectId, result.version.id), record: structuredClone(result.record) }
-  }
-
-  async publishCaseSet(projectVersionId: string, designId: string, runId: string, input: { name: string; expectedAuditId: string; expectedCaseSetSha256: string }, principal: Principal) {
-    const published = await this.store.transaction(state => {
-      assertOpenVersion(state, projectVersionId); const design = findDesign(state, projectVersionId, designId); const run = findRun(state, projectVersionId, designId, runId); const audit = required(run.coverageAudits.find(item => item.id === input.expectedAuditId && item.status === 'valid'), 'COVERAGE_AUDIT_STALE', '覆盖审计不存在或已失效')
-      const publicationBlockers = audit.blockers.filter(item => item.resolution !== 'execution_handoff')
-      if (publicationBlockers.length) throw new TestDesignError('TEST_CASE_SET_PUBLICATION_BLOCKED', '存在发布阻断项', 409, { blockers: publicationBlockers })
-      if (audit.caseSetSha256 !== input.expectedCaseSetSha256) throw new TestDesignError('TEST_CASE_SET_HASH_MISMATCH', '用例集合 Hash 与审计不一致', 409)
-      const currentAudit = runCoverageAudit(run)
-      if (currentAudit.inputSha256 !== audit.inputSha256 || currentAudit.caseSetSha256 !== audit.caseSetSha256) throw new TestDesignError('COVERAGE_AUDIT_STALE', '当前用例、数据、依据或处置状态与审计不一致', 409)
-      const currentPublicationBlockers = currentAudit.blockers.filter(item => item.resolution !== 'execution_handoff')
-      if (currentPublicationBlockers.length) throw new TestDesignError('TEST_CASE_SET_PUBLICATION_BLOCKED', '当前状态仍存在发布阻断项', 409, { blockers: currentPublicationBlockers })
-      const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在')
-      const members = run.testCases.filter(item => !item.tombstonedAt).map((testCase, ordinal) => { const revision = currentCaseRevision(testCase); if (testCase.reviewState !== 'approved') throw new TestDesignError('TEST_CASE_REVIEW_REQUIRED', `用例 ${testCase.id} 未批准`, 409); return { caseId: testCase.id, revision: revision.revision, ordinal, contentSha256: revision.contentSha256 } })
-      const canonicalContent = { schemaVersion: 'test-case-set/v1', projectVersionId, testDesignId: designId, runId, requirementReleaseId: run.basisSnapshot.requirementReleaseId, dataSetVersion: { id: dataSet.id, sha256: dataSet.contentSha256 }, coverageAudit: { id: audit.id, inputSha256: audit.inputSha256 }, cases: members.map(member => ({ ...member, content: currentCaseRevision(findCase(run, member.caseId)).content })) }
-      const contentSha256 = canonicalSha256(canonicalContent); const aggregate = designState(state); const existing = aggregate.caseSetVersions.find(item => item.testDesignId === designId && item.contentSha256 === contentSha256); if (existing) return structuredClone(existing)
-      const version: TestCaseSetVersion = { id: `test_case_set_${randomUUID()}`, projectId: design.projectId, projectVersionId, testDesignId: designId, runId, version: Math.max(0, ...aggregate.caseSetVersions.filter(item => item.testDesignId === designId).map(item => item.version)) + 1, schemaVersion: 'test-case-set/v1', name: cleanRequired(input.name, '用例集名称', 200), dataSetVersionId: dataSet.id, coverageAuditId: audit.id, members, canonicalContent, contentSha256, publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] } }
-      aggregate.caseSetVersions.push(version); return structuredClone(version)
-    })
-    if (published.projection.status === 'pending' && published.projection.files.length === 0) await this.projectCaseSet(published.id, 'upload')
-    return this.getCaseSet(published.id)
-  }
-
-  async getCaseSet(versionId: string) { const state = await this.store.snapshot(); return structuredClone(required(readDesignState(state).caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在')) }
-  async retryCaseSetProjection(versionId: string) { const version = await this.getCaseSet(versionId); if (!this.projector) throw new TestDesignError('TEST_CASE_ASSET_PROJECTION_UNAVAILABLE', '知识资产投影服务不可用', 503); if (version.projection.status !== 'failed') return version; await this.projectCaseSet(versionId, 'retry'); return this.getCaseSet(versionId) }
-  async exportCaseSet(versionId: string, format: 'json' | 'markdown' | 'xlsx') { const version = await this.getCaseSet(versionId); if (format === 'json') return { contentType: 'application/json; charset=utf-8', fileName: `${version.id}.json`, content: `${canonicalJson(version.canonicalContent)}\n` }; if (format === 'markdown') return { contentType: 'text/markdown; charset=utf-8', fileName: `${version.id}.md`, content: markdownCaseSet(version) }; return { contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName: `${version.id}.xlsx`, content: await xlsxCaseSet(version) } }
-
-  async projectCatalog(projectId: string, filters: { domain?: string; executionMethod?: string; suiteVersionId?: string } = {}) {
-    const state = await this.store.snapshot(); const aggregate = readDesignState(state); const suite = filters.suiteVersionId ? aggregate.suiteVersions.find(item => item.id === filters.suiteVersionId && item.projectId === projectId) : undefined
-    const allowed = suite ? new Set(suite.members.map(item => `${item.testCaseSetVersionId}:${item.caseId}:${item.revision}`)) : null
-    const items = aggregate.caseSetVersions.filter(item => item.projectId === projectId).flatMap(version => { const run = aggregate.runs.find(item => item.id === version.runId); if (!run) return []; return version.members.flatMap(member => { if (allowed && !allowed.has(`${version.id}:${member.caseId}:${member.revision}`)) return []; const testCase = run.testCases.find(item => item.id === member.caseId); const revision = testCase?.revisions.find(item => item.revision === member.revision); if (!revision || (filters.domain && revision.content.domain !== filters.domain) || (filters.executionMethod && !revision.content.executionMethods.some(method => method.method === filters.executionMethod))) return []; return [{ testCaseSetVersionId: version.id, testCaseSetName: version.name, caseId: member.caseId, revision: member.revision, content: revision.content, publishedAt: version.publishedAt, contentSha256: member.contentSha256 }] }) })
-    return { items, catalogAsOf: now() }
-  }
-
   async listSuites(projectId: string, suiteType?: string) { const state = await this.store.snapshot(); return structuredClone(readDesignState(state).suiteVersions.filter(item => item.projectId === projectId && (!suiteType || item.suiteType === suiteType)).sort(newest)) }
   async getSuite(projectId: string, suiteVersionId: string) { const state = await this.store.snapshot(); return structuredClone(required(readDesignState(state).suiteVersions.find(item => item.id === suiteVersionId && item.projectId === projectId), 'TEST_SUITE_VERSION_NOT_FOUND', '测试套件版本不存在')) }
 
@@ -663,8 +553,7 @@ export class TestDesignService {
       members.forEach((member, ordinal) => { member.ordinal = ordinal })
       const unusedOverrides = [...overrides.keys()].filter(key => !usedOverrides.has(key))
       if (unusedOverrides.length) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', '人工覆盖只能引用本次选择中 needs_confirmation 的冻结 Case Revision', 422, { overrides: unusedOverrides })
-      const testDataSnapshot = freezeHandoffDataRequirementSnapshot(aggregate, libraryVersion, selections)
-      const canonicalContent = { projectId: projectVersion.projectId, projectVersionId, testCaseLibraryVersionId: libraryVersion.id, ...(suite ? { suiteVersionId: suite.id } : {}), mode: input.mode, members, ...(testDataSnapshot ? { testDataSnapshot } : {}) }
+      const canonicalContent = { projectId: projectVersion.projectId, projectVersionId, testCaseLibraryVersionId: libraryVersion.id, ...(suite ? { suiteVersionId: suite.id } : {}), mode: input.mode, members }
       const contentSha256 = canonicalSha256(canonicalContent); const existing = aggregate.executionHandoffs.find(item => item.projectVersionId === projectVersionId && item.mode === input.mode && item.contentSha256 === contentSha256); if (existing) return structuredClone(existing)
       const handoff: TestExecutionHandoff = { id: `test_execution_handoff_${randomUUID()}`, ...canonicalContent, contentSha256, createdBy: principal.subjectId, createdAt: now() }; aggregate.executionHandoffs.push(handoff); return structuredClone(handoff)
     })
@@ -678,44 +567,7 @@ export class TestDesignService {
       .sort(newest))
   }
 
-  async reviewSmokeCandidate(versionId: string, caseId: string, input: { executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'accepted' | 'rejected' }, principal: Principal) {
-    return this.store.transaction(state => { const aggregate = designState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); assertOpenVersion(state, version.projectVersionId); const run = required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在'); assertMethodSubset(run, caseId, input.executionMethods); const relation: SmokeCandidateRelation = { testCaseSetVersionId: versionId, caseId, executionMethods: input.executionMethods, reason: cleanRequired(input.reason, '候选理由', 2_000), estimatedMinutes: positive(input.estimatedMinutes, 'estimatedMinutes'), stable: input.stable === true, dependencyReady: input.dependencyReady === true, decision: input.decision, actorId: principal.subjectId, reviewedAt: now() }; run.smokeCandidates = [...run.smokeCandidates.filter(item => item.testCaseSetVersionId !== versionId || item.caseId !== caseId), relation]; return structuredClone(relation) })
-  }
-
-  async setImpactedRegression(versionId: string, values: Array<{ suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string }>, principal: Principal) {
-    return this.store.transaction(state => { const aggregate = designState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); assertOpenVersion(state, version.projectVersionId); const references: ImpactedRegressionReference[] = values.map(value => { const suite = required(aggregate.suiteVersions.find(item => item.id === value.suiteVersionId && item.projectId === version.projectId && item.suiteType === 'regression'), 'TEST_SUITE_VERSION_NOT_FOUND', '回归套件版本不存在'); const member = required(suite.members.find(item => item.caseId === value.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '回归套件成员不存在'); const memberMethods = member.executionMethods ?? (member.executionMethod === 'ui' || member.executionMethod === 'api' ? [member.executionMethod] : []); if (!value.executionMethods.length || value.executionMethods.some(method => !memberMethods.includes(method))) throw new TestDesignError('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '影响回归执行方式必须是套件成员方式的非空子集', 422); return { ...value, testCaseSetVersionId: versionId, reason: cleanRequired(value.reason, '影响理由', 2_000), actorId: principal.subjectId, createdAt: now() } }); const run = required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在'); run.impactedRegression = [...run.impactedRegression.filter(item => item.testCaseSetVersionId !== versionId), ...references]; return structuredClone(references) })
-  }
-
-  async createHandoff(versionId: string, input: { strategy: 'standard' | 'fast' | 'full'; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; expectedCaseSetSha256: string }, principal: Principal) {
-    return this.store.transaction(state => {
-      const aggregate = designState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); assertOpenVersion(state, version.projectVersionId); if (version.contentSha256 !== input.expectedCaseSetSha256) throw new TestDesignError('TEST_CASE_SET_HASH_MISMATCH', '用例集 Hash 已变化', 409)
-      const run = required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在'); const smoke = input.smokeSuiteVersionId ? required(aggregate.suiteVersions.find(item => item.id === input.smokeSuiteVersionId && item.projectId === version.projectId && item.suiteType === 'smoke'), 'TEST_SUITE_VERSION_NOT_FOUND', '冒烟套件版本不存在') : undefined; const regression = input.regressionSuiteVersionId ? required(aggregate.suiteVersions.find(item => item.id === input.regressionSuiteVersionId && item.projectId === version.projectId && item.suiteType === 'regression'), 'TEST_SUITE_VERSION_NOT_FOUND', '回归套件版本不存在') : undefined
-      if (input.strategy !== 'full' && (!smoke || !regression)) throw new TestDesignError('TEST_EXECUTION_HANDOFF_BASELINE_REQUIRED', '标准或快速交接必须固定冒烟和回归套件版本', 422)
-      if (input.strategy === 'full' && !regression) throw new TestDesignError('TEST_EXECUTION_HANDOFF_BASELINE_REQUIRED', '直接全量交接必须固定回归套件版本', 422)
-      const members: TestExecutionHandoff['members'] = []; const add = (stage: TestExecutionHandoff['members'][number]['stage'], sourceVersionId: string, caseId: string, revision: number, methods: Array<'ui' | 'api'>, reason: string) => methods.forEach(method => { const dedupKey = `${caseId}:${revision}:${method}`; if (!members.some(item => item.dedupKey === dedupKey)) members.push({ stage, ordinal: members.length, sourceVersionId, caseId, revision, method, reason, dedupKey }) })
-      if (input.strategy !== 'full') {
-        smoke!.members.forEach(item => add('smoke', smoke!.id, item.caseId, item.revision, legacySuiteMemberUiApiMethods(item), item.reason))
-        run.smokeCandidates.filter(item => item.testCaseSetVersionId === version.id && item.decision === 'accepted').forEach(item => {
-          if (!item.stable || !item.dependencyReady) throw new TestDesignError('TEST_EXECUTION_HANDOFF_SMOKE_CANDIDATE_NOT_READY', `冒烟候选 ${item.caseId} 尚未满足稳定性或依赖条件`, 422)
-          const member = required(version.members.find(candidate => candidate.caseId === item.caseId), 'TEST_CASE_SET_MEMBER_NOT_FOUND', '冒烟候选不属于当前功能集')
-          add('smoke', version.id, item.caseId, member.revision, item.executionMethods, item.reason)
-        })
-      }
-      if (input.strategy !== 'full') version.members.forEach(item => { const testCase = findCase(run, item.caseId); add('new_feature', version.id, item.caseId, item.revision, currentCaseRevision(testCase).content.executionMethods.map(method => method.method), '本次新功能用例') })
-      if (input.strategy !== 'full') run.impactedRegression.filter(item => item.testCaseSetVersionId === version.id).forEach(item => { if (item.suiteVersionId !== regression!.id) throw new TestDesignError('TEST_EXECUTION_HANDOFF_REGRESSION_VERSION_MISMATCH', '影响回归引用与固定回归套件版本不一致', 422); const member = required(regression!.members.find(candidate => candidate.caseId === item.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '影响回归套件成员不存在'); add('impacted_regression', regression!.id, item.caseId, member.revision, item.executionMethods, item.reason) })
-      if (input.strategy !== 'fast') regression!.members.forEach(item => add('full_regression', regression!.id, item.caseId, item.revision, legacySuiteMemberUiApiMethods(item), item.reason))
-      const canonicalContent = { projectId: version.projectId, projectVersionId: version.projectVersionId, testCaseSetVersionId: version.id, strategy: input.strategy, ...(smoke ? { smokeSuiteVersionId: smoke.id } : {}), regressionSuiteVersionId: regression!.id, members }
-      const contentSha256 = canonicalSha256(canonicalContent)
-      const existing = aggregate.executionHandoffs.find(item => item.projectVersionId === version.projectVersionId && item.strategy === input.strategy && item.contentSha256 === contentSha256)
-      if (existing) return structuredClone(existing)
-      const handoff: TestExecutionHandoff = { id: `test_execution_handoff_${randomUUID()}`, ...canonicalContent, contentSha256, createdBy: principal.subjectId, createdAt: now() }; aggregate.executionHandoffs.push(handoff); return structuredClone(handoff)
-    })
-  }
-
-  async listHandoffs(versionId: string) { const state = await this.store.snapshot(); return structuredClone(readDesignState(state).executionHandoffs.filter(item => item.testCaseSetVersionId === versionId).sort(newest)) }
   async getHandoff(handoffId: string) { const state = await this.store.snapshot(); return structuredClone(required(readDesignState(state).executionHandoffs.find(item => item.id === handoffId), 'TEST_EXECUTION_HANDOFF_NOT_FOUND', '执行交接不存在')) }
-  async smokeCandidates(versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); return structuredClone(required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在').smokeCandidates.filter(item => !item.testCaseSetVersionId || item.testCaseSetVersionId === versionId)) }
-  async impactedRegression(versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); return structuredClone(required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在').impactedRegression.filter(item => !item.testCaseSetVersionId || item.testCaseSetVersionId === versionId)) }
 
   private async executeNode(runId: string, key: 'test_case_design' | 'test_design_repair', signal: AbortSignal, upstream: unknown) {
     await this.store.transaction(state => { const run = findRunById(state, runId); const target = node(run, key); Object.assign(target, { status: 'running', attempt: target.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined, execution: undefined }); Object.assign(run, { status: 'running', stage: key, startedAt: run.startedAt ?? now(), finishedAt: undefined, error: undefined, errorCode: undefined }); if (key === 'test_design_repair' && run.automaticRepair?.status === 'queued') Object.assign(run.automaticRepair, { status: 'running', startedAt: now(), finishedAt: undefined }) })
@@ -747,31 +599,6 @@ export class TestDesignService {
   private async fencedNodeTransaction<T>(nodeRunId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>) { if (!this.store.transactionWithTestDesignLease) throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '当前 Store 不支持测试设计节点租约', 503); const result = await this.store.transactionWithTestDesignLease(nodeRunId, lease, operation); if (result === null) throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '测试设计节点租约已失效', 409); return result }
   private async loadRun(runId: string) { const state = await this.store.snapshot(); return structuredClone(findRunById(state, runId)) }
   private async loadScopedRun(projectVersionId: string, designId: string, runId: string) { const state = await this.store.snapshot(); return structuredClone(findRun(state, projectVersionId, designId, runId)) }
-  private async projectCaseSet(versionId: string, trigger: 'upload' | 'retry') {
-    if (!this.projector) throw new TestDesignError('TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '用例集必须投影到正式 AssetVersion，但资产服务不可用', 503)
-    const state = await this.store.snapshot()
-    const version = required(readDesignState(state).caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在')
-    const projectVersion = required(state.projectVersions.find(item => item.id === version.projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
-    const run = required(readDesignState(state).runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '测试设计运行不存在')
-    const dataSet = required(run.dataSetVersions.find(item => item.id === version.dataSetVersionId), 'TEST_DATA_REQUIREMENT_SET_NOT_FOUND', '测试数据版本不存在')
-    const base = required(state.knowledgeBases.find(item => item.projectId === version.projectId), 'TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '项目知识库不存在')
-    const files = testCaseProjectionFiles(projectVersion.name, version, dataSet)
-    try {
-      const projected = await this.projectWorkspaceFiles(base.id, `test-case-set:${version.id}`, 'test_case', files, trigger)
-      await this.store.transaction(draft => {
-        const aggregate = designState(draft)
-        const target = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在')
-        target.projection = { status: projected.some(item => item.pending) ? 'pending' : 'succeeded', files: projected.map(item => ({ logicalPath: item.file.logicalPath, contentSha256: item.file.contentSha256, assetVersionId: item.assetVersionId })) }
-        const currentRun = required(aggregate.runs.find(item => item.id === target.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '测试设计运行不存在')
-        const paths = new Set(projected.map(item => item.file.logicalPath))
-        currentRun.formalWorkspaceFiles = [...currentRun.formalWorkspaceFiles.filter(item => !paths.has(item.logicalPath)), ...projected.map(item => ({ ...item.file, sourceType: 'test_case_set_version' as const, sourceId: target.id, assetVersionId: item.assetVersionId }))]
-      })
-    } catch (error) {
-      await this.store.transaction(draft => { const target = required(designState(draft).caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); target.projection = { status: 'failed', files: [], error: String(error instanceof Error ? error.message : error).slice(0, 2_000) } })
-      throw error
-    }
-  }
-
   private async projectLibraryVersion(versionId: string) {
     if (!this.projector) throw new TestDesignError('TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '正式用例库必须投影到 Workspace AssetVersion，但资产服务不可用', 503)
     const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.libraryVersions.find(item => item.id === versionId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); const sourceRun = version.sourceRunId ? aggregate.runs.find(item => item.id === version.sourceRunId) : undefined; const projectVersion = required(sourceRun ? state.projectVersions.find(item => item.id === sourceRun.projectVersionId) : state.projectVersions.filter(item => item.projectId === version.projectId).sort(newest)[0], 'PROJECT_VERSION_NOT_FOUND', '用例库项目版本不存在'); const base = required(state.knowledgeBases.find(item => item.projectId === version.projectId), 'TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '项目知识库不存在'); const files = libraryProjectionFiles(projectVersion.name, version, aggregate.libraryCases)
@@ -813,72 +640,31 @@ function repairInput(run: TestDesignWorkflowRun) {
   return { schemaVersion: 'test-design-repair-context/v1', attempt: state.attempt, maxAttempts: state.maxAttempts, auditId: audit.id, blockers: selectedRepairBlockers(audit, state), candidateWorkspacePath: 'workspace/agent_workspace/planning_agent/current-test-cases.json', baseCandidateSha256: canonicalSha256(repairCandidateContent(run)) }
 }
 
-/** The stable Service-owned base used for both the repair Workspace and v2 Patch conflict detection. */
+/** Stable Service-owned base used for the repair Workspace and v3 Patch conflict detection. */
 export function repairCandidateContent(run: TestDesignWorkflowRun): RepairCandidateSnapshot {
   const activeCases = run.testCases.filter(item => !item.tombstonedAt)
-  const refById = new Map(activeCases.map(item => [item.id, item.candidateRef ?? `case-${item.id}`]))
-  const proposalByCandidateCaseId = new Map(run.caseChangeProposals.flatMap(item => item.candidateCaseId ? [[item.candidateCaseId, item] as const] : []))
-  const dataSet = run.dataSetVersions.at(-1)
   return {
-    schemaVersion: 'test-design-repair/v1',
+    schemaVersion: 'test-case-design/v3',
     cases: activeCases.map(testCase => {
       const revision = currentCaseRevision(testCase)
-      const proposal = proposalByCandidateCaseId.get(testCase.id)
-      return { ref: requiredRepairCaseRef(refById, testCase.id), ...structuredClone(revision.content), dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [], ...(proposal ? { changeReason: proposal.reason, confidence: proposal.confidence } : {}) }
+      return { ref: testCase.candidateRef ?? `case-${testCase.id}`, ...structuredClone(revision.content) }
     }),
-    dimensionAssessments: structuredClone(run.dimensionAssessments ?? []),
-    scenarioClaims: structuredClone(run.scenarioClaims ?? []),
-    dataRequirements: (dataSet?.requirements ?? []).map((item, index): TestDataRequirementCandidate => ({
-      ref: `data-${index + 1}`,
-      name: item.name,
-      entityType: item.entityType,
-      featureTags: [...item.featureTags],
-      requirementRefs: [...(item.requirementRefs ?? [])],
-      caseRefs: item.caseIds.map(id => requiredRepairCaseRef(refById, id)),
-      fieldConstraints: structuredClone(item.fieldConstraints),
-      relationships: [...item.relationships],
-      quantity: item.quantity,
-      initialState: item.initialState,
-      preparationHint: item.preparationHint,
-      sensitivity: item.sensitivity,
-      isolation: item.isolation,
-      resetAndCleanup: item.resetAndCleanup,
-      readiness: item.readiness,
-      ...(item.readinessReason ? { readinessReason: item.readinessReason } : {}),
-    })),
-    findings: run.findings.map(item => ({ title: item.title, description: item.description, severity: item.severity, basisRefs: [...item.basisRefs] })),
-    confirmationItems: run.confirmationItems.filter(item => item.impactStage !== 'handoff').map(item => ({ title: item.title, question: item.question, decisionType: item.decisionType, impactStage: item.impactStage, affectedRefs: [...item.affectedRefs], blocker: item.blocker })),
-    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: requiredRepairCaseRef(refById, item.candidateCaseId) } : {}), requirementRefs: [...(item.requirementRefs ?? [])], reason: item.reason, confidence: item.confidence })),
   }
 }
 
 function completeCandidateSnapshot(value: TestCaseDesignCandidate | RepairCandidateSnapshot) {
   return {
-    schemaVersion: 'test-design-candidate-snapshot/v2',
+    schemaVersion: 'test-design-candidate-snapshot/v3',
     sourceSchemaVersion: value.schemaVersion,
     cases: value.cases.map(item => 'content' in item ? flatCandidateCase(item) : structuredClone(item)),
-    dimensionAssessments: structuredClone(value.dimensionAssessments),
-    scenarioClaims: structuredClone(value.scenarioClaims),
-    dataRequirements: structuredClone(value.dataRequirements),
-    findings: structuredClone(value.findings),
-    confirmationItems: structuredClone(value.confirmationItems),
-    proposals: structuredClone(value.proposals),
   }
 }
 
-function flatCandidateCase(candidate: CandidateCase): RepairCandidateCase { return { ref: candidate.ref, ...structuredClone(candidate.content), ...(candidate.changeReason ? { changeReason: candidate.changeReason } : {}), ...(candidate.confidence === undefined ? {} : { confidence: candidate.confidence }) } }
+function flatCandidateCase(candidate: CandidateCase): RepairCandidateCase { return { ref: candidate.ref, ...structuredClone(candidate.content) } }
 function requiredRepairCaseRef(refById: Map<string, string>, caseId: string) {
   const ref = refById.get(caseId)
   if (!ref) throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REFERENCE_INVALID', `自动修复候选引用的用例不存在或已删除：${caseId}`, 409)
   return ref
-}
-
-function materializeDesignIssues(run: TestDesignWorkflowRun, raw: unknown) {
-  const value = raw && typeof raw === 'object' ? raw as { findings?: unknown[]; confirmationItems?: unknown[] } : {}
-  const findings = (Array.isArray(value.findings) ? value.findings : []).slice(0, 500).map((candidate, index) => { const item = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {}; return { id: `test_design_finding_${randomUUID()}`, title: cleanRequired(String(item.title ?? `Finding ${index + 1}`), 'Finding 标题', 500), description: String(item.description ?? '').slice(0, 8_000), severity: ['blocker', 'high', 'medium', 'low'].includes(String(item.severity)) ? item.severity as 'blocker' | 'high' | 'medium' | 'low' : 'medium', basisRefs: Array.isArray(item.basisRefs) ? item.basisRefs.map(String) : [], state: 'open' as const, actions: [] } })
-  const confirmations = (Array.isArray(value.confirmationItems) ? value.confirmationItems : []).slice(0, 500).map((candidate, index) => { const item = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {}; return { id: `test_design_confirmation_${randomUUID()}`, title: cleanRequired(String(item.title ?? `待确认项 ${index + 1}`), '待确认项标题', 500), question: String(item.question ?? '').slice(0, 8_000), decisionType: String(item.decisionType ?? 'other').slice(0, 200), impactStage: ['case', 'data', 'publication', 'handoff'].includes(String(item.impactStage)) ? item.impactStage as 'case' | 'data' | 'publication' | 'handoff' : 'publication', affectedRefs: Array.isArray(item.affectedRefs) ? item.affectedRefs.map(String) : [], blocker: item.blocker === true, state: 'open' as const, actions: [] } })
-  for (const finding of findings) if (!run.findings.some(item => item.title === finding.title && item.description === finding.description)) run.findings.push(finding)
-  for (const confirmation of confirmations) if (!run.confirmationItems.some(item => item.title === confirmation.title && item.question === confirmation.question)) run.confirmationItems.push(confirmation)
 }
 
 function buildBasisSnapshot(design: TestDesign, requirement: BoundRequirementRelease, createdAt: string): TestDesignBasisSnapshot {
@@ -942,29 +728,16 @@ function buildHistoricalSnapshot(state: DatabaseState, design: TestDesign, creat
     const revision = required(sourceCase.revisions.find(item => item.revision === member.revision), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '正式历史用例 Revision 不存在')
     items.push({ id: `history_${libraryVersion!.id}_${sourceCase.id}_${revision.revision}`, kind, sourceId: `${libraryVersion!.id}:${sourceCase.id}:${revision.revision}`, contentSha256: revision.semanticSha256, content: structuredClone(revision.content), locator: { testCaseLibraryVersionId: libraryVersion!.id, caseId: sourceCase.id, revision: revision.revision, status: sourceCase.status } })
   }
-  for (const legacySelection of design.input.historicalCaseSelections ?? []) {
-    if (legacySelection.sourceType !== 'asset_version') continue
-    if (!inheritedSource || !sourceVersionHasAssetVersion(state, inheritedSource.id, legacySelection.assetVersionId!)) throw new TestDesignError('TEST_DESIGN_SOURCE_INHERITANCE_REQUIRED', '历史资产必须来自明确继承的来源版本', 422)
-    items.push(assetContentRef(state, design.projectId, legacySelection.assetVersionId!, 'historical_case_asset'))
-  }
   const baseline = libraryVersion
-  const selectedCaseIds = new Set(items.flatMap(item => {
-    const locator = item.locator as { caseId?: unknown } | undefined
-    return typeof locator?.caseId === 'string' ? [locator.caseId] : []
-  }))
-  const dataRequirements = libraryVersion?.dataRequirementSet?.requirements
-    .filter(item => item.caseIds.some(caseId => selectedCaseIds.has(caseId)))
-    .map(item => structuredClone(item))
   const base = {
     schemaVersion: 'historical-case-snapshot/v1' as const,
     items,
-    ...(dataRequirements?.length ? { dataRequirements } : {}),
     ...(baseline ? { baseTestCaseLibraryVersionId: baseline.id, baseTestCaseLibraryVersionSha256: baseline.contentSha256 } : {}),
     createdAt,
   }
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
-function assetContentRef(state: DatabaseState, projectId: string, versionId: string, kind: 'knowledge_asset' | 'historical_case_asset') { const version = required(state.versions.find(item => item.id === versionId && item.status === 'ready'), 'TEST_DESIGN_ASSET_NOT_READY', `资产版本 ${versionId} 不存在或未就绪`); const asset = required(state.assets.find(item => item.id === version.assetId), 'TEST_DESIGN_ASSET_NOT_READY', '资产不存在'); const base = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId && item.projectId === projectId), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '资产不属于当前项目'); return { id: `basis_asset_${version.id}`, kind, sourceId: version.id, contentSha256: version.contentHash, content: { assetId: asset.id, assetVersionId: version.id, assetType: asset.assetType, displayName: asset.displayName, logicalPath: asset.logicalPath, content: version.content, chunks: version.chunks.map(({ embedding: _embedding, ...chunk }) => chunk) }, locator: { projectId, knowledgeBaseId: base.id, assetId: asset.id, assetVersionId: version.id, logicalPath: asset.logicalPath } } }
+function assetContentRef(state: DatabaseState, projectId: string, versionId: string, kind: 'knowledge_asset') { const version = required(state.versions.find(item => item.id === versionId && item.status === 'ready'), 'TEST_DESIGN_ASSET_NOT_READY', `资产版本 ${versionId} 不存在或未就绪`); const asset = required(state.assets.find(item => item.id === version.assetId), 'TEST_DESIGN_ASSET_NOT_READY', '资产不存在'); const base = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId && item.projectId === projectId), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '资产不属于当前项目'); return { id: `basis_asset_${version.id}`, kind, sourceId: version.id, contentSha256: version.contentHash, content: { assetId: asset.id, assetVersionId: version.id, assetType: asset.assetType, displayName: asset.displayName, logicalPath: asset.logicalPath, content: version.content, chunks: version.chunks.map(({ embedding: _embedding, ...chunk }) => chunk) }, locator: { projectId, knowledgeBaseId: base.id, assetId: asset.id, assetVersionId: version.id, logicalPath: asset.logicalPath } } }
 function knowledgeBasisItems(state: DatabaseState, projectId: string, versionId: string) {
   const source = assetContentRef(state, projectId, versionId, 'knowledge_asset')
   const content = source.content as { assetId: string; assetVersionId: string; assetType: string; displayName: string; logicalPath: string; content: string; chunks: Array<{ id: string; chunkKey?: string; content: string; headingPath?: string[]; startLine?: number; endLine?: number }> }
@@ -1029,12 +802,6 @@ function validateDesignSources(state: DatabaseState, projectVersion: ProjectVers
     const index = required(state.indexes.find(item => item.id === augmentation.indexVersionId && item.status === 'active'), 'TEST_DESIGN_AUGMENTATION_INVALID', '固定索引不存在或未激活')
     const base = required(state.knowledgeBases.find(item => item.id === index.knowledgeBaseId), 'TEST_DESIGN_AUGMENTATION_INVALID', '固定索引知识库不存在')
     if (base.projectId !== projectId) throw new TestDesignError('TEST_DESIGN_AUGMENTATION_INVALID', '固定索引不属于当前项目')
-  }
-  for (const selection of input.historicalCaseSelections ?? []) {
-    const source = explicitlyInheritedSourceVersion(state, projectVersion)
-    if (selection.sourceType === 'asset_version' && source && sourceVersionHasAssetVersion(state, source.id, selection.assetVersionId!)) assetContentRef(state, projectId, selection.assetVersionId!, 'historical_case_asset')
-    else if (selection.sourceType === 'asset_version') throw new TestDesignError('TEST_DESIGN_SOURCE_INHERITANCE_REQUIRED', '当前版本未明确继承来源版本中的该历史资产', 422)
-    else throw new TestDesignError('TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '结构化历史用例请改用项目级用例库版本', 422)
   }
   const historical = input.historicalLibrarySelection ?? { mode: 'none' as const }
   if (historical.mode === 'none') return
@@ -1149,27 +916,15 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
 
 export function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean): TestCaseDesignCandidate {
   const submitted = validateTestCaseDesignCandidate(raw, repair)
-  const value = isTestDesignRepairPatch(submitted)
-    ? applyRepairPatch(run, submitted)
-    : validateHistoricalProposalPlan(submitted, run.historicalSnapshot)
-  if (!value.cases.length) throw new TestDesignError('TEST_DESIGN_CANDIDATE_EMPTY_WITHOUT_REUSABLE_HISTORY', 'test-case-design/v2 提交 cases: [] 时，当前版本必须明确继承且冻结快照中至少存在一条可复用历史用例', 422)
-  assertRequestedExecutionMethodCoverage(run, value)
+  const value = isTestDesignRepairPatch(submitted) ? applyRepairPatch(run, submitted) : submitted
+  if (!value.cases.length) throw new TestDesignError('TEST_DESIGN_CANDIDATE_EMPTY', 'test-case-design/v3 至少需要一条测试用例', 422)
+  validateCandidateRequirementRefs(run, value)
   const existingByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
   const idByRef = new Map(value.cases.map(candidate => [candidate.ref, existingByRef.get(candidate.ref)?.id ?? `test_case_${randomUUID()}`]))
-  const existingDataIdByRef = new Map((run.dataSetVersions.at(-1)?.requirements ?? []).map((item, index) => [`data-${index + 1}`, item.id]))
-  const dataIdByRef = new Map(value.dataRequirements.map(candidate => [candidate.ref, repair ? existingDataIdByRef.get(candidate.ref) ?? `test_data_${randomUUID()}` : `test_data_${randomUUID()}`]))
-  const proposalByCandidateRef = new Map(value.proposals.flatMap(item => item.candidateRef ? [[item.candidateRef, item] as const] : []))
-  const historicalBySourceKey = new Map(run.historicalSnapshot.items.flatMap(item => {
-    const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
-    return typeof locator?.caseId === 'string' && Number.isInteger(locator.revision) ? [[`${locator.caseId}:${locator.revision}`, item] as const] : []
-  }))
   const nextCases = value.cases.map(candidate => {
-    const dependencies = candidate.content.dependencies.map(reference => required(idByRef.get(reference), 'TEST_CASE_DEPENDENCY_INVALID', `依赖用例 ref ${reference} 不存在`))
-    const dataRequirementIds = value.dataRequirements.filter(item => item.caseRefs.includes(candidate.ref)).map(item => dataIdByRef.get(item.ref)!)
-    const content = { ...candidate.content, dependencies, dataRequirementIds }
+    const content = candidate.content
     const current = existingByRef.get(candidate.ref)
-    const proposal = proposalByCandidateRef.get(candidate.ref)
-    const historical = proposal?.sourceCaseId && proposal.sourceRevision !== undefined ? historicalBySourceKey.get(`${proposal.sourceCaseId}:${proposal.sourceRevision}`) : undefined
+    const historical = findHistoricalSemanticMatch(run, content)
     if (current) {
       const previous = currentCaseRevision(current)
       if (previous.semanticSha256 !== semanticContentSha256(content)) {
@@ -1189,31 +944,22 @@ export function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, 
   })
   if (repair) for (const removed of run.testCases.filter(item => item.candidateRef && !idByRef.has(item.candidateRef))) removed.tombstonedAt = now()
   run.testCases = repair ? [...run.testCases.filter(item => !item.candidateRef), ...nextCases] : nextCases
-  run.dimensionAssessments = structuredClone(value.dimensionAssessments)
-  run.scenarioClaims = structuredClone(value.scenarioClaims)
-  const requirements: TestDataRequirement[] = value.dataRequirements.map(candidate => ({
-    id: dataIdByRef.get(candidate.ref)!, name: candidate.name, entityType: candidate.entityType, featureTags: candidate.featureTags, requirementRefs: candidate.requirementRefs,
-    caseIds: candidate.caseRefs.map(reference => required(idByRef.get(reference), 'TEST_DATA_REQUIREMENT_CASE_INVALID', `数据需求引用的用例 ref ${reference} 无效`)),
-    fieldConstraints: candidate.fieldConstraints, relationships: candidate.relationships, quantity: candidate.quantity, initialState: candidate.initialState, preparationHint: candidate.preparationHint, sensitivity: candidate.sensitivity, isolation: candidate.isolation, resetAndCleanup: candidate.resetAndCleanup, readiness: candidate.readiness, ...(candidate.readinessReason ? { readinessReason: candidate.readinessReason } : {}),
-  }))
-  const normalizedRequirements = validateDataRequirements(run, requirements)
-  const currentDataSet = run.dataSetVersions.at(-1)
-  if (!currentDataSet || currentDataSet.contentSha256 !== canonicalSha256(normalizedRequirements)) run.dataSetVersions.push(dataSetVersion(run.dataSetVersions.length + 1, normalizedRequirements, actorId))
   materializeCaseChangeProposals(run, value, nextCases)
-  materializeDesignIssues(run, value)
   validateCurrentDependencyGraph(run)
   return value
 }
 
-function assertRequestedExecutionMethodCoverage(run: TestDesignWorkflowRun, value: TestCaseDesignCandidate) {
-  const covered = new Set(value.cases.flatMap(candidate => candidate.content.executionMethods.map(method => method.method)))
-  const missingMethods = (run.requestedExecutionMethods ?? []).filter(method => !covered.has(method))
-  if (missingMethods.length) throw new TestDesignError(
-    'TEST_DESIGN_EXECUTION_METHOD_UNCOVERED',
-    `测试设计选择的执行方式未出现在任何功能或安全用例中：${missingMethods.join('、')}；缺少接口、URL 或定位器等执行数据时请保留对应方式、将字段留空并标记 needs_confirmation`,
-    422,
-    { requestedExecutionMethods: run.requestedExecutionMethods, coveredExecutionMethods: [...covered], missingMethods },
-  )
+function validateCandidateRequirementRefs(run: TestDesignWorkflowRun, value: TestCaseDesignCandidate) {
+  const allowed = new Set(run.basisSnapshot.content.requirements.map(item => item.clientRequirementPointId.trim()))
+  for (const candidate of value.cases) {
+    const invalid = candidate.content.requirementRefs.filter(ref => !allowed.has(ref))
+    if (invalid.length) throw new TestDesignError('TEST_CASE_REQUIREMENT_REFERENCE_INVALID', `用例 ${candidate.ref} 引用了当前 Requirement Release 之外的需求：${invalid.join('、')}`, 422, { ref: candidate.ref, invalidRequirementRefs: invalid })
+  }
+}
+
+function findHistoricalSemanticMatch(run: TestDesignWorkflowRun, content: TestCaseContent) {
+  const hash = semanticContentSha256(content)
+  return run.historicalSnapshot.items.find(item => item.contentSha256 === hash)
 }
 
 function applyRepairPatch(run: TestDesignWorkflowRun, patch: TestDesignRepairPatch): TestCaseDesignCandidate {
@@ -1221,93 +967,44 @@ function applyRepairPatch(run: TestDesignWorkflowRun, patch: TestDesignRepairPat
   const actualSha256 = canonicalSha256(before)
   if (patch.baseCandidateSha256 !== actualSha256) throw new TestDesignError('TEST_DESIGN_REPAIR_BASE_CANDIDATE_CONFLICT', 'Repair Patch 的 baseCandidateSha256 与当前完整 Candidate 不一致，请重新读取当前快照后提交', 409, { expectedBaseCandidateSha256: actualSha256, actualBaseCandidateSha256: patch.baseCandidateSha256 })
   const cases = new Map(before.cases.map(item => [item.ref, structuredClone(item)]))
-  const scenarioClaims = structuredClone(before.scenarioClaims)
-  const dataRequirements = new Map(before.dataRequirements.map(item => [item.ref, structuredClone(item)]))
-  const dimensions = new Map(before.dimensionAssessments.map(item => [item.dimension, structuredClone(item)]))
-  const proposals = before.proposals.map(item => structuredClone(item))
-  const activeCaseByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
-  const proposalByCandidateRef = new Map(proposals.flatMap(item => item.candidateRef ? [[item.candidateRef, item] as const] : []))
-
   for (const ref of patch.removeCaseRefs) {
-    const current = activeCaseByRef.get(ref)
-    const proposal = proposalByCandidateRef.get(ref)
-    if (!current || !cases.has(ref)) throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REFERENCE_INVALID', `removeCaseRefs 引用了不存在的当前 Candidate：${ref}`, 422)
-    if (current.origin === 'historical_unchanged' || proposal?.operation === 'reuse' || proposal?.operation === 'update') throw new TestDesignError('TEST_DESIGN_REPAIR_HISTORICAL_CASE_REMOVAL_FORBIDDEN', `不能通过 Repair Patch 删除冻结历史 Case：${ref}`, 422)
-    if (proposal?.operation && proposal.operation !== 'create') throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REMOVAL_FORBIDDEN', `removeCaseRefs 只能删除本轮新增 Candidate：${ref}`, 422)
-    cases.delete(ref)
-    for (let index = scenarioClaims.length - 1; index >= 0; index -= 1) if (scenarioClaims[index].caseRef === ref) scenarioClaims.splice(index, 1)
-    const proposalIndex = proposals.findIndex(item => item.candidateRef === ref)
-    if (proposalIndex >= 0) proposals.splice(proposalIndex, 1)
+    if (!cases.delete(ref)) throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REFERENCE_INVALID', `removeCaseRefs 引用了不存在的当前 Candidate：${ref}`, 422)
   }
   for (const candidate of patch.upsertCases) {
-    const previous = cases.get(candidate.ref)
-    const next = flatCandidateCase(candidate)
-    const currentClaims = scenarioClaims.filter(item => item.caseRef === candidate.ref)
-    if (candidate.coverageClaims !== undefined) {
-      for (let index = scenarioClaims.length - 1; index >= 0; index -= 1) if (scenarioClaims[index].caseRef === candidate.ref) scenarioClaims.splice(index, 1)
-      scenarioClaims.push(...candidate.coverageClaims)
-    }
-    if (previous && semanticContentSha256(previous) === semanticContentSha256(next)) {
-      cases.set(candidate.ref, previous)
-      continue
-    }
-    if (candidate.coverageClaims === undefined && currentClaims.length && currentClaims.some(claim => claim.requirementRefs.some(requirementRef => !candidate.content.requirementRefs.includes(requirementRef)))) {
-      for (let index = scenarioClaims.length - 1; index >= 0; index -= 1) if (scenarioClaims[index].caseRef === candidate.ref) scenarioClaims.splice(index, 1)
-      scenarioClaims.push(...currentClaims.map(claim => ({ ...claim, requirementRefs: [...candidate.content.requirementRefs] })))
-    }
-    cases.set(candidate.ref, next)
-    const proposal = proposalByCandidateRef.get(candidate.ref)
-    if (!proposal) {
-      proposals.push({ operation: 'create', candidateRef: candidate.ref, requirementRefs: [...candidate.content.requirementRefs], reason: candidate.changeReason ?? 'Coverage Audit 修复产生的新测试场景', confidence: candidate.confidence ?? 0.8 })
-      continue
-    }
-    proposal.requirementRefs = [...candidate.content.requirementRefs]
-    if (candidate.changeReason) proposal.reason = candidate.changeReason
-    if (candidate.confidence !== undefined) proposal.confidence = candidate.confidence
-    if (proposal.sourceCaseId && proposal.sourceRevision !== undefined && (proposal.operation === 'reuse' || proposal.operation === 'update')) {
-      const source = run.historicalSnapshot.items.find(item => {
-        const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
-        return locator?.caseId === proposal.sourceCaseId && locator?.revision === proposal.sourceRevision
-      })
-      if (!source) throw new TestDesignError('CASE_CHANGE_PROPOSAL_SOURCE_INVALID', 'Repair Patch 的历史 Proposal 来源不属于当前冻结快照', 422)
-      proposal.operation = semanticContentSha256(candidate.content) === source.contentSha256 ? 'reuse' : 'update'
-    }
+    cases.set(candidate.ref, flatCandidateCase(candidate))
   }
-  for (const ref of patch.removeDataRequirementRefs) {
-    if (!dataRequirements.delete(ref)) throw new TestDesignError('TEST_DESIGN_REPAIR_DATA_REQUIREMENT_REFERENCE_INVALID', `removeDataRequirementRefs 引用了不存在的数据需求：${ref}`, 422)
-  }
-  for (const item of patch.upsertDataRequirements) dataRequirements.set(item.ref, structuredClone(item))
-  for (const item of patch.dimensionAssessmentUpdates) dimensions.set(item.dimension, structuredClone(item))
-
-  const full: Record<string, unknown> = {
-    schemaVersion: 'test-design-repair/v1',
-    cases: [...cases.values()],
-    dimensionAssessments: ['functional', 'performance', 'stability', 'compatibility', 'security'].flatMap(dimension => dimensions.has(dimension as TestCaseContent['dimension']) ? [dimensions.get(dimension as TestCaseContent['dimension'])] : []),
-    scenarioClaims,
-    dataRequirements: [...dataRequirements.values()],
-    findings: before.findings,
-    confirmationItems: before.confirmationItems,
-    proposals,
-  }
-  const normalized = validateTestCaseDesignCandidate(full, true)
+  const normalized = validateTestCaseDesignCandidate({ schemaVersion: 'test-case-design/v3', cases: [...cases.values()] }, false)
   if (isTestDesignRepairPatch(normalized)) throw new TestDesignError('TEST_DESIGN_REPAIR_PATCH_INVALID', 'Repair Patch 未能展开为完整 Candidate', 422)
-  return validateHistoricalProposalPlan(normalized, run.historicalSnapshot)
+  return normalized
 }
 
 function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestCaseDesignCandidate, cases: TestCase[]) {
   const byRef = new Map(cases.flatMap(testCase => testCase.candidateRef ? [[testCase.candidateRef, testCase] as const] : []))
+  const usedHistorical = new Set<string>()
+  const candidates: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; reason: string; confidence: number }> = value.cases.map(candidate => {
+    const testCase = required(byRef.get(candidate.ref), 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', '候选用例不存在')
+    const revision = currentCaseRevision(testCase)
+    const exact = run.historicalSnapshot.items.find(item => item.contentSha256 === revision.semanticSha256 && !usedHistorical.has(item.id))
+    const similar = exact ?? run.historicalSnapshot.items.find(item => {
+      if (usedHistorical.has(item.id) || !item.content || typeof item.content !== 'object') return false
+      const historicalContent = item.content as Partial<TestCaseContent>
+      return historicalContent.title === revision.content.title && historicalContent.dimension === revision.content.dimension
+    })
+    const historical = similar
+    if (historical) usedHistorical.add(historical.id)
+    const locator = historical?.locator as { caseId?: string; revision?: number } | undefined
+    return historical && locator?.caseId && locator.revision !== undefined
+      ? { operation: (historical.contentSha256 === revision.semanticSha256 ? 'reuse' : 'update') as 'reuse' | 'update', sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: candidate.ref, requirementRefs: requirementRefsForCase(run, revision.content), reason: historical.contentSha256 === revision.semanticSha256 ? 'Service 语义匹配到相同冻结 Revision' : 'Service 识别到同标题同维度的语义变化', confidence: historical.contentSha256 === revision.semanticSha256 ? 1 : 0.8 }
+      : { operation: 'create' as const, candidateRef: candidate.ref, requirementRefs: requirementRefsForCase(run, revision.content), reason: 'Service 未匹配到可复用的冻结历史用例', confidence: 0.8 }
+  })
+  for (const historical of run.historicalSnapshot.items.filter(item => !usedHistorical.has(item.id))) {
+    const locator = historical.locator as { caseId?: string; revision?: number } | undefined
+    if (locator?.caseId && locator.revision !== undefined) candidates.push({ operation: 'deprecate', sourceCaseId: locator.caseId, sourceRevision: locator.revision, requirementRefs: [], reason: '本轮候选未匹配该冻结历史用例，是否废弃需人工决定', confidence: 0.5 })
+  }
   const frozenByCase = new Map(run.historicalSnapshot.items.flatMap(item => {
     const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
     return typeof locator?.caseId === 'string' && Number.isInteger(locator.revision) ? [[`${locator.caseId}:${locator.revision}`, item] as const] : []
   }))
-  const candidates = value.proposals.length ? value.proposals : cases.map(testCase => {
-    const revision = currentCaseRevision(testCase)
-    const historical = run.historicalSnapshot.items.find(item => item.contentSha256 === revision.semanticSha256)
-    const locator = historical?.locator as { caseId?: string; revision?: number } | undefined
-    return historical && locator?.caseId && locator.revision !== undefined
-      ? { operation: 'reuse' as const, sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: testCase.candidateRef, requirementRefs: requirementRefsForCase(run, revision.content), reason: '与冻结历史 Revision 语义一致，优先复用', confidence: 1 }
-      : { operation: 'create' as const, candidateRef: testCase.candidateRef, requirementRefs: requirementRefsForCase(run, revision.content), reason: '冻结历史用例无法覆盖该 Requirement', confidence: 0.8 }
-  })
   const existing = new Map(run.caseChangeProposals.map(item => [proposalAssociation(item.sourceCaseId, item.sourceRevision, cases.find(candidate => candidate.id === item.candidateCaseId)?.candidateRef), item]))
   run.caseChangeProposals = candidates.map(candidate => {
     const source = candidate.sourceCaseId && candidate.sourceRevision !== undefined ? required(frozenByCase.get(`${candidate.sourceCaseId}:${candidate.sourceRevision}`), 'CASE_CHANGE_PROPOSAL_SOURCE_INVALID', 'Proposal 来源不属于冻结历史用例') : undefined
@@ -1414,10 +1111,6 @@ function repairBlockerCanRunIndependently(run: TestDesignWorkflowRun, audit: Cov
   return !audit.blockers.some(item => {
     if (item.resolution !== 'human_decision' && item.resolution !== 'manual_edit') return false
     if (relatedCaseIds.has(item.subjectId ?? '')) return true
-    const confirmation = run.confirmationItems.find(candidate => candidate.id === item.subjectId)
-    if (confirmation?.affectedRefs.includes(requirementId) || confirmation?.affectedRefs.some(ref => relatedCaseIds.has(ref))) return true
-    const finding = run.findings.find(candidate => candidate.id === item.subjectId)
-    if (finding?.basisRefs.includes(requirementId)) return true
     const clarification = run.basisSnapshot.content.clarifications.find(candidate => candidate.id === item.subjectId)
     return clarification?.requirementPointRefs.includes(requirementId) ?? false
   })
@@ -1437,52 +1130,14 @@ function repairBlockerCandidateIsSafe(run: TestDesignWorkflowRun, blocker: Cover
     return candidate.origin !== 'manual' && candidate.reviewActions.length === 0 && candidate.revisions.every(revision => revision.editorId === PLANNING_AGENT_EDITOR_ID) && (!proposal || proposal.decision === 'pending')
   })
 }
-function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { const dataSet = required(run.dataSetVersions.at(-1), 'TEST_CASE_NOT_READY', '数据需求版本不存在'); return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: run.testCases, dimensionAssessments: run.dimensionAssessments ?? [], scenarioClaims: run.scenarioClaims ?? [], dataSet, findings: run.findings, confirmationItems: run.confirmationItems }) }
+function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: run.testCases }) }
 function initialAutomaticRepairState(): NonNullable<TestDesignWorkflowRun['automaticRepair']> { return { status: 'idle', attempt: 0, maxAttempts: AUTOMATIC_REPAIR_MAX_ATTEMPTS, blockerCodes: [] } }
-
-function testCaseProjectionFiles(projectVersionName: string, version: TestCaseSetVersion, dataSet: TestDataRequirementSetVersion): TestDesignWorkspaceFile[] {
-  const directory = `workspace/branches/${safeWorkspaceSegment(projectVersionName)}/test-cases`
-  const casesJson = `${canonicalJson(version.canonicalContent)}\n`
-  const casesMarkdown = markdownCaseSet(version)
-  const dataJson = `${canonicalJson({ schemaVersion: 'test-data/v1', id: dataSet.id, version: dataSet.version, contentSha256: dataSet.contentSha256, requirements: dataSet.requirements })}\n`
-  const baseFiles = [
-    formalWorkspaceFile(`${directory}/test-cases.json`, 'test_case_set_version', version.id, casesJson),
-    formalWorkspaceFile(`${directory}/test-cases.md`, 'test_case_set_version', version.id, casesMarkdown),
-    formalWorkspaceFile(`${directory}/test-data.json`, 'test_case_set_version', version.id, dataJson),
-  ]
-  const manifestContent = `${canonicalJson({ schemaVersion: 'test-case-set-manifest/v1', testCaseSetVersionId: version.id, projectVersionId: version.projectVersionId, runId: version.runId, contentSha256: version.contentSha256, publishedAt: version.publishedAt, artifacts: baseFiles.map(item => ({ fileName: item.logicalPath.split('/').at(-1), mediaType: item.logicalPath.endsWith('.json') ? 'application/json' : 'text/markdown', contentSha256: item.contentSha256 })) })}\n`
-  return [...baseFiles, formalWorkspaceFile(`${directory}/manifest.json`, 'test_case_set_version', version.id, manifestContent)]
-}
-
-function formalWorkspaceFile(logicalPath: string, sourceType: 'test_case_set_version', sourceId: string, content: string): TestDesignWorkspaceFile {
-  return { logicalPath, sourceType, sourceId, contentSha256: canonicalSha256Text(content), content, displayName: logicalPath.split('/').at(-1) ?? logicalPath, sourceScope: 'formal_output' }
-}
 
 function normalizeWorkspacePath(value: string) { return value.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '') }
 function isWithinWorkspace(value: string) { const normalized = normalizeWorkspacePath(value); return normalized === 'workspace' || normalized.startsWith('workspace/') }
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 
-function validateDataRequirements(run: TestDesignWorkflowRun, requirements: TestDataRequirement[]) { const caseIds = new Set(run.testCases.filter(item => !item.tombstonedAt).map(item => item.id)); const ids = new Set<string>(); return requirements.map(requirement => { if (!requirement.id || ids.has(requirement.id)) throw new TestDesignError('TEST_DATA_REQUIREMENT_SCHEMA_INVALID', '数据需求 ID 缺失或重复', 422); ids.add(requirement.id); if (!requirement.name?.trim() || !requirement.entityType?.trim() || !Number.isInteger(requirement.quantity) || requirement.quantity < 1) throw new TestDesignError('TEST_DATA_REQUIREMENT_SCHEMA_INVALID', '数据需求基础字段无效', 422); if (requirement.caseIds.some(id => !caseIds.has(id))) throw new TestDesignError('TEST_DATA_REQUIREMENT_REFERENCE_INVALID', '数据需求引用不属于当前运行', 422); const serialized = canonicalJson(requirement); if (/(api[_ -]?key|authorization|cookie|token|身份证|真实账号)\s*[:=]\s*[^<\s]/iu.test(serialized)) throw new TestDesignError('TEST_DATA_REQUIREMENT_SECRET_FORBIDDEN', '数据需求不能包含真实凭据或个人敏感数据', 422); return structuredClone(requirement) }) }
-function dataSetVersion(version: number, requirements: TestDataRequirement[], actorId: string): TestDataRequirementSetVersion { return { id: `test_data_set_${randomUUID()}`, version, requirements: structuredClone(requirements), contentSha256: canonicalSha256(requirements), createdBy: actorId, createdAt: now() } }
-function freezeHandoffDataRequirementSnapshot(aggregate: TestDesignState, libraryVersion: TestCaseLibraryVersion, selections: Array<{ frozenContent?: TestCaseContent }>) {
-  const requiredIds = [...new Set(selections.flatMap(selection => selection.frozenContent?.dataRequirementIds ?? []))].sort((left, right) => left.localeCompare(right, 'en'))
-  if (!requiredIds.length) return undefined
-  const sourceRun = libraryVersion.sourceRunId ? aggregate.runs.find(item => item.id === libraryVersion.sourceRunId) : undefined
-  const sourceAudit = sourceRun && libraryVersion.publicationSummary?.coverageAudit.id
-    ? sourceRun.coverageAudits.find(item => item.id === libraryVersion.publicationSummary?.coverageAudit.id)
-    : undefined
-  const sourceSet = libraryVersion.dataRequirementSet
-    ?? (sourceAudit
-      ? sourceRun?.dataSetVersions.find(item => item.id === sourceAudit.dataSetVersionId)
-      : sourceRun?.dataSetVersions.at(-1))
-  if (!sourceSet) throw new TestDesignError('TEST_DATA_REQUIREMENT_SET_NOT_FOUND', '正式用例引用测试数据需求，但用例库版本没有保留独立数据需求快照', 409, { libraryVersionId: libraryVersion.id, requirementIds: requiredIds })
-  if (canonicalSha256(sourceSet.requirements) !== sourceSet.contentSha256) throw new TestDesignError('TEST_DATA_REQUIREMENT_SET_HASH_MISMATCH', '测试数据需求快照 Hash 不一致', 409, { sourceSetId: sourceSet.id })
-  const byId = new Map(sourceSet.requirements.map(requirement => [requirement.id, requirement]))
-  const requirements = requiredIds.map(id => structuredClone(required(byId.get(id), 'TEST_DATA_REQUIREMENT_NOT_FOUND', `测试数据需求 ${id} 不存在于固定数据需求版本`)))
-  const snapshot = { sourceSetId: sourceSet.id, sourceSetVersion: sourceSet.version, sourceSetSha256: sourceSet.contentSha256, requirements }
-  return { ...snapshot, contentSha256: canonicalSha256(snapshot) }
-}
-function semanticContentSha256(content: TestCaseContent) { return canonicalSha256({ ...content, tags: [...content.tags].sort() }) }
+function semanticContentSha256(content: TestCaseContent) { return canonicalSha256(content) }
 function synchronizeCandidateHistoricalOrigin(testCase: TestCase, historical: HistoricalCaseSnapshot['items'][number] | undefined) {
   if (!historical) return
   testCase.historicalSourceRef = historical.id
@@ -1490,47 +1145,19 @@ function synchronizeCandidateHistoricalOrigin(testCase: TestCase, historical: Hi
 }
 function newCase(runId: string, content: TestCaseContent, origin: TestCase['origin'], actorId: string, reason: string, id = `test_case_${randomUUID()}`): TestCase { const revision = createCaseRevision(0, content, actorId, reason); return { id, runId, origin, currentRevision: 0, reviewState: 'in_review', revisions: [revision], reviewActions: [] } }
 function createCaseRevision(revision: number, content: TestCaseContent, actorId: string, reason: string, previous?: TestCaseContent) { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: semanticContentSha256(content), diff: previous ? structuralDiff(previous, content) : [], editorId: actorId, reason: cleanRequired(reason, '保存说明', 2_000), createdAt: now() } }
-function createLibraryRevision(revision: number, content: TestCaseContent, actorId: string, changeReason: string, sourceRunId?: string, sourceProposalId?: string, traceability?: TestCaseTraceability): LibraryTestCaseRevision { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: canonicalSha256({ ...content, tags: [...content.tags].sort() }), ...(sourceRunId ? { sourceRunId } : {}), ...(sourceProposalId ? { sourceProposalId } : {}), ...(traceability ? { traceability: structuredClone(traceability) } : {}), changeReason, createdBy: actorId, createdAt: now() } }
+function createLibraryRevision(revision: number, content: TestCaseContent, actorId: string, changeReason: string, sourceRunId?: string, sourceProposalId?: string, traceability?: TestCaseTraceability): LibraryTestCaseRevision { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: canonicalSha256(content), ...(sourceRunId ? { sourceRunId } : {}), ...(sourceProposalId ? { sourceProposalId } : {}), ...(traceability ? { traceability: structuredClone(traceability) } : {}), changeReason, createdBy: actorId, createdAt: now() } }
 function currentLibraryRevision(testCase: LibraryTestCase) { return required(testCase.revisions.find(item => item.revision === testCase.currentRevision), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '正式用例当前 Revision 不存在') }
 function libraryCaseEtag(testCase: LibraryTestCase, revision = currentLibraryRevision(testCase)) { return `"library-case:${testCase.id}:r${revision.revision}:${canonicalSha256({ contentSha256: revision.contentSha256, status: testCase.status, updatedAt: testCase.updatedAt })}"` }
 function presentLibraryCase(testCase: LibraryTestCase, detail = false) { const revision = currentLibraryRevision(testCase); return { id: testCase.id, projectId: testCase.projectId, currentRevision: testCase.currentRevision, status: testCase.status, content: structuredClone(revision.content), contentSha256: revision.contentSha256, semanticSha256: revision.semanticSha256, createdAt: testCase.createdAt, updatedAt: testCase.updatedAt, etag: libraryCaseEtag(testCase, revision), ...(detail ? { revisions: structuredClone(testCase.revisions) } : {}) } }
 function findLibraryCase(state: DatabaseState, projectId: string, caseId: string) { return required(designState(state).libraryCases.find(item => item.id === caseId && item.projectId === projectId), 'LIBRARY_TEST_CASE_NOT_FOUND', '正式测试用例不存在') }
 function assertProjectExists(state: DatabaseState, projectId: string) { required(state.projects.find(item => item.id === projectId), 'PROJECT_NOT_FOUND', '项目不存在') }
-function executionMethodForContent(content: TestCaseContent): TestExecutionMethod { if (content.dimension === 'functional' || content.dimension === 'security') return content.executionMethods?.[0]?.method ?? content.executionSpec?.method ?? 'ui'; if (content.executionSpec) return content.executionSpec.method; if (content.dimension === 'performance') return 'performance_tool'; if (content.dimension === 'stability') return 'long_running'; if (content.dimension === 'compatibility') return 'environment_matrix'; return 'ui' }
-function executionMethodsForContent(content: TestCaseContent): TestExecutionMethod[] { if (content.dimension !== 'functional' && content.dimension !== 'security') return [executionMethodForContent(content)]; if (content.executionMethods?.length) return content.executionMethods.map(item => item.method); return content.executionSpec?.kind === 'functional' ? [content.executionSpec.method] : [] }
+function executionMethodForContent(content: TestCaseContent): TestExecutionMethod { return content.executionMethods[0] }
+function executionMethodsForContent(content: TestCaseContent): TestExecutionMethod[] { return [...content.executionMethods] }
 function executionSpecForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod) {
-  if (content.dimension !== 'functional' && content.dimension !== 'security') {
-    const spec = required(content.executionSpec, 'TEST_EXECUTION_CASE_NOT_READY', '正式用例缺少 executionSpec')
-    if (spec.method !== executionMethod) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式与冻结 Revision 的执行配置不一致', 422)
-    return structuredClone(spec)
-  }
-  if (executionMethod !== 'ui' && executionMethod !== 'api') throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '功能或安全用例只支持 UI/API 执行方式', 422)
-  const method = content.executionMethods?.find(item => item.method === executionMethod)
-  if (!method) {
-    const legacy = required(content.executionSpec && content.executionSpec.kind === 'functional' && content.executionSpec.method === executionMethod ? content.executionSpec : undefined, 'TEST_SUITE_EXECUTION_METHOD_INVALID', '冻结 Revision 未选择该执行方式')
-    return { ...structuredClone(legacy), preconditions: structuredClone(content.preconditions), testDataRequirements: structuredClone(content.dataRequirementIds), executionReadiness: 'needs_confirmation' as const, automationHint: legacy.automationHint || '历史用例缺少独立执行入口，待人工补充' }
-  }
-  return { kind: 'functional' as const, method: method.method, steps: structuredClone(method.steps), verificationChecks: structuredClone(method.verificationChecks), preconditions: structuredClone(content.preconditions), testDataRequirements: structuredClone(content.dataRequirementIds), executionReadiness: method.executionReadiness, automationHint: method.automationHint }
+  if (!content.executionMethods.includes(executionMethod)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '冻结 TestCase Revision 未选择该 UI/API 执行方式', 422)
+  return { schemaVersion: 'test-script-input/v1' as const, method: executionMethod, testCase: structuredClone(content) }
 }
-function concreteExecutionValue(value: unknown) { return typeof value === 'string' && Boolean(value.trim()) && !/(?:待确认|待补充|未提供|未知|legacy-untraced)/iu.test(value) }
-function executionConfigurationForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } {
-  const spec = executionSpecForMethod(content, executionMethod)
-  const issues: string[] = []
-  if (spec.kind === 'functional') {
-    if (!spec.steps.length || spec.steps.some(step => !concreteExecutionValue(step.action) || !concreteExecutionValue(step.expected))) issues.push('功能用例缺少完整执行步骤和预期结果')
-    const method = content.executionMethods?.find(item => item.method === spec.method)
-    if (!method) issues.push('功能用例 executionSpec.method 没有对应执行入口')
-    else if (method.method === 'ui' && !concreteExecutionValue(method.uiSpec.entry)) issues.push('功能 UI 用例缺少明确 UI 入口')
-    else if (method.method === 'ui' && !method.uiSpec.selectors?.some(concreteExecutionValue)) issues.push('功能 UI 用例缺少可执行 selector')
-    else if (method.method === 'api' && (!concreteExecutionValue(method.apiSpec.method) || !concreteExecutionValue(method.apiSpec.path))) issues.push('功能 API 用例缺少完整请求方法或路径')
-  } else if (spec.kind === 'performance') {
-    if (!spec.thresholds.length || spec.thresholds.some(threshold => !concreteExecutionValue(threshold.metric) || !concreteExecutionValue(threshold.target) || !concreteExecutionValue(threshold.sourceRef))) issues.push('性能用例缺少有效阈值或阈值来源')
-  } else if (spec.kind === 'stability') {
-    if (!concreteExecutionValue(spec.duration)) issues.push('稳定性用例缺少运行时长')
-  } else if (![...spec.browserMatrix, ...spec.operatingSystemMatrix, ...spec.viewportMatrix, ...spec.versionMatrix].some(concreteExecutionValue)) issues.push('兼容性用例缺少环境矩阵')
-  const status = spec.executionReadiness === 'blocked' ? 'blocked' : issues.length || spec.executionReadiness === 'needs_confirmation' ? 'needs_confirmation' : 'ready'
-  return { status, issues }
-}
+function executionConfigurationForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } { return content.executionMethods.includes(executionMethod) ? { status: 'ready', issues: [] } : { status: 'blocked', issues: ['TestCase 未选择该执行方式'] } }
 function executionConfiguration(content: TestCaseContent): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } {
   const configurations = executionMethodsForContent(content).map(method => ({ method, configuration: executionConfigurationForMethod(content, method) }))
   const status = configurations.some(item => item.configuration.status === 'blocked') ? 'blocked' : configurations.some(item => item.configuration.status === 'needs_confirmation') ? 'needs_confirmation' : 'ready'
@@ -1553,10 +1180,10 @@ function presentLibraryVersion(aggregate: TestDesignState, version: TestCaseLibr
   })
   return structuredClone({ ...version, members }) as TestCaseLibraryVersionDetail
 }
-function traceabilityRelevantContentChanged(before: TestCaseContent, after: TestCaseContent) { return canonicalSha256({ requirementRefs: before.requirementRefs, dataRequirementIds: before.dataRequirementIds, dimension: before.dimension, objective: before.objective }) !== canonicalSha256({ requirementRefs: after.requirementRefs, dataRequirementIds: after.dataRequirementIds, dimension: after.dimension, objective: after.objective }) }
+function traceabilityRelevantContentChanged(before: TestCaseContent, after: TestCaseContent) { return canonicalSha256(before.requirementRefs) !== canonicalSha256(after.requirementRefs) }
 function dynamicTraceabilityReference(value: string) { return /^(?:latest|active|current)(?:$|[:/@_-])/iu.test(value) }
 function assertTraceabilityMatchesContent(content: TestCaseContent, traceability: TestCaseTraceability) {
-  if (!traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(traceability.sourceRequirementReleaseId) || !traceability.requirementRefs.length || traceability.requirementRefs.some(item => item.requirementReleaseId !== traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(item.requirementReleaseId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 'requirementRefs 必须引用同一个固定 Requirement Release ID，禁止 latest、active、current 等动态引用', 422)
+  if (!traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(traceability.sourceRequirementReleaseId) || traceability.requirementRefs.some(item => item.requirementReleaseId !== traceability.sourceRequirementReleaseId || dynamicTraceabilityReference(item.requirementReleaseId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', 'requirementRefs 必须引用同一个固定 Requirement Release ID，禁止 latest、active、current 等动态引用', 422)
   const contentRefs = new Set(content.requirementRefs)
   if (contentRefs.size !== traceability.requirementRefs.length || traceability.requirementRefs.some(item => !contentRefs.has(item.requirementId))) throw new TestDesignError('LIBRARY_TEST_CASE_TRACEABILITY_MISMATCH', '测试用例 Requirement 引用必须与正式追溯一致', 422)
 }
@@ -1581,7 +1208,7 @@ function isUnchangedReuseProposal(run: TestDesignWorkflowRun, proposal: CaseChan
   const source = proposalSourceContent(run, proposal)
   return Boolean(candidate && source && candidate.origin === 'historical_unchanged' && candidate.reviewActions.length === 0 && candidate.revisions.every(revision => revision.editorId === PLANNING_AGENT_EDITOR_ID) && currentCaseRevision(candidate).semanticSha256 === semanticContentSha256(source))
 }
-function requiresHumanProposalDecision(proposal: CaseChangeProposal) { return proposal.operation === 'deprecate' || proposal.operation === 'reference' }
+function requiresHumanProposalDecision(_proposal: CaseChangeProposal) { return false }
 function resetProposalDecision(proposal: CaseChangeProposal) {
   proposal.decision = 'pending'
   delete proposal.decidedBy
@@ -1614,7 +1241,7 @@ function convertDeletedCandidateProposal(run: TestDesignWorkflowRun, testCase: T
     return
   }
   proposal.operation = 'deprecate'
-  proposal.reason = '人工删除当前候选用例；废弃正式历史 Case 需要显式确认'
+  proposal.reason = '当前候选集合不再包含该正式历史 Case；Service 按冻结基线执行废弃判断'
   proposal.diff = []
   delete proposal.candidateCaseId
   delete proposal.candidateContent
@@ -1624,14 +1251,15 @@ function reconcileAutomaticProposalDecisions(run: TestDesignWorkflowRun) {
   for (const proposal of run.caseChangeProposals) {
     if (proposal.decision !== 'pending' || requiresHumanProposalDecision(proposal)) continue
     const candidate = proposal.candidateCaseId ? run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt) : undefined
-    const eligible = isUnchangedReuseProposal(run, proposal)
+    const eligible = proposal.operation === 'deprecate'
+      || isUnchangedReuseProposal(run, proposal)
       || ((proposal.operation === 'create' || proposal.operation === 'update') && candidate?.reviewState === 'approved')
     if (!eligible) continue
     const decidedAt = now()
-    proposal.decision = 'accepted'
+    proposal.decision = proposal.operation === 'deprecate' ? 'deprecated' : 'accepted'
     proposal.decidedBy = TEST_DESIGN_SERVICE_ACTOR_ID
     proposal.decidedAt = decidedAt
-    proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: proposal.decisions.length, decision: 'accepted', comment: proposal.operation === 'reuse' ? 'Service 自动接受与冻结 Snapshot 一致的未变化复用' : 'Service 随当前 TestCase Revision 审核通过自动接受', decidedBy: TEST_DESIGN_SERVICE_ACTOR_ID, decidedAt })
+    proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: proposal.decisions.length, decision: proposal.operation === 'deprecate' ? 'deprecated' : 'accepted', comment: proposal.operation === 'reuse' ? 'Service 自动接受与冻结 Snapshot 一致的未变化复用' : proposal.operation === 'deprecate' ? 'Service 根据当前完整候选集合自动废弃未匹配的历史 Case' : 'Service 随当前 TestCase Revision 审核通过自动接受', decidedBy: TEST_DESIGN_SERVICE_ACTOR_ID, decidedAt })
   }
 }
 function validateProposalDecision(proposal: CaseChangeProposal, decision: Exclude<CaseChangeDecision, 'pending'>) { const allowed: Record<CaseChangeProposal['operation'], Array<Exclude<CaseChangeDecision, 'pending'>>> = { reuse: [], update: [], create: [], deprecate: ['deprecated', 'keep_original'], reference: ['reference', 'rejected'] }; if (!allowed[proposal.operation].includes(decision)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_INVALID', `${proposal.operation} 不允许决策 ${decision}`, 422) }
@@ -1653,10 +1281,6 @@ function assertLibraryPublicationGates(aggregate: TestDesignState, projectId: st
   if (unreviewed.length) throw new TestDesignError('TEST_CASE_REVIEW_REQUIRED', '所有候选用例必须完成人工审核', 409, { caseIds: unreviewed.map(item => item.id) })
   const pendingProposals = run.caseChangeProposals.filter(item => item.decision === 'pending' && requiresHumanProposalDecision(item))
   if (pendingProposals.length) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_REQUIRED', '高风险用例库变更必须先完成人工处置', 409, { proposalIds: pendingProposals.map(item => item.id) })
-  const blockingFindings = run.findings.filter(item => item.severity === 'blocker' && item.state !== 'resolved' && item.state !== 'rejected')
-  if (blockingFindings.length) throw new TestDesignError('TEST_CASE_LIBRARY_PUBLICATION_BLOCKED', '阻断级 Finding 尚未处理', 409, { findingIds: blockingFindings.map(item => item.id) })
-  const blockingConfirmations = run.confirmationItems.filter(item => item.blocker && item.impactStage !== 'handoff' && item.state !== 'resolved' && item.state !== 'rejected')
-  if (blockingConfirmations.length) throw new TestDesignError('TEST_CASE_LIBRARY_PUBLICATION_BLOCKED', '阻断发布的待确认项尚未处理', 409, { confirmationItemIds: blockingConfirmations.map(item => item.id) })
   for (const suite of aggregate.suiteVersions.filter(item => item.projectId === projectId)) for (const member of suite.members) {
     const testCase = aggregate.libraryCases.find(item => item.id === member.caseId && item.projectId === projectId)
     if (!testCase?.revisions.some(item => item.revision === member.revision)) throw new TestDesignError('LIBRARY_TEST_CASE_REVISION_CONFLICT', '已发布套件引用的正式用例 Revision 不存在', 409, { suiteVersionId: suite.id, caseId: member.caseId, revision: member.revision })
@@ -1687,64 +1311,6 @@ function assertLibraryBaselineMembersCurrent(aggregate: TestDesignState, project
     if (!revision || revision.contentSha256 !== member.contentSha256 || canonicalSha256(revision.content) !== member.contentSha256) throw new TestDesignError('TEST_CASE_LIBRARY_BASE_MEMBER_CHANGED', 'Run 冻结的基线成员 Revision 不存在或内容 Hash 已损坏', 409, { caseId: member.caseId, expectedRevision: member.revision, expectedSha256: member.contentSha256, actualSha256: revision?.contentSha256 })
   }
 }
-function buildLegacyMigrationPreview(aggregate: TestDesignState, projectId: string, legacyTestCaseSetVersionId: string) {
-  const migrated = aggregate.legacyMigrations.find(item => item.projectId === projectId && item.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId)
-  if (migrated) return { legacyTestCaseSetVersionId, status: 'migrated' as const, previewSha256: migrated.previewSha256, testCaseLibraryVersionId: migrated.testCaseLibraryVersionId, items: migrated.mappings.map(mapping => { const content = aggregate.libraryCases.find(item => item.id === mapping.libraryCaseId)?.revisions.find(item => item.revision === mapping.libraryRevision)?.content; const configuration = content ? executionConfiguration(content) : { status: 'blocked' as const, issues: ['冻结 Revision 内容不存在'] }; return { legacyCaseId: mapping.legacyCaseId, legacyRevision: mapping.legacyRevision, suggestedLibraryCaseId: mapping.libraryCaseId, resolution: 'reuse_identical' as const, content, executionConfigurationStatus: configuration.status, executionConfigurationIssues: configuration.issues } }) }
-  const legacy = required(aggregate.caseSetVersions.find(item => item.id === legacyTestCaseSetVersionId && item.projectId === projectId), 'TEST_CASE_SET_NOT_FOUND', '历史已发布用例集不存在')
-  const content = legacy.canonicalContent as { cases?: Array<{ caseId?: unknown; revision?: unknown; content?: unknown }> }
-  const sourceCases = Array.isArray(content?.cases) ? content.cases : []
-  if (!sourceCases.length) throw new TestDesignError('LEGACY_TEST_CASE_MIGRATION_SOURCE_INVALID', '历史用例集缺少可迁移的结构化用例内容', 409)
-  const items = sourceCases.map((source, index) => {
-    const legacyCaseId = cleanRequired(source.caseId, `cases[${index}].caseId`, 500)
-    const legacyRevision = Number(source.revision)
-    if (!Number.isInteger(legacyRevision) || legacyRevision < 0) throw new TestDesignError('LEGACY_TEST_CASE_MIGRATION_SOURCE_INVALID', `cases[${index}].revision 无效`, 409)
-    const normalized = normalizeLegacyCaseContent(source.content)
-    const priorMapping = aggregate.legacyMigrations.filter(record => record.projectId === projectId).flatMap(record => record.mappings).find(mapping => mapping.legacyCaseId === legacyCaseId)
-    const globallyOccupied = aggregate.libraryCases.find(item => item.id === legacyCaseId && item.projectId !== projectId)
-    const suggestedLibraryCaseId = priorMapping?.libraryCaseId ?? (globallyOccupied ? `library_test_case_legacy_${canonicalSha256(`${projectId}:${legacyCaseId}`).slice(0, 24)}` : legacyCaseId)
-    const existing = aggregate.libraryCases.find(item => item.id === suggestedLibraryCaseId && item.projectId === projectId)
-    const identical = existing?.revisions.find(revision => revision.contentSha256 === canonicalSha256(normalized))
-    const resolution = identical ? 'reuse_identical' as const : existing && !priorMapping ? 'needs_confirmation' as const : existing ? 'create_revision' as const : 'create' as const
-    const configuration = executionConfiguration(normalized)
-    return { legacyCaseId, legacyRevision, suggestedLibraryCaseId, resolution, content: normalized, executionConfigurationStatus: configuration.status, executionConfigurationIssues: configuration.issues }
-  })
-  const previewBody = { schemaVersion: 'legacy-test-case-migration-preview/v2', projectId, legacyTestCaseSetVersionId, sourceSha256: legacy.contentSha256, items: items.map(({ content: caseContent, ...item }) => ({ ...item, contentSha256: canonicalSha256(caseContent) })) }
-  return { ...previewBody, status: items.some(item => item.resolution === 'needs_confirmation' || item.executionConfigurationStatus !== 'ready') ? 'needs_confirmation' as const : 'ready' as const, previewSha256: canonicalSha256(previewBody), items }
-}
-function normalizeLegacyCaseContent(value: unknown): TestCaseContent {
-  const input = value && typeof value === 'object' && !Array.isArray(value) ? structuredClone(value) as Partial<TestCaseContent> : {}
-  const dimension = ['functional', 'performance', 'stability', 'compatibility', 'security'].includes(String(input.dimension)) ? input.dimension as TestCaseContent['dimension'] : 'functional'
-  const fallbackMethod = { method: 'ui' as const, uiSpec: { entry: '历史数据未提供 UI 入口' }, executionReadiness: 'needs_confirmation' as const, steps: [{ key: 'legacy-step-1', action: '历史用例未提供结构化执行步骤，等待人工补充', expected: '人工确认历史预期结果' }], verificationChecks: [], automationHint: '历史迁移后待人工确认' }
-  const executionMethods = Array.isArray(input.executionMethods) && input.executionMethods.length ? input.executionMethods : dimension === 'functional' || dimension === 'security' ? [fallbackMethod] : []
-  const executionSpec = input.executionSpec ?? (dimension === 'performance'
-    ? { kind: 'performance' as const, method: 'performance_tool' as const, target: '历史用例未提供性能目标', scenario: '历史用例未提供性能场景', virtualUsers: null, duration: null, rampUp: null, thresholds: [], dataStrategy: '历史用例未提供数据策略', environmentRequirements: [], executionReadiness: 'needs_confirmation' as const }
-    : dimension === 'stability'
-      ? { kind: 'stability' as const, method: 'long_running' as const, workload: '历史用例未提供稳定性负载', duration: null, interval: null, observations: [], recoveryPolicy: null, checkpointPolicy: null, environmentRequirements: [], executionReadiness: 'needs_confirmation' as const }
-      : dimension === 'compatibility'
-        ? { kind: 'compatibility' as const, method: 'environment_matrix' as const, baseMethod: 'ui' as const, baseCaseRefs: [], browserMatrix: [], operatingSystemMatrix: [], viewportMatrix: [], versionMatrix: [], expectedConsistency: '历史用例未提供兼容性一致性标准', executionReadiness: 'needs_confirmation' as const }
-        : undefined)
-  const normalized = validateTestCaseContent({
-    schemaVersion: 'test-case/v2',
-    title: typeof input.title === 'string' && input.title.trim() ? input.title : '历史测试用例',
-    objective: typeof input.objective === 'string' && input.objective.trim() ? input.objective : '历史用例未提供测试目标，等待人工补充',
-    dimension,
-    requirementRefs: Array.isArray(input.requirementRefs) ? input.requirementRefs : [],
-    priority: ['P0', 'P1', 'P2', 'P3'].includes(String(input.priority)) ? input.priority : 'P2',
-    preconditions: Array.isArray(input.preconditions) ? input.preconditions : [],
-    dataRequirementIds: Array.isArray(input.dataRequirementIds) ? input.dataRequirementIds : [],
-    cleanup: Array.isArray(input.cleanup) ? input.cleanup : [],
-    dependencies: [],
-    executionMethods,
-    ...(executionSpec ? { executionSpec } : {}),
-    sharedVerificationChecks: Array.isArray(input.sharedVerificationChecks) ? input.sharedVerificationChecks : [],
-    tags: [...new Set([...(Array.isArray(input.tags) ? input.tags : []), 'legacy-migrated'])],
-    domain: typeof input.domain === 'string' && input.domain.trim() ? input.domain : '历史迁移',
-  })
-  const configuration = executionConfiguration(normalized)
-  if (normalized.executionSpec && configuration.status !== normalized.executionSpec.executionReadiness) normalized.executionSpec = { ...normalized.executionSpec, executionReadiness: configuration.status }
-  if (normalized.executionSpec?.kind === 'functional') normalized.executionMethods = normalized.executionMethods.map(method => method.method === normalized.executionSpec!.method ? { ...method, executionReadiness: normalized.executionSpec!.executionReadiness } : method)
-  return normalized
-}
 function applyProposalToLibrary(aggregate: TestDesignState, projectId: string, run: TestDesignWorkflowRun, proposal: CaseChangeProposal, members: Map<string, { caseId: string; revision: number; ordinal: number; contentSha256: string }>, actorId: string) {
   if (proposal.decision === 'pending') throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_REQUIRED', 'Proposal 尚未处置', 409)
   const source = proposal.sourceCaseId ? required(aggregate.libraryCases.find(item => item.id === proposal.sourceCaseId && item.projectId === projectId), 'LIBRARY_TEST_CASE_NOT_FOUND', 'Proposal 来源正式用例不存在') : undefined
@@ -1761,9 +1327,10 @@ function applyProposalToLibrary(aggregate: TestDesignState, projectId: string, r
   if (proposal.operation === 'deprecate' && proposal.decision === 'deprecated') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '废弃来源用例不存在'); testCase.status = 'deprecated'; testCase.updatedAt = now(); members.delete(testCase.id); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = testCase.currentRevision }
 }
 
-function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange: boolean; members: Array<{ testCaseLibraryVersionId?: string; caseId: string; executionMethods?: Array<'ui' | 'api'>; executionMethod?: TestExecutionMethod; reason: string }> } {
+function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange: boolean; members: Array<{ testCaseLibraryVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string }> } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', '套件草稿必须是对象', 422)
   const input = raw as Record<string, unknown>
+  if (Object.keys(input).some(key => !['suiteKey', 'suiteType', 'name', 'testCaseLibraryVersionId', 'confirmLibraryVersionChange', 'members'].includes(key))) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', '套件草稿包含未知字段', 422)
   const suiteType = String(input.suiteType)
   if (!['smoke', 'regression', 'custom'].includes(suiteType)) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', 'suiteType 必须为 smoke、regression 或 custom', 422)
   if (!Array.isArray(input.members) || input.members.length > 10_000) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', 'members 必须是最多 10000 项的数组', 422)
@@ -1778,7 +1345,7 @@ function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' |
     members: input.members.map((candidate, index) => {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', `members[${index}] 必须是对象`, 422)
       const item = candidate as Record<string, unknown>
-      const legacyMethod = item.executionMethod === undefined ? undefined : testExecutionMethod(item.executionMethod, `members[${index}].executionMethod`)
+      if (Object.keys(item).some(key => !['testCaseLibraryVersionId', 'caseId', 'executionMethods', 'reason'].includes(key))) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}] 包含未知字段`, 422)
       const rawExecutionMethods = item.executionMethods
       if (rawExecutionMethods !== undefined && !Array.isArray(rawExecutionMethods)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 必须是数组`, 422)
       const executionMethods = Array.isArray(rawExecutionMethods)
@@ -1789,9 +1356,8 @@ function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' |
         : undefined
       if (executionMethods && !executionMethods.length) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 不能为空`, 422)
       if (executionMethods && new Set(executionMethods).size !== executionMethods.length) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 不能包含重复执行方式`, 422)
-      if (!executionMethods && !legacyMethod) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}] 必须提供 executionMethods 或 executionMethod`, 422)
-      if (executionMethods && legacyMethod && !executionMethods.includes(legacyMethod as 'ui' | 'api')) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}] 的 executionMethod 必须属于 executionMethods`, 422)
-      return { ...(typeof item.testCaseLibraryVersionId === 'string' && item.testCaseLibraryVersionId.trim() ? { testCaseLibraryVersionId: item.testCaseLibraryVersionId.trim() } : {}), caseId: cleanRequired(item.caseId, 'caseId', 500), ...(executionMethods ? { executionMethods: canonicalSuiteExecutionMethods(executionMethods) } : {}), ...(legacyMethod ? { executionMethod: legacyMethod } : {}), reason: cleanRequired(item.reason, '选择原因', 2_000) }
+      if (!executionMethods) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}] 必须提供 executionMethods`, 422)
+      return { ...(typeof item.testCaseLibraryVersionId === 'string' && item.testCaseLibraryVersionId.trim() ? { testCaseLibraryVersionId: item.testCaseLibraryVersionId.trim() } : {}), caseId: cleanRequired(item.caseId, 'caseId', 500), executionMethods: canonicalSuiteExecutionMethods(executionMethods), reason: cleanRequired(item.reason, '选择原因', 2_000) }
     }),
   }
 }
@@ -1805,19 +1371,13 @@ function validateSuiteMembers(aggregate: TestDesignState, projectId: string, tes
     const member = required(version.members.find(item => item.caseId === value.caseId), 'TEST_CASE_LIBRARY_MEMBER_NOT_FOUND', '套件成员不属于固定的用例库版本')
     const frozenContent = required(member.frozenContent, 'TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH', '用例库成员缺少冻结内容')
     const availableMethods = executionMethodsForContent(frozenContent)
-    const selectedMethods = value.executionMethods ?? (value.executionMethod === 'ui' || value.executionMethod === 'api' ? [value.executionMethod] : undefined)
-    if (frozenContent.dimension === 'functional' || frozenContent.dimension === 'security') {
-      if (!selectedMethods?.length || selectedMethods.some(method => !availableMethods.includes(method))) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式不是冻结 Revision 实际拥有方式的非空子集', 422, { caseId: member.caseId, revision: member.revision, selectedMethods: selectedMethods ?? [], availableMethods })
-      return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: canonicalSuiteExecutionMethods(selectedMethods), ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
-    }
-    const selectedMethod = value.executionMethod ?? (value.executionMethods?.length === 1 ? value.executionMethods[0] : undefined)
-    if (!selectedMethod || value.executionMethods?.length && (value.executionMethods.length !== 1 || value.executionMethods[0] !== selectedMethod) || availableMethods.length !== 1 || availableMethods[0] !== selectedMethod) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式不是冻结 Revision 实际拥有的非功能执行方式', 422, { caseId: member.caseId, revision: member.revision, selectedMethods: value.executionMethods ?? (selectedMethod ? [selectedMethod] : []), availableMethods })
-    return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: [], executionMethod: selectedMethod, ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
+    const selectedMethods = value.executionMethods
+    if (!selectedMethods?.length || selectedMethods.some(method => !availableMethods.includes(method))) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式不是冻结 Revision 实际拥有方式的非空子集', 422, { caseId: member.caseId, revision: member.revision, selectedMethods: selectedMethods ?? [], availableMethods })
+    return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: canonicalSuiteExecutionMethods(selectedMethods), ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
   })
 }
 function canonicalSuiteExecutionMethods(methods: Array<'ui' | 'api'>) { return (['ui', 'api'] as const).filter((method): method is 'ui' | 'api' => methods.includes(method)) }
-function suiteMemberExecutionMethods(member: TestSuiteVersionMember, frozenContent: TestCaseContent): TestExecutionMethod[] { return member.executionMethods?.length ? canonicalSuiteExecutionMethods(member.executionMethods) : member.executionMethod ? [member.executionMethod] : executionMethodsForContent(frozenContent) }
-function legacySuiteMemberUiApiMethods(member: TestSuiteVersionMember): Array<'ui' | 'api'> { return member.executionMethods?.length ? member.executionMethods : member.executionMethod === 'ui' || member.executionMethod === 'api' ? [member.executionMethod] : [] }
+function suiteMemberExecutionMethods(member: TestSuiteVersionMember, _frozenContent: TestCaseContent): TestExecutionMethod[] { return canonicalSuiteExecutionMethods(member.executionMethods) }
 function suiteDraftEtag(draft: TestSuiteDraft) { return `"suite-draft:${draft.id}:${canonicalSha256({ contentSha256: draft.contentSha256, status: draft.status, updatedAt: draft.updatedAt })}"` }
 function versionMemberDiff<T extends { caseId: string; revision: number }>(left: T[], right: T[]) { const before = new Map(left.map(item => [item.caseId, item])); const after = new Map(right.map(item => [item.caseId, item])); return [...new Set([...before.keys(), ...after.keys()])].sort().map(caseId => { const from = before.get(caseId); const to = after.get(caseId); return { caseId, change: !from ? 'added' as const : !to ? 'removed' as const : canonicalSha256(from) === canonicalSha256(to) ? 'unchanged' as const : 'modified' as const, ...(from ? { from: structuredClone(from) } : {}), ...(to ? { to: structuredClone(to) } : {}) } }).filter(item => item.change !== 'unchanged') }
 function libraryProjectionFiles(projectVersionName: string, version: TestCaseLibraryVersion, cases: LibraryTestCase[]): TestDesignWorkspaceFile[] {
@@ -1831,16 +1391,15 @@ function libraryProjectionFiles(projectVersionName: string, version: TestCaseLib
     if (traceability) assertTraceabilityMatchesContent(content, traceability)
     return { caseId: testCase.id, revision: revision.revision, contentSha256: member.contentSha256, content: structuredClone(content), ...(traceability ? { traceability: structuredClone(traceability) } : {}), executionReadiness: member.executionReadiness ?? executionConfiguration(content).status }
   })
-  const canonicalContent = { schemaVersion: 'test-case-library/v2', versionId: version.id, projectId: version.projectId, version: version.version, name: version.name, contentSha256: version.contentSha256, cases: entries }
+  const canonicalContent = { schemaVersion: 'test-case-library/v3', versionId: version.id, projectId: version.projectId, version: version.version, name: version.name, contentSha256: version.contentSha256, cases: entries }
   const json = `${canonicalJson(canonicalContent)}\n`
-  const dataRequirementsJson = version.dataRequirementSet ? `${canonicalJson({ schemaVersion: 'test-data-requirements/v1', sourceSetId: version.dataRequirementSet.id, sourceSetVersion: version.dataRequirementSet.version, sourceSetSha256: version.dataRequirementSet.contentSha256, requirements: version.dataRequirementSet.requirements })}\n` : undefined
   const markdown = [`# ${version.name}`, '', `- Library Version: ${version.version}`, `- Version ID: ${version.id}`, `- SHA-256: ${version.contentSha256}`, '', ...entries.flatMap(item => {
     const trace = item.traceability
     const requirementIds = trace?.requirementRefs.map(reference => reference.requirementId) ?? []
-    return [`## ${item.caseId} r${item.revision} · ${item.content.title}`, '', item.content.objective, '', `- Case ID: ${item.caseId}`, `- Revision: r${item.revision}`, `- Content SHA-256: ${item.contentSha256}`, `- Dimension: ${item.content.dimension}`, `- Priority: ${item.content.priority}`, `- Execution Method: ${executionMethodForContent(item.content)}`, `- Execution Readiness: ${item.executionReadiness}`, `- Execution Spec: ${item.content.executionSpec ? canonicalJson(item.content.executionSpec) : '未配置'}`, `- Requirement Release: ${trace?.sourceRequirementReleaseId ?? '历史数据未建立正式追溯'}`, `- Requirement ID: ${requirementIds.length ? requirementIds.join(', ') : '历史数据未建立正式追溯'}`, '']
+    return [`## ${item.caseId} r${item.revision} · ${item.content.title}`, '', `- Case ID: ${item.caseId}`, `- Revision: r${item.revision}`, `- Content SHA-256: ${item.contentSha256}`, `- Dimension: ${item.content.dimension}`, `- Priority: ${item.content.priority}`, `- Execution Methods: ${item.content.executionMethods.join(', ')}`, `- Requirement Release: ${trace?.sourceRequirementReleaseId ?? version.sourceRunId ?? '未绑定'}`, `- Requirement ID: ${requirementIds.length ? requirementIds.join(', ') : '扩展测试'}`, '', '### 前置条件', ...item.content.preconditions.map(value => `- ${value}`), '', '### 步骤', ...item.content.steps.map(value => `- ${value}`), '', '### 预期结果', ...item.content.expectedResults.map(value => `- ${value}`), '']
   })].join('\n')
-  const files = [{ name: 'test-cases.json', content: json, displayName: `用例库 V${version.version} JSON` }, { name: 'test-cases.md', content: markdown, displayName: `用例库 V${version.version} 文档` }, ...(dataRequirementsJson ? [{ name: 'test-data-requirements.json', content: dataRequirementsJson, displayName: `测试数据需求 V${version.dataRequirementSet!.version}` }] : [])]
-  const manifestBody = { schemaVersion: 'test-case-library-manifest/v2', versionId: version.id, contentSha256: version.contentSha256, members: entries.map(item => ({ caseId: item.caseId, revision: item.revision, contentSha256: item.contentSha256, ...(item.content.executionSpec ? { executionSpec: item.content.executionSpec } : {}), executionReadiness: item.executionReadiness, ...(item.traceability ? { traceability: item.traceability } : { traceabilityStatus: '历史数据未建立正式追溯' }) })), files: files.map(file => ({ name: file.name, sha256: canonicalSha256Text(file.content) })) }
+  const files = [{ name: 'test-cases.json', content: json, displayName: `用例库 V${version.version} JSON` }, { name: 'test-cases.md', content: markdown, displayName: `用例库 V${version.version} 文档` }]
+  const manifestBody = { schemaVersion: 'test-case-library-manifest/v3', versionId: version.id, contentSha256: version.contentSha256, members: entries.map(item => ({ caseId: item.caseId, revision: item.revision, contentSha256: item.contentSha256, executionMethods: item.content.executionMethods, ...(item.traceability ? { traceability: item.traceability } : { traceabilityStatus: '扩展测试，无 Requirement direct trace' }) })), files: files.map(file => ({ name: file.name, sha256: canonicalSha256Text(file.content) })) }
   const manifest = `${canonicalJson(manifestBody)}\n`
   return [...files.map(file => ({ logicalPath: `${directory}/${file.name}`, sourceType: 'test_case_library_version' as const, sourceId: version.id, contentSha256: canonicalSha256Text(file.content), content: file.content, displayName: file.displayName, sourceScope: 'formal_output' as const })), { logicalPath: `${directory}/manifest.json`, sourceType: 'test_case_library_version', sourceId: version.id, contentSha256: canonicalSha256Text(manifest), content: manifest, displayName: `用例库 V${version.version} Manifest`, sourceScope: 'formal_output' }]
 }
@@ -1853,10 +1412,8 @@ function structuralDiff(before: unknown, after: unknown, path = ''): Array<{ pat
   return [...new Set([...Object.keys(left), ...Object.keys(right)])].sort().flatMap(key => structuralDiff(left[key], right[key], `${path}/${key}`))
 }
 function applyReviewAction(testCase: TestCase, input: { decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw'; targetRevision: number; comment?: string }, actorId: string) { if (testCase.currentRevision !== input.targetRevision) throw new TestDesignError('TEST_CASE_REVISION_CONFLICT', '审核目标 revision 已变化', 412); if (['reject', 'request_revision'].includes(input.decision) && !input.comment?.trim()) throw new TestDesignError('TEST_CASE_REVIEW_COMMENT_REQUIRED', '退回修改或拒绝必须填写审核意见。', 422); const transitions = { draft: { submit: 'in_review' }, in_review: { approve: 'approved', reject: 'rejected', request_revision: 'needs_revision', withdraw: 'draft' }, approved: { request_revision: 'needs_revision' }, rejected: {}, needs_revision: { submit: 'in_review' } } as const; const toState = (transitions[testCase.reviewState] as Record<string, TestCase['reviewState'] | undefined>)[input.decision]; if (!toState) throw new TestDesignError('TEST_CASE_REVIEW_TRANSITION_INVALID', `不能从 ${testCase.reviewState} 执行 ${input.decision}`, 409); testCase.reviewActions.push({ id: `test_case_review_${randomUUID()}`, targetRevision: input.targetRevision, fromState: testCase.reviewState, toState, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), actorId, createdAt: now() }); testCase.reviewState = toState }
-function applyDisposition(target: { state: 'open' | 'confirmed' | 'resolved' | 'deferred' | 'rejected'; actions: Array<{ id: string; expectedVersion: number; fromState: string; toState: string; decision: string; comment?: string; structuredDecision?: unknown; actorId: string; createdAt: string }> }, input: { expectedVersion: number; decision: 'confirm' | 'resolve' | 'defer' | 'reject' | 'reopen'; comment?: string; structuredDecision?: unknown }, actorId: string) { if (target.actions.length !== input.expectedVersion) throw new TestDesignError('TEST_DESIGN_DISPOSITION_VERSION_CONFLICT', '处置版本已变化', 409); const toState = input.decision === 'confirm' ? 'confirmed' : input.decision === 'resolve' ? 'resolved' : input.decision === 'defer' ? 'deferred' : input.decision === 'reject' ? 'rejected' : 'open'; target.actions.push({ id: `test_design_action_${randomUUID()}`, expectedVersion: input.expectedVersion, fromState: target.state, toState, decision: input.decision, ...(input.comment?.trim() ? { comment: input.comment.trim().slice(0, 4_000) } : {}), ...(input.structuredDecision === undefined ? {} : { structuredDecision: structuredClone(input.structuredDecision) }), actorId, createdAt: now() }); target.state = toState }
 function validateCurrentDependencyGraph(run: TestDesignWorkflowRun) { validateCaseDependencyGraph(run.testCases.filter(item => !item.tombstonedAt).map(item => ({ id: item.id, content: currentCaseRevision(item).content }))) }
 function invalidateAudit(run: TestDesignWorkflowRun) { run.coverageAudits.forEach(item => { item.status = 'stale' }) }
-function assertMethodSubset(run: TestDesignWorkflowRun, caseId: string, methods: Array<'ui' | 'api'>) { if (!methods.length) throw new TestDesignError('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '执行方式子集不能为空', 422); const content = currentCaseRevision(findCase(run, caseId)).content; const available = new Set(content.executionMethods.filter(method => method.executionReadiness === 'ready').map(method => method.method)); if (methods.some(method => !available.has(method))) throw new TestDesignError('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '执行方式不是来源用例 ready 方式的子集', 422) }
 function publishArtifact(run: TestDesignWorkflowRun, key: TestDesignNodeKey, output: { schemaVersion: string; content: unknown }) { const target = node(run, key); const artifactValue: WorkflowArtifact = { id: `workflow_artifact_${randomUUID()}`, nodeKey: key, schemaVersion: output.schemaVersion, generation: target.generation, content: structuredClone(output.content), contentSha256: canonicalSha256(output.content), createdAt: now() }; run.artifacts.push(artifactValue); target.outputArtifactId = artifactValue.id }
 function finishNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey, execution?: WorkflowNodeRun['execution']) { const target = node(run, key); Object.assign(target, { status: 'succeeded', finishedAt: now(), ...(execution ? { execution } : {}) }) }
 function failNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey, error: unknown) { const target = node(run, key); const message = error instanceof Error ? error.message : String(error); const execution = error && typeof error === 'object' && 'execution' in error ? (error as { execution?: WorkflowNodeRun['execution'] }).execution : undefined; Object.assign(target, { status: 'failed', finishedAt: now(), error: message, errorCode: errorCode(message), ...(execution ? { execution } : {}) }) }
@@ -1885,20 +1442,14 @@ function findDesign(state: DatabaseState, projectVersionId: string, designId: st
 function findRun(state: DatabaseState, projectVersionId: string, designId: string, runId: string) { findDesign(state, projectVersionId, designId); return required(readDesignState(state).runs.find(item => item.id === runId && item.testDesignId === designId && item.projectVersionId === projectVersionId), 'TEST_DESIGN_RUN_NOT_FOUND', '测试设计运行不存在') }
 function findRunById(state: DatabaseState, runId: string) { return required(designState(state).runs.find(item => item.id === runId), 'TEST_DESIGN_RUN_NOT_FOUND', '测试设计运行不存在') }
 function assertOpenVersion(state: DatabaseState, projectVersionId: string) { const version = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在'); if (version.status !== 'open') throw new TestDesignError('PROJECT_VERSION_READ_ONLY', '当前项目版本只读', 409) }
-function designState(state: DatabaseState): TestDesignState { const aggregate = state.testDesignState ??= emptyTestDesignState(); aggregate.legacyMigrations ??= []; return aggregate }
+function designState(state: DatabaseState): TestDesignState { return state.testDesignState ??= emptyTestDesignState() }
 function readDesignState(state: DatabaseState): TestDesignState { return state.testDesignState ?? emptyTestDesignState() }
-function emptyTestDesignState(): TestDesignState { return { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [] } }
+function emptyTestDesignState(): TestDesignState { return { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] } }
 function presentRun(run: TestDesignWorkflowRun, detail = false) { const value = structuredClone(run); if (value.status === 'succeeded') { value.error = undefined; value.errorCode = undefined } if (!detail) return { id: value.id, testDesignId: value.testDesignId, projectVersionId: value.projectVersionId, status: value.status, stage: value.stage, progress: value.progress, createdAt: value.createdAt, startedAt: value.startedAt, finishedAt: value.finishedAt, errorCode: value.errorCode, error: value.error }; return value }
 function presentCase(testCase: TestCase, detail = false) { const revision = currentCaseRevision(testCase); const value = { id: testCase.id, runId: testCase.runId, origin: testCase.origin, currentRevision: testCase.currentRevision, reviewState: testCase.reviewState, content: structuredClone(revision.content), contentSha256: revision.contentSha256, etag: etag('case', testCase.id, revision.revision, revision.contentSha256), ...(detail ? { revisions: structuredClone(testCase.revisions), reviewActions: structuredClone(testCase.reviewActions), tombstonedAt: testCase.tombstonedAt } : {}) }; return value }
-function markdownCaseSet(version: TestCaseSetVersion) { const content = version.canonicalContent as { cases: Array<{ caseId: string; revision: number; content: TestCaseContent }> }; return [`# ${version.name}`, '', `- Version: ${version.version}`, `- Schema: ${version.schemaVersion}`, `- Content SHA-256: ${version.contentSha256}`, '', ...content.cases.flatMap(item => [`## ${item.caseId} r${item.revision}: ${item.content.title}`, '', item.content.objective, '', `- Dimension: ${item.content.dimension}`, `- Priority: ${item.content.priority}`, `- Methods: ${item.content.executionMethods.map(method => method.method).join(', ')}`, ''])].join('\n') }
-async function xlsxCaseSet(version: TestCaseSetVersion) { const value = version.canonicalContent as { cases: Array<{ caseId: string; revision: number; content: TestCaseContent }> }; const rows = [['Case ID', 'Revision', 'Title', 'Objective', 'Dimension', 'Priority', 'Methods', 'Domain', 'Preconditions', 'Steps', 'Checks'], ...value.cases.map(item => [item.caseId, String(item.revision), item.content.title, item.content.objective, item.content.dimension, item.content.priority, item.content.executionMethods.map(method => method.method).join(', '), item.content.domain, item.content.preconditions.join('\n'), item.content.executionMethods.flatMap(method => method.steps.map(step => `[${method.method}] ${step.key}: ${step.action} => ${step.expected}`)).join('\n'), item.content.executionMethods.flatMap(method => method.verificationChecks.map(check => `[${method.method}] ${check.description}`)).concat(item.content.sharedVerificationChecks.map(check => `[shared] ${check.description}`)).join('\n')])]; const sheetRows = rows.map((row, rowIndex) => `<row r="${rowIndex + 1}">${row.map((cell, columnIndex) => `<c r="${columnName(columnIndex + 1)}${rowIndex + 1}" t="inlineStr"${rowIndex === 0 ? ' s="1"' : ''}><is><t xml:space="preserve">${xml(safeSpreadsheetText(cell))}</t></is></c>`).join('')}</row>`).join(''); const zip = new JSZip(); zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'); zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'); zip.file('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Test Cases" sheetId="1" r:id="rId1"/></sheets></workbook>'); zip.file('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'); zip.file('xl/styles.xml', '<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font/><font><b/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf xfId="0"/><xf xfId="0" fontId="1" applyFont="1"/></cellXfs></styleSheet>'); zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`); return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) }
-function columnName(index: number) { let name = ''; for (let value = index; value > 0; value = Math.floor((value - 1) / 26)) name = String.fromCharCode(65 + ((value - 1) % 26)) + name; return name }
-function safeSpreadsheetText(value: string) { return /^[=+\-@]/u.test(value) ? `'${value}` : value }
-function xml(value: string) { return value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;') }
 function required<T>(value: T | null | undefined, code: string, message: string): T { if (value == null) throw new TestDesignError(code, message, code.endsWith('_NOT_FOUND') ? 404 : 409); return value }
 function cleanRequired(value: unknown, label: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) throw new TestDesignError('TEST_DESIGN_INPUT_INVALID', `${label} 不能为空且不能超过 ${max} 个字符`, 422); return value.trim() }
-function testExecutionMethod(value: unknown, label: string): TestExecutionMethod { if (!['ui', 'api', 'performance_tool', 'long_running', 'environment_matrix'].includes(String(value))) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', `${label} 无效`, 422); return value as TestExecutionMethod }
-function positive(value: unknown, label: string) { const number = Number(value); if (!Number.isFinite(number) || number <= 0) throw new TestDesignError('TEST_DESIGN_INPUT_INVALID', `${label} 必须是正数`, 422); return number }
+function testExecutionMethod(value: unknown, label: string): TestExecutionMethod { if (value !== 'ui' && value !== 'api') throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', `${label} 只能是 ui 或 api`, 422); return value }
 function newest(left: { createdAt?: string; publishedAt?: string }, right: { createdAt?: string; publishedAt?: string }) { return String(right.createdAt ?? right.publishedAt).localeCompare(String(left.createdAt ?? left.publishedAt)) }
 function now() { return new Date().toISOString() }
 function errorCode(message: string) { return /^([A-Z][A-Z0-9_]+):/u.exec(message)?.[1] ?? 'TEST_DESIGN_RUN_FAILED' }

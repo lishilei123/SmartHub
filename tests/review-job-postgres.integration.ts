@@ -3,9 +3,7 @@ import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import { Pool } from 'pg'
 import type { ReviewRun } from '../server/domain/types.js'
-import { canonicalSha256 } from '../server/application/canonical-json.js'
-import { TestDesignService } from '../server/application/test-design-service.js'
-import type { TestCaseContent, TestDesign, TestDesignWorkflowRun } from '../server/domain/test-design-types.js'
+import type { TestDesign, TestDesignWorkflowRun } from '../server/domain/test-design-types.js'
 import { runMigrations } from '../server/infrastructure/migrations.js'
 import { PostgresStore } from '../server/infrastructure/postgres-store.js'
 import type { ReviewJob, TaskLease, TestDesignJob } from '../server/infrastructure/store.js'
@@ -35,9 +33,7 @@ await store.load()
 await seedParents()
 
 test.after(async () => {
-  await database.query('DELETE FROM smarthub.legacy_test_case_id_mappings mapping USING smarthub.legacy_test_case_migrations migration WHERE mapping.migration_id=migration.id AND migration.project_id=$1', [ids.project])
-  await database.query('DELETE FROM smarthub.legacy_test_case_migrations WHERE project_id=$1', [ids.project])
-  await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.executionHandoffs = state.testDesignState.executionHandoffs.filter(item => !item.id.startsWith(prefix)); state.testDesignState.suiteVersions = state.testDesignState.suiteVersions.filter(item => !item.id.startsWith(prefix)); state.testDesignState.suiteDrafts = state.testDesignState.suiteDrafts.filter(item => !item.id.startsWith(prefix)); state.testDesignState.libraryVersions = state.testDesignState.libraryVersions.filter(item => !item.id.startsWith(prefix)); state.testDesignState.libraryCases = state.testDesignState.libraryCases.filter(item => !item.id.startsWith(prefix)); state.testDesignState.legacyMigrations = state.testDesignState.legacyMigrations.filter(item => !item.id.startsWith(prefix)) })
+  await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.executionHandoffs = state.testDesignState.executionHandoffs.filter(item => !item.id.startsWith(prefix)); state.testDesignState.suiteVersions = state.testDesignState.suiteVersions.filter(item => !item.id.startsWith(prefix)); state.testDesignState.suiteDrafts = state.testDesignState.suiteDrafts.filter(item => !item.id.startsWith(prefix)); state.testDesignState.libraryVersions = state.testDesignState.libraryVersions.filter(item => !item.id.startsWith(prefix)); state.testDesignState.libraryCases = state.testDesignState.libraryCases.filter(item => !item.id.startsWith(prefix)) })
   await database.query('DELETE FROM smarthub.test_suite_drafts WHERE project_id=$1', [ids.project])
   await database.query('UPDATE smarthub.workflow_runs SET base_test_case_library_version_id=NULL, base_test_case_library_version_sha256=NULL WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.test_case_library_version_members member USING smarthub.test_case_library_versions version WHERE member.version_id=version.id AND version.project_id=$1', [ids.project])
@@ -46,7 +42,7 @@ test.after(async () => {
   await database.query('DELETE FROM smarthub.library_test_case_revision_test_point_refs reference USING smarthub.library_test_cases test_case WHERE reference.case_id=test_case.id AND test_case.project_id=$1', [ids.project])
   await database.query('DELETE FROM smarthub.library_test_case_revisions revision USING smarthub.library_test_cases test_case WHERE revision.case_id=test_case.id AND test_case.project_id=$1', [ids.project])
   await database.query('DELETE FROM smarthub.library_test_cases WHERE project_id=$1', [ids.project])
-  await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.caseSetVersions = state.testDesignState.caseSetVersions.filter(item => !item.id.startsWith(prefix)); state.testDesignState.runs = state.testDesignState.runs.filter(item => !item.id.startsWith(prefix)); state.testDesignState.designs = state.testDesignState.designs.filter(item => !item.id.startsWith(prefix)) })
+  await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.runs = state.testDesignState.runs.filter(item => !item.id.startsWith(prefix)); state.testDesignState.designs = state.testDesignState.designs.filter(item => !item.id.startsWith(prefix)) })
   await database.query('DELETE FROM smarthub.case_change_proposal_decisions decision USING smarthub.case_change_proposals proposal WHERE decision.proposal_id=proposal.id AND proposal.workflow_run_id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.case_change_proposals WHERE workflow_run_id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.workflow_task_jobs WHERE id LIKE $1', [`${prefix}%`])
@@ -161,9 +157,9 @@ test('PostgreSQL Phase 4 使用规范化事实表并以 nodeRunId 隔离 fencing
     agentConfigurationSnapshot: {} as TestDesignWorkflowRun['agentConfigurationSnapshot'], workspaceSnapshot: {} as TestDesignWorkflowRun['workspaceSnapshot'], formalWorkspaceFiles: [],
     retrievalSnapshot: { canonicalVersion: 'retrieval-snapshot/v1', mode: 'disabled', assetVersionIds: [], queryPlan: [], hits: [], snapshotSha256: '5'.repeat(64), createdAt: now },
     historicalSnapshot: { schemaVersion: 'historical-case-snapshot/v1', items: [], snapshotSha256: '6'.repeat(64), createdAt: now },
-    nodeRuns: [{ id: nodeRunId, nodeKey: 'test_case_design', generation: 1, attempt: 0, status: 'queued', dependencies: [] }], artifacts: [], gateDecisions: [], testCases: [], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], events: [], createdBy: 'integration-test', createdAt: now,
+    nodeRuns: [{ id: nodeRunId, nodeKey: 'test_case_design', generation: 1, attempt: 0, status: 'queued', dependencies: [] }], artifacts: [], gateDecisions: [], testCases: [], caseChangeProposals: [], coverageAudits: [], events: [], createdBy: 'integration-test', createdAt: now,
   }
-  await store.transaction(state => { const aggregate = state.testDesignState ??= { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], suiteVersions: [], executionHandoffs: [] }; aggregate.designs.push(design); aggregate.runs.push(run) })
+  await store.transaction(state => { const aggregate = state.testDesignState ??= { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] }; aggregate.designs.push(design); aggregate.runs.push(run) })
   const normalized = await database.query<{ designs: string; runs: string; snapshots: string; items: string }>('SELECT (SELECT count(*) FROM smarthub.test_designs WHERE id=$1)::text AS designs, (SELECT count(*) FROM smarthub.workflow_runs WHERE id=$2)::text AS runs, (SELECT count(*) FROM smarthub.test_design_basis_snapshots WHERE workflow_run_id=$2)::text AS snapshots, (SELECT count(*) FROM smarthub.test_design_snapshot_items WHERE workflow_run_id=$2)::text AS items', [designId, runId])
   assert.deepEqual(normalized.rows[0], { designs: '1', runs: '1', snapshots: '1', items: '1' })
 
@@ -180,77 +176,6 @@ test('PostgreSQL Phase 4 使用规范化事实表并以 nodeRunId 隔离 fencing
   const secondLease: TaskLease = { workerId: 'phase4-worker-b', runToken: required(second.runToken, '第二次 Phase 4 节点缺少 fencing token') }
   assert.equal(await store.finishTestDesignJob?.(nodeRunId, secondLease, 'succeeded'), true)
   await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.runs = state.testDesignState.runs.filter(item => item.id !== runId); state.testDesignState.designs = state.testDesignState.designs.filter(item => item.id !== designId) })
-})
-
-test('PostgreSQL Migration 26 完整恢复追溯、冻结 Revision、readiness override 和幂等迁移', async () => {
-  const designId = `${prefix}-formal-design`
-  const runId = `${prefix}-formal-run`
-  const legacySetId = `${prefix}-legacy-set`
-  const libraryCaseId = `${prefix}-library-case`
-  const libraryVersionId = `${prefix}-library-version`
-  const draftId = `${prefix}-suite-draft`
-  const suiteVersionId = `${prefix}-suite-version`
-  const handoffId = `${prefix}-handoff`
-  const migrationId = `${prefix}-migration`
-  const proposalId = `${prefix}-proposal`
-  const previewSha256 = '9'.repeat(64)
-  const traceability = { sourceRequirementReleaseId: `${prefix}-release`, requirementRefs: [{ requirementReleaseId: `${prefix}-release`, requirementId: 'REQ-1' }], testPointRefs: [{ testPointTreeVersionId: `${prefix}-tree-version`, testPointId: `${prefix}-point` }] }
-  const content: TestCaseContent = { schemaVersion: 'test-case/v2', title: 'PostgreSQL 正式用例', objective: '验证持久化恢复', dimension: 'functional', testPointIds: [`${prefix}-point`], priority: 'P0', preconditions: [], dataRequirementIds: [`${prefix}-data`], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/orders', viewport: '1440x900', selectors: ['data-testid=orders'] }, steps: [{ key: 'step-1', action: '打开订单页', expected: '订单页可用' }], verificationChecks: [{ key: 'check-1', description: '订单列表可见' }], executionReadiness: 'ready', automationHint: 'UI 自动化' }], executionSpec: { kind: 'functional', method: 'ui', uiSpec: { entry: '/orders', viewport: '1440x900', selectors: ['data-testid=orders'] }, preconditions: [], steps: [{ key: 'step-1', action: '打开订单页', expected: '订单页可用' }], verificationChecks: [{ key: 'check-1', description: '订单列表可见' }], testDataRequirements: [`${prefix}-data`], executionReadiness: 'ready', automationHint: 'UI 自动化' }, sharedVerificationChecks: [], tags: ['postgres'], domain: '订单' }
-  const design: TestDesign = { id: designId, projectVersionId: ids.projectVersion, projectId: ids.project, name: 'PostgreSQL 正式资产', objective: '验证 Migration 26', input: { name: 'PostgreSQL 正式资产', objective: '验证 Migration 26', knowledgeAugmentation: { mode: 'disabled' } }, logicalInputSha256: '1'.repeat(64), createdBy: 'integration-test', createdAt: now }
-  const run: TestDesignWorkflowRun = {
-    id: runId, testDesignId: designId, projectVersionId: ids.projectVersion, status: 'succeeded', stage: 'completed', progress: 100, idempotencyKey: `${prefix}-formal`,
-    basisSnapshot: { schemaVersion: 'test-design-basis-snapshot/v3', projectVersionId: ids.projectVersion, requirementReleaseId: traceability.sourceRequirementReleaseId, verificationRunId: `${prefix}-verification`, requirementReleaseContentSha256: '2'.repeat(64), content: { requirements: [], evidence: [], clarifications: [], testFocus: [] }, snapshotSha256: '3'.repeat(64), createdAt: now },
-    agentConfigurationSnapshot: {} as TestDesignWorkflowRun['agentConfigurationSnapshot'], workspaceSnapshot: {} as TestDesignWorkflowRun['workspaceSnapshot'], formalWorkspaceFiles: [], retrievalSnapshot: { canonicalVersion: 'retrieval-snapshot/v1', mode: 'disabled', assetVersionIds: [], queryPlan: [], hits: [], snapshotSha256: '4'.repeat(64), createdAt: now }, historicalSnapshot: { schemaVersion: 'historical-case-snapshot/v1', items: [], snapshotSha256: '5'.repeat(64), createdAt: now },
-    nodeRuns: [], artifacts: [], gateDecisions: [], testCases: [], caseChangeProposals: [{ id: proposalId, runId, operation: 'create', candidateContent: content, diff: [], requirementRefs: ['REQ-1'], testPointIds: [`${prefix}-point`], reason: '新增正式用例', confidence: 1, decision: 'accepted', createdAt: now, decidedBy: 'integration-test', decidedAt: now, decisions: [{ id: `${proposalId}-decision`, expectedVersion: 0, fromDecision: 'pending', decision: 'accepted', decidedBy: 'integration-test', decidedAt: now }] }], dataSetVersions: [], coverageAudits: [], smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], events: [], createdBy: 'integration-test', createdAt: now, finishedAt: now,
-  }
-  const legacySet = { id: legacySetId, projectId: ids.project, projectVersionId: ids.projectVersion, testDesignId: designId, runId, version: 1, schemaVersion: 'test-case-set/v1' as const, name: '历史用例集', treeVersionId: `${prefix}-tree-version`, dataSetVersionId: `${prefix}-data-version`, coverageAuditId: `${prefix}-audit`, members: [], canonicalContent: { schemaVersion: 'test-case-set/v1', cases: [{ caseId: libraryCaseId, revision: 1, content }] }, contentSha256: '6'.repeat(64), publishedBy: 'integration-test', publishedAt: now, projection: { status: 'succeeded' as const, files: [] } }
-  await store.transaction(state => { const aggregate = state.testDesignState ??= { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [] }; aggregate.designs.push(design); aggregate.runs.push(run); aggregate.caseSetVersions.push(legacySet) })
-
-  const revision = { revision: 1, content, contentSha256: canonicalSha256(content), semanticSha256: 'b'.repeat(64), traceability, sourceRunId: runId, sourceProposalId: proposalId, changeReason: 'Proposal 合入', createdBy: 'integration-test', createdAt: now }
-  const currentContent = { ...content, title: 'PostgreSQL 当前 Revision 标题', priority: 'P1' as const }
-  const currentRevision = { revision: 2, content: currentContent, contentSha256: canonicalSha256(currentContent), semanticSha256: canonicalSha256(currentContent), traceability, changeReason: '人工维护当前 Revision', createdBy: 'integration-test', createdAt: now }
-  const member = { testCaseLibraryVersionId: libraryVersionId, caseId: libraryCaseId, revision: 1, ordinal: 0, executionMethods: ['ui' as const], executionMethod: 'ui' as const, reason: '核心链路' }
-  await store.transaction(state => {
-    const aggregate = state.testDesignState!
-    aggregate.libraryCases.push({ id: libraryCaseId, projectId: ids.project, currentRevision: 2, status: 'active', createdAt: now, updatedAt: now, revisions: [revision, currentRevision] })
-    aggregate.libraryVersions.push({ id: libraryVersionId, projectId: ids.project, version: 1, name: '正式用例库 V1', sourceRunId: runId, legacyTestCaseSetVersionId: legacySetId, members: [{ caseId: libraryCaseId, revision: 1, ordinal: 0, contentSha256: revision.contentSha256, frozenContent: content, traceability, executionReadiness: 'ready' }], contentSha256: 'c'.repeat(64), publishedBy: 'integration-test', publishedAt: now, projection: { status: 'succeeded', files: [] } })
-    aggregate.suiteDrafts.push({ id: draftId, projectId: ids.project, suiteKey: 'postgres-smoke', suiteType: 'smoke', name: 'PostgreSQL Smoke', testCaseLibraryVersionId: libraryVersionId, compatibilityStatus: 'compatible', members: [member], contentSha256: 'd'.repeat(64), status: 'published', publishedVersionId: suiteVersionId, createdBy: 'integration-test', createdAt: now, updatedBy: 'integration-test', updatedAt: now })
-    aggregate.suiteVersions.push({ id: suiteVersionId, projectId: ids.project, suiteKey: 'postgres-smoke', suiteType: 'smoke', version: 1, name: 'PostgreSQL Smoke', testCaseLibraryVersionId: libraryVersionId, compatibilityStatus: 'compatible', members: [member], contentSha256: 'e'.repeat(64), publishedBy: 'integration-test', publishedAt: now, status: 'active' })
-    aggregate.executionHandoffs.push({ id: handoffId, projectId: ids.project, projectVersionId: ids.projectVersion, testCaseLibraryVersionId: libraryVersionId, suiteVersionId, mode: 'smoke', members: [{ stage: 'smoke', ordinal: 0, sourceVersionId: suiteVersionId, caseId: libraryCaseId, revision: 1, method: 'ui', reason: '核心链路', dedupKey: `${libraryCaseId}:1:ui`, dimension: 'functional', executionSpec: content.executionSpec!, traceability, selectionReason: '核心链路', contentSha256: revision.contentSha256, readinessOverride: { reason: '人工确认历史执行配置', actorId: 'integration-test', createdAt: now } }], contentSha256: 'f'.repeat(64), createdBy: 'integration-test', createdAt: now })
-    aggregate.legacyMigrations.push({ id: migrationId, projectId: ids.project, legacyTestCaseSetVersionId: legacySetId, previewSha256, status: 'migrated', mappings: [{ legacyCaseId: libraryCaseId, legacyRevision: 1, libraryCaseId, libraryRevision: 1, resolution: 'created' }], testCaseLibraryVersionId: libraryVersionId, migratedBy: 'integration-test', migratedAt: now })
-  })
-  await store.transaction(state => { const persistedRun = state.testDesignState!.runs.find(item => item.id === runId)!; persistedRun.baseTestCaseLibraryVersionId = libraryVersionId; persistedRun.baseTestCaseLibraryVersionSha256 = 'c'.repeat(64); persistedRun.historicalSnapshot.baseTestCaseLibraryVersionId = libraryVersionId; persistedRun.historicalSnapshot.baseTestCaseLibraryVersionSha256 = 'c'.repeat(64) })
-
-  const restarted = new PostgresStore(connectionString); await restarted.load()
-  try {
-    const snapshot = await restarted.snapshot(); const aggregate = snapshot.testDesignState!
-    const restoredCase = aggregate.libraryCases.find(item => item.id === libraryCaseId)!
-    assert.deepEqual(restoredCase.revisions[0].traceability, traceability)
-    assert.equal(aggregate.runs.find(item => item.id === runId)!.caseChangeProposals[0].decisions.length, 1)
-    assert.equal(aggregate.libraryVersions.find(item => item.id === libraryVersionId)!.members[0].revision, 1)
-    const frozenVersion = await new TestDesignService(restarted).getLibraryVersion(ids.project, libraryVersionId)
-    assert.equal(frozenVersion.members[0].frozenContent?.title, content.title)
-    assert.notEqual(frozenVersion.members[0].frozenContent?.title, restoredCase.revisions.find(item => item.revision === restoredCase.currentRevision)!.content.title)
-    assert.equal(aggregate.suiteDrafts.find(item => item.id === draftId)!.testCaseLibraryVersionId, libraryVersionId)
-    assert.equal(aggregate.suiteVersions.find(item => item.id === suiteVersionId)!.members[0].caseId, libraryCaseId)
-    const restoredHandoffMember = aggregate.executionHandoffs.find(item => item.id === handoffId)!.members[0]
-    assert.equal(restoredHandoffMember.dimension, 'functional'); assert.deepEqual(restoredHandoffMember.executionSpec, content.executionSpec); assert.deepEqual(restoredHandoffMember.traceability, traceability); assert.equal(restoredHandoffMember.contentSha256, revision.contentSha256); assert.equal(restoredHandoffMember.readinessOverride?.reason, '人工确认历史执行配置')
-    const idempotent = await new TestDesignService(restarted).migrateLegacyCaseSet(ids.project, { legacyTestCaseSetVersionId: legacySetId, expectedPreviewSha256: previewSha256 }, { subjectId: 'integration-test', displayName: '集成测试' })
-    assert.equal(idempotent.version.id, libraryVersionId); assert.equal(idempotent.record.id, migrationId)
-  } finally { await restarted.close?.() }
-
-  const normalized = await database.query<{ migration: string; requirements: string; points: string; handoffs: string; frozen: string; baseline: string }>(`SELECT
-    (SELECT count(*) FROM smarthub.schema_migrations WHERE version=26)::text AS migration,
-    (SELECT count(*) FROM smarthub.library_test_case_revision_requirement_refs WHERE case_id=$1)::text AS requirements,
-    (SELECT count(*) FROM smarthub.library_test_case_revision_test_point_refs WHERE case_id=$1)::text AS points,
-    (SELECT count(*) FROM smarthub.test_execution_handoff_members WHERE handoff_id=$2 AND dimension='functional' AND execution_spec IS NOT NULL AND traceability IS NOT NULL AND content_sha256 IS NOT NULL AND readiness_override IS NOT NULL)::text AS handoffs,
-    (SELECT count(*) FROM smarthub.test_case_library_version_members WHERE version_id=$4 AND frozen_content IS NOT NULL AND traceability IS NOT NULL AND execution_readiness='ready')::text AS frozen,
-    (SELECT count(*) FROM smarthub.workflow_runs WHERE id=$3 AND base_test_case_library_version_id=$4 AND base_test_case_library_version_sha256=$5)::text AS baseline`, [libraryCaseId, handoffId, runId, libraryVersionId, 'c'.repeat(64)])
-  assert.deepEqual(normalized.rows[0], { migration: '1', requirements: '2', points: '2', handoffs: '1', frozen: '1', baseline: '1' })
-  await assert.rejects(database.query('DELETE FROM smarthub.library_test_case_revisions WHERE case_id=$1 AND revision=1', [libraryCaseId]), /foreign key/iu)
-  await assert.rejects(database.query('DELETE FROM smarthub.test_case_library_versions WHERE id=$1', [libraryVersionId]), /foreign key/iu)
-  await runMigrations(connectionString)
-  assert.equal((await database.query<{ count: string }>('SELECT count(*)::text AS count FROM smarthub.schema_migrations WHERE version=26')).rows[0].count, '1')
 })
 
 async function seedParents() {

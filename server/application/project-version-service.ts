@@ -65,7 +65,6 @@ export class ProjectVersionService {
       if (testDesignRuns.some(item => ['queued', 'running', 'waiting_gate'].includes(item.status))) throw new Error('项目版本仍有活动测试设计工作流，请先取消运行后再删除')
       const testDesignIds = new Set((testDesignState?.designs ?? []).filter(item => item.projectVersionId === version.id).map(item => item.id))
       const testDesignRunIds = new Set(testDesignRuns.map(item => item.id))
-      const caseSetVersionIds = new Set((testDesignState?.caseSetVersions ?? []).filter(item => item.projectVersionId === version.id).map(item => item.id))
       const deletedBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id).length
       const deletedRunIds = new Set(reviewRuns.map(item => item.id))
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
@@ -73,13 +72,12 @@ export class ProjectVersionService {
       state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
       state.reviewRuns = state.reviewRuns.filter(item => item.projectVersionId !== version.id)
       if (testDesignState) {
-        testDesignState.executionHandoffs = testDesignState.executionHandoffs.filter(item => item.projectVersionId !== version.id && (!item.testCaseSetVersionId || !caseSetVersionIds.has(item.testCaseSetVersionId)))
-        testDesignState.caseSetVersions = testDesignState.caseSetVersions.filter(item => item.projectVersionId !== version.id)
+        testDesignState.executionHandoffs = testDesignState.executionHandoffs.filter(item => item.projectVersionId !== version.id)
         testDesignState.runs = testDesignState.runs.filter(item => !testDesignRunIds.has(item.id))
         testDesignState.designs = testDesignState.designs.filter(item => !testDesignIds.has(item.id))
       }
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
-      return { id: version.id, name: version.name, projectId: version.projectId, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseSetVersions: caseSetVersionIds.size }
+      return { id: version.id, name: version.name, projectId: version.projectId, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length }
     })
     const workspaceCleanup = this.workspaceCleaner
       ? await this.workspaceCleaner.queueProjectVersionWorkspaceCleanup(deleted.projectId, deleted.name)

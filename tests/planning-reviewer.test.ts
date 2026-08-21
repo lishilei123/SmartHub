@@ -21,7 +21,7 @@ test('CoverageReviewer 正常执行并读取 Service 自动冻结的完整只读
       models: [{ id: 'model-1', name: 'reviewer-model', displayName: 'Reviewer Model', contextWindow: 32_768, maxOutputTokens: 4_096, capabilities: ['tool_calling'], enabled: true, health: 'healthy', qualityGate: { version: 'model-probe/v2', checkedAt: '2026-08-21T00:00:00.000Z', passed: true, sampleSha256: '1'.repeat(64), inputCharacters: 8_000, checks: { connectivity: true, longContext: true, structuredSubmission: true, toolCalling: true } } }],
     })
     state.agentConfigurationVersions.push(configuration)
-    state.testDesignState = { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [run], caseSetVersions: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [] }
+    state.testDesignState = { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [run], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] }
   })
 
   let captured: ReviewerExecutionInput | undefined
@@ -53,12 +53,11 @@ test('CoverageReviewer 正常执行并读取 Service 自动冻结的完整只读
   const result = await service.reviewCoverage(run.id)
   assert.equal(result.reviewerType, 'coverage')
   assert.equal(captured?.reviewerType, 'coverage')
-  assert.deepEqual(captured?.requiredReadPaths.map(path => path.split('/').at(-1)), ['test-cases.json', 'test-data-requirements.json', 'coverage-audit.json'])
+  assert.deepEqual(captured?.requiredReadPaths.map(path => path.split('/').at(-1)), ['test-cases.json', 'coverage-audit.json'])
   assert.match(captured?.task ?? '', /Requirement Release Content/u)
   assert.match(captured?.task ?? '', /REQ-1/u)
   const files = captured?.snapshot.workspaceFiles ?? []
   assert.ok(files.some(file => file.logicalPath.endsWith('/test-cases.json') && file.content.includes('case-current')))
-  assert.ok(files.some(file => file.logicalPath.endsWith('/test-data-requirements.json') && file.content.includes('data-current')))
   assert.ok(files.some(file => file.logicalPath.endsWith('/coverage-audit.json') && file.content.includes('audit-current')))
   const persisted = (await store.snapshot()).testDesignState?.runs[0].planningSubAgentRuns?.at(-1)
   assert.equal(persisted?.status, 'succeeded')
@@ -85,7 +84,7 @@ function planningConfiguration(agentDefinition: AgentDefinitionVersion): AgentCo
 }
 
 function coverageRun(agentDefinition: AgentDefinitionVersion, configuration: AgentConfigurationVersion): TestDesignWorkflowRun {
-  const caseContent: TestCaseContent = { schemaVersion: 'test-case/v2', title: '当前用例', objective: '验证当前 Coverage', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P0', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [], sharedVerificationChecks: [], tags: [], domain: 'Reviewer' }
+  const caseContent: TestCaseContent = { schemaVersion: 'test-case/v3', title: '当前用例', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P0', preconditions: [], executionMethods: ['api'], steps: ['执行当前用例'], expectedResults: ['结果符合预期'] }
   const caseSha256 = canonicalSha256(caseContent)
   const testCases = [{ id: 'case-current', runId: 'test-design-run-1', origin: 'ai' as const, candidateRef: 'TC-1', currentRevision: 1, reviewState: 'in_review' as const, revisions: [{ revision: 1, content: caseContent, contentSha256: caseSha256, semanticSha256: caseSha256, diff: [], editorId: 'agent', reason: '生成', createdAt: '2026-08-21T01:00:00.000Z' }], reviewActions: [] }]
   const caseSetSha256 = canonicalSha256([{ caseId: 'case-current', revision: 1, contentSha256: caseSha256 }])
@@ -97,9 +96,8 @@ function coverageRun(agentDefinition: AgentDefinitionVersion, configuration: Age
     currentInputRefs: [],
     workspaceSnapshot: { schemaVersion: 'project-workspace-snapshot/v1', projectId: 'project-1', projectVersionId: 'project-version-1', projectVersionName: 'V1', rootLogicalPath: 'workspace', activeBranchLogicalPath: 'workspace/branches/V1', agentLogicalPath: 'workspace/agent_workspace/planning_agent', knowledgeBaseId: 'kb-1', indexVersionId: 'index-1', requirementReleaseId: 'release-1', verificationRunId: 'requirement-run-1', requirementReleaseContentSha256: canonicalSha256(requirementContent), files: [], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: '9'.repeat(64) },
     formalWorkspaceFiles: [], retrievalSnapshot: { canonicalVersion: 'retrieval-snapshot/v1', mode: 'disabled', assetVersionIds: [], queryPlan: [], hits: [], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: 'a'.repeat(64) }, historicalSnapshot: { schemaVersion: 'historical-case-snapshot/v1', items: [], createdAt: '2026-08-21T00:00:00.000Z', snapshotSha256: 'b'.repeat(64) },
-    nodeRuns: [], artifacts: [], gateDecisions: [], testCases, scenarioClaims: [], dimensionAssessments: [], caseChangeProposals: [],
-    dataSetVersions: [{ id: 'data-current', version: 1, requirements: [], contentSha256: 'c'.repeat(64), createdBy: 'agent', createdAt: '2026-08-21T01:00:00.000Z' }],
+    nodeRuns: [], artifacts: [], gateDecisions: [], testCases, caseChangeProposals: [],
     coverageAudits: [{ id: 'audit-current', runId: 'test-design-run-1', requirementReleaseId: 'release-1', dataSetVersionId: 'data-current', caseSetSha256, inputSha256: 'd'.repeat(64), status: 'valid', statistics: { totalBasis: 1, coveredBasis: 1, totalCases: 1 }, relations: [], blockers: [], advisories: [], createdAt: '2026-08-21T02:00:00.000Z' }],
-    smokeCandidates: [], impactedRegression: [], findings: [], confirmationItems: [], events: [], createdBy: 'test', createdAt: '2026-08-21T00:00:00.000Z', finishedAt: '2026-08-21T02:00:00.000Z',
+    events: [], createdBy: 'test', createdAt: '2026-08-21T00:00:00.000Z', finishedAt: '2026-08-21T02:00:00.000Z',
   }
 }

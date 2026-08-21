@@ -243,8 +243,7 @@ export function freezeExecutionTaskInput(input: {
       'Handoff 追溯快照与固定用例库成员不一致',
     )
   }
-  const requiredDataIds = [...new Set(libraryMember.frozenContent.dataRequirementIds)]
-    .sort((left, right) => left.localeCompare(right, 'en'))
+  const requiredDataIds: string[] = []
   let testDataBindings: FrozenExecutionTaskInput['testDataBindings']
   if (requiredDataIds.length) {
     if (!input.testData) {
@@ -654,23 +653,12 @@ function normalizeAst(value: unknown): unknown {
 }
 
 function verificationChecks(spec: TestCaseExecutionSpec) {
-  return 'verificationChecks' in spec ? spec.verificationChecks : []
+  return spec.testCase.expectedResults.map((description, index) => ({ key: `expected-${index + 1}`, description }))
 }
 
 function resolveExecutionSpec(content: TestCaseContent, method: string): TestCaseExecutionSpec {
-  if (content.executionSpec?.method === method) return content.executionSpec
-  const executionMethod = content.executionMethods.find(item => item.method === method)
-  if (!executionMethod) throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_NOT_IN_CASE', '固定用例不包含 Handoff 执行方法')
-  return {
-    kind: 'functional',
-    method: executionMethod.method,
-    steps: executionMethod.steps,
-    verificationChecks: executionMethod.verificationChecks,
-    preconditions: content.preconditions,
-    testDataRequirements: content.dataRequirementIds,
-    executionReadiness: executionMethod.executionReadiness,
-    automationHint: executionMethod.automationHint,
-  }
+  if (method !== 'ui' && method !== 'api' || !content.executionMethods.includes(method)) throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_NOT_IN_CASE', '固定用例不包含 Handoff 执行方法')
+  return { schemaVersion: 'test-script-input/v1', method, testCase: structuredClone(content) }
 }
 
 function safePackagePath(value: string) {
@@ -679,7 +667,7 @@ function safePackagePath(value: string) {
     throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_PATH_INVALID', `执行包路径不安全：${value}`)
   }
   const parts = normalized.split('/')
-  if (parts.some(part => !part || part === '.' || part === '..' || part.length > 120 || /[<>:"|?* -]/u.test(part) || /[. ]$/u.test(part) || windowsReserved(part))) {
+  if (parts.some(part => !part || part === '.' || part === '..' || part.length > 120 || /[<>:"|?*\u0000-\u001F]/u.test(part) || /[. ]$/u.test(part) || windowsReserved(part))) {
     throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_PATH_INVALID', `执行包路径不安全：${value}`)
   }
   return parts.join('/')

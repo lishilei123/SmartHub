@@ -284,7 +284,7 @@ function safeText(value: string, field: string, maximum: number) {
   if (
     !normalized
     || normalized.length > maximum
-    || /[ -]/u.test(normalized)
+    || /[\u0000-\u001F\u007F]/u.test(normalized)
   ) {
     throw new Error(`TEST_EXECUTION_ENVIRONMENT_${field.toUpperCase()}_INVALID`)
   }
@@ -296,7 +296,7 @@ function safeHost(value: string) {
   if (
     !normalized
     || normalized.length > 253
-    || /[ - /@\\]/u.test(normalized)
+    || /[\u0000-\u0020\u007F/@\\]/u.test(normalized)
   ) {
     throw new Error('TEST_EXECUTION_ENVIRONMENT_HOST_INVALID')
   }

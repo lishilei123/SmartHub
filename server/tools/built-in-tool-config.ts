@@ -170,6 +170,7 @@ function arrayOptions(schema: Record<string, unknown>) {
     ...descriptionOptions(schema),
     ...(typeof schema.minItems === 'number' ? { minItems: schema.minItems } : {}),
     ...(typeof schema.maxItems === 'number' ? { maxItems: schema.maxItems } : {}),
+    ...(typeof schema.uniqueItems === 'boolean' ? { uniqueItems: schema.uniqueItems } : {}),
   }
 }
 
@@ -264,9 +265,10 @@ function validateJsonSchema(value: unknown, path: string): asserts value is Reco
       return
     }
     case 'array':
-      assertFields(value, ['type', 'items', 'minItems', 'maxItems', 'description'], path)
+      assertFields(value, ['type', 'items', 'minItems', 'maxItems', 'uniqueItems', 'description'], path)
       validateNonNegativeInteger(value.minItems, `${path}.minItems`)
       validateNonNegativeInteger(value.maxItems, `${path}.maxItems`)
+      if (value.uniqueItems !== undefined && typeof value.uniqueItems !== 'boolean') throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.uniqueItems 无效`)
       if (typeof value.minItems === 'number' && typeof value.maxItems === 'number' && value.minItems > value.maxItems) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path} 数组范围无效`)
       validateDescription(value, path)
       validateJsonSchema(value.items, `${path}.items`)

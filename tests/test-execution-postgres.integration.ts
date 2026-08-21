@@ -22,7 +22,6 @@ import type {
   ScriptRevision,
 } from '../server/domain/test-execution-types.js'
 import type {
-  FunctionalExecutionSpec,
   TestCaseContent,
   TestCaseLibraryVersionMemberDetail,
   TestExecutionHandoffMember,
@@ -55,33 +54,18 @@ const ids = {
   job: `${prefix}-job`,
 }
 
-const executionSpec: FunctionalExecutionSpec = {
-  kind: 'functional',
-  method: 'ui',
-  steps: [{ key: 'open', action: '打开健康页', expected: '页面可见' }],
-  verificationChecks: [{ key: 'ready', description: '状态为 Ready' }],
-  preconditions: [],
-  testDataRequirements: [],
-  executionReadiness: 'ready',
-  automationHint: '使用 data-testid',
-}
 const caseContent: TestCaseContent = {
-  schemaVersion: 'test-case/v2',
+  schemaVersion: 'test-case/v3',
   title: '健康检查',
-  objective: '验证服务状态',
   dimension: 'functional',
-  testPointIds: ['health-point'],
+  requirementRefs: ['health-point'],
   priority: 'P0',
   preconditions: [],
-  dataRequirementIds: [],
-  cleanup: [],
-  dependencies: [],
-  executionMethods: [{ method: 'ui', uiSpec: { entry: '/health' }, steps: executionSpec.steps, verificationChecks: executionSpec.verificationChecks, executionReadiness: 'ready', automationHint: executionSpec.automationHint }],
-  executionSpec,
-  sharedVerificationChecks: executionSpec.verificationChecks,
-  tags: ['smoke'],
-  domain: 'system',
+  executionMethods: ['ui'],
+  steps: ['打开健康页'],
+  expectedResults: ['状态为 Ready'],
 }
+const executionSpec = { schemaVersion: 'test-script-input/v1' as const, method: 'ui' as const, testCase: caseContent }
 const caseContentSha256 = canonicalSha256(caseContent)
 const libraryMember: TestCaseLibraryVersionMemberDetail = {
   caseId: ids.libraryCase,
@@ -89,11 +73,12 @@ const libraryMember: TestCaseLibraryVersionMemberDetail = {
   ordinal: 0,
   contentSha256: caseContentSha256,
   frozenContent: caseContent,
+  frozenExecutionMethods: ['ui'],
   executionReadiness: 'ready',
 }
 const librarySourceRunId = `${prefix}-library-source-run`
 const libraryVersionSha256 = canonicalSha256({
-  schemaVersion: 'test-case-library/v1',
+  schemaVersion: 'test-case-library/v3',
   projectId: ids.project,
   sourceRunId: librarySourceRunId,
   members: [libraryMember],

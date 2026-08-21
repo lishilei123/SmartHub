@@ -393,8 +393,8 @@ function executionRunFixture(agents: ExecutionRun['agents']): ExecutionRun {
 }
 
 function executionTaskFixture(runId: string): ExecutionTask {
-  const executionSpec = { kind: 'functional' as const, method: 'ui' as const, steps: [], verificationChecks: [{ key: 'ready', description: '页面已就绪' }], preconditions: [], testDataRequirements: [], executionReadiness: 'ready' as const, automationHint: 'Playwright' }
-  const caseContent = { schemaVersion: 'test-case/v2' as const, title: '状态检查', objective: '检查页面状态', dimension: 'functional' as const, requirementRefs: ['point-1'], priority: 'P0' as const, preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [], executionSpec, sharedVerificationChecks: [], tags: [], domain: '状态' }
+  const caseContent = { schemaVersion: 'test-case/v3' as const, title: '状态检查', dimension: 'functional' as const, requirementRefs: ['point-1'], priority: 'P0' as const, preconditions: [], executionMethods: ['ui' as const], steps: ['打开状态页'], expectedResults: ['页面已就绪'] }
+  const executionSpec = { schemaVersion: 'test-script-input/v1' as const, method: 'ui' as const, testCase: caseContent }
   return {
     id: 'task-1',
     runId,

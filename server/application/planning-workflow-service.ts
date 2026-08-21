@@ -38,7 +38,7 @@ export type PlanningReviewerRuntime = Pick<PiAgentRuntimeAdapter, 'contextProfil
 
 export type CoverageReviewerSourceRun = Pick<
   TestDesignWorkflowRun,
-  'id' | 'testCases' | 'dataSetVersions' | 'coverageAudits'
+  'id' | 'testCases' | 'coverageAudits'
 > & {
   basisSnapshot: Pick<TestDesignWorkflowRun['basisSnapshot'], 'requirementReleaseId' | 'requirementReleaseContentSha256'>
 }
@@ -604,9 +604,8 @@ export function captureCoverageReviewerSource(
       .at(-1),
     'COVERAGE_REVIEW_AUDIT_REQUIRED',
   )
-  const dataSet = required(run.dataSetVersions.find(item => item.id === audit.dataSetVersionId), 'TEST_DATA_VERSION_NOT_FOUND')
   if (audit.caseSetSha256 !== canonicalSha256(testCases)) throw new Error('COVERAGE_AUDIT_SOURCE_DRIFT')
-  return { kind: 'test_design', testDesignRunId: run.id, requirementReleaseId: run.basisSnapshot.requirementReleaseId, requirementReleaseContentSha256: run.basisSnapshot.requirementReleaseContentSha256, testCases, dataSetVersionId: dataSet.id, dataSetContentSha256: dataSet.contentSha256, coverageAuditId: audit.id, coverageAuditInputSha256: audit.inputSha256 }
+  return { kind: 'test_design', testDesignRunId: run.id, requirementReleaseId: run.basisSnapshot.requirementReleaseId, requirementReleaseContentSha256: run.basisSnapshot.requirementReleaseContentSha256, testCases, coverageAuditId: audit.id, coverageAuditInputSha256: audit.inputSha256 }
 }
 
 function coverageReviewerProjection(
@@ -625,13 +624,10 @@ function coverageReviewerProjection(
     const revision = required(item.revisions.find(candidate => candidate.revision === reference.revision && candidate.contentSha256 === reference.contentSha256), 'TEST_CASE_REVISION_SOURCE_DRIFT')
     return { id: item.id, revisionNumber: reference.revision, reviewState: item.reviewState, revision }
   }) }, run.id))
-  const dataSet = required(run.dataSetVersions.find(item => item.id === sourceReference.dataSetVersionId && item.contentSha256 === sourceReference.dataSetContentSha256), 'TEST_DATA_VERSION_SOURCE_DRIFT')
-  const dataPath = reviewRoot + '/test-data-requirements.json'
-  files.set(dataPath, candidateFile(dataPath, { schemaVersion: 'planning-review-test-data/v1', dataSet }, run.id))
   const audit = required(run.coverageAudits.find(item => item.id === sourceReference.coverageAuditId && item.inputSha256 === sourceReference.coverageAuditInputSha256), 'COVERAGE_AUDIT_SOURCE_DRIFT')
   const auditPath = reviewRoot + '/coverage-audit.json'
-  files.set(auditPath, candidateFile(auditPath, { schemaVersion: 'planning-review-coverage-audit/v1', audit, findings: run.findings, confirmationItems: run.confirmationItems }, run.id))
-  const requiredLogicalPaths = [casesPath, dataPath, auditPath]
+  files.set(auditPath, candidateFile(auditPath, { schemaVersion: 'planning-review-coverage-audit/v1', audit }, run.id))
+  const requiredLogicalPaths = [casesPath, auditPath]
   const workspaceFiles = [...files.values()].map(file => ({ logicalPath: file.logicalPath, contentSha256: file.contentSha256, content: file.content, displayName: file.displayName, ...(file.assetId ? { assetId: file.assetId } : {}), ...(file.assetVersionId ? { assetVersionId: file.assetVersionId } : {}) })).sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'zh-CN'))
   const task = coverageReviewerTask(run, sourceReference, audit)
   const snapshot: PlanningReviewerSnapshot = { runId: 'review:coverage:' + run.id, projectId: project.id, projectName: project.name, projectVersionId: projectVersion.id, projectVersionName: projectVersion.name, knowledgeBaseId: run.workspaceSnapshot.knowledgeBaseId, indexVersionId: run.workspaceSnapshot.indexVersionId, assets: workspaceFiles.flatMap(file => file.assetId && file.assetVersionId ? [{ assetId: file.assetId, assetVersionId: file.assetVersionId, assetContentHash: file.contentSha256, logicalPath: file.logicalPath, displayName: file.displayName }] : []), documentWorkspace: { mode: 'agent_directory', logicalPath: run.workspaceSnapshot.rootLogicalPath, rootLogicalPath: run.workspaceSnapshot.rootLogicalPath, activeBranchLogicalPath: run.workspaceSnapshot.activeBranchLogicalPath, branchLogicalPaths: state.projectVersions.filter(item => item.projectId === project.id).map(item => 'workspace/branches/' + safeWorkspaceSegment(item.name)), agentLogicalPath: run.workspaceSnapshot.agentLogicalPath, layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] }, workspaceFiles, agentDefinition: structuredClone(configuration.agentDefinition), taskSha256: canonicalSha256(task), createdAt: new Date().toISOString() }
@@ -650,7 +646,6 @@ function coverageReviewerTask(
     `Requirement Release Content Hash：${run.basisSnapshot.requirementReleaseContentSha256}`,
     `Requirement Release Content：${canonicalJson(run.basisSnapshot.content)}`,
     `TestCase Revisions：${JSON.stringify(sourceReference.testCases)}`,
-    `DataSet Version：${sourceReference.dataSetVersionId}`,
     `CoverageAudit：${audit.id}`,
     `Coverage inputSha256：${audit.inputSha256}`,
     '只输出 ReviewCandidate；不得修改 Stage、Workspace、Case、Expected Result 或发布对象。',

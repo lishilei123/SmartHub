@@ -35,7 +35,6 @@ import type {
   ScriptRevision,
 } from '../server/domain/test-execution-types.js'
 import type {
-  FunctionalExecutionSpec,
   TestCaseContent,
   TestCaseLibraryVersionMemberDetail,
   TestExecutionHandoffMember,
@@ -56,41 +55,19 @@ import type {
   SandboxExecutionResult,
 } from '../server/runner/execution-sandbox.js'
 
-const executionSpec: FunctionalExecutionSpec = {
-  kind: 'functional',
-  method: 'ui',
-  steps: [{ key: 'open', action: '打开状态页', expected: '页面已加载' }],
-  verificationChecks: [{ key: 'status', description: '状态显示 Ready' }],
-  preconditions: [],
-  testDataRequirements: [],
-  executionReadiness: 'ready',
-  automationHint: '使用 data-testid',
-}
-
 const caseContent: TestCaseContent = {
-  schemaVersion: 'test-case/v2',
+  schemaVersion: 'test-case/v3',
   title: '状态检查',
-  objective: '验证状态页显示 Ready',
   dimension: 'functional',
   requirementRefs: ['point-status'],
   priority: 'P0',
   preconditions: [],
-  dataRequirementIds: [],
-  cleanup: [],
-  dependencies: [],
-  executionMethods: [{
-    method: 'ui',
-    uiSpec: { entry: '/status' },
-    steps: executionSpec.steps,
-    verificationChecks: executionSpec.verificationChecks,
-    executionReadiness: 'ready',
-    automationHint: executionSpec.automationHint,
-  }],
-  executionSpec,
-  sharedVerificationChecks: executionSpec.verificationChecks,
-  tags: ['smoke'],
-  domain: 'system',
+  executionMethods: ['ui'],
+  steps: ['打开状态页'],
+  expectedResults: ['状态显示 Ready'],
 }
+
+const executionSpec = { schemaVersion: 'test-script-input/v1' as const, method: 'ui' as const, testCase: caseContent }
 
 const caseContentSha256 = canonicalSha256(caseContent)
 const libraryMember: TestCaseLibraryVersionMemberDetail = {
@@ -119,7 +96,7 @@ function scriptSource(locator = 'status') {
 
 test('status', async ({ page }) => {
   await page.goto('/status')
-  // smarthub:assert status
+  // smarthub:assert expected-1
   await expect(page.locator('[data-testid="${locator}"]')).toHaveText('Ready')
 })
 `

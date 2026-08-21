@@ -1472,21 +1472,18 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
 
   const handoffResult = await client.query<{
     project_version_id: string
-    test_case_set_version_id: string | null
     test_case_library_version_id: string | null
     suite_version_id: string | null
     execution_mode: string | null
     content_sha256: string
     data: TestExecutionHandoff
   }>(`
-    SELECT project_version_id,test_case_set_version_id,test_case_library_version_id,suite_version_id,execution_mode,content_sha256,data
+    SELECT project_version_id,test_case_library_version_id,suite_version_id,execution_mode,content_sha256,data
     FROM smarthub.test_execution_handoffs WHERE id=$1 FOR SHARE
   `, [run.handoff.handoffId])
   const handoff = handoffResult.rows[0]
   if (!handoff) throw new Error('TEST_EXECUTION_HANDOFF_NOT_FOUND')
-  if (handoff.test_case_set_version_id || !handoff.test_case_library_version_id || !handoff.execution_mode) {
-    throw new Error('TEST_EXECUTION_HANDOFF_MIGRATION_REQUIRED')
-  }
+  if (!handoff.test_case_library_version_id || !handoff.execution_mode) throw new Error('TEST_EXECUTION_HANDOFF_SOURCE_INVALID')
   if (
     handoff.project_version_id !== run.projectVersionId
     || handoff.test_case_library_version_id !== run.handoff.testCaseLibraryVersionId
@@ -1500,11 +1497,10 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
   const libraryResult = await client.query<{
     project_id: string
     source_run_id: string | null
-    legacy_test_case_set_version_id: string | null
     content_sha256: string
     data: TestCaseLibraryVersionDetail
   }>(`
-    SELECT project_id,source_run_id,legacy_test_case_set_version_id,content_sha256,data
+    SELECT project_id,source_run_id,content_sha256,data
     FROM smarthub.test_case_library_versions WHERE id=$1 FOR SHARE
   `, [run.handoff.testCaseLibraryVersionId])
   const library = libraryResult.rows[0]
@@ -1527,29 +1523,14 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
   if (!libraryMemberResult.rows.length) throw new Error('TEST_EXECUTION_LIBRARY_MEMBERS_EMPTY')
   const libraryMembers = libraryMemberResult.rows.map(persistedLibraryMember)
   assertUniqueOrdinals(libraryMembers, 'TEST_EXECUTION_LIBRARY_MEMBER_ORDINAL_INVALID')
-  const libraryCanonical = library.source_run_id && !library.legacy_test_case_set_version_id
-    ? {
-        schemaVersion: 'test-case-library/v1',
-        projectId: run.projectId,
-        sourceRunId: library.source_run_id,
-        ...(library.data.dataRequirementSet ? {
-          dataRequirementSet: {
-            id: library.data.dataRequirementSet.id,
-            version: library.data.dataRequirementSet.version,
-            contentSha256: library.data.dataRequirementSet.contentSha256,
-          },
-        } : {}),
-        members: libraryMembers,
-      }
-    : library.legacy_test_case_set_version_id && !library.source_run_id
-      ? {
-          schemaVersion: 'test-case-library/v1',
-          projectId: run.projectId,
-          legacyTestCaseSetVersionId: library.legacy_test_case_set_version_id,
-          members: libraryMembers,
-        }
-      : null
-  if (!libraryCanonical || canonicalSha256(libraryCanonical) !== library.content_sha256) {
+  if (!library.source_run_id) throw new Error('TEST_EXECUTION_LIBRARY_SOURCE_INVALID')
+  const libraryCanonical = {
+    schemaVersion: 'test-case-library/v3',
+    projectId: run.projectId,
+    sourceRunId: library.source_run_id,
+    members: libraryMembers,
+  }
+  if (canonicalSha256(libraryCanonical) !== library.content_sha256) {
     throw new Error('TEST_EXECUTION_LIBRARY_CONTENT_HASH_MISMATCH')
   }
 
@@ -1573,7 +1554,6 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
     ...(run.handoff.suiteVersionId ? { suiteVersionId: run.handoff.suiteVersionId } : {}),
     mode: run.handoff.mode,
     members: handoffMembers,
-    ...(handoff.data.testDataSnapshot ? { testDataSnapshot: handoff.data.testDataSnapshot } : {}),
   }
   if (canonicalSha256(handoffCanonical) !== handoff.content_sha256) {
     throw new Error('TEST_EXECUTION_HANDOFF_CONTENT_HASH_MISMATCH')
@@ -1642,7 +1622,7 @@ async function validatePersistedSuite(
     throw new Error('TEST_EXECUTION_SUITE_VERSION_MISMATCH')
   }
   const suiteMemberResult = await client.query<PersistedSuiteMemberRow>(`
-    SELECT test_case_set_version_id,test_case_library_version_id,case_id,case_revision,ordinal,
+    SELECT test_case_library_version_id,case_id,case_revision,ordinal,
            execution_methods,execution_method,data
     FROM smarthub.test_suite_version_members
     WHERE suite_version_id=$1
@@ -1698,7 +1678,6 @@ interface PersistedHandoffMemberRow {
 }
 
 interface PersistedSuiteMemberRow {
-  test_case_set_version_id: string | null
   test_case_library_version_id: string | null
   case_id: string
   case_revision: number
@@ -1727,6 +1706,7 @@ function persistedLibraryMember(row: PersistedLibraryMemberRow): TestCaseLibrary
     ordinal: Number(row.ordinal),
     contentSha256: row.content_sha256,
     frozenContent: structuredClone(row.frozen_content),
+    frozenExecutionMethods: [...row.frozen_content.executionMethods],
     ...(row.traceability ? { traceability: structuredClone(row.traceability) } : {}),
     executionReadiness: row.execution_readiness,
   }
@@ -1763,12 +1743,10 @@ function persistedSuiteMember(row: PersistedSuiteMemberRow, libraryVersionId: st
     throw new Error('TEST_EXECUTION_SUITE_MEMBER_SNAPSHOT_INVALID')
   }
   return {
-    ...(row.test_case_set_version_id ? { testCaseSetVersionId: row.test_case_set_version_id } : {}),
     testCaseLibraryVersionId: row.test_case_library_version_id,
     caseId: row.case_id,
     revision: Number(row.case_revision),
     executionMethods: executionMethods as Array<'ui' | 'api'>,
-    executionMethod: row.execution_method as TestExecutionMethod,
     ordinal: Number(row.ordinal),
     reason: requiredString(row.data, 'reason', 'TEST_EXECUTION_SUITE_MEMBER_SNAPSHOT_INVALID'),
   }

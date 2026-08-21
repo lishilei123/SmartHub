@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import type { CaseChangeDecision, CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignRunSummary, TestDesignWorkflowRun, TestExecutionMethod, TestSuiteDraft } from '../types'
+import type { CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignRunSummary, TestDesignWorkflowRun, TestExecutionMethod, TestSuiteDraft } from '../types'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 const LIVE_RUN_REFRESH_MS = 1_000
@@ -26,7 +26,6 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const [suiteDrafts, setSuiteDrafts] = useState<TestSuiteDraft[]>([])
   const [suiteVersions, setSuiteVersions] = useState<LibraryTestSuiteVersion[]>([])
   const [handoffs, setHandoffs] = useState<LibraryExecutionHandoff[]>([])
-  const [legacyMigrationPreview, setLegacyMigrationPreview] = useState<Awaited<ReturnType<typeof api.previewLegacyCaseMigration>> | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [technicalError, setTechnicalError] = useState('')
@@ -210,27 +209,6 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     await requestAudit(design.id, run.id)
   }, [design, requestAudit, run])
 
-  const resolveIssue = useCallback(async (kind: 'finding' | 'confirmation', id: string, expectedVersion: number, decision: api.TestDesignIssueDecision = 'resolve', comment?: string) => {
-    if (!projectVersionId || !design || !run) return
-    const confirmationResult = kind === 'confirmation'
-      ? await guarded('resolve-issue', () => api.actOnConfirmation(projectVersionId, design.id, run.id, id, { expectedVersion, decision, comment }), '人工处理已记录。')
-      : undefined
-    if (kind === 'finding') await guarded('resolve-issue', () => api.actOnFinding(projectVersionId, design.id, run.id, id, { expectedVersion, decision, comment }), '人工处理已记录。')
-    if (confirmationResult?.requiredAction === 'resynthesize') {
-      await resynthesize()
-      return
-    }
-    await refreshAndScheduleAudit()
-  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, resynthesize, run])
-
-  const decideProposal = useCallback(async (proposalId: string, decision: Exclude<CaseChangeDecision, 'pending'>, comment?: string) => {
-    if (!projectVersionId || !design || !run) return
-    const proposal = run.caseChangeProposals.find(item => item.id === proposalId)
-    if (!proposal) return
-    await guarded('proposal-decision', () => api.decideProposal(projectVersionId, design.id, run.id, proposalId, { expectedVersion: proposal.decisions.length, decision, comment }), '特殊用例库变更决定已记录。')
-    await refreshRun()
-  }, [design, guarded, projectVersionId, refreshRun, run])
-
   const publish = useCallback(async (name: string) => {
     if (!projectVersionId || !design || !run) return
     const audit = [...run.coverageAudits].reverse().find(item => item.status === 'valid')
@@ -256,8 +234,6 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const saveSuiteDraft = useCallback(async (draft: TestSuiteDraft | undefined, value: api.SuiteDraftInput) => { if (!inputs) return; if (draft) { const loaded = await api.loadSuiteDraft(inputs.projectVersion.projectId, draft.id); await guarded('suite-save', () => api.updateSuiteDraft(inputs.projectVersion.projectId, draft.id, loaded.response.headers.get('etag') ?? draft.etag ?? '', value), '测试套件草稿已保存。') } else await guarded('suite-create', () => api.createSuiteDraft(inputs.projectVersion.projectId, value), '测试套件草稿已创建。'); await loadCollection() }, [guarded, inputs, loadCollection])
   const publishSuite = useCallback(async (draft: TestSuiteDraft) => { if (!inputs) return; const loaded = await api.loadSuiteDraft(inputs.projectVersion.projectId, draft.id); await guarded('suite-publish', () => api.publishSuiteDraft(inputs.projectVersion.projectId, draft.id, loaded.response.headers.get('etag') ?? draft.etag ?? ''), '不可变测试套件版本已发布。'); await loadCollection() }, [guarded, inputs, loadCollection])
   const deprecateSuite = useCallback(async (version: LibraryTestSuiteVersion) => { if (!inputs) return; await guarded('suite-deprecate', () => api.deprecateSuiteVersion(inputs.projectVersion.projectId, version.id), '测试套件版本已废弃，历史引用保留。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const previewLegacyMigration = useCallback(async (legacyTestCaseSetVersionId: string) => { if (!inputs) return; const preview = await guarded('legacy-migration-preview', () => api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId)); if (preview) setLegacyMigrationPreview(preview); return preview }, [guarded, inputs])
-  const migrateLegacyCaseSet = useCallback(async (legacyTestCaseSetVersionId: string, confirmUncertain = false) => { if (!inputs) return; const preview = legacyMigrationPreview?.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId ? legacyMigrationPreview : await api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId); await guarded('legacy-migration', () => api.migrateLegacyCaseSet(inputs.projectVersion.projectId, { legacyTestCaseSetVersionId, expectedPreviewSha256: preview.previewSha256, confirmUncertain }), '历史已发布用例集已幂等导入正式用例库。'); setLegacyMigrationPreview(null); await loadCollection() }, [guarded, inputs, legacyMigrationPreview, loadCollection])
 
-  return { inputs, designs, design, run, runs, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, openRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
+  return { inputs, designs, design, run, runs, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, openRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite }
 }

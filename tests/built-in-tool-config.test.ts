@@ -77,71 +77,41 @@ test('测试用例提交工具向模型声明 Requirement 直接追溯字段', (
   const schema = descriptor.parameters as unknown as {
     additionalProperties: boolean
     required: string[]
-    properties: { schemaVersion: { const: string }; cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }; scenarioClaims?: unknown; proposals?: unknown; historicalChanges: unknown }
+    properties: { schemaVersion: { const: string }; cases: { minItems?: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
   }
-  assert.equal(descriptor.version, '3.0.0')
+  assert.equal(descriptor.version, '4.0.0')
   assert.equal(schema.additionalProperties, false)
-  assert.equal(schema.properties.schemaVersion.const, 'test-case-design/v2')
-  assert.equal('scenarioClaims' in schema.properties, false)
-  assert.equal('proposals' in schema.properties, false)
-  assert.equal('historicalChanges' in schema.properties, true)
+  assert.equal(schema.properties.schemaVersion.const, 'test-case-design/v3')
+  assert.deepEqual(Object.keys(schema.properties).sort(), ['cases', 'schemaVersion'])
   assert.ok(schema.required.includes('cases'))
-  assert.equal(schema.properties.cases.minItems, 0)
+  assert.equal(schema.properties.cases.minItems, undefined)
   assert.equal(schema.properties.cases.items.additionalProperties, false)
   assert.ok(schema.properties.cases.items.required.includes('ref'))
   assert.ok(schema.properties.cases.items.required.includes('requirementRefs'))
 })
 
-test('测试用例与修复提交工具声明闭合的 test-case/v2、executionSpec 与 Proposal 层级', () => {
-  for (const toolId of ['test_design_cases.submit_result', 'test_design_repair.submit_result']) {
-  const schema = defaultBuiltInToolConfigResolver.toDescriptor(toolId).parameters as unknown as {
-    additionalProperties: boolean
-    properties: {
-      cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, { minItems?: number }> } }
-      scenarioClaims: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { enum?: string[]; minItems?: number; required?: string[] }> } }
-      dataRequirements: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, { description?: string }> } }
-      proposals: { items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } }
-    }
-  }
+test('测试用例提交工具声明闭合的扁平 TestCase v3', () => {
+  const schema = defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').parameters as any
   const caseSchema = schema.properties.cases.items
-  const dataSchema = schema.properties.dataRequirements.items
-  assert.equal(schema.additionalProperties, false)
-  assert.equal(schema.properties.cases.minItems, toolId === 'test_design_cases.submit_result' ? 0 : 1)
   assert.equal(caseSchema.additionalProperties, false)
-  assert.ok(caseSchema.required.includes('preconditions'))
-  assert.ok(caseSchema.required.includes('executionMethods'))
-  assert.ok(caseSchema.required.includes('executionSpec'))
-  assert.equal(caseSchema.properties.executionMethods.minItems, 0)
-  if (toolId === 'test_design_repair.submit_result') {
-    const scenarioSchema = schema.properties.scenarioClaims.items
-    assert.equal(scenarioSchema.additionalProperties, false)
-    assert.deepEqual(scenarioSchema.required, ['ref', 'caseRef', 'requirementRefs', 'kind', 'subject', 'variant', 'polarity', 'oracle'])
-    assert.equal(scenarioSchema.properties.requirementRefs.minItems, 1)
-    assert.deepEqual(scenarioSchema.properties.polarity.enum, ['positive', 'negative', 'neutral'])
-    assert.deepEqual(scenarioSchema.properties.transition.required, ['from', 'to'])
-    assert.equal(schema.properties.proposals.items.additionalProperties, false)
-    assert.ok(schema.properties.proposals.items.required.includes('operation'))
-    assert.ok(schema.properties.proposals.items.required.includes('confidence'))
-  } else {
-    assert.equal('scenarioClaims' in schema.properties, false)
-    assert.equal('proposals' in schema.properties, false)
-  }
-  assert.ok(!('preConditions' in caseSchema.properties))
-  assert.ok(!('steps' in caseSchema.properties))
-  assert.equal(dataSchema.additionalProperties, false)
-  assert.ok(dataSchema.required.includes('caseRefs'))
-  assert.ok(dataSchema.required.includes('fieldConstraints'))
-  }
+  assert.deepEqual(caseSchema.required, ['ref', 'schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults'])
+  assert.deepEqual(Object.keys(caseSchema.properties).sort(), [...caseSchema.required].sort())
+  assert.equal(caseSchema.properties.schemaVersion.const, 'test-case/v3')
+  assert.equal(caseSchema.properties.requirementRefs.minItems, undefined)
+  assert.equal(caseSchema.properties.requirementRefs.uniqueItems, true)
+  assert.equal(caseSchema.properties.executionMethods.uniqueItems, true)
+  assert.deepEqual(caseSchema.properties.executionMethods.items.enum, ['ui', 'api'])
 })
 
-test('测试设计提交工具允许执行阶段字段留空并保留 UI/API 通道', () => {
-  for (const toolId of ['test_design_cases.submit_result', 'test_design_repair.submit_result']) {
-    const schema = defaultBuiltInToolConfigResolver.toDescriptor(toolId).parameters as any
-    const methodSchema = schema.properties.cases.items.properties.executionMethods.items.properties
-    assert.equal(methodSchema.uiSpec.properties.entry.minLength, 0)
-    assert.equal(methodSchema.apiSpec.properties.method.minLength, 0)
-    assert.equal(methodSchema.apiSpec.properties.path.minLength, 0)
-  }
+test('测试设计修复工具只声明 v3 patch 字段', () => {
+  const descriptor = defaultBuiltInToolConfigResolver.toDescriptor('test_design_repair.submit_result')
+  const schema = descriptor.parameters as any
+  assert.equal(descriptor.version, '3.0.0')
+  assert.equal(schema.additionalProperties, false)
+  assert.deepEqual(schema.required, ['schemaVersion', 'baseCandidateSha256', 'upsertCases', 'removeCaseRefs'])
+  assert.deepEqual(Object.keys(schema.properties).sort(), [...schema.required].sort())
+  assert.equal(schema.properties.schemaVersion.const, 'test-design-repair/v3')
+  assert.equal(schema.properties.upsertCases.items.properties.schemaVersion.const, 'test-case/v3')
 })
 
 test('configuration validation rejects unsafe paths, unknown handlers, duplicate Pi names, and privileged variants', () => {
@@ -177,7 +147,7 @@ test('JSON Schema conversion preserves required fields, bounds, enums, consts, d
     type: 'object',
     properties: {
       requiredText: { type: 'string', minLength: 1, maxLength: 5, description: 'required text' },
-      optionalTags: { type: 'array', minItems: 1, maxItems: 2, items: { enum: ['a', 'b'] } },
+      optionalTags: { type: 'array', minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ['a', 'b'] } },
       fixed: { const: 'fixed-value' },
     },
     required: ['requiredText', 'fixed'],
@@ -188,7 +158,7 @@ test('JSON Schema conversion preserves required fields, bounds, enums, consts, d
     required: string[]
     properties: {
       requiredText: { minLength: number; maxLength: number; description: string }
-      optionalTags: { minItems: number; maxItems: number; items: { enum: string[] } }
+      optionalTags: { minItems: number; maxItems: number; uniqueItems: boolean; items: { enum: string[] } }
       fixed: { const: string }
     }
   }
@@ -197,6 +167,7 @@ test('JSON Schema conversion preserves required fields, bounds, enums, consts, d
   assert.deepEqual(schema.properties.requiredText, { type: 'string', minLength: 1, maxLength: 5, description: 'required text' })
   assert.equal(schema.properties.optionalTags.minItems, 1)
   assert.equal(schema.properties.optionalTags.maxItems, 2)
+  assert.equal(schema.properties.optionalTags.uniqueItems, true)
   assert.equal(schema.properties.fixed.const, 'fixed-value')
 })
 

@@ -2,11 +2,30 @@ import type {
   TestCaseContent,
   TestCaseExecutionSpec,
   TestCaseTraceability,
-  TestDataRequirement,
   TestDimension,
   TestExecutionMethod,
   TestExecutionMode,
 } from './test-design-types.js'
+
+/** Execution-owned controlled data definition; TestCase v3 never embeds this shape. */
+export interface TestDataRequirement {
+  id: string
+  name: string
+  entityType: string
+  featureTags: string[]
+  requirementRefs?: string[]
+  caseIds: string[]
+  fieldConstraints: Record<string, string>
+  relationships: string[]
+  quantity: number
+  initialState: string
+  preparationHint: string
+  sensitivity: 'public' | 'internal' | 'sensitive'
+  isolation: string
+  resetAndCleanup: string
+  readiness: 'ready' | 'needs_confirmation' | 'blocked'
+  readinessReason?: string
+}
 
 export interface ExecutionTestDataBinding {
   requirementId: string

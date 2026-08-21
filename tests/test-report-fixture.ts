@@ -10,24 +10,8 @@ import type {
   FrozenExecutionAgentSnapshot,
   ScriptRevision,
 } from '../server/domain/test-execution-types.js'
-import type {
-  FunctionalExecutionSpec,
-  TestCaseContent,
-} from '../server/domain/test-design-types.js'
+import type { TestCaseContent } from '../server/domain/test-design-types.js'
 import type { TestExecutionReportSource } from '../server/infrastructure/test-execution-store.js'
-
-const executionSpec: FunctionalExecutionSpec = {
-  kind: 'functional',
-  method: 'ui',
-  steps: [{ key: 'open', action: '打开页面', expected: '页面加载' }],
-  verificationChecks: [{ key: 'visible', description: '内容可见' }],
-  preconditions: [],
-  testDataRequirements: [],
-  executionReadiness: 'ready',
-  automationHint: '使用稳定定位器',
-}
-
-const executionSpecSha256 = canonicalSha256(executionSpec)
 
 function agent(agentKey: FrozenExecutionAgentSnapshot['agentKey']): FrozenExecutionAgentSnapshot {
   const base = {
@@ -65,29 +49,18 @@ function task(
   title = `报告用例 ${ordinal}`,
 ): ExecutionTask {
   const caseContent: TestCaseContent = {
-    schemaVersion: 'test-case/v2',
+    schemaVersion: 'test-case/v3',
     title,
-    objective: `验证报告用例 ${ordinal}`,
     dimension: 'functional',
     requirementRefs: [`REQ-${ordinal}`],
     priority: 'P1',
     preconditions: [],
-    dataRequirementIds: [],
-    cleanup: [],
-    dependencies: [],
-    executionMethods: [{
-      method: 'ui',
-      uiSpec: { entry: `/case-${ordinal}` },
-      steps: executionSpec.steps,
-      verificationChecks: executionSpec.verificationChecks,
-      executionReadiness: 'ready',
-      automationHint: executionSpec.automationHint,
-    }],
-    executionSpec,
-    sharedVerificationChecks: executionSpec.verificationChecks,
-    tags: ['report'],
-    domain: 'reporting',
+    executionMethods: ['ui'],
+    steps: [`打开报告用例 ${ordinal} 页面`],
+    expectedResults: ['内容可见'],
   }
+  const executionSpec = { schemaVersion: 'test-script-input/v1' as const, method: 'ui' as const, testCase: caseContent }
+  const executionSpecSha256 = canonicalSha256(executionSpec)
   const inputBase = {
     sourceVersionId: 'library-version-1',
     ordinal,

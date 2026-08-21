@@ -199,13 +199,11 @@ export class JsonStore implements StateStore {
 export function normalizeTestDesignState(state: DatabaseState) {
   const aggregate = state.testDesignState
   if (!aggregate) return
-  aggregate.caseSetVersions ??= []
   aggregate.libraryCases ??= []
   aggregate.libraryVersions ??= []
   aggregate.suiteDrafts ??= []
   aggregate.suiteVersions ??= []
   aggregate.executionHandoffs ??= []
-  aggregate.legacyMigrations ??= []
   for (const run of aggregate.runs ?? []) run.caseChangeProposals ??= []
   for (const draft of aggregate.suiteDrafts) normalizeSuiteLibraryBinding(draft)
   for (const version of aggregate.suiteVersions) normalizeSuiteLibraryBinding(version)

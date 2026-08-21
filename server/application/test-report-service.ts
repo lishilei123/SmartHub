@@ -785,7 +785,7 @@ function compare(left: string, right: string) {
 
 function requiredIdentity(value: string, field: string) {
   const normalized = String(value ?? '').trim()
-  if (!normalized || normalized.length > 500 || /[ -]/u.test(normalized)) {
+  if (!normalized || normalized.length > 500 || /[\u0000-\u001F\u007F]/u.test(normalized)) {
     throw new TestReportServiceError(
       'TEST_REPORT_IDENTITY_INVALID',
       `${field} 无效`,

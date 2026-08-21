@@ -11,8 +11,8 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
 
   const allInputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs$/.exec(url.pathname)
   if (allInputs && method === 'GET') { await authorize(allInputs[1], 'test-design:read'); return send(response, 200, await service.inputCandidates(allInputs[1])) }
-  const inputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs\/(requirement-release|knowledge-assets|fixed-indexes|historical-case-sets|historical-case-assets)$/.exec(url.pathname)
-  if (inputs && method === 'GET') { await authorize(inputs[1], 'test-design:read'); const candidates = await service.inputCandidates(inputs[1]); const keys = { 'requirement-release': 'requirementRelease', 'knowledge-assets': 'knowledgeAssets', 'fixed-indexes': 'fixedIndexes', 'historical-case-sets': 'historicalCaseSets', 'historical-case-assets': 'historicalCaseAssets' } as const; return send(response, 200, candidates[keys[inputs[2] as keyof typeof keys]]) }
+  const inputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs\/(requirement-release|knowledge-assets|fixed-indexes)$/.exec(url.pathname)
+  if (inputs && method === 'GET') { await authorize(inputs[1], 'test-design:read'); const candidates = await service.inputCandidates(inputs[1]); const keys = { 'requirement-release': 'requirementRelease', 'knowledge-assets': 'knowledgeAssets', 'fixed-indexes': 'fixedIndexes' } as const; return send(response, 200, candidates[keys[inputs[2] as keyof typeof keys]]) }
   const readiness = /^\/api\/project-versions\/([^/]+)\/test-designs\/agent-readiness$/.exec(url.pathname)
   if (readiness && method === 'GET') { await authorize(readiness[1], 'test-design:read'); return send(response, 200, (await service.inputCandidates(readiness[1])).agentReadiness) }
   const designs = /^\/api\/project-versions\/([^/]+)\/test-designs$/.exec(url.pathname)
@@ -50,9 +50,6 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   const batchReview = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-cases\/batch-review-actions$/.exec(url.pathname)
   if (batchReview && method === 'POST') { await authorize(batchReview[1], 'test-design:review'); return send(response, 201, await service.batchReview(batchReview[1], batchReview[2], batchReview[3], await json(request) as never, principal)) }
 
-  const data = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-data-requirements$/.exec(url.pathname)
-  if (data && method === 'GET') { await authorize(data[1], 'test-design:read'); return send(response, 200, { versions: await service.getDataRequirements(data[1], data[2], data[3]) }) }
-  if (data && method === 'PATCH') { await authorize(data[1], 'test-design:edit'); const body = await json(request); return send(response, 201, await service.replaceDataRequirements(data[1], data[2], data[3], body.requirements, principal)) }
   const audits = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/coverage-audits$/.exec(url.pathname)
   if (audits && method === 'GET') { await authorize(audits[1], 'test-design:read'); return send(response, 200, { items: await service.coverageAudits(audits[1], audits[2], audits[3]) }) }
   const matrix = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/coverage-matrix$/.exec(url.pathname)
@@ -63,39 +60,12 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (retrievalSource && method === 'GET') { await authorize(retrievalSource[1], 'test-design:read'); return send(response, 200, await service.retrievalSource(retrievalSource[1], retrievalSource[2], retrievalSource[3], retrievalSource[4])) }
   const historicalSource = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/historical-cases\/([^/]+)$/.exec(url.pathname)
   if (historicalSource && method === 'GET') { await authorize(historicalSource[1], 'test-design:read'); return send(response, 200, await service.historicalSource(historicalSource[1], historicalSource[2], historicalSource[3], historicalSource[4])) }
-  const findings = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/findings$/.exec(url.pathname)
-  if (findings && method === 'GET') { await authorize(findings[1], 'test-design:read'); return send(response, 200, { items: await service.findings(findings[1], findings[2], findings[3]) }) }
-  const findingAction = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/findings\/([^/]+)\/actions$/.exec(url.pathname)
-  if (findingAction && method === 'POST') { await authorize(findingAction[1], 'test-design:review'); return send(response, 201, await service.actOnFinding(findingAction[1], findingAction[2], findingAction[3], findingAction[4], await json(request) as never, principal)) }
-  const confirmations = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/confirmation-items$/.exec(url.pathname)
-  if (confirmations && method === 'GET') { await authorize(confirmations[1], 'test-design:read'); return send(response, 200, { items: await service.confirmationItems(confirmations[1], confirmations[2], confirmations[3]) }) }
-  const confirmationAction = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/confirmation-items\/([^/]+)\/actions$/.exec(url.pathname)
-  if (confirmationAction && method === 'POST') { await authorize(confirmationAction[1], 'test-design:review'); return send(response, 201, await service.actOnConfirmation(confirmationAction[1], confirmationAction[2], confirmationAction[3], confirmationAction[4], await json(request) as never, principal)) }
   const proposals = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/case-change-proposals$/.exec(url.pathname)
   if (proposals && method === 'GET') { await authorize(proposals[1], 'test-design:read'); return send(response, 200, { items: await service.listCaseChangeProposals(proposals[1], proposals[2], proposals[3], url.searchParams.get('operation') ?? undefined) }) }
   const proposalDecision = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/case-change-proposals\/([^/]+)\/decisions$/.exec(url.pathname)
   if (proposalDecision && method === 'POST') { await authorize(proposalDecision[1], 'test-design:review'); return send(response, 201, await service.decideCaseChangeProposal(proposalDecision[1], proposalDecision[2], proposalDecision[3], proposalDecision[4], await json(request) as never, principal)) }
   const publishLibrary = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-case-library-versions$/.exec(url.pathname)
   if (publishLibrary && method === 'POST') { await authorize(publishLibrary[1], 'test-design:publish'); return send(response, 201, await service.publishLibraryVersion(publishLibrary[1], publishLibrary[2], publishLibrary[3], await json(request) as never, principal)) }
-  const publish = /^\/api\/project-versions\/([^/]+)\/test-designs\/([^/]+)\/runs\/([^/]+)\/test-case-set-versions$/.exec(url.pathname)
-  if (publish && method === 'POST') { await authorize(publish[1], 'test-design:publish'); return send(response, 201, await service.publishCaseSet(publish[1], publish[2], publish[3], await json(request) as never, principal)) }
-
-  const caseSet = /^\/api\/test-case-set-versions\/([^/]+)$/.exec(url.pathname)
-  if (caseSet && method === 'GET') { const value = await service.getCaseSet(caseSet[1]); await authorize(value.projectVersionId, 'test-design:read'); return send(response, 200, value) }
-  const projectionRetry = /^\/api\/test-case-set-versions\/([^/]+)\/knowledge-asset-publication\/retry$/.exec(url.pathname)
-  if (projectionRetry && method === 'POST') { const value = await service.getCaseSet(projectionRetry[1]); await authorize(value.projectVersionId, 'test-design:publish'); return send(response, 202, await service.retryCaseSetProjection(projectionRetry[1])) }
-  const caseSetExport = /^\/api\/test-case-set-versions\/([^/]+)\/(export\.json|report\.md|export\.xlsx)$/.exec(url.pathname)
-  if (caseSetExport && method === 'GET') { const value = await service.getCaseSet(caseSetExport[1]); await authorize(value.projectVersionId, 'test-design:export'); const format = caseSetExport[2] === 'export.json' ? 'json' : caseSetExport[2] === 'export.xlsx' ? 'xlsx' : 'markdown'; const payload = await service.exportCaseSet(caseSetExport[1], format); response.setHeader('Content-Type', payload.contentType); response.setHeader('Content-Disposition', `attachment; filename="${payload.fileName}"`); response.statusCode = 200; response.end(payload.content); return true }
-  const smokeList = /^\/api\/test-case-set-versions\/([^/]+)\/smoke-candidates$/.exec(url.pathname)
-  if (smokeList && method === 'GET') { const value = await service.getCaseSet(smokeList[1]); await authorize(value.projectVersionId, 'test-design:read'); return send(response, 200, { items: await service.smokeCandidates(smokeList[1]) }) }
-  const smoke = /^\/api\/test-case-set-versions\/([^/]+)\/smoke-candidates\/([^/]+)\/review$/.exec(url.pathname)
-  if (smoke && method === 'POST') { const value = await service.getCaseSet(smoke[1]); await authorize(value.projectVersionId, 'test-design:review'); return send(response, 200, await service.reviewSmokeCandidate(smoke[1], smoke[2], await json(request) as never, principal)) }
-  const impacted = /^\/api\/test-case-set-versions\/([^/]+)\/impacted-regression$/.exec(url.pathname)
-  if (impacted && method === 'PUT') { const value = await service.getCaseSet(impacted[1]); await authorize(value.projectVersionId, 'test-design:edit'); const body = await json(request); return send(response, 200, await service.setImpactedRegression(impacted[1], body.references, principal)) }
-  if (impacted && method === 'GET') { const value = await service.getCaseSet(impacted[1]); await authorize(value.projectVersionId, 'test-design:read'); return send(response, 200, { items: await service.impactedRegression(impacted[1]) }) }
-  const handoffs = /^\/api\/test-case-set-versions\/([^/]+)\/execution-handoffs$/.exec(url.pathname)
-  if (handoffs && method === 'POST') { const value = await service.getCaseSet(handoffs[1]); await authorize(value.projectVersionId, 'test-design:publish'); return send(response, 201, await service.createHandoff(handoffs[1], await json(request) as never, principal)) }
-  if (handoffs && method === 'GET') { const value = await service.getCaseSet(handoffs[1]); await authorize(value.projectVersionId, 'test-design:read'); return send(response, 200, { items: await service.listHandoffs(handoffs[1]) }) }
   const handoff = /^\/api\/test-execution-handoffs\/([^/]+)$/.exec(url.pathname)
   if (handoff && method === 'GET') { const value = await service.getHandoff(handoff[1]); await authorize(value.projectVersionId, 'test-design:read'); return send(response, 200, value) }
 
@@ -105,8 +75,6 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   const projectLibraryHandoffs = /^\/api\/project-versions\/([^/]+)\/test-case-library-handoffs$/.exec(url.pathname)
   if (projectLibraryHandoffs && method === 'GET') { await authorize(projectLibraryHandoffs[1], 'test-design:read'); return send(response, 200, { items: await service.listLibraryHandoffs(projectLibraryHandoffs[1], url.searchParams.get('libraryVersionId') ?? undefined) }) }
 
-  const catalog = /^\/api\/projects\/([^/]+)\/test-case-catalog$/.exec(url.pathname)
-  if (catalog && method === 'GET') { await authorizeProject(catalog[1], principal, controls, store); return send(response, 200, await service.projectCatalog(catalog[1], { domain: url.searchParams.get('domain') ?? undefined, executionMethod: url.searchParams.get('executionMethod') ?? undefined, suiteVersionId: url.searchParams.get('suiteVersionId') ?? undefined })) }
   const suites = /^\/api\/projects\/([^/]+)\/test-suite-versions$/.exec(url.pathname)
   if (suites && method === 'GET') { await authorizeProject(suites[1], principal, controls, store); return send(response, 200, { items: await service.listSuites(suites[1], url.searchParams.get('suiteType') ?? undefined) }) }
   const suite = /^\/api\/projects\/([^/]+)\/test-suite-versions\/([^/]+)$/.exec(url.pathname)
@@ -128,10 +96,6 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (libraryVersion && method === 'GET' && libraryVersion[2] !== 'diff') { await authorizeProjectPermission(libraryVersion[1], 'test-design:read', principal, controls, store); return send(response, 200, await service.getLibraryVersion(libraryVersion[1], libraryVersion[2])) }
   const libraryVersionDiff = /^\/api\/projects\/([^/]+)\/test-case-library-versions\/diff$/.exec(url.pathname)
   if (libraryVersionDiff && method === 'GET') { await authorizeProjectPermission(libraryVersionDiff[1], 'test-design:read', principal, controls, store); return send(response, 200, { changes: await service.compareLibraryVersions(libraryVersionDiff[1], String(url.searchParams.get('from')), String(url.searchParams.get('to'))) }) }
-  const legacyMigrationPreview = /^\/api\/projects\/([^/]+)\/test-case-library-migrations\/([^/]+)\/preview$/.exec(url.pathname)
-  if (legacyMigrationPreview && method === 'GET') { await authorizeProjectPermission(legacyMigrationPreview[1], 'test-design:read', principal, controls, store); return send(response, 200, await service.previewLegacyCaseMigration(legacyMigrationPreview[1], legacyMigrationPreview[2])) }
-  const legacyMigration = /^\/api\/projects\/([^/]+)\/test-case-library-migrations$/.exec(url.pathname)
-  if (legacyMigration && method === 'POST') { await authorizeProjectPermission(legacyMigration[1], 'test-design:publish', principal, controls, store); return send(response, 201, await service.migrateLegacyCaseSet(legacyMigration[1], await json(request) as never, principal)) }
   const suiteDrafts = /^\/api\/projects\/([^/]+)\/test-suite-drafts$/.exec(url.pathname)
   if (suiteDrafts && method === 'GET') { await authorizeProjectPermission(suiteDrafts[1], 'test-design:read', principal, controls, store); return send(response, 200, { items: await service.listSuiteDrafts(suiteDrafts[1]) }) }
   if (suiteDrafts && method === 'POST') { await authorizeProjectPermission(suiteDrafts[1], 'test-design:edit', principal, controls, store); return send(response, 201, await service.createSuiteDraft(suiteDrafts[1], await json(request), principal)) }

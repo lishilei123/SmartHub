@@ -51,7 +51,7 @@ test('测试用例编辑携带 If-Match 并将人工审核通过写入单条 Rev
     requests.push({ path: new URL(String(input)).pathname, method: init?.method ?? 'GET', etag: new Headers(init?.headers).get('if-match') ?? '', body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
     return Response.json({ id: 'case-1', currentRevision: 2, reviewState: 'approved', revisions: [], reviewActions: [] }, { headers: { etag: '"case:case-1:2:new"' } })
   }
-  const content = { schemaVersion: 'test-case/v1', title: '编辑后的用例', objective: '验证编辑', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: [{ method: 'ui', uiSpec: { entry: '/' }, executionReadiness: 'ready', steps: [{ key: 's1', action: '打开页面', expected: '页面可用' }], verificationChecks: [], automationHint: '' }], sharedVerificationChecks: [], tags: [], domain: '订单' } as const
+  const content = { schemaVersion: 'test-case/v3', title: '编辑后的用例', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P1', preconditions: [], executionMethods: ['ui'], steps: ['打开页面'], expectedResults: ['页面可用'] } as const
   try {
     await patchCase('pv-1', 'design-1', 'run-1', 'case-1', '"case:case-1:1:old"', content, '人工修订')
     await reviewCase('pv-1', 'design-1', 'run-1', 'case-1', 'approve', 2, '人工审核通过')

@@ -1,20 +1,10 @@
-import { AlertTriangle, Check, ChevronDown, History, Pencil, Plus, RefreshCw, TestTube2, Trash2, X } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
-import { actualExecutionMethod, createEmptyTestCase, executionPendingItems, TestCaseEditor, testCaseEditorValid } from './TestCaseEditor'
-import type { TestCaseContent, TestCaseExecutionSpec, TestDesignCase, TestDesignWorkflowRun } from './types'
-
-type ReviewDecision = 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw'
-
-const reviewActionMeta: Record<ReviewDecision, { title: string; description: string; submitLabel: string; requiresComment: boolean; danger?: boolean }> = {
-  submit: { title: '提交人工审核', description: '当前 Revision 将进入人工审核队列。提交后如需修改，必须先撤回审核或由审核人退回修改。', submitLabel: '提交审核', requiresComment: false },
-  approve: { title: '审核通过', description: '确认当前 Revision 满足测试设计要求。通过后，后续内容修改必须先发起变更。', submitLabel: '审核通过', requiresComment: false },
-  reject: { title: '审核拒绝', description: '拒绝会保留当前 Revision 和审核记录；如需继续处理，可编辑生成新的草稿 Revision 后重新提交。', submitLabel: '确认拒绝', requiresComment: true, danger: true },
-  request_revision: { title: '退回修改', description: '当前 Revision 将退回修改状态。修改会创建新的草稿 Revision，并使现有 Coverage Audit 失效。', submitLabel: '退回修改', requiresComment: true },
-  withdraw: { title: '撤回审核', description: '当前 Revision 将回到草稿状态。撤回后可以编辑并再次提交审核。', submitLabel: '撤回审核', requiresComment: false },
-}
+import { useEffect, useMemo, useState } from 'react'
+import { Pencil, Plus, Trash2, X } from 'lucide-react'
+import { actualExecutionMethod, createEmptyTestCase, dimensionLabel, TestCaseEditor, testCaseEditorValid } from './TestCaseEditor'
+import type { TestCaseContent, TestDesignCase, TestDesignWorkflowRun } from './types'
 
 type Props = {
-  run: TestDesignWorkflowRun
+  run?: TestDesignWorkflowRun | null
   busy: boolean
   createRequest?: number
   onBatchApprove: () => Promise<void>
@@ -22,138 +12,38 @@ type Props = {
   onCreate: (content: TestCaseContent) => Promise<void>
   onEdit: (caseId: string, content: TestCaseContent, reason: string) => Promise<void>
   onDelete: (caseId: string) => Promise<void>
-  onReview: (caseId: string, decision: ReviewDecision, targetRevision: number, comment?: string) => Promise<void>
+  onReview: (caseId: string, decision: 'submit' | 'approve' | 'reject' | 'request_revision' | 'withdraw', revision: number, comment?: string) => Promise<void>
 }
 
-export function TestCasePanel({ run, busy, createRequest, onBatchApprove, onResynthesize, onCreate, onEdit, onDelete, onReview }: Props) {
-  const cases = run.testCases.filter(item => !item.tombstonedAt)
-  const [expanded, setExpanded] = useState<string | null>(null)
-  const [editor, setEditor] = useState<{ mode: 'create' } | { mode: 'edit'; testCase: TestDesignCase } | null>(null)
-  const [deleting, setDeleting] = useState<TestDesignCase | null>(null)
-  const [reviewAction, setReviewAction] = useState<{ testCase: TestDesignCase; decision: ReviewDecision } | null>(null)
-  const [confirmingResynthesis, setConfirmingResynthesis] = useState(false)
-  const counts = cases.reduce<Record<string, number>>((result, item) => ({ ...result, [item.reviewState]: (result[item.reviewState] ?? 0) + 1 }), {})
-  const approvedCount = counts.approved ?? 0
-  const pendingReviewCount = counts.in_review ?? 0
-  const needsRevisionCount = counts.needs_revision ?? 0
-  const rejectedCount = counts.rejected ?? 0
-  const draftCount = counts.draft ?? 0
-  const requestReviewAction = (testCase: TestDesignCase, decision: ReviewDecision) => {
-    if (reviewActionMeta[decision].requiresComment) setReviewAction({ testCase, decision })
-    else void onReview(testCase.id, decision, testCase.currentRevision).catch(() => undefined)
-  }
-  useEffect(() => { if (createRequest) setEditor({ mode: 'create' }) }, [createRequest])
-  return <section className="td2-card td2-cases" id="test-case-list">
-    <header className="td2-section-head"><div><p className="td2-kicker">本次测试设计</p><h2>测试用例审核</h2><p>逐条查看、修改并审核测试用例；保存成功后会自动重新执行覆盖检查。</p></div></header>
-    <div className="td2-case-toolbar">
-      <div className="td2-case-stats"><span>共 <b>{cases.length}</b></span><span>待人工审核 <b>{pendingReviewCount}</b></span><span>待修改 <b>{needsRevisionCount}</b></span><span>草稿 <b>{draftCount}</b></span><span>已拒绝 <b>{rejectedCount}</b></span><span>审核通过 <b>{approvedCount}</b></span></div>
-      <div className="td2-run-actions"><button className="td2-button primary td2-batch-approve" disabled={busy || !pendingReviewCount} onClick={() => void onBatchApprove().catch(() => undefined)}><Check />{pendingReviewCount ? `批量审核通过（${pendingReviewCount}）` : '没有待审核 Revision'}</button><button className="td2-button ghost" disabled={busy} onClick={() => setEditor({ mode: 'create' })}><Plus />新增用例</button><button className="td2-button ghost" disabled={busy} onClick={() => setConfirmingResynthesis(true)}><RefreshCw />AI 重新生成</button></div>
+export function TestCasePanel(props: Props) {
+  const cases = useMemo(() => props.run?.testCases.filter(item => !item.tombstonedAt) ?? [], [props.run])
+  const [selectedId, setSelectedId] = useState<string>()
+  const [editing, setEditing] = useState<TestDesignCase | 'new'>()
+  useEffect(() => { if (props.createRequest) setEditing('new') }, [props.createRequest])
+  useEffect(() => { if (!selectedId || !cases.some(item => item.id === selectedId)) setSelectedId(cases[0]?.id) }, [cases, selectedId])
+  const selected = cases.find(item => item.id === selectedId)
+  return <section className="td2-case-workbench">
+    <header className="td2-workbench-header"><div><h2>测试用例审核</h2><small>审核测试语义；自动化实现由 TestExecution / TestScriptAgent 负责。</small></div><div><button onClick={() => setEditing('new')}><Plus />新增</button><button disabled={props.busy || !cases.length} onClick={() => void props.onBatchApprove()}>批量审核</button><button disabled={props.busy} onClick={() => void props.onResynthesize()}>重新生成</button></div></header>
+    <div className="td2-case-layout">
+      <nav className="td2-case-list">{cases.map(item => { const content = currentContent(item); return <button key={item.id} className={selectedId === item.id ? 'active' : ''} onClick={() => setSelectedId(item.id)}><b>{content.title}</b><small>{dimensionLabel(content.dimension)} · {content.priority} · {actualExecutionMethod(content)}</small><span>{content.requirementRefs.length ? `${content.requirementRefs.length} 个关联需求` : '扩展测试'}</span></button> })}{!cases.length && <p className="tdw-muted">尚无测试用例。</p>}</nav>
+      <div className="td2-case-detail">{selected ? <CaseDetail testCase={selected} busy={props.busy} onEdit={() => setEditing(selected)} onDelete={() => void props.onDelete(selected.id)} onReview={props.onReview} /> : <p className="tdw-muted">选择一条用例查看审核内容。</p>}</div>
     </div>
-    {cases.length ? <div className="td2-case-list">{cases.map(testCase => <CaseRow key={testCase.id} testCase={testCase} requirementRefs={run.caseChangeProposals.find(item => item.candidateCaseId === testCase.id)?.requirementRefs ?? currentContent(testCase).requirementRefs} busy={busy} expanded={expanded === testCase.id} onToggle={() => setExpanded(expanded === testCase.id ? null : testCase.id)} onEdit={() => setEditor({ mode: 'edit', testCase })} onDelete={() => setDeleting(testCase)} onReview={decision => requestReviewAction(testCase, decision)} />)}</div> : <div className="td2-empty-compact"><TestTube2 /><span>{run.stage === 'test_case_design' ? 'PlanningAgent 正在生成用例…' : 'Requirement 已就绪，可人工新增用例。'}</span></div>}
-    {editor && <CaseEditorDialog key={editor.mode === 'edit' ? `${editor.testCase.id}:${editor.testCase.currentRevision}` : 'new-case'} testCase={editor.mode === 'edit' ? editor.testCase : undefined} busy={busy} onClose={() => setEditor(null)} onSave={(content, reason) => editor.mode === 'edit' ? onEdit(editor.testCase.id, content, reason) : onCreate(content)} />}
-    {reviewAction && <ReviewActionDialog testCase={reviewAction.testCase} decision={reviewAction.decision} busy={busy} onClose={() => setReviewAction(null)} onSubmit={comment => onReview(reviewAction.testCase.id, reviewAction.decision, reviewAction.testCase.currentRevision, comment)} />}
-    {deleting && <CaseDialog title="删除测试用例" onClose={() => setDeleting(null)}><div className="td2-dialog-form"><div className="td2-danger-note"><AlertTriangle /><span><b>删除“{currentContent(deleting).title}”？</b><small>用例将被标记删除，依赖关系和覆盖检查会重新校验；已发布的正式用例版本不受影响。</small></span></div><DialogActions busy={busy} valid onClose={() => setDeleting(null)} submitLabel="确认删除" danger onSubmit={() => { void onDelete(deleting.id).then(() => setDeleting(null)).catch(() => undefined) }} /></div></CaseDialog>}
-    {confirmingResynthesis && <CaseDialog title="AI 重新生成测试用例" onClose={() => setConfirmingResynthesis(false)}><div className="td2-dialog-form"><div className="td2-danger-note"><AlertTriangle /><span><b>确定重新生成本次候选用例？</b><small>当前未发布的测试用例、测试数据需求和历史用例变更建议会由服务端清空后重新生成；已发布的正式用例版本不会受影响。</small></span></div><DialogActions busy={busy} valid onClose={() => setConfirmingResynthesis(false)} submitLabel="确认重新生成" danger onSubmit={() => { void onResynthesize().then(() => setConfirmingResynthesis(false)).catch(() => undefined) }} /></div></CaseDialog>}
+    {editing && <CaseEditorDialog testCase={editing === 'new' ? undefined : editing} busy={props.busy} onClose={() => setEditing(undefined)} onSave={async (content, reason) => { if (editing === 'new') await props.onCreate(content); else await props.onEdit(editing.id, content, reason); setEditing(undefined) }} />}
   </section>
 }
 
-function CaseRow({ testCase, requirementRefs, busy, expanded, onToggle, onEdit, onDelete, onReview }: { testCase: TestDesignCase; requirementRefs: string[]; busy: boolean; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; onReview: (decision: ReviewDecision) => void }) {
-  const revision = testCase.revisions.find(item => item.revision === testCase.currentRevision)!
-  const content = revision.content
-  const readiness = content.executionSpec?.executionReadiness ?? content.executionMethods[0]?.executionReadiness ?? 'needs_confirmation'
-  const pending = executionPendingItems(content)
-  const editable = ['draft', 'needs_revision', 'rejected'].includes(testCase.reviewState)
-  return <article id={`test-case-${testCase.id}`} className={expanded ? 'expanded' : ''}><button className="td2-case-summary" onClick={onToggle} aria-expanded={expanded}><span className={`td2-review-state ${testCase.reviewState}`}>{reviewStateLabel(testCase.reviewState)}</span><div className="td2-case-identification"><b>{content.title}</b><small>{content.objective}</small><div className="td2-case-facts"><span>{dimensionLabel(content.dimension)} · {content.priority}</span><span>执行方式：{executionMethodLabel(actualExecutionMethod(content))}</span><span>执行就绪：{readinessLabel(readiness)}</span><span>来源：{originLabel(testCase.origin)}</span><span>关联 Requirement：{requirementRefs.length ? requirementRefs.join('、') : '未关联'}</span></div></div><div className="td2-methods"><span>{executionMethodLabel(actualExecutionMethod(content))}</span>{pending.length > 0 && <span className="needs_confirmation">待确认 {pending.length}</span>}<span>查看详情</span></div><ChevronDown /></button>
-    {expanded && <div className="td2-case-detail"><div><h4>目标</h4><p>{content.objective}</p></div><div><h4>前置条件</h4>{content.preconditions.length ? <ul>{content.preconditions.map(item => <li key={item}>{item}</li>)}</ul> : <p>无</p>}</div><section className="td2-execution-summary"><header><b>{dimensionLabel(content.dimension)} · {executionMethodLabel(actualExecutionMethod(content))}</b><span className={readiness} title={readiness}>{readinessLabel(readiness)}</span></header><ExecutionSpecView content={content} /></section><section><h4>待确认项</h4>{pending.length ? <ul>{pending.map(item => <li key={item}>{item}</li>)}</ul> : <p>无</p>}</section><section><h4>Requirement 追溯 / 测试数据需求</h4><div className="tdw-chips">{requirementRefs.map(id => <code key={`requirement-${id}`}>{id}</code>)}{content.dataRequirementIds.map(id => <code key={`data-${id}`}>{id}</code>)}</div></section>
-      <section className="td2-case-governance"><header><b>Revision 与审核记录</b><History /></header><div className="td2-revision-list">{[...testCase.revisions].reverse().map(item => <span key={item.revision}><b>Revision {item.revision}</b><small>{new Date(item.createdAt).toLocaleString('zh-CN')}</small><code title={item.contentSha256}>{item.contentSha256}</code></span>)}</div>{testCase.reviewActions.length > 0 && <div className="td2-review-history">{[...testCase.reviewActions].reverse().map(action => <span key={action.id}>{reviewDecisionLabel(action.decision)} · Revision {action.targetRevision ?? testCase.currentRevision}{action.comment ? ` · ${action.comment}` : ''}</span>)}</div>}</section>
-      <div className="td2-case-actions">{editable && <button className="td2-button ghost" disabled={busy} onClick={onEdit}><Pencil />编辑并新建草稿 Revision</button>}{testCase.reviewState === 'draft' && <button className="td2-button primary" disabled={busy} onClick={() => onReview('submit')}><Check />提交审核</button>}{testCase.reviewState === 'in_review' && <><button className="td2-button primary" disabled={busy} onClick={() => onReview('approve')}><Check />审核通过</button><button className="td2-button ghost" disabled={busy} onClick={() => onReview('request_revision')}>退回修改</button><button className="td2-button danger" disabled={busy} onClick={() => onReview('reject')}>审核拒绝</button><button className="td2-button ghost" disabled={busy} onClick={() => onReview('withdraw')}>撤回审核</button></>}{testCase.reviewState === 'approved' && <button className="td2-button ghost" disabled={busy} onClick={() => onReview('request_revision')}><Pencil />发起变更</button>}<button className="td2-button danger" disabled={busy} onClick={onDelete}><Trash2 />删除</button></div>
-      <footer><code title={testCase.id}>{testCase.id}</code><code title={revision.contentSha256}>{revision.contentSha256}</code></footer></div>}
+function CaseDetail({ testCase, busy, onEdit, onDelete, onReview }: { testCase: TestDesignCase; busy: boolean; onEdit: () => void; onDelete: () => void; onReview: Props['onReview'] }) {
+  const content = currentContent(testCase)
+  const [comment, setComment] = useState('')
+  return <article className="td2-case-card"><header><div><span className={`tdw-status ${testCase.reviewState}`}>{testCase.reviewState}</span><h3>{content.title}</h3><code>{testCase.id} · r{testCase.currentRevision}</code></div><div><button disabled={busy || testCase.reviewState === 'in_review'} onClick={onEdit}><Pencil />编辑</button><button disabled={busy} className="danger" onClick={onDelete}><Trash2 />删除</button></div></header>
+    <div className="tdw-proposal-kpis"><span><small>测试类型</small><b>{dimensionLabel(content.dimension)}</b></span><span><small>优先级</small><b>{content.priority}</b></span><span><small>执行方式</small><b>{actualExecutionMethod(content)}</b></span><span><small>关联需求</small><b>{content.requirementRefs.length ? content.requirementRefs.join(', ') : '扩展测试'}</b></span></div>
+    <TextSection title="前置条件" values={content.preconditions} empty="无" />
+    <TextSection title="执行步骤" values={content.steps} ordered />
+    <TextSection title="预期结果" values={content.expectedResults} ordered />
+    <section><h4>人工审核</h4><textarea placeholder="退回或拒绝时填写意见" value={comment} onChange={event => setComment(event.target.value)} /><div className="td2-review-actions">{testCase.reviewState === 'draft' || testCase.reviewState === 'needs_revision' ? <button disabled={busy} onClick={() => void onReview(testCase.id, 'submit', testCase.currentRevision)}>提交审核</button> : null}{testCase.reviewState === 'in_review' && <><button disabled={busy} onClick={() => void onReview(testCase.id, 'approve', testCase.currentRevision)}>批准</button><button disabled={busy || !comment.trim()} onClick={() => void onReview(testCase.id, 'request_revision', testCase.currentRevision, comment)}>退回修改</button><button disabled={busy || !comment.trim()} onClick={() => void onReview(testCase.id, 'reject', testCase.currentRevision, comment)}>拒绝</button></>}</div></section>
   </article>
 }
 
-function ExecutionSpecView({ content }: { content: TestCaseContent }) {
-  const spec = content.executionSpec
-  if (!spec) return <div className="td2-execution-empty"><AlertTriangle /><span><b>执行配置尚未生成</b><small>当前 Revision 没有持久化 executionSpec，不能据此推断执行步骤。</small></span></div>
-  return <div className="td2-execution-view">
-    {spec.kind === 'functional' && <FunctionalExecutionView content={content} spec={spec} />}
-    {spec.kind === 'performance' && <PerformanceExecutionView spec={spec} />}
-    {spec.kind === 'stability' && <StabilityExecutionView spec={spec} />}
-    {spec.kind === 'compatibility' && <CompatibilityExecutionView spec={spec} />}
-    <details className="td2-raw-spec"><summary>查看原始 executionSpec（诊断）</summary><pre className="tdw-json">{JSON.stringify(spec, null, 2)}</pre></details>
-  </div>
-}
-
-function FunctionalExecutionView({ content, spec }: { content: TestCaseContent; spec: Extract<TestCaseExecutionSpec, { kind: 'functional' }> }) {
-  const method = content.executionMethods.find(item => item.method === spec.method)
-  const entry = method?.method === 'ui'
-    ? `${method.uiSpec.entry}${method.uiSpec.viewport ? ` · ${method.uiSpec.viewport}` : ''}`
-    : method?.method === 'api'
-      ? `${method.apiSpec.method.toUpperCase()} ${method.apiSpec.path}`
-      : '待确认'
-  return <>
-    <dl className="td2-execution-meta"><MetaItem label="执行方式" value={executionMethodLabel(spec.method)} /><MetaItem label="执行入口" value={entry} /><MetaItem label="步骤 / 检查" value={`${spec.steps.length} / ${spec.verificationChecks.length}`} /></dl>
-    <section className="td2-execution-block"><h5>执行步骤</h5>{spec.steps.length ? <ol className="td2-execution-steps">{spec.steps.map((step, index) => <li key={step.key}><i>{index + 1}</i><div><b>{step.action}</b><p><span>预期</span>{step.expected}</p></div></li>)}</ol> : <p className="td2-execution-missing">未提供执行步骤</p>}</section>
-    <section className="td2-execution-block"><h5>验证检查</h5>{spec.verificationChecks.length ? <div className="td2-verification-list">{spec.verificationChecks.map(check => <article key={check.key}><code>{check.key}</code><span>{check.description}</span></article>)}</div> : <p className="td2-execution-missing">未提供验证检查</p>}</section>
-    <section className="td2-execution-note"><b>自动化提示</b><p>{spec.automationHint || '未提供'}</p></section>
-  </>
-}
-
-function PerformanceExecutionView({ spec }: { spec: Extract<TestCaseExecutionSpec, { kind: 'performance' }> }) {
-  return <>
-    <dl className="td2-execution-meta"><MetaItem label="性能目标" value={spec.target} /><MetaItem label="虚拟用户" value={spec.virtualUsers} /><MetaItem label="持续 / Ramp-up" value={`${displayValue(spec.duration)} / ${displayValue(spec.rampUp)}`} /></dl>
-    <section className="td2-execution-block"><h5>负载场景</h5><p>{spec.scenario}</p></section>
-    <section className="td2-execution-block"><h5>阈值</h5>{spec.thresholds.length ? <div className="td2-verification-list">{spec.thresholds.map((threshold, index) => <article key={`${threshold.metric}-${index}`}><code>{threshold.metric}</code><span>{threshold.target}<small>来源：{threshold.sourceRef}</small></span></article>)}</div> : <p className="td2-execution-missing">未提供性能阈值</p>}</section>
-    <section className="td2-execution-note"><b>数据策略</b><p>{spec.dataStrategy || '未提供'}</p></section>
-    <StringList title="环境要求" items={spec.environmentRequirements} />
-  </>
-}
-
-function StabilityExecutionView({ spec }: { spec: Extract<TestCaseExecutionSpec, { kind: 'stability' }> }) {
-  return <>
-    <dl className="td2-execution-meta"><MetaItem label="稳定性负载" value={spec.workload} /><MetaItem label="持续时间" value={spec.duration} /><MetaItem label="观测间隔" value={spec.interval} /></dl>
-    <StringList title="稳定性观测" items={spec.observations} />
-    <dl className="td2-execution-meta compact"><MetaItem label="恢复策略" value={spec.recoveryPolicy} /><MetaItem label="检查点策略" value={spec.checkpointPolicy} /></dl>
-    <StringList title="环境要求" items={spec.environmentRequirements} />
-  </>
-}
-
-function CompatibilityExecutionView({ spec }: { spec: Extract<TestCaseExecutionSpec, { kind: 'compatibility' }> }) {
-  const matrices = [
-    ['浏览器', spec.browserMatrix],
-    ['操作系统', spec.operatingSystemMatrix],
-    ['视口', spec.viewportMatrix],
-    ['版本', spec.versionMatrix],
-  ] as const
-  return <>
-    <dl className="td2-execution-meta"><MetaItem label="基础执行方式" value={executionMethodLabel(spec.baseMethod)} /><MetaItem label="基础用例" value={spec.baseCaseRefs.length ? spec.baseCaseRefs.join('、') : null} /><MetaItem label="一致性预期" value={spec.expectedConsistency} /></dl>
-    <section className="td2-execution-block"><h5>兼容矩阵</h5><div className="td2-compatibility-matrix">{matrices.map(([label, values]) => <article key={label}><b>{label}</b>{values.length ? <div>{values.map(value => <span key={value}>{value}</span>)}</div> : <small>未提供</small>}</article>)}</div></section>
-  </>
-}
-
-function MetaItem({ label, value }: { label: string; value: string | number | null | undefined }) { return <div><dt>{label}</dt><dd>{displayValue(value)}</dd></div> }
-function StringList({ title, items }: { title: string; items: string[] }) { return <section className="td2-execution-block"><h5>{title}</h5>{items.length ? <ul className="td2-execution-list">{items.map(item => <li key={item}>{item}</li>)}</ul> : <p className="td2-execution-missing">未提供</p>}</section> }
-function displayValue(value: string | number | null | undefined) { return value === null || value === undefined || value === '' ? '待确认' : String(value) }
-
-function CaseEditorDialog({ testCase, busy, onClose, onSave }: { testCase?: TestDesignCase; busy: boolean; onClose: () => void; onSave: (content: TestCaseContent, reason: string) => Promise<void> }) {
-  const [content, setContent] = useState<TestCaseContent>(() => testCase ? currentContent(testCase) : createEmptyTestCase())
-  const [reason, setReason] = useState(testCase ? '人工编辑测试用例' : '人工新建测试用例')
-  const valid = testCaseEditorValid(content) && (!testCase || reason.trim().length >= 2)
-  return <CaseDialog title={testCase ? `编辑用例 · Revision ${testCase.currentRevision}` : '新增测试用例'} wide onClose={onClose}><form className="td2-dialog-form" onSubmit={event => { event.preventDefault(); if (valid) void onSave(content, reason.trim()).then(onClose).catch(() => undefined) }}><TestCaseEditor value={content} onChange={setContent} />{testCase && <label>Revision 修改说明<input value={reason} onChange={event => setReason(event.target.value)} /></label>}<DialogActions busy={busy} valid={valid} onClose={onClose} submitLabel={testCase ? '保存新草稿 Revision' : '创建待审核用例'} /></form></CaseDialog>
-}
-
-function ReviewActionDialog({ testCase, decision, busy, onClose, onSubmit }: { testCase: TestDesignCase; decision: ReviewDecision; busy: boolean; onClose: () => void; onSubmit: (comment?: string) => Promise<void> }) {
-  const action = reviewActionMeta[decision]
-  const [comment, setComment] = useState('')
-  const valid = !action.requiresComment || comment.trim().length >= 2
-  return <CaseDialog title={action.title} onClose={onClose}><form className="td2-dialog-form" onSubmit={event => { event.preventDefault(); if (valid) void onSubmit(comment.trim() || undefined).then(onClose).catch(() => undefined) }}><p>{action.description}</p><p><b>{currentContent(testCase).title}</b><br />当前 Revision：r{testCase.currentRevision}</p>{action.requiresComment && <label>审核意见<textarea value={comment} onChange={event => setComment(event.target.value)} placeholder="请说明处理原因（至少 2 个字符）" autoFocus /></label>}<DialogActions busy={busy} valid={valid} onClose={onClose} submitLabel={action.submitLabel} danger={action.danger} /></form></CaseDialog>
-}
-
-function CaseDialog({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: ReactNode }) { return <div className="td2-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className={`td2-dialog ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><h3>{title}</h3><button aria-label="关闭" onClick={onClose}><X /></button></header>{children}</section></div> }
-function DialogActions({ busy, valid, onClose, submitLabel, danger, onSubmit }: { busy: boolean; valid: boolean; onClose: () => void; submitLabel: string; danger?: boolean; onSubmit?: () => void }) { return <footer className="td2-dialog-actions"><button type="button" className="td2-button ghost" disabled={busy} onClick={onClose}>取消</button><button type={onSubmit ? 'button' : 'submit'} className={`td2-button ${danger ? 'danger' : 'primary'}`} disabled={busy || !valid} onClick={onSubmit}>{submitLabel}</button></footer> }
-function currentContent(testCase: TestDesignCase) { return testCase.revisions.find(item => item.revision === testCase.currentRevision)!.content }
-function reviewStateLabel(value: TestDesignCase['reviewState']) { return ({ draft: '草稿', in_review: '待人工审核', approved: '审核通过', rejected: '审核拒绝', needs_revision: '待修改' } as const)[value] }
-function reviewDecisionLabel(value: string) { return ({ submit: '提交人工审核', approve: '审核通过', reject: '审核拒绝', request_revision: '退回修改', withdraw: '撤回审核' } as Record<string, string>)[value] ?? value }
-function originLabel(value: TestDesignCase['origin']) { return ({ ai: 'AI 新增', manual: '人工新增', historical_unchanged: '复用历史用例', historical_modified: '修改历史用例', historical_reference: '历史用例参考（未纳入）' } as const)[value] }
-function dimensionLabel(value: TestCaseContent['dimension']) { return ({ functional: '功能', performance: '性能', stability: '稳定性', compatibility: '兼容性', security: '安全' } as const)[value] }
-function executionMethodLabel(value: string) { return ({ ui: 'UI', api: 'API', performance_tool: '性能工具', long_running: '长稳运行', environment_matrix: '环境矩阵' } as Record<string, string>)[value] ?? value }
-function readinessLabel(value: string) { return ({ ready: '已就绪', blocked: '已阻断', needs_confirmation: '待确认' } as Record<string, string>)[value] ?? value }
+function TextSection({ title, values, empty, ordered }: { title: string; values: string[]; empty?: string; ordered?: boolean }) { const Tag = ordered ? 'ol' : 'ul'; return <section><h4>{title}</h4>{values.length ? <Tag>{values.map((item, index) => <li key={`${index}:${item}`}>{item}</li>)}</Tag> : <p className="tdw-muted">{empty ?? '无'}</p>}</section> }
+function currentContent(testCase: TestDesignCase) { return testCase.revisions.find(item => item.revision === testCase.currentRevision)?.content ?? testCase.revisions.at(-1)!.content }
+function CaseEditorDialog({ testCase, busy, onClose, onSave }: { testCase?: TestDesignCase; busy: boolean; onClose: () => void; onSave: (content: TestCaseContent, reason: string) => Promise<void> }) { const [content, setContent] = useState(() => testCase ? structuredClone(currentContent(testCase)) : createEmptyTestCase()); const [reason, setReason] = useState(testCase ? '调整测试语义' : '人工新增测试用例'); return <div className="tdw-backdrop"><section className="tdw-modal wide"><header><b>{testCase ? '编辑 TestCase v3' : '新增 TestCase v3'}</b><button onClick={onClose}><X /></button></header><TestCaseEditor value={content} onChange={setContent} /><label>变更原因<input value={reason} onChange={event => setReason(event.target.value)} /></label><footer><button onClick={onClose}>取消</button><button className="primary" disabled={busy || !reason.trim() || !testCaseEditorValid(content)} onClick={() => void onSave(content, reason.trim())}>保存</button></footer></section></div> }

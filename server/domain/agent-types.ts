@@ -348,8 +348,6 @@ export type PlanningReviewerSourceReference =
         revision: number
         contentSha256: string
       }>
-      dataSetVersionId: string
-      dataSetContentSha256: string
       coverageAuditId: string
       coverageAuditInputSha256: string
     }

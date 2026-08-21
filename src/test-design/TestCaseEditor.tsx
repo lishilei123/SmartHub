@@ -1,109 +1,30 @@
-import type { TestCaseContent, TestCaseExecutionSpec } from './types'
+import type { TestCaseContent } from './types'
 
-type Props = {
-  value: TestCaseContent
-  onChange: (value: TestCaseContent) => void
-}
-
-export function TestCaseEditor({ value, onChange }: Props) {
-  const patchCommon = (patch: Partial<TestCaseContent>) => {
-    const next = { ...value, ...patch }
-    if (next.executionSpec?.kind === 'functional') {
-      next.executionSpec = { ...next.executionSpec, preconditions: next.preconditions, testDataRequirements: next.dataRequirementIds }
-    }
-    onChange(next)
+export function TestCaseEditor({ value, onChange }: { value: TestCaseContent; onChange: (value: TestCaseContent) => void }) {
+  const patch = (next: Partial<TestCaseContent>) => onChange({ ...value, ...next })
+  const toggleMethod = (method: 'ui' | 'api') => {
+    const selected = value.executionMethods.includes(method)
+    const executionMethods = selected ? value.executionMethods.filter(item => item !== method) : [...value.executionMethods, method]
+    patch({ executionMethods: (['ui', 'api'] as const).filter(item => executionMethods.includes(item)) })
   }
-  const changeDimension = (dimension: TestCaseContent['dimension']) => {
-    const executionSpec = defaultExecutionSpec(dimension)
-    onChange({ ...value, dimension, executionSpec, executionMethods: functionalMethods(executionSpec, value) })
-  }
-  return <div className="td-case-editor">
-    <CommonCaseFields value={value} onChange={patchCommon} onDimensionChange={changeDimension} />
-    {(value.dimension === 'functional' || value.dimension === 'security') && <FunctionalExecutionEditor value={value} onChange={onChange} />}
-    {value.dimension === 'performance' && <PerformanceExecutionEditor value={value} onChange={onChange} />}
-    {value.dimension === 'stability' && <StabilityExecutionEditor value={value} onChange={onChange} />}
-    {value.dimension === 'compatibility' && <CompatibilityExecutionEditor value={value} onChange={onChange} />}
+  return <div className="tdw-form-grid">
+    <label className="wide">标题<input value={value.title} onChange={event => patch({ title: event.target.value })} /></label>
+    <label>测试类型<select value={value.dimension} onChange={event => patch({ dimension: event.target.value as TestCaseContent['dimension'] })}>{['functional', 'performance', 'stability', 'compatibility', 'security'].map(item => <option key={item} value={item}>{dimensionLabel(item as TestCaseContent['dimension'])}</option>)}</select></label>
+    <label>优先级<select value={value.priority} onChange={event => patch({ priority: event.target.value as TestCaseContent['priority'] })}>{['P0', 'P1', 'P2', 'P3'].map(item => <option key={item}>{item}</option>)}</select></label>
+    <fieldset className="wide"><legend>执行方式</legend><label><input type="checkbox" checked={value.executionMethods.includes('ui')} onChange={() => toggleMethod('ui')} /> UI</label><label><input type="checkbox" checked={value.executionMethods.includes('api')} onChange={() => toggleMethod('api')} /> API</label></fieldset>
+    <LineEditor label="关联需求" hint="每行一个 Requirement ID；留空表示扩展风险测试。" values={value.requirementRefs} onChange={requirementRefs => patch({ requirementRefs })} />
+    <LineEditor label="前置条件" values={value.preconditions} onChange={preconditions => patch({ preconditions })} />
+    <LineEditor label="执行步骤" values={value.steps} onChange={steps => patch({ steps })} />
+    <LineEditor label="预期结果" values={value.expectedResults} onChange={expectedResults => patch({ expectedResults })} />
   </div>
 }
 
-export function CommonCaseFields({ value, onChange, onDimensionChange }: { value: TestCaseContent; onChange: (patch: Partial<TestCaseContent>) => void; onDimensionChange: (dimension: TestCaseContent['dimension']) => void }) {
-  return <fieldset className="td-case-editor-section"><legend>CommonCaseFields</legend><div className="td2-editor-grid">
-    <label className="wide">标题<input autoFocus value={value.title} onChange={event => onChange({ title: event.target.value })} /></label>
-    <label className="wide">测试目标<textarea value={value.objective} onChange={event => onChange({ objective: event.target.value })} /></label>
-    <label>维度<select value={value.dimension} onChange={event => onDimensionChange(event.target.value as TestCaseContent['dimension'])}>{['functional', 'performance', 'stability', 'compatibility', 'security'].map(item => <option value={item} key={item}>{item}</option>)}</select></label>
-    <label>优先级<select value={value.priority} onChange={event => onChange({ priority: event.target.value as TestCaseContent['priority'] })}>{['P0', 'P1', 'P2', 'P3'].map(item => <option value={item} key={item}>{item}</option>)}</select></label>
-    <label className="wide">业务域<input value={value.domain} onChange={event => onChange({ domain: event.target.value })} /></label>
-    <label className="wide">关联 Requirement ID（每行一项）<textarea value={value.requirementRefs.join('\n')} onChange={event => onChange({ requirementRefs: lines(event.target.value) })} /></label>
-    <label>前置条件（每行一项）<textarea value={value.preconditions.join('\n')} onChange={event => onChange({ preconditions: lines(event.target.value) })} /></label>
-    <label>测试数据需求 ID（每行一项）<textarea value={value.dataRequirementIds.join('\n')} onChange={event => onChange({ dataRequirementIds: lines(event.target.value) })} /></label>
-    <label>清理动作（每行一项）<textarea value={value.cleanup.join('\n')} onChange={event => onChange({ cleanup: lines(event.target.value) })} /></label>
-    <label>标签（每行一项）<textarea value={value.tags.join('\n')} onChange={event => onChange({ tags: lines(event.target.value) })} /></label>
-  </div></fieldset>
+function LineEditor({ label, hint, values, onChange }: { label: string; hint?: string; values: string[]; onChange: (values: string[]) => void }) {
+  return <label className="wide">{label}<textarea value={values.join('\n')} onChange={event => onChange(event.target.value.split(/\r?\n/u).map(item => item.trim()).filter(Boolean))} />{hint && <small>{hint}</small>}</label>
 }
 
-export function FunctionalExecutionEditor({ value, onChange }: { value: TestCaseContent; onChange: (value: TestCaseContent) => void }) {
-  const fallback = defaultExecutionSpec('functional') as Extract<TestCaseExecutionSpec, { kind: 'functional' }>
-  const methods = value.executionMethods?.length ? value.executionMethods : [defaultFunctionalMethod(fallback.method)]
-  const compatibleSpec = value.executionSpec?.kind === 'functional' ? value.executionSpec : undefined
-  const selectedMethod = compatibleSpec && methods.some(item => item.method === compatibleSpec.method) ? compatibleSpec.method : methods[0].method
-  const method = methods.find(item => item.method === selectedMethod)!
-  const commit = (nextMethods: TestCaseContent['executionMethods'], activeMethod = selectedMethod) => {
-    const active = nextMethods.find(item => item.method === activeMethod) ?? nextMethods[0]
-    onChange({ ...value, executionMethods: nextMethods, executionSpec: functionalProjection(active, value) })
-  }
-  const updateMethod = (nextMethod: TestCaseContent['executionMethods'][number]) => commit(methods.map(item => item.method === nextMethod.method ? nextMethod : item), nextMethod.method)
-  const setEnabled = (target: 'ui' | 'api', enabled: boolean) => {
-    if (!enabled && methods.length === 1) return
-    const next = enabled ? [...methods, defaultFunctionalMethod(target)] : methods.filter(item => item.method !== target)
-    commit(next, enabled ? target : (selectedMethod === target ? next[0].method : selectedMethod))
-  }
-  const selectTab = (target: 'ui' | 'api') => commit(methods, target)
-  return <fieldset className="td-case-editor-section"><legend>执行方式</legend><div className="td2-editor-grid">
-    <label><span>执行方式</span><span><input type="checkbox" checked={methods.some(item => item.method === 'ui')} disabled={methods.length === 1 && method.method === 'ui'} onChange={event => setEnabled('ui', event.target.checked)} /> UI</span><span><input type="checkbox" checked={methods.some(item => item.method === 'api')} disabled={methods.length === 1 && method.method === 'api'} onChange={event => setEnabled('api', event.target.checked)} /> API</span></label>
-  </div><div className="tdw-tabs">{methods.map(item => <button type="button" key={item.method} className={item.method === selectedMethod ? 'tdw-tab-active' : ''} onClick={() => selectTab(item.method)}>{item.method === 'ui' ? 'UI 配置' : 'API 配置'}</button>)}</div><div className="td2-editor-grid">
-    <Readiness value={method.executionReadiness} onChange={executionReadiness => updateMethod({ ...method, executionReadiness })} />
-    {method.method === 'ui' ? <><label className="wide">页面入口<input value={method.uiSpec.entry} onChange={event => updateMethod({ ...method, uiSpec: { ...method.uiSpec, entry: event.target.value } })} /></label><label>视口<input value={method.uiSpec.viewport ?? ''} onChange={event => updateMethod({ ...method, uiSpec: { ...method.uiSpec, viewport: nullable(event.target.value) ?? undefined } })} /></label><label>定位器（每行一项）<textarea value={(method.uiSpec.selectors ?? []).join('\n')} onChange={event => updateMethod({ ...method, uiSpec: { ...method.uiSpec, selectors: lines(event.target.value) } })} /></label></> : <><label>HTTP 方法<input value={method.apiSpec.method} onChange={event => updateMethod({ ...method, apiSpec: { ...method.apiSpec, method: event.target.value.toUpperCase() } })} /></label><label>请求路径<input value={method.apiSpec.path} onChange={event => updateMethod({ ...method, apiSpec: { ...method.apiSpec, path: event.target.value } })} /></label><label>Request Schema Ref<input value={method.apiSpec.requestSchemaRef ?? ''} onChange={event => updateMethod({ ...method, apiSpec: { ...method.apiSpec, requestSchemaRef: nullable(event.target.value) ?? undefined } })} /></label><label>Response Schema Ref<input value={method.apiSpec.responseSchemaRef ?? ''} onChange={event => updateMethod({ ...method, apiSpec: { ...method.apiSpec, responseSchemaRef: nullable(event.target.value) ?? undefined } })} /></label></>}
-    <label className="wide">自动化提示<textarea value={method.automationHint} onChange={event => updateMethod({ ...method, automationHint: event.target.value })} /></label>
-  </div><StepsEditor steps={method.steps} onChange={steps => updateMethod({ ...method, steps })} /><ChecksEditor checks={method.verificationChecks} onChange={verificationChecks => updateMethod({ ...method, verificationChecks })} /></fieldset>
-}
-
-export function PerformanceExecutionEditor({ value, onChange }: { value: TestCaseContent; onChange: (value: TestCaseContent) => void }) {
-  const spec = value.executionSpec?.kind === 'performance' ? value.executionSpec : defaultExecutionSpec('performance') as Extract<TestCaseExecutionSpec, { kind: 'performance' }>
-  const update = (patch: Partial<typeof spec>) => { const next = { ...spec, ...patch }; if (!next.thresholds.length) next.executionReadiness = 'needs_confirmation'; onChange({ ...value, executionSpec: next, executionMethods: [] }) }
-  return <fieldset className="td-case-editor-section"><legend>PerformanceExecutionEditor</legend><div className="td2-editor-grid">
-    <label className="wide">测试目标 target<textarea value={spec.target} onChange={event => update({ target: event.target.value })} /></label><label className="wide">场景 scenario<textarea value={spec.scenario} onChange={event => update({ scenario: event.target.value })} /></label>
-    <label>并发用户数<input type="number" min="1" value={spec.virtualUsers ?? ''} onChange={event => update({ virtualUsers: event.target.value ? Number(event.target.value) : null })} /></label><label>持续时间<input value={spec.duration ?? ''} onChange={event => update({ duration: nullable(event.target.value) })} /></label><label>Ramp Up<input value={spec.rampUp ?? ''} onChange={event => update({ rampUp: nullable(event.target.value) })} /></label><Readiness value={spec.executionReadiness} onChange={executionReadiness => update({ executionReadiness })} />
-    <label className="wide">数据策略<textarea value={spec.dataStrategy} onChange={event => update({ dataStrategy: event.target.value })} /></label><label className="wide">环境要求（每行一项）<textarea value={spec.environmentRequirements.join('\n')} onChange={event => update({ environmentRequirements: lines(event.target.value) })} /></label>
-  </div><div className="td-structured-list"><header><b>性能阈值与来源</b><button type="button" onClick={() => update({ thresholds: [...spec.thresholds, { metric: '', target: '', sourceRef: '' }] })}>+ 阈值</button></header>{spec.thresholds.map((threshold, index) => <div className="td-threshold-row" key={index}><input aria-label={`阈值 ${index + 1} 指标`} placeholder="metric" value={threshold.metric} onChange={event => update({ thresholds: replace(spec.thresholds, index, { ...threshold, metric: event.target.value }) })} /><input aria-label={`阈值 ${index + 1} 目标`} placeholder="target" value={threshold.target} onChange={event => update({ thresholds: replace(spec.thresholds, index, { ...threshold, target: event.target.value }) })} /><input aria-label={`阈值 ${index + 1} 来源`} placeholder="sourceRef" value={threshold.sourceRef} onChange={event => update({ thresholds: replace(spec.thresholds, index, { ...threshold, sourceRef: event.target.value }) })} /><button type="button" onClick={() => update({ thresholds: spec.thresholds.filter((_, itemIndex) => itemIndex !== index) })}>删除</button></div>)}{!spec.thresholds.length && <p className="td-confirmation-note">没有阈值或需求来源：保存后保持 needs_confirmation，并生成阻断发布的待确认项。</p>}</div></fieldset>
-}
-
-export function StabilityExecutionEditor({ value, onChange }: { value: TestCaseContent; onChange: (value: TestCaseContent) => void }) {
-  const spec = value.executionSpec?.kind === 'stability' ? value.executionSpec : defaultExecutionSpec('stability') as Extract<TestCaseExecutionSpec, { kind: 'stability' }>
-  const update = (patch: Partial<typeof spec>) => { const next = { ...spec, ...patch }; if (!next.duration) next.executionReadiness = 'needs_confirmation'; onChange({ ...value, executionSpec: next, executionMethods: [] }) }
-  return <fieldset className="td-case-editor-section"><legend>StabilityExecutionEditor</legend><div className="td2-editor-grid"><label className="wide">工作负载<textarea value={spec.workload} onChange={event => update({ workload: event.target.value })} /></label><label>持续时间<input value={spec.duration ?? ''} onChange={event => update({ duration: nullable(event.target.value) })} /></label><label>采样间隔<input value={spec.interval ?? ''} onChange={event => update({ interval: nullable(event.target.value) })} /></label><Readiness value={spec.executionReadiness} onChange={executionReadiness => update({ executionReadiness })} /><label className="wide">观察项（每行一项）<textarea value={spec.observations.join('\n')} onChange={event => update({ observations: lines(event.target.value) })} /></label><label>恢复策略<textarea value={spec.recoveryPolicy ?? ''} onChange={event => update({ recoveryPolicy: nullable(event.target.value) })} /></label><label>检查点策略<textarea value={spec.checkpointPolicy ?? ''} onChange={event => update({ checkpointPolicy: nullable(event.target.value) })} /></label><label className="wide">环境要求（每行一项）<textarea value={spec.environmentRequirements.join('\n')} onChange={event => update({ environmentRequirements: lines(event.target.value) })} /></label></div>{!spec.duration && <p className="td-confirmation-note">未提供持续时间：保存后保持 needs_confirmation，并生成阻断发布的待确认项。</p>}</fieldset>
-}
-
-export function CompatibilityExecutionEditor({ value, onChange }: { value: TestCaseContent; onChange: (value: TestCaseContent) => void }) {
-  const spec = value.executionSpec?.kind === 'compatibility' ? value.executionSpec : defaultExecutionSpec('compatibility') as Extract<TestCaseExecutionSpec, { kind: 'compatibility' }>
-  const update = (patch: Partial<typeof spec>) => { const next = { ...spec, ...patch }; if (!compatibilityMatrixSize(next)) next.executionReadiness = 'needs_confirmation'; onChange({ ...value, executionSpec: next, executionMethods: [] }) }
-  return <fieldset className="td-case-editor-section"><legend>CompatibilityExecutionEditor</legend><div className="td2-editor-grid"><label>基础执行方式<select value={spec.baseMethod} onChange={event => update({ baseMethod: event.target.value as 'ui' | 'api' })}><option value="ui">UI</option><option value="api">API</option></select></label><Readiness value={spec.executionReadiness} onChange={executionReadiness => update({ executionReadiness })} /><label className="wide">基础用例引用（每行一项）<textarea value={spec.baseCaseRefs.join('\n')} onChange={event => update({ baseCaseRefs: lines(event.target.value) })} /></label><MatrixField label="浏览器矩阵" value={spec.browserMatrix} onChange={browserMatrix => update({ browserMatrix })} /><MatrixField label="操作系统矩阵" value={spec.operatingSystemMatrix} onChange={operatingSystemMatrix => update({ operatingSystemMatrix })} /><MatrixField label="视口矩阵" value={spec.viewportMatrix} onChange={viewportMatrix => update({ viewportMatrix })} /><MatrixField label="版本矩阵" value={spec.versionMatrix} onChange={versionMatrix => update({ versionMatrix })} /><label className="wide">预期一致性<textarea value={spec.expectedConsistency} onChange={event => update({ expectedConsistency: event.target.value })} /></label></div>{!compatibilityMatrixSize(spec) && <p className="td-confirmation-note">尚无有效兼容矩阵：保存后保持 needs_confirmation，并生成阻断发布的待确认项。</p>}</fieldset>
-}
-
-function StepsEditor({ steps, onChange }: { steps: Extract<TestCaseExecutionSpec, { kind: 'functional' }>['steps']; onChange: (steps: Extract<TestCaseExecutionSpec, { kind: 'functional' }>['steps']) => void }) { return <div className="td-structured-list"><header><b>执行步骤</b><button type="button" onClick={() => onChange([...steps, { key: `step-${steps.length + 1}`, action: '', expected: '' }])}>+ 步骤</button></header>{steps.map((step, index) => <div className="td-step-row" key={index}><input aria-label={`步骤 ${index + 1} 标识`} value={step.key} onChange={event => onChange(replace(steps, index, { ...step, key: event.target.value }))} /><textarea aria-label={`步骤 ${index + 1} 动作`} value={step.action} onChange={event => onChange(replace(steps, index, { ...step, action: event.target.value }))} /><textarea aria-label={`步骤 ${index + 1} 预期`} value={step.expected} onChange={event => onChange(replace(steps, index, { ...step, expected: event.target.value }))} /><button type="button" disabled={steps.length === 1} onClick={() => onChange(steps.filter((_, itemIndex) => itemIndex !== index))}>删除</button></div>)}</div> }
-function ChecksEditor({ checks, onChange }: { checks: Extract<TestCaseExecutionSpec, { kind: 'functional' }>['verificationChecks']; onChange: (checks: Extract<TestCaseExecutionSpec, { kind: 'functional' }>['verificationChecks']) => void }) { return <div className="td-structured-list"><header><b>验证检查点</b><button type="button" onClick={() => onChange([...checks, { key: `check-${checks.length + 1}`, description: '' }])}>+ 检查点</button></header>{checks.map((check, index) => <div className="td-check-row" key={index}><input aria-label={`检查点 ${index + 1} 标识`} value={check.key} onChange={event => onChange(replace(checks, index, { ...check, key: event.target.value }))} /><textarea aria-label={`检查点 ${index + 1} 描述`} value={check.description} onChange={event => onChange(replace(checks, index, { ...check, description: event.target.value }))} /><button type="button" onClick={() => onChange(checks.filter((_, itemIndex) => itemIndex !== index))}>删除</button></div>)}</div> }
-function Readiness({ value, onChange }: { value: 'ready' | 'blocked' | 'needs_confirmation'; onChange: (value: 'ready' | 'blocked' | 'needs_confirmation') => void }) { return <label>Execution Readiness<select value={value} onChange={event => onChange(event.target.value as typeof value)}><option value="ready">ready</option><option value="blocked">blocked</option><option value="needs_confirmation">needs_confirmation</option></select></label> }
-function MatrixField({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) { return <label>{label}（每行一项）<textarea value={value.join('\n')} onChange={event => onChange(lines(event.target.value))} /></label> }
-
-export function createEmptyTestCase(): TestCaseContent { const executionSpec = defaultExecutionSpec('functional'); return { schemaVersion: 'test-case/v2', title: '', objective: '', dimension: 'functional', requirementRefs: [], priority: 'P1', preconditions: [], dataRequirementIds: [], cleanup: [], dependencies: [], executionMethods: functionalMethods(executionSpec, { executionMethods: [] } as unknown as TestCaseContent), executionSpec, sharedVerificationChecks: [], tags: [], domain: '未分类' } }
-export function defaultExecutionSpec(dimension: TestCaseContent['dimension']): TestCaseExecutionSpec { if (dimension === 'performance') return { kind: 'performance', method: 'performance_tool', target: '', scenario: '', virtualUsers: null, duration: null, rampUp: null, thresholds: [], dataStrategy: '', environmentRequirements: [], executionReadiness: 'needs_confirmation' }; if (dimension === 'stability') return { kind: 'stability', method: 'long_running', workload: '', duration: null, interval: null, observations: [], recoveryPolicy: null, checkpointPolicy: null, environmentRequirements: [], executionReadiness: 'needs_confirmation' }; if (dimension === 'compatibility') return { kind: 'compatibility', method: 'environment_matrix', baseMethod: 'ui', baseCaseRefs: [], browserMatrix: [], operatingSystemMatrix: [], viewportMatrix: [], versionMatrix: [], expectedConsistency: '', executionReadiness: 'needs_confirmation' }; return { kind: 'functional', method: 'ui', steps: [{ key: 'step-1', action: '', expected: '' }], verificationChecks: [], preconditions: [], testDataRequirements: [], executionReadiness: 'needs_confirmation', automationHint: '' } }
-export function testCaseEditorValid(value: TestCaseContent) { if (!value.title.trim() || !value.objective.trim() || !value.domain.trim() || !value.requirementRefs.length || !value.executionSpec) return false; const spec = value.executionSpec; if (spec.kind === 'functional') return Boolean(value.executionMethods?.length && value.executionMethods.every(method => method.steps.length && method.steps.every(step => step.key.trim() && step.action.trim() && step.expected.trim()) && (method.method === 'ui' ? method.uiSpec.entry.trim() : method.apiSpec.method.trim() && method.apiSpec.path.trim()))); if (spec.kind === 'performance') return Boolean(spec.target.trim() && spec.scenario.trim() && spec.dataStrategy.trim() && spec.thresholds.every(item => item.metric.trim() && item.target.trim() && item.sourceRef.trim())); if (spec.kind === 'stability') return Boolean(spec.workload.trim()); return Boolean(spec.expectedConsistency.trim()) }
-export function executionPendingItems(value: TestCaseContent) { const spec = value.executionSpec; if (spec?.kind === 'performance' && !spec.thresholds.length) return ['性能阈值及其需求来源']; if (spec?.kind === 'stability' && !spec.duration) return ['稳定性运行时长']; if (spec?.kind === 'compatibility' && !compatibilityMatrixSize(spec)) return ['兼容性环境矩阵']; return [] }
-export function actualExecutionMethod(value: TestCaseContent) { return value.executionMethods?.length ? value.executionMethods.map(item => item.method).join(' + ') : value.executionSpec?.method ?? '未配置' }
-
-function defaultFunctionalMethod(method: 'ui' | 'api'): TestCaseContent['executionMethods'][number] { const common = { executionReadiness: 'needs_confirmation' as const, steps: [{ key: 'step-1', action: '', expected: '' }], verificationChecks: [], automationHint: '' }; return method === 'ui' ? { method, uiSpec: { entry: '' }, ...common } : { method, apiSpec: { method: '', path: '' }, ...common } }
-function functionalMethods(spec: TestCaseExecutionSpec, source: TestCaseContent): TestCaseContent['executionMethods'] { if (spec.kind !== 'functional') return []; return source.executionMethods?.length ? source.executionMethods : [defaultFunctionalMethod(spec.method)] }
-function functionalProjection(method: TestCaseContent['executionMethods'][number], value: TestCaseContent): Extract<TestCaseExecutionSpec, { kind: 'functional' }> { return { kind: 'functional', method: method.method, steps: method.steps, verificationChecks: method.verificationChecks, preconditions: value.preconditions, testDataRequirements: value.dataRequirementIds, executionReadiness: method.executionReadiness, automationHint: method.automationHint } }
-function compatibilityMatrixSize(spec: Extract<TestCaseExecutionSpec, { kind: 'compatibility' }>) { return spec.browserMatrix.length + spec.operatingSystemMatrix.length + spec.viewportMatrix.length + spec.versionMatrix.length }
-function replace<T>(items: T[], index: number, value: T) { return items.map((item, itemIndex) => itemIndex === index ? value : item) }
-function lines(value: string) { return [...new Set(value.split(/\r?\n/u).map(item => item.trim()).filter(Boolean))] }
-function nullable(value: string) { return value.trim() || null }
+export function createEmptyTestCase(): TestCaseContent { return { schemaVersion: 'test-case/v3', title: '', dimension: 'functional', priority: 'P1', requirementRefs: [], executionMethods: ['ui'], preconditions: [], steps: [], expectedResults: [] } }
+export function testCaseEditorValid(value: TestCaseContent) { return Boolean(value.schemaVersion === 'test-case/v3' && value.title.trim() && value.executionMethods.length && value.steps.some(item => item.trim()) && value.expectedResults.some(item => item.trim())) }
+export function executionPendingItems(_value: TestCaseContent) { return [] }
+export function actualExecutionMethod(value: TestCaseContent) { return value.executionMethods.map(item => item.toUpperCase()).join(' + ') }
+export function dimensionLabel(value: TestCaseContent['dimension']) { return ({ functional: '功能', performance: '性能', stability: '稳定性', compatibility: '兼容性', security: '安全' } as const)[value] }

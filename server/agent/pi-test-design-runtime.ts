@@ -4,7 +4,7 @@ import { builtInToolBindingToken, toolBindingToken, toolsetContentHash } from '.
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
 import { repairCandidateContent, type PlanningAgentRuntime } from '../application/test-design-service.js'
-import { isTestDesignRepairPatch, TestDesignError, validateHistoricalProposalPlan, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDesignRepairPatch } from '../application/test-design-validation.js'
+import { isTestDesignRepairPatch, TestDesignError, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDesignRepairPatch } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
 import type { TestDesign, TestDesignRunAgentConfigurationSnapshot, TestDesignWorkflowRun, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot } from '../domain/test-design-types.js'
@@ -18,11 +18,11 @@ const WORKSPACE_TOOL_IDS = ['workspace.read_file', 'workspace.grep_files', 'work
 export const TEST_DESIGN_STAGE_BINDINGS = {
   test_case_design: {
     submitToolId: 'test_design_cases.submit_result',
-    schemaVersion: 'test-case-design/v2',
+    schemaVersion: 'test-case-design/v3',
   },
   test_design_repair: {
     submitToolId: 'test_design_repair.submit_result',
-    schemaVersion: 'test-design-repair/v2',
+    schemaVersion: 'test-design-repair/v3',
   },
 } as const
 
@@ -185,19 +185,16 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
   const stageRules = stage === 'test_case_design'
     ? [
-          'Requirement Release 是本轮唯一正式覆盖基线；本轮只提交新增 Candidate Case 与实际变化的历史决策。每条用例必须使用 requirementRefs 直接关联至少一个 Requirement。Service 会恢复未变化冻结历史用例、其冻结数据关系和完整内部 Candidate Snapshot。',
-          'cases[] 只包含新增用例与 historicalChanges.update 的完整新内容。historicalChanges 只允许 update、deprecate、reference，并仅填写冻结 sourceCaseId/sourceRevision、update 的 candidateRef、reason、confidence；未出现在 historicalChanges 的冻结历史用例由 Service 自动 reuse。不得复制历史 Case 正文、正式 ID、Hash 或 Revision，也不得用省略变更静默删除历史用例。新增 Case 不要提交 create Proposal，Service 会自动生成；reuse 自动接受，create/update 随当前 Case Revision 审核通过自动接受，只有 deprecate 与必要的 reference 需要额外人工决策。',
-          '每个 functional/security Candidate Case 都必须在自身 coverageClaims[] 提供至少一条 Claim。coverageClaim 只包含 ref、kind、subject、variant、polarity、明确且可独立判定的 oracle，以及可选 transition/knowledgeRefs；coverageClaims[].kind 是场景意图分类，不是 Case dimension 或 executionSpec.kind，禁止把 functional、performance、stability、compatibility、security 复制到这里，必须从提交 Tool Schema 为该字段提供的枚举中选择。不要重复填写 caseRef 或 requirementRefs，Service 会从所属 Case 自动派生。不要提交根级 scenarioClaims。coverageClaims[].kind=state_transition 时必须额外声明 transition:{from,to}，一条 Claim 只允许一个明确状态边；它不是 TestPoint，不会获得正式 ID、Revision、Version 或发布。',
-          '提交前必须提供根级 dimensionAssessments，且恰好覆盖 functional、performance、stability、compatibility、security 五个维度。每项包含 dimension、applicable、reason、requirementRefs、risks、scenarioClaims；不适用必须用当前冻结 Requirement 的 requirementRefs 说明依据，适用维度必须列出待覆盖场景族并生成对应维度用例。它是候选覆盖地图，不会创建新的人工审核阶段。',
-          '功能和安全用例的执行步骤、检查点、就绪状态及自动化提示只在 executionMethods 的对应 UI/API 方式中完整填写。design.executionMethods 中每个已选择方式都必须至少出现在一条适用用例中；没有正式 API method/path、UI entry/selector 等执行数据时仍保留该方式并将未知字段提交为空字符串，留到创建测试执行时补充，绝不编造，也不要仅因这些执行阶段字段为空而改变测试设计候选状态。executionSpec 对此类用例只提交 kind=functional 与同一 method；服务端会从 executionMethods 和用例根字段投影正式 executionSpec。不要提交第二份重复步骤。',
-          '非功能 executionSpec 必须使用精确字段：performance 为 kind=performance、method=performance_tool、target、scenario、virtualUsers、duration、rampUp、thresholds、dataStrategy、environmentRequirements、executionReadiness；stability 为 kind=stability、method=long_running、workload、duration、interval、observations、recoveryPolicy、checkpointPolicy、environmentRequirements、executionReadiness；compatibility 为 kind=compatibility、method=environment_matrix、baseMethod、baseCaseRefs、browserMatrix、operatingSystemMatrix、viewportMatrix、versionMatrix、expectedConsistency、executionReadiness。cases[] 根对象和 executionSpec 都不得添加这些列表之外的自定义字段。',
-          '性能 thresholds 必须是数组；每一项严格且仅为 { metric, target, sourceRef }，三者都是非空字符串。把比较符、数值、单位和适用范围合并写进 target；不得使用 operator、value、unit，也不得提交缺少其中任一字段的半成品阈值。若没有正式阈值，提交 thresholds: []、executionReadiness: needs_confirmation，并建立 blocker Confirmation Item。',
+          'Requirement 是正式业务事实来源，但不是测试设计的场景边界。先保证正式 Requirement 的核心业务行为得到直接测试覆盖，再主动扩展异常、边界、权限、状态、并发、一致性、重复操作、恢复、性能、稳定性、兼容性、安全、历史缺陷与 Knowledge 风险场景。',
+          'requirementRefs 仅表示 TestCase 对正式 Requirement 的直接追溯。Expected Result 直接来源于 Requirement 时填写对应 ID；风险或边界探索没有直接 Requirement 行为依据时必须使用 requirementRefs: []，不得为了 Coverage 强行绑定不相关 Requirement。',
+          '允许发散但禁止编造产品业务规则、权限矩阵、性能阈值、错误码、错误文案、接口、URL、Selector、账号、环境或状态机。信息不足时只写安全、稳定、一致、无越权、无不可恢复错误等可确定底线，或把技术事实留到 TestExecution 配置。',
+          '从 functional、performance、stability、compatibility、security 五个方向思考，只生成有价值的场景；不要求每个维度都有 Case，也不提交适用性表。一个 Case 应有清晰可审核的测试目标；自然完整业务闭环可以合并，明显不同且可独立失败的测试意图可以拆分，这不是 Validator Gate。',
+          '每条 Case 只提交一份自然语言 preconditions、steps、expectedResults。executionMethods 只选择 ui、api 或二者；不要区分 UI/API 两套步骤，也不要提交执行配置、数据需求、Coverage 内部模型、Finding、Confirmation 或历史 Proposal。',
         ]
       : [
-          '当前任务只列出经过 Service 作用域判定、可安全自动修复的 agent_repair blockers；正式 Requirement 保持不变。提交 test-design-repair/v2 时，baseCandidateSha256 必须等于任务和 current-test-cases.json 对应的当前完整 Candidate；Hash 不一致时重新读取快照，不能猜测或覆盖。',
-          'Patch 的 upsertCases 是新增或替换指定 ref 的完整 test-case/v2 内容；functional/security 用例将其 coverageClaims 一并放在该 Case 内。可安全修复的完整 Candidate 可以同时包含当前版本 AI Case 与未变化历史 reuse Case；Patch 只修改当前 Run Candidate，绝不修改来源冻结 Revision。removeCaseRefs 只可删除本轮新增 Candidate，不能删除冻结历史 reuse Case。未在 Patch 中列出的 Case、Proposal、历史来源、数据关系和维度评估由 Service 保持不变；Service 会同步 Candidate、ScenarioClaim、requirementRefs、diff 与 Proposal 状态。',
-          'upsertDataRequirements / removeDataRequirementRefs 只处理确实受 blocker 影响的数据需求；dimensionAssessmentUpdates 只更新受影响维度。Service 会把 Patch 重新展开为完整 Candidate，执行完整 Validator 和 Coverage Audit，并保留修复前后 Diff。',
-          '遇到 TEST_CASE_OVER_MERGED 时，依据 blocker.details 和 current-test-cases.json 中的 scenarioClaims 拆分 Candidate Case，并将每条 ScenarioClaim 重新指向承担该独立 Atomic Test Intent 的 caseRef。',
+          '当前任务只列出可安全自动修复的 Coverage blockers；正式 Requirement 保持不变。提交 test-design-repair/v3 时，baseCandidateSha256 必须等于任务与 current-test-cases.json 对应的当前完整 Candidate。',
+          'upsertCases 只包含新增或完整替换的扁平 test-case/v3；removeCaseRefs 只删除本轮 Candidate。未在 Patch 中出现的 Case 保持不变。',
+          'Requirement 未覆盖时，应新增真正验证该 Requirement 的 Case；不得把已有扩展风险 Case 强行增加 requirementRefs 只为让 Coverage 变绿。',
         ]
   const readingRules = stage === 'test_case_design'
     ? [
@@ -211,15 +208,15 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   return [
     ...stageRules,
     ...readingRules,
-    '提交 cases[] 时，每一项必须是扁平的 test-case/v2 对象：ref、schemaVersion、title、requirementRefs、executionMethods、executionSpec 等字段同级。禁止使用 { ref, content: {...} } 包装。',
+    '提交 Case 必须是扁平 test-case/v3：ref、schemaVersion、title、dimension、priority、requirementRefs、executionMethods、preconditions、steps、expectedResults，禁止额外字段或 { ref, content } 包装。',
     'Runtime 实际暴露的工具、结果 Schema 和 Submit Tool 是本轮执行权限边界。',
     'Workflow 只推进业务流程，不调度 Skill；PlanningAgent 查看 Enabled Skill Catalog，并只在当前 Stage 确有方法缺口时自主决定是否通过 skill.read 读取正文。已有 TRUSTED_SKILL 正文仍在 Context 时直接复用。',
     'requirementRelease.content.clarifications 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
-    '不得编造阈值、时长、兼容矩阵、接口、定位器、账号、环境或 Expected Result。',
+    '不得编造阈值、时长、兼容矩阵、接口、定位器、账号、环境或产品业务 Expected Result。',
     'PlanningAgent 只生成语义候选；正式 ID、Revision、Version、Hash 和数据库状态由 Service / Validator 管理。',
     stage === 'test_design_repair'
-      ? `完成 Self Review 后，通过 ${binding.submitToolId} 提交 test-design-repair/v2 Patch：必须携带任务中给出的 baseCandidateSha256；只提交 upsert/remove 的 Case、数据需求和受影响维度，不要重新提交完整 Candidate、Proposal 或根级 ScenarioClaim。若服务端拒绝，根据错误路径修正后重新提交。`
-      : `完成 Self Review 后，通过 ${binding.submitToolId} 提交 test-case-design/v2；Service 会生成完整、可审计的 Candidate Snapshot。若服务端拒绝，根据错误路径修正后重新提交。`,
+      ? `完成 Self Review 后，通过 ${binding.submitToolId} 提交 test-design-repair/v3 Patch：携带 baseCandidateSha256，并只提交 upsertCases/removeCaseRefs。若服务端拒绝，根据错误路径修正后重新提交。`
+      : `完成 Self Review 后，通过 ${binding.submitToolId} 提交根对象严格只有 schemaVersion 和 cases 的 test-case-design/v3。若服务端拒绝，根据错误路径修正后重新提交。`,
   ]
 }
 
@@ -283,7 +280,6 @@ function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, wo
 async function validateStageCandidate(stage: TestDesignStage, candidate: Record<string, unknown>, run: TestDesignWorkflowRun) {
   try {
     const result = validateTestCaseDesignCandidate(candidate, stage === 'test_design_repair')
-    if (!isTestDesignRepairPatch(result)) validateHistoricalProposalPlan(result, run.historicalSnapshot)
     return { valid: true, result, issues: [] }
   } catch (error) {
     const details = error instanceof TestDesignError && error.details && typeof error.details === 'object' ? error.details as { path?: unknown } : undefined
@@ -306,56 +302,19 @@ export function projectTestCaseCandidateSubmission(
     return {
       schemaVersion: candidate.schemaVersion,
       baseCandidateSha256: candidate.baseCandidateSha256,
-      upsertCases: candidate.upsertCases.map(item => projectCandidateCase(item, item.coverageClaims ?? [])),
+      upsertCases: candidate.upsertCases.map(projectCandidateCase),
       removeCaseRefs: structuredClone(candidate.removeCaseRefs),
-      upsertDataRequirements: structuredClone(candidate.upsertDataRequirements),
-      removeDataRequirementRefs: structuredClone(candidate.removeDataRequirementRefs),
-      dimensionAssessmentUpdates: structuredClone(candidate.dimensionAssessmentUpdates),
-    }
-  }
-  if (candidate.schemaVersion === 'test-case-design/v2') {
-    return {
-      schemaVersion: candidate.schemaVersion,
-      cases: candidate.cases.map(item => projectCandidateCase(item, candidate.scenarioClaims.filter(claim => claim.caseRef === item.ref))),
-      dimensionAssessments: structuredClone(candidate.dimensionAssessments),
-      ...(candidate.dataRequirements.length ? { dataRequirements: structuredClone(candidate.dataRequirements) } : {}),
-      ...(candidate.findings.length ? { findings: structuredClone(candidate.findings) } : {}),
-      ...(candidate.confirmationItems.length ? { confirmationItems: structuredClone(candidate.confirmationItems) } : {}),
-      ...(candidate.proposals.length ? { historicalChanges: candidate.proposals.map(item => ({ operation: item.operation, sourceCaseId: item.sourceCaseId, sourceRevision: item.sourceRevision, ...(item.candidateRef ? { candidateRef: item.candidateRef } : {}), reason: item.reason, confidence: item.confidence })) } : {}),
     }
   }
   return {
     schemaVersion: candidate.schemaVersion,
-    cases: candidate.cases.map(({ ref, content }) => ({
-      ref,
-      ...structuredClone(content),
-    })),
-    dimensionAssessments: structuredClone(candidate.dimensionAssessments),
-    scenarioClaims: structuredClone(candidate.scenarioClaims),
-    dataRequirements: structuredClone(candidate.dataRequirements),
-    findings: structuredClone(candidate.findings),
-    confirmationItems: structuredClone(candidate.confirmationItems),
-    proposals: structuredClone(candidate.proposals),
+    cases: candidate.cases.map(projectCandidateCase),
   }
 }
 
-function projectCandidateCase(candidate: TestCaseDesignCandidate['cases'][number], claims: TestCaseDesignCandidate['scenarioClaims']) {
-  return {
-    ref: candidate.ref,
-    ...structuredClone(candidate.content),
-    ...(candidate.changeReason ? { changeReason: candidate.changeReason } : {}),
-    ...(candidate.confidence === undefined ? {} : { confidence: candidate.confidence }),
-    ...(claims.length ? { coverageClaims: claims.map(({ caseRef: _caseRef, requirementRefs: _requirementRefs, ...claim }) => structuredClone(claim)) } : {}),
-  }
-}
+function projectCandidateCase(candidate: TestCaseDesignCandidate['cases'][number]) { return { ref: candidate.ref, ...structuredClone(candidate.content) } }
 
-function testCaseCandidateRecoveryHint(message: string) {
-  if (message.includes('不能通过删除 Proposal 省略冻结历史用例')) {
-    return '。请恢复每条缺失历史用例的 Proposal；reuse/update 都要将 sourceCaseId/sourceRevision 与本次 cases[] 中完整、扁平的临时 Candidate Case 通过 candidateRef 关联。不要删除 reuse Proposal 来规避校验。'
-  }
-  if (!message.includes('thresholds') && !['operator', 'value', 'unit'].some(field => message.includes(field))) return ''
-  return '。性能 executionSpec.thresholds 是数组；每项只能包含 metric、target、sourceRef 三个非空字符串。比较符、数值和单位都写入 target 这个完整字符串，不能传 operator/value/unit，也不能删掉 metric、target 或 sourceRef 中的任一字段。没有正式阈值时提交空数组并标记 needs_confirmation，同时建立阻断 Confirmation Item。'
-}
+function testCaseCandidateRecoveryHint(_message: string) { return '。请严格按 v3 Schema 提交，不要恢复已删除的治理或执行字段。' }
 
 function executionRecord(stage: TestDesignStage, agentVersion: string, modelLabel: string, events: AgentExecutionEvent[], turns?: number, toolCalls?: number, toolErrors?: number, framework: AgentExecutionOutput['framework'] = { name: 'pi-agent-core', version: piVersion }, context?: AgentExecutionContext, inputDeliveryManifest?: InputDeliveryManifest) {
   return { agentKey: 'planning' as const, workflowStage: stage, agentVersion, modelLabel, degraded: false, turns: turns ?? Math.max(0, ...events.map(event => event.turn ?? 0)), toolCalls: toolCalls ?? events.filter(event => event.type === 'tool_execution_start').length, toolErrors: toolErrors ?? events.filter(event => event.type === 'tool_execution_end' && event.isError).length, events: structuredClone(events), framework, ...(context ? { context: structuredClone(context) } : {}), ...(inputDeliveryManifest ? { inputDeliveryManifest: structuredClone(inputDeliveryManifest) } : {}) }
