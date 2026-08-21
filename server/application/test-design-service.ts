@@ -4,7 +4,7 @@ import type { AgentExecutionEvent } from '../domain/agent-types.js'
 import type { DatabaseState, ProjectVersion, ReviewRun } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type {
-  CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, CoverageAudit, HistoricalCaseSnapshot, LibraryTestCase, LibraryTestCaseRevision, RetrievalSnapshot, TestCase,
+  CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, CoverageAudit, EffectiveTestCase, HistoricalCaseSnapshot, LibraryTestCase, LibraryTestCaseRevision, RetrievalSnapshot, TestCase,
   TestCaseContent, TestCaseLibraryVersion, TestCaseLibraryVersionDetail, TestDesign, TestDesignBasisSnapshot, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot,
   TestCaseTraceability, TestDesignNodeKey, TestDesignRunAgentConfigurationSnapshot, TestDesignState, TestDesignWorkflowRun, TestExecutionHandoff, TestExecutionMethod,
   TestSuiteDraft, TestSuiteVersion, TestSuiteVersionMember, WorkflowArtifact, WorkflowNodeRun,
@@ -190,13 +190,13 @@ export class TestDesignService {
     const publishedRunIds = new Set(aggregate.libraryVersions.flatMap(item => item.sourceRunId ? [item.sourceRunId] : []))
     return aggregate.runs.filter(item => item.projectVersionId === projectVersionId && item.testDesignId === designId).sort(newest).map(run => {
       const baseline = run.baseTestCaseLibraryVersionId ? aggregate.libraryVersions.find(item => item.id === run.baseTestCaseLibraryVersionId) : undefined
-      return { ...presentRun(run), ...(run.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: run.baseTestCaseLibraryVersionId } : {}), ...(baseline ? { baseTestCaseLibraryVersion: { id: baseline.id, version: baseline.version, name: baseline.name } } : {}), caseCount: run.testCases.filter(item => !item.tombstonedAt).length, pendingManualProposalCount: run.caseChangeProposals.filter(item => item.decision === 'pending' && requiresHumanProposalDecision(item)).length, published: publishedRunIds.has(run.id) }
+      return { ...presentRun(run), ...(run.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: run.baseTestCaseLibraryVersionId } : {}), ...(baseline ? { baseTestCaseLibraryVersion: { id: baseline.id, version: baseline.version, name: baseline.name } } : {}), caseCount: run.testCases.filter(item => !item.tombstonedAt).length, candidateCaseCount: run.testCases.filter(item => !item.tombstonedAt).length, effectiveCaseCount: buildEffectiveCaseSet(run).length, pendingManualProposalCount: run.caseChangeProposals.filter(item => item.decision === 'pending' && requiresHumanProposalDecision(item)).length, published: publishedRunIds.has(run.id) }
     })
   }
 
   async getRun(projectVersionId: string, designId: string, runId: string) {
     const state = await this.store.snapshot(); const run = findRun(state, projectVersionId, designId, runId)
-    return { ...presentRun(run, true), caseChangeProposalSha256: caseChangeProposalSha256(run.caseChangeProposals ?? []) }
+    return { ...presentRun(run, true), candidateCaseCount: run.testCases.filter(item => !item.tombstonedAt).length, effectiveCaseCount: buildEffectiveCaseSet(run).length, caseChangeProposalSha256: caseChangeProposalSha256(run.caseChangeProposals ?? []) }
   }
 
   async processPreparedRun(runId: string, signal = new AbortController().signal): Promise<TestDesignWorkflowRun> {
@@ -318,7 +318,7 @@ export class TestDesignService {
       task: [
         '请重新生成测试用例。',
         '',
-        '请继续在当前 Planning Session 中，基于当前 Requirement Release、正式 Clarification 和冻结 Workspace 重新生成完整测试用例候选。',
+        '请继续在当前 Planning Session 中，基于当前 Requirement Release、正式 Clarification 和冻结 Workspace 重新生成本轮新增或确实需要调整的 TestCase Candidate Delta。未变化历史用例无需重新输出。',
       ].join('\n'),
       metadata: {
         testDesignRunId: runId,
@@ -917,14 +917,13 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
 export function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean): TestCaseDesignCandidate {
   const submitted = validateTestCaseDesignCandidate(raw, repair)
   const value = isTestDesignRepairPatch(submitted) ? applyRepairPatch(run, submitted) : submitted
-  if (!value.cases.length) throw new TestDesignError('TEST_DESIGN_CANDIDATE_EMPTY', 'test-case-design/v3 至少需要一条测试用例', 422)
+  if (!value.cases.length && !run.historicalSnapshot.items.length) throw new TestDesignError('TEST_DESIGN_CANDIDATE_EMPTY', '没有冻结 Historical Baseline 时，test-case-design/v3 至少需要一条测试用例', 422)
   validateCandidateRequirementRefs(run, value)
   const existingByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
   const idByRef = new Map(value.cases.map(candidate => [candidate.ref, existingByRef.get(candidate.ref)?.id ?? `test_case_${randomUUID()}`]))
   const nextCases = value.cases.map(candidate => {
     const content = candidate.content
     const current = existingByRef.get(candidate.ref)
-    const historical = findHistoricalSemanticMatch(run, content)
     if (current) {
       const previous = currentCaseRevision(current)
       if (previous.semanticSha256 !== semanticContentSha256(content)) {
@@ -933,13 +932,11 @@ export function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, 
         current.currentRevision = revision.revision
         current.reviewState = 'in_review'
       }
-      synchronizeCandidateHistoricalOrigin(current, historical)
       current.tombstonedAt = undefined
       return current
     }
-    const testCase = newCase(run.id, content, historical ? (semanticContentSha256(content) === historical.contentSha256 ? 'historical_unchanged' : 'historical_modified') : 'ai', PLANNING_AGENT_EDITOR_ID, historical ? '固定历史用例当前 Candidate' : 'PlanningAgent 候选', idByRef.get(candidate.ref)!)
+    const testCase = newCase(run.id, content, 'ai', PLANNING_AGENT_EDITOR_ID, 'PlanningAgent Candidate Delta', idByRef.get(candidate.ref)!)
     testCase.candidateRef = candidate.ref
-    if (historical) testCase.historicalSourceRef = historical.id
     return testCase
   })
   if (repair) for (const removed of run.testCases.filter(item => item.candidateRef && !idByRef.has(item.candidateRef))) removed.tombstonedAt = now()
@@ -955,11 +952,6 @@ function validateCandidateRequirementRefs(run: TestDesignWorkflowRun, value: Tes
     const invalid = candidate.content.requirementRefs.filter(ref => !allowed.has(ref))
     if (invalid.length) throw new TestDesignError('TEST_CASE_REQUIREMENT_REFERENCE_INVALID', `用例 ${candidate.ref} 引用了当前 Requirement Release 之外的需求：${invalid.join('、')}`, 422, { ref: candidate.ref, invalidRequirementRefs: invalid })
   }
-}
-
-function findHistoricalSemanticMatch(run: TestDesignWorkflowRun, content: TestCaseContent) {
-  const hash = semanticContentSha256(content)
-  return run.historicalSnapshot.items.find(item => item.contentSha256 === hash)
 }
 
 function applyRepairPatch(run: TestDesignWorkflowRun, patch: TestDesignRepairPatch): TestCaseDesignCandidate {
@@ -981,25 +973,24 @@ function applyRepairPatch(run: TestDesignWorkflowRun, patch: TestDesignRepairPat
 function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestCaseDesignCandidate, cases: TestCase[]) {
   const byRef = new Map(cases.flatMap(testCase => testCase.candidateRef ? [[testCase.candidateRef, testCase] as const] : []))
   const usedHistorical = new Set<string>()
-  const candidates: Array<{ operation: 'reuse' | 'update' | 'create' | 'deprecate'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; reason: string; confidence: number }> = value.cases.map(candidate => {
+  const candidates: Array<{ operation: 'reuse' | 'update' | 'create'; sourceCaseId?: string; sourceRevision?: number; candidateRef?: string; requirementRefs: string[]; reason: string; confidence: number }> = value.cases.map(candidate => {
     const testCase = required(byRef.get(candidate.ref), 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', '候选用例不存在')
     const revision = currentCaseRevision(testCase)
-    const exact = run.historicalSnapshot.items.find(item => item.contentSha256 === revision.semanticSha256 && !usedHistorical.has(item.id))
-    const similar = exact ?? run.historicalSnapshot.items.find(item => {
-      if (usedHistorical.has(item.id) || !item.content || typeof item.content !== 'object') return false
-      const historicalContent = item.content as Partial<TestCaseContent>
-      return historicalContent.title === revision.content.title && historicalContent.dimension === revision.content.dimension
-    })
-    const historical = similar
+    const match = matchHistoricalCandidate(run, revision.content, usedHistorical)
+    const historical = match.item
     if (historical) usedHistorical.add(historical.id)
     const locator = historical?.locator as { caseId?: string; revision?: number } | undefined
-    return historical && locator?.caseId && locator.revision !== undefined
-      ? { operation: (historical.contentSha256 === revision.semanticSha256 ? 'reuse' : 'update') as 'reuse' | 'update', sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: candidate.ref, requirementRefs: requirementRefsForCase(run, revision.content), reason: historical.contentSha256 === revision.semanticSha256 ? 'Service 语义匹配到相同冻结 Revision' : 'Service 识别到同标题同维度的语义变化', confidence: historical.contentSha256 === revision.semanticSha256 ? 1 : 0.8 }
-      : { operation: 'create' as const, candidateRef: candidate.ref, requirementRefs: requirementRefsForCase(run, revision.content), reason: 'Service 未匹配到可复用的冻结历史用例', confidence: 0.8 }
+    if (historical && locator?.caseId && locator.revision !== undefined) {
+      testCase.historicalSourceRef = historical.id
+      testCase.origin = match.kind === 'exact' ? 'historical_unchanged' : 'historical_modified'
+      if (match.kind === 'exact') testCase.reviewState = 'approved'
+      return { operation: match.kind === 'exact' ? 'reuse' : 'update', sourceCaseId: locator.caseId, sourceRevision: locator.revision, candidateRef: candidate.ref, requirementRefs: requirementRefsForCase(run, revision.content), reason: match.kind === 'exact' ? 'Service 通过唯一 semanticSha256 匹配复用冻结 Revision' : 'Service 通过标题、维度、Requirement 与执行方式的唯一高置信匹配识别语义更新', confidence: match.kind === 'exact' ? 1 : 0.9 }
+    }
+    return { operation: 'create' as const, candidateRef: candidate.ref, requirementRefs: requirementRefsForCase(run, revision.content), reason: match.kind === 'ambiguous' ? '存在多个可能的历史交集，Service 安全降级为新增并保留全部历史用例' : 'Service 未匹配到可证明为同一测试意图的冻结历史用例', confidence: match.kind === 'ambiguous' ? 0.5 : 0.8 }
   })
   for (const historical of run.historicalSnapshot.items.filter(item => !usedHistorical.has(item.id))) {
     const locator = historical.locator as { caseId?: string; revision?: number } | undefined
-    if (locator?.caseId && locator.revision !== undefined) candidates.push({ operation: 'deprecate', sourceCaseId: locator.caseId, sourceRevision: locator.revision, requirementRefs: [], reason: '本轮候选未匹配该冻结历史用例，是否废弃需人工决定', confidence: 0.5 })
+    if (locator?.caseId && locator.revision !== undefined) candidates.push({ operation: 'reuse', sourceCaseId: locator.caseId, sourceRevision: locator.revision, requirementRefs: requirementRefsForCase(run, historical.content as TestCaseContent), reason: '本轮 Candidate Delta 未修改该冻结历史用例，Service 默认保留并复用原 Revision', confidence: 1 })
   }
   const frozenByCase = new Map(run.historicalSnapshot.items.flatMap(item => {
     const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
@@ -1037,6 +1028,38 @@ function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestC
   })
   reconcileAutomaticProposalDecisions(run)
 }
+
+type HistoricalCandidateMatch = { kind: 'exact' | 'update' | 'ambiguous' | 'none'; item?: HistoricalCaseSnapshot['items'][number] }
+
+function matchHistoricalCandidate(run: TestDesignWorkflowRun, content: TestCaseContent, usedHistorical: Set<string>): HistoricalCandidateMatch {
+  const available = run.historicalSnapshot.items.filter(item => !usedHistorical.has(item.id) && isHistoricalTestCaseContent(item.content))
+  const hash = semanticContentSha256(content)
+  const exact = available.filter(item => item.contentSha256 === hash)
+  if (exact.length === 1) return { kind: 'exact', item: exact[0] }
+  if (exact.length > 1) return { kind: 'ambiguous' }
+  const update = available.filter(item => highConfidenceHistoricalIntent(item.content as TestCaseContent, content))
+  if (update.length === 1) return { kind: 'update', item: update[0] }
+  return { kind: update.length > 1 ? 'ambiguous' : 'none' }
+}
+
+function highConfidenceHistoricalIntent(historical: TestCaseContent, candidate: TestCaseContent) {
+  if (normalizeSemanticText(historical.title) !== normalizeSemanticText(candidate.title) || historical.dimension !== candidate.dimension) return false
+  if (!sameStringSet(historical.executionMethods, candidate.executionMethods)) return false
+  const sameRequirements = historical.requirementRefs.length > 0 && candidate.requirementRefs.length > 0 && sameStringSet(historical.requirementRefs, candidate.requirementRefs)
+  const behaviorSimilarity = tokenSimilarity([...historical.preconditions, ...historical.steps, ...historical.expectedResults], [...candidate.preconditions, ...candidate.steps, ...candidate.expectedResults])
+  return sameRequirements || behaviorSimilarity >= 0.6
+}
+
+function isHistoricalTestCaseContent(value: unknown): value is TestCaseContent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const content = value as Partial<TestCaseContent>
+  return content.schemaVersion === 'test-case/v3' && typeof content.title === 'string' && typeof content.dimension === 'string' && Array.isArray(content.requirementRefs) && Array.isArray(content.executionMethods) && Array.isArray(content.preconditions) && Array.isArray(content.steps) && Array.isArray(content.expectedResults)
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]) { return left.length === right.length && [...new Set(left)].every(item => new Set(right).has(item)) }
+function normalizeSemanticText(value: string) { return value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('zh-CN') }
+function semanticTokens(values: readonly string[]) { return new Set(values.flatMap(value => normalizeSemanticText(value).split(/[^\p{L}\p{N}]+/gu).filter(token => token.length >= 2))) }
+function tokenSimilarity(left: readonly string[], right: readonly string[]) { const a = semanticTokens(left); const b = semanticTokens(right); if (!a.size || !b.size) return 0; const intersection = [...a].filter(token => b.has(token)).length; return intersection / Math.max(a.size, b.size) }
 
 function requirementRefsForCase(_run: TestDesignWorkflowRun, content: TestCaseContent) { return [...new Set(content.requirementRefs ?? [])] }
 function proposalAssociation(sourceCaseId?: string, sourceRevision?: number, candidateRef?: string) { return `${sourceCaseId ?? ''}:${sourceRevision ?? ''}:${candidateRef ?? ''}` }
@@ -1130,7 +1153,35 @@ function repairBlockerCandidateIsSafe(run: TestDesignWorkflowRun, blocker: Cover
     return candidate.origin !== 'manual' && candidate.reviewActions.length === 0 && candidate.revisions.every(revision => revision.editorId === PLANNING_AGENT_EDITOR_ID) && (!proposal || proposal.decision === 'pending')
   })
 }
-function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit { return auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: run.testCases }) }
+export function buildEffectiveCaseSet(run: TestDesignWorkflowRun): EffectiveTestCase[] {
+  const effective = new Map<string, EffectiveTestCase>()
+  for (const historical of run.historicalSnapshot.items) {
+    if (!isHistoricalTestCaseContent(historical.content)) continue
+    const locator = historical.locator as { caseId?: unknown; revision?: unknown } | undefined
+    if (typeof locator?.caseId !== 'string' || !Number.isInteger(locator.revision)) continue
+    const revision = locator.revision as number
+    effective.set(locator.caseId, { caseId: locator.caseId, revision, content: structuredClone(historical.content), contentSha256: semanticContentSha256(historical.content), source: 'historical_reuse', sourceCaseId: locator.caseId })
+  }
+  for (const proposal of run.caseChangeProposals) {
+    const candidate = proposal.candidateCaseId ? run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt) : undefined
+    const candidateRevision = candidate ? currentCaseRevision(candidate) : undefined
+    if (proposal.operation === 'update' && proposal.sourceCaseId && proposal.sourceRevision !== undefined && candidateRevision) {
+      effective.set(proposal.sourceCaseId, { caseId: proposal.sourceCaseId, revision: proposal.sourceRevision + 1, content: structuredClone(candidateRevision.content), contentSha256: candidateRevision.contentSha256, source: 'historical_update', sourceCaseId: proposal.sourceCaseId, candidateCaseId: candidate!.id })
+    }
+    if (proposal.operation === 'create' && candidateRevision) {
+      effective.set(candidate!.id, { caseId: candidate!.id, revision: 1, content: structuredClone(candidateRevision.content), contentSha256: candidateRevision.contentSha256, source: 'candidate_create', candidateCaseId: candidate!.id })
+    }
+  }
+  return [...effective.values()].sort((left, right) => left.caseId.localeCompare(right.caseId))
+}
+
+function runCoverageAudit(run: TestDesignWorkflowRun): CoverageAudit {
+  const audit = auditTestDesignCoverage({ runId: run.id, basis: run.basisSnapshot, retrieval: run.retrievalSnapshot, historical: run.historicalSnapshot, cases: buildEffectiveCaseSet(run) })
+  for (const proposal of run.caseChangeProposals.filter(item => item.operation === 'create' && item.reason.includes('多个可能的历史交集'))) {
+    audit.advisories.push({ code: 'POSSIBLE_HISTORICAL_OVERLAP', message: 'Candidate 可能对应多个 Historical Case；Service 已保留全部历史项并将 Candidate 安全降级为 create。', subjectId: proposal.candidateCaseId })
+  }
+  return audit
+}
 function initialAutomaticRepairState(): NonNullable<TestDesignWorkflowRun['automaticRepair']> { return { status: 'idle', attempt: 0, maxAttempts: AUTOMATIC_REPAIR_MAX_ATTEMPTS, blockerCodes: [] } }
 
 function normalizeWorkspacePath(value: string) { return value.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '') }
@@ -1138,11 +1189,6 @@ function isWithinWorkspace(value: string) { const normalized = normalizeWorkspac
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 
 function semanticContentSha256(content: TestCaseContent) { return canonicalSha256(content) }
-function synchronizeCandidateHistoricalOrigin(testCase: TestCase, historical: HistoricalCaseSnapshot['items'][number] | undefined) {
-  if (!historical) return
-  testCase.historicalSourceRef = historical.id
-  testCase.origin = currentCaseRevision(testCase).semanticSha256 === historical.contentSha256 ? 'historical_unchanged' : 'historical_modified'
-}
 function newCase(runId: string, content: TestCaseContent, origin: TestCase['origin'], actorId: string, reason: string, id = `test_case_${randomUUID()}`): TestCase { const revision = createCaseRevision(0, content, actorId, reason); return { id, runId, origin, currentRevision: 0, reviewState: 'in_review', revisions: [revision], reviewActions: [] } }
 function createCaseRevision(revision: number, content: TestCaseContent, actorId: string, reason: string, previous?: TestCaseContent) { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: semanticContentSha256(content), diff: previous ? structuralDiff(previous, content) : [], editorId: actorId, reason: cleanRequired(reason, '保存说明', 2_000), createdAt: now() } }
 function createLibraryRevision(revision: number, content: TestCaseContent, actorId: string, changeReason: string, sourceRunId?: string, sourceProposalId?: string, traceability?: TestCaseTraceability): LibraryTestCaseRevision { return { revision, content: structuredClone(content), contentSha256: canonicalSha256(content), semanticSha256: canonicalSha256(content), ...(sourceRunId ? { sourceRunId } : {}), ...(sourceProposalId ? { sourceProposalId } : {}), ...(traceability ? { traceability: structuredClone(traceability) } : {}), changeReason, createdBy: actorId, createdAt: now() } }
@@ -1202,12 +1248,6 @@ function validateLibraryTraceability(state: DatabaseState, projectId: string, co
 }
 function caseChangeProposalSha256(proposals: CaseChangeProposal[]) { return canonicalSha256(proposals.map(item => ({ id: item.id, operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateCaseId: item.candidateCaseId } : {}), ...(item.candidateContent ? { candidateContentSha256: canonicalSha256(item.candidateContent) } : {}), decision: item.decision, decisionVersion: item.decisions.length })).sort((left, right) => left.id.localeCompare(right.id))) }
 function proposalSourceContent(run: TestDesignWorkflowRun, proposal: CaseChangeProposal): TestCaseContent | undefined { if (!proposal.sourceCaseId || proposal.sourceRevision === undefined) return undefined; return run.historicalSnapshot.items.find(item => { const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined; return locator?.caseId === proposal.sourceCaseId && locator?.revision === proposal.sourceRevision })?.content as TestCaseContent | undefined }
-function isUnchangedReuseProposal(run: TestDesignWorkflowRun, proposal: CaseChangeProposal) {
-  if (proposal.operation !== 'reuse' || !proposal.candidateCaseId || !proposal.sourceCaseId || proposal.sourceRevision === undefined) return false
-  const candidate = run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt)
-  const source = proposalSourceContent(run, proposal)
-  return Boolean(candidate && source && candidate.origin === 'historical_unchanged' && candidate.reviewActions.length === 0 && candidate.revisions.every(revision => revision.editorId === PLANNING_AGENT_EDITOR_ID) && currentCaseRevision(candidate).semanticSha256 === semanticContentSha256(source))
-}
 function requiresHumanProposalDecision(_proposal: CaseChangeProposal) { return false }
 function resetProposalDecision(proposal: CaseChangeProposal) {
   proposal.decision = 'pending'
@@ -1240,8 +1280,8 @@ function convertDeletedCandidateProposal(run: TestDesignWorkflowRun, testCase: T
     run.caseChangeProposals = run.caseChangeProposals.filter(item => item.id !== proposal.id)
     return
   }
-  proposal.operation = 'deprecate'
-  proposal.reason = '当前候选集合不再包含该正式历史 Case；Service 按冻结基线执行废弃判断'
+  proposal.operation = 'reuse'
+  proposal.reason = 'Candidate Delta 已移除该更新；Service 回退为保留冻结历史 Revision'
   proposal.diff = []
   delete proposal.candidateCaseId
   delete proposal.candidateContent
@@ -1251,15 +1291,14 @@ function reconcileAutomaticProposalDecisions(run: TestDesignWorkflowRun) {
   for (const proposal of run.caseChangeProposals) {
     if (proposal.decision !== 'pending' || requiresHumanProposalDecision(proposal)) continue
     const candidate = proposal.candidateCaseId ? run.testCases.find(item => item.id === proposal.candidateCaseId && !item.tombstonedAt) : undefined
-    const eligible = proposal.operation === 'deprecate'
-      || isUnchangedReuseProposal(run, proposal)
+    const eligible = proposal.operation === 'reuse'
       || ((proposal.operation === 'create' || proposal.operation === 'update') && candidate?.reviewState === 'approved')
     if (!eligible) continue
     const decidedAt = now()
-    proposal.decision = proposal.operation === 'deprecate' ? 'deprecated' : 'accepted'
+    proposal.decision = 'accepted'
     proposal.decidedBy = TEST_DESIGN_SERVICE_ACTOR_ID
     proposal.decidedAt = decidedAt
-    proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: proposal.decisions.length, decision: proposal.operation === 'deprecate' ? 'deprecated' : 'accepted', comment: proposal.operation === 'reuse' ? 'Service 自动接受与冻结 Snapshot 一致的未变化复用' : proposal.operation === 'deprecate' ? 'Service 根据当前完整候选集合自动废弃未匹配的历史 Case' : 'Service 随当前 TestCase Revision 审核通过自动接受', decidedBy: TEST_DESIGN_SERVICE_ACTOR_ID, decidedAt })
+    proposal.decisions.push({ id: `case_change_decision_${randomUUID()}`, expectedVersion: proposal.decisions.length, decision: 'accepted', comment: proposal.operation === 'reuse' ? 'Service 自动保留并复用冻结 Historical Baseline Revision' : 'Service 随当前 TestCase Revision 审核通过自动接受', decidedBy: TEST_DESIGN_SERVICE_ACTOR_ID, decidedAt })
   }
 }
 function validateProposalDecision(proposal: CaseChangeProposal, decision: Exclude<CaseChangeDecision, 'pending'>) { const allowed: Record<CaseChangeProposal['operation'], Array<Exclude<CaseChangeDecision, 'pending'>>> = { reuse: [], update: [], create: [], deprecate: ['deprecated', 'keep_original'], reference: ['reference', 'rejected'] }; if (!allowed[proposal.operation].includes(decision)) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_INVALID', `${proposal.operation} 不允许决策 ${decision}`, 422) }

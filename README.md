@@ -46,13 +46,13 @@
 ## 当前已实现的统一 PlanningAgent 测试设计流程
 
 - `PlanningAgent` 发布配置决定启用哪些 Skill；运行开始时只加载 Enabled Skill Catalog，Agent 自主判断何时通过 `skill.read` 读取正文。Workflow 只推进业务 Stage、收窄 Tool/提交协议和执行 Gate，不调度或激活 Skill。
-- `test_case_design` 阶段由 Runtime 直接提供完整冻结的 `RequirementRelease.content`，并从 `currentInputRefs` 识别本次任务重点；Agent 可在 Project Workspace Snapshot 内按需读取用户资料和明确列出的历史快照，最终只提交根字段为 `schemaVersion`、`cases` 的 `test-case-design/v3` Candidate。
+- `test_case_design` 阶段由 Runtime 直接提供完整冻结的 `RequirementRelease.content`，并从 `currentInputRefs` 识别本次任务重点；Agent 可在 Project Workspace Snapshot 内按需读取用户资料和明确列出的历史快照，最终只提交根字段为 `schemaVersion`、`cases` 的 `test-case-design/v3` Candidate Delta。未变化历史用例无需重新输出；存在冻结历史基线时 `cases: []` 合法。
 - 每条 AI 提交的 `test-case/v3` 只包含 `ref`、`schemaVersion`、`title`、`dimension`、`priority`、`requirementRefs`、`executionMethods`、`preconditions`、`steps`、`expectedResults`。Service 将 `ref` 作为本轮候选身份处理，正式 Library 内容只冻结其余九个测试语义字段。`requirementRefs` 必须存在但允许为空；空数组表示扩展风险测试，不计入正式 Requirement Coverage。非空引用必须属于当前冻结 Requirement Release。
-- Service/Validator 校验严格字段白名单、语义内容与 Requirement 引用；Service 通过语义 Hash 和当前正式库自行完成复用、新增、修改与废弃判断，并独占 Case ID、Revision、Hash 和不可变历史。Agent 不提交任何历史匹配或变更计划。
-- `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；用例生成后必须经过人工用例审核，发布仍由 Service 门禁控制。
-- Coverage Audit 是服务端确定性步骤，不是 Agent Stage。Coverage 只由显式 `requirementRefs` 计算；扩展测试不隐含覆盖。服务端另外校验引用真实性、重复风险、步骤与预期结果完整性；可疑重复只产生建议，不阻断扩展测试。
-- `test_design_repair` 只接受 `test-design-repair/v3` 的 `baseCandidateSha256`、`upsertCases` 与 `removeCaseRefs`。修复后按完整 v3 Candidate 重新校验。
-- 发布后的正式用例库保存完整 TestCase v3 语义；Execution Handoff 按 `executionMethods` 展开 UI/API 方法级成员。Selector、Endpoint、账号、环境和测试数据属于 Execution Run 的 Execution Context，不进入 TestDesign Candidate。
+- Service/Validator 校验严格字段白名单、语义内容与 Requirement 引用；Service 先冻结 Historical Baseline，再把 Candidate Delta 按唯一精确匹配 `reuse`、唯一高置信同意图变更 `update`、无可靠匹配 `create` 合并为 Effective Case Set。未命中的历史项一律保留，歧义匹配安全降级为 `create` 并给出 Advisory，绝不从 AI 省略推导 `deprecate`。正式废弃只通过用例库人工管理入口触发。
+- `test_case_design` 和 `test_design_repair` 由同一个 `PlanningAgent` 执行。Agent 和 Skill 均不能切换 Stage、扩大 Tool 权限或发布正式版本；人工审核只针对 create/update 或人工修改，未变化的历史复用无需重新审核，发布仍由 Service 门禁控制。
+- Coverage Audit 是服务端确定性步骤，不是 Agent Stage。Coverage 消费 Historical reuse + update + create 的 Effective Case Set，并且只对 `coverageTarget=true` 的 Requirement 计算总数、覆盖数和未覆盖 Repair；`requirementRefs=[]` 的扩展测试仍进入最终资产但不隐含 Requirement Coverage。
+- `test_design_repair` 只接受 `test-design-repair/v3` 的 `baseCandidateSha256`、`upsertCases` 与 `removeCaseRefs`，且只修改本轮 Candidate Delta。移除历史 update Candidate 会回退为冻结历史 Revision，不会删除或废弃正式 Historical Case。
+- 发布后的正式用例库是 Historical Baseline + accepted Update + accepted Create 的完整合集，并保存完整 TestCase v3 语义；Execution Handoff 只消费该不可变完整 Library，并按 `executionMethods` 展开 UI/API 方法级成员。Selector、Endpoint、账号、环境和测试数据属于 Execution Run 的 Execution Context，不进入 TestDesign Candidate。
 - 自动校验后的用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、资产版本、索引、同步任务、模型与 AI 资源、Agent 配置、ReviewRun/Job，以及 TestDesign Workflow、Snapshot、树、用例 revision、Coverage、用例集、套件和交接均写入 `smarthub` schema。旧技术方案表和旧测试设计数据由迁移直接删除。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除；未配置 `DATABASE_URL` 时回退到 JSON 文件，生产模式必须使用 PostgreSQL Worker。

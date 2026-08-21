@@ -67,7 +67,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (!projectVersionId || !design || !run) return
     const next = await api.loadRun(projectVersionId, design.id, run.id)
     setRun(next)
-    setRuns(current => current.map(item => item.id === next.id ? { ...item, status: next.status, stage: next.stage, progress: next.progress, startedAt: next.startedAt, finishedAt: next.finishedAt, errorCode: next.errorCode, error: next.error, baseTestCaseLibraryVersionId: next.baseTestCaseLibraryVersionId, caseCount: next.testCases.filter(testCase => !testCase.tombstonedAt).length, pendingManualProposalCount: next.caseChangeProposals.filter(proposal => proposal.decision === 'pending' && (proposal.operation === 'deprecate' || proposal.operation === 'reference')).length } : item))
+    setRuns(current => current.map(item => item.id === next.id ? { ...item, status: next.status, stage: next.stage, progress: next.progress, startedAt: next.startedAt, finishedAt: next.finishedAt, errorCode: next.errorCode, error: next.error, baseTestCaseLibraryVersionId: next.baseTestCaseLibraryVersionId, caseCount: next.candidateCaseCount ?? next.testCases.filter(testCase => !testCase.tombstonedAt).length, candidateCaseCount: next.candidateCaseCount, effectiveCaseCount: next.effectiveCaseCount, pendingManualProposalCount: next.pendingManualProposalCount ?? 0 } : item))
     return next
   }, [projectVersionId, design, run])
 

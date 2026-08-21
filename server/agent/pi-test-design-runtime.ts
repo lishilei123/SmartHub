@@ -176,7 +176,7 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
 
 function testDesignTaskMessage(stage: TestDesignStage) {
   if (stage === 'test_case_design') {
-    return 'Requirement Release 已正式发布。请直接基于任务中明确提供的结构化 Requirement Release content，并按需读取冻结 Workspace 中的用户资料与历史用例快照，设计完整测试用例。'
+    return 'Requirement Release 已正式发布。请直接基于任务中明确提供的结构化 Requirement Release content，并按需读取冻结 Workspace 中的用户资料与历史用例快照，只设计本轮新增或确实需要调整的 TestCase Candidate Delta。未变化历史用例无需重新提交。'
   }
   return 'Coverage Audit 已识别可由 Agent 修复的候选问题。请继续当前测试策划工作，修复任务中列出的 agent_repair blockers，并保持其他候选语义稳定。'
 }
@@ -190,6 +190,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
           '允许发散但禁止编造产品业务规则、权限矩阵、性能阈值、错误码、错误文案、接口、URL、Selector、账号、环境或状态机。信息不足时只写安全、稳定、一致、无越权、无不可恢复错误等可确定底线，或把技术事实留到 TestExecution 配置。',
           '从 functional、performance、stability、compatibility、security 五个方向思考，只生成有价值的场景；不要求每个维度都有 Case，也不提交适用性表。一个 Case 应有清晰可审核的测试目标；自然完整业务闭环可以合并，明显不同且可独立失败的测试意图可以拆分，这不是 Validator Gate。',
           '每条 Case 只提交一份自然语言 preconditions、steps、expectedResults。executionMethods 只选择 ui、api 或二者；不要区分 UI/API 两套步骤，也不要提交执行配置、数据需求、Coverage 内部模型、Finding、Confirmation 或历史 Proposal。',
+          'cases[] 是本轮 Candidate Delta，不是当前版本完整用例库。历史用例完全未变化时允许提交 cases: []；不要为表达 reuse 而重新输出历史 Case，也不要输出 reuse、update、create、deprecate 等生命周期动作。',
         ]
       : [
           '当前任务只列出可安全自动修复的 Coverage blockers；正式 Requirement 保持不变。提交 test-design-repair/v3 时，baseCandidateSha256 必须等于任务与 current-test-cases.json 对应的当前完整 Candidate。',
@@ -199,11 +200,11 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const readingRules = stage === 'test_case_design'
     ? [
         '正式 Requirement、Evidence、Clarification 和 Test Focus 已由 Runtime 在 requirementRelease.content 中完整提供，不要到 Workspace 寻找其 JSON 或 Markdown 镜像。coreFactPaths 只列出需要自主读取的冻结历史资料。',
-        '若 coreFactPaths 中存在 historical-test-cases.json，它是本轮唯一的历史用例库基线，必须读取并判断复用、修改、新增或废弃；不得用 branches/*/test-case-library/v*/ 下的 manifest、test-cases 或其他正式投影重复建立历史基线。历史资料不能覆盖当前 Requirement Release。',
+        '若 coreFactPaths 中存在 historical-test-cases.json，它是本轮唯一的冻结历史用例库基线。可按需读取它来理解已有覆盖、避免无意义重复，并识别当前 Requirement 变化可能影响的既有场景；只输出新增或确实需要调整的 TestCase。未输出的历史 Case 默认继续保留，禁止用省略表达删除或废弃。不得用 branches/*/test-case-library/v*/ 下的其他正式投影重复建立历史基线。',
         '补充 Workspace 或共享知识只可用于已命名的事实缺口或风险：先用受限路径的 ls/find/grep 或 knowledge.search 定位，再读取最小必要范围。相同 contentHash 和所需行范围仍在当前 Context 时直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。',
       ]
     : [
-        '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。除 blocker 直接引用外，不回读历史用例库或共享知识；完整冻结 Workspace 仍是授权边界，不是默认遍历清单。',
+        '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。current-test-cases.json 只包含本轮 Candidate Delta；removeCaseRefs 只撤销本轮 Candidate，绝不删除或废弃 Historical Baseline。除 blocker 直接引用外，不回读历史用例库或共享知识。',
       ]
   return [
     ...stageRules,

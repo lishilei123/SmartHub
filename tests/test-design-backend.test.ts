@@ -3,7 +3,7 @@ import test from 'node:test'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
 import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
 import { validateTestCaseContent, validateTestCaseDesignCandidate } from '../server/application/test-design-validation.js'
-import type { TestCase, TestCaseContent } from '../server/domain/test-design-types.js'
+import type { EffectiveTestCase, TestCaseContent } from '../server/domain/test-design-types.js'
 
 function content(overrides: Partial<TestCaseContent> = {}): TestCaseContent {
   return {
@@ -22,13 +22,9 @@ function content(overrides: Partial<TestCaseContent> = {}): TestCaseContent {
 
 function candidateCase(ref: string, value = content()) { return { ref, ...value } }
 
-function storedCase(id: string, value: TestCaseContent): TestCase {
+function effectiveCase(id: string, value: TestCaseContent): EffectiveTestCase {
   const hash = canonicalSha256(value)
-  return {
-    id, runId: 'run-1', candidateRef: id, currentRevision: 1, origin: 'generated', reviewState: 'draft', reviewActions: [],
-    revisions: [{ revision: 1, content: value, contentSha256: hash, semanticSha256: hash, editorId: 'test', reason: 'fixture', createdAt: new Date(0).toISOString() }],
-    createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
-  }
+  return { caseId: id, revision: 1, content: value, contentSha256: hash, source: 'candidate_create', candidateCaseId: id }
 }
 
 test('TestCase v3 只接受统一语义字段，且扩展测试允许空 requirementRefs', () => {
@@ -57,10 +53,10 @@ test('test-design-repair/v3 只接受 base hash、upsert 和 remove', () => {
 test('Coverage 只统计显式 Requirement 引用，扩展测试既不覆盖也不阻断', () => {
   const audit = auditTestDesignCoverage({
     runId: 'run-1',
-    basis: { requirementReleaseId: 'release-1', snapshotSha256: 'b'.repeat(64), content: { requirements: [{ clientRequirementPointId: 'REQ-1' }, { clientRequirementPointId: 'REQ-2' }], clarifications: [] } } as never,
+    basis: { requirementReleaseId: 'release-1', snapshotSha256: 'b'.repeat(64), content: { requirements: [{ clientRequirementPointId: 'REQ-1', coverageTarget: true }, { clientRequirementPointId: 'REQ-2', coverageTarget: true }], clarifications: [] } } as never,
     retrieval: { snapshotSha256: 'c'.repeat(64) } as never,
     historical: { snapshotSha256: 'd'.repeat(64), items: [] } as never,
-    cases: [storedCase('case-formal', content()), storedCase('case-extended', content({ title: '越权风险探索', requirementRefs: [], dimension: 'security' }))],
+    cases: [effectiveCase('case-formal', content()), effectiveCase('case-extended', content({ title: '越权风险探索', requirementRefs: [], dimension: 'security' }))],
   })
   assert.deepEqual(audit.statistics, { totalBasis: 2, coveredBasis: 1, totalCases: 2 })
   assert.ok(audit.blockers.some(item => item.code === 'COVERAGE_REQUIREMENT_UNCOVERED' && item.subjectId === 'REQ-2'))
@@ -72,10 +68,10 @@ test('Coverage 对无效 Requirement 引用阻断，可疑重复只给 Advisory'
   const duplicate = content({ requirementRefs: ['REQ-NOT-FOUND'] })
   const audit = auditTestDesignCoverage({
     runId: 'run-1',
-    basis: { requirementReleaseId: 'release-1', snapshotSha256: 'b'.repeat(64), content: { requirements: [{ clientRequirementPointId: 'REQ-1' }], clarifications: [] } } as never,
+    basis: { requirementReleaseId: 'release-1', snapshotSha256: 'b'.repeat(64), content: { requirements: [{ clientRequirementPointId: 'REQ-1', coverageTarget: true }], clarifications: [] } } as never,
     retrieval: { snapshotSha256: 'c'.repeat(64) } as never,
     historical: { snapshotSha256: 'd'.repeat(64), items: [] } as never,
-    cases: [storedCase('case-1', duplicate), storedCase('case-2', duplicate)],
+    cases: [effectiveCase('case-1', duplicate), effectiveCase('case-2', duplicate)],
   })
   assert.ok(audit.blockers.some(item => item.code === 'TEST_CASE_REQUIREMENT_REFERENCE_INVALID'))
   assert.ok(audit.advisories.some(item => item.code === 'POSSIBLE_DUPLICATE_TEST_CASE'))

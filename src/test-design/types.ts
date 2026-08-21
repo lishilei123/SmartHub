@@ -59,6 +59,8 @@ export type TestDesignRunSummary = {
   baseTestCaseLibraryVersionId?: string
   baseTestCaseLibraryVersion?: { id: string; version: number; name: string }
   caseCount?: number
+  candidateCaseCount?: number
+  effectiveCaseCount?: number
   pendingManualProposalCount?: number
   published?: boolean
 }

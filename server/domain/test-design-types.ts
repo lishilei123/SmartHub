@@ -299,6 +299,17 @@ export interface TestCase {
   tombstonedAt?: string
 }
 
+/** Service projection used by Coverage and publication before formal IDs/Revisions are persisted. */
+export interface EffectiveTestCase {
+  caseId: string
+  revision: number
+  content: TestCaseContent
+  contentSha256: string
+  source: 'historical_reuse' | 'historical_update' | 'candidate_create'
+  sourceCaseId?: string
+  candidateCaseId?: string
+}
+
 export interface CoverageAudit {
   id: string
   runId: string
