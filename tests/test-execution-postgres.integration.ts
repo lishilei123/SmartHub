@@ -1495,10 +1495,19 @@ async function waitForPostgresLock(queryPattern: string) {
 }
 
 async function seedParents() {
+  const libraryCaseRevision = {
+    revision: 1,
+    content: caseContent,
+    contentSha256: caseContentSha256,
+    semanticSha256: caseContentSha256,
+    changeReason: 'integration test',
+    createdBy: 'integration-test',
+    createdAt: now,
+  }
   await database.query('INSERT INTO smarthub.projects (id,name,created_at,data) VALUES ($1,$2,$3,$4::jsonb)', [ids.project, `${prefix} project`, now, JSON.stringify({ id: ids.project, name: `${prefix} project`, createdAt: now })])
   await database.query('INSERT INTO smarthub.project_versions (id,project_id,name,status,created_at,updated_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [ids.projectVersion, ids.project, `${prefix} version`, 'open', now, now, JSON.stringify({ id: ids.projectVersion, projectId: ids.project, name: `${prefix} version`, status: 'open', createdAt: now, updatedAt: now })])
-  await database.query('INSERT INTO smarthub.library_test_cases (id,project_id,current_revision,status,created_at,updated_at,data) VALUES ($1,$2,1,$3,$4,$4,$5::jsonb)', [ids.libraryCase, ids.project, 'active', now, JSON.stringify({ id: ids.libraryCase, projectId: ids.project, currentRevision: 1, status: 'active', createdAt: now, updatedAt: now })])
-  await database.query('INSERT INTO smarthub.library_test_case_revisions (case_id,revision,content_sha256,semantic_sha256,created_by,created_at,content,data) VALUES ($1,1,$2,$2,$3,$4,$5::jsonb,$6::jsonb)', [ids.libraryCase, caseContentSha256, 'integration-test', now, JSON.stringify(caseContent), JSON.stringify({ revision: 1, content: caseContent, contentSha256: caseContentSha256, semanticSha256: caseContentSha256, changeReason: 'integration test', createdBy: 'integration-test', createdAt: now })])
+  await database.query('INSERT INTO smarthub.library_test_cases (id,project_id,current_revision,status,created_at,updated_at,data) VALUES ($1,$2,1,$3,$4,$4,$5::jsonb)', [ids.libraryCase, ids.project, 'active', now, JSON.stringify({ id: ids.libraryCase, projectId: ids.project, currentRevision: 1, status: 'active', createdAt: now, updatedAt: now, revisions: [libraryCaseRevision] })])
+  await database.query('INSERT INTO smarthub.library_test_case_revisions (case_id,revision,content_sha256,semantic_sha256,created_by,created_at,content,data) VALUES ($1,1,$2,$2,$3,$4,$5::jsonb,$6::jsonb)', [ids.libraryCase, caseContentSha256, 'integration-test', now, JSON.stringify(caseContent), JSON.stringify(libraryCaseRevision)])
   await database.query('INSERT INTO smarthub.test_case_library_versions (id,project_id,version,name,source_run_id,content_sha256,published_by,published_at,data) VALUES ($1,$2,1,$3,$4,$5,$6,$7,$8::jsonb)', [ids.libraryVersion, ids.project, 'Execution library', librarySourceRunId, run.handoff.testCaseLibraryVersionSha256, 'integration-test', now, JSON.stringify({ id: ids.libraryVersion, projectId: ids.project, version: 1, name: 'Execution library', sourceRunId: librarySourceRunId, members: [libraryMember], contentSha256: run.handoff.testCaseLibraryVersionSha256, publishedBy: 'integration-test', publishedAt: now, projection: { status: 'succeeded', files: [] } })])
   await database.query('INSERT INTO smarthub.test_case_library_version_members (version_id,case_id,case_revision,ordinal,content_sha256,frozen_content,execution_readiness) VALUES ($1,$2,1,0,$3,$4::jsonb,$5)', [ids.libraryVersion, ids.libraryCase, caseContentSha256, JSON.stringify(caseContent), 'ready'])
   await database.query('INSERT INTO smarthub.test_execution_handoffs (id,project_version_id,test_case_library_version_id,execution_mode,strategy,content_sha256,created_by,created_at,content,data) VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8::jsonb,$8::jsonb)', [ids.handoff, ids.projectVersion, ids.libraryVersion, 'full', run.handoff.handoffSha256, 'integration-test', now, JSON.stringify({ id: ids.handoff, projectId: ids.project, projectVersionId: ids.projectVersion, testCaseLibraryVersionId: ids.libraryVersion, mode: 'full', members: [handoffMember], contentSha256: run.handoff.handoffSha256, createdBy: 'integration-test', createdAt: now })])

@@ -1062,6 +1062,20 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
     await client.query('INSERT INTO smarthub.test_design_retrieval_snapshots (id,workflow_run_id,mode,snapshot_sha256,created_at,data) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET snapshot_sha256=EXCLUDED.snapshot_sha256,data=EXCLUDED.data', [snapshots[1].id,run.id,run.retrievalSnapshot.mode,snapshots[1].hash,run.retrievalSnapshot.createdAt,JSON.stringify(run.retrievalSnapshot)])
     await client.query('INSERT INTO smarthub.test_design_historical_case_snapshots (id,workflow_run_id,snapshot_sha256,created_at,data) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (id) DO UPDATE SET snapshot_sha256=EXCLUDED.snapshot_sha256,data=EXCLUDED.data', [snapshots[2].id,run.id,snapshots[2].hash,run.historicalSnapshot.createdAt,JSON.stringify(run.historicalSnapshot)])
     const snapshotItems = [
+      ...run.basisSnapshot.content.requirements.map((item, ordinal) => ({
+        kind: 'basis',
+        item: {
+          kind: 'requirement_release',
+          sourceId: item.clientRequirementPointId,
+          contentSha256: createHash('sha256').update(JSON.stringify(item)).digest('hex'),
+          content: item,
+          locator: {
+            requirementReleaseId: run.basisSnapshot.requirementReleaseId,
+            requirementId: item.clientRequirementPointId,
+          },
+        },
+        ordinal,
+      })),
       ...run.retrievalSnapshot.hits.map((item, ordinal) => ({ kind: 'retrieval', item: { ...item, kind: 'knowledge_asset', sourceId: `${item.assetVersionId}:${item.chunkId}` }, ordinal })),
       ...run.historicalSnapshot.items.map((item, ordinal) => ({ kind: 'historical', item, ordinal })),
     ]

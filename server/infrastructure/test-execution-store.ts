@@ -732,6 +732,11 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       SET lease_expires_at=clock_timestamp()+($5::text||' milliseconds')::interval,heartbeat_at=clock_timestamp(),updated_at=clock_timestamp()
       WHERE id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND fencing_token=$4
         AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM smarthub.test_execution_tasks task
+          WHERE task.id=test_execution_jobs.task_id
+            AND task.status NOT IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled')
+        )
     `, [jobId, lease.workerId, lease.runToken, lease.fencingToken, Math.max(1_000, leaseMs)])
     return result.rowCount === 1
   }

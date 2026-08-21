@@ -39,7 +39,6 @@ test.after(async () => {
   await database.query('DELETE FROM smarthub.test_case_library_version_members member USING smarthub.test_case_library_versions version WHERE member.version_id=version.id AND version.project_id=$1', [ids.project])
   await database.query('DELETE FROM smarthub.test_case_library_versions WHERE project_id=$1', [ids.project])
   await database.query('DELETE FROM smarthub.library_test_case_revision_requirement_refs reference USING smarthub.library_test_cases test_case WHERE reference.case_id=test_case.id AND test_case.project_id=$1', [ids.project])
-  await database.query('DELETE FROM smarthub.library_test_case_revision_test_point_refs reference USING smarthub.library_test_cases test_case WHERE reference.case_id=test_case.id AND test_case.project_id=$1', [ids.project])
   await database.query('DELETE FROM smarthub.library_test_case_revisions revision USING smarthub.library_test_cases test_case WHERE revision.case_id=test_case.id AND test_case.project_id=$1', [ids.project])
   await database.query('DELETE FROM smarthub.library_test_cases WHERE project_id=$1', [ids.project])
   await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.runs = state.testDesignState.runs.filter(item => !item.id.startsWith(prefix)); state.testDesignState.designs = state.testDesignState.designs.filter(item => !item.id.startsWith(prefix)) })
