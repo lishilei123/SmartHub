@@ -602,7 +602,7 @@ export class TestDesignService {
       const libraryMembers = new Map(detailedLibraryVersion.members.map(item => [item.caseId, item]))
       const selections = input.mode === 'full'
         ? detailedLibraryVersion.members.map(item => ({ ...item, executionMethods: executionMethodsForContent(item.frozenContent), reason: '指定用例库版本的全部冻结用例' }))
-        : suite!.members.map(item => { if (item.testCaseLibraryVersionId !== libraryVersion.id) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员不属于指定用例库版本', 422); const libraryMember = required(libraryMembers.get(item.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '套件成员不属于指定用例库版本'); if (item.revision !== libraryMember.revision) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员 Revision 与用例库版本冻结 Revision 不一致', 422, { caseId: item.caseId, suiteRevision: item.revision, libraryRevision: libraryMember.revision }); const methods = item.executionMethods.length ? item.executionMethods : item.executionMethod ? [item.executionMethod] : executionMethodsForContent(libraryMember.frozenContent); return { ...libraryMember, executionMethods: methods, reason: item.reason } })
+        : suite!.members.map(item => { if (item.testCaseLibraryVersionId !== libraryVersion.id) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员不属于指定用例库版本', 422); const libraryMember = required(libraryMembers.get(item.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '套件成员不属于指定用例库版本'); if (item.revision !== libraryMember.revision) throw new TestDesignError('TEST_EXECUTION_HANDOFF_LIBRARY_VERSION_MISMATCH', '套件成员 Revision 与用例库版本冻结 Revision 不一致', 422, { caseId: item.caseId, suiteRevision: item.revision, libraryRevision: libraryMember.revision }); const methods = suiteMemberExecutionMethods(item, libraryMember.frozenContent); return { ...libraryMember, executionMethods: methods, reason: item.reason } })
       if (input.mode === 'regression') for (const caseId of [...new Set(input.impactedCaseIds ?? [])]) { const member = required(libraryMembers.get(caseId), 'TEST_CASE_LIBRARY_MEMBER_NOT_FOUND', '变更影响用例不属于指定用例库版本'); if (!selections.some(item => item.caseId === caseId)) selections.push({ ...member, executionMethods: executionMethodsForContent(member.frozenContent), reason: '需求变更影响分析补充' }) }
       if (input.executionReadinessOverrides !== undefined && !Array.isArray(input.executionReadinessOverrides)) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', 'executionReadinessOverrides 必须是数组', 422)
       const overrides = new Map<string, { reason: string; actorId: string; createdAt: string }>()
@@ -632,6 +632,9 @@ export class TestDesignService {
           return { stage: input.mode, ordinal: 0, sourceVersionId: suite?.id ?? libraryVersion.id, caseId: selection.caseId, revision: selection.revision, method, reason, dedupKey: `${selection.caseId}:${selection.revision}:${method}`, dimension: content.dimension, executionSpec, ...(selection.traceability ? { traceability: structuredClone(selection.traceability) } : {}), selectionReason: reason, contentSha256: selection.contentSha256, ...(readinessOverride ? { readinessOverride } : {}) }
         })
       })
+      const handoffDedupKeys = new Set<string>()
+      const duplicate = members.find(member => handoffDedupKeys.has(member.dedupKey) || !handoffDedupKeys.add(member.dedupKey))
+      if (duplicate) throw new TestDesignError('TEST_EXECUTION_HANDOFF_MEMBER_DUPLICATE', 'Execution Handoff 的 Case Revision / 执行方式组合不能重复', 422, { caseId: duplicate.caseId, revision: duplicate.revision, method: duplicate.method, dedupKey: duplicate.dedupKey })
       members.forEach((member, ordinal) => { member.ordinal = ordinal })
       const unusedOverrides = [...overrides.keys()].filter(key => !usedOverrides.has(key))
       if (unusedOverrides.length) throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', '人工覆盖只能引用本次选择中 needs_confirmation 的冻结 Case Revision', 422, { overrides: unusedOverrides })
@@ -655,7 +658,7 @@ export class TestDesignService {
   }
 
   async setImpactedRegression(versionId: string, values: Array<{ suiteVersionId: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string }>, principal: Principal) {
-    return this.store.transaction(state => { const aggregate = designState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); assertOpenVersion(state, version.projectVersionId); const references: ImpactedRegressionReference[] = values.map(value => { const suite = required(aggregate.suiteVersions.find(item => item.id === value.suiteVersionId && item.projectId === version.projectId && item.suiteType === 'regression'), 'TEST_SUITE_VERSION_NOT_FOUND', '回归套件版本不存在'); const member = required(suite.members.find(item => item.caseId === value.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '回归套件成员不存在'); if (!value.executionMethods.length || value.executionMethods.some(method => !member.executionMethods.includes(method))) throw new TestDesignError('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '影响回归执行方式必须是套件成员方式的非空子集', 422); return { ...value, testCaseSetVersionId: versionId, reason: cleanRequired(value.reason, '影响理由', 2_000), actorId: principal.subjectId, createdAt: now() } }); const run = required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在'); run.impactedRegression = [...run.impactedRegression.filter(item => item.testCaseSetVersionId !== versionId), ...references]; return structuredClone(references) })
+    return this.store.transaction(state => { const aggregate = designState(state); const version = required(aggregate.caseSetVersions.find(item => item.id === versionId), 'TEST_CASE_SET_NOT_FOUND', '用例集版本不存在'); assertOpenVersion(state, version.projectVersionId); const references: ImpactedRegressionReference[] = values.map(value => { const suite = required(aggregate.suiteVersions.find(item => item.id === value.suiteVersionId && item.projectId === version.projectId && item.suiteType === 'regression'), 'TEST_SUITE_VERSION_NOT_FOUND', '回归套件版本不存在'); const member = required(suite.members.find(item => item.caseId === value.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '回归套件成员不存在'); const memberMethods = member.executionMethods ?? (member.executionMethod === 'ui' || member.executionMethod === 'api' ? [member.executionMethod] : []); if (!value.executionMethods.length || value.executionMethods.some(method => !memberMethods.includes(method))) throw new TestDesignError('TEST_CASE_EXECUTION_METHODS_SCHEMA_INVALID', '影响回归执行方式必须是套件成员方式的非空子集', 422); return { ...value, testCaseSetVersionId: versionId, reason: cleanRequired(value.reason, '影响理由', 2_000), actorId: principal.subjectId, createdAt: now() } }); const run = required(aggregate.runs.find(item => item.id === version.runId), 'TEST_DESIGN_RUN_NOT_FOUND', '运行不存在'); run.impactedRegression = [...run.impactedRegression.filter(item => item.testCaseSetVersionId !== versionId), ...references]; return structuredClone(references) })
   }
 
   async createHandoff(versionId: string, input: { strategy: 'standard' | 'fast' | 'full'; smokeSuiteVersionId?: string; regressionSuiteVersionId?: string; expectedCaseSetSha256: string }, principal: Principal) {
@@ -666,7 +669,7 @@ export class TestDesignService {
       if (input.strategy === 'full' && !regression) throw new TestDesignError('TEST_EXECUTION_HANDOFF_BASELINE_REQUIRED', '直接全量交接必须固定回归套件版本', 422)
       const members: TestExecutionHandoff['members'] = []; const add = (stage: TestExecutionHandoff['members'][number]['stage'], sourceVersionId: string, caseId: string, revision: number, methods: Array<'ui' | 'api'>, reason: string) => methods.forEach(method => { const dedupKey = `${caseId}:${revision}:${method}`; if (!members.some(item => item.dedupKey === dedupKey)) members.push({ stage, ordinal: members.length, sourceVersionId, caseId, revision, method, reason, dedupKey }) })
       if (input.strategy !== 'full') {
-        smoke!.members.forEach(item => add('smoke', smoke!.id, item.caseId, item.revision, item.executionMethods, item.reason))
+        smoke!.members.forEach(item => add('smoke', smoke!.id, item.caseId, item.revision, legacySuiteMemberUiApiMethods(item), item.reason))
         run.smokeCandidates.filter(item => item.testCaseSetVersionId === version.id && item.decision === 'accepted').forEach(item => {
           if (!item.stable || !item.dependencyReady) throw new TestDesignError('TEST_EXECUTION_HANDOFF_SMOKE_CANDIDATE_NOT_READY', `冒烟候选 ${item.caseId} 尚未满足稳定性或依赖条件`, 422)
           const member = required(version.members.find(candidate => candidate.caseId === item.caseId), 'TEST_CASE_SET_MEMBER_NOT_FOUND', '冒烟候选不属于当前功能集')
@@ -675,7 +678,7 @@ export class TestDesignService {
       }
       if (input.strategy !== 'full') version.members.forEach(item => { const testCase = findCase(run, item.caseId); add('new_feature', version.id, item.caseId, item.revision, currentCaseRevision(testCase).content.executionMethods.map(method => method.method), '本次新功能用例') })
       if (input.strategy !== 'full') run.impactedRegression.filter(item => item.testCaseSetVersionId === version.id).forEach(item => { if (item.suiteVersionId !== regression!.id) throw new TestDesignError('TEST_EXECUTION_HANDOFF_REGRESSION_VERSION_MISMATCH', '影响回归引用与固定回归套件版本不一致', 422); const member = required(regression!.members.find(candidate => candidate.caseId === item.caseId), 'TEST_SUITE_MEMBER_NOT_FOUND', '影响回归套件成员不存在'); add('impacted_regression', regression!.id, item.caseId, member.revision, item.executionMethods, item.reason) })
-      if (input.strategy !== 'fast') regression!.members.forEach(item => add('full_regression', regression!.id, item.caseId, item.revision, item.executionMethods, item.reason))
+      if (input.strategy !== 'fast') regression!.members.forEach(item => add('full_regression', regression!.id, item.caseId, item.revision, legacySuiteMemberUiApiMethods(item), item.reason))
       const canonicalContent = { projectId: version.projectId, projectVersionId: version.projectVersionId, testCaseSetVersionId: version.id, strategy: input.strategy, ...(smoke ? { smokeSuiteVersionId: smoke.id } : {}), regressionSuiteVersionId: regression!.id, members }
       const contentSha256 = canonicalSha256(canonicalContent)
       const existing = aggregate.executionHandoffs.find(item => item.projectVersionId === version.projectVersionId && item.strategy === input.strategy && item.contentSha256 === contentSha256)
@@ -1509,7 +1512,7 @@ function applyProposalToLibrary(aggregate: TestDesignState, projectId: string, r
   if (proposal.operation === 'deprecate' && proposal.decision === 'deprecated') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '废弃来源用例不存在'); testCase.status = 'deprecated'; testCase.updatedAt = now(); members.delete(testCase.id); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = testCase.currentRevision }
 }
 
-function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange: boolean; members: Array<{ testCaseLibraryVersionId?: string; caseId: string; executionMethod: TestExecutionMethod; reason: string }> } {
+function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange: boolean; members: Array<{ testCaseLibraryVersionId?: string; caseId: string; executionMethods?: Array<'ui' | 'api'>; executionMethod?: TestExecutionMethod; reason: string }> } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', '套件草稿必须是对象', 422)
   const input = raw as Record<string, unknown>
   const suiteType = String(input.suiteType)
@@ -1526,9 +1529,20 @@ function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' |
     members: input.members.map((candidate, index) => {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', `members[${index}] 必须是对象`, 422)
       const item = candidate as Record<string, unknown>
-      const executionMethod = String(item.executionMethod) as TestExecutionMethod
-      if (!['ui', 'api', 'performance_tool', 'long_running', 'environment_matrix'].includes(executionMethod)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethod 无效`, 422)
-      return { ...(typeof item.testCaseLibraryVersionId === 'string' && item.testCaseLibraryVersionId.trim() ? { testCaseLibraryVersionId: item.testCaseLibraryVersionId.trim() } : {}), caseId: cleanRequired(item.caseId, 'caseId', 500), executionMethod, reason: cleanRequired(item.reason, '选择原因', 2_000) }
+      const legacyMethod = item.executionMethod === undefined ? undefined : testExecutionMethod(item.executionMethod, `members[${index}].executionMethod`)
+      const rawExecutionMethods = item.executionMethods
+      if (rawExecutionMethods !== undefined && !Array.isArray(rawExecutionMethods)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 必须是数组`, 422)
+      const executionMethods = Array.isArray(rawExecutionMethods)
+        ? rawExecutionMethods.map((method, methodIndex) => {
+          if (method !== 'ui' && method !== 'api') throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods[${methodIndex}] 只能是 ui 或 api`, 422)
+          return method
+        })
+        : undefined
+      if (executionMethods && !executionMethods.length) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 不能为空`, 422)
+      if (executionMethods && new Set(executionMethods).size !== executionMethods.length) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 不能包含重复执行方式`, 422)
+      if (!executionMethods && !legacyMethod) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}] 必须提供 executionMethods 或 executionMethod`, 422)
+      if (executionMethods && legacyMethod && !executionMethods.includes(legacyMethod as 'ui' | 'api')) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}] 的 executionMethod 必须属于 executionMethods`, 422)
+      return { ...(typeof item.testCaseLibraryVersionId === 'string' && item.testCaseLibraryVersionId.trim() ? { testCaseLibraryVersionId: item.testCaseLibraryVersionId.trim() } : {}), caseId: cleanRequired(item.caseId, 'caseId', 500), ...(executionMethods ? { executionMethods: canonicalSuiteExecutionMethods(executionMethods) } : {}), ...(legacyMethod ? { executionMethod: legacyMethod } : {}), reason: cleanRequired(item.reason, '选择原因', 2_000) }
     }),
   }
 }
@@ -1541,10 +1555,20 @@ function validateSuiteMembers(aggregate: TestDesignState, projectId: string, tes
     seen.add(value.caseId)
     const member = required(version.members.find(item => item.caseId === value.caseId), 'TEST_CASE_LIBRARY_MEMBER_NOT_FOUND', '套件成员不属于固定的用例库版本')
     const frozenContent = required(member.frozenContent, 'TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH', '用例库成员缺少冻结内容')
-    if (executionMethodForContent(frozenContent) !== value.executionMethod) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式与冻结 Revision 的 executionSpec 不一致', 422)
-    return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: value.executionMethod === 'ui' || value.executionMethod === 'api' ? [value.executionMethod] : [], executionMethod: value.executionMethod, ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
+    const availableMethods = executionMethodsForContent(frozenContent)
+    const selectedMethods = value.executionMethods ?? (value.executionMethod === 'ui' || value.executionMethod === 'api' ? [value.executionMethod] : undefined)
+    if (frozenContent.dimension === 'functional' || frozenContent.dimension === 'security') {
+      if (!selectedMethods?.length || selectedMethods.some(method => !availableMethods.includes(method))) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式不是冻结 Revision 实际拥有方式的非空子集', 422, { caseId: member.caseId, revision: member.revision, selectedMethods: selectedMethods ?? [], availableMethods })
+      return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: canonicalSuiteExecutionMethods(selectedMethods), ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
+    }
+    const selectedMethod = value.executionMethod ?? (value.executionMethods?.length === 1 ? value.executionMethods[0] : undefined)
+    if (!selectedMethod || value.executionMethods?.length && (value.executionMethods.length !== 1 || value.executionMethods[0] !== selectedMethod) || availableMethods.length !== 1 || availableMethods[0] !== selectedMethod) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '套件执行方式不是冻结 Revision 实际拥有的非功能执行方式', 422, { caseId: member.caseId, revision: member.revision, selectedMethods: value.executionMethods ?? (selectedMethod ? [selectedMethod] : []), availableMethods })
+    return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: [], executionMethod: selectedMethod, ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
   })
 }
+function canonicalSuiteExecutionMethods(methods: Array<'ui' | 'api'>) { return (['ui', 'api'] as const).filter((method): method is 'ui' | 'api' => methods.includes(method)) }
+function suiteMemberExecutionMethods(member: TestSuiteVersionMember, frozenContent: TestCaseContent): TestExecutionMethod[] { return member.executionMethods?.length ? canonicalSuiteExecutionMethods(member.executionMethods) : member.executionMethod ? [member.executionMethod] : executionMethodsForContent(frozenContent) }
+function legacySuiteMemberUiApiMethods(member: TestSuiteVersionMember): Array<'ui' | 'api'> { return member.executionMethods?.length ? member.executionMethods : member.executionMethod === 'ui' || member.executionMethod === 'api' ? [member.executionMethod] : [] }
 function suiteDraftEtag(draft: TestSuiteDraft) { return `"suite-draft:${draft.id}:${canonicalSha256({ contentSha256: draft.contentSha256, status: draft.status, updatedAt: draft.updatedAt })}"` }
 function versionMemberDiff<T extends { caseId: string; revision: number }>(left: T[], right: T[]) { const before = new Map(left.map(item => [item.caseId, item])); const after = new Map(right.map(item => [item.caseId, item])); return [...new Set([...before.keys(), ...after.keys()])].sort().map(caseId => { const from = before.get(caseId); const to = after.get(caseId); return { caseId, change: !from ? 'added' as const : !to ? 'removed' as const : canonicalSha256(from) === canonicalSha256(to) ? 'unchanged' as const : 'modified' as const, ...(from ? { from: structuredClone(from) } : {}), ...(to ? { to: structuredClone(to) } : {}) } }).filter(item => item.change !== 'unchanged') }
 function libraryProjectionFiles(projectVersionName: string, version: TestCaseLibraryVersion, cases: LibraryTestCase[]): TestDesignWorkspaceFile[] {

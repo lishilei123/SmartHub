@@ -65,7 +65,8 @@ export const diffLibraryVersions = (projectId: string, from: string, to: string)
 
 export const loadSuiteDrafts = (projectId: string) => request<{ items: TestSuiteDraft[] }>(`${projectScope(projectId)}/test-suite-drafts`)
 export const loadSuiteVersions = (projectId: string) => request<{ items: LibraryTestSuiteVersion[] }>(`${projectScope(projectId)}/test-suite-versions`)
-type SuiteDraftInput = { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange?: boolean; members: Array<{ caseId: string; executionMethod: TestExecutionMethod; reason: string }> }
+export type SuiteDraftMemberInput = { caseId: string; executionMethods?: Array<'ui' | 'api'>; executionMethod?: TestExecutionMethod; reason: string }
+export type SuiteDraftInput = { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange?: boolean; members: SuiteDraftMemberInput[] }
 export const createSuiteDraft = (projectId: string, input: SuiteDraftInput) => request<TestSuiteDraft>(`${projectScope(projectId)}/test-suite-drafts`, { method: 'POST', body: JSON.stringify(input) })
 export const loadSuiteDraft = (projectId: string, draftId: string) => requestWithResponse<TestSuiteDraft>(`${projectScope(projectId)}/test-suite-drafts/${encodeURIComponent(draftId)}`)
 export const updateSuiteDraft = (projectId: string, draftId: string, etag: string, input: SuiteDraftInput) => request<TestSuiteDraft>(`${projectScope(projectId)}/test-suite-drafts/${encodeURIComponent(draftId)}`, { method: 'PUT', headers: { 'if-match': etag }, body: JSON.stringify(input) })

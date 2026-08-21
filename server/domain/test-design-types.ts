@@ -537,7 +537,12 @@ export interface WorkspaceArtifactProjection {
   error?: string
 }
 
-export interface TestSuiteVersionMember { testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; caseId: string; revision: number; executionMethods: Array<'ui' | 'api'>; executionMethod?: TestExecutionMethod; ordinal: number; reason: string }
+/**
+ * Functional/security suite members freeze one or more UI/API methods in
+ * executionMethods. executionMethod remains only for historical members and
+ * the single-method non-functional execution contracts.
+ */
+export interface TestSuiteVersionMember { testCaseSetVersionId?: string; testCaseLibraryVersionId?: string; caseId: string; revision: number; executionMethods?: Array<'ui' | 'api'>; executionMethod?: TestExecutionMethod; ordinal: number; reason: string }
 export interface TestSuiteVersion { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom' | 'functional_domain'; version: number; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteVersionMember[]; contentSha256: string; publishedBy: string; publishedAt: string; status?: 'active' | 'deprecated'; deprecatedBy?: string; deprecatedAt?: string }
 export interface TestSuiteDraft { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteVersionMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string }
 export interface SmokeCandidateRelation { testCaseSetVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string; estimatedMinutes: number; stable: boolean; dependencyReady: boolean; decision: 'pending' | 'accepted' | 'rejected'; actorId?: string; reviewedAt?: string }
