@@ -57,6 +57,52 @@ test('冻结历史用例不能通过删除 reuse Proposal 从完整 Candidate �
   assert.doesNotThrow(() => validateHistoricalProposalPlan(validateTestCaseDesignCandidate(complete), historical))
 })
 
+test('v2 将内联 coverageClaims 和历史变更规范化为完整内部 Claim/Proposal，update/deprecate/reference 不要求重复正文', () => {
+  const first = content(['REQ-1'], '历史状态用例')
+  const second = content(['REQ-1'], '历史废弃用例')
+  const third = content(['REQ-1'], '历史参考用例')
+  const historical = {
+    schemaVersion: 'historical-case-snapshot/v1',
+    items: [
+      { id: 'history-1', kind: 'test_case_library', sourceId: 'library-1:case-1:1', contentSha256: canonicalSha256({ ...first, tags: [] }), content: first, locator: { caseId: 'case-1', revision: 1 } },
+      { id: 'history-2', kind: 'test_case_library', sourceId: 'library-1:case-2:1', contentSha256: canonicalSha256({ ...second, tags: [] }), content: second, locator: { caseId: 'case-2', revision: 1 } },
+      { id: 'history-3', kind: 'test_case_library', sourceId: 'library-1:case-3:1', contentSha256: canonicalSha256({ ...third, tags: [] }), content: third, locator: { caseId: 'case-3', revision: 1 } },
+    ],
+    createdAt: new Date().toISOString(),
+    snapshotSha256: 'history-snapshot',
+  } as never
+  const updated = { ...content(['REQ-1'], '更新后的状态用例'), title: '更新后的状态用例' }
+  const submission = {
+    schemaVersion: 'test-case-design/v2',
+    cases: [{ ref: 'case-updated', ...updated, coverageClaims: [{ ref: 'SC-UPDATED', kind: 'state_transition', subject: 'task.status', variant: 'todo->in_progress', polarity: 'positive', oracle: '状态为 in_progress', transition: { from: 'todo', to: 'in_progress' } }] }],
+    dimensionAssessments: fiveDimensions(),
+    historicalChanges: [
+      { operation: 'update', sourceCaseId: 'case-1', sourceRevision: 1, candidateRef: 'case-updated', reason: '状态规则已修改', confidence: 0.95 },
+      { operation: 'deprecate', sourceCaseId: 'case-2', sourceRevision: 1, reason: '能力已删除', confidence: 0.98 },
+      { operation: 'reference', sourceCaseId: 'case-3', sourceRevision: 1, reason: '仅保留设计参考', confidence: 0.9 },
+    ],
+  }
+  const normalized = validateTestCaseDesignCandidate(submission)
+  assert.ok(!('baseCandidateSha256' in normalized))
+  const complete = validateHistoricalProposalPlan(normalized, historical)
+  assert.equal(complete.cases.length, 1)
+  assert.deepEqual(complete.scenarioClaims[0] && { caseRef: complete.scenarioClaims[0].caseRef, requirementRefs: complete.scenarioClaims[0].requirementRefs }, { caseRef: 'case-updated', requirementRefs: ['REQ-1'] })
+  assert.deepEqual(complete.proposals.map(item => [item.operation, item.candidateRef]).sort(), [['deprecate', undefined], ['reference', undefined], ['update', 'case-updated']])
+
+  const duplicateClaim = { ...submission, scenarioClaims: [claim('SC-UPDATED', 'case-updated')] }
+  assert.throws(() => validateTestCaseDesignCandidate(duplicateClaim), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_DESIGN_CANDIDATE_SCHEMA_INVALID' && error.message.includes('同时出现在根级'))
+})
+
+function fiveDimensions() {
+  return [
+    { dimension: 'functional', applicable: true, reason: 'Requirement 定义状态行为', requirementRefs: ['REQ-1'], risks: ['状态转换'], scenarioClaims: ['状态迁移'] },
+    { dimension: 'performance', applicable: false, reason: 'Requirement 未定义性能目标', requirementRefs: ['REQ-1'], risks: [], scenarioClaims: [] },
+    { dimension: 'stability', applicable: false, reason: 'Requirement 未定义稳定性目标', requirementRefs: ['REQ-1'], risks: [], scenarioClaims: [] },
+    { dimension: 'compatibility', applicable: false, reason: 'Requirement 未定义兼容性矩阵', requirementRefs: ['REQ-1'], risks: [], scenarioClaims: [] },
+    { dimension: 'security', applicable: false, reason: 'Requirement 未定义安全规则', requirementRefs: ['REQ-1'], risks: [], scenarioClaims: [] },
+  ]
+}
+
 test('Coverage Audit 直接建立 Requirement 到 TestCase 关系，并识别多需求闭环', () => {
   const result = audit([testCase('case-1', content(['REQ-1', 'REQ-2']))], ['REQ-1', 'REQ-2'], [claim('SC-1', 'case-1', { requirementRefs: ['REQ-1', 'REQ-2'] })])
   assert.equal(result.statistics.totalBasis, 2)

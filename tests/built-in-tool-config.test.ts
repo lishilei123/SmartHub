@@ -75,7 +75,7 @@ test('测试用例提交工具向模型声明 Requirement 直接追溯字段', (
     required: string[]
     properties: { cases: { minItems: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
   }
-  assert.equal(descriptor.version, '1.3.0')
+  assert.equal(descriptor.version, '2.0.0')
   assert.equal(schema.additionalProperties, false)
   assert.ok(schema.required.includes('cases'))
   assert.equal(schema.properties.cases.minItems, 1)

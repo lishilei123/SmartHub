@@ -439,12 +439,12 @@
       }
     },
     "test_design_cases.submit_result": {
-      "version": "1.3.0",
+      "version": "2.0.0",
       "piName": "test_design_cases_submit_result",
       "label": "提交测试用例候选",
       "catalogName": "提交测试用例候选",
-      "description": "提交含 ScenarioClaim 的 test-case-design/v1 完整用例、测试数据与 Proposal 候选；正式 ID 和 Revision 由服务端生成。",
-      "catalogDescription": "提交含 ScenarioClaim 的 test-case-design/v1 完整用例、测试数据与 Proposal 候选；正式 ID 和 Revision 由服务端生成。",
+      "description": "提交 test-case-design/v2 的新增/修改候选、内联 coverageClaims 与历史变更决策；Service 从冻结快照恢复 reuse、数据关系、ScenarioClaim 与完整 Proposal。",
+      "catalogDescription": "提交引用式测试用例候选；Service 生成完整审计快照，历史 Proposal 仍进入人工审核。",
       "risk": "internal_write",
       "timeoutMs": 30000,
       "idempotent": false,
@@ -455,7 +455,7 @@
         "type": "object",
         "properties": {
           "schemaVersion": {
-            "const": "test-case-design/v1"
+            "enum": ["test-case-design/v1", "test-case-design/v2"]
           },
           "cases": {
             "type": "array",
@@ -731,6 +731,36 @@
                   "minLength": 1,
                   "maxLength": 200
                 },
+                "coverageClaims": {
+                  "type": "array",
+                  "maxItems": 10000,
+                  "description": "v2 用例内联候选覆盖声明；Service 自动补 caseRef 与 requirementRefs。",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
+                      "kind": { "enum": ["crud_lifecycle", "state_transition", "enum", "validation", "filter", "search", "permission", "boundary", "exception", "statistics", "cross_channel_consistency", "other"] },
+                      "subject": { "type": "string", "minLength": 1, "maxLength": 500 },
+                      "variant": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                      "polarity": { "enum": ["positive", "negative", "neutral"] },
+                      "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                      "transition": {
+                        "type": "object",
+                        "properties": {
+                          "from": { "type": "string", "minLength": 1, "maxLength": 500 },
+                          "to": { "type": "string", "minLength": 1, "maxLength": 500 }
+                        },
+                        "required": ["from", "to"],
+                        "additionalProperties": false
+                      },
+                      "knowledgeRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }
+                    },
+                    "required": ["ref", "kind", "subject", "variant", "polarity", "oracle"],
+                    "additionalProperties": false
+                  }
+                },
+                "changeReason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
                 "requirementRefs": {
                   "type": "array",
                   "minItems": 1,
@@ -1049,6 +1079,24 @@
               "additionalProperties": false
             }
           },
+          "historicalChanges": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "v2 仅提交实际变化的冻结历史用例；未声明项由 Service 自动 reuse。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "operation": { "enum": ["update", "deprecate", "reference"] },
+                "sourceCaseId": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "sourceRevision": { "type": "integer", "minimum": 1 },
+                "candidateRef": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+              },
+              "required": ["operation", "sourceCaseId", "sourceRevision", "reason", "confidence"],
+              "additionalProperties": false
+            }
+          },
           "proposals": {
             "type": "array",
             "maxItems": 1000,
@@ -1112,23 +1160,18 @@
         "required": [
           "schemaVersion",
           "cases",
-          "dimensionAssessments",
-          "scenarioClaims",
-          "dataRequirements",
-          "findings",
-          "confirmationItems",
-          "proposals"
+          "dimensionAssessments"
         ],
         "additionalProperties": false
       }
     },
     "test_design_repair.submit_result": {
-      "version": "1.3.0",
+      "version": "2.0.0",
       "piName": "test_design_repair_submit_result",
       "label": "提交测试设计修复候选",
       "catalogName": "提交测试设计修复候选",
-      "description": "提交含 ScenarioClaim 的 test-design-repair/v1 完整修复候选；只处理服务端标记 resolution=agent_repair 的问题。",
-      "catalogDescription": "提交含 ScenarioClaim 的 test-design-repair/v1 完整修复候选；只处理服务端标记 resolution=agent_repair 的问题。",
+      "description": "提交 test-design-repair/v2 Patch；Service 校验完整候选 SHA、应用 Patch、重跑 Validator/Coverage Audit 并保存 Diff。",
+      "catalogDescription": "提交范围化测试设计修复 Patch；不重新提交完整候选或 Proposal。",
       "risk": "internal_write",
       "timeoutMs": 30000,
       "idempotent": false,
@@ -1139,7 +1182,42 @@
         "type": "object",
         "properties": {
           "schemaVersion": {
-            "const": "test-design-repair/v1"
+            "enum": ["test-design-repair/v1", "test-design-repair/v2"]
+          },
+          "baseCandidateSha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "description": "v2 必填：current-test-cases.json 对应的 Service 完整 Candidate SHA-256。"
+          },
+          "upsertCases": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "v2 新增或完整替换指定 Candidate ref；每项使用 cases[] 的 flat test-case/v2 字段，并把 Claim 放进 coverageClaims。",
+            "items": { "type": "object", "properties": {}, "additionalProperties": true }
+          },
+          "removeCaseRefs": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "v2 只可删除本轮新增 Candidate，不能删除冻结历史 reuse Case。",
+            "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+          },
+          "upsertDataRequirements": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "v2 新增或替换受影响的数据需求；每项使用完整 dataRequirements[] 字段。",
+            "items": { "type": "object", "properties": {}, "additionalProperties": true }
+          },
+          "removeDataRequirementRefs": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+          },
+          "dimensionAssessmentUpdates": {
+            "type": "array",
+            "maxItems": 5,
+            "description": "v2 仅提交受 blocker 影响的完整 DimensionAssessment。",
+            "items": { "type": "object", "properties": {}, "additionalProperties": true }
           },
           "cases": {
             "type": "array",
@@ -1415,6 +1493,36 @@
                   "minLength": 1,
                   "maxLength": 200
                 },
+                "coverageClaims": {
+                  "type": "array",
+                  "maxItems": 10000,
+                  "description": "v2 用例内联候选覆盖声明；Service 自动补 caseRef 与 requirementRefs。",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
+                      "kind": { "enum": ["crud_lifecycle", "state_transition", "enum", "validation", "filter", "search", "permission", "boundary", "exception", "statistics", "cross_channel_consistency", "other"] },
+                      "subject": { "type": "string", "minLength": 1, "maxLength": 500 },
+                      "variant": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                      "polarity": { "enum": ["positive", "negative", "neutral"] },
+                      "oracle": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                      "transition": {
+                        "type": "object",
+                        "properties": {
+                          "from": { "type": "string", "minLength": 1, "maxLength": 500 },
+                          "to": { "type": "string", "minLength": 1, "maxLength": 500 }
+                        },
+                        "required": ["from", "to"],
+                        "additionalProperties": false
+                      },
+                      "knowledgeRefs": { "type": "array", "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }
+                    },
+                    "required": ["ref", "kind", "subject", "variant", "polarity", "oracle"],
+                    "additionalProperties": false
+                  }
+                },
+                "changeReason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
                 "requirementRefs": {
                   "type": "array",
                   "minItems": 1,
@@ -1794,14 +1902,7 @@
           }
         },
         "required": [
-          "schemaVersion",
-          "cases",
-          "dimensionAssessments",
-          "scenarioClaims",
-          "dataRequirements",
-          "findings",
-          "confirmationItems",
-          "proposals"
+          "schemaVersion"
         ],
         "additionalProperties": false
       }

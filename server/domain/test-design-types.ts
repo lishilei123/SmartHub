@@ -176,6 +176,12 @@ export interface RetrievalSnapshot {
 export interface HistoricalCaseSnapshot {
   schemaVersion: 'historical-case-snapshot/v1'
   items: FrozenContentRef[]
+  /**
+   * The data set frozen with the selected Library Version. It is copied into
+   * a new Run only by the Service when a v2 reference submission reuses the
+   * corresponding frozen Cases; it is never supplied by the PlanningAgent.
+   */
+  dataRequirements?: TestDataRequirement[]
   baseTestCaseLibraryVersionId?: string
   baseTestCaseLibraryVersionSha256?: string
   createdAt: string

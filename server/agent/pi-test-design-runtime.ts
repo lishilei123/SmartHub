@@ -3,8 +3,8 @@ import type { AgentConfigurationService } from '../application/agent-configurati
 import { builtInToolBindingToken, toolBindingToken, toolsetContentHash } from '../application/ai-resource-hash.js'
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import { buildTestDesignDirectoryInputPlan } from './requirement-context-assembler.js'
-import type { PlanningAgentRuntime } from '../application/test-design-service.js'
-import { TestDesignError, validateHistoricalProposalPlan, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDataRequirementCandidate } from '../application/test-design-validation.js'
+import { repairCandidateContent, type PlanningAgentRuntime } from '../application/test-design-service.js'
+import { isTestDesignRepairPatch, TestDesignError, validateHistoricalProposalPlan, validateTestCaseDesignCandidate, type TestCaseDesignCandidate, type TestCaseDesignCandidateSubmission, type TestDesignRepairPatch } from '../application/test-design-validation.js'
 import type { AgentConfigurationVersion, AgentModelReference, DatabaseState, GenerativeModel, GenerativeModelSource, ToolResource } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type { AgentExecutionContext, AgentExecutionEvent, AgentExecutionOutput, AgentModelConnection, InputDeliveryManifest, PlanningTestDesignSnapshot } from '../domain/agent-types.js'
@@ -19,11 +19,11 @@ const WORKSPACE_TOOL_IDS = ['workspace.read_file', 'workspace.grep_files', 'work
 export const TEST_DESIGN_STAGE_BINDINGS = {
   test_case_design: {
     submitToolId: 'test_design_cases.submit_result',
-    schemaVersion: 'test-case-design/v1',
+    schemaVersion: 'test-case-design/v2',
   },
   test_design_repair: {
     submitToolId: 'test_design_repair.submit_result',
-    schemaVersion: 'test-design-repair/v1',
+    schemaVersion: 'test-design-repair/v2',
   },
 } as const
 
@@ -149,7 +149,7 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
       }, signal)
       return {
         schemaVersion: binding.schemaVersion,
-        content: projectTestCaseCandidateSubmission(output.candidate as TestCaseDesignCandidate),
+        content: projectTestCaseCandidateSubmission(output.candidate as TestCaseDesignCandidate | TestDesignRepairPatch),
         execution: executionRecord(stage, configuration.agentDefinition.version, model.modelName, output.events, output.turns, output.toolCalls, output.toolErrors, output.framework, output.context, output.inputDeliveryManifest),
       }
     } catch (error) {
@@ -181,7 +181,7 @@ export function buildPlanningTestDesignTask(run: TestDesignWorkflowRun, design: 
     agentCapabilities: { enabledSkills: run.agentConfigurationSnapshot.agentDefinition.enabledSkills },
     runtimeBoundary: { submitTool: binding.submitToolId, schemaVersion: binding.schemaVersion },
     task: testDesignTaskMessage(stage),
-    ...(repairState && repairAudit ? { repair: { attempt: repairState.attempt, maxAttempts: repairState.maxAttempts, auditId: repairAudit.id, blockers: repairBlockers, currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json' } } : {}),
+    ...(repairState && repairAudit ? { repair: { attempt: repairState.attempt, maxAttempts: repairState.maxAttempts, auditId: repairAudit.id, blockers: repairBlockers, currentCandidatePath: '/workspace/agent_workspace/planning_agent/current-test-cases.json', baseCandidateSha256: canonicalSha256(repairCandidateContent(run)) } } : {}),
     instructions: testDesignStageInstructions(stage),
   })
 }
@@ -197,15 +197,20 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
   const stageRules = stage === 'test_case_design'
     ? [
-          'Requirement Release 是本轮唯一正式覆盖基线；本轮交付测试用例、测试数据需求和用例库变更 Proposal。每条用例必须使用 requirementRefs 直接关联至少一个 Requirement。',
-          'cases[] 是本轮完整候选集合，不是仅新增或修改的差量。每条冻结历史用例必须恰有一个 reuse、update、deprecate 或 reference Proposal。reuse 与 update 都必须让 Proposal.candidateRef 指向本次 cases[] 中完整、扁平的临时 Candidate Case；reuse 的内容必须与冻结历史语义一致，update 才表示内容变化。所谓 reuse 不复制的是正式 Case ID/Revision，不是省略 Candidate Case 正文。不得通过删除 reuse Proposal 来修复 candidateRef 校验错误。',
-          '每个 functional/security Candidate Case 都必须提供至少一条根级 scenarioClaims。ScenarioClaim 只说明一个可独立判定的 Atomic Test Intent：使用临时 caseRef、Requirement 子集、kind、subject、variant、polarity、明确且可独立判定的 oracle，以及可选 knowledgeRefs。kind=state_transition 时必须额外声明 transition:{from,to}，一条 Claim 只允许一个明确状态边；它不是 TestPoint，不会获得正式 ID、Revision、Version 或发布。',
+          'Requirement Release 是本轮唯一正式覆盖基线；本轮只提交新增 Candidate Case 与实际变化的历史决策。每条用例必须使用 requirementRefs 直接关联至少一个 Requirement。Service 会恢复未变化冻结历史用例、其冻结数据关系和完整内部 Candidate Snapshot。',
+          'cases[] 只包含新增用例与 historicalChanges.update 的完整新内容。historicalChanges 只允许 update、deprecate、reference，并仅填写冻结 sourceCaseId/sourceRevision、update 的 candidateRef、reason、confidence；未出现在 historicalChanges 的冻结历史用例由 Service 自动 reuse。不得复制历史 Case 正文、正式 ID、Hash 或 Revision，也不得用省略变更静默删除历史用例。新增 Case 不要提交 create Proposal，Service 会自动生成并交给原有人工 Proposal 审核。',
+          '每个 functional/security Candidate Case 都必须在自身 coverageClaims[] 提供至少一条 Claim。coverageClaim 只包含 ref、kind、subject、variant、polarity、明确且可独立判定的 oracle，以及可选 transition/knowledgeRefs；不要重复填写 caseRef 或 requirementRefs，Service 会从所属 Case 自动派生。根级 scenarioClaims 仅用于兼容旧 test-case-design/v1，不能与 coverageClaims 重复。kind=state_transition 时必须额外声明 transition:{from,to}，一条 Claim 只允许一个明确状态边；它不是 TestPoint，不会获得正式 ID、Revision、Version 或发布。',
           '提交前必须提供根级 dimensionAssessments，且恰好覆盖 functional、performance、stability、compatibility、security 五个维度。每项包含 dimension、applicable、reason、requirementRefs、risks、scenarioClaims；不适用必须用当前冻结 Requirement 的 requirementRefs 说明依据，适用维度必须列出待覆盖场景族并生成对应维度用例。它是候选覆盖地图，不会创建新的人工审核阶段。',
           '功能和安全用例的执行步骤、检查点、就绪状态及自动化提示只在 executionMethods 的对应 UI/API 方式中完整填写。executionSpec 对此类用例只提交 kind=functional 与同一 method；服务端会从 executionMethods 和用例根字段投影正式 executionSpec。不要提交第二份重复步骤。',
           '非功能 executionSpec 必须使用精确字段：performance 为 kind=performance、method=performance_tool、target、scenario、virtualUsers、duration、rampUp、thresholds、dataStrategy、environmentRequirements、executionReadiness；stability 为 kind=stability、method=long_running、workload、duration、interval、observations、recoveryPolicy、checkpointPolicy、environmentRequirements、executionReadiness；compatibility 为 kind=compatibility、method=environment_matrix、baseMethod、baseCaseRefs、browserMatrix、operatingSystemMatrix、viewportMatrix、versionMatrix、expectedConsistency、executionReadiness。cases[] 根对象和 executionSpec 都不得添加这些列表之外的自定义字段。',
           '性能 thresholds 必须是数组；每一项严格且仅为 { metric, target, sourceRef }，三者都是非空字符串。把比较符、数值、单位和适用范围合并写进 target；不得使用 operator、value、unit，也不得提交缺少其中任一字段的半成品阈值。若没有正式阈值，提交 thresholds: []、executionReadiness: needs_confirmation，并建立 blocker Confirmation Item。',
         ]
-      : ['当前任务只列出经过 Service 作用域判定、可安全自动修复的 agent_repair blockers；正式 Requirement 保持不变。遇到 TEST_CASE_OVER_MERGED 时，依据 blocker.details 和 current-test-cases.json 中的 scenarioClaims 拆分 Candidate Case，并将每条 ScenarioClaim 重新指向承担该独立 Atomic Test Intent 的 caseRef。']
+      : [
+          '当前任务只列出经过 Service 作用域判定、可安全自动修复的 agent_repair blockers；正式 Requirement 保持不变。提交 test-design-repair/v2 时，baseCandidateSha256 必须等于任务和 current-test-cases.json 对应的当前完整 Candidate；Hash 不一致时重新读取快照，不能猜测或覆盖。',
+          'Patch 的 upsertCases 是新增或替换指定 ref 的完整 test-case/v2 内容；functional/security 用例将其 coverageClaims 一并放在该 Case 内。removeCaseRefs 只可删除本轮新增 Candidate，不能删除冻结历史 reuse Case。未在 Patch 中列出的 Case、Proposal、历史来源、数据关系和维度评估由 Service 保持不变。',
+          'upsertDataRequirements / removeDataRequirementRefs 只处理确实受 blocker 影响的数据需求；dimensionAssessmentUpdates 只更新受影响维度。Service 会把 Patch 重新展开为完整 Candidate，执行完整 Validator 和 Coverage Audit，并保留修复前后 Diff。',
+          '遇到 TEST_CASE_OVER_MERGED 时，依据 blocker.details 和 current-test-cases.json 中的 scenarioClaims 拆分 Candidate Case，并将每条 ScenarioClaim 重新指向承担该独立 Atomic Test Intent 的 caseRef。',
+        ]
   const readingRules = stage === 'test_case_design'
     ? [
         'coreFactPaths 列出本轮正式 Requirement Release、Clarification、Test Focus 和冻结历史快照的精确路径与 Hash。先按这些路径形成一次连续、非重叠的读取计划；完整冻结 Workspace 是授权边界，不是遍历任务。',
@@ -213,7 +218,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
         '补充 Workspace 或共享知识只可用于已命名的事实缺口或风险：先用受限路径的 ls/find/grep 或 knowledge.search 定位，再读取最小必要范围。相同 contentHash 和所需行范围仍在当前 Context 时直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。',
       ]
     : [
-        '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。除 blocker 直接引用外，不回读历史用例库或共享知识；若服务端报告冻结历史 Proposal 不完整，历史快照是该错误直接引用的资料，必须恢复缺失 Proposal 及其完整 Candidate Case。完整冻结 Workspace 仍是授权边界，不是默认遍历清单。',
+        '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。除 blocker 直接引用外，不回读历史用例库或共享知识；完整冻结 Workspace 仍是授权边界，不是默认遍历清单。',
       ]
   return [
     ...stageRules,
@@ -224,7 +229,9 @@ function testDesignStageInstructions(stage: TestDesignStage) {
     'requirements/clarifications.json 中 answered 是正式事实；dismissed 只是处置理由，不得转化为断言，相关缺口必须保留。',
     '不得编造阈值、时长、兼容矩阵、接口、定位器、账号、环境或 Expected Result。',
     'PlanningAgent 只生成语义候选；正式 ID、Revision、Version、Hash 和数据库状态由 Service / Validator 管理。',
-    `完成 Self Review 后，通过 ${binding.submitToolId} 提交一个完整 ${binding.schemaVersion} 候选；若服务端拒绝，根据错误路径修正后重新提交。`,
+    stage === 'test_design_repair'
+      ? `完成 Self Review 后，通过 ${binding.submitToolId} 提交 test-design-repair/v2 Patch：必须携带任务中给出的 baseCandidateSha256；只提交 upsert/remove 的 Case、数据需求和受影响维度，不要重新提交完整 Candidate、Proposal 或根级 ScenarioClaim。若服务端拒绝，根据错误路径修正后重新提交。`
+      : `完成 Self Review 后，通过 ${binding.submitToolId} 提交 test-case-design/v2；Service 会生成完整、可审计的 Candidate Snapshot。若服务端拒绝，根据错误路径修正后重新提交。`,
   ]
 }
 
@@ -262,46 +269,6 @@ function stageWorkspace(run: TestDesignWorkflowRun, stage: TestDesignStage): Tes
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
-function repairCandidateContent(run: TestDesignWorkflowRun) {
-  const activeCases = run.testCases.filter(item => !item.tombstonedAt)
-  const refById = new Map(activeCases.map(item => [item.id, item.candidateRef ?? `case-${item.id}`]))
-  const dataSet = run.dataSetVersions.at(-1)
-  return {
-    schemaVersion: 'test-design-repair-input/v1',
-    cases: activeCases.map(testCase => {
-      const revision = testCase.revisions.find(item => item.revision === testCase.currentRevision)!
-      return { ref: requiredRepairCaseRef(refById, testCase.id), ...revision.content, dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] }
-    }),
-    dimensionAssessments: structuredClone(run.dimensionAssessments ?? []),
-    scenarioClaims: structuredClone(run.scenarioClaims ?? []),
-    dataRequirements: (dataSet?.requirements ?? []).map((item, index): TestDataRequirementCandidate => ({
-      ref: `data-${index + 1}`,
-      name: item.name,
-      entityType: item.entityType,
-      featureTags: [...item.featureTags],
-      ...(item.requirementRefs?.length ? { requirementRefs: [...item.requirementRefs] } : {}),
-      caseRefs: item.caseIds.map(id => refById.get(id) ?? id),
-      fieldConstraints: structuredClone(item.fieldConstraints),
-      relationships: [...item.relationships],
-      quantity: item.quantity,
-      initialState: item.initialState,
-      preparationHint: item.preparationHint,
-      sensitivity: item.sensitivity,
-      isolation: item.isolation,
-      resetAndCleanup: item.resetAndCleanup,
-      readiness: item.readiness,
-      ...(item.readinessReason ? { readinessReason: item.readinessReason } : {}),
-    })),
-    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: requiredRepairCaseRef(refById, item.candidateCaseId) } : {}), requirementRefs: item.requirementRefs, reason: item.reason, confidence: item.confidence })),
-  }
-}
-
-function requiredRepairCaseRef(refById: Map<string, string>, caseId: string) {
-  const ref = refById.get(caseId)
-  if (!ref) throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REFERENCE_INVALID', `自动修复候选引用的用例不存在或已删除：${caseId}`, 409)
-  return ref
-}
-
 function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, workspace: TestDesignWorkspaceSnapshot, configuration: AgentConfigurationVersion, task: string): PlanningTestDesignSnapshot {
   const projectVersion = state.projectVersions.find(item => item.id === run.projectVersionId)
   const project = state.projects.find(item => item.id === projectVersion?.projectId)
@@ -328,7 +295,7 @@ function buildAgentSnapshot(state: DatabaseState, run: TestDesignWorkflowRun, wo
 async function validateStageCandidate(stage: TestDesignStage, candidate: Record<string, unknown>, run: TestDesignWorkflowRun) {
   try {
     const result = validateTestCaseDesignCandidate(candidate, stage === 'test_design_repair')
-    validateHistoricalProposalPlan(result, run.historicalSnapshot)
+    if (!isTestDesignRepairPatch(result)) validateHistoricalProposalPlan(result, run.historicalSnapshot)
     return { valid: true, result, issues: [] }
   } catch (error) {
     const details = error instanceof TestDesignError && error.details && typeof error.details === 'object' ? error.details as { path?: unknown } : undefined
@@ -345,8 +312,30 @@ async function validateStageCandidate(stage: TestDesignStage, candidate: Record<
  * to the flat wire shape without ever accepting wrapped model input.
  */
 export function projectTestCaseCandidateSubmission(
-  candidate: TestCaseDesignCandidate,
+  candidate: TestCaseDesignCandidate | TestDesignRepairPatch,
 ): TestCaseDesignCandidateSubmission {
+  if (isTestDesignRepairPatch(candidate)) {
+    return {
+      schemaVersion: candidate.schemaVersion,
+      baseCandidateSha256: candidate.baseCandidateSha256,
+      upsertCases: candidate.upsertCases.map(item => projectCandidateCase(item, item.coverageClaims ?? [])),
+      removeCaseRefs: structuredClone(candidate.removeCaseRefs),
+      upsertDataRequirements: structuredClone(candidate.upsertDataRequirements),
+      removeDataRequirementRefs: structuredClone(candidate.removeDataRequirementRefs),
+      dimensionAssessmentUpdates: structuredClone(candidate.dimensionAssessmentUpdates),
+    }
+  }
+  if (candidate.schemaVersion === 'test-case-design/v2') {
+    return {
+      schemaVersion: candidate.schemaVersion,
+      cases: candidate.cases.map(item => projectCandidateCase(item, candidate.scenarioClaims.filter(claim => claim.caseRef === item.ref))),
+      dimensionAssessments: structuredClone(candidate.dimensionAssessments),
+      ...(candidate.dataRequirements.length ? { dataRequirements: structuredClone(candidate.dataRequirements) } : {}),
+      ...(candidate.findings.length ? { findings: structuredClone(candidate.findings) } : {}),
+      ...(candidate.confirmationItems.length ? { confirmationItems: structuredClone(candidate.confirmationItems) } : {}),
+      ...(candidate.proposals.length ? { historicalChanges: candidate.proposals.map(item => ({ operation: item.operation, sourceCaseId: item.sourceCaseId, sourceRevision: item.sourceRevision, ...(item.candidateRef ? { candidateRef: item.candidateRef } : {}), reason: item.reason, confidence: item.confidence })) } : {}),
+    }
+  }
   return {
     schemaVersion: candidate.schemaVersion,
     cases: candidate.cases.map(({ ref, content }) => ({
@@ -359,6 +348,16 @@ export function projectTestCaseCandidateSubmission(
     findings: structuredClone(candidate.findings),
     confirmationItems: structuredClone(candidate.confirmationItems),
     proposals: structuredClone(candidate.proposals),
+  }
+}
+
+function projectCandidateCase(candidate: TestCaseDesignCandidate['cases'][number], claims: TestCaseDesignCandidate['scenarioClaims']) {
+  return {
+    ref: candidate.ref,
+    ...structuredClone(candidate.content),
+    ...(candidate.changeReason ? { changeReason: candidate.changeReason } : {}),
+    ...(candidate.confidence === undefined ? {} : { confidence: candidate.confidence }),
+    ...(claims.length ? { coverageClaims: claims.map(({ caseRef: _caseRef, requirementRefs: _requirementRefs, ...claim }) => structuredClone(claim)) } : {}),
   }
 }
 

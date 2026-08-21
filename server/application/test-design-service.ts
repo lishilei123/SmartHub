@@ -13,10 +13,21 @@ import type {
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { auditTestDesignCoverage } from './test-design-coverage-auditor.js'
-import { assertEtag, etag, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateHistoricalProposalPlan, validateTestCaseContent, validateTestCaseDesignCandidate, type TestCaseDesignCandidate } from './test-design-validation.js'
+import { assertEtag, etag, isTestDesignRepairPatch, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateHistoricalProposalPlan, validateTestCaseContent, validateTestCaseDesignCandidate, type CandidateCase, type TestCaseDesignCandidate, type TestDataRequirementCandidate, type TestDesignRepairPatch } from './test-design-validation.js'
 import { classifyWorkspaceSourceScope } from './project-workspace-snapshot.js'
 
 const AUTOMATIC_REPAIR_MAX_ATTEMPTS = 1
+
+type RepairCandidateSnapshot = {
+  schemaVersion: 'test-design-repair/v1'
+  cases: Array<{ ref: string } & TestCaseContent>
+  dimensionAssessments: TestCaseDesignCandidate['dimensionAssessments']
+  scenarioClaims: TestCaseDesignCandidate['scenarioClaims']
+  dataRequirements: TestDataRequirementCandidate[]
+  findings: Record<string, unknown>[]
+  confirmationItems: Record<string, unknown>[]
+  proposals: TestCaseDesignCandidate['proposals']
+}
 
 export interface PlanningAgentRuntime {
   readiness?(projectVersionId?: string, requirementReleaseId?: string): Promise<{ ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }>
@@ -197,9 +208,10 @@ export class TestDesignService {
         let repairQueued = false
         await this.store.transaction(state => {
           const current = findRunById(state, runId)
-          publishArtifact(current, 'test_case_design', output)
+          const finalized = finalizeCaseDesignAndAudit(current, output.content, current.createdBy, false)
+          publishArtifact(current, 'test_case_design', finalized.artifact)
           finishNode(current, 'test_case_design', output.execution)
-          repairQueued = finalizeCaseDesignAndAudit(current, output.content, current.createdBy, false)
+          repairQueued = finalized.repairQueued
         })
         if (repairQueued) return this.processPreparedRun(runId, signal)
       }
@@ -209,9 +221,10 @@ export class TestDesignService {
         let repairQueued = false
         await this.store.transaction(state => {
           const current = findRunById(state, runId)
-          publishArtifact(current, 'test_design_repair', output)
+          const finalized = finalizeCaseDesignAndAudit(current, output.content, current.createdBy, true)
+          publishArtifact(current, 'test_design_repair', finalized.artifact)
           finishNode(current, 'test_design_repair', output.execution)
-          repairQueued = finalizeCaseDesignAndAudit(current, output.content, current.createdBy, true)
+          repairQueued = finalized.repairQueued
         })
         if (repairQueued) return this.processPreparedRun(runId, signal)
       }
@@ -262,9 +275,10 @@ export class TestDesignService {
         const run = findRunById(state, runId)
         const target = required(run.nodeRuns.find(item => item.id === nodeRunId && item.nodeKey === key), 'WORKFLOW_NODE_NOT_FOUND', '节点已被新 generation 替换')
         if (target.status !== 'running') throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '节点已不处于当前执行状态', 409)
-        publishArtifact(run, key, output)
+        const finalized = finalizeCaseDesignAndAudit(run, output.content, run.createdBy, key === 'test_design_repair')
+        publishArtifact(run, key, finalized.artifact)
         finishNode(run, key, output.execution)
-        return { repairQueued: finalizeCaseDesignAndAudit(run, output.content, run.createdBy, key === 'test_design_repair') }
+        return { repairQueued: finalized.repairQueued }
       })
       if (result.repairQueued) await this.schedule(runId)
       return this.loadRun(runId)
@@ -785,7 +799,65 @@ function caseDesignInput(run: TestDesignWorkflowRun) {
 function repairInput(run: TestDesignWorkflowRun) {
   const state = required(run.automaticRepair, 'TEST_DESIGN_REPAIR_NOT_QUEUED', '自动修复状态不存在')
   const audit = required(run.coverageAudits.find(item => item.id === state.triggerAuditId), 'TEST_DESIGN_REPAIR_AUDIT_NOT_FOUND', '触发修复的 Coverage Audit 不存在')
-  return { schemaVersion: 'test-design-repair-context/v1', attempt: state.attempt, maxAttempts: state.maxAttempts, auditId: audit.id, blockers: selectedRepairBlockers(audit, state), candidateWorkspacePath: 'workspace/agent_workspace/planning_agent/current-test-cases.json' }
+  return { schemaVersion: 'test-design-repair-context/v1', attempt: state.attempt, maxAttempts: state.maxAttempts, auditId: audit.id, blockers: selectedRepairBlockers(audit, state), candidateWorkspacePath: 'workspace/agent_workspace/planning_agent/current-test-cases.json', baseCandidateSha256: canonicalSha256(repairCandidateContent(run)) }
+}
+
+/** The stable Service-owned base used for both the repair Workspace and v2 Patch conflict detection. */
+export function repairCandidateContent(run: TestDesignWorkflowRun): RepairCandidateSnapshot {
+  const activeCases = run.testCases.filter(item => !item.tombstonedAt)
+  const refById = new Map(activeCases.map(item => [item.id, item.candidateRef ?? `case-${item.id}`]))
+  const dataSet = run.dataSetVersions.at(-1)
+  return {
+    schemaVersion: 'test-design-repair/v1',
+    cases: activeCases.map(testCase => {
+      const revision = currentCaseRevision(testCase)
+      return { ref: requiredRepairCaseRef(refById, testCase.id), ...structuredClone(revision.content), dependencies: revision.content.dependencies.map(id => refById.get(id) ?? id), dataRequirementIds: [] }
+    }),
+    dimensionAssessments: structuredClone(run.dimensionAssessments ?? []),
+    scenarioClaims: structuredClone(run.scenarioClaims ?? []),
+    dataRequirements: (dataSet?.requirements ?? []).map((item, index): TestDataRequirementCandidate => ({
+      ref: `data-${index + 1}`,
+      name: item.name,
+      entityType: item.entityType,
+      featureTags: [...item.featureTags],
+      requirementRefs: [...(item.requirementRefs ?? [])],
+      caseRefs: item.caseIds.map(id => requiredRepairCaseRef(refById, id)),
+      fieldConstraints: structuredClone(item.fieldConstraints),
+      relationships: [...item.relationships],
+      quantity: item.quantity,
+      initialState: item.initialState,
+      preparationHint: item.preparationHint,
+      sensitivity: item.sensitivity,
+      isolation: item.isolation,
+      resetAndCleanup: item.resetAndCleanup,
+      readiness: item.readiness,
+      ...(item.readinessReason ? { readinessReason: item.readinessReason } : {}),
+    })),
+    findings: run.findings.map(item => ({ title: item.title, description: item.description, severity: item.severity, basisRefs: [...item.basisRefs] })),
+    confirmationItems: run.confirmationItems.filter(item => item.impactStage !== 'handoff').map(item => ({ title: item.title, question: item.question, decisionType: item.decisionType, impactStage: item.impactStage, affectedRefs: [...item.affectedRefs], blocker: item.blocker })),
+    proposals: run.caseChangeProposals.map(item => ({ operation: item.operation, ...(item.sourceCaseId ? { sourceCaseId: item.sourceCaseId } : {}), ...(item.sourceRevision !== undefined ? { sourceRevision: item.sourceRevision } : {}), ...(item.candidateCaseId ? { candidateRef: requiredRepairCaseRef(refById, item.candidateCaseId) } : {}), requirementRefs: [...(item.requirementRefs ?? [])], reason: item.reason, confidence: item.confidence })),
+  }
+}
+
+function completeCandidateSnapshot(value: TestCaseDesignCandidate | RepairCandidateSnapshot) {
+  return {
+    schemaVersion: 'test-design-candidate-snapshot/v2',
+    sourceSchemaVersion: value.schemaVersion,
+    cases: value.cases.map(item => 'content' in item ? flatCandidateCase(item) : structuredClone(item)),
+    dimensionAssessments: structuredClone(value.dimensionAssessments),
+    scenarioClaims: structuredClone(value.scenarioClaims),
+    dataRequirements: structuredClone(value.dataRequirements),
+    findings: structuredClone(value.findings),
+    confirmationItems: structuredClone(value.confirmationItems),
+    proposals: structuredClone(value.proposals),
+  }
+}
+
+function flatCandidateCase(candidate: CandidateCase): { ref: string } & TestCaseContent { return { ref: candidate.ref, ...structuredClone(candidate.content) } }
+function requiredRepairCaseRef(refById: Map<string, string>, caseId: string) {
+  const ref = refById.get(caseId)
+  if (!ref) throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REFERENCE_INVALID', `自动修复候选引用的用例不存在或已删除：${caseId}`, 409)
+  return ref
 }
 
 function materializeDesignIssues(run: TestDesignWorkflowRun, raw: unknown) {
@@ -867,7 +939,20 @@ function buildHistoricalSnapshot(state: DatabaseState, design: TestDesign, creat
   }
   const latestLibraryVersion = aggregate.libraryVersions.filter(item => item.projectId === design.projectId).sort((left, right) => right.version - left.version)[0]
   const baseline = libraryVersion ?? latestLibraryVersion
-  const base = { schemaVersion: 'historical-case-snapshot/v1' as const, items, ...(baseline ? { baseTestCaseLibraryVersionId: baseline.id, baseTestCaseLibraryVersionSha256: baseline.contentSha256 } : {}), createdAt }
+  const selectedCaseIds = new Set(items.flatMap(item => {
+    const locator = item.locator as { caseId?: unknown } | undefined
+    return typeof locator?.caseId === 'string' ? [locator.caseId] : []
+  }))
+  const dataRequirements = libraryVersion?.dataRequirementSet?.requirements
+    .filter(item => item.caseIds.some(caseId => selectedCaseIds.has(caseId)))
+    .map(item => structuredClone(item))
+  const base = {
+    schemaVersion: 'historical-case-snapshot/v1' as const,
+    items,
+    ...(dataRequirements?.length ? { dataRequirements } : {}),
+    ...(baseline ? { baseTestCaseLibraryVersionId: baseline.id, baseTestCaseLibraryVersionSha256: baseline.contentSha256 } : {}),
+    createdAt,
+  }
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 function assetContentRef(state: DatabaseState, projectId: string, versionId: string, kind: 'knowledge_asset' | 'historical_case_asset') { const version = required(state.versions.find(item => item.id === versionId && item.status === 'ready'), 'TEST_DESIGN_ASSET_NOT_READY', `资产版本 ${versionId} 不存在或未就绪`); const asset = required(state.assets.find(item => item.id === version.assetId), 'TEST_DESIGN_ASSET_NOT_READY', '资产不存在'); const base = required(state.knowledgeBases.find(item => item.id === asset.knowledgeBaseId && item.projectId === projectId), 'TEST_DESIGN_HISTORICAL_SOURCE_INVALID', '资产不属于当前项目'); return { id: `basis_asset_${version.id}`, kind, sourceId: version.id, contentSha256: version.contentHash, content: { assetId: asset.id, assetVersionId: version.id, assetType: asset.assetType, displayName: asset.displayName, logicalPath: asset.logicalPath, content: version.content, chunks: version.chunks.map(({ embedding: _embedding, ...chunk }) => chunk) }, locator: { projectId, knowledgeBaseId: base.id, assetId: asset.id, assetVersionId: version.id, logicalPath: asset.logicalPath } } }
@@ -1039,9 +1124,11 @@ function buildWorkspaceSnapshot(state: DatabaseState, design: TestDesign, requir
   return { ...base, snapshotSha256: canonicalSha256(base) }
 }
 
-function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean) {
-  const value = validateTestCaseDesignCandidate(raw, repair)
-  validateHistoricalProposalPlan(value, run.historicalSnapshot)
+function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean): TestCaseDesignCandidate {
+  const submitted = validateTestCaseDesignCandidate(raw, repair)
+  const value = isTestDesignRepairPatch(submitted)
+    ? applyRepairPatch(run, submitted)
+    : validateHistoricalProposalPlan(submitted, run.historicalSnapshot)
   const existingByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
   const idByRef = new Map(value.cases.map(candidate => [candidate.ref, existingByRef.get(candidate.ref)?.id ?? `test_case_${randomUUID()}`]))
   const dataIdByRef = new Map(value.dataRequirements.map(candidate => [candidate.ref, `test_data_${randomUUID()}`]))
@@ -1082,6 +1169,57 @@ function materializeCaseDesign(run: TestDesignWorkflowRun, raw: unknown, actorId
   materializeDesignIssues(run, value)
   materializeExecutionConfirmations(run, nextCases)
   validateCurrentDependencyGraph(run)
+  return value
+}
+
+function applyRepairPatch(run: TestDesignWorkflowRun, patch: TestDesignRepairPatch): TestCaseDesignCandidate {
+  const before = repairCandidateContent(run)
+  const actualSha256 = canonicalSha256(before)
+  if (patch.baseCandidateSha256 !== actualSha256) throw new TestDesignError('TEST_DESIGN_REPAIR_BASE_CANDIDATE_CONFLICT', 'Repair Patch 的 baseCandidateSha256 与当前完整 Candidate 不一致，请重新读取当前快照后提交', 409, { expectedBaseCandidateSha256: actualSha256, actualBaseCandidateSha256: patch.baseCandidateSha256 })
+  const cases = new Map(before.cases.map(item => [item.ref, structuredClone(item)]))
+  const scenarioClaims = structuredClone(before.scenarioClaims)
+  const dataRequirements = new Map(before.dataRequirements.map(item => [item.ref, structuredClone(item)]))
+  const dimensions = new Map(before.dimensionAssessments.map(item => [item.dimension, structuredClone(item)]))
+  const proposals = before.proposals.map(item => structuredClone(item))
+  const activeCaseByRef = new Map(run.testCases.filter(item => !item.tombstonedAt && item.candidateRef).map(item => [item.candidateRef!, item]))
+  const proposalByCandidateRef = new Map(proposals.flatMap(item => item.candidateRef ? [[item.candidateRef, item] as const] : []))
+
+  for (const ref of patch.removeCaseRefs) {
+    const current = activeCaseByRef.get(ref)
+    const proposal = proposalByCandidateRef.get(ref)
+    if (!current || !cases.has(ref)) throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REFERENCE_INVALID', `removeCaseRefs 引用了不存在的当前 Candidate：${ref}`, 422)
+    if (current.origin === 'historical_unchanged' || proposal?.operation === 'reuse' || proposal?.operation === 'update') throw new TestDesignError('TEST_DESIGN_REPAIR_HISTORICAL_CASE_REMOVAL_FORBIDDEN', `不能通过 Repair Patch 删除冻结历史 Case：${ref}`, 422)
+    if (proposal?.operation && proposal.operation !== 'create') throw new TestDesignError('TEST_DESIGN_REPAIR_CASE_REMOVAL_FORBIDDEN', `removeCaseRefs 只能删除本轮新增 Candidate：${ref}`, 422)
+    cases.delete(ref)
+    for (let index = scenarioClaims.length - 1; index >= 0; index -= 1) if (scenarioClaims[index].caseRef === ref) scenarioClaims.splice(index, 1)
+    const proposalIndex = proposals.findIndex(item => item.candidateRef === ref)
+    if (proposalIndex >= 0) proposals.splice(proposalIndex, 1)
+  }
+  for (const candidate of patch.upsertCases) {
+    cases.set(candidate.ref, flatCandidateCase(candidate))
+    for (let index = scenarioClaims.length - 1; index >= 0; index -= 1) if (scenarioClaims[index].caseRef === candidate.ref) scenarioClaims.splice(index, 1)
+    scenarioClaims.push(...(candidate.coverageClaims ?? []))
+    if (!proposalByCandidateRef.has(candidate.ref)) proposals.push({ operation: 'create', candidateRef: candidate.ref, requirementRefs: [...candidate.content.requirementRefs], reason: candidate.changeReason ?? 'Coverage Audit 修复产生的新测试场景', confidence: candidate.confidence ?? 0.8 })
+  }
+  for (const ref of patch.removeDataRequirementRefs) {
+    if (!dataRequirements.delete(ref)) throw new TestDesignError('TEST_DESIGN_REPAIR_DATA_REQUIREMENT_REFERENCE_INVALID', `removeDataRequirementRefs 引用了不存在的数据需求：${ref}`, 422)
+  }
+  for (const item of patch.upsertDataRequirements) dataRequirements.set(item.ref, structuredClone(item))
+  for (const item of patch.dimensionAssessmentUpdates) dimensions.set(item.dimension, structuredClone(item))
+
+  const full: Record<string, unknown> = {
+    schemaVersion: 'test-design-repair/v1',
+    cases: [...cases.values()],
+    dimensionAssessments: ['functional', 'performance', 'stability', 'compatibility', 'security'].flatMap(dimension => dimensions.has(dimension as TestCaseContent['dimension']) ? [dimensions.get(dimension as TestCaseContent['dimension'])] : []),
+    scenarioClaims,
+    dataRequirements: [...dataRequirements.values()],
+    findings: before.findings,
+    confirmationItems: before.confirmationItems,
+    proposals,
+  }
+  const normalized = validateTestCaseDesignCandidate(full, true)
+  if (isTestDesignRepairPatch(normalized)) throw new TestDesignError('TEST_DESIGN_REPAIR_PATCH_INVALID', 'Repair Patch 未能展开为完整 Candidate', 422)
+  return validateHistoricalProposalPlan(normalized, run.historicalSnapshot)
 }
 
 function materializeCaseChangeProposals(run: TestDesignWorkflowRun, value: TestCaseDesignCandidate, cases: TestCase[]) {
@@ -1174,7 +1312,13 @@ function requirementRefsForCase(_run: TestDesignWorkflowRun, content: TestCaseCo
 function proposalIdentity(operation: string, sourceCaseId?: string, sourceRevision?: number, candidateRef?: string) { return `${operation}:${sourceCaseId ?? ''}:${sourceRevision ?? ''}:${candidateRef ?? ''}` }
 
 function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, actorId: string, repair: boolean) {
-  materializeCaseDesign(run, raw, actorId, repair)
+  const beforeCandidate = repair ? repairCandidateContent(run) : undefined
+  const before = beforeCandidate ? completeCandidateSnapshot(beforeCandidate) : undefined
+  const value = materializeCaseDesign(run, raw, actorId, repair)
+  const after = completeCandidateSnapshot(value)
+  const artifact = repair
+    ? { schemaVersion: 'test-design-repair-snapshot/v2', content: { baseCandidateSha256: canonicalSha256(beforeCandidate!), before, after, diff: structuralDiff(before, after) } }
+    : { schemaVersion: 'test-case-design-candidate-snapshot/v2', content: after }
   const auditNode = node(run, 'coverage_audit')
   Object.assign(auditNode, { status: 'running', attempt: auditNode.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined })
   const audit = runCoverageAudit(run)
@@ -1203,7 +1347,7 @@ function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, ac
     else advanceNodeGeneration(run, repairNode, 'queued')
     advanceNodeGeneration(run, node(run, 'coverage_audit'), 'pending')
     Object.assign(run, { status: 'queued', stage: 'test_design_repair', progress: 80, finishedAt: undefined, error: undefined, errorCode: undefined })
-    return true
+    return { repairQueued: true, artifact }
   }
 
   const attempted = state.attempt > 0
@@ -1219,7 +1363,7 @@ function finalizeCaseDesignAndAudit(run: TestDesignWorkflowRun, raw: unknown, ac
     finishedAt: now(),
   })
   Object.assign(run, { status: 'succeeded', stage: 'completed', progress: 100, finishedAt: now(), error: undefined, errorCode: undefined })
-  return false
+  return { repairQueued: false, artifact }
 }
 function selectedRepairBlockers(audit: CoverageAudit, state: NonNullable<TestDesignWorkflowRun['automaticRepair']>) {
   const scopes = state.blockerScopes

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
+import { canonicalSha256 } from '../server/application/canonical-json.js'
 import { TestDesignService, type PlanningAgentRuntime } from '../server/application/test-design-service.js'
+import { validateTestCaseContent } from '../server/application/test-design-validation.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
 const principal = { subjectId: 'test-owner', displayName: '测试负责人' }
@@ -109,6 +111,106 @@ test('未尝试的非独立修复在相关 human_decision 下标记 deferred，�
   assert.ok(completed.coverageAudits.at(-1)?.blockers.some(item => item.code === 'TEST_CASE_EXPECTED_RESULT_UNCLEAR'))
 })
 
+test('test-case-design/v2 仅提交新用例时，Service 从冻结快照恢复 100 条历史用例并派生完整 reuse/create Proposal', async () => {
+  const store = await storeWithPublishedRequirement()
+  await installHistoricalLibrary(store, 100)
+  const submitted = referenceCandidate([caseCandidate('TC-NEW', '新增状态校验')])
+  const runtime: PlanningAgentRuntime = {
+    readiness: async () => ({ ready: true, agents: [] }),
+    freezeConfiguration: async () => frozenConfiguration(),
+    execute: async () => ({ schemaVersion: 'test-case-design/v2', content: submitted }),
+  }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '引用式历史复用', objective: '验证冻结历史复用', knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('project-version-1', design.id, 'reference-submission', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
+
+  assert.equal(completed.status, 'succeeded', completed.error)
+  assert.equal(completed.testCases.filter(item => !item.tombstonedAt).length, 101)
+  assert.equal(completed.caseChangeProposals.filter(item => item.operation === 'reuse').length, 100)
+  assert.equal(completed.caseChangeProposals.filter(item => item.operation === 'create').length, 1)
+  assert.equal(completed.caseChangeProposals.filter(item => item.decision === 'pending').length, 101, 'Service 自动 Proposal 仍须人工处置')
+  assert.ok(completed.testCases.some(item => item.origin === 'historical_unchanged' && item.revisions[item.currentRevision].content.title === '冻结历史 1'))
+  const artifact = completed.artifacts.find(item => item.id === completed.nodeRuns.find(item => item.nodeKey === 'test_case_design')?.outputArtifactId)
+  assert.equal((artifact?.content as { cases?: unknown[] }).cases?.length, 101, 'Artifact 必须保存 Service 生成的完整 Candidate Snapshot')
+
+  const legacyLike = {
+    schemaVersion: 'test-case-design/v1',
+    cases: completed.testCases.filter(item => !item.tombstonedAt).map(item => ({ ref: item.candidateRef, ...item.revisions[item.currentRevision].content })),
+    dimensionAssessments: submitted.dimensionAssessments,
+    scenarioClaims: completed.scenarioClaims,
+    dataRequirements: [],
+    findings: [],
+    confirmationItems: [],
+    proposals: completed.caseChangeProposals.map(item => ({ operation: item.operation, sourceCaseId: item.sourceCaseId, sourceRevision: item.sourceRevision, candidateRef: completed.testCases.find(testCase => testCase.id === item.candidateCaseId)?.candidateRef, requirementRefs: item.requirementRefs, reason: item.reason, confidence: item.confidence })),
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(submitted)) <= Buffer.byteLength(JSON.stringify(legacyLike)) * 0.6, '引用式提交应比同一完整历史集合至少减少 40%')
+})
+
+test('test-design-repair/v2 仅应用指定 Patch、重跑审计并保存修复前后完整 Diff', async () => {
+  const store = await storeWithPublishedRequirement()
+  let repairSubmission: Record<string, unknown> | undefined
+  const runtime: PlanningAgentRuntime = {
+    readiness: async () => ({ ready: true, agents: [] }),
+    freezeConfiguration: async () => frozenConfiguration(),
+    execute: async input => {
+      if (input.stage === 'test_case_design') {
+        return {
+          schemaVersion: 'test-case-design/v2',
+          content: referenceCandidate([{
+            ...caseCandidate('TC-MERGED', '合并状态迁移'),
+            coverageClaims: [inlineStateClaim('SC-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress'), inlineStateClaim('SC-DONE', 'in_progress->completed', 'positive', '状态变更后为 completed')],
+          }]),
+        }
+      }
+      const upstream = input.upstream as { baseCandidateSha256: string }
+      repairSubmission = {
+        schemaVersion: 'test-design-repair/v2',
+        baseCandidateSha256: upstream.baseCandidateSha256,
+        upsertCases: [
+          { ...caseCandidate('TC-TODO', 'todo 到 in_progress'), coverageClaims: [inlineStateClaim('SC-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress')] },
+          { ...caseCandidate('TC-DONE', 'in_progress 到 completed'), coverageClaims: [inlineStateClaim('SC-DONE', 'in_progress->completed', 'positive', '状态变更后为 completed')] },
+        ],
+        removeCaseRefs: ['TC-MERGED'],
+        upsertDataRequirements: [],
+        removeDataRequirementRefs: [],
+        dimensionAssessmentUpdates: [],
+      }
+      return { schemaVersion: 'test-design-repair/v2', content: repairSubmission }
+    },
+  }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: 'Patch 修复', objective: '验证 Patch 范围', knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('project-version-1', design.id, 'repair-patch', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
+
+  assert.equal(completed.status, 'succeeded', completed.error)
+  assert.equal(completed.automaticRepair?.attempt, 1)
+  assert.deepEqual(completed.testCases.filter(item => !item.tombstonedAt).map(item => item.candidateRef).sort(), ['TC-DONE', 'TC-TODO'])
+  assert.ok(completed.coverageAudits.slice(0, -1).every(item => item.status === 'stale'))
+  const repairArtifact = completed.artifacts.find(item => item.id === completed.nodeRuns.find(item => item.nodeKey === 'test_design_repair')?.outputArtifactId)
+  assert.equal(repairArtifact?.schemaVersion, 'test-design-repair-snapshot/v2')
+  assert.ok(Array.isArray((repairArtifact?.content as { diff?: unknown[] }).diff) && (repairArtifact?.content as { diff: unknown[] }).diff.length > 0)
+  assert.equal('cases' in (repairSubmission ?? {}), false, 'Repair v2 不重复提交完整 cases[]')
+})
+
+test('test-design-repair/v2 拒绝过期 baseCandidateSha256，不会将 Patch 应用到其他快照', async () => {
+  const store = await storeWithPublishedRequirement()
+  const runtime: PlanningAgentRuntime = {
+    readiness: async () => ({ ready: true, agents: [] }),
+    freezeConfiguration: async () => frozenConfiguration(),
+    execute: async input => input.stage === 'test_case_design'
+      ? { schemaVersion: 'test-case-design/v2', content: referenceCandidate([{ ...caseCandidate('TC-MERGED', '合并状态迁移'), coverageClaims: [inlineStateClaim('SC-TODO', 'todo->in_progress', 'positive', '状态变更后为 in_progress'), inlineStateClaim('SC-DONE', 'in_progress->completed', 'positive', '状态变更后为 completed')] }]) }
+      : { schemaVersion: 'test-design-repair/v2', content: { schemaVersion: 'test-design-repair/v2', baseCandidateSha256: '0'.repeat(64), upsertCases: [], removeCaseRefs: [], upsertDataRequirements: [], removeDataRequirementRefs: [], dimensionAssessmentUpdates: [] } },
+  }
+  const service = new TestDesignService(store, runtime)
+  const design = await service.createDesign('project-version-1', { name: '过期 Patch', objective: '验证 Hash 冲突', knowledgeAugmentation: { mode: 'disabled' } }, principal)
+  const run = await service.createRun('project-version-1', design.id, 'stale-repair-patch', principal)
+  const completed = await waitForCompletedRun(service, 'project-version-1', design.id, run.id)
+  assert.equal(completed.status, 'failed')
+  assert.match(completed.error ?? '', /TEST_DESIGN_REPAIR_BASE_CANDIDATE_CONFLICT/)
+})
+
 function caseCandidate(ref: string, title: string) {
   return {
     ref,
@@ -128,6 +230,38 @@ function caseCandidate(ref: string, title: string) {
     tags: [],
     domain: '任务',
   }
+}
+
+function inlineStateClaim(ref: string, variant: string, polarity: 'positive' | 'negative', oracle: string) { const [from, to] = variant.split('->'); return { ref, kind: 'state_transition' as const, subject: 'task.status', variant, polarity, oracle, transition: { from: from?.trim() || variant, to: to?.trim() || variant } } }
+function referenceCandidate(cases: Array<ReturnType<typeof caseCandidate> & { coverageClaims?: ReturnType<typeof inlineStateClaim>[] }>) {
+  return {
+    schemaVersion: 'test-case-design/v2' as const,
+    cases: cases.map(item => ({ ...item, coverageClaims: item.coverageClaims ?? [inlineStateClaim(`SC-${item.ref}`, 'todo->in_progress', 'positive', '状态变更后为 in_progress')] })),
+    dimensionAssessments: [
+      { dimension: 'functional' as const, applicable: true, reason: 'Requirement 明确任务状态行为', requirementRefs: ['RP-STATE'], risks: ['状态转换'], scenarioClaims: ['状态迁移'] },
+      { dimension: 'performance' as const, applicable: false, reason: 'Requirement 未声明性能目标', requirementRefs: ['RP-STATE'], risks: [], scenarioClaims: [] },
+      { dimension: 'stability' as const, applicable: false, reason: 'Requirement 未声明稳定性目标', requirementRefs: ['RP-STATE'], risks: [], scenarioClaims: [] },
+      { dimension: 'compatibility' as const, applicable: false, reason: 'Requirement 未声明兼容性矩阵', requirementRefs: ['RP-STATE'], risks: [], scenarioClaims: [] },
+      { dimension: 'security' as const, applicable: false, reason: 'Requirement 未声明安全规则', requirementRefs: ['RP-STATE'], risks: [], scenarioClaims: [] },
+    ],
+  }
+}
+
+async function installHistoricalLibrary(store: JsonStore, count: number) {
+  await store.transaction(state => {
+    const requirements = Array.from({ length: count }, (_, index) => {
+      const source = caseCandidate(`HISTORY-${index + 1}`, `冻结历史 ${index + 1}`)
+      const { ref: _ref, ...base } = source
+      const content = validateTestCaseContent({ ...base, executionMethods: [{ ...source.executionMethods[0], executionReadiness: 'ready' as const }], executionSpec: { kind: 'functional' as const, method: 'ui' as const } })
+      const semanticSha256 = canonicalSha256({ ...content, tags: [...content.tags].sort() })
+      return { caseId: `CASE-${String(index + 1).padStart(3, '0')}`, content, semanticSha256 }
+    })
+    state.testDesignState = {
+      architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], caseSetVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [],
+      libraryCases: requirements.map(item => ({ id: item.caseId, projectId: 'project-1', currentRevision: 1, status: 'active', createdAt: '2026-08-20T00:00:00.000Z', updatedAt: '2026-08-20T00:00:00.000Z', revisions: [{ revision: 1, content: item.content, contentSha256: canonicalSha256(item.content), semanticSha256: item.semanticSha256, changeReason: '冻结 Fixture', createdBy: 'test-owner', createdAt: '2026-08-20T00:00:00.000Z' }] })),
+      libraryVersions: [{ id: 'library-v1', projectId: 'project-1', version: 1, name: '冻结历史', sourceRunId: 'history-run', dataRequirementSet: { id: 'data-history', version: 1, requirements: [], contentSha256: canonicalSha256([]), createdAt: '2026-08-20T00:00:00.000Z', createdBy: 'test-owner' }, members: requirements.map((item, index) => ({ caseId: item.caseId, revision: 1, ordinal: index, contentSha256: canonicalSha256(item.content), frozenContent: item.content })), contentSha256: canonicalSha256(requirements.map(item => item.caseId)), publishedBy: 'test-owner', publishedAt: '2026-08-20T00:00:00.000Z', projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics: { reuse: count, update: 0, create: 0, deprecate: 0, reference: 0 }, dimensionStatistics: { functional: count }, coverageAudit: { id: 'history-audit', statistics: { totalBasis: 1, coveredBasis: 1, totalCases: count, approvedCases: count }, blockerCount: 0 } } }],
+    } as never
+  })
 }
 
 function stateClaim(ref: string, caseRef: string, variant: string, polarity: 'positive' | 'negative', oracle: string) { const [from, to] = variant.split('->'); return { ref, caseRef, requirementRefs: ['RP-STATE'], kind: 'state_transition' as const, subject: 'task.status', variant, polarity, oracle, transition: { from: from?.trim() || variant, to: to?.trim() || variant } } }
