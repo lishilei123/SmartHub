@@ -230,10 +230,10 @@ export interface AgentExecutionEvent {
   }
   parentSessionId?: string
   subAgentRunId?: string
-  reviewerType?: 'requirement' | 'test_case' | 'coverage'
+  reviewerType?: 'requirement' | 'coverage'
 }
 
-export type PlanningReviewerType = 'requirement' | 'test_case' | 'coverage'
+export type PlanningReviewerType = 'requirement' | 'coverage'
 
 export interface ReviewCandidate {
   schemaVersion: 'planning-review-candidate/v1'
@@ -348,10 +348,10 @@ export type PlanningReviewerSourceReference =
         revision: number
         contentSha256: string
       }>
-      dataSetVersionId?: string
-      dataSetContentSha256?: string
-      coverageAuditId?: string
-      coverageAuditInputSha256?: string
+      dataSetVersionId: string
+      dataSetContentSha256: string
+      coverageAuditId: string
+      coverageAuditInputSha256: string
     }
 
 export interface PlanningSubAgentRunRecord {

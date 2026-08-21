@@ -104,6 +104,10 @@ test('运行面板展示冻结配置与折叠技术诊断，Agent 轨迹统一�
   assert.match(planningPage, /totalEventCount/u)
   assert.match(planningPage, /testDesignExecutions/u)
   assert.match(source, /Coverage 检查/u)
+  assert.match(source, /AI Coverage 复核/u)
+  assert.match(source, /当前 TestCase 最新 Revision/u)
+  assert.match(source, /开始 Coverage AI 复核/u)
+  assert.doesNotMatch(source, /测试用例审阅|Test Case Revision|caseRevisions|sourceSelection/u)
 })
 
 test('同一 TestDesign 展示运行历史并以选中 runId 切换完整工作区', () => {

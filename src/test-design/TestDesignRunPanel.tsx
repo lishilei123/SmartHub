@@ -1,11 +1,7 @@
 import { AlertTriangle, Bot, CheckCircle2, Database, LockKeyhole, RefreshCw, Server, ShieldCheck } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { PlanningContextMetrics, PlanningSubAgentRuns } from '../PlanningObservability'
-import {
-  runTestDesignReviewer,
-  type PlanningReviewerType,
-  type TestDesignReviewerSourceSelection,
-} from '../planning-api'
+import { runCoverageReviewer } from '../planning-api'
 import type { TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './types'
 
 const flow = [
@@ -15,49 +11,21 @@ const flow = [
 ] as const
 
 export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }: { design: TestDesign; run: TestDesignWorkflowRun | null; busy: boolean; onRefresh: () => void; onStartRun: () => void }) {
-  const [reviewing, setReviewing] = useState<PlanningReviewerType | ''>('')
+  const [reviewingCoverage, setReviewingCoverage] = useState(false)
   const [reviewError, setReviewError] = useState('')
-  const [dataSetVersionId, setDataSetVersionId] = useState('')
-  const [coverageAuditId, setCoverageAuditId] = useState('')
-  const [caseRevisions, setCaseRevisions] = useState<Record<string, string>>({})
-  useEffect(() => {
-    setDataSetVersionId('')
-    setCoverageAuditId('')
-    setCaseRevisions({})
-  }, [run?.id])
   if (!run) return <section className="td2-card td2-empty"><Bot /><h2>{design.name}</h2><p>这个测试设计还没有运行。启动时将冻结当前绑定的 Requirement Release 与 Workspace。</p><button className="td2-button primary" onClick={onStartRun}>启动 TestDesign Run</button></section>
   const executions = run.nodeRuns.filter(node => node.execution).flatMap(node => node.execution ? [{ node, execution: node.execution }] : [])
   const context = executions.map(item => item.execution.context).filter(Boolean).at(-1)
   const nodeErrors = run.nodeRuns.filter(node => node.error)
   const eventErrors = executions.flatMap(({ node, execution }) => execution.events.filter(event => event.isError).map(event => ({ node, event })))
   const diagnosticCount = Number(Boolean(run.error)) + nodeErrors.length + eventErrors.length + Number(Boolean(reviewError))
-  const selectedCases = run.testCases.filter(item => !item.tombstonedAt).flatMap(item => {
-    const revision = Number(caseRevisions[item.id])
-    return Number.isInteger(revision) && revision > 0
-      ? [{ caseId: item.id, revision }]
-      : []
-  })
-  const sourceSelection = (
-    reviewerType: Exclude<PlanningReviewerType, 'requirement'>,
-  ): TestDesignReviewerSourceSelection | undefined => {
-    if (
-      !dataSetVersionId
-      || selectedCases.length !== run.testCases.filter(item => !item.tombstonedAt).length
-      || (reviewerType === 'coverage' && !coverageAuditId)
-    ) return undefined
-    return {
-      testCases: selectedCases,
-      dataSetVersionId,
-      ...(reviewerType === 'coverage' ? { coverageAuditId } : {}),
-    }
-  }
-  const review = async (reviewerType: Exclude<PlanningReviewerType, 'requirement'>) => {
-    const selection = sourceSelection(reviewerType)
-    if (reviewing || !selection) return
-    setReviewing(reviewerType); setReviewError('')
-    try { await runTestDesignReviewer(run.id, reviewerType, selection); onRefresh() }
+  const hasValidCoverageAudit = run.coverageAudits.some(item => item.status === 'valid')
+  const reviewCoverage = async () => {
+    if (reviewingCoverage || !hasValidCoverageAudit) return
+    setReviewingCoverage(true); setReviewError('')
+    try { await runCoverageReviewer(run.id); onRefresh() }
     catch (error) { setReviewError(error instanceof Error ? error.message : 'Reviewer 执行失败') }
-    finally { setReviewing('') }
+    finally { setReviewingCoverage(false) }
   }
   return <section className="td2-run-grid">
     <div className="td2-card td2-run-main">
@@ -70,7 +38,7 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
         <Snapshot icon={<Bot />} title="Agent 配置快照" primary={`V${run.agentConfigurationSnapshot.configurationVersion} · ${run.agentConfigurationSnapshot.primaryModel.modelName}`} secondary={run.agentConfigurationSnapshot.configurationId} hash={run.agentConfigurationSnapshot.configurationSha256} />
       </div>
       <PlanningContextMetrics context={context} />
-      <div className="td2-reviewer-actions"><span><ShieldCheck /><b>只读 Reviewer SubAgents</b></span><div className="td2-reviewer-sources"><label>DataSet Version<select aria-label="Test DataSet Version" value={dataSetVersionId} onChange={event => setDataSetVersionId(event.target.value)}><option value="">选择固定 DataSet</option>{run.dataSetVersions.map(version => <option key={version.id} value={version.id}>V{version.version} · {version.id}</option>)}</select></label><label>Coverage Audit<select aria-label="Coverage Audit" value={coverageAuditId} onChange={event => { const id = event.target.value; setCoverageAuditId(id); const audit = run.coverageAudits.find(item => item.id === id); if (audit) setDataSetVersionId(audit.dataSetVersionId) }}><option value="">选择固定 Audit</option>{run.coverageAudits.map(audit => <option key={audit.id} value={audit.id}>{audit.id} · {audit.status}</option>)}</select></label>{run.testCases.filter(item => !item.tombstonedAt).map(item => <label key={item.id}>Case {item.id}<select aria-label={`Test Case Revision ${item.id}`} value={caseRevisions[item.id] ?? ''} onChange={event => setCaseRevisions(current => ({ ...current, [item.id]: event.target.value }))}><option value="">选择固定 Revision</option>{item.revisions.map(revision => <option key={revision.revision} value={revision.revision}>R{revision.revision} · {revision.contentSha256.slice(0, 12)}</option>)}</select></label>)}</div><div className="td2-reviewer-buttons"><button disabled={Boolean(reviewing) || !sourceSelection('test_case')} onClick={() => void review('test_case')}>{reviewing === 'test_case' ? '审阅中…' : '测试用例审阅'}</button><button disabled={Boolean(reviewing) || !sourceSelection('coverage')} onClick={() => void review('coverage')}>{reviewing === 'coverage' ? '审阅中…' : 'Coverage 审阅'}</button></div></div>
+      <div className="td2-reviewer-actions"><span><ShieldCheck /><b>AI Coverage 复核</b></span><div className="td2-reviewer-sources"><p>审阅对象：</p><ul><li>当前 TestCase 最新 Revision</li><li>当前有效 DataSet</li><li>最新有效 Coverage Audit</li></ul>{!hasValidCoverageAudit && <small>当前没有有效 Coverage Audit，请先完成或重新执行 Coverage 检查。</small>}</div><div className="td2-reviewer-buttons"><button disabled={reviewingCoverage || !hasValidCoverageAudit} onClick={() => void reviewCoverage()}>{reviewingCoverage ? '复核中…' : '开始 Coverage AI 复核'}</button></div></div>
       <PlanningSubAgentRuns runs={run.planningSubAgentRuns} />
       <details className={`td2-technical-diagnostics ${diagnosticCount ? 'has-errors' : ''}`}><summary><AlertTriangle /><span><b>技术诊断</b><small>{diagnosticCount ? `${diagnosticCount} 条异常记录，仅用于失败排查` : '当前没有运行异常'}</small></span></summary><div><dl><span><dt>Run ID</dt><dd>{run.id}</dd></span><span><dt>状态 / 阶段</dt><dd>{run.status} · {run.stage}</dd></span><span><dt>Node</dt><dd>{run.nodeRuns.length}</dd></span></dl>{run.error && <article><b>{run.errorCode ?? 'TEST_DESIGN_RUN_FAILED'}</b><p>{run.error}</p></article>}{nodeErrors.map(node => <article key={`node-${node.id}`}><b>{node.nodeKey} · {node.errorCode ?? 'TEST_DESIGN_NODE_FAILED'}</b><p>{node.error}</p><small>{node.id} · attempt {node.attempt}</small></article>)}{eventErrors.map(({ node, event }) => <article key={`event-${node.id}-${event.sequence}`}><b>{node.nodeKey} · {event.toolId ?? event.type}</b><p>{event.content ?? 'Agent 工具调用返回异常；完整事件请在主界面 Agent 协作中查看。'}</p><small>#{event.sequence} · {new Date(event.occurredAt).toLocaleString('zh-CN')}</small></article>)}{reviewError && <article><b>Reviewer 未完成</b><p>{reviewError}</p></article>}{!diagnosticCount && <p className="td2-diagnostic-empty">本次运行没有记录 Run、Node 或 Agent Tool 异常。</p>}</div></details>
     </div>

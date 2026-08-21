@@ -1,12 +1,11 @@
 import { Bot, BrainCircuit, Clock3, Gauge, GitBranch, RefreshCw, ShieldCheck } from 'lucide-react'
-import type { AgentExecutionContext, PlanningSubAgentRunRecord } from './planning-api'
+import type { AgentExecutionContext, PlanningReviewerType, PlanningSubAgentRunRecord } from './planning-api'
 import './planning.css'
 
-const reviewerLabels = {
+const reviewerLabels: Record<PlanningReviewerType, string> = {
   requirement: 'RequirementReviewer',
-  test_case: 'TestCaseReviewer',
   coverage: 'CoverageReviewer',
-} as const
+}
 
 export function PlanningContextMetrics({ context, compacting = false, onCompact }: { context?: AgentExecutionContext | null; compacting?: boolean; onCompact?: () => void }) {
   if (!context) return <div className="planning-context-empty"><BrainCircuit /><span><b>Parent Session 尚未创建</b><small>第一次运行需求分析或测试设计 Stage 后建立 projectVersion 级会话。</small></span></div>

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { auditTestDesignCoverage } from '../server/application/test-design-coverage-auditor.js'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
+import { captureCoverageReviewerSource, type CoverageReviewerSourceRun } from '../server/application/planning-workflow-service.js'
 import { TestDesignError, validateHistoricalProposalPlan, validateTestCaseDesignCandidate, validateTestCaseContent } from '../server/application/test-design-validation.js'
 import type { ScenarioClaim, TestCase, TestCaseContent } from '../server/domain/test-design-types.js'
 
@@ -27,6 +28,39 @@ function candidate(cases: Array<{ ref: string; content: TestCaseContent }>, scen
   }
 }
 function overMerged(result: ReturnType<typeof audit>) { return result.blockers.find(item => item.code === 'TEST_CASE_OVER_MERGED') }
+
+test('CoverageReviewer 由 Service 冻结 active Case currentRevision、Audit DataSet 与最新 valid Audit', () => {
+  const current = testCase('case-current', content(['REQ-1']))
+  const revisedContent = content(['REQ-1'], '当前最新 Revision')
+  current.revisions.push({ revision: 1, content: revisedContent, contentSha256: canonicalSha256(revisedContent), semanticSha256: canonicalSha256({ ...revisedContent, tags: [] }), diff: [], editorId: 'test', reason: '更新', createdAt: '2026-08-21T01:00:00.000Z' })
+  current.currentRevision = 1
+  const deleted = testCase('case-deleted', content(['REQ-2']))
+  deleted.tombstonedAt = '2026-08-21T01:00:00.000Z'
+  const currentCaseSet = [{ caseId: current.id, revision: 1, contentSha256: current.revisions[1].contentSha256 }]
+  const caseSetSha256 = canonicalSha256(currentCaseSet)
+  const auditBase = { runId: 'run-1', requirementReleaseId: 'release-1', caseSetSha256, inputSha256: 'f'.repeat(64), status: 'valid' as const, statistics: { totalBasis: 1, coveredBasis: 1, totalCases: 1 }, relations: [], blockers: [], advisories: [] }
+  const sourceRun = {
+    id: 'run-1',
+    basisSnapshot: { requirementReleaseId: 'release-1', requirementsJsonSha256: 'a'.repeat(64) },
+    testCases: [current, deleted],
+    dataSetVersions: [
+      { id: 'data-old', version: 1, requirements: [], contentSha256: 'b'.repeat(64), createdBy: 'test', createdAt: '2026-08-21T01:00:00.000Z' },
+      { id: 'data-current', version: 2, requirements: [], contentSha256: 'c'.repeat(64), createdBy: 'test', createdAt: '2026-08-21T02:00:00.000Z' },
+    ],
+    coverageAudits: [
+      { ...auditBase, id: 'audit-old', dataSetVersionId: 'data-old', createdAt: '2026-08-21T01:30:00.000Z' },
+      { ...auditBase, id: 'audit-stale-newest', dataSetVersionId: 'data-current', status: 'stale' as const, createdAt: '2026-08-21T03:00:00.000Z' },
+      { ...auditBase, id: 'audit-current', dataSetVersionId: 'data-current', inputSha256: 'd'.repeat(64), createdAt: '2026-08-21T02:30:00.000Z' },
+    ],
+  } satisfies CoverageReviewerSourceRun
+
+  const frozen = captureCoverageReviewerSource(sourceRun)
+  assert.deepEqual(frozen.testCases, currentCaseSet)
+  assert.equal(frozen.dataSetVersionId, 'data-current')
+  assert.equal(frozen.dataSetContentSha256, 'c'.repeat(64))
+  assert.equal(frozen.coverageAuditId, 'audit-current')
+  assert.equal(frozen.coverageAuditInputSha256, 'd'.repeat(64))
+})
 
 test('TestCase 候选直接使用 Requirement refs，并允许一个 Requirement 展开多条场景', () => {
   const cases = [content(['REQ-1'], '正确密码登录'), content(['REQ-1'], '密码错误'), content(['REQ-1', 'REQ-2'], '登录后跳转')].map((item, index) => ({ ref: `case-${index + 1}`, content: item }))

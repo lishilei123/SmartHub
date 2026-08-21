@@ -54,6 +54,38 @@ async function loadAgentConfiguration(baseUrl: string, scenePath: 'planning' | '
   return await response.json() as HttpAgentConfiguration
 }
 
+test('Planning Profile 只暴露 RequirementReviewer 与 CoverageReviewer，并由 HTTP 拒绝旧 test_case Reviewer', async () => {
+  await withServer(async baseUrl => {
+    const profileResponse = await fetch(`${baseUrl}/planning-agent/profile`)
+    assert.equal(profileResponse.status, 200)
+    const profile = await profileResponse.json() as {
+      subAgents: Array<{ reviewerType: string; label: string }>
+      stageProfiles: Array<{ stage: string; reviewers: string[] }>
+    }
+    assert.deepEqual(profile.subAgents, [
+      { reviewerType: 'requirement', label: 'RequirementReviewer', session: 'independent', workspace: 'read_only', resultSchemaVersion: 'planning-review-candidate/v1' },
+      { reviewerType: 'coverage', label: 'CoverageReviewer', session: 'independent', workspace: 'read_only', resultSchemaVersion: 'planning-review-candidate/v1' },
+    ])
+    assert.deepEqual(profile.stageProfiles.find(item => item.stage === 'test_case_design')?.reviewers, [])
+
+    const rejected = await fetch(`${baseUrl}/test-design-runs/not-needed/planning-reviewer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reviewerType: 'test_case' }),
+    })
+    assert.equal(rejected.status, 400)
+    assert.match((await rejected.json() as { error: string }).error, /PLANNING_REVIEWER_TYPE_INVALID/u)
+
+    const manualSelection = await fetch(`${baseUrl}/test-design-runs/not-needed/planning-reviewer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reviewerType: 'coverage', testCases: [{ caseId: 'case-1', revision: 1 }] }),
+    })
+    assert.equal(manualSelection.status, 400)
+    assert.match((await manualSelection.json() as { error: string }).error, /PLANNING_REVIEWER_REQUEST_INVALID/u)
+  })
+})
+
 test('Agent 配置接口返回统一 PlanningAgent 并按场景隔离保存', async () => {
   await withServer(async baseUrl => {
     const planning = await loadAgentConfiguration(baseUrl, 'planning')

@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfigurationScene, AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import type { TestDesignReviewerSourceSelection } from '../application/planning-workflow-service.js'
 import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
@@ -168,18 +167,15 @@ async function route(request: IncomingMessage, response: ServerResponse, control
   }
   const testDesignReviewer = /^\/api\/test-design-runs\/([^/]+)\/planning-reviewer$/.exec(url.pathname)
   if (method === 'POST' && testDesignReviewer) {
+    const body = await json(request)
+    const reviewerType = String(body.reviewerType ?? '')
+    if (reviewerType !== 'coverage') throw new Error('PLANNING_REVIEWER_TYPE_INVALID')
+    if (Object.keys(body).some(key => key !== 'reviewerType')) throw new Error('PLANNING_REVIEWER_REQUEST_INVALID')
     const state = await stateStore.snapshot()
     const run = state.testDesignState?.runs.find(item => item.id === testDesignReviewer[1])
     if (!run) throw new Error('TEST_DESIGN_RUN_NOT_FOUND')
     await requireProjectVersion(run.projectVersionId, 'test-design:review')
-    const body = await json(request)
-    const reviewerType = String(body.reviewerType ?? '')
-    if (!['test_case', 'coverage'].includes(reviewerType)) throw new Error('PLANNING_REVIEWER_TYPE_INVALID')
-    return send(response, 202, await planningWorkflowService.reviewTestDesign({
-      sourceRunId: run.id,
-      reviewerType: reviewerType as 'test_case' | 'coverage',
-      sourceSelection: testDesignReviewerSourceSelection(body),
-    }))
+    return send(response, 202, await planningWorkflowService.reviewCoverage(run.id))
   }
   const projectVersionAnalysisRuns = /^\/api\/project-versions\/([^/]+)\/requirement-analysis-runs$/.exec(url.pathname)
   if (method === 'POST' && projectVersionAnalysisRuns) {
@@ -418,30 +414,6 @@ async function loadApproval(approvalId: string) {
 }
 
 function stringList(value: unknown) { return Array.isArray(value) ? value.map(String) : undefined }
-function testDesignReviewerSourceSelection(body: Record<string, unknown>): TestDesignReviewerSourceSelection {
-  if (!Array.isArray(body.testCases)) {
-    throw new Error('TEST_CASE_SOURCE_SELECTION_REQUIRED')
-  }
-  const testCases = body.testCases.map((candidate, index) => {
-    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      throw new Error(`TEST_CASE_SOURCE_SELECTION_INVALID: ${index}`)
-    }
-    const reference = candidate as Record<string, unknown>
-    const caseRevision = Number(reference.revision)
-    const caseId = String(reference.caseId ?? '').trim()
-    if (!caseId || !Number.isInteger(caseRevision) || caseRevision <= 0) {
-      throw new Error(`TEST_CASE_SOURCE_SELECTION_INVALID: ${index}`)
-    }
-    return { caseId, revision: caseRevision }
-  })
-  const dataSetVersionId = String(body.dataSetVersionId ?? '').trim()
-  const coverageAuditId = String(body.coverageAuditId ?? '').trim()
-  return {
-    testCases,
-    ...(dataSetVersionId ? { dataSetVersionId } : {}),
-    ...(coverageAuditId ? { coverageAuditId } : {}),
-  }
-}
 function optionalPositiveInteger(value: string | null) {
   if (value == null || value === '') return undefined
   const parsed = Number(value)

@@ -2,15 +2,7 @@ import type { AgentConfigurationVersion } from './agent-configuration-api'
 
 const apiBase = import.meta.env.VITE_PLANNING_API_BASE ?? 'http://127.0.0.1:8787/api'
 
-export type PlanningReviewerType = 'requirement' | 'test_case' | 'coverage'
-export type TestDesignReviewerSourceSelection = {
-  testCases: Array<{
-    caseId: string
-    revision: number
-  }>
-  dataSetVersionId?: string
-  coverageAuditId?: string
-}
+export type PlanningReviewerType = 'requirement' | 'coverage'
 export type PlanningWorkflowStage =
   | 'requirement_analysis'
   | 'requirement_release'
@@ -127,15 +119,13 @@ export const loadPlanningWorkflow = (projectVersionId: string) => request<Planni
 export const loadPlanningContext = (projectVersionId: string) => request<AgentExecutionContext | null>(`/project-versions/${encodeURIComponent(projectVersionId)}/planning-context`)
 export const compactPlanningContext = (projectVersionId: string) => request<AgentExecutionContext>(`/project-versions/${encodeURIComponent(projectVersionId)}/planning-context`, { method: 'POST' })
 export const runRequirementReviewer = (runId: string) => request(`/requirement-analysis-runs/${encodeURIComponent(runId)}/planning-reviewer`, { method: 'POST' })
-export const runTestDesignReviewer = (
+export const runCoverageReviewer = (
   runId: string,
-  reviewerType: Exclude<PlanningReviewerType, 'requirement'>,
-  sourceSelection: TestDesignReviewerSourceSelection,
 ) => request(
   `/test-design-runs/${encodeURIComponent(runId)}/planning-reviewer`,
   {
     method: 'POST',
-    body: JSON.stringify({ reviewerType, ...sourceSelection }),
+    body: JSON.stringify({ reviewerType: 'coverage' }),
   },
 )
 

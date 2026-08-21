@@ -23,6 +23,10 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').piName, 'test_script_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').piName, 'failure_analysis_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').piName, 'script_repair_submit_result')
+  const reviewer = defaultBuiltInToolConfigResolver.toDescriptor('reviewer.submit_result').parameters as unknown as {
+    properties: { reviewerType: { enum: string[] } }
+  }
+  assert.deepEqual(reviewer.properties.reviewerType.enum, ['requirement', 'coverage'])
 })
 
 test('Requirement Analysis coverageTarget Schema 升级会发布新的 Tool 绑定令牌', () => {
