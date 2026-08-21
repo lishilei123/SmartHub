@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import type { CaseChangeDecision, CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionMethod, TestSuiteDraft } from '../types'
+import type { CaseChangeDecision, CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignRunSummary, TestDesignWorkflowRun, TestExecutionMethod, TestSuiteDraft } from '../types'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 const LIVE_RUN_REFRESH_MS = 1_000
@@ -20,6 +20,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const [designs, setDesigns] = useState<TestDesign[]>([])
   const [design, setDesign] = useState<TestDesign | null>(null)
   const [run, setRun] = useState<TestDesignWorkflowRun | null>(null)
+  const [runs, setRuns] = useState<TestDesignRunSummary[]>([])
   const [libraryCases, setLibraryCases] = useState<LibraryTestCase[]>([])
   const [libraryVersions, setLibraryVersions] = useState<TestCaseLibraryVersion[]>([])
   const [suiteDrafts, setSuiteDrafts] = useState<TestSuiteDraft[]>([])
@@ -67,6 +68,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (!projectVersionId || !design || !run) return
     const next = await api.loadRun(projectVersionId, design.id, run.id)
     setRun(next)
+    setRuns(current => current.map(item => item.id === next.id ? { ...item, status: next.status, stage: next.stage, progress: next.progress, startedAt: next.startedAt, finishedAt: next.finishedAt, errorCode: next.errorCode, error: next.error, baseTestCaseLibraryVersionId: next.baseTestCaseLibraryVersionId, caseCount: next.testCases.filter(testCase => !testCase.tombstonedAt).length, pendingProposalCount: next.caseChangeProposals.filter(proposal => proposal.decision === 'pending').length } : item))
     return next
   }, [projectVersionId, design, run])
 
@@ -101,7 +103,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   }, [refreshRun, requestAudit])
 
   useEffect(() => {
-    setInputs(null); setDesigns([]); setDesign(null); setRun(null); setLibraryCases([]); setLibraryVersions([]); setSuiteDrafts([]); setSuiteVersions([]); setHandoffs([]); setError(''); setTechnicalError(''); setAuditRetryError(''); resynthesisRunIdRef.current = null
+    setInputs(null); setDesigns([]); setDesign(null); setRun(null); setRuns([]); setLibraryCases([]); setLibraryVersions([]); setSuiteDrafts([]); setSuiteVersions([]); setHandoffs([]); setError(''); setTechnicalError(''); setAuditRetryError(''); resynthesisRunIdRef.current = null
     if (projectVersionId) void loadCollection().catch(recordError)
   }, [projectVersionId, loadCollection, recordError])
   useEffect(() => {
@@ -118,8 +120,11 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const openDesign = useCallback(async (selected: TestDesign) => {
     if (!projectVersionId) return
     setDesign(selected); setHandoffs([]); setAuditRetryError('')
-    if (!selected.latestRun) { setRun(null); return }
-    const next = await guarded('load-run', () => api.loadRun(projectVersionId, selected.id, selected.latestRun!.id))
+    const history = await guarded('load-runs', () => api.loadRuns(projectVersionId, selected.id))
+    setRuns(history.items)
+    const selectedRunId = history.items[0]?.id
+    if (!selectedRunId) { setRun(null); return }
+    const next = await guarded('load-run', () => api.loadRun(projectVersionId, selected.id, selectedRunId))
     setRun(next)
   }, [guarded, projectVersionId])
 
@@ -127,29 +132,36 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     if (!projectVersionId) return
     setDesign(null); setRun(null); setHandoffs([]); setAuditRetryError('')
     const linked = await guarded('load-linked-run', async () => {
-      const [nextDesign, nextRun] = await Promise.all([
+      const [nextDesign, nextRun, history] = await Promise.all([
         api.loadDesign(projectVersionId, designId),
         api.loadRun(projectVersionId, designId, runId),
+        api.loadRuns(projectVersionId, designId),
       ])
-      return { design: nextDesign, run: nextRun }
+      return { design: nextDesign, run: nextRun, runs: history.items }
     })
-    setDesign(linked.design); setRun(linked.run)
+    setDesign(linked.design); setRun(linked.run); setRuns(linked.runs)
   }, [guarded, projectVersionId])
 
-  const closeDesign = useCallback(() => { setDesign(null); setRun(null); setHandoffs([]); setAuditRetryError('') }, [])
+  const openRun = useCallback(async (runId: string) => {
+    if (!projectVersionId || !design) return
+    const next = await guarded('load-run', () => api.loadRun(projectVersionId, design.id, runId))
+    setRun(next); setHandoffs([]); setAuditRetryError('')
+  }, [design, guarded, projectVersionId])
+
+  const closeDesign = useCallback(() => { setDesign(null); setRun(null); setRuns([]); setHandoffs([]); setAuditRetryError('') }, [])
 
   const create = useCallback(async (input: CreateTestDesignInput) => {
     if (!projectVersionId) return
     const nextDesign = await guarded('create', () => api.createDesign(projectVersionId, input))
     const nextRun = await api.createRun(projectVersionId, nextDesign.id)
-    setDesign({ ...nextDesign, latestRun: nextRun }); setRun(nextRun)
+    setDesign({ ...nextDesign, latestRun: nextRun }); setRun(nextRun); setRuns((await api.loadRuns(projectVersionId, nextDesign.id)).items)
     await loadCollection(); notify('测试设计已创建，Requirement Release 与 Workspace 快照已冻结。', 'success')
   }, [guarded, loadCollection, notify, projectVersionId])
 
   const startRun = useCallback(async () => {
     if (!projectVersionId || !design) return
     const next = await guarded('start-run', () => api.createRun(projectVersionId, design.id), '已启动新的测试设计运行。')
-    setRun(next); setHandoffs([]); setAuditRetryError('')
+    setRun(next); setRuns((await api.loadRuns(projectVersionId, design.id)).items); setHandoffs([]); setAuditRetryError('')
   }, [design, guarded, projectVersionId])
 
   const resynthesize = useCallback(async () => {
@@ -235,7 +247,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
       throw cause
     }
     const version = await guarded('publish', () => api.publishLibraryVersion(projectVersionId, design.id, run.id, { name, expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256, expectedProposalSha256: run.caseChangeProposalSha256 }), '正式测试用例版本已发布并投影到 Workspace。')
-    await Promise.all([refreshRun(), loadCollection()]); return version
+    const [, , history] = await Promise.all([refreshRun(), loadCollection(), api.loadRuns(projectVersionId, design.id)]); setRuns(history.items); return version
   }, [design, guarded, loadCollection, notify, projectVersionId, recordError, refreshRun, run])
 
   const handoff = useCallback(async (version: TestCaseLibraryVersion, mode: 'smoke' | 'regression' | 'full' | 'custom', suiteVersionId?: string, impactedCaseIds?: string[], executionReadinessOverrides?: ExecutionReadinessOverrideInput[]) => {
@@ -254,5 +266,5 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const previewLegacyMigration = useCallback(async (legacyTestCaseSetVersionId: string) => { if (!inputs) return; const preview = await guarded('legacy-migration-preview', () => api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId)); if (preview) setLegacyMigrationPreview(preview); return preview }, [guarded, inputs])
   const migrateLegacyCaseSet = useCallback(async (legacyTestCaseSetVersionId: string, confirmUncertain = false) => { if (!inputs) return; const preview = legacyMigrationPreview?.legacyTestCaseSetVersionId === legacyTestCaseSetVersionId ? legacyMigrationPreview : await api.previewLegacyCaseMigration(inputs.projectVersion.projectId, legacyTestCaseSetVersionId); await guarded('legacy-migration', () => api.migrateLegacyCaseSet(inputs.projectVersion.projectId, { legacyTestCaseSetVersionId, expectedPreviewSha256: preview.previewSha256, confirmUncertain }), '历史已发布用例集已幂等导入正式用例库。'); setLegacyMigrationPreview(null); await loadCollection() }, [guarded, inputs, legacyMigrationPreview, loadCollection])
 
-  return { inputs, designs, design, run, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, batchAcceptUnchangedReuseProposals, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
+  return { inputs, designs, design, run, runs, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, legacyMigrationPreview, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, openRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, resolveIssue, decideProposal, batchAcceptUnchangedReuseProposals, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite, previewLegacyMigration, migrateLegacyCaseSet }
 }

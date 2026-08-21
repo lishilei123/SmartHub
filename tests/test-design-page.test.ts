@@ -39,10 +39,13 @@ test('创建面板明确展示绑定需求发布包并定义范围、维度和�
   assert.match(source, /排除范围/u)
   assert.match(source, /测试维度/u)
   assert.match(source, /执行入口/u)
-  assert.match(source, /不使用历史用例（默认）/u)
+  assert.match(source, /latestInheritedLibrary \? 'latest_library' : 'none'/u)
+  assert.match(source, /来源版本最新正式用例库（默认）/u)
+  assert.match(source, /默认继承来源版本/u)
+  assert.match(source, /正式用例库：V/u)
   assert.match(source, /inheritsSourceAssets/u)
   assert.match(source, /mode: 'none'/u)
-  assert.doesNotMatch(source, /默认使用项目最新用例库/u)
+  assert.doesNotMatch(source, /默认选择当前项目版本其他 Run/u)
   assert.doesNotMatch(source, /basisMode|review_baseline|sourceTechnicalSolutionRunId/u)
 })
 
@@ -72,6 +75,17 @@ test('运行面板展示冻结 Release、Workspace、Agent 配置与实时轨迹
   assert.match(source, /Skill 已读取/u)
   assert.match(source, /skillKey/u)
   assert.match(source, /Coverage 检查/u)
+})
+
+test('同一 TestDesign 展示运行历史并以选中 runId 切换完整工作区', () => {
+  const page = read('../src/test-design/TestDesignPage.tsx')
+  const hook = read('../src/test-design/hooks/useTestDesign.ts')
+  const api = read('../src/test-design/api.ts')
+  for (const label of ['运行历史', '新建运行', '状态 / 阶段', '历史基线', '用例 / 待处理 Proposal', '已发布', '未发布']) assert.match(page, new RegExp(label, 'u'))
+  assert.match(page, /model\.openRun\(item\.id\)/u)
+  assert.match(hook, /api\.loadRuns/u)
+  assert.match(hook, /api\.loadRun\(projectVersionId, design\.id, runId\)/u)
+  assert.match(api, /test-designs\/\$\{encodeURIComponent\(designId\)\}\/runs/u)
 })
 
 test('测试用例支持新增、结构化编辑、单条审核与 Revision 记录', () => {

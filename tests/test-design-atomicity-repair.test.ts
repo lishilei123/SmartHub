@@ -161,7 +161,7 @@ test('未选择来源版本时，test-case-design/v2 的 cases: [] 由 Service �
 test('仅保留来源关系而未继承时，不暴露也不加载来源冻结历史用例', async () => {
   const store = await storeWithPublishedRequirement()
   await installHistoricalLibrary(store, 1)
-  await store.transaction(state => { state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.id !== 'binding-target') })
+  await store.transaction(state => { state.projectVersions.find(item => item.id === 'project-version-1')!.inheritRequirementBindings = false })
   const service = new TestDesignService(store)
   const inputs = await service.inputCandidates('project-version-1')
   assert.equal(inputs.projectVersion.inheritsSourceAssets, false)
@@ -170,6 +170,106 @@ test('仅保留来源关系而未继承时，不暴露也不加载来源冻结�
     () => service.createDesign('project-version-1', { name: '错误继承', objective: '未勾选继承不能选择来源历史', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal),
     /TEST_DESIGN_SOURCE_INHERITANCE_REQUIRED/u,
   )
+})
+
+test('自动创建由 Service 选择来源版本最新正式用例库，并在 Run 启动后冻结确切版本与成员 Revision', async () => {
+  const store = await storeWithPublishedRequirement()
+  await installHistoricalLibrary(store, 1)
+  await addHistoricalLibraryVersion(store, 2, '2026-08-20T01:00:00.000Z')
+  await store.transaction(state => { const analysis = state.reviewRuns.find(item => item.id === 'review-run-1')!; analysis.result = { summary: { overview: '自动测试设计' }, testFocus: [] } as never })
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v2', content: referenceCandidate([]) }) }
+  const service = new TestDesignService(store, runtime)
+  const created = await service.createAutomaticDesignAndRun('project-version-1', 'review-run-1')
+  assert.deepEqual(created.design.input.historicalLibrarySelection, { mode: 'latest_library' })
+  assert.equal(created.run.baseTestCaseLibraryVersionId, 'library-v2')
+  assert.equal(created.run.baseTestCaseLibraryVersionSha256, 'library-v2-sha256')
+  assert.deepEqual(created.run.historicalSnapshot.items.map(item => (item.locator as { revision: number }).revision), [1])
+  const frozenSnapshot = structuredClone(created.run.historicalSnapshot)
+
+  await addHistoricalLibraryVersion(store, 3, '2026-08-20T02:00:00.000Z')
+  const persisted = await service.getRun('project-version-1', created.design.id, created.run.id)
+  assert.deepEqual(persisted.historicalSnapshot, frozenSnapshot)
+  assert.equal(persisted.baseTestCaseLibraryVersionId, 'library-v2')
+  const nextRun = await service.createRun('project-version-1', created.design.id, 'test-design-run:auto:new-request', principal)
+  assert.equal(nextRun.baseTestCaseLibraryVersionId, 'library-v3')
+  assert.equal((await service.getRun('project-version-1', created.design.id, created.run.id)).baseTestCaseLibraryVersionId, 'library-v2')
+})
+
+test('来源版本没有正式用例库时，自动创建按首次全量生成且不报错', async () => {
+  const store = await storeWithPublishedRequirement()
+  await store.transaction(state => {
+    const target = state.projectVersions.find(item => item.id === 'project-version-1')!
+    target.sourceProjectVersionId = 'project-version-source-empty'
+    target.inheritRequirementBindings = true
+    state.projectVersions.push({ id: 'project-version-source-empty', projectId: target.projectId, name: 'V0', status: 'locked', inheritRequirementBindings: false, createdAt: '2026-08-19T00:00:00.000Z', updatedAt: '2026-08-19T00:00:00.000Z' })
+    const analysis = state.reviewRuns.find(item => item.id === 'review-run-1')!
+    analysis.result = { summary: { overview: '首次全量设计' }, testFocus: [] } as never
+  })
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v1', content: candidate([caseCandidate('TC-FIRST', '首次生成')], [stateClaim('SC-FIRST', 'TC-FIRST', 'todo->in_progress', 'positive', '状态为 in_progress')]) }) }
+  const service = new TestDesignService(store, runtime)
+  const created = await service.createAutomaticDesignAndRun('project-version-1', 'review-run-1')
+  assert.deepEqual(created.design.input.historicalLibrarySelection, { mode: 'none' })
+  assert.equal(created.run.historicalSnapshot.items.length, 0)
+  assert.equal(created.run.baseTestCaseLibraryVersionId, undefined)
+})
+
+test('同一 TestDesign 的重试幂等、两个 Run 候选 Proposal Audit 审核与快照完全隔离', async () => {
+  const store = await storeWithPublishedRequirement()
+  await installHistoricalLibrary(store, 2)
+  const runtime: PlanningAgentRuntime = { readiness: async () => ({ ready: true, agents: [] }), freezeConfiguration: async () => frozenConfiguration(), execute: async () => ({ schemaVersion: 'test-case-design/v2', content: referenceCandidate([]) }) }
+  let projectedAsset = 0
+  const projector = { ingest: async () => ({ version: { id: `projected-asset-${++projectedAsset}` }, task: null }) }
+  const service = new TestDesignService(store, runtime, projector)
+  const design = await service.createDesign('project-version-1', { name: '并行运行隔离', objective: '验证同一设计的运行隔离', knowledgeAugmentation: { mode: 'disabled' }, historicalLibrarySelection: { mode: 'library_version', testCaseLibraryVersionId: 'library-v1' } }, principal)
+  const runA = await service.createRun('project-version-1', design.id, 'test-design-run:fixture:request-a', principal)
+  const retryA = await service.createRun('project-version-1', design.id, 'test-design-run:fixture:request-a', principal)
+  const runB = await service.createRun('project-version-1', design.id, 'test-design-run:fixture:request-b', principal)
+  assert.equal(retryA.id, runA.id)
+  assert.notEqual(runB.id, runA.id)
+  const completedA = await waitForCompletedRun(service, 'project-version-1', design.id, runA.id)
+  const completedB = await waitForCompletedRun(service, 'project-version-1', design.id, runB.id)
+  assert.notEqual(completedA.testCases[0]?.id, completedB.testCases[0]?.id)
+  assert.notEqual(completedA.caseChangeProposals[0]?.id, completedB.caseChangeProposals[0]?.id)
+  assert.notEqual(completedA.coverageAudits[0]?.id, completedB.coverageAudits[0]?.id)
+  assert.notEqual(completedA.artifacts[0]?.id, completedB.artifacts[0]?.id)
+  assert.equal(completedA.historicalSnapshot.baseTestCaseLibraryVersionId, 'library-v1')
+  assert.equal(completedB.historicalSnapshot.baseTestCaseLibraryVersionId, 'library-v1')
+  const beforeB = structuredClone(completedB)
+
+  for (const testCase of completedA.testCases) await service.reviewCase('project-version-1', design.id, completedA.id, testCase.id, { decision: 'approve', targetRevision: testCase.currentRevision, comment: 'Run A 独立审核' }, principal)
+  for (const proposal of completedA.caseChangeProposals) await service.decideCaseChangeProposal('project-version-1', design.id, completedA.id, proposal.id, { expectedVersion: 0, decision: 'accepted', comment: '仅接受 Run A' }, principal)
+  await service.reAudit('project-version-1', design.id, completedA.id)
+  const afterB = await service.getRun('project-version-1', design.id, completedB.id)
+  assert.deepEqual(afterB.testCases, beforeB.testCases)
+  assert.deepEqual(afterB.caseChangeProposals, beforeB.caseChangeProposals)
+  assert.deepEqual(afterB.coverageAudits, beforeB.coverageAudits)
+  assert.deepEqual(afterB.artifacts, beforeB.artifacts)
+  assert.deepEqual(afterB.historicalSnapshot, beforeB.historicalSnapshot)
+
+  for (const testCase of afterB.testCases) await service.reviewCase('project-version-1', design.id, afterB.id, testCase.id, { decision: 'approve', targetRevision: testCase.currentRevision, comment: 'Run B 独立审核' }, principal)
+  for (const proposal of afterB.caseChangeProposals) await service.decideCaseChangeProposal('project-version-1', design.id, afterB.id, proposal.id, { expectedVersion: 0, decision: 'accepted', comment: '仅接受 Run B' }, principal)
+  await service.reAudit('project-version-1', design.id, afterB.id)
+  const publishableA = await service.getRun('project-version-1', design.id, completedA.id)
+  const publishableB = await service.getRun('project-version-1', design.id, completedB.id)
+  const auditA = publishableA.coverageAudits.at(-1)!
+  assert.deepEqual(auditA.blockers.filter(item => item.resolution !== 'execution_handoff'), [])
+  const publishedA = await service.publishLibraryVersion('project-version-1', design.id, publishableA.id, { name: 'Run A 正式库', expectedAuditId: auditA.id, expectedCaseSetSha256: auditA.caseSetSha256, expectedProposalSha256: publishableA.caseChangeProposalSha256 }, principal)
+  const bAfterAPublished = await service.getRun('project-version-1', design.id, afterB.id)
+  assert.deepEqual(bAfterAPublished.testCases, publishableB.testCases)
+  assert.deepEqual(bAfterAPublished.caseChangeProposals, publishableB.caseChangeProposals)
+  assert.deepEqual(bAfterAPublished.coverageAudits, publishableB.coverageAudits)
+  assert.deepEqual(bAfterAPublished.historicalSnapshot, beforeB.historicalSnapshot)
+  const auditB = bAfterAPublished.coverageAudits.at(-1)!
+  const publishedB = await service.publishLibraryVersion('project-version-1', design.id, bAfterAPublished.id, { name: 'Run B 正式库', expectedAuditId: auditB.id, expectedCaseSetSha256: auditB.caseSetSha256, expectedProposalSha256: bAfterAPublished.caseChangeProposalSha256 }, principal)
+  assert.notEqual(publishedA.id, publishedB.id)
+  assert.equal(publishedB.version, publishedA.version + 1)
+  assert.equal(publishedA.sourceRunId, completedA.id)
+  assert.equal(publishedB.sourceRunId, completedB.id)
+  const history = await service.listRuns('project-version-1', design.id)
+  assert.equal(history.length, 2)
+  assert.deepEqual(new Set(history.map(item => item.id)), new Set([completedA.id, completedB.id]))
+  assert.equal(history.find(item => item.id === completedB.id)?.pendingProposalCount, 0)
+  assert.equal(history.every(item => item.published), true)
 })
 
 test('Patch 修改复用历史 Candidate 时仅创建当前 Run Revision，Proposal/Claim/决策保持一致且相同 Patch 幂等', async () => {
@@ -364,13 +464,25 @@ async function installHistoricalLibrary(store: JsonStore, count: number) {
     const target = state.projectVersions.find(item => item.id === 'project-version-1')!
     const sourceProjectVersionId = 'project-version-source'
     target.sourceProjectVersionId = sourceProjectVersionId
-    state.projectVersions.push({ id: sourceProjectVersionId, projectId: target.projectId, name: 'V0', status: 'locked', createdAt: '2026-08-19T00:00:00.000Z', updatedAt: '2026-08-19T00:00:00.000Z' } as never)
+    target.inheritRequirementBindings = true
+    state.projectVersions.push({ id: sourceProjectVersionId, projectId: target.projectId, name: 'V0', status: 'locked', inheritRequirementBindings: false, createdAt: '2026-08-19T00:00:00.000Z', updatedAt: '2026-08-19T00:00:00.000Z' } as never)
     state.projectVersionRequirementBindings.push({ id: 'binding-source', projectVersionId: sourceProjectVersionId, assetId: 'asset-1', assetVersionId: 'version-fixed', createdAt: '2026-08-19T00:00:00.000Z' }, { id: 'binding-target', projectVersionId: target.id, assetId: 'asset-1', assetVersionId: 'version-fixed', createdAt: '2026-08-20T00:00:00.000Z' })
     state.testDesignState = {
       architectureVersion: 'single-agent-skills/v1', designs: [], runs: [{ id: 'history-run', projectVersionId: sourceProjectVersionId } as never], caseSetVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [], legacyMigrations: [],
       libraryCases: requirements.map(item => ({ id: item.caseId, projectId: 'project-1', currentRevision: 1, status: 'active', createdAt: '2026-08-20T00:00:00.000Z', updatedAt: '2026-08-20T00:00:00.000Z', revisions: [{ revision: 1, content: item.content, contentSha256: canonicalSha256(item.content), semanticSha256: item.semanticSha256, changeReason: '冻结 Fixture', createdBy: 'test-owner', createdAt: '2026-08-20T00:00:00.000Z' }] })),
       libraryVersions: [{ id: 'library-v1', projectId: 'project-1', version: 1, name: '冻结历史', sourceRunId: 'history-run', dataRequirementSet: { id: 'data-history', version: 1, requirements: [], contentSha256: canonicalSha256([]), createdAt: '2026-08-20T00:00:00.000Z', createdBy: 'test-owner' }, members: requirements.map((item, index) => ({ caseId: item.caseId, revision: 1, ordinal: index, contentSha256: canonicalSha256(item.content), frozenContent: item.content })), contentSha256: canonicalSha256(requirements.map(item => item.caseId)), publishedBy: 'test-owner', publishedAt: '2026-08-20T00:00:00.000Z', projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics: { reuse: count, update: 0, create: 0, deprecate: 0, reference: 0 }, dimensionStatistics: { functional: count }, coverageAudit: { id: 'history-audit', statistics: { totalBasis: 1, coveredBasis: 1, totalCases: count, approvedCases: count }, blockerCount: 0 } } }],
     } as never
+  })
+}
+
+async function addHistoricalLibraryVersion(store: JsonStore, version: number, publishedAt: string) {
+  await store.transaction(state => {
+    const aggregate = state.testDesignState!
+    const source = aggregate.libraryVersions.find(item => item.id === 'library-v1')!
+    const sourceProjectVersionId = state.projectVersions.find(item => item.id === 'project-version-1')!.sourceProjectVersionId!
+    const sourceRunId = `history-run-${version}`
+    aggregate.runs.push({ id: sourceRunId, projectVersionId: sourceProjectVersionId } as never)
+    aggregate.libraryVersions.push({ ...structuredClone(source), id: `library-v${version}`, version, name: `冻结历史 V${version}`, sourceRunId, contentSha256: `library-v${version}-sha256`, publishedAt })
   })
 }
 

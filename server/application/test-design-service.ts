@@ -73,7 +73,7 @@ export class TestDesignService {
     const inheritedLibraryVersionIds = new Set(inheritedLibraryVersions.map(item => item.id))
     const agentReadiness = this.runtime?.readiness ? await this.runtime.readiness(projectVersionId) : { ready: Boolean(this.runtime), agents: [{ agentKey: 'planning', ready: Boolean(this.runtime), reason: this.runtime ? undefined : 'PlanningAgent Runtime 未配置' }] }
     return {
-      projectVersion: { id: projectVersion.id, projectId: projectVersion.projectId, name: projectVersion.name, status: projectVersion.status, ...(projectVersion.sourceProjectVersionId ? { sourceProjectVersionId: projectVersion.sourceProjectVersionId } : {}), inheritsSourceAssets: Boolean(inheritedSource) },
+      projectVersion: { id: projectVersion.id, projectId: projectVersion.projectId, name: projectVersion.name, status: projectVersion.status, ...(projectVersion.sourceProjectVersionId ? { sourceProjectVersionId: projectVersion.sourceProjectVersionId } : {}), ...(inheritedSource ? { sourceProjectVersionName: inheritedSource.name } : {}), inheritsSourceAssets: Boolean(inheritedSource) },
       requirementRelease: requirementRelease ? presentRequirementRelease(requirementRelease, true) : null,
       requirementReleases: requirementReleases.map(item => presentRequirementRelease(item, item.binding.releaseId === requirementRelease?.binding.releaseId)),
       knowledgeAssets,
@@ -111,6 +111,8 @@ export class TestDesignService {
       if (existing) return { design: structuredClone(existing), created: false }
       const result = required(analysisRun.result, 'REQUIREMENT_RESULT_NOT_FOUND', '需求理解结果不存在')
       const activeIndex = state.indexes.find(item => item.id === analysisRun.snapshot.indexVersionId && item.status === 'active')
+      const inheritedSource = explicitlyInheritedSourceVersion(state, projectVersion)
+      const latestInheritedLibrary = inheritedSource ? latestPublishedLibraryVersion(inheritedLibraryVersionsForSource(aggregate, inheritedSource.id)) : undefined
       const rawInput: CreateTestDesignInput = {
         name: `${projectVersion.name} · 自动测试设计`,
         objective: result.summary.overview.trim() || '依据已冻结的需求理解生成可追溯测试用例。',
@@ -121,7 +123,9 @@ export class TestDesignService {
         userCoverageObjectives: result.testFocus.map(item => `${item.title}：${item.description}`),
         knowledgeAugmentation: activeIndex ? { mode: 'fixed_index', indexVersionId: activeIndex.id } : { mode: 'disabled' },
         historicalCaseSelections: [],
-        historicalLibrarySelection: { mode: 'none' },
+        historicalLibrarySelection: latestInheritedLibrary
+          ? { mode: 'latest_library' }
+          : { mode: 'none' },
       }
       const input = validateCreateTestDesignInput(rawInput)
       validateDesignSources(state, projectVersion, input)
@@ -141,7 +145,7 @@ export class TestDesignService {
       aggregate.designs.push(design)
       return { design: structuredClone(design), created: true }
     })
-    const run = await this.createRun(projectVersionId, created.design.id, `automatic:${created.design.sourceRequirementReleaseId}`, { subjectId: 'system:planning-workflow', displayName: 'Planning Workflow' })
+    const run = await this.createRun(projectVersionId, created.design.id, `test-design-run:${created.design.id}:automatic:${analysisRunId}`, { subjectId: 'system:planning-workflow', displayName: 'Planning Workflow' })
     return { design: created.design, run }
   }
 
@@ -194,7 +198,12 @@ export class TestDesignService {
 
   async listRuns(projectVersionId: string, designId: string) {
     const state = await this.store.snapshot(); findDesign(state, projectVersionId, designId)
-    return readDesignState(state).runs.filter(item => item.testDesignId === designId).sort(newest).map(run => presentRun(run))
+    const aggregate = readDesignState(state)
+    const publishedRunIds = new Set(aggregate.libraryVersions.flatMap(item => item.sourceRunId ? [item.sourceRunId] : []))
+    return aggregate.runs.filter(item => item.projectVersionId === projectVersionId && item.testDesignId === designId).sort(newest).map(run => {
+      const baseline = run.baseTestCaseLibraryVersionId ? aggregate.libraryVersions.find(item => item.id === run.baseTestCaseLibraryVersionId) : undefined
+      return { ...presentRun(run), ...(run.baseTestCaseLibraryVersionId ? { baseTestCaseLibraryVersionId: run.baseTestCaseLibraryVersionId } : {}), ...(baseline ? { baseTestCaseLibraryVersion: { id: baseline.id, version: baseline.version, name: baseline.name } } : {}), caseCount: run.testCases.filter(item => !item.tombstonedAt).length, pendingProposalCount: run.caseChangeProposals.filter(item => item.decision === 'pending').length, published: publishedRunIds.has(run.id) }
+    })
   }
 
   async getRun(projectVersionId: string, designId: string, runId: string) {
@@ -501,7 +510,9 @@ export class TestDesignService {
     const published = await this.store.transaction(state => {
       assertOpenVersion(state, projectVersionId); const design = findDesign(state, projectVersionId, designId); const run = findRun(state, projectVersionId, designId, runId); const aggregate = designState(state)
       const existing = aggregate.libraryVersions.find(item => item.sourceRunId === runId); if (existing) return structuredClone(existing)
-      assertLibraryBaselineUnchanged(aggregate, design.projectId, run)
+      const baseline = run.baseTestCaseLibraryVersionId
+        ? required(aggregate.libraryVersions.find(item => item.id === run.baseTestCaseLibraryVersionId && item.projectId === design.projectId && item.contentSha256 === run.baseTestCaseLibraryVersionSha256), 'TEST_CASE_LIBRARY_BASE_CHANGED', 'Run 冻结的正式用例库版本或 Hash 不存在')
+        : undefined
       const audit = required(run.coverageAudits.find(item => item.id === input.expectedAuditId && item.status === 'valid'), 'COVERAGE_AUDIT_STALE', '覆盖审计不存在或已失效')
       const dataRequirementSet = required(run.dataSetVersions.find(item => item.id === audit.dataSetVersionId), 'TEST_DATA_REQUIREMENT_SET_NOT_FOUND', 'Coverage Audit 固定的测试数据需求版本不存在')
       if (canonicalSha256(dataRequirementSet.requirements) !== dataRequirementSet.contentSha256) throw new TestDesignError('TEST_DATA_REQUIREMENT_SET_HASH_MISMATCH', '测试数据需求版本 Hash 不一致', 409)
@@ -513,10 +524,9 @@ export class TestDesignService {
       const pending = run.caseChangeProposals.filter(item => item.decision === 'pending'); if (pending.length) throw new TestDesignError('CASE_CHANGE_PROPOSAL_DECISION_REQUIRED', '所有 Proposal 必须先完成人工处置', 409, { proposalIds: pending.map(item => item.id) })
       const currentAudit = runCoverageAudit(run); if (currentAudit.inputSha256 !== audit.inputSha256 || currentAudit.caseSetSha256 !== audit.caseSetSha256 || currentAudit.blockers.some(item => item.resolution !== 'execution_handoff')) throw new TestDesignError('COVERAGE_AUDIT_STALE', '发布前测试设计状态已变化，请重新审计', 409)
       assertLibraryPublicationGates(aggregate, design.projectId, run)
-      const previous = aggregate.libraryVersions.filter(item => item.projectId === design.projectId).sort((left, right) => right.version - left.version)[0]
-      assertLibraryBaselineMembersCurrent(aggregate, design.projectId, run, previous)
-      assertProposalSourcesCurrent(aggregate, design.projectId, run, previous)
-      const members = new Map((previous?.members ?? []).map(item => [item.caseId, { ...item }]))
+      assertLibraryBaselineMembersCurrent(aggregate, design.projectId, run, baseline)
+      assertProposalSourcesCurrent(aggregate, design.projectId, run, baseline)
+      const members = new Map((baseline?.members ?? []).map(item => [item.caseId, { ...item }]))
       for (const proposal of run.caseChangeProposals) applyProposalToLibrary(aggregate, design.projectId, run, proposal, members, principal.subjectId)
       const orderedMembers = [...members.values()].sort((left, right) => left.caseId.localeCompare(right.caseId)).map((member, ordinal) => freezeLibraryVersionMember(aggregate, design.projectId, { ...member, ordinal }))
       const canonicalContent = { schemaVersion: 'test-case-library/v1', projectId: design.projectId, sourceRunId: runId, dataRequirementSet: { id: dataRequirementSet.id, version: dataRequirementSet.version, contentSha256: dataRequirementSet.contentSha256 }, members: orderedMembers }
@@ -1082,12 +1092,9 @@ function validateDesignSources(state: DatabaseState, projectVersion: ProjectVers
 }
 
 function explicitlyInheritedSourceVersion(state: DatabaseState, projectVersion: ProjectVersion) {
+  if (!projectVersion.inheritRequirementBindings) return undefined
   const source = projectVersion.sourceProjectVersionId ? state.projectVersions.find(item => item.id === projectVersion.sourceProjectVersionId && item.projectId === projectVersion.projectId) : undefined
-  if (!source) return undefined
-  const sourceBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === source.id)
-  if (!sourceBindings.length) return undefined
-  const targetBindings = new Set(state.projectVersionRequirementBindings.filter(item => item.projectVersionId === projectVersion.id).map(item => `${item.assetId}:${item.assetVersionId}`))
-  return sourceBindings.every(item => targetBindings.has(`${item.assetId}:${item.assetVersionId}`)) ? source : undefined
+  return source
 }
 
 function sourceVersionHasAssetVersion(state: DatabaseState, sourceProjectVersionId: string, assetVersionId: string) {
@@ -1097,6 +1104,10 @@ function sourceVersionHasAssetVersion(state: DatabaseState, sourceProjectVersion
 function inheritedLibraryVersionsForSource(aggregate: TestDesignState, sourceProjectVersionId: string) {
   const sourceRunIds = new Set(aggregate.runs.filter(run => run.projectVersionId === sourceProjectVersionId).map(run => run.id))
   return aggregate.libraryVersions.filter(item => Boolean(item.sourceRunId && sourceRunIds.has(item.sourceRunId)))
+}
+
+function latestPublishedLibraryVersion(versions: TestCaseLibraryVersion[]) {
+  return [...versions].sort((left, right) => right.version - left.version || right.publishedAt.localeCompare(left.publishedAt))[0]
 }
 
 function publishedRequirements(analysisRun: ReviewRun) {
@@ -1691,13 +1702,6 @@ function assertLibraryPublicationGates(aggregate: TestDesignState, projectId: st
     if (!testCase?.revisions.some(item => item.revision === member.revision)) throw new TestDesignError('LIBRARY_TEST_CASE_REVISION_CONFLICT', 'Execution Handoff 引用的正式用例 Revision 不存在', 409, { handoffId: handoff.id, caseId: member.caseId, revision: member.revision })
   }
 }
-function assertLibraryBaselineUnchanged(aggregate: TestDesignState, projectId: string, run: TestDesignWorkflowRun) {
-  const latest = aggregate.libraryVersions.filter(item => item.projectId === projectId).sort((left, right) => right.version - left.version)[0]
-  const unchanged = run.baseTestCaseLibraryVersionId
-    ? latest?.id === run.baseTestCaseLibraryVersionId && latest.contentSha256 === run.baseTestCaseLibraryVersionSha256
-    : !latest
-  if (!unchanged) throw new TestDesignError('TEST_CASE_LIBRARY_BASE_CHANGED', '正式用例库在本任务运行期间已经变化，请重新分析或基于最新版本重新创建任务。', 409, { expectedVersionId: run.baseTestCaseLibraryVersionId, expectedSha256: run.baseTestCaseLibraryVersionSha256, currentVersionId: latest?.id, currentSha256: latest?.contentSha256 })
-}
 function assertProposalSourcesCurrent(aggregate: TestDesignState, projectId: string, run: TestDesignWorkflowRun, baseline?: TestCaseLibraryVersion) {
   const baselineMembers = new Map((baseline?.members ?? []).map(item => [item.caseId, item]))
   for (const proposal of run.caseChangeProposals) {
@@ -1705,8 +1709,8 @@ function assertProposalSourcesCurrent(aggregate: TestDesignState, projectId: str
     const baselineMember = baselineMembers.get(proposal.sourceCaseId)
     if (!baselineMember || baselineMember.revision !== proposal.sourceRevision) throw new TestDesignError('CASE_CHANGE_PROPOSAL_SOURCE_STALE', 'Proposal 来源不再是运行冻结基线中的 Revision', 409, { proposalId: proposal.id, sourceCaseId: proposal.sourceCaseId, sourceRevision: proposal.sourceRevision })
     const source = aggregate.libraryCases.find(item => item.id === proposal.sourceCaseId && item.projectId === projectId)
-    if (!source || source.status !== 'active') throw new TestDesignError('CASE_CHANGE_PROPOSAL_SOURCE_STALE', 'Proposal 来源用例已被其他任务废弃或移除', 409, { proposalId: proposal.id, sourceCaseId: proposal.sourceCaseId })
-    if (source.currentRevision !== proposal.sourceRevision) throw new TestDesignError('LIBRARY_TEST_CASE_REVISION_CONFLICT', 'Proposal 来源正式用例 Revision 已变化，禁止旧 Proposal 覆盖较新 Revision', 409, { proposalId: proposal.id, sourceCaseId: source.id, expectedRevision: proposal.sourceRevision, currentRevision: source.currentRevision })
+    const revision = source?.revisions.find(item => item.revision === proposal.sourceRevision)
+    if (!source || !revision || revision.contentSha256 !== baselineMember.contentSha256 || canonicalSha256(revision.content) !== baselineMember.contentSha256) throw new TestDesignError('CASE_CHANGE_PROPOSAL_SOURCE_STALE', 'Proposal 来源冻结 Revision 不存在或内容已损坏', 409, { proposalId: proposal.id, sourceCaseId: proposal.sourceCaseId, sourceRevision: proposal.sourceRevision })
   }
 }
 function assertLibraryBaselineMembersCurrent(aggregate: TestDesignState, projectId: string, run: TestDesignWorkflowRun, baseline?: TestCaseLibraryVersion) {
@@ -1715,9 +1719,8 @@ function assertLibraryBaselineMembersCurrent(aggregate: TestDesignState, project
     if (correspondingProposal) continue
     const testCase = aggregate.libraryCases.find(item => item.id === member.caseId && item.projectId === projectId)
     if (!testCase) throw new TestDesignError('TEST_CASE_LIBRARY_BASE_MEMBER_CHANGED', '基线成员在任务运行期间被移除', 409, { caseId: member.caseId, revision: member.revision })
-    if (testCase.status === 'deprecated') throw new TestDesignError('TEST_CASE_LIBRARY_BASE_MEMBER_DEPRECATED', '基线成员在任务运行期间被并发废弃，禁止静默从新版本删除', 409, { caseId: member.caseId, revision: member.revision })
     const revision = testCase.revisions.find(item => item.revision === member.revision)
-    if (!revision || revision.contentSha256 !== member.contentSha256 || canonicalSha256(revision.content) !== member.contentSha256 || testCase.currentRevision !== member.revision) throw new TestDesignError('TEST_CASE_LIBRARY_BASE_MEMBER_CHANGED', '基线成员的当前 Revision 或内容 Hash 在任务运行期间发生变化', 409, { caseId: member.caseId, expectedRevision: member.revision, currentRevision: testCase.currentRevision, expectedSha256: member.contentSha256, actualSha256: revision?.contentSha256 })
+    if (!revision || revision.contentSha256 !== member.contentSha256 || canonicalSha256(revision.content) !== member.contentSha256) throw new TestDesignError('TEST_CASE_LIBRARY_BASE_MEMBER_CHANGED', 'Run 冻结的基线成员 Revision 不存在或内容 Hash 已损坏', 409, { caseId: member.caseId, expectedRevision: member.revision, expectedSha256: member.contentSha256, actualSha256: revision?.contentSha256 })
   }
 }
 function buildLegacyMigrationPreview(aggregate: TestDesignState, projectId: string, legacyTestCaseSetVersionId: string) {
@@ -1787,7 +1790,7 @@ function applyProposalToLibrary(aggregate: TestDesignState, projectId: string, r
   if (candidate && candidate.reviewState !== 'approved') throw new TestDesignError('TEST_CASE_REVIEW_REQUIRED', `Proposal 候选用例 ${candidate.id} 未批准`, 409)
   if (proposal.decision === 'reference' || proposal.decision === 'rejected') return
   if (proposal.decision === 'keep_original') { if (source && sourceRevision) members.set(source.id, { caseId: source.id, revision: sourceRevision.revision, ordinal: 0, contentSha256: sourceRevision.contentSha256 }); return }
-  if (proposal.operation === 'reuse') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '复用来源用例不存在'); const revision = required(sourceRevision, 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '复用来源 Revision 不存在'); if (testCase.status !== 'active') throw new TestDesignError('LIBRARY_TEST_CASE_DEPRECATED', '废弃用例不能直接复用', 409); members.set(testCase.id, { caseId: testCase.id, revision: revision.revision, ordinal: 0, contentSha256: revision.contentSha256 }); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = revision.revision; return }
+  if (proposal.operation === 'reuse') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '复用来源用例不存在'); const revision = required(sourceRevision, 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '复用来源 Revision 不存在'); members.set(testCase.id, { caseId: testCase.id, revision: revision.revision, ordinal: 0, contentSha256: revision.contentSha256 }); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = revision.revision; return }
   if (proposal.operation === 'update') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '修改来源用例不存在'); const content = required(candidateRevision?.content, 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', '修改 Proposal 缺少候选内容'); const revision = createLibraryRevision(testCase.currentRevision + 1, content, actorId, proposal.reason, run.id, proposal.id, traceabilityForProposal(run, proposal, content)); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; testCase.status = 'active'; testCase.updatedAt = revision.createdAt; members.set(testCase.id, { caseId: testCase.id, revision: revision.revision, ordinal: 0, contentSha256: revision.contentSha256 }); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = revision.revision; return }
   if (proposal.operation === 'create') { const content = required(candidateRevision?.content, 'CASE_CHANGE_PROPOSAL_CANDIDATE_INVALID', '新增 Proposal 缺少候选内容'); const createdAt = now(); const revision = createLibraryRevision(1, content, actorId, proposal.reason, run.id, proposal.id, traceabilityForProposal(run, proposal, content)); const testCase: LibraryTestCase = { id: `library_test_case_${randomUUID()}`, projectId, currentRevision: 1, status: 'active', createdAt, updatedAt: createdAt, revisions: [revision] }; aggregate.libraryCases.push(testCase); members.set(testCase.id, { caseId: testCase.id, revision: 1, ordinal: 0, contentSha256: revision.contentSha256 }); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = 1; return }
   if (proposal.operation === 'deprecate' && proposal.decision === 'deprecated') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '废弃来源用例不存在'); testCase.status = 'deprecated'; testCase.updatedAt = now(); members.delete(testCase.id); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = testCase.currentRevision }

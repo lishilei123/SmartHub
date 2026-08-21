@@ -26,6 +26,8 @@ test('项目版本隔离需求绑定且新版本只按显式选择继承绑定',
   assert.equal((await service.bindings(first.id)).length, 1)
   assert.equal((await service.bindings(blank.id)).length, 0)
   assert.deepEqual((await service.bindings(inherited.id)).map(item => item.assetVersionId), ['asset-version-1'])
+  assert.equal(blank.inheritRequirementBindings, false)
+  assert.equal(inherited.inheritRequirementBindings, true)
 })
 
 test('锁定和归档版本拒绝新增或替换需求绑定', async () => {
@@ -48,6 +50,7 @@ test('open 版本可独立移除继承得到的需求绑定', async () => {
   await service.unbindRequirement(child.id, childBinding.id)
   assert.equal((await service.bindings(child.id)).length, 0)
   assert.equal((await service.bindings(source.id)).length, 1)
+  assert.equal((await service.list()).find(item => item.id === child.id)?.inheritRequirementBindings, true)
 })
 
 test('删除版本同时删除需求绑定并保护仍被继承的来源版本', async () => {

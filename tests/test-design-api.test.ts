@@ -32,10 +32,10 @@ test('测试设计聚合输入路由只计算一次完整候选数据', async ()
   assert.equal(handled, true); assert.equal(calls, 1); assert.deepEqual(JSON.parse(body), candidates)
 })
 
-test('启动 TestDesign Run 携带服务端要求的幂等键', async () => {
+test('启动 TestDesign Run 使用一次用户操作的 clientRequestId 作为幂等键', async () => {
   const originalFetch = globalThis.fetch; let idempotencyKey = ''
   globalThis.fetch = async (_input, init) => { idempotencyKey = new Headers(init?.headers).get('idempotency-key') ?? ''; return Response.json({ id: 'run-1', status: 'queued' }) }
-  try { const run = await createRun('pv-1', 'design-1'); assert.equal(run.id, 'run-1'); assert.match(idempotencyKey, /^test-design-design-1-[0-9a-f-]{36}$/u) } finally { globalThis.fetch = originalFetch }
+  try { const run = await createRun('pv-1', 'design-1', 'request-1'); assert.equal(run.id, 'run-1'); assert.equal(idempotencyKey, 'test-design-run:design-1:request-1') } finally { globalThis.fetch = originalFetch }
 })
 
 test('测试设计不再暴露 RequirementCoverage API', () => {

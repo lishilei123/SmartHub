@@ -28,7 +28,7 @@ export class ProjectVersionService {
       if (state.projectVersions.some(item => item.projectId === project.id && item.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('版本名称已存在')
       const source = input.sourceProjectVersionId ? required(state.projectVersions.find(item => item.id === input.sourceProjectVersionId && item.projectId === project.id), '来源版本不存在') : undefined
       const createdAt = now()
-      const version = { id: id('pv'), projectId: project.id, name, description: input.description?.trim() || undefined, status: 'open' as const, sourceProjectVersionId: source?.id, createdAt, updatedAt: createdAt }
+      const version = { id: id('pv'), projectId: project.id, name, description: input.description?.trim() || undefined, status: 'open' as const, sourceProjectVersionId: source?.id, inheritRequirementBindings: Boolean(source && input.inheritRequirementBindings), createdAt, updatedAt: createdAt }
       state.projectVersions.push(version)
       if (source && input.inheritRequirementBindings) {
         for (const binding of state.projectVersionRequirementBindings.filter(item => item.projectVersionId === source.id)) {

@@ -22,8 +22,9 @@ export const loadInputs = (projectVersionId: string) => request<TestDesignInputC
 export const loadDesigns = (projectVersionId: string) => request<{ items: TestDesign[] }>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs`)
 export const loadDesign = (projectVersionId: string, designId: string) => request<TestDesign>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs/${encodeURIComponent(designId)}`)
 export const loadRun = (projectVersionId: string, designId: string, runId: string) => request<TestDesignWorkflowRun>(runScope(projectVersionId, designId, runId))
+export const loadRuns = (projectVersionId: string, designId: string) => request<{ items: import('./types').TestDesignRunSummary[] }>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs/${encodeURIComponent(designId)}/runs`)
 export const createDesign = (projectVersionId: string, input: CreateTestDesignInput) => request<TestDesign>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs`, { method: 'POST', body: JSON.stringify(input) })
-export const createRun = (projectVersionId: string, designId: string) => request<TestDesignWorkflowRun>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs/${encodeURIComponent(designId)}/runs`, { method: 'POST', headers: { 'idempotency-key': `test-design-${designId}-${crypto.randomUUID()}` } })
+export const createRun = (projectVersionId: string, designId: string, clientRequestId = crypto.randomUUID()) => request<TestDesignWorkflowRun>(`/project-versions/${encodeURIComponent(projectVersionId)}/test-designs/${encodeURIComponent(designId)}/runs`, { method: 'POST', headers: { 'idempotency-key': `test-design-run:${designId}:${clientRequestId}` } })
 export const cancelRun = (projectVersionId: string, designId: string, runId: string) => request<TestDesignWorkflowRun>(`${runScope(projectVersionId, designId, runId)}/cancel`, { method: 'POST' })
 export const resynthesizeCases = (projectVersionId: string, designId: string, runId: string) => request<TestDesignWorkflowRun>(`${runScope(projectVersionId, designId, runId)}/actions/resynthesize`, { method: 'POST' })
 

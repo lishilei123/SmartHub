@@ -14,6 +14,7 @@ export type ProjectVersion = {
   description?: string
   status: ProjectVersionStatus
   sourceProjectVersionId?: string
+  inheritRequirementBindings: boolean
   requirementReleaseBinding?: RequirementReleaseBinding
   requirementReleaseBindings?: RequirementReleaseBinding[]
   activeRequirementReleaseId?: string
