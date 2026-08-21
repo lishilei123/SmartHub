@@ -142,7 +142,10 @@ export class PiTestDesignRuntimeAdapter implements PlanningAgentRuntime {
           initialTask: task,
           validateCandidate: async candidate => validateStageCandidate(stage, candidate, input.run),
         },
-        onEvent: event => { events.push(event) },
+        onEvent: async event => {
+          events.push(event)
+          await input.onExecutionEvent?.(event)
+        },
       }, signal)
       return {
         schemaVersion: binding.schemaVersion,

@@ -1,4 +1,4 @@
-import { Activity, Bot, CheckCircle2, Circle, Clock3, Database, LockKeyhole, RefreshCw, Server, ShieldCheck, Wrench } from 'lucide-react'
+import { Bot, CheckCircle2, Database, LockKeyhole, RefreshCw, Server, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { PlanningContextMetrics, PlanningSubAgentRuns } from '../PlanningObservability'
 import {
@@ -6,7 +6,7 @@ import {
   type PlanningReviewerType,
   type TestDesignReviewerSourceSelection,
 } from '../planning-api'
-import type { AgentEvent, TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './types'
+import type { TestDesign, TestDesignNodeRun, TestDesignWorkflowRun } from './types'
 
 const flow = [
   { key: 'test_case_design', label: '用例生成', owner: 'PlanningAgent' },
@@ -27,7 +27,6 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
   }, [run?.id])
   if (!run) return <section className="td2-card td2-empty"><Bot /><h2>{design.name}</h2><p>这个测试设计还没有运行。启动时将冻结当前绑定的 Requirement Release 与 Workspace。</p><button className="td2-button primary" onClick={onStartRun}>启动 TestDesign Run</button></section>
   const executions = run.nodeRuns.filter(node => node.execution).flatMap(node => node.execution ? [{ node, execution: node.execution }] : [])
-  const events = executions.flatMap(item => item.execution.events.map(event => ({ ...event, stage: item.node.nodeKey }))).sort((left, right) => right.sequence - left.sequence).slice(0, 80)
   const context = executions.map(item => item.execution.context).filter(Boolean).at(-1)
   const selectedCases = run.testCases.filter(item => !item.tombstonedAt).flatMap(item => {
     const revision = Number(caseRevisions[item.id])
@@ -73,7 +72,6 @@ export function TestDesignRunPanel({ design, run, busy, onRefresh, onStartRun }:
       <PlanningSubAgentRuns runs={run.planningSubAgentRuns} />
       {run.error && <div className="td2-error"><b>{run.errorCode ?? '运行失败'}</b><span>{run.error}</span></div>}
     </div>
-    <aside className="td2-card td2-trace"><header><div><Activity /><span><b>Pi Agent 实时轨迹</b><small>{executions.length} 次 Stage 执行 · {events.length} 条最近事件</small></span></div></header><div className="td2-trace-list">{events.length ? events.map(event => <article key={`${event.stage}-${event.sequence}-${event.toolCallId ?? ''}`} className={event.isError ? 'error' : ''}><i>{event.toolId ? <Wrench /> : event.type.includes('model') ? <Bot /> : <Circle />}</i><div><b>{skillReadLabel(event) ?? event.toolId ?? event.type}</b><small>{stageLabel(event.stage)} · Turn {event.turn ?? '—'} · {formatTime(event.occurredAt)}</small>{event.content && !event.skillKey && <p>{truncate(event.content, 220)}</p>}</div></article>) : <div className="td2-empty-compact"><Clock3 /><span>等待 PlanningAgent 运行事件</span></div>}</div></aside>
   </section>
 }
 
@@ -85,10 +83,3 @@ function FlowStep({ node, label, owner, repairState, runStatus }: { node?: TestD
 }
 
 function Snapshot({ icon, title, primary, secondary, hash }: { icon: React.ReactNode; title: string; primary: string; secondary: string; hash: string }) { return <article><i>{icon}</i><div><small>{title}</small><b>{primary}</b><span>{secondary}</span><code>{hash}</code></div></article> }
-function stageLabel(value: string) { return flow.find(item => item.key === value)?.label ?? value }
-function skillReadLabel(event: AgentEvent) {
-  if (!event.skillKey) return undefined
-  return `${event.type === 'skill_read_replayed' ? 'Skill 缓存重放' : 'Skill 已读取'}：${event.skillKey}${event.version ? ` · v${event.version}` : ''}`
-}
-function formatTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }
-function truncate(value: string, length: number) { return value.length > length ? `${value.slice(0, length)}…` : value }

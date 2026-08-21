@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import JSZip from 'jszip'
 import type { Principal } from '../domain/access-control.js'
+import type { AgentExecutionEvent } from '../domain/agent-types.js'
 import type { DatabaseState, ReviewRun } from '../domain/types.js'
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type {
@@ -25,6 +26,7 @@ export interface PlanningAgentRuntime {
     stage: 'test_case_design' | 'test_design_repair'
     run: TestDesignWorkflowRun
     upstream: unknown
+    onExecutionEvent?: (event: AgentExecutionEvent) => void | Promise<void>
   }, signal: AbortSignal): Promise<{ schemaVersion: string; content: unknown; execution?: WorkflowNodeRun['execution'] }>
 }
 type WorkspaceArtifactIngestInput = { knowledgeBaseId: string; sourceType: 'upload'; sourceKey: string; assetType: string; displayName: string; logicalPath: string; content: string; taskTrigger?: 'upload' | 'retry' }
@@ -246,7 +248,16 @@ export class TestDesignService {
       })
       const running = await this.loadRun(runId)
       const upstream = key === 'test_case_design' ? caseDesignInput(running) : repairInput(running)
-      const output = await this.runtime.execute({ stage: key, run: running, upstream }, signal)
+      const events: AgentExecutionEvent[] = []
+      const output = await this.runtime.execute({
+        stage: key,
+        run: running,
+        upstream,
+        onExecutionEvent: async event => {
+          events.push(event)
+          if (shouldCheckpointTestDesignExecution(event)) await this.saveNodeExecutionProgress(runId, nodeRunId, key, events, lease)
+        },
+      }, signal)
       const result = await this.fencedNodeTransaction(nodeRunId, lease, state => {
         const run = findRunById(state, runId)
         const target = required(run.nodeRuns.find(item => item.id === nodeRunId && item.nodeKey === key), 'WORKFLOW_NODE_NOT_FOUND', '节点已被新 generation 替换')
@@ -672,7 +683,28 @@ export class TestDesignService {
 
   private async executeNode(runId: string, key: 'test_case_design' | 'test_design_repair', signal: AbortSignal, upstream: unknown) {
     await this.store.transaction(state => { const run = findRunById(state, runId); const target = node(run, key); Object.assign(target, { status: 'running', attempt: target.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined, execution: undefined }); Object.assign(run, { status: 'running', stage: key, startedAt: run.startedAt ?? now(), finishedAt: undefined, error: undefined, errorCode: undefined }); if (key === 'test_design_repair' && run.automaticRepair?.status === 'queued') Object.assign(run.automaticRepair, { status: 'running', startedAt: now(), finishedAt: undefined }) })
-    const run = await this.loadRun(runId); return this.runtime!.execute({ stage: key, run, upstream }, signal)
+    const run = await this.loadRun(runId)
+    const nodeRunId = node(run, key).id
+    const events: AgentExecutionEvent[] = []
+    return this.runtime!.execute({
+      stage: key,
+      run,
+      upstream,
+      onExecutionEvent: async event => {
+        events.push(event)
+        if (shouldCheckpointTestDesignExecution(event)) await this.saveNodeExecutionProgress(runId, nodeRunId, key, events)
+      },
+    }, signal)
+  }
+  private async saveNodeExecutionProgress(runId: string, nodeRunId: string, key: 'test_case_design' | 'test_design_repair', events: AgentExecutionEvent[], lease?: TaskLease) {
+    const persist = (state: DatabaseState) => {
+      const run = readDesignState(state).runs.find(item => item.id === runId)
+      const target = run?.nodeRuns.find(item => item.id === nodeRunId && item.nodeKey === key)
+      if (!run || !target || target.status !== 'running') return
+      target.execution = testDesignExecutionProgress(run, key, events)
+    }
+    if (lease) await this.fencedNodeTransaction(nodeRunId, lease, persist)
+    else await this.store.transaction(persist)
   }
   private startLocally(runId: string) { if (this.activeRuns.has(runId)) return; const controller = new AbortController(); this.activeRuns.set(runId, controller); void this.processPreparedRun(runId, controller.signal).catch(() => undefined).finally(() => this.activeRuns.delete(runId)) }
   private async schedule(runId: string) { if (!this.store.enqueueTestDesignJob) { this.startLocally(runId); return } const run = await this.loadRun(runId); const targets = run.nodeRuns.filter(item => item.status === 'queued'); await Promise.all(targets.map(async target => { const createdAt = now(); await this.store.enqueueTestDesignJob!({ id: `workflow_job_${randomUUID()}`, runId, nodeRunId: target.id, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: createdAt, createdAt, updatedAt: createdAt }) })) }
@@ -1527,6 +1559,22 @@ function assertMethodSubset(run: TestDesignWorkflowRun, caseId: string, methods:
 function publishArtifact(run: TestDesignWorkflowRun, key: TestDesignNodeKey, output: { schemaVersion: string; content: unknown }) { const target = node(run, key); const artifactValue: WorkflowArtifact = { id: `workflow_artifact_${randomUUID()}`, nodeKey: key, schemaVersion: output.schemaVersion, generation: target.generation, content: structuredClone(output.content), contentSha256: canonicalSha256(output.content), createdAt: now() }; run.artifacts.push(artifactValue); target.outputArtifactId = artifactValue.id }
 function finishNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey, execution?: WorkflowNodeRun['execution']) { const target = node(run, key); Object.assign(target, { status: 'succeeded', finishedAt: now(), ...(execution ? { execution } : {}) }) }
 function failNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey, error: unknown) { const target = node(run, key); const message = error instanceof Error ? error.message : String(error); const execution = error && typeof error === 'object' && 'execution' in error ? (error as { execution?: WorkflowNodeRun['execution'] }).execution : undefined; Object.assign(target, { status: 'failed', finishedAt: now(), error: message, errorCode: errorCode(message), ...(execution ? { execution } : {}) }) }
+function shouldCheckpointTestDesignExecution(event: AgentExecutionEvent) { return ['tool_execution_end', 'turn_end', 'agent_end', 'result_submission_required', 'result_submission_retry', 'input_package_built', 'input_batch_delivered'].includes(event.type) }
+function testDesignExecutionProgress(run: TestDesignWorkflowRun, stage: 'test_case_design' | 'test_design_repair', events: AgentExecutionEvent[]): WorkflowNodeRun['execution'] {
+  const framework = events.find(event => event.framework)?.framework
+  return {
+    agentKey: 'planning',
+    workflowStage: stage,
+    agentVersion: run.agentConfigurationSnapshot.agentDefinition.version,
+    modelLabel: run.agentConfigurationSnapshot.primaryModel.modelName,
+    degraded: false,
+    turns: events.reduce((maximum, event) => Math.max(maximum, event.turn ?? 0), 0),
+    toolCalls: events.filter(event => event.type === 'tool_execution_start').length,
+    toolErrors: events.filter(event => event.type === 'tool_execution_end' && event.isError).length,
+    ...(framework ? { framework } : {}),
+    events: structuredClone(events),
+  }
+}
 function queueNode(run: TestDesignWorkflowRun, key: TestDesignNodeKey) { const target = node(run, key); Object.assign(target, { status: 'queued', error: undefined, errorCode: undefined }) }
 function advanceNodeGeneration(run: TestDesignWorkflowRun, target: WorkflowNodeRun, status: WorkflowNodeRun['status']) { target.generation += 1; target.attempt = 0; target.id = `${run.id}:${target.nodeKey}:g${target.generation}:a0`; target.status = status; target.outputArtifactId = undefined; target.startedAt = undefined; target.finishedAt = undefined; target.error = undefined; target.errorCode = undefined; target.execution = undefined }
 function node(run: TestDesignWorkflowRun, key: TestDesignNodeKey) { return required(run.nodeRuns.find(item => item.nodeKey === key), 'WORKFLOW_NODE_NOT_FOUND', `${key} 节点不存在`) }

@@ -3,6 +3,7 @@ import * as api from '../api'
 import type { CaseChangeDecision, CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignWorkflowRun, TestExecutionMethod, TestSuiteDraft } from '../types'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
+const LIVE_RUN_REFRESH_MS = 1_000
 
 export function useTestDesign(projectVersionId: string | undefined, notify: Notify) {
   const [inputs, setInputs] = useState<TestDesignInputCandidates | null>(null)
@@ -51,7 +52,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   useEffect(() => { setInputs(null); setDesigns([]); setDesign(null); setRun(null); setLibraryCases([]); setLibraryVersions([]); setSuiteDrafts([]); setSuiteVersions([]); setHandoffs([]); if (projectVersionId) void loadCollection().catch(cause => setError(cause instanceof Error ? cause.message : String(cause))) }, [projectVersionId, loadCollection])
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.status)) return
-    const timer = window.setInterval(() => { void refreshRun().catch(cause => setError(cause instanceof Error ? cause.message : String(cause))) }, 1800)
+    const timer = window.setInterval(() => { void refreshRun().catch(cause => setError(cause instanceof Error ? cause.message : String(cause))) }, LIVE_RUN_REFRESH_MS)
     return () => window.clearInterval(timer)
   }, [run, refreshRun])
 

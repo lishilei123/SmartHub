@@ -528,12 +528,14 @@ function testDesignTone(status?: string) {
 }
 
 function TestDesignConversationEntry({ linkage, run, error }: { linkage: { designId: string; runId: string }; run?: TestDesignWorkflowRun; error: string }) {
+  const startedNodes = run?.nodeRuns.filter(node => node.status !== 'pending' || node.startedAt || node.finishedAt || node.execution) ?? []
   return <section className="rav2-test-design-conversation">
     <article className="rav2-agent-task"><span><TestTube2 /></span><div><b>自动测试设计</b><p>Requirement Release 已冻结；PlanningAgent 继续在同一 Planning Session 生成测试用例并校验覆盖。</p><small>{linkage.runId} · TestDesign {linkage.designId}</small></div><Badge tone={testDesignTone(run?.status)}>{run ? run.status === 'succeeded' ? '已完成' : run.status === 'failed' ? '失败' : run.status === 'cancelled' ? '已取消' : '执行中' : '正在读取'}</Badge></article>
     {error ? <article className="rav2-run-control failed"><AlertTriangle /><span><b>测试设计运行读取失败</b><small>{error}</small></span></article> : !run ? <div className="rav2-agent-waiting"><LoaderCircle className="rotating" /><span><b>正在读取测试设计运行</b><small>测试用例和覆盖审计轨迹将同步到当前协作会话。</small></span></div> : <>
       <div className="rav2-agent-metrics"><span>{run.progress}% 进度</span><span>{run.nodeRuns.filter(node => node.status === 'succeeded').length}/{run.nodeRuns.length} 阶段完成</span>{run.error ? <span className="failed">{run.errorCode ?? 'TEST_DESIGN_RUN_FAILED'}</span> : null}</div>
       {run.error && <article className="rav2-run-control failed"><AlertTriangle /><span><b>测试设计已停止</b><small>{run.error}</small></span></article>}
-      {run.nodeRuns.map(node => <TestDesignNodeConversationEntry key={node.id} node={node} />)}
+      {startedNodes.map(node => <TestDesignNodeConversationEntry key={node.id} node={node} />)}
+      {!startedNodes.length && <div className="rav2-agent-waiting"><LoaderCircle className="rotating" /><span><b>等待测试设计首条运行记录</b><small>阶段实际启动后，会按发生顺序追加到当前协作会话。</small></span></div>}
     </>}
   </section>
 }
@@ -589,5 +591,15 @@ function TestDesignNodeConversationEntry({ node }: { node: TestDesignNodeRun }) 
   const toolStarts = new Map(events.filter(event => event.type === 'tool_execution_start' && event.toolCallId).map(event => [event.toolCallId!, event]))
   const completedCalls = new Set(events.filter(event => event.type === 'tool_execution_end' && event.toolCallId).map(event => event.toolCallId))
   const visibleEvents = events.filter(event => !(event.type === 'tool_execution_start' && completedCalls.has(event.toolCallId)))
-  return <div className="rav2-execution-attempt"><article className={`rav2-run-control ${node.status === 'failed' || node.status === 'cancelled' ? 'failed' : ''}`}><Activity /><span><b>{testDesignStageLabels[node.nodeKey]} · 第 {node.attempt} 次</b><small>{node.status === 'succeeded' ? '已完成' : node.status === 'failed' ? '失败，已保留运行记录' : node.status === 'running' ? '执行中' : '等待上游阶段'} · {events.length} 条事件</small></span><Badge tone={testDesignTone(node.status)}>{node.status}</Badge></article>{node.error && <article className="rav2-run-control failed"><AlertTriangle /><span><b>{node.errorCode ?? 'TEST_DESIGN_STAGE_FAILED'}</b><small>{node.error}</small></span></article>}{visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={`${node.id}:${event.sequence}`} />)}</div>
+  const terminal = node.status === 'succeeded' || node.status === 'failed' || node.status === 'cancelled'
+  const startTime = node.startedAt ? ` · ${eventTime(node.startedAt)}` : ''
+  const finishTime = node.finishedAt ? ` · ${eventTime(node.finishedAt)}` : ''
+  const startDetail = events.length ? `已写入 ${events.length} 条 Agent 事件` : node.status === 'running' ? '正在等待首个 Agent 事件' : node.nodeKey === 'coverage_audit' ? '服务端确定性 Coverage 检查已启动' : '阶段已启动'
+  const completionLabel = node.status === 'succeeded' ? '已完成' : node.status === 'failed' ? '失败，已保留运行记录' : '已取消，已保留运行记录'
+  return <>
+    <article className="rav2-run-control"><Activity /><span><b>{testDesignStageLabels[node.nodeKey]} · 第 {node.attempt} 次已启动</b><small>{startDetail}{startTime}</small></span><Badge tone="blue">已启动</Badge></article>
+    {visibleEvents.map(event => <AgentRunEvent event={event} start={event.type === 'tool_execution_end' ? toolStarts.get(event.toolCallId ?? '') : undefined} key={`${node.id}:${event.sequence}`} />)}
+    {terminal && <article className={`rav2-run-control ${node.status === 'failed' || node.status === 'cancelled' ? 'failed' : ''}`}><Activity /><span><b>{testDesignStageLabels[node.nodeKey]} · 第 {node.attempt} 次{completionLabel}</b><small>{node.nodeKey === 'coverage_audit' && node.status === 'succeeded' ? '服务端 Coverage Audit 已写入正式结果' : completionLabel}{finishTime}</small></span><Badge tone={testDesignTone(node.status)}>{node.status}</Badge></article>}
+    {node.error && <article className="rav2-run-control failed"><AlertTriangle /><span><b>{node.errorCode ?? 'TEST_DESIGN_STAGE_FAILED'}</b><small>{node.error}</small></span></article>}
+  </>
 }

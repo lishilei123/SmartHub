@@ -79,7 +79,7 @@
 .td2-agent-ready span { display:flex; flex-direction:column; }
 .td2-agent-ready small { color:var(--td2-muted); }
 .td2-blockers { margin:10px 0 0; color:#a55a12; font-size:12px; }
-.td2-run-grid { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(310px,.75fr); gap:16px; min-width:0; }
+.td2-run-grid { display:grid; grid-template-columns:minmax(0,1fr); min-width:0; }
 .td2-run-main { padding:20px; }
 .td2-section-head { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; }
 .td2-section-head h2 { margin:0; font-size:21px; }
@@ -108,20 +108,6 @@
 .td2-snapshot-grid small, .td2-snapshot-grid span { overflow:hidden; color:var(--td2-muted); text-overflow:ellipsis; white-space:nowrap; }
 .td2-snapshot-grid b, .td2-snapshot-grid code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .td2-snapshot-grid code { color:#8b94a5; font-size:10px; }
-.td2-trace { display:flex; flex-direction:column; min-height:420px; overflow:hidden; }
-.td2-trace>header { padding:15px; border-bottom:1px solid var(--td2-line); }
-.td2-trace>header>div { display:flex; align-items:center; gap:9px; }
-.td2-trace>header svg { width:18px; color:var(--td2-blue); }
-.td2-trace>header span { display:flex; flex-direction:column; }
-.td2-trace>header small { color:var(--td2-muted); }
-.td2-trace-list { max-height:590px; overflow:auto; }
-.td2-trace-list article { display:flex; gap:9px; padding:11px 14px; border-bottom:1px solid #eef1f5; }
-.td2-trace-list article.error { background:#fff5f5; }
-.td2-trace-list i { color:#77839a; }
-.td2-trace-list i svg { width:15px; }
-.td2-trace-list article div { display:flex; flex-direction:column; min-width:0; }
-.td2-trace-list small { color:var(--td2-muted); }
-.td2-trace-list p { margin:4px 0 0; overflow-wrap:anywhere; color:#4d586d; font-size:11px; }
 .td2-review, .td2-cases, .td2-audit, .td2-handoff { padding:20px; }
 .td2-approved { display:flex; align-items:center; gap:10px; margin:15px 0; padding:12px; border:1px solid #c8e8d9; border-radius:10px; color:#176b4a; background:#effaf5; }
 .td2-approved div { display:flex; flex-direction:column; min-width:0; }
@@ -279,7 +265,7 @@
 .td2-projection-files { margin-top:10px; border:1px solid var(--td2-line); border-radius:10px; overflow:hidden; }.td2-projection-files>b{display:block;padding:10px;background:#f6f7fa}.td2-projection-files article{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(120px,.5fr);align-items:center;gap:9px;padding:10px;border-top:1px solid var(--td2-line)}.td2-projection-files article>svg{width:16px;color:#176b4a}.td2-projection-files article span{display:flex;flex-direction:column;min-width:0}.td2-projection-files code{overflow:hidden;text-overflow:ellipsis}.td2-projection-files small{color:var(--td2-muted)}
 .td2-handoff-form { display:grid; grid-template-columns:1fr 1fr 1fr auto; align-items:end; gap:10px; margin-top:14px; padding:14px; border:1px solid var(--td2-line); border-radius:11px; }.td2-handoff-form>div>b{display:block;margin-bottom:7px}.td2-segments{display:flex;gap:5px}.td2-segments button{flex:1}
 .td2-handoff-list { margin-top:15px; }.td2-handoff-list h3{margin:0 0 8px}.td2-handoff-list article{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:11px;border:1px solid var(--td2-line);border-radius:9px}.td2-handoff-list article+article{margin-top:6px}.td2-handoff-list article>svg{width:18px;color:var(--td2-blue)}.td2-handoff-list article div{display:flex;flex-direction:column;min-width:0}.td2-handoff-list small{color:var(--td2-muted)}.td2-handoff-list code{overflow:hidden;text-overflow:ellipsis}
-@media (max-width:1150px) { .td2-run-grid{grid-template-columns:1fr}.td2-trace{min-height:300px}.td2-snapshot-grid{grid-template-columns:1fr}.td2-handoff-form{grid-template-columns:1fr 1fr}.td2-handoff-form>.td2-button{grid-column:1/-1}.td2-design-list{grid-template-columns:1fr} }
+@media (max-width:1150px) { .td2-snapshot-grid{grid-template-columns:1fr}.td2-handoff-form{grid-template-columns:1fr 1fr}.td2-handoff-form>.td2-button{grid-column:1/-1}.td2-design-list{grid-template-columns:1fr} }
 @media (max-width:760px) { .td2-shell{padding:12px}.td2-topbar{flex-wrap:wrap}.td2-bound-release{order:3;width:100%;margin-left:0}.td2-collection-head,.td2-section-head,.td2-choice-row,.td2-create>header,.td2-create>footer{align-items:stretch;flex-direction:column}.td2-form-grid,.td2-optional>div,.td2-blocker-groups,.td2-case-detail,.td2-editor-grid{grid-template-columns:1fr}.td2-case-detail>section,.td2-case-detail>footer,.td2-case-actions,.td2-form-grid label.wide,.td2-editor-grid>.wide{grid-column:1}.td2-flow{grid-template-columns:repeat(5,155px)}.td2-case-toolbar{align-items:stretch;flex-direction:column}.td2-case-toolbar .td2-run-actions{justify-content:flex-start}.td2-case-toolbar .td2-run-actions .td2-button{flex:1 1 auto}.td2-case-summary{grid-template-columns:auto minmax(0,1fr) auto}.td2-methods{display:none!important}.td2-tree-list>article{grid-template-columns:auto auto minmax(0,1fr);padding-left:12px}.td2-row-actions{grid-column:3}.td2-case-stats{overflow-x:auto}.td2-publish-box,.td2-published-set,.td2-handoff-form{grid-template-columns:1fr}.td2-downloads{flex-wrap:wrap}.td2-projection-files article{grid-template-columns:auto minmax(0,1fr)}.td2-projection-files article>code{grid-column:2}.td2-decisions article{grid-template-columns:auto minmax(0,1fr)}.td2-decisions article>.td2-button{grid-column:2}.td2-design-list>button{grid-template-columns:auto minmax(0,1fr) auto}.td2-progress-ring{display:none}.td2-dialog-backdrop{padding:8px}.td2-dialog{max-height:calc(100dvh - 16px)}.td2-point-picker{grid-template-columns:1fr}.td2-step-editor>div{grid-template-columns:1fr}.td2-step-editor>div>button{justify-self:end}.td2-case-actions .td2-button{width:100%} }
 @media (max-width:760px) { .td2-audit-state{grid-template-columns:auto minmax(0,1fr)}.td2-audit-state>span{grid-column:2;justify-self:start}.td2-audit-metrics,.td2-audit-category-grid{grid-template-columns:1fr}.td2-audit-category.execution_handoff{grid-column:1}.td2-audit-provenance span{grid-template-columns:1fr}.td2-audit-snapshot>header{align-items:flex-start;flex-direction:column}.td2-audit-snapshot header>span{align-self:flex-start} }
 
