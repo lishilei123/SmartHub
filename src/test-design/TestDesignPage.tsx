@@ -24,13 +24,14 @@ const designTabs: Array<{ key: DesignTab; label: string; icon: typeof ClipboardL
 
 export function TestDesignPage({ projectVersion, onManageVersions, notify, embedded = false, linkedDesignId, linkedRunId, initialCreate = false }: { projectVersion: ProjectVersion | null; onManageVersions: () => void; notify: Notify; embedded?: boolean; linkedDesignId?: string; linkedRunId?: string; initialCreate?: boolean }) {
   const routedEntry = new URL(window.location.href).searchParams.get('testDesignEntry')
-  const model = useTestDesign(projectVersion?.id, notify); const [entry, setEntry] = useState<Entry>(routedEntry === 'library' ? 'library' : 'designs'); const [tab, setTab] = useState<DesignTab>('details'); const [creating, setCreating] = useState(initialCreate); const autoOpeningId = useRef(''); const linkedOpeningId = useRef('')
+  const model = useTestDesign(projectVersion?.id, notify); const [entry, setEntry] = useState<Entry>(routedEntry === 'library' ? 'library' : 'designs'); const [tab, setTab] = useState<DesignTab>('details'); const [creating, setCreating] = useState(initialCreate); const autoOpeningId = useRef(''); const linkedOpeningId = useRef(''); const linkedOpenedTargetId = useRef('')
   const linkedTargetId = linkedDesignId && linkedRunId ? `${linkedDesignId}:${linkedRunId}` : ''
   useEffect(() => {
-    if (!linkedDesignId || !linkedRunId || (model.design?.id === linkedDesignId && model.run?.id === linkedRunId) || linkedOpeningId.current === linkedTargetId) return
+    if (!linkedDesignId || !linkedRunId) { linkedOpenedTargetId.current = ''; return }
+    if (linkedOpenedTargetId.current === linkedTargetId || linkedOpeningId.current === linkedTargetId) return
     linkedOpeningId.current = linkedTargetId
-    void model.openLinkedRun(linkedDesignId, linkedRunId).catch(() => undefined).finally(() => { linkedOpeningId.current = '' })
-  }, [linkedDesignId, linkedRunId, linkedTargetId, model.design?.id, model.run?.id, model.openLinkedRun])
+    void model.openLinkedRun(linkedDesignId, linkedRunId).then(() => { linkedOpenedTargetId.current = linkedTargetId }).catch(() => undefined).finally(() => { linkedOpeningId.current = '' })
+  }, [linkedDesignId, linkedRunId, linkedTargetId, model.openLinkedRun])
   useEffect(() => { const candidate = model.designs[0]; if (embedded || linkedTargetId || !candidate || model.design || creating || autoOpeningId.current === candidate.id) return; autoOpeningId.current = candidate.id; void model.openDesign(candidate).finally(() => { autoOpeningId.current = '' }) }, [creating, embedded, linkedTargetId, model.design, model.designs[0]?.id])
   if (!projectVersion) return <main className="td2-shell"><section className="td2-card td2-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>测试设计的 Requirement Release、Workspace 与正式产物都按项目版本隔离。</p><button className="td2-button primary" onClick={onManageVersions}>管理项目版本</button></section></main>
   if (embedded && (!model.inputs || (linkedTargetId && (!model.design || !model.run)))) return <EmbeddedTestDesignLoading contextReady={Boolean(model.inputs)} error={model.error} onRetry={linkedDesignId && linkedRunId ? () => { void model.openLinkedRun(linkedDesignId, linkedRunId).catch(() => undefined) } : undefined} />

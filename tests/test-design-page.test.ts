@@ -86,6 +86,8 @@ test('同一 TestDesign 展示运行历史并以选中 runId 切换完整工作�
   const api = read('../src/test-design/api.ts')
   for (const label of ['运行历史', '新建运行', '状态 / 阶段', '历史基线', '用例 / 特殊变更待确认', '已发布', '未发布']) assert.match(page, new RegExp(label, 'u'))
   assert.match(page, /model\.openRun\(item\.id\)/u)
+  assert.match(page, /linkedOpenedTargetId\.current === linkedTargetId/u)
+  assert.doesNotMatch(page, /\[linkedDesignId, linkedRunId, linkedTargetId, model\.design\?\.id, model\.run\?\.id/u)
   assert.match(hook, /api\.loadRuns/u)
   assert.match(hook, /api\.loadRun\(projectVersionId, design\.id, runId\)/u)
   assert.match(api, /test-designs\/\$\{encodeURIComponent\(designId\)\}\/runs/u)
