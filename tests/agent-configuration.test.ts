@@ -199,7 +199,7 @@ test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
   const expected = {
     testScript: {
       definitionKey: 'test-script',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'test_script.submit_result'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'test_script.submit_result'],
       skill: 'test-script-generation',
     },
     failureAnalysis: {
@@ -219,11 +219,14 @@ test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
     assert.deepEqual(agent.requiredToolIds, contract.tools)
     assert.deepEqual(agent.requiredSkillKeys, [contract.skill])
     assert.deepEqual(agent.requiredMcpServerKeys, [])
+    const unexpectedTool = agentKey === 'testScript'
+      ? 'failure_analysis.submit_result'
+      : 'knowledge.search'
     await assert.rejects(() => service.save('test_execution', {
       agentKey,
       revision: agent.draft.revision,
       routing: agent.draft.routing,
-      definition: { ...agent.draft.definition, toolIds: [...agent.draft.definition.toolIds, 'knowledge.search'] },
+      definition: { ...agent.draft.definition, toolIds: [...agent.draft.definition.toolIds, unexpectedTool] },
     }), /不允许额外工具/u)
     const saved = await service.save('test_execution', {
       agentKey,
@@ -326,9 +329,15 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
       'workspace.grep_files',
       'workspace.find_files',
       'workspace.list_directory',
+      ...(binding.agentKey === 'test-script'
+        ? ['knowledge.search', 'knowledge.read_chunk']
+        : []),
       binding.submitToolId,
     ])
-    assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.search'), false)
+    assert.equal(
+      input.executionProfile?.allowedToolIds.includes('knowledge.search'),
+      binding.agentKey === 'test-script',
+    )
     assert.equal(input.executionProfile?.allowedToolIds.some(toolId => /runner|shell|ssh|database|http/u.test(toolId)), false)
   }
   assert.equal(captured[0].snapshot.agentDefinition.contentSha256, (await service.getVersion(supersededId)).agentDefinition.contentSha256)

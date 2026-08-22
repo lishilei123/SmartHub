@@ -1,33 +1,34 @@
 # SmartHub 需求分析、测试设计与测试执行闭环
 
-当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 编排三个独立发布的 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`，并只把服务端校验后的 `ExecutionPackage` 交给非 Agentic OCI Playwright Runner。PostgreSQL 保存正式状态，Workspace 与 Artifact Store 只保存不可变投影和产物。
+当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 按 Execute First 编排 ProjectVersion Execution Binding、受控执行 Agent 与非 Agentic Local Workspace Runner。UIExecutionAgent 保持 Playwright CLI-first，并把真实 UI 操作期间观察到的业务 API 脱敏沉淀为 ProjectVersion Exploration Context。PostgreSQL 保存 Run/Task/Revision/Attempt 等正式状态；ProjectVersion Workspace 独立保存自动化工程、Binding 与脱敏后的可复用 Exploration Context，Artifact Store 保存不可变执行产物。
 
 ## 测试执行基础设施配置
 
-执行环境与 OCI Runner 不再从 `.env.local` 读取。进入 **设置 → 执行基础设施**，登记被测地址、允许目标和 OCI 网络，并发布固定镜像 Digest 的 Runner 配置。每次保存产生一个不可变服务端版本；新建 Run 会冻结该版本，历史 Run 继续按冻结版本执行。密钥只填写 `SMARTHUB_SECRET_*` 到服务器进程环境变量名的映射，真实值仍由部署环境注入，绝不保存或回显。
+执行基础设施的已发布配置继续保留不可变版本与历史快照；当前主执行链使用 ProjectVersion Local Workspace Runner，由用户在创建 Run 时提交被测系统 BaseURL。真实密钥仍只允许由部署环境注入，绝不保存或回显；Network Exploration 仅保留字段结构、必要非敏感 Header 和 `<REDACTED>` 标记。
 
 三个执行 Agent 的 Tool、Skill、MCP 白名单仍由服务端 Agent 配置治理：选择已就绪模型后分别发布 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`。执行 Agent 只能使用固定的 Workspace Tool、各自提交 Tool 和唯一 Skill，不能增加 MCP 或额外能力。
 
-测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库与套件。执行 Run 由用户填写被测系统地址；Service 只接受已登记 OCI 运行网络的地址，自动选择当前项目版本最新正式用例库并冻结其中全部可执行用例、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
+测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库与套件。执行 Run 自动选择当前项目版本最新正式用例库并冻结其中全部可执行用例、环境签名、Knowledge Index、Runner 和三个 Agent 配置快照；已有有效 Binding 直接执行，无 Binding 才按 `Exploration Context → 固定 Knowledge/API 文档 → Existing Workspace → Implement` 实现。每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史。
 
 ## 模块状态
 
 | 模块 | 当前状态 | 边界 |
 | --- | --- | --- |
 | 知识库、需求分析、测试设计 | 已实现 | 已接入真实 API、持久化数据、Agent Workflow 和服务端治理。 |
-| 测试执行 | 已实现 | 以当前 ProjectVersion 最新正式用例库的全部用例为唯一执行范围；Service 在创建 Run 时冻结输入，确定性编排三个隔离 Agent、OCI-only Runner、不可变 Attempt/Revision/Diagnosis/Artifact 与真实状态前端。 |
+| 测试执行 | 已实现 | 以当前 ProjectVersion 最新正式用例库的全部用例为唯一执行范围；Service 冻结输入与 Knowledge Index，优先执行 Binding；无 Binding 时复用脱敏 Exploration Context 与共享 Workspace，再交给 Local Workspace Runner。 |
 | 报告与诊断 | 已实现 | 绑定单个 `ExecutionRun`，从 PostgreSQL 正式事实确定性投影指标、九类诊断、非通过明细与完整追溯，并提供 canonical JSON 和 Markdown 导出。 |
 
 左侧“测试执行”展示 PostgreSQL 中的真实 Run/Task、就绪状态、冻结快照和不可变历史，不生成示例进度；“报告与诊断”只读汇总同一 Run 的正式事实，不调用 Agent 或 Runner，也不修改执行状态。
 
 ## 已实现
 
-- 测试执行：固定 `PlanningAgent → TestExecutionService → ExecutionPackage → OCI Playwright Runner` 边界，三个执行 Agent 分别发布与冻结，Service 独占状态、重试、诊断和修复决策；支持 UI/API 与 smoke/regression/full/custom，不支持的方法明确落为 `unsupported` 且不创建脚本或 Runner Attempt；
+- 测试执行：固定 `TestExecutionService → Execution Binding / Agent → ExecutionPackage → Local Workspace Runner` 边界，Service 独占状态、重试、诊断和修复决策；UIExecutionAgent 通过官方 Playwright CLI `requests/request` 能力观察业务 fetch/XHR，并在持久化前过滤静态资源、Analytics/Telemetry 和全部真实敏感值；API Case 无 Binding 时优先消费同版本 Context，UI Case 不得用 API 调用替代真实 UI；
+- TestScriptAgent 的受控能力已升级到 `test-script-generation@1.1.0` 与固定 Knowledge 工具；升级现有部署后需要重新发布该 Agent 配置，旧发布版本不会被双读或自动回退；
 - 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和三个 Agent 快照；
 - 测试设计：统一 `PlanningAgent`、`test-case-design/v3` Candidate、扁平 `test-case/v3`、显式 Requirement 引用、服务端 Coverage Audit、受控 v3 Repair、直接语义审核、正式用例库发布与 UI/API 方法级执行交接；Service 独占 Case ID、Revision、Hash、历史匹配和正式版本治理；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
-- 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；新版本可选择只继承来源版本的需求绑定，不继承需求分析运行与对话；
+- 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；显式继承来源版本时会复制 Requirement Binding、Execution Workspace、Execution Binding 与 Exploration Context，继承 Context 标记为 `needs_validation` 并在目标版本独立演进；
 - 页面启动时由后端解析并复用唯一的 SmartHub 默认知识库，不依赖浏览器 localStorage 决定数据归属，刷新、切换访问域名或开发模式重复挂载不会创建并切换到新空库；
 - UTF-8 Markdown/TXT 支持单文件上传、一次多选批量上传，也可通过 ZIP 批量导入；ZIP 保留子目录结构，并支持 Markdown 以相对路径引用其中的 PNG、JPG、GIF、WebP 和 SVG 图片；
 - 知识库目录创建、重命名、移动和递归删除持久化到 PostgreSQL；选中目录后上传会自动使用对应逻辑路径；
@@ -260,7 +261,7 @@ npm run build
 - `POST /api/knowledge-bases/:id/search`
 - `POST /api/knowledge-bases/:id/rebuild`
 
-当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。报告一期不新增数据库表或持久化报告快照：人工重试追加正式事实后会生成新的报告 Hash，但不会独立保留重试前文档；也不由 Agent 计算正式指标或生成发布建议。测试执行只支持服务端固定编排的三个隔离 Agent 与 OCI Playwright UI/API 自动化。
+当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。报告一期不新增数据库表或持久化报告快照：人工重试追加正式事实后会生成新的报告 Hash，但不会独立保留重试前文档；也不由 Agent 计算正式指标或生成发布建议。测试执行不提供 UI/API Timeline、步骤截图可视化或自动扩展 TestCase 范围；Exploration 只服务正式 TestCase Library 中既有 UI/API Case。
 
 需求分析采用独立 Worker 后台运行：启动接口创建分析 Run + Job 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page=requirement-analysis + projectVersionId + analysisId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `analysisId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
 

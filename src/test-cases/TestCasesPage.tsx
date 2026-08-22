@@ -45,7 +45,6 @@ export function TestCasesPage({ projectVersion, onManageVersions, notify }: { pr
 
   if (!projectVersion) return <section className="test-cases-page"><EmptyVersion onManageVersions={onManageVersions} /></section>
   return <section className="test-cases-page" aria-label="测试用例">
-    <header className="test-cases-hero"><div><span className="test-cases-eyebrow">FORMAL TEST CASE LIBRARY</span><h2>测试用例</h2><p>当前版本已审核并发布的正式测试用例；不读取测试设计 Run 中的临时候选。</p></div><div className="test-cases-version"><small>当前版本</small><b>{projectVersion.name}</b><button onClick={onManageVersions}>切换版本</button></div></header>
     {loading && <div className="test-cases-state">正在读取当前版本正式用例…</div>}
     {error && <div className="test-cases-state error"><AlertTriangle />{error}</div>}
     {!loading && !error && data?.libraryVersion === null && <EmptyLibrary />}

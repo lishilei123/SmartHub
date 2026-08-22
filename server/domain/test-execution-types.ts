@@ -143,6 +143,13 @@ export interface ExecutionRunnerSnapshot {
   configurationSha256?: string
 }
 
+export interface FrozenExecutionKnowledgeSnapshot {
+  knowledgeBaseId: string
+  indexVersionId: string
+  indexVersion: number
+  indexCreatedAt: string
+}
+
 export interface FrozenExecutionHandoffSnapshot {
   handoffId: string
   handoffSha256: string
@@ -162,6 +169,8 @@ export interface ExecutionRun {
   projectVersionId: string
   handoff: FrozenExecutionHandoffSnapshot
   environment: ExecutionEnvironmentSnapshot
+  /** Fixed Knowledge index used only as document/historical context. */
+  knowledge?: FrozenExecutionKnowledgeSnapshot
   /** Runtime data supply is frozen per Run and kept separate from formal case content. */
   testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
@@ -407,4 +416,56 @@ export interface ExecutionJob {
   }
   createdAt: string
   updatedAt: string
+}
+
+export type ExplorationValidationStatus = 'validated' | 'needs_validation' | 'invalid'
+
+export interface ExplorationSchemaShape {
+  type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null' | 'unknown'
+  properties?: Record<string, ExplorationSchemaShape>
+  required?: string[]
+  items?: ExplorationSchemaShape
+  redacted?: true
+}
+
+/**
+ * Redacted, runtime-observed HTTP behavior. This is intentionally a schema
+ * summary rather than a request/response recording: real values never cross
+ * the Exploration Context persistence boundary.
+ */
+export interface HttpExplorationObservation {
+  type: 'http_endpoint'
+  method: string
+  origin: string
+  path: string
+  queryParams: string[]
+  requestHeaders: Record<string, string>
+  requestSchema?: ExplorationSchemaShape
+  responseStatus?: number
+  responseSchema?: ExplorationSchemaShape
+  contentType?: string
+  observedFrom: {
+    page: string
+    action: string
+    actionType: 'navigate' | 'click' | 'fill' | 'select' | 'wait' | 'other'
+    sequence: number
+  }
+  confidence: number
+}
+
+/** ProjectVersion-owned reusable runtime knowledge; never Requirement truth. */
+export interface ProjectVersionExplorationResult extends HttpExplorationObservation {
+  id: string
+  projectVersionId: string
+  sourceCaseId: string
+  environmentSignature: string
+  source: 'ui_exploration' | 'api_exploration'
+  validationStatus: ExplorationValidationStatus
+  observedAt: string
+  createdAt: string
+  updatedAt: string
+  sourceRunId?: string
+  sourceTaskId?: string
+  inheritedFromProjectVersionId?: string
+  inheritedFromExplorationId?: string
 }

@@ -51,10 +51,10 @@ export const AGENT_CATALOG = {
     scene: 'test_execution',
     label: '测试脚本 Agent',
     identifier: 'TestScriptAgent',
-    requiredToolIds: [...WORKSPACE_TOOLS, 'test_script.submit_result'],
+    requiredToolIds: [...WORKSPACE_TOOLS, ...KNOWLEDGE_TOOLS, 'test_script.submit_result'],
     requiredSkillKeys: ['test-script-generation'],
     requiredMcpServerKeys: [],
-    runtimeToolIds: [...WORKSPACE_TOOLS],
+    runtimeToolIds: [...WORKSPACE_TOOLS, ...KNOWLEDGE_TOOLS],
     exactCapabilities: true,
   },
   failureAnalysis: {

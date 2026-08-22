@@ -81,8 +81,8 @@ implements TestExecutionWorkspaceProvider {
       projectName: input.run.projectId,
       projectVersionId: input.run.projectVersionId,
       projectVersionName: input.run.projectVersionId,
-      knowledgeBaseId: `test-execution:${input.run.projectId}`,
-      indexVersionId: `test-execution:${input.run.handoff.handoffSha256}`,
+      knowledgeBaseId: input.run.knowledge?.knowledgeBaseId ?? `test-execution:${input.run.projectId}`,
+      indexVersionId: input.run.knowledge?.indexVersionId ?? `test-execution:${input.run.handoff.handoffSha256}`,
       assets: [],
       documentWorkspace: {
         mode: 'agent_directory',
@@ -195,6 +195,7 @@ function frozenRunView(run: ExecutionRun) {
     projectVersionId: run.projectVersionId,
     handoff: run.handoff,
     environment: run.environment,
+    ...(run.knowledge ? { knowledge: run.knowledge } : {}),
     runner: run.runner,
     agents: run.agents,
     status: run.status,

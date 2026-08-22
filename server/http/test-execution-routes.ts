@@ -67,6 +67,22 @@ export async function routeTestExecution(
     })
   }
 
+  const explorationContext = /^\/api\/project-versions\/([^/]+)\/test-execution\/exploration-context$/.exec(url.pathname)
+  if (explorationContext && method === 'GET') {
+    const projectVersion = await scopedProjectVersion(
+      context,
+      explorationContext[1],
+      'test-execution:read',
+    )
+    privateNoStore(response)
+    return send(response, 200, {
+      schemaVersion: 'project-version-exploration-context/v1',
+      projectVersionId: projectVersion.id,
+      authority: 'runtime_observed_knowledge',
+      items: await requireService(service).listExplorationContext(projectVersion.id),
+    })
+  }
+
   const runs = /^\/api\/project-versions\/([^/]+)\/test-execution-runs$/.exec(url.pathname)
   if (runs && method === 'POST') {
     const projectVersion = await scopedProjectVersion(

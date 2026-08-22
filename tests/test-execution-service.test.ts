@@ -11,6 +11,11 @@ import {
   type TestExecutionAgentRuntime,
 } from '../server/application/test-execution-service.js'
 import {
+  createProjectVersionExplorationResult,
+  normalizeUiNetworkObservation,
+  type RawUiNetworkObservation,
+} from '../server/application/test-execution-exploration.js'
+import {
   FrozenTestExecutionWorkspaceProvider,
 } from '../server/application/test-execution-workspace-provider.js'
 import {
@@ -510,7 +515,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
 }
 
 class ScriptAgentRuntime implements TestExecutionAgentRuntime {
-  calls: Array<Pick<TestExecutionAgentRuntimeInput, 'stage' | 'stageContext' | 'uiExecution'>> = []
+  calls: Array<Pick<TestExecutionAgentRuntimeInput, 'stage' | 'stageContext' | 'uiExecution' | 'workspace'>> = []
   repairOrdinal = 0
 
   constructor(
@@ -533,6 +538,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
   async execute(input: TestExecutionAgentRuntimeInput): Promise<TestExecutionAgentRuntimeOutput> {
     this.calls.push(structuredClone({
       stage: input.stage,
+      workspace: input.workspace,
       ...(input.stageContext ? { stageContext: input.stageContext } : {}),
       ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
     }))
@@ -609,7 +615,10 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
 class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter {
   calls: Array<UiExecutionBrowserContext['phase']> = []
 
-  constructor(private readonly available = true) {}
+  constructor(
+    private readonly available = true,
+    private readonly networkCandidates: RawUiNetworkObservation[] = [],
+  ) {}
 
   async explore(input: {
     baseUrl: string
@@ -625,6 +634,7 @@ class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter {
       ...(this.available ? {
         snapshot: '- heading "状态页"\n- status [ref=e1]: Ready',
         locatorHints: ['- status [ref=e1]: Ready'],
+        networkCandidates: structuredClone(this.networkCandidates),
       } : {
         locatorHints: [],
         error: 'PLAYWRIGHT_CLI_UNAVAILABLE',
@@ -684,6 +694,7 @@ async function withService(
     repairSource?: (ordinal: number) => string
     workspace?: boolean
     playwrightCliAvailable?: boolean
+    networkCandidates?: RawUiNetworkObservation[]
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
@@ -693,7 +704,10 @@ async function withService(
     const artifactStore = new LocalExecutionArtifactStore(root)
     const runner = new SequenceRunner(results)
     const runtime = new ScriptAgentRuntime(value.run.agents, options)
-    const playwrightCli = new FixturePlaywrightCliAdapter(options.playwrightCliAvailable)
+    const playwrightCli = new FixturePlaywrightCliAdapter(
+      options.playwrightCliAvailable,
+      options.networkCandidates,
+    )
     const workspace = options.workspace
       ? new LocalExecutionWorkspaceStore(join(root, 'workspace'))
       : undefined
@@ -838,6 +852,137 @@ test('新 UI Case 先经 Playwright CLI snapshot，再由 Agent 写入当前 Wor
     assert.equal(binding?.entryFile, `tests/${store.task.id}.spec.ts`)
     assert.equal(binding?.bindingStatus, 'validated')
     assert.equal(runner.calls.length, 1)
+  }, { workspace: true })
+})
+
+test('UI Exploration 将 Action 关联业务 API 脱敏沉淀到当前 ProjectVersion 并交付 Agent', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: 'UI 入口通过', artifacts: [] },
+  ], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    const [result] = await workspace.listExplorationResults(store.run.projectVersionId)
+    assert.equal(result.sourceCaseId, store.task.input.caseId)
+    assert.equal(result.method, 'POST')
+    assert.equal(result.path, '/api/login')
+    assert.equal(result.observedFrom.action, 'click 登录')
+    assert.equal(result.requestHeaders.authorization, '<REDACTED>')
+    assert.equal(result.requestSchema?.properties?.password.redacted, true)
+    assert.equal(result.responseSchema?.properties?.token.redacted, true)
+    assert.equal(result.validationStatus, 'validated')
+    const projected = runtime.calls[0].workspace.workspaceFiles.find(
+      file => file.logicalPath === 'exploration/context.json',
+    )
+    assert.ok(projected)
+    assert.equal(projected.content.includes('real-password'), false)
+    assert.equal(projected.content.includes('real-token'), false)
+  }, {
+    workspace: true,
+    networkCandidates: [{
+      method: 'POST',
+      url: 'https://example.test/api/login',
+      resourceType: 'fetch',
+      requestHeaders: {
+        authorization: 'Bearer real-authorization',
+        cookie: 'session=real-session',
+        'content-type': 'application/json',
+      },
+      requestBody: { username: 'real-user', password: 'real-password' },
+      responseStatus: 200,
+      responseHeaders: { 'content-type': 'application/json' },
+      responseBody: { token: 'real-token', user: { id: 42 } },
+      page: '/login',
+      action: 'click 登录',
+      actionType: 'click',
+      sequence: 2,
+    }],
+  })
+})
+
+test('API Case 无 Binding 时优先获得当前 ProjectVersion Exploration Context 且不调用 UIExecutionAgent', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: 'API 入口通过', artifacts: [] },
+  ], async ({ service, store, runtime, playwrightCli, job, workspace }) => {
+    assert.ok(workspace)
+    const apiCaseContent: TestCaseContent = {
+      ...caseContent,
+      title: '正确账号登录 API',
+      executionMethods: ['api'],
+      steps: ['调用登录接口'],
+      expectedResults: ['返回登录成功'],
+    }
+    const apiInput = freezeExecutionTaskInput({
+      libraryMember: {
+        ...libraryMember,
+        caseId: 'TC_API_LOGIN_001',
+        contentSha256: canonicalSha256(apiCaseContent),
+        frozenContent: apiCaseContent,
+      },
+      handoffMember: {
+        ...handoffMember,
+        caseId: 'TC_API_LOGIN_001',
+        dedupKey: 'TC_API_LOGIN_001:1:api',
+        method: 'api',
+        contentSha256: canonicalSha256(apiCaseContent),
+        executionSpec: {
+          schemaVersion: 'test-script-input/v1',
+          method: 'api',
+          testCase: apiCaseContent,
+        },
+      },
+    })
+    store.task = { ...store.task, input: apiInput }
+    const observation = normalizeUiNetworkObservation({
+      method: 'POST',
+      url: 'https://example.test/api/login',
+      resourceType: 'xhr',
+      requestBody: { username: 'observed-user', password: 'observed-password' },
+      responseStatus: 200,
+      responseBody: { token: 'observed-token', user: { id: 1 } },
+      page: '/login',
+      action: 'click 登录',
+      actionType: 'click',
+      sequence: 2,
+    })!
+    await workspace.saveExplorationResults(store.run.projectVersionId, [
+      createProjectVersionExplorationResult({
+        projectVersionId: store.run.projectVersionId,
+        sourceCaseId: 'TC_UI_LOGIN_001',
+        environmentSignature: store.run.environment.signature,
+        sourceRunId: 'run-ui-login',
+        sourceTaskId: 'task-ui-login',
+        observedAt: '2026-08-13T11:00:00.000Z',
+        observation,
+      }),
+    ])
+
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.deepEqual(playwrightCli.calls, [])
+    assert.deepEqual(runtime.calls.map(call => call.stage), ['script_generation'])
+    const contextFile = runtime.calls[0].workspace.workspaceFiles.find(
+      file => file.logicalPath === 'exploration/context.json',
+    )
+    assert.ok(contextFile)
+    const context = JSON.parse(contextFile.content) as {
+      projectVersionId: string
+      authority: string
+      results: Array<{ sourceCaseId: string; method: string; path: string; validationStatus: string }>
+    }
+    assert.equal(context.projectVersionId, store.run.projectVersionId)
+    assert.equal(context.authority, 'runtime_observed_knowledge')
+    assert.deepEqual(context.results.map(result => ({
+      sourceCaseId: result.sourceCaseId,
+      method: result.method,
+      path: result.path,
+      validationStatus: result.validationStatus,
+    })), [{
+      sourceCaseId: 'TC_UI_LOGIN_001',
+      method: 'POST',
+      path: '/api/login',
+      validationStatus: 'validated',
+    }])
   }, { workspace: true })
 })
 

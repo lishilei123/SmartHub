@@ -249,6 +249,9 @@ export function buildTestExecutionAgentTask(
   binding = TEST_EXECUTION_STAGE_BINDINGS[input.stage],
 ) {
   const workspace = input.workspace.documentWorkspace
+  const explorationContext = input.workspace.workspaceFiles.find(
+    file => file.logicalPath === 'exploration/context.json',
+  )
   return canonicalJson({
     schemaVersion: 'test-execution-agent-task/v1',
     agent: binding.agentLabel,
@@ -276,6 +279,13 @@ export function buildTestExecutionAgentTask(
         ? `/${workspace.agentLogicalPath}`
         : undefined,
       fileCount: input.workspace.workspaceFiles.length,
+      ...(explorationContext ? {
+        explorationContext: {
+          logicalPath: '/exploration/context.json',
+          contentSha256: explorationContext.contentSha256,
+          authority: 'runtime_observed_knowledge',
+        },
+      } : {}),
     },
     ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
     stageContext: input.stageContext ?? {},
@@ -286,8 +296,13 @@ export function buildTestExecutionAgentTask(
     },
     instructions: [
       'Workflow Stage 已由 TestExecutionService 固定，不能自行切换。',
-      '先检查 execution/ 下已有 tests、pages、helpers、fixtures、api 与 bindings；优先复用公共能力。',
+      '进入 script_generation 表示 Service 已确认当前 Case 没有可直接执行的有效 Execution Binding；不得覆盖或重写其他已有 Binding。',
+      'API Case 无 Binding 时，先读取 /exploration/context.json 中当前 ProjectVersion 的真实环境观察，再查询受控 Knowledge/API 文档，最后结合 execution/ 下已有 API Client 与工程代码实现；已有相关 Endpoint/Method/Schema 时优先复用，不得从零猜测或重复发明。',
+      'UI Case、Failure Analysis 与 Repair 先检查 execution/ 下已有 tests、pages、helpers、fixtures、api 与 bindings；优先复用公共能力。',
+      'Exploration Context 是当前版本 Runtime Observed Knowledge，不是 Requirement Truth。它与 Knowledge/API 文档不一致时必须保留并指出差异，判断文档过期、环境版本差异、产品问题或探索失效；不得静默用其中一方覆盖另一方。needs_validation/inherited 结果可以辅助实现，但不能伪装成当前环境已验证事实。',
       '当 uiExecution 存在时，它是 UIExecutionAgent 用 Playwright CLI 对当前 BaseURL 的即时观察；只能基于其中真实 snapshot/locator hint 编写或修复 UI 自动化，不得凭空编造 selector。它不是另一套 Test Plan，也不能改变 TestCase 测试意图。',
+      'UI Case 即使观察到对应 API，也必须继续通过真实 UI 完成输入、交互和页面断言；禁止改成直接调用 API 后宣称 UI Case 通过。',
+      'Exploration Context 只包含脱敏后的字段结构；不得尝试恢复、记录或输出 Authorization、Cookie、Token、Password、Session、API Key、个人数据等真实值。',
       '使用当前冻结工作区中已经交付的受控知识上下文；文档与真实环境不一致时必须如实记录，不得编造 selector、API 或凭据。',
       '只读取当前 run/task 的冻结工作区；不得解析 latest、current 或 active 业务输入。',
       '不得调用 Shell、SSH、数据库、任意网络、其他 Agent 或 Runner。真实环境验证由 Local Runner 在提交候选后执行。',

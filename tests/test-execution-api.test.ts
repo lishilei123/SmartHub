@@ -74,6 +74,36 @@ test('不存在的正式 ProjectVersion 在授权前返回 404', async () => {
   assert.equal(authorized, false)
 })
 
+test('ProjectVersion Exploration Context 只读接口保持版本作用域并标记 Runtime Observed Knowledge', async () => {
+  const item = {
+    id: 'exploration-1',
+    projectVersionId: 'pv-1',
+    sourceCaseId: 'TC_UI_LOGIN_001',
+    method: 'POST',
+    path: '/api/login',
+    validationStatus: 'validated',
+  }
+  const result = await routeCall({
+    method: 'GET',
+    path: '/api/project-versions/pv-1/test-execution/exploration-context',
+    service: {
+      async listExplorationContext(projectVersionId: string) {
+        assert.equal(projectVersionId, 'pv-1')
+        return [item]
+      },
+    },
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.headers.get('cache-control'), 'private, no-store')
+  assert.equal(result.permissions[0]?.permission, 'test-execution:read')
+  assert.deepEqual(result.body, {
+    schemaVersion: 'project-version-exploration-context/v1',
+    projectVersionId: 'pv-1',
+    authority: 'runtime_observed_knowledge',
+    items: [item],
+  })
+})
+
 test('测试执行创建拒绝客户端指定执行范围', async () => {
   await assert.rejects(
     routeCall({

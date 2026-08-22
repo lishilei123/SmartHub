@@ -15,6 +15,7 @@ import type {
   FailureDiagnosis,
   FrozenExecutionTestDataSnapshot,
   FrozenExecutionAgentSnapshot,
+  ProjectVersionExplorationResult,
   ScriptArtifact,
   ScriptRevision,
 } from '../domain/test-execution-types.js'
@@ -37,6 +38,7 @@ import type {
 import type { PlaywrightRunner } from '../runner/playwright-runner.js'
 import { LocalExecutionWorkspaceStore, type CaseExecutionBinding } from '../infrastructure/execution-workspace-store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
+import { createProjectVersionExplorationResult } from './test-execution-exploration.js'
 import {
   assertExecutionPackageIntegrity,
   automaticRepairAllowed,
@@ -57,6 +59,10 @@ export interface ExecutionEnvironmentResolver {
   readiness(): Promise<{ ready: boolean; reason?: string }>
   resolveSnapshotForBaseUrl(baseUrl: string): Promise<ExecutionEnvironmentSnapshot>
   listSnapshots?(): Promise<ExecutionEnvironmentSnapshot[]>
+}
+
+export interface TestExecutionKnowledgeResolver {
+  resolveSnapshot(projectId: string): Promise<ExecutionRun['knowledge']>
 }
 
 export interface TestExecutionWorkspaceProvider {
@@ -119,6 +125,7 @@ export class TestExecutionService {
     private readonly clock: () => string = () => new Date().toISOString(),
     private readonly executionWorkspace?: LocalExecutionWorkspaceStore,
     private readonly uiExecutionAgent?: UIExecutionAgent,
+    private readonly knowledgeResolver?: TestExecutionKnowledgeResolver,
   ) {}
 
   async readiness() {
@@ -146,6 +153,11 @@ export class TestExecutionService {
   async environments() {
     return (await this.environmentResolver.listSnapshots?.() ?? [])
       .map(environment => structuredClone(environment))
+  }
+
+  async listExplorationContext(projectVersionId: string) {
+    requiredIdentity(projectVersionId, 'projectVersionId')
+    return this.executionWorkspace?.listExplorationResults(projectVersionId) ?? []
   }
 
   async listRuns(projectVersionId: string, limit = 50) {
@@ -446,10 +458,11 @@ export class TestExecutionService {
       )
     }
 
-    const [environment, agents, runnerReadiness] = await Promise.all([
+    const [environment, agents, runnerReadiness, knowledge] = await Promise.all([
       this.sourcesEnvironment(baseUrl),
       this.agentRuntime.freezeConfiguration(),
       this.runner.readiness(),
+      this.knowledgeResolver?.resolveSnapshot(modern.projectId),
     ])
     if (!runnerReadiness.ready) {
       throw new TestExecutionServiceError(
@@ -501,6 +514,7 @@ export class TestExecutionService {
         memberSnapshotSha256: canonicalSha256(frozenInputs),
       },
       environment,
+      ...(knowledge ? { knowledge: structuredClone(knowledge) } : {}),
       ...(testData ? { testData } : {}),
       runner: structuredClone(runnerReadiness.snapshot),
       agents: structuredClone(agents),
@@ -1354,6 +1368,23 @@ export class TestExecutionService {
         content: file.content,
         contentSha256: file.contentSha256,
       })))
+      const explorationResults = await this.executionWorkspace.listExplorationResults(run.projectVersionId)
+      if (explorationResults.length) {
+        const content = canonicalJson({
+          schemaVersion: 'project-version-exploration-context/v1',
+          projectVersionId: run.projectVersionId,
+          environmentSignature: run.environment.signature,
+          authority: 'runtime_observed_knowledge',
+          requirementTruth: false,
+          results: orderedExplorationResults(explorationResults, run, task, this.clock()),
+        })
+        projection.workspaceFiles.push({
+          logicalPath: 'exploration/context.json',
+          displayName: 'ProjectVersion Exploration Context · Runtime Observed Knowledge',
+          content,
+          contentSha256: sha256(content),
+        })
+      }
       projection.workspaceFiles.sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'en'))
     }
     if (
@@ -1421,8 +1452,82 @@ export class TestExecutionService {
     if (required && (!context || !context.available || !context.snapshot)) {
       throw new Error(`TEST_EXECUTION_UI_PLAYWRIGHT_CLI_EXPLORATION_REQUIRED: ${context?.error ?? 'snapshot missing'}`)
     }
+    if (context?.networkObservations.length) {
+      const observedAt = this.clock()
+      await this.executionWorkspace.saveExplorationResults(
+        run.projectVersionId,
+        context.networkObservations.map(observation => createProjectVersionExplorationResult({
+          projectVersionId: run.projectVersionId,
+          sourceCaseId: task.input.caseId,
+          environmentSignature: run.environment.signature,
+          sourceRunId: run.id,
+          sourceTaskId: task.id,
+          observedAt,
+          observation,
+        })),
+      )
+    }
     return context
   }
+}
+
+function orderedExplorationResults(
+  results: readonly ProjectVersionExplorationResult[],
+  run: ExecutionRun,
+  task: ExecutionTask,
+  currentTime: string,
+) {
+  const search = explorationSearchText(task)
+  return results.slice().sort((left, right) => {
+    const leftScore = explorationRelevance(left, run, search)
+    const rightScore = explorationRelevance(right, run, search)
+    return rightScore - leftScore
+      || right.observedAt.localeCompare(left.observedAt)
+      || left.id.localeCompare(right.id, 'en')
+  }).map(result => ({
+    ...result,
+    reuseRecommendation: explorationReuseRecommendation(result, run, currentTime),
+  }))
+}
+
+function explorationReuseRecommendation(
+  result: ProjectVersionExplorationResult,
+  run: ExecutionRun,
+  currentTime: string,
+) {
+  if (result.validationStatus === 'invalid') return 'do_not_reuse'
+  if (result.environmentSignature !== run.environment.signature) return 'context_only_environment_mismatch'
+  const age = Date.parse(currentTime) - Date.parse(result.observedAt)
+  const fresh = Number.isFinite(age) && age >= 0 && age <= 30 * 24 * 60 * 60 * 1_000
+  return result.validationStatus === 'validated' && fresh
+    ? 'prefer_reuse'
+    : 'reuse_with_validation'
+}
+
+function explorationRelevance(
+  result: ProjectVersionExplorationResult,
+  run: ExecutionRun,
+  search: Set<string>,
+) {
+  let score = 0
+  if (result.environmentSignature === run.environment.signature) score += 100
+  if (result.validationStatus === 'validated') score += 50
+  else if (result.validationStatus === 'needs_validation') score += 10
+  const candidate = `${result.sourceCaseId} ${result.path}`.toLocaleLowerCase()
+  for (const token of search) if (candidate.includes(token)) score += 5
+  return score
+}
+
+function explorationSearchText(task: ExecutionTask) {
+  const content = task.input.caseContent
+  const text = [
+    task.input.caseId,
+    content.title,
+    ...content.steps,
+    ...content.expectedResults,
+    ...content.requirementRefs,
+  ].join(' ').toLocaleLowerCase()
+  return new Set(text.match(/[\p{L}\p{N}_-]{3,}/gu) ?? [])
 }
 
 function validateModernHandoff(handoff: TestExecutionHandoff, projectVersionId: string) {

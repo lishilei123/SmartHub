@@ -1,7 +1,14 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import type { ExecutionPackageFile } from '../domain/test-execution-types.js'
+import {
+  assertSafeExplorationResult,
+  explorationContextKey,
+} from '../application/test-execution-exploration.js'
+import type {
+  ExecutionPackageFile,
+  ProjectVersionExplorationResult,
+} from '../domain/test-execution-types.js'
 
 export type ExecutionBindingStatus = 'inherited' | 'validated' | 'needs_validation' | 'invalid'
 
@@ -41,7 +48,7 @@ export class LocalExecutionWorkspaceStore {
   async ensure(projectVersionId: string) {
     const workspace = this.workspaceRoot(projectVersionId)
     await Promise.all([
-      ...['tests/ui', 'tests/api', 'pages', 'api', 'helpers', 'fixtures', 'data', 'config', 'artifacts', 'bindings']
+      ...['tests/ui', 'tests/api', 'pages', 'api', 'helpers', 'fixtures', 'data', 'config', 'artifacts', 'bindings', 'exploration']
         .map(directory => mkdir(join(workspace, directory), { recursive: true })),
     ])
     return workspace
@@ -97,6 +104,60 @@ export class LocalExecutionWorkspaceStore {
     return safe
   }
 
+  async listExplorationResults(projectVersionId: string) {
+    const root = await this.ensure(projectVersionId)
+    const files = await this.explorationFiles(root)
+    const results: ProjectVersionExplorationResult[] = []
+    for (const path of files) {
+      const result = assertSafeExplorationResult(
+        JSON.parse(await readFile(path, 'utf8')) as ProjectVersionExplorationResult,
+      )
+      if (result.projectVersionId !== projectVersionId) {
+        throw new Error('TEST_EXECUTION_EXPLORATION_PROJECT_VERSION_SCOPE_INVALID')
+      }
+      results.push(result)
+    }
+    return results.sort((left, right) =>
+      right.observedAt.localeCompare(left.observedAt)
+      || left.method.localeCompare(right.method, 'en')
+      || left.path.localeCompare(right.path, 'en'))
+  }
+
+  async saveExplorationResults(
+    projectVersionId: string,
+    values: readonly ProjectVersionExplorationResult[],
+  ) {
+    if (values.length > 100) throw new Error('TEST_EXECUTION_EXPLORATION_BATCH_TOO_LARGE')
+    const root = await this.ensure(projectVersionId)
+    const existingCount = (await this.explorationFiles(root)).length
+    if (existingCount + values.length > 1_000) throw new Error('TEST_EXECUTION_EXPLORATION_CONTEXT_TOO_LARGE')
+    const saved: ProjectVersionExplorationResult[] = []
+    for (const value of values) {
+      const safe = assertSafeExplorationResult(value)
+      if (safe.projectVersionId !== projectVersionId) {
+        throw new Error('TEST_EXECUTION_EXPLORATION_PROJECT_VERSION_SCOPE_INVALID')
+      }
+      const target = join(root, 'exploration', `${explorationName(safe)}.json`)
+      let existing: ProjectVersionExplorationResult | undefined
+      try {
+        existing = assertSafeExplorationResult(
+          JSON.parse(await readFile(target, 'utf8')) as ProjectVersionExplorationResult,
+        )
+      } catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+      }
+      const merged = assertSafeExplorationResult({
+        ...safe,
+        createdAt: existing?.createdAt ?? safe.createdAt,
+      })
+      const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
+      await writeFile(temporary, JSON.stringify(merged, null, 2), { encoding: 'utf8' })
+      await rename(temporary, target)
+      saved.push(merged)
+    }
+    return saved
+  }
+
   async inherit(sourceProjectVersionId: string, targetProjectVersionId: string) {
     const source = await this.ensure(sourceProjectVersionId)
     const target = this.workspaceRoot(targetProjectVersionId)
@@ -113,6 +174,22 @@ export class LocalExecutionWorkspaceStore {
         inheritedFromProjectVersionId: sourceProjectVersionId,
         updatedAt: inheritedAt,
       }, null, 2), { encoding: 'utf8' })
+    }
+    const explorations = await this.explorationFiles(target)
+    for (const path of explorations) {
+      const sourceResult = assertSafeExplorationResult(
+        JSON.parse(await readFile(path, 'utf8')) as ProjectVersionExplorationResult,
+      )
+      const inherited = assertSafeExplorationResult({
+        ...sourceResult,
+        id: `exploration_${sha256(`${targetProjectVersionId}\u0000${explorationContextKey(sourceResult, sourceResult.environmentSignature)}`).slice(0, 40)}`,
+        projectVersionId: targetProjectVersionId,
+        validationStatus: sourceResult.validationStatus === 'invalid' ? 'invalid' : 'needs_validation',
+        inheritedFromProjectVersionId: sourceProjectVersionId,
+        inheritedFromExplorationId: sourceResult.id,
+        updatedAt: inheritedAt,
+      })
+      await writeFile(path, JSON.stringify(inherited, null, 2), { encoding: 'utf8' })
     }
     await this.ensure(targetProjectVersionId)
   }
@@ -133,9 +210,10 @@ export class LocalExecutionWorkspaceStore {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         const absolute = join(directory, entry.name)
         if (entry.isDirectory()) pending.push(absolute)
-        else if (entry.isFile() && !relative(root, absolute).startsWith('bindings/')) {
-          const content = await readFile(absolute, 'utf8')
+        else if (entry.isFile()) {
           const path = relative(root, absolute).replaceAll('\\', '/')
+          if (['bindings/', 'exploration/'].some(prefix => path.startsWith(prefix))) continue
+          const content = await readFile(absolute, 'utf8')
           files.push({ path, content, contentSha256: sha256(content), size: Buffer.byteLength(content, 'utf8') })
         }
       }
@@ -157,6 +235,14 @@ export class LocalExecutionWorkspaceStore {
       .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
       .map(entry => join(directory, entry.name))
   }
+
+  private async explorationFiles(root: string) {
+    const directory = join(root, 'exploration')
+    return (await readdir(directory, { withFileTypes: true }))
+      .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+      .map(entry => join(directory, entry.name))
+      .sort((left, right) => left.localeCompare(right, 'en'))
+  }
 }
 
 function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
@@ -168,6 +254,9 @@ function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
 }
 
 function bindingName(caseId: string) { return sha256(caseId).slice(0, 32) }
+function explorationName(result: ProjectVersionExplorationResult) {
+  return explorationContextKey(result, result.environmentSignature).slice(0, 48)
+}
 function safeIdentity(value: string) {
   if (!/^[A-Za-z0-9._-]{1,200}$/u.test(value)) throw new Error('TEST_EXECUTION_WORKSPACE_IDENTITY_INVALID')
   return value
