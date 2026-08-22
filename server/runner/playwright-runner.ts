@@ -16,6 +16,7 @@ export interface ExecutionEnvironmentSecretResolver {
   resolveForLaunch(input: {
     environmentId: string
     environmentSignature: string
+    configurationId?: string
   }, signal: AbortSignal): Promise<Readonly<Record<string, string>>>
 }
 
@@ -72,6 +73,7 @@ export class OciPlaywrightRunner implements PlaywrightRunner {
       {
         environmentId: input.environment.environmentId,
         environmentSignature: input.environment.signature,
+        ...(input.runner.configurationId ? { configurationId: input.runner.configurationId } : {}),
       },
       signal,
     )

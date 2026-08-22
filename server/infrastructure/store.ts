@@ -1,7 +1,7 @@
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
-import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun } from '../domain/types.js'
+import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, ConfigVersion, DatabaseState, GenerativeModelSource, ProjectVersion, ProjectVersionRequirementBinding, ReviewRun, TestExecutionInfrastructureConfigurationVersion } from '../domain/types.js'
 import { normalizeRequirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 
 export interface TaskLease { workerId: string; runToken: string }
@@ -55,7 +55,7 @@ export type ReviewRunPage = {
   nextCursor?: string
 }
 
-export type ConfigurationTransactionScope = 'ai_configuration' | 'knowledge_configuration'
+export type ConfigurationTransactionScope = 'ai_configuration' | 'knowledge_configuration' | 'test_execution_infrastructure_configuration'
 
 export type KnowledgeReadState = {
   state: DatabaseState
@@ -67,7 +67,7 @@ export type DefaultKnowledgeBase = {
   knowledgeBase: DatabaseState['knowledgeBases'][number]
 }
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], testExecutionInfrastructureConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -83,6 +83,7 @@ export interface StateStore {
   listAiResources?(): Promise<AiResource[]>
   getAgentConfigurationState?(scene: AgentConfigurationScene): Promise<{ draft: AgentConfigurationDraft | null; versions: AgentConfigurationVersion[] }>
   getActiveAgentConfiguration?(scene: AgentConfigurationScene, agentKey: AgentConfigurationAgentKey): Promise<AgentConfigurationVersion | null>
+  listTestExecutionInfrastructureConfigurationVersions?(): Promise<TestExecutionInfrastructureConfigurationVersion[]>
   getProjectVersion?(projectVersionId: string): Promise<ProjectVersion | null>
   listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
   listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
@@ -146,7 +147,7 @@ export class JsonStore implements StateStore {
     try {
       const loaded = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[]; technicalSolutionReviews?: unknown[]; technicalSolutionRuns?: unknown[]; technicalSolutionFindingActions?: unknown[] }
       this.state = loaded
-      this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []
+      this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.testExecutionInfrastructureConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []
       this.state.projectVersions.forEach(normalizeRequirementReleaseBindings)
       const retiredDataRemoved = removeRetiredAgentData(loaded)
       normalizeTestDesignState(this.state)
@@ -165,6 +166,7 @@ export class JsonStore implements StateStore {
     })
   }
   async getActiveAgentConfiguration(scene: AgentConfigurationScene, agentKey: AgentConfigurationAgentKey) { return structuredClone(this.state.agentConfigurationVersions.find(item => item.scene === scene && item.agentKey === agentKey && item.status === 'active') ?? null) }
+  async listTestExecutionInfrastructureConfigurationVersions() { return structuredClone(this.state.testExecutionInfrastructureConfigurationVersions) }
   async getToolApproval(approvalId: string) { return structuredClone(this.state.toolApprovals.find(item => item.id === approvalId) ?? null) }
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
     await this.transaction(state => {

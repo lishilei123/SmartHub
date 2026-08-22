@@ -138,6 +138,9 @@ export interface ExecutionRunnerSnapshot {
   playwrightVersion: string
   imageReference: string
   imageDigest: string
+  configurationId?: string
+  configurationVersion?: number
+  configurationSha256?: string
 }
 
 export interface FrozenExecutionHandoffSnapshot {

@@ -1,6 +1,8 @@
 import type {
   ExecutionEnvironmentSnapshot,
 } from '../domain/test-execution-types.js'
+import type { TestExecutionEnvironmentProfile } from '../domain/types.js'
+import type { TestExecutionInfrastructureConfigurationService } from './test-execution-infrastructure-configuration-service.js'
 import type {
   ExecutionEnvironmentSecretResolver,
 } from '../runner/playwright-runner.js'
@@ -9,18 +11,7 @@ import type {
   ExecutionEnvironmentResolver,
 } from './test-execution-service.js'
 
-export type ExecutionEnvironmentProfile = {
-  environmentId: string
-  name: string
-  baseUrl: string
-  targets: Array<{
-    protocol: 'http' | 'https'
-    host: string
-    port: number
-  }>
-  networkName: string
-  secretEnvironmentVariables?: Readonly<Record<string, string>>
-}
+export type ExecutionEnvironmentProfile = TestExecutionEnvironmentProfile
 
 export class ConfiguredExecutionEnvironmentCatalog
 implements ExecutionEnvironmentResolver, ExecutionEnvironmentSecretResolver {
@@ -104,11 +95,68 @@ implements ExecutionEnvironmentResolver, ExecutionEnvironmentSecretResolver {
     )
   }
 
-  listSnapshots() {
+  async listSnapshots() {
     return [...this.profiles.values()]
       .map(profile => structuredClone(profile.snapshot))
       .sort((left, right) =>
         left.environmentId.localeCompare(right.environmentId))
+  }
+
+  /** Normalized non-secret configuration for creating an immutable release. */
+  exportProfiles(): ExecutionEnvironmentProfile[] {
+    return [...this.profiles.values()]
+      .map(profile => ({
+        environmentId: profile.snapshot.environmentId,
+        name: profile.snapshot.name,
+        baseUrl: profile.snapshot.baseUrl,
+        targets: structuredClone(profile.snapshot.targets),
+        networkName: profile.networkName,
+        ...(Object.keys(profile.secretEnvironmentVariables).length
+          ? { secretEnvironmentVariables: structuredClone(profile.secretEnvironmentVariables) }
+          : {}),
+      }))
+      .sort((left, right) => left.environmentId.localeCompare(right.environmentId))
+  }
+}
+
+/** Resolves the active server-owned infrastructure release on every operation. */
+export class ServerConfiguredExecutionEnvironmentCatalog
+implements ExecutionEnvironmentResolver, ExecutionEnvironmentSecretResolver {
+  constructor(private readonly configurations: TestExecutionInfrastructureConfigurationService) {}
+
+  async readiness() {
+    const catalog = await this.activeCatalog()
+    return catalog ? await catalog.readiness() : { ready: false, reason: 'TEST_EXECUTION_ENVIRONMENT_NOT_CONFIGURED' }
+  }
+
+  async resolveSnapshotForBaseUrl(baseUrl: string) {
+    const catalog = await this.requiredActiveCatalog()
+    return await catalog.resolveSnapshotForBaseUrl(baseUrl)
+  }
+
+  async resolveForLaunch(input: { environmentId: string; environmentSignature: string; configurationId?: string }, signal: AbortSignal) {
+    const configuration = input.configurationId
+      ? await this.configurations.resolveVersion(input.configurationId)
+      : await this.configurations.resolveActive()
+    if (!configuration) throw new Error('TEST_EXECUTION_ENVIRONMENT_NOT_CONFIGURED')
+    return await new ConfiguredExecutionEnvironmentCatalog(configuration.environments)
+      .resolveForLaunch(input, signal)
+  }
+
+  async listSnapshots() {
+    const catalog = await this.activeCatalog()
+    return catalog?.listSnapshots() ?? []
+  }
+
+  private async activeCatalog() {
+    const configuration = await this.configurations.resolveActive()
+    return configuration ? new ConfiguredExecutionEnvironmentCatalog(configuration.environments) : null
+  }
+
+  private async requiredActiveCatalog() {
+    const catalog = await this.activeCatalog()
+    if (!catalog) throw new Error('TEST_EXECUTION_ENVIRONMENT_NOT_CONFIGURED')
+    return catalog
   }
 }
 

@@ -2604,6 +2604,20 @@ const migrations: Migration[] = [{
     CREATE INDEX IF NOT EXISTS test_case_library_versions_project_version_published_idx
       ON smarthub.test_case_library_versions (project_version_id, published_at DESC, id DESC);
   `,
+}, {
+  version: 34,
+  name: 'test-execution-infrastructure-configuration-versions',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.test_execution_infrastructure_configuration_versions (
+      id text PRIMARY KEY,
+      version integer NOT NULL UNIQUE,
+      status text NOT NULL,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS test_execution_infrastructure_configuration_active_idx
+      ON smarthub.test_execution_infrastructure_configuration_versions (status, version DESC);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

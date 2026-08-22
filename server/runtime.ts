@@ -24,17 +24,16 @@ import { PiTestExecutionRuntimeAdapter } from './agent/pi-test-execution-runtime
 import { TestExecutionService } from './application/test-execution-service.js'
 import { TestReportService } from './application/test-report-service.js'
 import {
-  ConfiguredExecutionEnvironmentCatalog,
-  executionEnvironmentProfilesFromJson,
+  ServerConfiguredExecutionEnvironmentCatalog,
 } from './application/test-execution-environment.js'
+import { TestExecutionInfrastructureConfigurationService } from './application/test-execution-infrastructure-configuration-service.js'
 import { FrozenTestExecutionWorkspaceProvider } from './application/test-execution-workspace-provider.js'
 import { LocalExecutionArtifactStore } from './infrastructure/execution-artifact-store.js'
 import { PostgresTestExecutionStore } from './infrastructure/test-execution-store.js'
-import { OciExecutionSandbox } from './runner/execution-sandbox.js'
 import {
-  OciPlaywrightRunner,
   type PlaywrightRunner,
 } from './runner/playwright-runner.js'
+import { ConfiguredOciPlaywrightRunner } from './runner/configured-playwright-runner.js'
 
 const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -85,11 +84,11 @@ export const projectVersionService = new ProjectVersionService(stateStore, servi
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore
 
+export const testExecutionInfrastructureConfigurationService =
+  new TestExecutionInfrastructureConfigurationService(stateStore)
 export const executionEnvironmentCatalog =
-  new ConfiguredExecutionEnvironmentCatalog(
-    executionEnvironmentProfilesFromJson(
-      process.env.SMARTHUB_TEST_EXECUTION_ENVIRONMENTS,
-    ),
+  new ServerConfiguredExecutionEnvironmentCatalog(
+    testExecutionInfrastructureConfigurationService,
   )
 export const executionArtifactStore =
   new LocalExecutionArtifactStore(executionArtifactRoot)
@@ -108,71 +107,11 @@ export const testExecutionWorkspaceProvider = testExecutionStore
       executionArtifactStore,
     )
   : undefined
-function createPlaywrightRunner(): PlaywrightRunner {
-  const runnerVersion = process.env.SMARTHUB_RUNNER_VERSION
-  const playwrightVersion = process.env.SMARTHUB_PLAYWRIGHT_VERSION
-  const imageReference = process.env.SMARTHUB_RUNNER_IMAGE
-  const imageDigest = process.env.SMARTHUB_RUNNER_IMAGE_DIGEST
-  const runtimeExecutable = process.env.SMARTHUB_CONTAINER_RUNTIME
-  if (
-    runnerVersion
-    && playwrightVersion
-    && imageReference
-    && imageDigest
-    && runtimeExecutable
-  ) {
-    return new OciPlaywrightRunner(
-      new OciExecutionSandbox({
-        runtimeExecutable,
-        imageReference,
-        imageDigest,
-        runnerVersion,
-        playwrightVersion,
-        networkPolicies: executionEnvironmentCatalog.networkPolicies(),
-        ...(process.env.SMARTHUB_RUNNER_ENTRYPOINT
-          ? { entrypoint: process.env.SMARTHUB_RUNNER_ENTRYPOINT }
-          : {}),
-        ...(process.env.SMARTHUB_RUNNER_WORK_ROOT
-          ? { workingRoot: process.env.SMARTHUB_RUNNER_WORK_ROOT }
-          : {}),
-      }, executionArtifactStore),
-      executionEnvironmentCatalog,
-    )
-  }
-  return new UnavailablePlaywrightRunner({
-    runnerVersion: runnerVersion ?? 'unconfigured',
-    playwrightVersion: playwrightVersion ?? 'unconfigured',
-    imageReference: imageReference ?? 'unconfigured',
-    imageDigest: imageDigest ?? `sha256:${'0'.repeat(64)}`,
-  })
-}
-
-class UnavailablePlaywrightRunner implements PlaywrightRunner {
-  constructor(
-    private readonly value: ReturnType<PlaywrightRunner['snapshot']>,
-  ) {}
-
-  snapshot() {
-    return structuredClone(this.value)
-  }
-
-  async readiness() {
-    return {
-      ready: false,
-      reason: 'TEST_EXECUTION_RUNNER_UNAVAILABLE: OCI Runner 配置不完整',
-      snapshot: this.snapshot(),
-    }
-  }
-
-  async execute(): Promise<never> {
-    throw new Error(
-      'TEST_EXECUTION_RUNNER_UNAVAILABLE: 禁止降级为宿主执行',
-    )
-  }
-}
-
 export const playwrightRunner: PlaywrightRunner =
-  createPlaywrightRunner()
+  new ConfiguredOciPlaywrightRunner(
+    testExecutionInfrastructureConfigurationService,
+    executionArtifactStore,
+  )
 export const testExecutionService =
   testExecutionStore && testExecutionWorkspaceProvider
     ? new TestExecutionService(

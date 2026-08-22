@@ -20,7 +20,7 @@ export interface TestExecutionRouteContext {
   artifactStore: ExecutionArtifactStore
   resolveProjectVersion(projectVersionId: string): Promise<ProjectVersion | null>
   readiness(): Promise<unknown>
-  environments(): ExecutionEnvironmentSnapshot[]
+  environments(): Promise<ExecutionEnvironmentSnapshot[]>
   handoffs(projectVersionId: string): Promise<unknown[]>
 }
 
@@ -63,7 +63,7 @@ export async function routeTestExecution(
       'test-execution:read',
     )
     return send(response, 200, {
-      items: service?.environments() ?? context.environments(),
+      items: service ? await service.environments() : await context.environments(),
     })
   }
 

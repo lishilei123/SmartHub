@@ -41,3 +41,14 @@ test('Agent 配置 API 从 planning 与 test_execution 聚合并按 Agent 选择
   assert.match(source, /const path = scenePaths\[agentScenes\[agentKey\]\]/u)
   assert.match(source, /planning: 'planning'/u)
 })
+
+test('执行基础设施配置在设置页通过服务端版本发布，不回显密钥值', () => {
+  const page = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const api = readFileSync(new URL('../src/test-execution-infrastructure-api.ts', import.meta.url), 'utf8')
+  assert.match(page, /name: '执行基础设施'/u)
+  assert.match(page, /登记执行环境/u)
+  assert.match(page, /OCI Playwright Runner/u)
+  assert.match(page, /后续 Run 将冻结该版本/u)
+  assert.match(api, /test-execution-infrastructure-configuration/u)
+  assert.doesNotMatch(page, /secret-value/u)
+})

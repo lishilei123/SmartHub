@@ -54,7 +54,7 @@ export interface ImmutableTestExecutionSourceReader {
 export interface ExecutionEnvironmentResolver {
   readiness(): Promise<{ ready: boolean; reason?: string }>
   resolveSnapshotForBaseUrl(baseUrl: string): Promise<ExecutionEnvironmentSnapshot>
-  listSnapshots?(): ExecutionEnvironmentSnapshot[]
+  listSnapshots?(): Promise<ExecutionEnvironmentSnapshot[]>
 }
 
 export interface TestExecutionWorkspaceProvider {
@@ -139,8 +139,8 @@ export class TestExecutionService {
     }
   }
 
-  environments() {
-    return (this.environmentResolver.listSnapshots?.() ?? [])
+  async environments() {
+    return (await this.environmentResolver.listSnapshots?.() ?? [])
       .map(environment => structuredClone(environment))
   }
 

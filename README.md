@@ -2,6 +2,12 @@
 
 当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 编排三个独立发布的 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`，并只把服务端校验后的 `ExecutionPackage` 交给非 Agentic OCI Playwright Runner。PostgreSQL 保存正式状态，Workspace 与 Artifact Store 只保存不可变投影和产物。
 
+## 测试执行基础设施配置
+
+执行环境与 OCI Runner 不再从 `.env.local` 读取。进入 **设置 → 执行基础设施**，登记被测地址、允许目标和 OCI 网络，并发布固定镜像 Digest 的 Runner 配置。每次保存产生一个不可变服务端版本；新建 Run 会冻结该版本，历史 Run 继续按冻结版本执行。密钥只填写 `SMARTHUB_SECRET_*` 到服务器进程环境变量名的映射，真实值仍由部署环境注入，绝不保存或回显。
+
+三个执行 Agent 的 Tool、Skill、MCP 白名单仍由服务端 Agent 配置治理：选择已就绪模型后分别发布 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`。执行 Agent 只能使用固定的 Workspace Tool、各自提交 Tool 和唯一 Skill，不能增加 MCP 或额外能力。
+
 测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库与套件。执行 Run 由用户填写被测系统地址；Service 只接受已登记 OCI 运行网络的地址，自动选择当前项目版本最新正式用例库并冻结其中全部可执行用例、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
 
 ## 模块状态

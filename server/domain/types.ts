@@ -171,6 +171,38 @@ export interface AgentConfigurationVersion {
   publishedBy: string
 }
 
+export interface TestExecutionEnvironmentProfile {
+  environmentId: string
+  name: string
+  baseUrl: string
+  targets: Array<{ protocol: 'http' | 'https'; host: string; port: number }>
+  networkName: string
+  /** Runner-visible name -> server process environment-variable name. */
+  secretEnvironmentVariables?: Readonly<Record<string, string>>
+}
+
+export interface TestExecutionRunnerConfiguration {
+  containerRuntime: 'docker' | 'podman'
+  runnerVersion: string
+  playwrightVersion: string
+  imageReference: string
+  imageDigest: string
+  entrypoint?: string
+  workingRoot?: string
+}
+
+/** Server-owned immutable release of runner and environment configuration. */
+export interface TestExecutionInfrastructureConfigurationVersion {
+  id: string
+  version: number
+  status: 'active' | 'superseded'
+  environments: TestExecutionEnvironmentProfile[]
+  runner?: TestExecutionRunnerConfiguration
+  contentSha256: string
+  createdAt: string
+  publishedBy: string
+}
+
 export interface EmbeddingSourceModel {
   name: string
   dimensions: number
@@ -380,7 +412,7 @@ export interface ReviewRun {
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; testExecutionInfrastructureConfigurationVersions: TestExecutionInfrastructureConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

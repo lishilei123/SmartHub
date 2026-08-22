@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfigurationScene, AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
+import type { TestExecutionInfrastructureConfigurationInput } from '../application/test-execution-infrastructure-configuration-service.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
@@ -19,7 +20,7 @@ import { routeTestReport } from './test-report-routes.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionService, testExecutionStore, testReportService }
+export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -82,6 +83,10 @@ async function route(request: IncomingMessage, response: ServerResponse, control
       return send(response, 201, await agentConfigurationService.publish(scene, { agentKey: String(body.agentKey) as AgentConfigurationInput['agentKey'], revision: Number(body.revision), publishedBy: principal.displayName }))
     }
   }
+  if (url.pathname === '/api/test-execution-infrastructure-configuration') {
+    if (method === 'GET') return send(response, 200, await testExecutionInfrastructureConfigurationService.get())
+    if (method === 'PUT') return send(response, 201, await testExecutionInfrastructureConfigurationService.publish(await json(request) as TestExecutionInfrastructureConfigurationInput, principal.displayName))
+  }
   if (await routeTestExecution(request, response, {
     method,
     url,
@@ -93,7 +98,7 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     readiness: async () => testExecutionService
       ? testExecutionService.readiness()
       : unavailableTestExecutionReadiness(),
-    environments: () => executionEnvironmentCatalog.listSnapshots(),
+    environments: async () => await executionEnvironmentCatalog.listSnapshots(),
     handoffs: async projectVersionId =>
       testDesignService.listLibraryHandoffs(projectVersionId),
   })) return
