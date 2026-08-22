@@ -65,3 +65,19 @@ test('删除版本同时删除需求绑定并保护仍被继承的来源版本',
   assert.equal(deletedSource.deletedBindings, 1)
   assert.deepEqual(await service.list(), [])
 })
+
+test('删除未被继承的项目版本时同步删除其专属用例库版本', async () => {
+  const { store, service } = await fixture()
+  const version = await service.create({ name: 'V1.0' })
+  await store.transaction(state => {
+    state.testDesignState = {
+      architectureVersion: 'single-agent-skills/v1',
+      designs: [], runs: [], libraryCases: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [],
+      libraryVersions: [{ id: 'library-version-1', projectId: 'project-1', projectVersionId: version.id } as never],
+    }
+  })
+  const deleted = await service.delete(version.id)
+  assert.equal(deleted.deletedTestCaseLibraryVersions, 1)
+  assert.deepEqual(await service.list(), [])
+  assert.equal((await store.snapshot()).testDesignState?.libraryVersions.length, 0)
+})

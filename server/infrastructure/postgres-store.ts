@@ -944,7 +944,7 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const normalizedDesigns = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['designs'][number] }>('SELECT data FROM smarthub.test_designs ORDER BY created_at DESC, id')
   const normalizedRuns = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['runs'][number] }>("SELECT data FROM smarthub.workflow_runs WHERE domain_type='test_design' ORDER BY created_at DESC, id")
   const normalizedLibraryCases = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['libraryCases'][number] }>('SELECT data FROM smarthub.library_test_cases ORDER BY updated_at DESC, id')
-  const normalizedLibraryVersions = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['libraryVersions'][number] }>('SELECT data FROM smarthub.test_case_library_versions ORDER BY published_at DESC, id')
+  const normalizedLibraryVersions = await client.query<{ project_version_id: string; data: NonNullable<DatabaseState['testDesignState']>['libraryVersions'][number] }>('SELECT project_version_id,data FROM smarthub.test_case_library_versions ORDER BY published_at DESC, id')
   const normalizedSuiteDrafts = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['suiteDrafts'][number] }>('SELECT data FROM smarthub.test_suite_drafts ORDER BY updated_at DESC, id')
   const normalizedSuites = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['suiteVersions'][number] }>('SELECT data FROM smarthub.test_suite_versions ORDER BY published_at DESC, id')
   const normalizedHandoffs = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['executionHandoffs'][number] }>('SELECT data FROM smarthub.test_execution_handoffs ORDER BY created_at DESC, id')
@@ -954,7 +954,7 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
     designs: normalizedDesigns.rows.map(row => row.data),
     runs: normalizedRuns.rows.map(row => row.data),
     libraryCases: normalizedLibraryCases.rows.map(row => row.data),
-    libraryVersions: normalizedLibraryVersions.rows.map(row => row.data),
+    libraryVersions: normalizedLibraryVersions.rows.map(row => ({ ...row.data, projectVersionId: row.project_version_id })),
     suiteDrafts: normalizedSuiteDrafts.rows.map(row => row.data),
     suiteVersions: normalizedSuites.rows.map(row => row.data),
     executionHandoffs: normalizedHandoffs.rows.map(row => row.data),
@@ -1128,7 +1128,7 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
     }
   }
   for (const version of aggregate.libraryVersions) {
-    await client.query('INSERT INTO smarthub.test_case_library_versions (id,project_id,version,name,source_run_id,legacy_test_case_set_version_id,content_sha256,published_by,published_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO NOTHING', [version.id,version.projectId,version.version,version.name,version.sourceRunId??null,null,version.contentSha256,version.publishedBy,version.publishedAt,JSON.stringify(version)])
+    await client.query('INSERT INTO smarthub.test_case_library_versions (id,project_id,project_version_id,version,name,source_run_id,legacy_test_case_set_version_id,content_sha256,published_by,published_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT (id) DO NOTHING', [version.id,version.projectId,version.projectVersionId,version.version,version.name,version.sourceRunId??null,null,version.contentSha256,version.publishedBy,version.publishedAt,JSON.stringify(version)])
     for (const member of version.members) await client.query('INSERT INTO smarthub.test_case_library_version_members (version_id,case_id,case_revision,ordinal,content_sha256,frozen_content,traceability,execution_readiness) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8) ON CONFLICT (version_id,case_id) DO UPDATE SET case_revision=EXCLUDED.case_revision,ordinal=EXCLUDED.ordinal,content_sha256=EXCLUDED.content_sha256,frozen_content=COALESCE(EXCLUDED.frozen_content,smarthub.test_case_library_version_members.frozen_content),traceability=COALESCE(EXCLUDED.traceability,smarthub.test_case_library_version_members.traceability),execution_readiness=COALESCE(EXCLUDED.execution_readiness,smarthub.test_case_library_version_members.execution_readiness)', [version.id,member.caseId,member.revision,member.ordinal,member.contentSha256,member.frozenContent?JSON.stringify(member.frozenContent):null,member.traceability?JSON.stringify(member.traceability):null,member.executionReadiness??null])
   }
   for (const draft of aggregate.suiteDrafts) {
@@ -1152,6 +1152,8 @@ async function deleteRemovedTestDesignState(client: PoolClient, before: Database
   const current = state.testDesignState ?? { architectureVersion: 'single-agent-skills/v1' as const, designs: [], runs: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] }
   const removedHandoffs = previous.executionHandoffs.filter(item => !current.executionHandoffs.some(candidate => candidate.id === item.id)).map(item => item.id)
   if (removedHandoffs.length) await client.query('DELETE FROM smarthub.test_execution_handoffs WHERE id = ANY($1::text[])', [removedHandoffs])
+  const removedSuiteDrafts = previous.suiteDrafts.filter(item => !current.suiteDrafts.some(candidate => candidate.id === item.id)).map(item => item.id)
+  if (removedSuiteDrafts.length) await client.query('DELETE FROM smarthub.test_suite_drafts WHERE id = ANY($1::text[])', [removedSuiteDrafts])
   const removedSuites = previous.suiteVersions.filter(item => !current.suiteVersions.some(candidate => candidate.id === item.id)).map(item => item.id)
   if (removedSuites.length) {
     await client.query('DELETE FROM smarthub.test_suite_versions WHERE id = ANY($1::text[])', [removedSuites])
@@ -1168,6 +1170,13 @@ async function deleteRemovedTestDesignState(client: PoolClient, before: Database
   }
   const removedDesigns = previous.designs.filter(item => !current.designs.some(candidate => candidate.id === item.id)).map(item => item.id)
   if (removedDesigns.length) await client.query('DELETE FROM smarthub.test_designs WHERE id = ANY($1::text[])', [removedDesigns])
+  const removedLibraryVersions = previous.libraryVersions.filter(item => !current.libraryVersions.some(candidate => candidate.id === item.id)).map(item => item.id)
+  if (removedLibraryVersions.length) {
+    await client.query('DELETE FROM smarthub.legacy_test_case_id_mappings WHERE migration_id IN (SELECT id FROM smarthub.legacy_test_case_migrations WHERE test_case_library_version_id = ANY($1::text[]))', [removedLibraryVersions])
+    await client.query('DELETE FROM smarthub.legacy_test_case_migrations WHERE test_case_library_version_id = ANY($1::text[])', [removedLibraryVersions])
+    await client.query('DELETE FROM smarthub.test_case_library_version_members WHERE version_id = ANY($1::text[])', [removedLibraryVersions])
+    await client.query('DELETE FROM smarthub.test_case_library_versions WHERE id = ANY($1::text[])', [removedLibraryVersions])
+  }
 }
 
 

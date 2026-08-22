@@ -23,10 +23,11 @@ import './planning.css'
 import './workbench-layout.css'
 
 const PlanningPage = lazy(() => import('./PlanningPage').then(module => ({ default: module.PlanningPage })))
+const TestCasesPage = lazy(() => import('./test-cases/TestCasesPage').then(module => ({ default: module.TestCasesPage })))
 const TestExecutionPage = lazy(() => import('./test-execution/TestExecutionPage').then(module => ({ default: module.TestExecutionPage })))
 const TestReportPage = lazy(() => import('./test-report/TestReportPage').then(module => ({ default: module.TestReportPage })))
 
-type PageKey = 'dashboard' | 'planning' | 'documents' | 'execution' | 'reports' | 'settings'
+type PageKey = 'dashboard' | 'planning' | 'test-cases' | 'documents' | 'execution' | 'reports' | 'settings'
 type PlanningTab = 'requirements' | 'test-design' | 'workflow'
 type NotifyTone = 'success' | 'error' | 'warning'
 type Notify = (message: string, tone?: NotifyTone) => void
@@ -45,7 +46,7 @@ const agentConfigurationGroups: Array<{ label: string; agentKeys: AgentConfigura
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 
 const projectVersionStorageKey = 'smarthub-project-version-id'
-const pageKeys: PageKey[] = ['dashboard', 'planning', 'documents', 'execution', 'reports', 'settings']
+const pageKeys: PageKey[] = ['dashboard', 'planning', 'test-cases', 'documents', 'execution', 'reports', 'settings']
 const routedPage = (value: string | null): PageKey => value === 'requirement-analysis' || value === 'test-design' ? 'planning' : pageKeys.includes(value as PageKey) ? value as PageKey : 'dashboard'
 const legacyPlanningTab = (value: string | null): PlanningTab | undefined => value === 'requirement-analysis' ? 'requirements' : value === 'test-design' ? 'test-design' : undefined
 const restorePage = (): PageKey => {
@@ -60,6 +61,7 @@ const restoreProjectVersion = () => {
 const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: string }[] = [
   { key: 'dashboard', label: '工作台', icon: LayoutDashboard },
   { key: 'planning', label: '测试策划', icon: Sparkles },
+  { key: 'test-cases', label: '测试用例', icon: ListChecks },
   { key: 'execution', label: '测试执行', icon: Play },
   { key: 'reports', label: '报告与诊断', icon: Activity },
 ]
@@ -67,6 +69,7 @@ const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: 
 const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   dashboard: { title: '工作台', desc: '掌握项目质量状态与 AI 任务进展' },
   planning: { title: '测试策划', desc: 'PlanningAgent 串联需求理解、自动测试设计、Coverage Audit 与正式发布交接' },
+  'test-cases': { title: '测试用例', desc: '查看当前项目版本已审核通过及继承复用的正式测试用例' },
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
   execution: { title: '测试执行', desc: '基于不可变 Handoff、独立执行 Agents 与 OCI Playwright Runner 的正式执行工作台' },
   reports: { title: '报告与诊断', desc: '基于 PostgreSQL 正式执行事实的确定性单 Run 报告、失败诊断与完整追溯' },
@@ -132,7 +135,7 @@ function App() {
     if (next.page) url.searchParams.set('page', next.page)
     if (next.projectVersionId) url.searchParams.set('projectVersionId', next.projectVersionId)
     else if (next.projectVersionId === '') url.searchParams.delete('projectVersionId')
-    if (next.resetAnalysisContext) ['analysisId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'executionMaintenanceProposalId', 'testDesignEntry', 'libraryCaseId', 'reportRunId', 'tab', 'assetView', 'planningTab'].forEach(key => url.searchParams.delete(key))
+    if (next.resetAnalysisContext) ['analysisId', 'runId', 'view', 'findingId', 'evidenceId', 'testDesignId', 'workflowRunId', 'executionRunId', 'executionTaskId', 'executionMaintenanceProposalId', 'testDesignEntry', 'libraryCaseId', 'testCaseId', 'reportRunId', 'tab', 'assetView', 'planningTab'].forEach(key => url.searchParams.delete(key))
     if (next.planningTab) url.searchParams.set('planningTab', next.planningTab)
     window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', url)
   }, [])
@@ -243,10 +246,11 @@ function App() {
       </button>
     </aside>
     <main>
-      <section className={`content ${page === 'planning' ? 'planning-content' : ''} ${page === 'execution' ? 'execution-content' : ''} ${page === 'reports' ? 'reports-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
+      <section className={`content ${page === 'planning' ? 'planning-content' : ''} ${page === 'test-cases' ? 'test-cases-content' : ''} ${page === 'execution' ? 'execution-content' : ''} ${page === 'reports' ? 'reports-content' : ''} ${page === 'documents' ? 'documents-content' : ''} ${page === 'settings' ? 'settings-content' : ''}`}>
         <div className="page-head"><div><h1>{meta.title}</h1><p>{meta.desc}</p></div></div>
         {page === 'dashboard' && <Dashboard navigate={navigate} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} />}
         {page === 'planning' && <Suspense fallback={<PageLoading label="正在加载测试策划工作台…" />}><PlanningPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} documents={knowledgeDocumentList} knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={() => refreshKnowledge()} refreshProjectVersions={refreshProjectVersions} onManageVersions={() => setVersionManagerOpen(true)} onOpenKnowledge={() => navigate('documents')} onOpenActivity={() => setActivityOpen(true)} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} /></Suspense>}
+        {page === 'test-cases' && <Suspense fallback={<PageLoading label="正在加载正式测试用例…" />}><TestCasesPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'documents' && <Documents knowledgeBaseId={knowledgeBaseId} apiState={knowledgeApiState} refreshKnowledge={refreshKnowledge} loadDocument={hydrateDocument} directories={workspaceKnowledgeTree.directories} documents={workspaceKnowledgeTree.documents} workspaceRootDirectoryId={workspaceKnowledgeTree.rootDirectoryId} notify={notify} addAudit={entry => setAudit(current => [entry, ...current])} />}
         {page === 'execution' && <Suspense fallback={<PageLoading label="正在加载测试执行工作台…" />}><TestExecutionPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}
         {page === 'reports' && <Suspense fallback={<PageLoading label="正在加载报告与诊断工作台…" />}><TestReportPage key={activeProjectVersion?.id ?? 'no-version'} projectVersion={activeProjectVersion} onManageVersions={() => setVersionManagerOpen(true)} notify={notify} /></Suspense>}

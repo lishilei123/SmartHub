@@ -391,6 +391,8 @@ export interface TestCaseLibraryVersionMemberDetail extends TestCaseLibraryVersi
 export interface TestCaseLibraryVersion {
   id: string
   projectId: string
+  /** Formal ownership boundary. A published library can belong to one ProjectVersion only. */
+  projectVersionId: string
   version: number
   name: string
   sourceRunId?: string

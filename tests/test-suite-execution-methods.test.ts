@@ -10,6 +10,7 @@ const principal = { subjectId: 'suite-test-user', displayName: '套件测试用�
 const now = '2026-08-21T00:00:00.000Z'
 const projectId = 'project-suite-methods'
 const projectVersionId = 'project-version-suite-methods'
+const anotherProjectVersionId = 'project-version-suite-methods-other'
 const libraryVersionId = 'library-version-suite-methods'
 
 function content(title: string, dimension: TestCaseContent['dimension'], executionMethods: Array<'ui' | 'api'>): TestCaseContent {
@@ -29,11 +30,12 @@ async function fixture() {
   })
   const members = cases.map(item => ({ caseId: item.id, revision: 1, ordinal: item.ordinal, contentSha256: item.contentSha256 }))
   const sourceRunId = 'run-suite-fixture'
-  const librarySha256 = canonicalSha256({ schemaVersion: 'test-case-library/v3', projectId, sourceRunId, members })
+  const librarySha256 = canonicalSha256({ schemaVersion: 'test-case-library/v3', projectId, projectVersionId, sourceRunId, members })
   await store.transaction(state => {
     state.projects.push({ id: projectId, name: '套件执行方式测试', createdAt: now })
     state.projectVersions.push({ id: projectVersionId, projectId, name: '测试版本', status: 'open', createdAt: now, updatedAt: now })
-    state.testDesignState = { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], libraryCases: cases.map(item => item.libraryCase), libraryVersions: [{ id: libraryVersionId, projectId, version: 1, name: '正式用例库 V1', sourceRunId, members, contentSha256: librarySha256, publishedBy: principal.subjectId, publishedAt: now, projection: { status: 'succeeded', files: [] } }], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] } as TestDesignState
+    state.projectVersions.push({ id: anotherProjectVersionId, projectId, name: '另一测试版本', status: 'open', createdAt: now, updatedAt: now })
+    state.testDesignState = { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], libraryCases: cases.map(item => item.libraryCase), libraryVersions: [{ id: libraryVersionId, projectId, projectVersionId, version: 1, name: '正式用例库 V1', sourceRunId, members, contentSha256: librarySha256, publishedBy: principal.subjectId, publishedAt: now, projection: { status: 'succeeded', files: [] } }], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] } as TestDesignState
   })
   return { service: new TestDesignService(store), librarySha256 }
 }
@@ -66,4 +68,9 @@ test('扩展 Case 与所有测试维度都通过 TestCase v3 的 UI/API 方法�
   const handoff = await service.createLibraryHandoff(projectVersionId, libraryVersionId, { mode: 'full', expectedLibrarySha256: librarySha256 }, principal)
   assert.deepEqual(handoff.members.map(item => `${item.caseId}:${item.method}`), ['CASE-DUAL:ui', 'CASE-DUAL:api', 'CASE-SECURITY:api', 'CASE-PERFORMANCE:api'])
   assert.deepEqual(handoff.members.find(item => item.caseId === 'CASE-SECURITY')?.executionSpec?.testCase.requirementRefs, [])
+})
+
+test('Execution Handoff 拒绝同项目的其它 ProjectVersion 使用当前版本正式用例库', async () => {
+  const { service, librarySha256 } = await fixture()
+  await assert.rejects(() => service.createLibraryHandoff(anotherProjectVersionId, libraryVersionId, { mode: 'full', expectedLibrarySha256: librarySha256 }, principal), (error: unknown) => error instanceof TestDesignError && error.code === 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND')
 })

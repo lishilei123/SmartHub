@@ -2556,6 +2556,54 @@ const migrations: Migration[] = [{
       RETURN NEW;
     END $$;
   `,
+}, {
+  version: 33,
+  name: 'bind-test-case-library-version-to-project-version',
+  sql: `
+    ALTER TABLE smarthub.test_case_library_versions
+      ADD COLUMN IF NOT EXISTS project_version_id text REFERENCES smarthub.project_versions(id) ON DELETE RESTRICT;
+    UPDATE smarthub.test_case_library_versions library_version
+      SET project_version_id=project_version.id
+      FROM smarthub.workflow_runs run
+      JOIN smarthub.project_versions project_version ON project_version.id=run.project_version_id
+      WHERE library_version.source_run_id=run.id
+        AND project_version.project_id=library_version.project_id
+        AND library_version.project_version_id IS NULL;
+    UPDATE smarthub.test_case_library_versions library_version
+      SET project_version_id=legacy_version.project_version_id
+      FROM smarthub.test_case_set_versions legacy_version
+      WHERE library_version.legacy_test_case_set_version_id=legacy_version.id
+        AND legacy_version.project_id=library_version.project_id
+        AND library_version.project_version_id IS NULL;
+    UPDATE smarthub.test_case_library_versions library_version
+      SET project_version_id=only_project_version.id
+      FROM (
+        SELECT project_id, min(id) AS id
+        FROM smarthub.project_versions
+        GROUP BY project_id
+        HAVING count(*)=1
+      ) only_project_version
+      WHERE only_project_version.project_id=library_version.project_id
+        AND library_version.project_version_id IS NULL;
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM smarthub.test_case_library_versions
+        WHERE project_version_id IS NULL
+      ) THEN
+        RAISE EXCEPTION 'TEST_CASE_LIBRARY_VERSION_PROJECT_VERSION_BACKFILL_UNRESOLVED';
+      END IF;
+    END $$;
+    ALTER TABLE smarthub.test_case_library_versions
+      ALTER COLUMN project_version_id SET NOT NULL;
+    ALTER TABLE smarthub.test_case_library_versions
+      DROP CONSTRAINT IF EXISTS test_case_library_versions_project_id_version_key;
+    ALTER TABLE smarthub.test_case_library_versions
+      ADD CONSTRAINT test_case_library_versions_project_version_version_key UNIQUE (project_version_id, version);
+    CREATE INDEX IF NOT EXISTS test_case_library_versions_project_version_published_idx
+      ON smarthub.test_case_library_versions (project_version_id, published_at DESC, id DESC);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

@@ -244,8 +244,8 @@ test('Test 12：Library Publication 与 Full Handoff 包含历史 reuse、历史
   const createdC = caseContent('修改项目')
   const sourceCases = [libraryCase('CASE-A', historicalA), libraryCase('CASE-B', historicalB), libraryCase('CASE-RISK', historicalRisk)]
   const members = sourceCases.map((item, ordinal) => ({ caseId: item.id, revision: 1, ordinal, contentSha256: item.revisions[0]!.contentSha256 }))
-  const baselineContent = { schemaVersion: 'test-case-library/v3', projectId: 'project-delta', sourceRunId: 'previous-run', members }
-  const baseline: TestCaseLibraryVersion = { id: 'library-v1', projectId: 'project-delta', version: 1, name: '历史正式库', sourceRunId: 'previous-run', members, contentSha256: canonicalSha256(baselineContent), publishedBy: 'previous-owner', publishedAt: now, projection: { status: 'succeeded', files: [] } }
+  const baselineContent = { schemaVersion: 'test-case-library/v3', projectId: 'project-delta', projectVersionId: 'project-version-delta', sourceRunId: 'previous-run', members }
+  const baseline: TestCaseLibraryVersion = { id: 'library-v1', projectId: 'project-delta', projectVersionId: 'project-version-delta', version: 1, name: '历史正式库', sourceRunId: 'previous-run', members, contentSha256: canonicalSha256(baselineContent), publishedBy: 'previous-owner', publishedAt: now, projection: { status: 'succeeded', files: [] } }
   const run = runFixture(sourceCases.map(item => historicalItem(item.id, 1, item.revisions[0]!.content)))
   run.baseTestCaseLibraryVersionSha256 = baseline.contentSha256
   run.historicalSnapshot.sourceTestCaseLibraryVersionSha256 = baseline.contentSha256
@@ -335,7 +335,7 @@ function historicalBaselineFixture(inheritRequirementBindings: boolean, includeS
   const otherRun = structuredClone(sourceRun)
   otherRun.id = 'source-run-other'
   otherRun.projectVersionId = 'project-version-other'
-  const library = (id: string, version: number, sourceRunId: string): TestCaseLibraryVersion => ({ id, projectId: 'project-delta', version, name: `正式库 V${version}`, sourceRunId, members: [structuredClone(member)], contentSha256: canonicalSha256({ id, version, member }), publishedBy: 'owner', publishedAt: `2026-08-2${version}T00:00:00.000Z`, projection: { status: 'succeeded', files: [] } })
+  const library = (id: string, version: number, sourceRunId: string): TestCaseLibraryVersion => { const projectVersionId = sourceRunId === sourceRun.id ? 'project-version-v1' : 'project-version-other'; return { id, projectId: 'project-delta', projectVersionId, version, name: `正式库 V${version}`, sourceRunId, members: [structuredClone(member)], contentSha256: canonicalSha256({ id, projectVersionId, version, member }), publishedBy: 'owner', publishedAt: `2026-08-2${version}T00:00:00.000Z`, projection: { status: 'succeeded', files: [] } } }
   const libraryVersions = includeSourceLibrary ? [library('library-v1', 1, sourceRun.id), library('library-v3', 3, sourceRun.id), library('library-other-v99', 99, otherRun.id)] : [library('library-other-v99', 99, otherRun.id)]
   const state = {
     projectVersions: [

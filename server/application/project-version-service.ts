@@ -65,6 +65,11 @@ export class ProjectVersionService {
       if (testDesignRuns.some(item => ['queued', 'running', 'waiting_gate'].includes(item.status))) throw new Error('项目版本仍有活动测试设计工作流，请先取消运行后再删除')
       const testDesignIds = new Set((testDesignState?.designs ?? []).filter(item => item.projectVersionId === version.id).map(item => item.id))
       const testDesignRunIds = new Set(testDesignRuns.map(item => item.id))
+      const libraryVersionIds = new Set((testDesignState?.libraryVersions ?? []).filter(item => item.projectVersionId === version.id).map(item => item.id))
+      const crossVersionHandoff = (testDesignState?.executionHandoffs ?? []).find(item => item.projectVersionId !== version.id && libraryVersionIds.has(item.testCaseLibraryVersionId))
+      if (crossVersionHandoff) throw new Error('当前版本的用例库仍被其他项目版本的执行交接引用，不能删除')
+      const deletedSuiteDrafts = (testDesignState?.suiteDrafts ?? []).filter(item => item.testCaseLibraryVersionId && libraryVersionIds.has(item.testCaseLibraryVersionId))
+      const deletedSuiteVersions = (testDesignState?.suiteVersions ?? []).filter(item => item.testCaseLibraryVersionId && libraryVersionIds.has(item.testCaseLibraryVersionId))
       const deletedBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id).length
       const deletedRunIds = new Set(reviewRuns.map(item => item.id))
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
@@ -75,9 +80,12 @@ export class ProjectVersionService {
         testDesignState.executionHandoffs = testDesignState.executionHandoffs.filter(item => item.projectVersionId !== version.id)
         testDesignState.runs = testDesignState.runs.filter(item => !testDesignRunIds.has(item.id))
         testDesignState.designs = testDesignState.designs.filter(item => !testDesignIds.has(item.id))
+        testDesignState.suiteDrafts = testDesignState.suiteDrafts.filter(item => !deletedSuiteDrafts.some(candidate => candidate.id === item.id))
+        testDesignState.suiteVersions = testDesignState.suiteVersions.filter(item => !deletedSuiteVersions.some(candidate => candidate.id === item.id))
+        testDesignState.libraryVersions = testDesignState.libraryVersions.filter(item => !libraryVersionIds.has(item.id))
       }
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
-      return { id: version.id, name: version.name, projectId: version.projectId, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length }
+      return { id: version.id, name: version.name, projectId: version.projectId, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseLibraryVersions: libraryVersionIds.size, deletedTestSuiteDrafts: deletedSuiteDrafts.length, deletedTestSuiteVersions: deletedSuiteVersions.length }
     })
     const workspaceCleanup = this.workspaceCleaner
       ? await this.workspaceCleaner.queueProjectVersionWorkspaceCleanup(deleted.projectId, deleted.name)

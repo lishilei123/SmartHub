@@ -9,6 +9,8 @@ export async function routeTestDesign(request: IncomingMessage, response: Server
   if (!url.pathname.includes('test-design') && !url.pathname.includes('test-case') && !url.pathname.includes('test-suite') && !url.pathname.includes('test-execution')) return false
   const authorize = (projectVersionId: string, permission: ProjectVersionPermission) => controls.authorize(principal, projectVersionId, permission)
 
+  const publishedTestCases = /^\/api\/project-versions\/([^/]+)\/test-cases$/.exec(url.pathname)
+  if (publishedTestCases && method === 'GET') { await authorize(publishedTestCases[1], 'test-design:read'); return send(response, 200, await service.publishedTestCases(publishedTestCases[1])) }
   const allInputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs$/.exec(url.pathname)
   if (allInputs && method === 'GET') { await authorize(allInputs[1], 'test-design:read'); return send(response, 200, await service.inputCandidates(allInputs[1])) }
   const inputs = /^\/api\/project-versions\/([^/]+)\/test-designs\/inputs\/(requirement-release|knowledge-assets|fixed-indexes)$/.exec(url.pathname)

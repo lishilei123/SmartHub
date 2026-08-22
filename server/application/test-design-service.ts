@@ -6,7 +6,7 @@ import type { DatabaseState, ProjectVersion, ReviewRun } from '../domain/types.j
 import { activeRequirementReleaseBinding, requirementReleaseBindings } from '../domain/requirement-release-bindings.js'
 import type {
   CaseChangeDecision, CaseChangeProposal, CreateTestDesignInput, CoverageAudit, EffectiveTestCase, HistoricalCaseSnapshot, LibraryTestCase, LibraryTestCaseRevision, RetrievalSnapshot, TestCase,
-  TestCaseContent, TestCaseLibraryVersion, TestCaseLibraryVersionDetail, TestDesign, TestDesignBasisSnapshot, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot,
+  TestCaseContent, TestCaseLibraryVersion, TestCaseLibraryVersionDetail, TestCaseLibraryVersionMemberDetail, TestDesign, TestDesignBasisSnapshot, TestDesignWorkspaceFile, TestDesignWorkspaceSnapshot,
   TestCaseTraceability, TestDesignNodeKey, TestDesignRunAgentConfigurationSnapshot, TestDesignState, TestDesignWorkflowRun, TestExecutionHandoff, TestExecutionMethod,
   TestSuiteDraft, TestSuiteVersion, TestSuiteVersionMember, WorkflowArtifact, WorkflowNodeRun,
 } from '../domain/test-design-types.js'
@@ -466,11 +466,11 @@ export class TestDesignService {
       const members = new Map((baseline?.members ?? []).map(item => [item.caseId, { ...item }]))
       for (const proposal of run.caseChangeProposals) applyProposalToLibrary(aggregate, design.projectId, run, proposal, members, principal.subjectId)
       const orderedMembers = [...members.values()].sort((left, right) => left.caseId.localeCompare(right.caseId)).map((member, ordinal) => freezeLibraryVersionMember(aggregate, design.projectId, { ...member, ordinal, traceability: effectiveTraceabilityForPublishedMember(run, member.caseId) }))
-      const canonicalContent = { schemaVersion: 'test-case-library/v3', projectId: design.projectId, sourceRunId: runId, members: orderedMembers }
+      const canonicalContent = { schemaVersion: 'test-case-library/v3', projectId: design.projectId, projectVersionId, sourceRunId: runId, members: orderedMembers }
       const contentSha256 = canonicalSha256(canonicalContent)
       const proposalStatistics = Object.fromEntries((['reuse', 'update', 'create', 'deprecate', 'reference'] as const).map(operation => [operation, run.caseChangeProposals.filter(item => item.operation === operation && item.decision !== 'rejected').length])) as Record<CaseChangeProposal['operation'], number>
       const dimensionStatistics = orderedMembers.reduce<Partial<Record<TestCaseContent['dimension'], number>>>((result, member) => { const content = required(aggregate.libraryCases.find(item => item.id === member.caseId)?.revisions.find(item => item.revision === member.revision)?.content, 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '发布成员 Revision 不存在'); result[content.dimension] = (result[content.dimension] ?? 0) + 1; return result }, {})
-      const version: TestCaseLibraryVersion = { id: `test_case_library_version_${randomUUID()}`, projectId: design.projectId, version: Math.max(0, ...aggregate.libraryVersions.filter(item => item.projectId === design.projectId).map(item => item.version)) + 1, name: cleanRequired(input.name, '用例库版本名称', 200), sourceRunId: runId, members: orderedMembers, contentSha256, publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics, dimensionStatistics, coverageAudit: { id: audit.id, statistics: structuredClone(audit.statistics), blockerCount: audit.blockers.length } } }
+      const version: TestCaseLibraryVersion = { id: `test_case_library_version_${randomUUID()}`, projectId: design.projectId, projectVersionId, version: Math.max(0, ...aggregate.libraryVersions.filter(item => item.projectVersionId === projectVersionId).map(item => item.version)) + 1, name: cleanRequired(input.name, '用例库版本名称', 200), sourceRunId: runId, members: orderedMembers, contentSha256, publishedBy: principal.subjectId, publishedAt: now(), projection: { status: 'pending', files: [] }, publicationSummary: { proposalStatistics, dimensionStatistics, coverageAudit: { id: audit.id, statistics: structuredClone(audit.statistics), blockerCount: audit.blockers.length } } }
       aggregate.libraryVersions.push(version); return structuredClone(version)
     })
     if (published.projection.status === 'pending' && !published.projection.files.length) await this.projectLibraryVersion(published.id)
@@ -479,6 +479,22 @@ export class TestDesignService {
 
   async listLibraryVersions(projectId: string, sourceRunId?: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return aggregate.libraryVersions.filter(item => item.projectId === projectId && (!sourceRunId || item.sourceRunId === sourceRunId)).sort((left, right) => right.version - left.version).map(item => presentLibraryVersion(aggregate, item)) }
   async getLibraryVersion(projectId: string, versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return presentLibraryVersion(aggregate, required(aggregate.libraryVersions.find(item => item.id === versionId && item.projectId === projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在')) }
+  async publishedTestCases(projectVersionId: string) {
+    const state = await this.store.snapshot()
+    const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
+    const aggregate = readDesignState(state)
+    const libraryVersion = latestPublishedLibraryVersion(aggregate.libraryVersions.filter(item => item.projectVersionId === projectVersionId))
+    if (!libraryVersion) return { projectVersion: { id: projectVersion.id, name: projectVersion.name }, libraryVersion: null, statistics: publishedTestCaseStatistics([]), items: [] }
+    const run = required(libraryVersion.sourceRunId ? aggregate.runs.find(item => item.id === libraryVersion.sourceRunId && item.projectVersionId === projectVersionId) : undefined, 'TEST_CASE_LIBRARY_VERSION_SOURCE_INVALID', '正式用例库缺少当前 ProjectVersion 的发布 Run')
+    const detail = presentLibraryVersion(aggregate, libraryVersion)
+    const items = detail.members.map(member => presentPublishedTestCase(run, member))
+    return {
+      projectVersion: { id: projectVersion.id, name: projectVersion.name },
+      libraryVersion: { id: libraryVersion.id, version: libraryVersion.version, name: libraryVersion.name, contentSha256: libraryVersion.contentSha256, publishedAt: libraryVersion.publishedAt },
+      statistics: publishedTestCaseStatistics(items),
+      items,
+    }
+  }
   async compareLibraryVersions(projectId: string, fromId: string, toId: string) { const left = await this.getLibraryVersion(projectId, fromId); const right = await this.getLibraryVersion(projectId, toId); return versionMemberDiff(left.members, right.members) }
   async listSuites(projectId: string, suiteType?: string) { const state = await this.store.snapshot(); return structuredClone(readDesignState(state).suiteVersions.filter(item => item.projectId === projectId && (!suiteType || item.suiteType === suiteType)).sort(newest)) }
   async getSuite(projectId: string, suiteVersionId: string) { const state = await this.store.snapshot(); return structuredClone(required(readDesignState(state).suiteVersions.find(item => item.id === suiteVersionId && item.projectId === projectId), 'TEST_SUITE_VERSION_NOT_FOUND', '测试套件版本不存在')) }
@@ -505,7 +521,7 @@ export class TestDesignService {
 
   async createLibraryHandoff(projectVersionId: string, libraryVersionId: string, input: { mode: 'smoke' | 'regression' | 'full' | 'custom'; suiteVersionId?: string; impactedCaseIds?: string[]; expectedLibrarySha256: string; executionReadinessOverrides?: Array<{ caseId: string; revision: number; method?: TestExecutionMethod; reason: string }> }, principal: Principal) {
     return this.store.transaction(state => {
-      assertOpenVersion(state, projectVersionId); const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在'); const aggregate = designState(state); const libraryVersion = required(aggregate.libraryVersions.find(item => item.id === libraryVersionId && item.projectId === projectVersion.projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); if (libraryVersion.contentSha256 !== input.expectedLibrarySha256) throw new TestDesignError('TEST_CASE_LIBRARY_HASH_MISMATCH', '用例库版本 Hash 不一致', 409)
+      assertOpenVersion(state, projectVersionId); const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在'); const aggregate = designState(state); const libraryVersion = required(aggregate.libraryVersions.find(item => item.id === libraryVersionId && item.projectId === projectVersion.projectId && item.projectVersionId === projectVersionId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不属于当前项目版本'); if (libraryVersion.contentSha256 !== input.expectedLibrarySha256) throw new TestDesignError('TEST_CASE_LIBRARY_HASH_MISMATCH', '用例库版本 Hash 不一致', 409)
       const detailedLibraryVersion = presentLibraryVersion(aggregate, libraryVersion)
       const expectedSuiteType = input.mode === 'smoke' ? 'smoke' : input.mode === 'regression' ? 'regression' : input.mode === 'custom' ? 'custom' : undefined
       const suite = expectedSuiteType ? required(aggregate.suiteVersions.find(item => item.id === input.suiteVersionId && item.projectId === projectVersion.projectId && item.suiteType === expectedSuiteType && item.status !== 'deprecated'), 'TEST_SUITE_VERSION_NOT_FOUND', `${expectedSuiteType} 套件版本不存在`) : undefined
@@ -598,7 +614,7 @@ export class TestDesignService {
   private async loadScopedRun(projectVersionId: string, designId: string, runId: string) { const state = await this.store.snapshot(); return structuredClone(findRun(state, projectVersionId, designId, runId)) }
   private async projectLibraryVersion(versionId: string) {
     if (!this.projector) throw new TestDesignError('TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '正式用例库必须投影到 Workspace AssetVersion，但资产服务不可用', 503)
-    const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.libraryVersions.find(item => item.id === versionId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); const sourceRun = version.sourceRunId ? aggregate.runs.find(item => item.id === version.sourceRunId) : undefined; const projectVersion = required(sourceRun ? state.projectVersions.find(item => item.id === sourceRun.projectVersionId) : state.projectVersions.filter(item => item.projectId === version.projectId).sort(newest)[0], 'PROJECT_VERSION_NOT_FOUND', '用例库项目版本不存在'); const base = required(state.knowledgeBases.find(item => item.projectId === version.projectId), 'TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '项目知识库不存在'); const files = libraryProjectionFiles(projectVersion.name, version, aggregate.libraryCases)
+    const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.libraryVersions.find(item => item.id === versionId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); const projectVersion = required(state.projectVersions.find(item => item.id === version.projectVersionId && item.projectId === version.projectId), 'PROJECT_VERSION_NOT_FOUND', '用例库项目版本不存在'); const base = required(state.knowledgeBases.find(item => item.projectId === version.projectId), 'TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '项目知识库不存在'); const files = libraryProjectionFiles(projectVersion.name, version, aggregate.libraryCases)
     try {
       const projected = await this.projectWorkspaceFiles(base.id, `test-case-library:${version.id}`, 'test_case_library', files, 'upload')
       await this.store.transaction(draft => { const current = designState(draft); const target = required(current.libraryVersions.find(item => item.id === version.id), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); target.projection = { status: projected.some(item => item.pending) ? 'pending' : 'succeeded', files: projected.map(item => ({ logicalPath: item.file.logicalPath, contentSha256: item.file.contentSha256, assetVersionId: item.assetVersionId })) }; const run = target.sourceRunId ? current.runs.find(item => item.id === target.sourceRunId) : undefined; if (run) { const paths = new Set(projected.map(item => item.file.logicalPath)); run.formalWorkspaceFiles = [...run.formalWorkspaceFiles.filter(item => !paths.has(item.logicalPath)), ...projected.map(item => ({ ...item.file, sourceType: 'test_case_library_version' as const, sourceId: target.id, assetVersionId: item.assetVersionId }))] } })
@@ -857,13 +873,56 @@ function explicitlyInheritedSourceVersion(state: DatabaseState, projectVersion: 
   return source
 }
 
-function inheritedLibraryVersionsForSource(aggregate: TestDesignState, sourceProjectVersionId: string) {
-  const sourceRunIds = new Set(aggregate.runs.filter(run => run.projectVersionId === sourceProjectVersionId).map(run => run.id))
-  return aggregate.libraryVersions.filter(item => Boolean(item.sourceRunId && sourceRunIds.has(item.sourceRunId)))
-}
+function inheritedLibraryVersionsForSource(aggregate: TestDesignState, sourceProjectVersionId: string) { return aggregate.libraryVersions.filter(item => item.projectVersionId === sourceProjectVersionId) }
 
 function latestPublishedLibraryVersion(versions: TestCaseLibraryVersion[]) {
   return [...versions].sort((left, right) => right.version - left.version || right.publishedAt.localeCompare(left.publishedAt))[0]
+}
+
+type PublishedTestCaseItem = {
+  caseId: string
+  revision: number
+  source: 'current_created' | 'historical_reused' | 'historical_modified'
+  content: TestCaseContent
+  executionReadiness: 'ready' | 'needs_confirmation' | 'blocked'
+  contentSha256: string
+  traceability?: TestCaseTraceability
+  sourceTraceability?: { sourceProjectVersionId: string; sourceCaseId: string; sourceRevision: number; changeType: 'reuse' | 'update' }
+}
+
+function presentPublishedTestCase(run: TestDesignWorkflowRun, member: TestCaseLibraryVersionMemberDetail): PublishedTestCaseItem {
+  const historical = run.historicalSnapshot.items.find(item => {
+    const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
+    return locator?.caseId === member.caseId && locator?.revision === member.revision
+  })
+  const update = run.caseChangeProposals.find(item => item.operation === 'update' && item.appliedCaseId === member.caseId && item.appliedRevision === member.revision)
+  const created = run.caseChangeProposals.find(item => item.operation === 'create' && item.appliedCaseId === member.caseId && item.appliedRevision === member.revision)
+  const historicalSource = update ? run.historicalSnapshot.items.find(item => {
+    const locator = item.locator as { caseId?: unknown; revision?: unknown } | undefined
+    return locator?.caseId === update.sourceCaseId && locator?.revision === update.sourceRevision
+  }) : historical
+  const source = update ? 'historical_modified' : historicalSource ? 'historical_reused' : created ? 'current_created' : undefined
+  if (!source) throw new TestDesignError('TEST_CASE_LIBRARY_PUBLICATION_SOURCE_INVALID', '正式用例库成员无法追溯到当前版本发布结果', 409, { runId: run.id, caseId: member.caseId, revision: member.revision })
+  const locator = historicalSource?.locator as { sourceProjectVersionId?: unknown; caseId?: unknown; revision?: unknown } | undefined
+  const sourceTraceability = source === 'current_created' ? undefined : {
+    sourceProjectVersionId: required(typeof locator?.sourceProjectVersionId === 'string' ? locator.sourceProjectVersionId : undefined, 'TEST_CASE_LIBRARY_PUBLICATION_SOURCE_INVALID', '历史正式用例缺少来源 ProjectVersion'),
+    sourceCaseId: required(typeof locator?.caseId === 'string' ? locator.caseId : undefined, 'TEST_CASE_LIBRARY_PUBLICATION_SOURCE_INVALID', '历史正式用例缺少来源 Case'),
+    sourceRevision: required(typeof locator?.revision === 'number' ? locator.revision : undefined, 'TEST_CASE_LIBRARY_PUBLICATION_SOURCE_INVALID', '历史正式用例缺少来源 Revision'),
+    changeType: source === 'historical_modified' ? 'update' as const : 'reuse' as const,
+  }
+  return { caseId: member.caseId, revision: member.revision, source, content: structuredClone(member.frozenContent), executionReadiness: member.executionReadiness, contentSha256: member.contentSha256, ...(member.traceability ? { traceability: structuredClone(member.traceability) } : {}), ...(sourceTraceability ? { sourceTraceability } : {}) }
+}
+
+function publishedTestCaseStatistics(items: PublishedTestCaseItem[]) {
+  return {
+    total: items.length,
+    currentCreated: items.filter(item => item.source === 'current_created').length,
+    historicalReused: items.filter(item => item.source === 'historical_reused').length,
+    historicalModified: items.filter(item => item.source === 'historical_modified').length,
+    ready: items.filter(item => item.executionReadiness === 'ready').length,
+    needsConfirmation: items.filter(item => item.executionReadiness === 'needs_confirmation').length,
+    blocked: items.filter(item => item.executionReadiness === 'blocked').length,
+  }
 }
 
 function publishedRequirementRelease(analysisRun: ReviewRun) {
