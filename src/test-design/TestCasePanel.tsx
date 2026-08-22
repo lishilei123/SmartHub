@@ -1,4 +1,4 @@
-import { CheckCircle2, History, Pencil, Plus, RotateCcw, Search, Trash2, X } from 'lucide-react'
+import { CheckCircle2, Eye, History, Pencil, Plus, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { actualExecutionMethod, createEmptyTestCase, dimensionLabel, TestCaseEditor, testCaseEditorValid } from './TestCaseEditor'
 import type { ReviewState, TestCaseContent, TestDesignCase, TestDesignWorkflowRun } from './types'
@@ -31,6 +31,7 @@ export function TestCasePanel(props: Props) {
   const workbenchRef = useRef<HTMLElement>(null)
   const cases = useMemo(() => props.run?.testCases.filter(item => !item.tombstonedAt) ?? [], [props.run])
   const [selectedId, setSelectedId] = useState<string>()
+  const [viewing, setViewing] = useState(false)
   const [editing, setEditing] = useState<TestDesignCase | 'new'>()
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<ReviewFilter>('all')
@@ -50,14 +51,14 @@ export function TestCasePanel(props: Props) {
 
   useEffect(() => { if (props.createRequest) setEditing('new') }, [props.createRequest])
   useEffect(() => {
-    if (!selectedId || !filteredCases.some(item => item.id === selectedId)) setSelectedId(filteredCases[0]?.id)
+    if (selectedId && !filteredCases.some(item => item.id === selectedId)) setViewing(false)
   }, [filteredCases, selectedId])
   useEffect(() => {
     if (!props.focusRequest?.requestId) return
     const caseId = props.focusRequest.caseId
     setQuery('')
     setFilter('all')
-    if (caseId && cases.some(item => item.id === caseId)) setSelectedId(caseId)
+    if (caseId && cases.some(item => item.id === caseId)) { setSelectedId(caseId); setViewing(true) }
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
       const mobileDetail = caseId && window.matchMedia('(max-width: 760px)').matches ? document.getElementById('test-case-detail') : undefined
@@ -88,26 +89,24 @@ export function TestCasePanel(props: Props) {
         return <button key={item.key} type="button" aria-pressed={filter === item.key} className={filter === item.key ? 'active' : ''} onClick={() => setFilter(item.key)}>{item.label}<span>{count}</span></button>
       })}</nav>
       <div className="td2-case-result" aria-live="polite">
-        <span>显示 <b>{filteredCases.length}</b> / {cases.length} 条{selectedPosition >= 0 ? ` · 当前第 ${selectedPosition + 1} 条` : ''}</span>
+        <span>显示 <b>{filteredCases.length}</b> / {cases.length} 条{viewing && selectedPosition >= 0 ? ` · 当前第 ${selectedPosition + 1} 条` : ''}</span>
         {filtersActive && <button type="button" onClick={() => { setQuery(''); setFilter('all') }}><RotateCcw />清除筛选</button>}
       </div>
     </div>
 
-    <div className="td2-case-layout">
-      <nav className="td2-case-list" aria-label="Candidate 测试用例列表">
+    <div className="td2-case-list" aria-label="Candidate 测试用例列表">
         {filteredCases.map(item => {
           const content = currentContent(item)
-          return <button id={`test-case-${item.id}`} key={item.id} type="button" aria-current={selectedId === item.id ? 'true' : undefined} className={selectedId === item.id ? 'active' : ''} onClick={() => setSelectedId(item.id)}>
-            <span className="td2-case-list-labels"><span className={`td2-review-state ${item.reviewState}`}>{reviewStateLabel(item.reviewState)}</span><span className="td2-case-origin">{originLabel(item.origin)}</span></span>
-            <b>{content.title}</b>
-            <small>{dimensionLabel(content.dimension)} · {content.priority} · {actualExecutionMethod(content)}</small>
-            <em>{content.requirementRefs.length ? `${content.requirementRefs.length} 个关联需求` : '扩展测试'} · r{item.currentRevision}</em>
-          </button>
+          return <article id={`test-case-${item.id}`} key={item.id} className={selectedId === item.id ? 'active' : ''}>
+            <div className="td2-case-list-labels"><span className={`td2-review-state ${item.reviewState}`}>{reviewStateLabel(item.reviewState)}</span><span className="td2-case-origin">{originLabel(item.origin)}</span></div>
+            <div className="td2-case-row-title"><b>{content.title}</b><small>{content.requirementRefs.length ? `${content.requirementRefs.length} 个关联需求` : '扩展测试'} · r{item.currentRevision}</small></div>
+            <small className="td2-case-row-meta">{dimensionLabel(content.dimension)} · {content.priority} · {actualExecutionMethod(content)}</small>
+            <button className="td2-button ghost" type="button" onClick={() => { setSelectedId(item.id); setViewing(true) }}><Eye />查看</button>
+          </article>
         })}
         {!filteredCases.length && <div className="td2-case-list-empty"><Search /><b>没有匹配的用例</b><small>调整搜索词或审核状态后重试。</small></div>}
-      </nav>
-      <div className="td2-case-detail" id="test-case-detail">{selected ? <CaseDetail testCase={selected} busy={props.busy} onEdit={() => setEditing(selected)} onDelete={() => void props.onDelete(selected.id)} onReview={props.onReview} /> : <div className="td2-case-detail-empty"><b>{cases.length ? '请选择一条用例' : '本轮没有 Candidate Delta'}</b><small>{cases.length ? '左侧列表会保留当前筛选结果。' : '冻结的历史用例仍会进入 Effective Case Set。'}</small></div>}</div>
     </div>
+    {viewing && selected && <div className="tdw-backdrop td2-case-viewer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setViewing(false) }}><section className="tdw-modal wide td2-case-viewer" id="test-case-detail" role="dialog" aria-modal="true" aria-label="查看测试用例"><header><div><Eye /><span><b>查看测试用例</b><small>在此完成本条 Candidate 的审核或 Revision 编辑。</small></span></div><button aria-label="关闭查看测试用例" onClick={() => setViewing(false)}><X /></button></header><CaseDetail testCase={selected} busy={props.busy} onEdit={() => { setViewing(false); setEditing(selected) }} onDelete={() => { setViewing(false); void props.onDelete(selected.id) }} onReview={props.onReview} /></section></div>}
     {editing && <CaseEditorDialog testCase={editing === 'new' ? undefined : editing} busy={props.busy} onClose={() => setEditing(undefined)} onSave={async (content, reason) => { if (editing === 'new') await props.onCreate(content); else await props.onEdit(editing.id, content, reason); setEditing(undefined) }} />}
   </section>
 }

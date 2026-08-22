@@ -501,3 +501,37 @@
     flex: 1 1 auto;
   }
 }
+
+/* Candidate review: a calm, compact index with one deliberate detail surface.
+   The list remains scannable in the planning flow; long case content opens only
+   when the reviewer asks for it, avoiding a persistent competing detail pane. */
+.td2-case-workbench .td2-case-list { display:grid; overflow:visible; border-right:0; background:#fff; }
+.td2-case-workbench .td2-case-list>article { display:grid; grid-template-columns:minmax(154px,.72fr) minmax(260px,1.7fr) minmax(178px,1fr) auto; align-items:center; gap:12px; min-width:0; padding:11px 16px; border-bottom:1px solid #edf0f4; background:#fff; transition:background-color .16s ease, box-shadow .16s ease; }
+.td2-case-workbench .td2-case-list>article:hover { background:#fafbfe; }
+.td2-case-workbench .td2-case-list>article.active { background:#f5f7ff; box-shadow:inset 3px 0 #5965e9; }
+.td2-case-list>article:last-child { border-bottom:0; }
+.td2-case-list-labels { min-width:0; }
+.td2-case-row-title { display:grid; gap:3px; min-width:0; }
+.td2-case-row-title b { overflow:hidden; color:#35415a; font-size:12px; line-height:1.45; text-overflow:ellipsis; white-space:nowrap; }
+.td2-case-row-title small, .td2-case-row-meta { color:#7c8799; font-size:10px; line-height:1.45; }
+.td2-case-row-meta { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.td2-case-list>article>.td2-button { min-height:31px; padding:0 10px; font-size:10px; }
+.td2-case-viewer { width:min(960px,calc(100vw - 32px)); max-height:min(840px,calc(100vh - 32px)); overflow:auto; }
+.td2-case-viewer>.td2-case-card { padding:18px; }
+.td2-case-viewer .td2-case-card>header { padding-bottom:14px; }
+.td2-case-viewer-backdrop { z-index:30; }
+.tdw-layout.tdw-layout-simple { grid-template-columns:minmax(0,1fr); }
+.tdw-layout-simple .tdw-content { padding:18px clamp(14px,2vw,28px) 28px; }
+
+@media (min-width:901px) {
+  .tdw-embedded .tdw-review-workspace>.td2-case-workbench { overflow:auto; }
+}
+
+@media (max-width:760px) {
+  .td2-case-workbench .td2-case-list>article { grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:11px 12px; }
+  .td2-case-list-labels { grid-column:1/-1; }
+  .td2-case-row-meta { display:none; }
+  .td2-case-row-title b { white-space:normal; }
+  .td2-case-viewer { width:calc(100vw - 16px); max-height:calc(100vh - 16px); }
+  .td2-case-viewer>.td2-case-card { padding:14px; }
+}
