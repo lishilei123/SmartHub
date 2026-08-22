@@ -24,7 +24,7 @@ import { PiTestExecutionRuntimeAdapter } from './agent/pi-test-execution-runtime
 import { TestExecutionService } from './application/test-execution-service.js'
 import { TestReportService } from './application/test-report-service.js'
 import {
-  ServerConfiguredExecutionEnvironmentCatalog,
+  LocalBaseUrlExecutionEnvironmentResolver,
 } from './application/test-execution-environment.js'
 import { TestExecutionInfrastructureConfigurationService } from './application/test-execution-infrastructure-configuration-service.js'
 import { FrozenTestExecutionWorkspaceProvider } from './application/test-execution-workspace-provider.js'
@@ -33,7 +33,8 @@ import { PostgresTestExecutionStore } from './infrastructure/test-execution-stor
 import {
   type PlaywrightRunner,
 } from './runner/playwright-runner.js'
-import { ConfiguredOciPlaywrightRunner } from './runner/configured-playwright-runner.js'
+import { LocalWorkspaceRunner } from './runner/local-workspace-runner.js'
+import { LocalExecutionWorkspaceStore } from './infrastructure/execution-workspace-store.js'
 
 const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -44,6 +45,8 @@ const modelRoot = process.env.SMARTHUB_MODEL_ROOT ?? resolve(dataRoot, 'models')
 const skillRoot = process.env.SMARTHUB_SKILL_ROOT ?? resolve(dataRoot, 'skills')
 const executionArtifactRoot = process.env.SMARTHUB_EXECUTION_ARTIFACT_ROOT
   ?? resolve(dataRoot, 'test-execution-artifacts')
+const executionWorkspaceRoot = process.env.SMARTHUB_EXECUTION_WORKSPACE_ROOT
+  ?? resolve(dataRoot, 'test-execution-workspaces')
 const production = process.env.NODE_ENV === 'production'
 const databaseUrl = process.env.SMARTHUB_FORCE_JSON_STORE === 'true' ? undefined : process.env.DATABASE_URL
 
@@ -80,16 +83,14 @@ export const planningWorkflowService = new PlanningWorkflowService(
   testDesignService,
 )
 requirementAnalysisService.onRequirementReleaseReady(async runId => { await planningWorkflowService.requirementReleaseReady(runId) })
-export const projectVersionService = new ProjectVersionService(stateStore, service)
+export const executionWorkspaceStore = new LocalExecutionWorkspaceStore(executionWorkspaceRoot)
+export const projectVersionService = new ProjectVersionService(stateStore, service, executionWorkspaceStore)
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore
 
 export const testExecutionInfrastructureConfigurationService =
   new TestExecutionInfrastructureConfigurationService(stateStore)
-export const executionEnvironmentCatalog =
-  new ServerConfiguredExecutionEnvironmentCatalog(
-    testExecutionInfrastructureConfigurationService,
-  )
+export const executionEnvironmentCatalog = new LocalBaseUrlExecutionEnvironmentResolver()
 export const executionArtifactStore =
   new LocalExecutionArtifactStore(executionArtifactRoot)
 export const testExecutionStore = databaseUrl
@@ -107,11 +108,7 @@ export const testExecutionWorkspaceProvider = testExecutionStore
       executionArtifactStore,
     )
   : undefined
-export const playwrightRunner: PlaywrightRunner =
-  new ConfiguredOciPlaywrightRunner(
-    testExecutionInfrastructureConfigurationService,
-    executionArtifactStore,
-  )
+export const playwrightRunner: PlaywrightRunner = new LocalWorkspaceRunner(executionArtifactStore)
 export const testExecutionService =
   testExecutionStore && testExecutionWorkspaceProvider
     ? new TestExecutionService(
@@ -122,6 +119,8 @@ export const testExecutionService =
         testExecutionWorkspaceProvider,
         executionEnvironmentCatalog,
         playwrightRunner,
+        undefined,
+        executionWorkspaceStore,
       )
     : undefined
 export const testReportService = testExecutionStore

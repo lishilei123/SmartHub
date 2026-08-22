@@ -13,6 +13,31 @@ import type {
 
 export type ExecutionEnvironmentProfile = TestExecutionEnvironmentProfile
 
+/**
+ * Local workspace execution has no OCI network allow-list. The supplied BaseURL
+ * is still normalized and frozen into the Run before any Agent or Runner use.
+ */
+export class LocalBaseUrlExecutionEnvironmentResolver implements ExecutionEnvironmentResolver {
+  async readiness() { return { ready: true } }
+
+  async resolveSnapshotForBaseUrl(baseUrl: string) {
+    const normalized = normalizeUnscopedBaseUrl(baseUrl)
+    const url = new URL(normalized)
+    const protocol = url.protocol.slice(0, -1) as 'http' | 'https'
+    const port = url.port ? Number(url.port) : protocol === 'https' ? 443 : 80
+    const base = {
+      schemaVersion: 'test-execution-environment/v1',
+      environmentId: `base-url:${protocol}:${url.hostname.toLocaleLowerCase()}:${port}`,
+      name: normalized,
+      baseUrl: normalized,
+      targets: [{ protocol, host: url.hostname.toLocaleLowerCase(), port }],
+    }
+    return { ...base, signature: canonicalSha256(base) }
+  }
+
+  async listSnapshots() { return [] }
+}
+
 export class ConfiguredExecutionEnvironmentCatalog
 implements ExecutionEnvironmentResolver, ExecutionEnvironmentSecretResolver {
   private readonly profiles = new Map<string, {

@@ -268,6 +268,8 @@ export interface ExecutionPackageCandidate {
   schemaVersion: 'test-script-generation/v1' | 'script-repair/v1'
   taskId: string
   parentScriptRevisionId?: string
+  /** Persistent workspace entry. Legacy candidates omit it and use the task entry. */
+  entryFile?: string
   files: Array<{
     path: string
     content: string

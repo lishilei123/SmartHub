@@ -177,7 +177,7 @@ test('测试执行与报告诊断均使用真实懒加载页面', () => {
   assert.match(app, /\.\/test-report\/TestReportPage/u)
   assert.match(app, /正在加载报告与诊断工作台/u)
   assert.doesNotMatch(app, /报告与诊断[^\n]+hint: '占位'/u)
-  for (const boundary of ['PostgreSQL', 'Artifact Store', 'OCI Runner', '全部正式用例']) assert.match(`${page}\n${runPanel}`, new RegExp(boundary, 'u'))
+  for (const boundary of ['PostgreSQL', 'Artifact Store', 'Local Workspace Runner', '全部正式用例']) assert.match(`${page}\n${runPanel}`, new RegExp(boundary, 'u'))
   for (const history of ['Runner Attempts', 'Same-script retries', 'Automatic repairs', '诊断', '脚本 Revision', 'Artifacts']) assert.match(taskPanel, new RegExp(history, 'u'))
   assert.match(api, /JSON\.stringify\(\{ baseUrl \}\)/u)
   for (const contract of ['执行范围', '全部正式用例', '创建 Run', 'testCaseLibraryVersionId', '被测系统地址', 'type="url"']) assert.match(runPanel, new RegExp(contract, 'u'))

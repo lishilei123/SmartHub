@@ -10,8 +10,18 @@ export interface ProjectVersionWorkspaceCleaner {
   queueProjectVersionWorkspaceCleanup(projectId: string, projectVersionName: string): Promise<ProjectVersionWorkspaceCleanup>
 }
 
+export interface ProjectVersionExecutionWorkspaceManager {
+  ensure(projectVersionId: string): Promise<unknown>
+  inherit(sourceProjectVersionId: string, targetProjectVersionId: string): Promise<void>
+  remove(projectVersionId: string): Promise<void>
+}
+
 export class ProjectVersionService {
-  constructor(private readonly store: StateStore, private readonly workspaceCleaner?: ProjectVersionWorkspaceCleaner) {}
+  constructor(
+    private readonly store: StateStore,
+    private readonly workspaceCleaner?: ProjectVersionWorkspaceCleaner,
+    private readonly executionWorkspace?: ProjectVersionExecutionWorkspaceManager,
+  ) {}
 
   async list() {
     if (this.store.listProjectVersions) return this.store.listProjectVersions()
@@ -23,7 +33,7 @@ export class ProjectVersionService {
   async create(input: { name: string; description?: string; sourceProjectVersionId?: string; inheritRequirementBindings?: boolean }) {
     const name = input.name.trim()
     if (!name) throw new Error('版本名称不能为空')
-    return this.store.transaction(state => {
+    const version = await this.store.transaction(state => {
       const project = platformProject(state)
       if (state.projectVersions.some(item => item.projectId === project.id && item.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('版本名称已存在')
       const source = input.sourceProjectVersionId ? required(state.projectVersions.find(item => item.id === input.sourceProjectVersionId && item.projectId === project.id), '来源版本不存在') : undefined
@@ -37,6 +47,14 @@ export class ProjectVersionService {
       }
       return version
     })
+    if (this.executionWorkspace) {
+      if (input.sourceProjectVersionId && input.inheritRequirementBindings) {
+        await this.executionWorkspace.inherit(input.sourceProjectVersionId, version.id)
+      } else {
+        await this.executionWorkspace.ensure(version.id)
+      }
+    }
+    return version
   }
 
   async updateStatus(projectVersionId: string, status: ProjectVersionStatus) {
@@ -90,6 +108,7 @@ export class ProjectVersionService {
     const workspaceCleanup = this.workspaceCleaner
       ? await this.workspaceCleaner.queueProjectVersionWorkspaceCleanup(deleted.projectId, deleted.name)
       : { taskIds: [], directories: 0, assets: 0 }
+    await this.executionWorkspace?.remove(deleted.id)
     const { projectId: _projectId, ...result } = deleted
     return { ...result, workspaceCleanupTaskIds: workspaceCleanup.taskIds, deletedWorkspaceDirectories: workspaceCleanup.directories, deletedWorkspaceAssets: workspaceCleanup.assets }
   }

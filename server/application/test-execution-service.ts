@@ -34,6 +34,7 @@ import type {
   TestExecutionTransaction,
 } from '../infrastructure/test-execution-store.js'
 import type { PlaywrightRunner } from '../runner/playwright-runner.js'
+import { LocalExecutionWorkspaceStore, type CaseExecutionBinding } from '../infrastructure/execution-workspace-store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import {
   assertExecutionPackageIntegrity,
@@ -115,6 +116,7 @@ export class TestExecutionService {
     private readonly environmentResolver: ExecutionEnvironmentResolver,
     private readonly runner: PlaywrightRunner,
     private readonly clock: () => string = () => new Date().toISOString(),
+    private readonly executionWorkspace?: LocalExecutionWorkspaceStore,
   ) {}
 
   async readiness() {
@@ -617,6 +619,45 @@ export class TestExecutionService {
     task: ExecutionTask,
     signal: AbortSignal,
   ) {
+    if (this.executionWorkspace) {
+      const binding = await this.executionWorkspace.resolveBinding(
+        run.projectVersionId,
+        task.input.caseId,
+      )
+      if (binding && binding.bindingStatus !== 'invalid' && binding.executionType === executableMethod(task)) {
+        const source = await this.executionWorkspace.readEntry(run.projectVersionId, binding)
+        const executionPackage = buildExecutionPackage({
+          candidate: {
+            schemaVersion: 'test-script-generation/v1',
+            taskId: task.id,
+            entryFile: binding.entryFile,
+            files: [{ path: binding.entryFile, content: source }],
+            summary: '复用 ProjectVersion Execution Workspace 入口',
+          },
+          task: { ...task.input, taskId: task.id },
+          environmentSignature: run.environment.signature,
+        })
+        const cacheKey = taskScriptCacheKey(run, task)
+        await this.persistScriptRevision({
+          job, lease, run, task, expectedStatus: 'pending', executionPackage,
+          scriptArtifact: {
+            id: stableIdentity('test_execution_script_artifact', { cacheKey }), cacheKey,
+            caseId: task.input.caseId, caseRevision: task.input.caseRevision,
+            method: executableMethod(task), caseContentSha256: task.input.caseContentSha256,
+            executionSpecSha256: task.input.executionSpecSha256, taskInputSha256: task.input.inputSha256,
+            environmentSignature: run.environment.signature,
+            testScriptAgentVersion: run.agents.testScript.configurationVersion,
+            testScriptAgentConfigurationSha256: run.agents.testScript.configurationSha256,
+            createdAt: this.clock(),
+          },
+          // The immutable revision records the entry actually executed. It is
+          // not a ScriptArtifact cache replay: the source of truth is the
+          // ProjectVersion workspace binding.
+          source: 'agent', generatedBy: run.agents.testScript, incrementRepair: false,
+        })
+        return
+      }
+    }
     const cacheKey = taskScriptCacheKey(run, task)
     const cached = await this.store.getScriptArtifactByCacheKey(cacheKey)
     if (!cached) {
@@ -654,6 +695,7 @@ export class TestExecutionService {
       task: { ...task.input, taskId: task.id },
       environmentSignature: run.environment.signature,
     })
+    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
     await this.persistScriptRevision({
       job,
       lease,
@@ -809,6 +851,7 @@ export class TestExecutionService {
       'TEST_EXECUTION_SCRIPT_ARTIFACT_NOT_FOUND',
       '当前 ScriptRevision 缺少脚本缓存身份',
     )
+    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
     await this.persistScriptRevision({
       job,
       lease,
@@ -840,7 +883,7 @@ export class TestExecutionService {
     repairReason?: string
     incrementRepair: boolean
   }) {
-    const file = input.executionPackage.files[0]
+    const file = required(input.executionPackage.files.find(candidate => candidate.path === input.executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
     const stored = await this.artifactStore.put({
       body: executionArtifactBody(file.content),
       mimeType: 'text/typescript; charset=utf-8',
@@ -971,6 +1014,7 @@ export class TestExecutionService {
         expectedPackageSha256: revision.package.packageSha256,
         environment: run.environment,
         runner: run.runner,
+        ...(await this.workspaceRunTarget(run, task, revision)),
       }, signal)
     } catch (error) {
       result = {
@@ -1111,7 +1155,9 @@ export class TestExecutionService {
           taskId: task.id,
           expectedStatus: 'running',
           expectedStateVersion: task.stateVersion + 1,
-          status: failedAttempts.length === 0 ? 'retrying' : 'diagnosing',
+          status: this.executionWorkspace
+            ? retryableFailure(result.error, result.summary) && failedAttempts.length === 0 ? 'retrying' : 'diagnosing'
+            : failedAttempts.length === 0 ? 'retrying' : 'diagnosing',
           error: result.error,
         })
       },
@@ -1128,8 +1174,8 @@ export class TestExecutionService {
     const revision = await this.currentRevision(task)
     const attempts = (await this.store.listAttempts(task.id))
       .filter(item => item.scriptRevisionId === revision.id && item.status === 'failed')
-    if (attempts.length < 2) {
-      throw new Error('TEST_EXECUTION_DIAGNOSIS_REQUIRES_TWO_FAILURES')
+    if (!attempts.length || !this.executionWorkspace && attempts.length < 2) {
+      throw new Error(this.executionWorkspace ? 'TEST_EXECUTION_DIAGNOSIS_ATTEMPT_REQUIRED' : 'TEST_EXECUTION_DIAGNOSIS_REQUIRES_TWO_FAILURES')
     }
     const artifacts = (await Promise.all(
       attempts.map(attempt => this.store.listArtifacts(task.id, attempt.id)),
@@ -1275,6 +1321,16 @@ export class TestExecutionService {
       diagnoses: structuredClone(diagnoses),
       artifacts: structuredClone(artifacts),
     })
+    if (this.executionWorkspace) {
+      const snapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
+      projection.workspaceFiles.push(...snapshot.files.map(file => ({
+        logicalPath: `execution/${file.path}`,
+        displayName: `Execution Workspace · ${file.path}`,
+        content: file.content,
+        contentSha256: file.contentSha256,
+      })))
+      projection.workspaceFiles.sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'en'))
+    }
     if (
       projection.runId !== run.id
       || projection.projectId !== run.projectId
@@ -1283,6 +1339,40 @@ export class TestExecutionService {
       throw new Error('TEST_EXECUTION_WORKSPACE_SCOPE_MISMATCH')
     }
     return projection
+  }
+
+  private async persistWorkspaceImplementation(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    executionPackage: ExecutionPackage,
+    bindingStatus: CaseExecutionBinding['bindingStatus'],
+  ) {
+    if (!this.executionWorkspace) return
+    await this.executionWorkspace.writeFiles(run.projectVersionId, executionPackage.files)
+    const entry = required(executionPackage.files.find(file => file.path === executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
+    const now = this.clock()
+    await this.executionWorkspace.saveBinding({
+      projectVersionId: run.projectVersionId,
+      caseId: task.input.caseId,
+      executionType: executableMethod(task),
+      entryFile: entry.path,
+      entrySymbol: task.input.caseId,
+      bindingStatus,
+      entrySha256: entry.contentSha256,
+      caseContentSha256: task.input.caseContentSha256,
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+
+  private async workspaceRunTarget(run: ExecutionRun, task: ExecutionTask, revision: ScriptRevision) {
+    if (!this.executionWorkspace) return {}
+    const binding = await this.executionWorkspace.resolveBinding(run.projectVersionId, task.input.caseId)
+    if (!binding || binding.bindingStatus === 'invalid' || binding.entrySha256 !== revision.contentSha256) {
+      throw new Error('TEST_EXECUTION_WORKSPACE_BINDING_DRIFT')
+    }
+    const snapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
+    return { workspace: { root: snapshot.root, entryFile: binding.entryFile, entrySymbol: binding.entrySymbol } }
   }
 }
 
@@ -1777,6 +1867,10 @@ function caseRevisionKey(caseId: string, revision: number) {
 
 function taskEntrypoint(taskId: string) {
   return `tests/${taskId}.spec.ts`
+}
+
+function retryableFailure(error?: string, summary?: string) {
+  return /(?:timeout|timed? out|ECONNRESET|ECONNREFUSED|temporary network|network error)/iu.test(`${error ?? ''}\n${summary ?? ''}`)
 }
 
 function terminalTaskStatus(status: ExecutionTask['status']) {

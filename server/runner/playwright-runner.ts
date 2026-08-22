@@ -34,6 +34,12 @@ export interface PlaywrightRunner {
     expectedPackageSha256: string
     environment: ExecutionEnvironmentSnapshot
     runner: ExecutionRunnerSnapshot
+    /** Present for persistent ProjectVersion workspaces. OCI runners may ignore it. */
+    workspace?: {
+      root: string
+      entryFile: string
+      entrySymbol: string
+    }
   }, signal: AbortSignal): Promise<SandboxExecutionResult>
 }
 

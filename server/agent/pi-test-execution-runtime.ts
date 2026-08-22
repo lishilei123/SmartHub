@@ -282,8 +282,10 @@ export function buildTestExecutionAgentTask(
     },
     instructions: [
       'Workflow Stage 已由 TestExecutionService 固定，不能自行切换。',
+      '先检查 execution/ 下已有 tests、pages、helpers、fixtures、api 与 bindings；优先复用公共能力。',
+      '使用当前冻结工作区中已经交付的受控知识上下文；文档与真实环境不一致时必须如实记录，不得编造 selector、API 或凭据。',
       '只读取当前 run/task 的冻结工作区；不得解析 latest、current 或 active 业务输入。',
-      '不得调用 Shell、SSH、数据库、任意网络、其他 Agent 或 Runner。',
+      '不得调用 Shell、SSH、数据库、任意网络、其他 Agent 或 Runner。真实环境验证由 Local Runner 在提交候选后执行。',
       'Agent 文本不能作为系统命令直接执行。',
       '不得修改正式 TestCase、Expected Result、Verification Check、断言意义、测试目标或需求规则。',
       `完成后只能调用 ${binding.submitToolId} 提交结构化候选。`,
@@ -325,7 +327,7 @@ function validateStageInput(
     if (
       !input.stageContext?.scriptRevisionId
       || !input.stageContext.attemptIds
-      || input.stageContext.attemptIds.length < 2
+      || input.stageContext.attemptIds.length < 1
     ) throw new Error('TEST_EXECUTION_DIAGNOSIS_CONTEXT_REQUIRED')
   }
   if (input.stage === 'script_repair') {

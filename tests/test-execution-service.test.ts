@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -42,6 +43,7 @@ import type {
 import {
   LocalExecutionArtifactStore,
 } from '../server/infrastructure/execution-artifact-store.js'
+import { LocalExecutionWorkspaceStore } from '../server/infrastructure/execution-workspace-store.js'
 import type {
   CreateExecutionAggregateInput,
   ExecutionJobLease,
@@ -543,7 +545,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
     } else if (input.stage === 'failure_diagnosis') {
       schemaVersion = 'failure-analysis/v1'
       agentKey = 'failure-analysis'
-      assert.equal(input.stageContext?.attemptIds?.length, 2)
+      assert.ok((input.stageContext?.attemptIds?.length ?? 0) >= 1)
       candidate = {
         schemaVersion,
         taskId: input.task.id,
@@ -639,12 +641,14 @@ async function withService(
     runner: SequenceRunner
     runtime: ScriptAgentRuntime
     job: ExecutionJob
+    workspace?: LocalExecutionWorkspaceStore
   }) => Promise<void>,
   options: {
     environmentReadiness?: { ready: boolean; reason?: string }
     diagnosisCategory?: FailureDiagnosis['category']
     repairable?: boolean
     repairSource?: (ordinal: number) => string
+    workspace?: boolean
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
@@ -654,6 +658,9 @@ async function withService(
     const artifactStore = new LocalExecutionArtifactStore(root)
     const runner = new SequenceRunner(results)
     const runtime = new ScriptAgentRuntime(value.run.agents, options)
+    const workspace = options.workspace
+      ? new LocalExecutionWorkspaceStore(join(root, 'workspace'))
+      : undefined
     const service = new TestExecutionService(
       {
         async getCurrentLibraryVersion() { throw new Error('NOT_USED') },
@@ -674,8 +681,9 @@ async function withService(
       },
       runner,
       () => '2026-08-13T12:00:00.000Z',
+      workspace,
     )
-    await operation({ service, store, runner, runtime, job: value.job })
+    await operation({ service, store, runner, runtime, job: value.job, workspace })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -699,6 +707,79 @@ test('TestExecutionService 将环境配置和 secret 来源纳入总 readiness',
       reason: 'TEST_EXECUTION_ENVIRONMENT_SECRETS_UNAVAILABLE',
     },
   })
+})
+
+test('已有有效 Execution Binding 时直接 Runner，不调用实现 Agent', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '历史入口通过', artifacts: [] },
+  ], async ({ service, store, runner, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'ui',
+      entryFile: 'tests/ui/status.spec.ts',
+      entrySymbol: store.task.input.caseId,
+      bindingStatus: 'validated',
+      entrySha256,
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.equal(runner.calls.length, 1)
+    assert.equal(runner.calls[0].package.manifest.entrypoint, 'tests/ui/status.spec.ts')
+    assert.deepEqual(runtime.calls, [])
+    assert.equal(store.revisions[0].source, 'agent')
+  }, { workspace: true })
+})
+
+test('Workspace 历史入口首次失败后直接诊断，产品缺陷不修改 Workspace', async () => {
+  await withService([
+    { status: 'failed', exitCode: 1, durationMs: 8, summary: '业务断言失败', error: 'expected Ready', artifacts: [] },
+  ], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
+      executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: store.task.input.caseId,
+      bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'failed')
+    assert.equal(store.task.runnerAttemptCount, 1)
+    assert.deepEqual(runtime.calls.map(call => call.stage), ['failure_diagnosis'])
+    assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 0)
+    assert.equal((await workspace.readEntry(store.run.projectVersionId, { entryFile: 'tests/ui/status.spec.ts' })), source)
+  }, { workspace: true, diagnosisCategory: 'product_defect' })
+})
+
+test('Workspace script_defect 仅在诊断后修改代码并 Retry', async () => {
+  await withService([
+    { status: 'failed', exitCode: 1, durationMs: 8, summary: 'selector 不存在', error: 'locator not found', artifacts: [] },
+    { status: 'passed', exitCode: 0, durationMs: 7, summary: '修复后通过', artifacts: [] },
+  ], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
+      executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: store.task.input.caseId,
+      bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.equal(store.task.runnerAttemptCount, 2)
+    assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 1)
+    assert.deepEqual(runtime.calls.map(call => call.stage), ['failure_diagnosis', 'script_repair'])
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+  }, { workspace: true, diagnosisCategory: 'script_defect' })
 })
 
 test('TestExecutionService 首次真实失败固定同脚本重试，成功后确定性标记 flaky', async () => {

@@ -54,13 +54,13 @@ export function ExecutionRunPanel({
 
   return <div className="te-run-column">
     <section className="te-card te-readiness">
-      <header><div><h2>执行就绪状态</h2><p>生产执行要求正式存储、不可变 Artifact、三个独立 Agent 与 OCI Runner 全部就绪。</p></div><button className="te-icon-button" disabled={loading} onClick={() => void onRefresh()} aria-label="刷新执行就绪状态"><RefreshCw /></button></header>
+      <header><div><h2>执行就绪状态</h2><p>生产执行要求正式存储、不可变 Artifact、受控 Agent 与 ProjectVersion Execution Workspace Runner 全部就绪。</p></div><button className="te-icon-button" disabled={loading} onClick={() => void onRefresh()} aria-label="刷新执行就绪状态"><RefreshCw /></button></header>
       <div className="te-readiness-grid">
         <ReadinessItem icon={<Database />} label="PostgreSQL" ready={readiness?.store.ready} reason={readiness?.store.reason} />
         <ReadinessItem icon={<Box />} label="Artifact Store" ready={readiness?.artifactStore.ready} reason={readiness?.artifactStore.reason} />
         <ReadinessItem icon={<Globe2 />} label="执行环境" ready={readiness?.environment.ready} reason={readiness?.environment.reason} />
         <ReadinessItem icon={<Bot />} label="执行 Agents" ready={readiness?.agents.ready} reason={readiness?.agents.agents.filter(item => !item.ready).map(item => item.reason ?? item.agentKey).join('；')} />
-        <ReadinessItem icon={<Server />} label="OCI Runner" ready={readiness?.runner.ready} reason={readiness?.runner.reason} />
+        <ReadinessItem icon={<Server />} label="Local Workspace Runner" ready={readiness?.runner.ready} reason={readiness?.runner.reason} />
       </div>
       {readiness && <span className={`te-status-pill ${readiness.ready ? 'passed' : 'blocked'}`}>{readiness.ready ? '可以创建真实执行' : 'Runner unavailable / Agent not ready'}</span>}
     </section>
@@ -96,7 +96,7 @@ export function ExecutionRunPanel({
         <div><dt>Environment</dt><dd>{run.value.environment.name} · {shortId(run.value.environment.signature)}</dd></div>
         <div><dt>Test data</dt><dd>{run.value.testData ? `需求 V${run.value.testData.sourceSetVersion} · ${run.value.testData.bindings.length} 项供给 · ${shortId(run.value.testData.contentSha256)}` : '无额外数据需求'}</dd></div>
         <div><dt>Runner</dt><dd>{run.value.runner.runnerVersion} · Playwright {run.value.runner.playwrightVersion}</dd></div>
-        <div><dt>Image</dt><dd title={`${run.value.runner.imageReference}@${run.value.runner.imageDigest}`}>{run.value.runner.imageReference} · {shortId(run.value.runner.imageDigest)}</dd></div>
+        <div><dt>Execution workspace</dt><dd>{run.value.runner.imageReference === 'local-workspace' ? 'ProjectVersion 隔离 · 可持续复用' : `Legacy OCI image · ${run.value.runner.imageReference}`}</dd></div>
         <div><dt>Agent snapshots</dt><dd>{Object.values(run.value.agents).map(agent => `${agent.agentKey} v${agent.configurationVersion}`).join(' · ')}</dd></div>
       </dl>
     </section>}

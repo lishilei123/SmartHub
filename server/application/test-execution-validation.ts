@@ -334,15 +334,19 @@ export function buildExecutionPackage(input: {
   if (!['ui', 'api'].includes(input.task.method)) {
     throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_UNSUPPORTED', '不支持的方法不能创建执行包')
   }
-  const entrypoint = `tests/${safeIdentity(input.task.taskId, 'taskId')}.spec.ts`
+  const legacyEntrypoint = input.candidate.entryFile === undefined
+  const entrypoint = legacyEntrypoint
+    ? `tests/${safeIdentity(input.task.taskId, 'taskId')}.spec.ts`
+    : safePackagePath(input.candidate.entryFile!)
   const files = normalizePackageFiles(input.candidate.files)
-  if (files.length !== 1 || files[0].path !== entrypoint) {
+  const entry = files.find(file => file.path === entrypoint)
+  if (!entry || legacyEntrypoint && (files.length !== 1 || files[0].path !== entrypoint)) {
     throw new TestExecutionValidationError(
       'TEST_EXECUTION_PACKAGE_ENTRYPOINT_INVALID',
-      `执行包必须且只能包含固定入口 ${entrypoint}`,
+      legacyEntrypoint ? `执行包必须且只能包含固定入口 ${entrypoint}` : `执行包必须包含入口 ${entrypoint}`,
     )
   }
-  const assertions = validateEntrypointSource(files[0].content, input.task.executionSpec)
+  const assertions = validateEntrypointSource(entry.content, input.task.executionSpec)
   if (input.baselineAssertions) assertProtectedAssertions(input.baselineAssertions, assertions)
   const protectedAssertionSha256 = canonicalSha256(assertions)
   const manifestBase = {
@@ -376,6 +380,7 @@ export function assertExecutionPackageIntegrity(input: {
     candidate: {
       schemaVersion: 'test-script-generation/v1',
       taskId: input.task.taskId,
+      entryFile: input.package.manifest.entrypoint,
       files: input.package.files,
       summary: 'Runner boundary validation',
     },
