@@ -11,7 +11,10 @@ const principal = { subjectId: 'test-owner', displayName: '测试负责人' }
 test('TestDesign 直接冻结 Requirement Release content，且 Workspace 只保留用户资料', async () => {
   const store = new JsonStore(null)
   await store.load()
-  const content = releaseContent('RP-MACHINE', '来自 Requirement Release content')
+  const content: RequirementReleaseContent = {
+    ...releaseContent('RP-MACHINE', '来自 Requirement Release content'),
+    testFocus: [{ id: 'TF-FROZEN', title: '已退休测试重点', description: '仅验证旧 Release 仍可按原 Hash 冻结', requirementPointRefs: ['RP-MACHINE'] }],
+  }
   const contentSha256 = canonicalSha256(content)
   await store.transaction(state => {
     state.projects.push({ id: 'project-1', name: '订单项目', createdAt: '2026-08-12T00:00:00.000Z' })
@@ -66,6 +69,7 @@ test('TestDesign 直接冻结 Requirement Release content，且 Workspace 只保
   assert.equal(run.basisSnapshot.requirementReleaseContentSha256, contentSha256)
   assert.deepEqual(run.basisSnapshot.content, content)
   assert.equal(run.basisSnapshot.content.requirements[0].clientRequirementPointId, 'RP-MACHINE')
+  assert.equal(run.basisSnapshot.content.testFocus?.[0].id, 'TF-FROZEN')
   assert.equal(run.workspaceSnapshot.requirementReleaseContentSha256, contentSha256)
   assert.ok(run.workspaceSnapshot.files.some(item => item.assetVersionId === 'version-user'))
   assert.ok(run.workspaceSnapshot.files.some(item => item.assetVersionId === 'version-prototype'))

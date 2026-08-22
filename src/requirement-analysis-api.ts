@@ -113,6 +113,8 @@ export type RequirementReleasePackage = {
     requirements: RequirementPoint[]
     evidence: AnalysisEvidence[]
     clarifications: PlanningClarification[]
+    /** Frozen only on Requirement Releases published before Test Focus retirement. */
+    testFocus?: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
   }
   sourceAssetVersionIds: string[]
   generationExecution: AgentExecutionRecord

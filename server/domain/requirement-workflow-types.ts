@@ -24,6 +24,16 @@ export interface RequirementReleaseContent {
   requirements: CandidateRequirementPoint[]
   evidence: CandidateEvidence[]
   clarifications: PlanningClarification[]
+  /**
+   * Frozen field from already-published requirement-release/v1 records.
+   * New Releases omit it and Test Design must not use it as a design input.
+   */
+  testFocus?: Array<{
+    id: string
+    title: string
+    description: string
+    requirementPointRefs: string[]
+  }>
 }
 
 export interface RequirementReleasePackage {

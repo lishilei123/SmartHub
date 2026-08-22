@@ -872,8 +872,8 @@ function publishedRequirementRelease(analysisRun: ReviewRun) {
   if (release.schemaVersion !== 'requirement-release/v1' || release.projectVersionId !== analysisRun.projectVersionId || release.verificationRunId !== analysisRun.id) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release 与固定需求分析运行不一致', 422)
   const content = release.content
   if (!content || !Array.isArray(content.requirements) || !Array.isArray(content.evidence) || !Array.isArray(content.clarifications)) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release content 结构无效', 422)
-  const allowedContentKeys = new Set(['requirements', 'evidence', 'clarifications'])
-  if (Object.keys(content).length !== allowedContentKeys.size || Object.keys(content).some(key => !allowedContentKeys.has(key))) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release content 包含不属于当前 Schema 的字段', 422)
+  const allowedContentKeys = new Set(['requirements', 'evidence', 'clarifications', 'testFocus'])
+  if (Object.keys(content).some(key => !allowedContentKeys.has(key)) || (content.testFocus !== undefined && !Array.isArray(content.testFocus))) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release content 包含不属于当前 Schema 的字段', 422)
   if (canonicalSha256(content) !== release.contentSha256) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_HASH_MISMATCH', 'Requirement Release content Hash 校验失败', 422)
   const requirementIds = content.requirements.map(item => item.clientRequirementPointId.trim())
   const evidenceIds = content.evidence.map(item => item.clientEvidenceId.trim())
@@ -887,7 +887,8 @@ function publishedRequirementRelease(analysisRun: ReviewRun) {
     || (point.coverageRationale !== undefined && !point.coverageRationale.trim()))
   const invalidEvidence = content.evidence.some(item => !item.clientEvidenceId.trim() || !sourceIdSet.has(item.sourceRef.assetVersionId))
   const invalidClarification = content.clarifications.some(item => !item.id.trim() || item.requirementPointRefs.some(reference => !requirementIdSet.has(reference)) || (item.blocking && item.status === 'pending'))
-  if (!requirementIds.length || requirementIds.some(id => !id) || requirementIdSet.size !== requirementIds.length || evidenceIdSet.size !== evidenceIds.length || invalidRequirement || invalidEvidence || invalidClarification) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release content Schema、引用或发布来源无效', 422)
+  const invalidFrozenTestFocus = content.testFocus?.some(item => !item.id.trim() || !item.title.trim() || !item.description.trim() || !Array.isArray(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !requirementIdSet.has(reference))) ?? false
+  if (!requirementIds.length || requirementIds.some(id => !id) || requirementIdSet.size !== requirementIds.length || evidenceIdSet.size !== evidenceIds.length || invalidRequirement || invalidEvidence || invalidClarification || invalidFrozenTestFocus) throw new TestDesignError('TEST_DESIGN_REQUIREMENTS_PACKAGE_INVALID', 'Requirement Release content Schema、引用或发布来源无效', 422)
   return release
 }
 
