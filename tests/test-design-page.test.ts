@@ -39,7 +39,7 @@ test('需求分析页面只在当前选择的成功 Requirement Release Run 上�
   assert.match(source, /<TestDesignConversationEntry linkage=\{linkedTestDesign\}/u)
   assert.doesNotMatch(source, /测试点设计|RequirementCoverage/u)
   assert.match(source, /测试设计已停止/u)
-  for (const contract of ['loadLibraryVersions', 'loadLibraryHandoffs', 'sourceRunId === linkedTestDesign.runId', 'testCaseLibraryVersionId === libraryVersion.id', '测试用例候选', '尚未发布正式用例库', '正式测试用例库', '非正式', '冻结交接记录']) assert.match(source, new RegExp(contract, 'u'))
+  for (const contract of ['loadLibraryVersions', 'loadLibraryHandoffs', 'sourceRunId === linkedTestDesign.runId', 'testCaseLibraryVersionId === libraryVersion.id', '测试用例候选', '尚未发布正式用例库', '正式测试用例库', '非正式']) assert.match(source, new RegExp(contract, 'u'))
   assert.doesNotMatch(source, /machineReadableArtifactNames|releaseArtifacts\.map\(artifact/u)
   assert.match(source, /PostgreSQL 中的不可变结构化 content 是唯一正式机器事实/u)
   assert.match(source, /requirement-analysis\.md/u)
@@ -177,10 +177,10 @@ test('测试执行与报告诊断均使用真实懒加载页面', () => {
   assert.match(app, /\.\/test-report\/TestReportPage/u)
   assert.match(app, /正在加载报告与诊断工作台/u)
   assert.doesNotMatch(app, /报告与诊断[^\n]+hint: '占位'/u)
-  for (const boundary of ['TestExecutionHandoff', 'PostgreSQL', 'Artifact Store', 'OCI Runner']) assert.match(`${page}\n${runPanel}`, new RegExp(boundary, 'u'))
+  for (const boundary of ['PostgreSQL', 'Artifact Store', 'OCI Runner', '全部正式用例']) assert.match(`${page}\n${runPanel}`, new RegExp(boundary, 'u'))
   for (const history of ['Runner Attempts', 'Same-script retries', 'Automatic repairs', '诊断', '脚本 Revision', 'Artifacts']) assert.match(taskPanel, new RegExp(history, 'u'))
-  assert.match(api, /JSON\.stringify\(\{ handoffId, environmentId, testDataBindings \}\)/u)
-  for (const contract of ['测试数据供给', '来源引用', 'fixture://', '只保存 Fixture', 'run.value.testData']) assert.match(runPanel, new RegExp(contract, 'u'))
+  assert.match(api, /JSON\.stringify\(\{ baseUrl \}\)/u)
+  for (const contract of ['执行范围', '全部正式用例', '创建 Run', 'testCaseLibraryVersionId', '被测系统地址', 'type="url"']) assert.match(runPanel, new RegExp(contract, 'u'))
   assert.doesNotMatch(api, /JSON\.stringify\(\{[^}]*mode/u)
   assert.doesNotMatch(`${page}\n${runPanel}\n${taskPanel}\n${hook}`, /Math\.random|setInterval|fakeArtifact|mockProgress/u)
   assert.match(hook, /window\.setTimeout\(poll, 1800\)/u)
@@ -190,7 +190,7 @@ test('测试执行与报告诊断均使用真实懒加载页面', () => {
   assert.equal(existsSync(new URL('../_temp.patch', import.meta.url)), false)
 })
 
-test('Coverage 面板只展示确定性 v3 审计，发布面板显示正式资产文件', () => {
+test('Coverage 面板只展示确定性 v3 审计，发布面板突出正式发布状态', () => {
   const audit = read('../src/test-design/CoverageAuditPanel.tsx')
   const publish = read('../src/test-design/TestDesignPublicationPanel.tsx')
   const runPanel = read('../src/test-design/TestDesignRunPanel.tsx')
@@ -204,18 +204,15 @@ test('Coverage 面板只展示确定性 v3 审计，发布面板显示正式资�
   assert.match(audit, /coverageTarget Requirement/u)
   assert.match(audit, /coverageAudits\.at\(-1\)/u)
   assert.match(publish, /Coverage Audit/u)
-  assert.match(publish, /Workspace 投影/u)
+  assert.match(publish, /正式用例库已发布/u)
+  assert.doesNotMatch(publish, /Workspace 投影待处理/u)
   assert.match(publish, /contentSha256/u)
-  assert.match(publish, /创建执行交接/u)
   assert.match(publish, /publicationAuditBlockers/u)
-  assert.match(publish, /handoffFocusRequest/u)
-  assert.match(publish, /scrollIntoView/u)
-  assert.match(publish, /Execution Run 时绑定/u)
   assert.doesNotMatch(publish, /find\(item => item\.status === 'valid'\)/u)
   assert.match(runPanel, /not_needed · 无 agent_repair 阻断项/u)
 })
 
-test('历史用例库版本、套件批量选择与 Handoff 全部使用冻结 Revision', () => {
+test('历史用例库版本、套件和发布记录全部使用冻结 Revision', () => {
   const suite = read('../src/test-design/TestSuiteLibraryPanel.tsx')
   const library = read('../src/test-design/TestCaseLibraryPanel.tsx')
   const publish = read('../src/test-design/TestDesignPublicationPanel.tsx')
@@ -232,7 +229,7 @@ test('历史用例库版本、套件批量选择与 Handoff 全部使用冻结 R
   assert.match(library, /扩展测试 \/ 当前版本无 Requirement direct trace/u)
   assert.doesNotMatch(library, /<h4>需求追溯<\/h4>/u)
   assert.match(publish, /冻结内容 Hash/u)
-  assert.match(publish, /TestCase v3 Revision/u)
+  assert.match(publish, /冻结 Revision r/u)
   assert.match(publish, /memberMethods/u)
 })
 

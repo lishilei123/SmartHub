@@ -170,11 +170,14 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
     setRun(next); setAuditRetryError('')
   }, [design, guarded, projectVersionId, run])
 
-  const reviewCases = useCallback(async () => {
+  const reviewCases = useCallback(async (requestedTargets?: Array<{ caseId: string; targetRevision: number }>) => {
     if (!projectVersionId || !design || !run) return
-    const targets = run.testCases.filter(item => !item.tombstonedAt && item.reviewState === 'in_review').map(item => ({ caseId: item.id, targetRevision: item.currentRevision }))
+    const eligibleTargets = new Map(run.testCases.filter(item => !item.tombstonedAt && item.reviewState === 'in_review').map(item => [item.id, item.currentRevision]))
+    const targets = requestedTargets
+      ? requestedTargets.filter(target => eligibleTargets.get(target.caseId) === target.targetRevision)
+      : [...eligibleTargets].map(([caseId, targetRevision]) => ({ caseId, targetRevision }))
     if (!targets.length) return
-    await guarded('case-approve', () => api.batchReviewCases(projectVersionId, design.id, run.id, targets, 'approve'), '当前待审核 Revision 已批量审核通过。')
+    await guarded('case-approve', () => api.batchReviewCases(projectVersionId, design.id, run.id, targets, 'approve'), `${targets.length} 条选中测试用例已审核通过。`)
     await refreshRun()
   }, [design, guarded, projectVersionId, refreshRun, run])
 

@@ -479,6 +479,20 @@ export class TestDesignService {
 
   async listLibraryVersions(projectId: string, sourceRunId?: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return aggregate.libraryVersions.filter(item => item.projectId === projectId && (!sourceRunId || item.sourceRunId === sourceRunId)).sort((left, right) => right.version - left.version).map(item => presentLibraryVersion(aggregate, item)) }
   async getLibraryVersion(projectId: string, versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return presentLibraryVersion(aggregate, required(aggregate.libraryVersions.find(item => item.id === versionId && item.projectId === projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在')) }
+  async getCurrentLibraryVersion(projectVersionId: string) {
+    const state = await this.store.snapshot()
+    const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
+    const aggregate = readDesignState(state)
+    const libraryVersion = latestPublishedLibraryVersion(aggregate.libraryVersions.filter(item => item.projectVersionId === projectVersion.id))
+    if (!libraryVersion) throw new TestDesignError('TEST_EXECUTION_LIBRARY_REQUIRED', '当前项目版本尚未发布正式用例库', 409)
+    return presentLibraryVersion(aggregate, libraryVersion)
+  }
+  async createDefaultExecutionHandoff(projectVersionId: string, libraryVersionId: string, expectedLibrarySha256: string, createdBy: string) {
+    return this.createLibraryHandoff(projectVersionId, libraryVersionId, {
+      mode: 'full',
+      expectedLibrarySha256,
+    }, { subjectId: createdBy, displayName: createdBy })
+  }
   async publishedTestCases(projectVersionId: string) {
     const state = await this.store.snapshot()
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')

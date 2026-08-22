@@ -360,7 +360,7 @@ test('执行环境快照不含 secret，且只在签名一致的 Runner 启动�
       ready: false,
       reason: 'TEST_EXECUTION_ENVIRONMENT_SECRETS_UNAVAILABLE',
     })
-    const snapshot = await catalog.resolveSnapshot('environment-test')
+    const snapshot = await catalog.resolveSnapshotForBaseUrl('https://EXAMPLE.test/status')
     assert.deepEqual(snapshot, {
       environmentId: 'environment-test',
       name: '隔离测试环境',
@@ -368,6 +368,10 @@ test('执行环境快照不含 secret，且只在签名一致的 Runner 启动�
       targets: [{ protocol: 'https', host: 'example.test', port: 443 }],
       signature: snapshot.signature,
     })
+    await assert.rejects(
+      catalog.resolveSnapshotForBaseUrl('https://unregistered.example.test/'),
+      /TEST_EXECUTION_ENVIRONMENT_NOT_REGISTERED/u,
+    )
     assert.equal(JSON.stringify(snapshot).includes(sourceName), false)
     assert.deepEqual(catalog.networkPolicies(), {
       [snapshot.signature]: 'smarthub-test-network',

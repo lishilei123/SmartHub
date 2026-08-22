@@ -1,10 +1,8 @@
 import type {
   CaseMaintenanceProposal,
   ExecutionEnvironment,
-  ExecutionHandoff,
   ExecutionReadiness,
   ExecutionRun,
-  ExecutionTestDataBinding,
   ExecutionTask,
   ExecutionTaskDetail,
   MaintenanceProposalDetail,
@@ -75,12 +73,6 @@ export async function loadEnvironments(projectVersionId: string) {
   )).value.items
 }
 
-export async function loadHandoffs(projectVersionId: string) {
-  return (await request<{ items: ExecutionHandoff[] }>(
-    `${projectScope(projectVersionId)}/test-execution/handoffs`,
-  )).value.items
-}
-
 export async function loadRuns(projectVersionId: string, limit = 50) {
   return (await request<{ items: ExecutionRun[] }>(
     `${projectScope(projectVersionId)}/test-execution-runs?limit=${limit}`,
@@ -145,15 +137,13 @@ export function decideMaintenanceProposal(
 
 export function createRun(
   projectVersionId: string,
-  handoffId: string,
-  environmentId: string,
-  testDataBindings: ExecutionTestDataBinding[],
+  baseUrl: string,
   idempotencyKey: string,
 ) {
   return request<ExecutionRun>(`${projectScope(projectVersionId)}/test-execution-runs`, {
     method: 'POST',
     headers: { 'idempotency-key': idempotencyKey },
-    body: JSON.stringify({ handoffId, environmentId, testDataBindings }),
+    body: JSON.stringify({ baseUrl }),
   })
 }
 

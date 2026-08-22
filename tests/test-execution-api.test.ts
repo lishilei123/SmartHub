@@ -27,7 +27,7 @@ const task = {
   stateVersion: 7,
 }
 
-test('测试执行创建只接受 Handoff、环境与受控数据绑定并传入认证主体和幂等键', async () => {
+test('测试执行创建只接受被测系统地址并由服务端冻结当前正式用例库', async () => {
   let input: Record<string, unknown> | undefined
   const service = {
     async createRun(value: Record<string, unknown>) {
@@ -39,13 +39,7 @@ test('测试执行创建只接受 Handoff、环境与受控数据绑定并传入
     method: 'POST',
     path: '/api/project-versions/pv-1/test-execution-runs',
     body: {
-      handoffId: 'handoff-1',
-      environmentId: 'staging',
-      testDataBindings: [{
-        requirementId: 'data-login-user',
-        sourceType: 'fixture',
-        sourceRef: 'fixture://project/login-users/v3',
-      }],
+      baseUrl: 'https://staging.example.com',
     },
     headers: { 'idempotency-key': 'create-run-key' },
     service,
@@ -54,13 +48,7 @@ test('测试执行创建只接受 Handoff、环境与受控数据绑定并传入
   assert.equal(result.headers.get('etag'), '"test-execution-run-v4"')
   assert.deepEqual(input, {
     projectVersionId: 'pv-1',
-    handoffId: 'handoff-1',
-    environmentId: 'staging',
-    testDataBindings: [{
-      requirementId: 'data-login-user',
-      sourceType: 'fixture',
-      sourceRef: 'fixture://project/login-users/v3',
-    }],
+    baseUrl: 'https://staging.example.com',
     idempotencyKey: 'create-run-key',
     createdBy: 'operator-1',
   })
@@ -86,14 +74,13 @@ test('不存在的正式 ProjectVersion 在授权前返回 404', async () => {
   assert.equal(authorized, false)
 })
 
-test('测试执行创建拒绝客户端覆盖 execution mode', async () => {
+test('测试执行创建拒绝客户端指定执行范围', async () => {
   await assert.rejects(
     routeCall({
       method: 'POST',
       path: '/api/project-versions/pv-1/test-execution-runs',
       body: {
-        handoffId: 'handoff-1',
-        environmentId: 'staging',
+        baseUrl: 'https://staging.example.com',
         mode: 'smoke',
       },
       headers: { 'idempotency-key': 'create-run-key' },

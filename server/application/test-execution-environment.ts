@@ -58,10 +58,12 @@ implements ExecutionEnvironmentResolver, ExecutionEnvironmentSecretResolver {
         }
   }
 
-  async resolveSnapshot(environmentId: string) {
-    const profile = this.profiles.get(environmentId)
+  async resolveSnapshotForBaseUrl(baseUrl: string) {
+    const normalizedBaseUrl = normalizeUnscopedBaseUrl(baseUrl)
+    const profile = [...this.profiles.values()].find(item =>
+      item.snapshot.baseUrl === normalizedBaseUrl)
     if (!profile) {
-      throw new Error('TEST_EXECUTION_ENVIRONMENT_NOT_FOUND')
+      throw new Error('TEST_EXECUTION_ENVIRONMENT_NOT_REGISTERED')
     }
     return structuredClone(profile.snapshot)
   }
@@ -240,6 +242,25 @@ function normalizeBaseUrl(
     && target.port === port)) {
     throw new Error('TEST_EXECUTION_ENVIRONMENT_BASE_URL_NOT_ALLOWED')
   }
+  return url.toString()
+}
+
+function normalizeUnscopedBaseUrl(value: string) {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('TEST_EXECUTION_BASE_URL_INVALID')
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol)
+    || url.username
+    || url.password
+    || url.hash
+  ) {
+    throw new Error('TEST_EXECUTION_BASE_URL_INVALID')
+  }
+  safeHost(url.hostname)
   return url.toString()
 }
 

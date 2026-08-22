@@ -71,7 +71,7 @@ const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   planning: { title: '测试策划', desc: 'PlanningAgent 串联需求理解、自动测试设计、Coverage Audit 与正式发布交接' },
   'test-cases': { title: '测试用例', desc: '查看当前项目版本已审核通过及继承复用的正式测试用例' },
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
-  execution: { title: '测试执行', desc: '基于不可变 Handoff、独立执行 Agents 与 OCI Playwright Runner 的正式执行工作台' },
+  execution: { title: '测试执行', desc: '基于当前正式用例库、独立执行 Agents 与 OCI Playwright Runner 的正式执行工作台' },
   reports: { title: '报告与诊断', desc: '基于 PostgreSQL 正式执行事实的确定性单 Run 报告、失败诊断与完整追溯' },
   settings: { title: '系统管理', desc: '配置模型、集成、权限与平台策略' },
 }

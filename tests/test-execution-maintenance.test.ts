@@ -250,9 +250,13 @@ test('前端维护 Tab、pending 筛选、If-Match 决策和 accepted-only 正�
 
   assert.match(page, /searchParams\.set\('testDesignEntry', 'library'\)/u)
   assert.match(page, /searchParams\.set\('libraryCaseId', caseId\)/u)
+  assert.match(runPanel, /全部正式用例/u)
+  assert.doesNotMatch(runPanel, /选择不可变 Handoff/u)
+  assert.doesNotMatch(page, /testDesignEntry', 'releases'/u)
   assert.match(page, /searchParams\.delete\('executionMaintenanceProposalId'\)/u)
   assert.doesNotMatch(page, /searchParams\.set\([^\n]*(?:summary|proposedChange|caseRevision)/u)
   assert.match(designPage, /searchParams\.get\('libraryCaseId'\)/u)
+  assert.match(designPage, /value === 'library' \|\| value === 'suites' \|\| value === 'releases'/u)
   assert.match(library, /api\.loadLibraryCase\(projectId, selected\.id\)/u)
   assert.match(library, /setEditor\(result\.value\)/u)
   assert.match(library, /restoredInitialCase/u)

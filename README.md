@@ -2,14 +2,14 @@
 
 当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 编排三个独立发布的 `TestScriptAgent`、`FailureAnalysisAgent`、`ScriptRepairAgent`，并只把服务端校验后的 `ExecutionPackage` 交给非 Agentic OCI Playwright Runner。PostgreSQL 保存正式状态，Workspace 与 Artifact Store 只保存不可变投影和产物。
 
-测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库、套件与 `TestExecutionHandoff`。执行 Run 仅接受 Handoff 与服务端环境标识，冻结业务输入、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
+测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库与套件。执行 Run 由用户填写被测系统地址；Service 只接受已登记 OCI 运行网络的地址，自动选择当前项目版本最新正式用例库并冻结其中全部可执行用例、环境签名、Runner 和三个 Agent 配置快照；每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史，未满足 PostgreSQL、Artifact、Agent 或 OCI Runner readiness 时拒绝创建真实执行。
 
 ## 模块状态
 
 | 模块 | 当前状态 | 边界 |
 | --- | --- | --- |
 | 知识库、需求分析、测试设计 | 已实现 | 已接入真实 API、持久化数据、Agent Workflow 和服务端治理。 |
-| 测试执行 | 已实现 | 以不可变 `TestExecutionHandoff` 为唯一正式输入；Service 确定性编排、三个隔离 Agent、OCI-only Runner、不可变 Attempt/Revision/Diagnosis/Artifact 与真实状态前端。 |
+| 测试执行 | 已实现 | 以当前 ProjectVersion 最新正式用例库的全部用例为唯一执行范围；Service 在创建 Run 时冻结输入，确定性编排三个隔离 Agent、OCI-only Runner、不可变 Attempt/Revision/Diagnosis/Artifact 与真实状态前端。 |
 | 报告与诊断 | 已实现 | 绑定单个 `ExecutionRun`，从 PostgreSQL 正式事实确定性投影指标、九类诊断、非通过明细与完整追溯，并提供 canonical JSON 和 Markdown 导出。 |
 
 左侧“测试执行”展示 PostgreSQL 中的真实 Run/Task、就绪状态、冻结快照和不可变历史，不生成示例进度；“报告与诊断”只读汇总同一 Run 的正式事实，不调用 Agent 或 Runner，也不修改执行状态。
@@ -54,7 +54,7 @@
 - `semanticSha256` 只对标题、维度、优先级、执行方式、前置条件、步骤和预期结果这些 Test Intent 字段求 Hash，不包含 `requirementRefs`；`contentSha256` 仍覆盖完整 TestCase v3 内容。Requirement 编号变化本身不会创建新 Revision。
 - Coverage Audit 是服务端确定性步骤，不是 Agent Stage。Service 使用规范化业务语义 Fingerprint 与唯一高置信规则，把来源 Release Requirement 保守映射到当前 Release；相同 `RP-xxx` 字符串从不作为跨版本证明。Requirement Trace Coverage 只消费 Effective Case Set 的 `effectiveRequirementRefs`，并且只对 `coverageTarget=true` 的 Requirement 计算总数、追溯数和未追溯 Repair。它不表示异常、边界、状态或组合场景已完整覆盖。歧义或无法映射只产生 Advisory，历史 Case 继续保留但不虚增追溯覆盖率；`requirementRefs=[]` 的扩展测试仍进入最终资产。
 - `test_design_repair` 只接受 `test-design-repair/v3` 的 `baseCandidateSha256`、`upsertCases` 与 `removeCaseRefs`，且只修改本轮 Candidate Delta。移除历史 update Candidate 会回退为冻结历史 Revision，不会删除或废弃正式 Historical Case。
-- 发布后的正式用例库是 Historical Baseline + accepted Update + accepted Create 的完整合集，并保存完整 TestCase v3 语义。Library Member 另外冻结当前 ProjectVersion 的 Requirement Release Traceability：历史复用保持原 Case Revision 与其原始追溯不变，但成员使用映射后的当前 Requirement refs。项目级 Case 详情分别展示 Revision 原始追溯与各 Library Version Member 当前版本追溯。Execution Handoff 只消费该不可变完整 Library，并按 `executionMethods` 展开 UI/API 方法级成员。Selector、Endpoint、账号、环境和测试数据属于 Execution Run 的 Execution Context，不进入 TestDesign Candidate。
+- 发布后的正式用例库是 Historical Baseline + accepted Update + accepted Create 的完整合集，并保存完整 TestCase v3 语义。Library Member 另外冻结当前 ProjectVersion 的 Requirement Release Traceability：历史复用保持原 Case Revision 与其原始追溯不变，但成员使用映射后的当前 Requirement refs。项目级 Case 详情分别展示 Revision 原始追溯与各 Library Version Member 当前版本追溯。创建 Execution Run 时，Service 只读取当前项目版本最新的不可变完整 Library，并按 `executionMethods` 展开其中全部 UI/API 方法级成员。Selector、Endpoint、账号、环境和测试数据属于 Execution Run 的 Execution Context，不进入 TestDesign Candidate。
 - 自动校验后的用例集投影到 `workspace/branches/{version}/test_cases/test-cases.json|test-cases.md|manifest.json`。每个文件都先进入正式 Asset/AssetVersion 体系，数据库与 Workspace 不形成双真相。
 
 本地开发默认通过 `.env.local` 的 `DATABASE_URL` 使用 PostgreSQL；项目、知识库、资产版本、索引、同步任务、模型与 AI 资源、Agent 配置、ReviewRun/Job，以及 TestDesign Workflow、Snapshot、树、用例 revision、Coverage、用例集、套件和交接均写入 `smarthub` schema。旧技术方案表和旧测试设计数据由迁移直接删除。写事务在数据库锁内读取最新状态并只对变化实体执行 UPSERT/定向删除；未配置 `DATABASE_URL` 时回退到 JSON 文件，生产模式必须使用 PostgreSQL Worker。

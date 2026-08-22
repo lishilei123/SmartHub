@@ -656,9 +656,8 @@ async function withService(
     const runtime = new ScriptAgentRuntime(value.run.agents, options)
     const service = new TestExecutionService(
       {
-        async getHandoff() { throw new Error('NOT_USED') },
-        async getLibraryVersion() { throw new Error('NOT_USED') },
-        async getSuite() { throw new Error('NOT_USED') },
+        async getCurrentLibraryVersion() { throw new Error('NOT_USED') },
+        async createDefaultExecutionHandoff() { throw new Error('NOT_USED') },
       },
       store,
       runtime,
@@ -668,7 +667,10 @@ async function withService(
         async readiness() {
           return options.environmentReadiness ?? { ready: true }
         },
-        async resolveSnapshot() { return environment },
+        async resolveSnapshotForBaseUrl(baseUrl) {
+          assert.equal(baseUrl, environment.baseUrl)
+          return environment
+        },
       },
       runner,
       () => '2026-08-13T12:00:00.000Z',

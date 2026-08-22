@@ -341,8 +341,12 @@
 .td2-case-controls>nav button.active { border-color:#d7ddfa; color:#4253ca; background:#eef1ff; font-weight:700; }
 .td2-case-controls>nav button span { display:grid; min-width:17px; height:17px; padding:0 4px; place-items:center; border-radius:9px; color:#7d8796; background:#e9edf3; font-size:8px; }
 .td2-case-controls>nav button.active span { color:#fff; background:#5965e9; }
-.td2-case-result { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; min-width:0; padding-top:8px; border-top:1px solid #edf0f4; color:#8993a3; font-size:9px; }
+.td2-case-result { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:0; padding-top:8px; border-top:1px solid #edf0f4; color:#8993a3; font-size:9px; }
 .td2-case-result b { color:#4d5970; font-size:10px; }
+.td2-case-result-actions { display:flex; align-items:center; gap:8px; }
+.td2-select-all,.td2-case-selector { display:inline-flex; align-items:center; gap:5px; color:#65718a; font-size:9px; cursor:pointer; white-space:nowrap; }
+.td2-select-all input,.td2-case-selector input { width:15px; height:15px; margin:0; accent-color:#5965e9; cursor:pointer; }
+.td2-select-all input:disabled,.td2-case-selector input:disabled { cursor:not-allowed; }
 .td2-case-result button { display:inline-flex; align-items:center; gap:5px; padding:3px 6px; border:0; border-radius:5px; color:#5965c8; background:transparent; font-size:9px; cursor:pointer; }
 .td2-case-result button:hover { background:#eef1ff; }
 .td2-case-result button svg { width:12px; }
@@ -506,7 +510,8 @@
    The list remains scannable in the planning flow; long case content opens only
    when the reviewer asks for it, avoiding a persistent competing detail pane. */
 .td2-case-workbench .td2-case-list { display:grid; overflow:visible; border-right:0; background:#fff; }
-.td2-case-workbench .td2-case-list>article { display:grid; grid-template-columns:minmax(154px,.72fr) minmax(260px,1.7fr) minmax(178px,1fr) auto; align-items:center; gap:12px; min-width:0; padding:11px 16px; border-bottom:1px solid #edf0f4; background:#fff; transition:background-color .16s ease, box-shadow .16s ease; }
+.td2-case-workbench .td2-case-list>article { display:grid; grid-template-columns:auto minmax(154px,.72fr) minmax(260px,1.7fr) minmax(178px,1fr) auto; align-items:center; gap:12px; min-width:0; padding:11px 16px; border-bottom:1px solid #edf0f4; background:#fff; transition:background-color .16s ease, box-shadow .16s ease; }
+.td2-case-selector { justify-self:center; }
 .td2-case-workbench .td2-case-list>article:hover { background:#fafbfe; }
 .td2-case-workbench .td2-case-list>article.active { background:#f5f7ff; box-shadow:inset 3px 0 #5965e9; }
 .td2-case-list>article:last-child { border-bottom:0; }
@@ -528,10 +533,12 @@
 }
 
 @media (max-width:760px) {
-  .td2-case-workbench .td2-case-list>article { grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:11px 12px; }
-  .td2-case-list-labels { grid-column:1/-1; }
+  .td2-case-workbench .td2-case-list>article { grid-template-columns:auto minmax(0,1fr) auto; gap:8px; padding:11px 12px; }
+  .td2-case-list-labels { grid-column:2/-1; }
   .td2-case-row-meta { display:none; }
   .td2-case-row-title b { white-space:normal; }
+  .td2-case-result { align-items:flex-start; flex-direction:column; }
+  .td2-case-result-actions { width:100%; justify-content:space-between; }
   .td2-case-viewer { width:calc(100vw - 16px); max-height:calc(100vh - 16px); }
   .td2-case-viewer>.td2-case-card { padding:14px; }
 }

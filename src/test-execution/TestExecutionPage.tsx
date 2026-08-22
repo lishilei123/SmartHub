@@ -97,7 +97,7 @@ export function TestExecutionPage({
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
 
-  if (!projectVersion) return <main className="te-shell"><section className="te-card te-page-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>TestExecutionHandoff、Run、Task 与全部执行历史都按项目版本授权和隔离。</p><button className="te-primary" onClick={onManageVersions}>管理项目版本</button></section></main>
+  if (!projectVersion) return <main className="te-shell"><section className="te-card te-page-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>正式用例库、Run、Task 与全部执行历史都按项目版本授权和隔离。</p><button className="te-primary" onClick={onManageVersions}>管理项目版本</button></section></main>
 
   return <main className="te-shell">
     <header className="te-page-header">
@@ -110,7 +110,6 @@ export function TestExecutionPage({
       <ExecutionRunPanel
         readiness={model.readiness}
         environments={model.environments}
-        handoffs={model.handoffs}
         runs={model.runs}
         run={model.run}
         maintenanceProposals={model.maintenanceProposals}
@@ -118,8 +117,8 @@ export function TestExecutionPage({
         busy={model.busy}
         loading={model.loading}
         onRefresh={model.loadCollection}
-        onCreate={async (handoffId, environmentId, testDataBindings) => {
-          const created = await model.create(handoffId, environmentId, testDataBindings)
+        onCreate={async baseUrl => {
+          const created = await model.create(baseUrl)
           if (created) updateExecutionRoute(created.id)
           return created
         }}

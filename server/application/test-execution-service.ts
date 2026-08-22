@@ -21,7 +21,6 @@ import type {
 import type {
   TestCaseLibraryVersionDetail,
   TestExecutionHandoff,
-  TestSuiteVersion,
 } from '../domain/test-design-types.js'
 import type {
   TestExecutionAgentRuntimeInput,
@@ -48,14 +47,13 @@ import {
 } from './test-execution-validation.js'
 
 export interface ImmutableTestExecutionSourceReader {
-  getHandoff(handoffId: string): Promise<TestExecutionHandoff>
-  getLibraryVersion(projectId: string, versionId: string): Promise<TestCaseLibraryVersionDetail>
-  getSuite(projectId: string, suiteVersionId: string): Promise<TestSuiteVersion>
+  getCurrentLibraryVersion(projectVersionId: string): Promise<TestCaseLibraryVersionDetail>
+  createDefaultExecutionHandoff(projectVersionId: string, libraryVersionId: string, expectedLibrarySha256: string, createdBy: string): Promise<TestExecutionHandoff>
 }
 
 export interface ExecutionEnvironmentResolver {
   readiness(): Promise<{ ready: boolean; reason?: string }>
-  resolveSnapshot(environmentId: string): Promise<ExecutionEnvironmentSnapshot>
+  resolveSnapshotForBaseUrl(baseUrl: string): Promise<ExecutionEnvironmentSnapshot>
   listSnapshots?(): ExecutionEnvironmentSnapshot[]
 }
 
@@ -84,8 +82,7 @@ export interface TestExecutionAgentRuntime {
 
 export type CreateTestExecutionRunInput = {
   projectVersionId: string
-  handoffId: string
-  environmentId: string
+  baseUrl: string
   testDataBindings?: unknown
   idempotencyKey: string
   createdBy: string
@@ -381,16 +378,14 @@ export class TestExecutionService {
 
   async createRun(input: CreateTestExecutionRunInput) {
     const projectVersionId = requiredIdentity(input.projectVersionId, 'projectVersionId')
-    const handoffId = requiredIdentity(input.handoffId, 'handoffId')
-    const environmentId = requiredIdentity(input.environmentId, 'environmentId')
+    const baseUrl = requiredUrl(input.baseUrl)
     const idempotencyKey = requiredIdentity(input.idempotencyKey, 'idempotencyKey')
     const createdBy = requiredIdentity(input.createdBy, 'createdBy')
     const requestedTestDataBindings = normalizeExecutionTestDataBindings(input.testDataBindings)
     const replay = await this.store.getRunByIdempotencyKey(projectVersionId, idempotencyKey)
     if (replay) {
       if (
-        replay.handoff.handoffId !== handoffId
-        || replay.environment.environmentId !== environmentId
+        replay.environment.baseUrl !== baseUrl
         || replay.createdBy !== createdBy
         || canonicalSha256(replay.testData?.bindings ?? []) !== canonicalSha256(requestedTestDataBindings)
       ) {
@@ -403,18 +398,18 @@ export class TestExecutionService {
       return replay
     }
 
-    const handoff = await this.sources.getHandoff(handoffId)
-    const modern = validateModernHandoff(handoff, projectVersionId)
-    const library = await this.sources.getLibraryVersion(
-      modern.projectId,
-      modern.testCaseLibraryVersionId,
+    const library = await this.sources.getCurrentLibraryVersion(projectVersionId)
+    validateLibraryVersion(library, library.projectId, projectVersionId)
+    const handoff = await this.sources.createDefaultExecutionHandoff(
+      projectVersionId,
+      library.id,
+      library.contentSha256,
+      createdBy,
     )
-    validateLibraryVersion(library, modern.projectId)
+    const modern = validateModernHandoff(handoff, projectVersionId)
+    if (modern.testCaseLibraryVersionId !== library.id) throw new TestExecutionServiceError('TEST_EXECUTION_LIBRARY_VERSION_MISMATCH', '执行范围未固定为当前正式用例库版本')
     const testData = freezeExecutionTestDataSnapshot(requestedTestDataBindings)
-    const suite = modern.suiteVersionId
-      ? await this.sources.getSuite(modern.projectId, modern.suiteVersionId)
-      : undefined
-    validateSuiteVersion(modern, library, suite)
+    validateSuiteVersion(modern, library)
 
     const libraryMembers = new Map(
       library.members.map(member => [caseRevisionKey(member.caseId, member.revision), member]),
@@ -448,7 +443,7 @@ export class TestExecutionService {
     }
 
     const [environment, agents, runnerReadiness] = await Promise.all([
-      this.sourcesEnvironment(environmentId),
+      this.sourcesEnvironment(baseUrl),
       this.agentRuntime.freezeConfiguration(),
       this.runner.readiness(),
     ])
@@ -498,10 +493,6 @@ export class TestExecutionService {
         projectVersionId,
         testCaseLibraryVersionId: library.id,
         testCaseLibraryVersionSha256: library.contentSha256,
-        ...(suite ? {
-          suiteVersionId: suite.id,
-          suiteVersionSha256: suite.contentSha256,
-        } : {}),
         mode: modern.mode,
         memberSnapshotSha256: canonicalSha256(frozenInputs),
       },
@@ -575,12 +566,32 @@ export class TestExecutionService {
     }
   }
 
-  private async sourcesEnvironment(environmentId: string) {
-    const environment = await this.environmentResolver.resolveSnapshot(environmentId)
-    if (environment.environmentId !== environmentId) {
+  private async sourcesEnvironment(baseUrl: string) {
+    let environment: ExecutionEnvironmentSnapshot
+    try {
+      environment = await this.environmentResolver.resolveSnapshotForBaseUrl(baseUrl)
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error)
+      if (code === 'TEST_EXECUTION_BASE_URL_INVALID') {
+        throw new TestExecutionServiceError(
+          code,
+          '被测系统地址必须是有效的 http 或 https 地址',
+          400,
+        )
+      }
+      if (code === 'TEST_EXECUTION_ENVIRONMENT_NOT_REGISTERED') {
+        throw new TestExecutionServiceError(
+          code,
+          '被测系统地址尚未登记到可执行 OCI 运行网络',
+          422,
+        )
+      }
+      throw error
+    }
+    if (environment.baseUrl !== baseUrl) {
       throw new TestExecutionServiceError(
         'TEST_EXECUTION_ENVIRONMENT_SCOPE_MISMATCH',
-        '环境解析器返回了错误的环境身份',
+        '环境解析器返回了与请求地址不一致的环境快照',
       )
     }
     const base = {
@@ -1300,8 +1311,8 @@ function validateModernHandoff(handoff: TestExecutionHandoff, projectVersionId: 
   return handoff
 }
 
-function validateLibraryVersion(library: TestCaseLibraryVersionDetail, projectId: string) {
-  if (library.projectId !== projectId || !library.members.length) {
+function validateLibraryVersion(library: TestCaseLibraryVersionDetail, projectId: string, projectVersionId?: string) {
+  if (library.projectId !== projectId || (projectVersionId && library.projectVersionId !== projectVersionId) || !library.members.length) {
     throw new TestExecutionServiceError(
       'TEST_EXECUTION_LIBRARY_VERSION_MISMATCH',
       '固定用例库版本与执行交接不一致',
@@ -1362,10 +1373,9 @@ function validateSuiteVersion(
     mode: NonNullable<TestExecutionHandoff['mode']>
   },
   library: TestCaseLibraryVersionDetail,
-  suite?: TestSuiteVersion,
 ) {
   if (handoff.mode === 'full') {
-    if (handoff.suiteVersionId || suite) {
+    if (handoff.suiteVersionId) {
       throw new TestExecutionServiceError(
         'TEST_EXECUTION_SUITE_FORBIDDEN',
         'full 模式不能固定测试套件',
@@ -1373,33 +1383,7 @@ function validateSuiteVersion(
     }
     return
   }
-  if (
-    !suite
-    || suite.id !== handoff.suiteVersionId
-    || suite.projectId !== handoff.projectId
-    || suite.suiteType !== handoff.mode
-    || suite.testCaseLibraryVersionId !== library.id
-    || suite.compatibilityStatus !== 'compatible'
-  ) {
-    throw new TestExecutionServiceError(
-      'TEST_EXECUTION_SUITE_VERSION_MISMATCH',
-      '执行套件与 Handoff 固定的用例库版本或模式不一致',
-    )
-  }
-  const canonical = {
-    projectId: suite.projectId,
-    suiteKey: suite.suiteKey,
-    suiteType: suite.suiteType,
-    name: suite.name,
-    testCaseLibraryVersionId: library.id,
-    members: suite.members,
-  }
-  if (canonicalSha256(canonical) !== suite.contentSha256) {
-    throw new TestExecutionServiceError(
-      'TEST_EXECUTION_SUITE_CONTENT_HASH_MISMATCH',
-      '固定测试套件内容 Hash 无效',
-    )
-  }
+  throw new TestExecutionServiceError('TEST_EXECUTION_SCOPE_INVALID', '执行 Run 只支持当前正式用例库的全部用例')
 }
 
 function taskScriptCacheKey(run: ExecutionRun, task: ExecutionTask) {
@@ -1708,6 +1692,33 @@ function requiredIdentity(value: string, field: string) {
     )
   }
   return normalized
+}
+
+function requiredUrl(value: string) {
+  const normalized = String(value ?? '').trim()
+  let url: URL
+  try {
+    url = new URL(normalized)
+  } catch {
+    throw new TestExecutionServiceError(
+      'TEST_EXECUTION_BASE_URL_INVALID',
+      '被测系统地址必须是有效的 http 或 https 地址',
+      400,
+    )
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol)
+    || url.username
+    || url.password
+    || url.hash
+  ) {
+    throw new TestExecutionServiceError(
+      'TEST_EXECUTION_BASE_URL_INVALID',
+      '被测系统地址必须是有效的 http 或 https 地址',
+      400,
+    )
+  }
+  return url.toString()
 }
 
 function required<T>(

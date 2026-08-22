@@ -8,7 +8,7 @@ type Props = {
   busy: boolean
   createRequest?: number
   focusRequest?: { caseId?: string; requestId: number }
-  onBatchApprove: () => Promise<void>
+  onBatchApprove: (targets: Array<{ caseId: string; targetRevision: number }>) => Promise<void>
   onResynthesize: () => Promise<void>
   onCreate: (content: TestCaseContent) => Promise<void>
   onEdit: (caseId: string, content: TestCaseContent, reason: string) => Promise<void>
@@ -31,6 +31,7 @@ export function TestCasePanel(props: Props) {
   const workbenchRef = useRef<HTMLElement>(null)
   const cases = useMemo(() => props.run?.testCases.filter(item => !item.tombstonedAt) ?? [], [props.run])
   const [selectedId, setSelectedId] = useState<string>()
+  const [selectedCaseIds, setSelectedCaseIds] = useState<Set<string>>(() => new Set())
   const [viewing, setViewing] = useState(false)
   const [editing, setEditing] = useState<TestDesignCase | 'new'>()
   const [query, setQuery] = useState('')
@@ -54,6 +55,13 @@ export function TestCasePanel(props: Props) {
     if (selectedId && !filteredCases.some(item => item.id === selectedId)) setViewing(false)
   }, [filteredCases, selectedId])
   useEffect(() => {
+    const reviewableIds = new Set(cases.filter(item => item.reviewState === 'in_review').map(item => item.id))
+    setSelectedCaseIds(current => {
+      const next = new Set([...current].filter(id => reviewableIds.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [cases])
+  useEffect(() => {
     if (!props.focusRequest?.requestId) return
     const caseId = props.focusRequest.caseId
     setQuery('')
@@ -69,6 +77,9 @@ export function TestCasePanel(props: Props) {
 
   const selected = cases.find(item => item.id === selectedId)
   const pendingReviewCount = counts.in_review ?? 0
+  const selectedReviewCases = cases.filter(item => item.reviewState === 'in_review' && selectedCaseIds.has(item.id))
+  const visibleReviewCases = filteredCases.filter(item => item.reviewState === 'in_review')
+  const allVisibleReviewCasesSelected = visibleReviewCases.length > 0 && visibleReviewCases.every(item => selectedCaseIds.has(item.id))
   const selectedPosition = filteredCases.findIndex(item => item.id === selectedId)
   const filtersActive = Boolean(query.trim()) || filter !== 'all'
 
@@ -77,7 +88,7 @@ export function TestCasePanel(props: Props) {
       <div><p>本次测试设计</p><h2>Candidate Delta 审核</h2><small>逐条查看本轮新增或修改的用例；未变化的历史用例由 Service 直接复用。</small></div>
       <div className="td2-workbench-actions">
         <button className="td2-button ghost" onClick={() => setEditing('new')}><Plus />新增用例</button>
-        <button className="td2-button primary" disabled={props.busy || pendingReviewCount === 0} onClick={() => void props.onBatchApprove()}><CheckCircle2 />{pendingReviewCount ? `批量审核通过（${pendingReviewCount}）` : '暂无待审核'}</button>
+        <button className="td2-button primary" disabled={props.busy || selectedReviewCases.length === 0} onClick={() => void props.onBatchApprove(selectedReviewCases.map(item => ({ caseId: item.id, targetRevision: item.currentRevision }))).then(() => setSelectedCaseIds(new Set())).catch(() => undefined)}><CheckCircle2 />{selectedReviewCases.length ? `审核选中用例（${selectedReviewCases.length}）` : pendingReviewCount ? `请选择待审核用例（${pendingReviewCount}）` : '暂无待审核'}</button>
         <button className="td2-button ghost" disabled={props.busy} onClick={() => void props.onResynthesize()}>重新生成 Delta</button>
       </div>
     </header>
@@ -89,15 +100,29 @@ export function TestCasePanel(props: Props) {
         return <button key={item.key} type="button" aria-pressed={filter === item.key} className={filter === item.key ? 'active' : ''} onClick={() => setFilter(item.key)}>{item.label}<span>{count}</span></button>
       })}</nav>
       <div className="td2-case-result" aria-live="polite">
-        <span>显示 <b>{filteredCases.length}</b> / {cases.length} 条{viewing && selectedPosition >= 0 ? ` · 当前第 ${selectedPosition + 1} 条` : ''}</span>
-        {filtersActive && <button type="button" onClick={() => { setQuery(''); setFilter('all') }}><RotateCcw />清除筛选</button>}
+        <span>显示 <b>{filteredCases.length}</b> / {cases.length} 条{selectedReviewCases.length ? ` · 已选 ${selectedReviewCases.length} 条待审核用例` : viewing && selectedPosition >= 0 ? ` · 当前第 ${selectedPosition + 1} 条` : ''}</span>
+        <div className="td2-case-result-actions">
+          {visibleReviewCases.length > 0 && <label className="td2-select-all"><input type="checkbox" checked={allVisibleReviewCasesSelected} onChange={event => setSelectedCaseIds(current => {
+            const next = new Set(current)
+            visibleReviewCases.forEach(item => event.target.checked ? next.add(item.id) : next.delete(item.id))
+            return next
+          })} />全选当前待审核用例</label>}
+          {filtersActive && <button type="button" onClick={() => { setQuery(''); setFilter('all') }}><RotateCcw />清除筛选</button>}
+        </div>
       </div>
     </div>
 
     <div className="td2-case-list" aria-label="Candidate 测试用例列表">
         {filteredCases.map(item => {
           const content = currentContent(item)
+          const selectable = item.reviewState === 'in_review'
           return <article id={`test-case-${item.id}`} key={item.id} className={selectedId === item.id ? 'active' : ''}>
+            <label className="td2-case-selector" title={selectable ? '选择此待审核用例' : '仅待审核用例可批量审核'}><input type="checkbox" aria-label={`选择 ${content.title}`} checked={selectedCaseIds.has(item.id)} disabled={!selectable} onChange={event => setSelectedCaseIds(current => {
+              const next = new Set(current)
+              if (event.target.checked) next.add(item.id)
+              else next.delete(item.id)
+              return next
+            })} /></label>
             <div className="td2-case-list-labels"><span className={`td2-review-state ${item.reviewState}`}>{reviewStateLabel(item.reviewState)}</span><span className="td2-case-origin">{originLabel(item.origin)}</span></div>
             <div className="td2-case-row-title"><b>{content.title}</b><small>{content.requirementRefs.length ? `${content.requirementRefs.length} 个关联需求` : '扩展测试'} · r{item.currentRevision}</small></div>
             <small className="td2-case-row-meta">{dimensionLabel(content.dimension)} · {content.priority} · {actualExecutionMethod(content)}</small>

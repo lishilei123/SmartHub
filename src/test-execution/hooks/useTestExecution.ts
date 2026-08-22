@@ -3,10 +3,8 @@ import * as api from '../api'
 import type {
   CaseMaintenanceProposal,
   ExecutionEnvironment,
-  ExecutionHandoff,
   ExecutionReadiness,
   ExecutionRun,
-  ExecutionTestDataBinding,
   ExecutionTask,
   ExecutionTaskDetail,
   MaintenanceProposalDetail,
@@ -22,7 +20,6 @@ export function useTestExecution(
 ) {
   const [readiness, setReadiness] = useState<ExecutionReadiness | null>(null)
   const [environments, setEnvironments] = useState<ExecutionEnvironment[]>([])
-  const [handoffs, setHandoffs] = useState<ExecutionHandoff[]>([])
   const [runs, setRuns] = useState<ExecutionRun[]>([])
   const [run, setRun] = useState<Versioned<ExecutionRun> | null>(null)
   const [tasks, setTasks] = useState<ExecutionTask[]>([])
@@ -50,17 +47,15 @@ export function useTestExecution(
     const requestGeneration = generation.current
     setLoading(true)
     try {
-      const [nextReadiness, nextEnvironments, nextHandoffs, nextRuns] =
+      const [nextReadiness, nextEnvironments, nextRuns] =
         await Promise.all([
           api.loadReadiness(projectVersionId),
           api.loadEnvironments(projectVersionId),
-          api.loadHandoffs(projectVersionId),
           api.loadRuns(projectVersionId),
         ])
       if (requestGeneration !== generation.current) return
       setReadiness(nextReadiness)
       setEnvironments(nextEnvironments)
-      setHandoffs(nextHandoffs)
       setRuns(nextRuns)
       setError('')
     } catch (cause) {
@@ -159,7 +154,6 @@ export function useTestExecution(
     proposalRequest.current += 1
     setReadiness(null)
     setEnvironments([])
-    setHandoffs([])
     setRuns([])
     setRun(null)
     setTasks([])
@@ -196,19 +190,15 @@ export function useTestExecution(
   }, [fail, refreshSelection, run])
 
   const create = useCallback(async (
-    handoffId: string,
-    environmentId: string,
-    testDataBindings: ExecutionTestDataBinding[],
+    baseUrl: string,
   ) => {
     if (!projectVersionId || busy) return
     setBusy('create')
     try {
       const created = await api.createRun(
         projectVersionId,
-        handoffId,
-        environmentId,
-        testDataBindings,
-        api.executionIdempotencyKey('create', handoffId),
+        baseUrl,
+        api.executionIdempotencyKey('create', baseUrl),
       )
       setRun(created)
       setTask(null)
@@ -337,7 +327,6 @@ export function useTestExecution(
   return {
     readiness,
     environments,
-    handoffs,
     runs,
     run,
     tasks,
