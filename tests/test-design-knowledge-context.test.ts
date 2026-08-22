@@ -36,6 +36,10 @@ test('冻结 Retrieval Hits 经确定性裁剪后直接进入 TestCase Design Ru
   assert.match(parsed.instructions.join('\n'), /必须作为 Case 设计和 Self Review 的风险参考/u)
   assert.match(parsed.instructions.join('\n'), /结果不理想时允许修改 Query 后继续搜索/u)
   assert.match(parsed.instructions.join('\n'), /不得为每个 Requirement 机械搜索/u)
+  assert.match(parsed.instructions.join('\n'), /合法枚举集合只证明值属于业务集合/u)
+  assert.match(parsed.instructions.join('\n'), /in_progress → todo 是可独立失败的明确回退风险/u)
+  assert.match(parsed.instructions.join('\n'), /必须返回 A 且不返回 B/u)
+  assert.match(parsed.instructions.join('\n'), /默认使用一条 Case 并选择 executionMethods: \[ui, api\]/u)
 })
 
 test('Retrieval Query 直接使用 Requirement、answered Clarification 与 TestDesign 正式输入', () => {
@@ -87,7 +91,7 @@ test('Requirement Analysis 与 Release 不再携带额外测试中间列表，Te
   assert.doesNotMatch(types, /interface\s+(?:TestPoint|RiskContext)|type\s+(?:TestPoint|RiskContext)/u)
 })
 
-test('Skill 保留自然闭环并要求独立风险拆分，Coverage UI 明确为追溯覆盖率', () => {
+test('Skill 区分枚举与状态机、补齐明确非法边并强化查询正反断言', () => {
   const skill = read('../server/skills/test-case-design/SKILL.md')
   const auditPanel = read('../src/test-design/CoverageAuditPanel.tsx')
   const page = read('../src/test-design/TestDesignPage.tsx')
@@ -97,8 +101,16 @@ test('Skill 保留自然闭环并要求独立风险拆分，Coverage UI 明确�
   assert.match(skill, /Do not split merely to increase Case count/u)
   assert.match(skill, /not formal product facts and do not force Case decomposition/u)
   assert.match(skill, /“result is non-empty” is insufficient/u)
-  assert.match(skill, /invalid inputs, invalid state transitions, duplicate operations, query accuracy, data consistency, permission risks, historical defects/u)
+  assert.match(skill, /invalid inputs, explicit state-machine legal paths and directly implied illegal reverse\/skipped transitions, duplicate operations, query positive\/negative accuracy/u)
   assert.match(skill, /If the intent can fail independently and no existing Case covers it, add a separate Case/u)
+  assert.match(skill, /Never equate membership in a valid enum with permission to supply that value in every operation or lifecycle phase/u)
+  assert.match(skill, /do not prove enum validity by directly creating a resource in every state/u)
+  assert.match(skill, /`in_progress → todo`/u)
+  assert.match(skill, /persisted state remains unchanged/u)
+  assert.match(skill, /Do not generate a mathematical Requirement × state-combination matrix/u)
+  assert.match(skill, /searching that keyword must return A and exclude B/u)
+  assert.match(skill, /Do not invent fuzzy matching, case sensitivity, trimming, tokenization, or searched fields/u)
+  assert.match(skill, /Use one Case with `executionMethods: \[ui, api\]` when UI and API exercise the same business Test Intent/u)
   assert.match(skill, /Call `knowledge\.read_chunk` only when a search hit needs fuller context/u)
   assert.match(skill, /revise the query and continue searching/u)
   assert.match(skill, /Do not call Knowledge tools once per Requirement/u)
