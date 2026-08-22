@@ -26,6 +26,7 @@ import type {
   TestExecutionAgentRuntimeInput,
   TestExecutionAgentRuntimeOutput,
 } from '../agent/pi-test-execution-runtime.js'
+import type { UIExecutionAgent, UiExecutionAgentPhase } from '../agent/ui-execution-agent.js'
 import type { ExecutionArtifactStore } from '../infrastructure/execution-artifact-store.js'
 import { executionArtifactBody } from '../infrastructure/execution-artifact-store.js'
 import type {
@@ -117,6 +118,7 @@ export class TestExecutionService {
     private readonly runner: PlaywrightRunner,
     private readonly clock: () => string = () => new Date().toISOString(),
     private readonly executionWorkspace?: LocalExecutionWorkspaceStore,
+    private readonly uiExecutionAgent?: UIExecutionAgent,
   ) {}
 
   async readiness() {
@@ -719,12 +721,14 @@ export class TestExecutionService {
     task: ExecutionTask,
     signal: AbortSignal,
   ) {
+    const uiExecution = await this.uiExecutionContext(run, task, 'implementation', signal, true)
     const workspace = await this.workspace(run, task)
     const output = await this.agentRuntime.execute({
       stage: 'script_generation',
       run,
       task,
       workspace,
+      ...(uiExecution ? { uiExecution } : {}),
       validateCandidate: candidateValidator(candidate => buildExecutionPackage({
         candidate: packageCandidate(candidate),
         task: { ...task.input, taskId: task.id },
@@ -739,6 +743,7 @@ export class TestExecutionService {
     })
     const createdAt = this.clock()
     const cacheKey = taskScriptCacheKey(run, task)
+    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
     await this.persistScriptRevision({
       job,
       lease,
@@ -799,6 +804,23 @@ export class TestExecutionService {
     const artifacts = (await Promise.all(
       attempts.map(attempt => this.store.listArtifacts(task.id, attempt.id)),
     )).flat()
+    const uiExecution = await this.uiExecutionContext(run, task, 'script_repair', signal)
+    if (task.input.method === 'ui' && uiExecution && !uiExecution.available) {
+      await requiredLeaseTransaction(
+        this.store,
+        job.id,
+        lease,
+        transaction => transaction.transitionTask({
+          taskId: task.id,
+          expectedStatus: 'repairing',
+          expectedStateVersion: task.stateVersion,
+          status: 'waiting_manual',
+          error: 'TEST_EXECUTION_UI_PLAYWRIGHT_CLI_UNAVAILABLE',
+          finishedAt: this.clock(),
+        }),
+      )
+      return
+    }
     const workspace = await this.workspace(
       run,
       task,
@@ -819,6 +841,7 @@ export class TestExecutionService {
       run,
       task,
       workspace,
+      ...(uiExecution ? { uiExecution } : {}),
       stageContext: {
         parentScriptRevisionId: parent.id,
         diagnosisId: diagnosis.id,
@@ -1181,6 +1204,7 @@ export class TestExecutionService {
       attempts.map(attempt => this.store.listArtifacts(task.id, attempt.id)),
     )).flat()
     const diagnoses = await this.store.listDiagnoses(task.id)
+    const uiExecution = await this.uiExecutionContext(run, task, 'failure_analysis', signal)
     const workspace = await this.workspace(run, task, revision, attempts, diagnoses, artifacts)
     const context = {
       taskId: task.id,
@@ -1195,6 +1219,7 @@ export class TestExecutionService {
       run,
       task,
       workspace,
+      ...(uiExecution ? { uiExecution } : {}),
       stageContext: {
         scriptRevisionId: revision.id,
         attemptIds: context.attemptIds,
@@ -1373,6 +1398,30 @@ export class TestExecutionService {
     }
     const snapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
     return { workspace: { root: snapshot.root, entryFile: binding.entryFile, entrySymbol: binding.entrySymbol } }
+  }
+
+  private async uiExecutionContext(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    phase: UiExecutionAgentPhase,
+    signal: AbortSignal,
+    required = false,
+  ) {
+    if (task.input.method !== 'ui' || !this.executionWorkspace) return undefined
+    if (!this.uiExecutionAgent) {
+      if (required) throw new Error('TEST_EXECUTION_UI_AGENT_REQUIRED')
+      return undefined
+    }
+    const context = await this.uiExecutionAgent.explore({
+      baseUrl: run.environment.baseUrl,
+      run,
+      task,
+      phase,
+    }, signal)
+    if (required && (!context || !context.available || !context.snapshot)) {
+      throw new Error(`TEST_EXECUTION_UI_PLAYWRIGHT_CLI_EXPLORATION_REQUIRED: ${context?.error ?? 'snapshot missing'}`)
+    }
+    return context
   }
 }
 

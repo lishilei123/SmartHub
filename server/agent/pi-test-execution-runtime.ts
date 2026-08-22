@@ -35,6 +35,7 @@ import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.
 import { agentCatalogEntryByDefinition } from './agent-catalog.js'
 import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
 import { buildTestExecutionDirectoryInputPlan } from './requirement-context-assembler.js'
+import type { UiExecutionBrowserContext } from './ui-execution-agent.js'
 
 export const TEST_EXECUTION_STAGE_BINDINGS = {
   script_generation: {
@@ -93,6 +94,8 @@ export interface TestExecutionAgentRuntimeInput {
   run: ExecutionRun
   task: ExecutionTask
   workspace: TestExecutionAgentWorkspaceProjection
+  /** Ephemeral output from the Service-owned Playwright CLI capability. */
+  uiExecution?: UiExecutionBrowserContext
   stageContext?: TestExecutionAgentStageContext
   validateCandidate: CandidateValidation
 }
@@ -274,6 +277,7 @@ export function buildTestExecutionAgentTask(
         : undefined,
       fileCount: input.workspace.workspaceFiles.length,
     },
+    ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
     stageContext: input.stageContext ?? {},
     stageContract: {
       allowedSkill: binding.skillKey,
@@ -283,6 +287,7 @@ export function buildTestExecutionAgentTask(
     instructions: [
       'Workflow Stage 已由 TestExecutionService 固定，不能自行切换。',
       '先检查 execution/ 下已有 tests、pages、helpers、fixtures、api 与 bindings；优先复用公共能力。',
+      '当 uiExecution 存在时，它是 UIExecutionAgent 用 Playwright CLI 对当前 BaseURL 的即时观察；只能基于其中真实 snapshot/locator hint 编写或修复 UI 自动化，不得凭空编造 selector。它不是另一套 Test Plan，也不能改变 TestCase 测试意图。',
       '使用当前冻结工作区中已经交付的受控知识上下文；文档与真实环境不一致时必须如实记录，不得编造 selector、API 或凭据。',
       '只读取当前 run/task 的冻结工作区；不得解析 latest、current 或 active 业务输入。',
       '不得调用 Shell、SSH、数据库、任意网络、其他 Agent 或 Runner。真实环境验证由 Local Runner 在提交候选后执行。',

@@ -21,6 +21,11 @@ import type {
   TestExecutionAgentRuntimeInput,
   TestExecutionAgentRuntimeOutput,
 } from '../server/agent/pi-test-execution-runtime.js'
+import {
+  UIExecutionAgent,
+  type PlaywrightCliToolAdapter,
+  type UiExecutionBrowserContext,
+} from '../server/agent/ui-execution-agent.js'
 import type {
   CaseMaintenanceProposal,
   ExecutionArtifact,
@@ -505,7 +510,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
 }
 
 class ScriptAgentRuntime implements TestExecutionAgentRuntime {
-  calls: Array<Pick<TestExecutionAgentRuntimeInput, 'stage' | 'stageContext'>> = []
+  calls: Array<Pick<TestExecutionAgentRuntimeInput, 'stage' | 'stageContext' | 'uiExecution'>> = []
   repairOrdinal = 0
 
   constructor(
@@ -529,6 +534,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
     this.calls.push(structuredClone({
       stage: input.stage,
       ...(input.stageContext ? { stageContext: input.stageContext } : {}),
+      ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
     }))
     let candidate: Record<string, unknown>
     let schemaVersion: TestExecutionAgentRuntimeOutput['schemaVersion']
@@ -600,6 +606,33 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
   }
 }
 
+class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter {
+  calls: Array<UiExecutionBrowserContext['phase']> = []
+
+  constructor(private readonly available = true) {}
+
+  async explore(input: {
+    baseUrl: string
+    task: ExecutionTask
+    phase: UiExecutionBrowserContext['phase']
+  }) {
+    this.calls.push(input.phase)
+    return {
+      tool: 'playwright-cli' as const,
+      phase: input.phase,
+      baseUrl: input.baseUrl,
+      available: this.available,
+      ...(this.available ? {
+        snapshot: '- heading "状态页"\n- status [ref=e1]: Ready',
+        locatorHints: ['- status [ref=e1]: Ready'],
+      } : {
+        locatorHints: [],
+        error: 'PLAYWRIGHT_CLI_UNAVAILABLE',
+      }),
+    }
+  }
+}
+
 class SequenceRunner implements PlaywrightRunner {
   calls: Array<{ attemptId: string; package: ExecutionPackage }> = []
 
@@ -640,6 +673,7 @@ async function withService(
     store: InMemoryExecutionStore
     runner: SequenceRunner
     runtime: ScriptAgentRuntime
+    playwrightCli: FixturePlaywrightCliAdapter
     job: ExecutionJob
     workspace?: LocalExecutionWorkspaceStore
   }) => Promise<void>,
@@ -649,6 +683,7 @@ async function withService(
     repairable?: boolean
     repairSource?: (ordinal: number) => string
     workspace?: boolean
+    playwrightCliAvailable?: boolean
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
@@ -658,6 +693,7 @@ async function withService(
     const artifactStore = new LocalExecutionArtifactStore(root)
     const runner = new SequenceRunner(results)
     const runtime = new ScriptAgentRuntime(value.run.agents, options)
+    const playwrightCli = new FixturePlaywrightCliAdapter(options.playwrightCliAvailable)
     const workspace = options.workspace
       ? new LocalExecutionWorkspaceStore(join(root, 'workspace'))
       : undefined
@@ -682,8 +718,9 @@ async function withService(
       runner,
       () => '2026-08-13T12:00:00.000Z',
       workspace,
+      new UIExecutionAgent(playwrightCli),
     )
-    await operation({ service, store, runner, runtime, job: value.job, workspace })
+    await operation({ service, store, runner, runtime, playwrightCli, job: value.job, workspace })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -709,10 +746,10 @@ test('TestExecutionService 将环境配置和 secret 来源纳入总 readiness',
   })
 })
 
-test('已有有效 Execution Binding 时直接 Runner，不调用实现 Agent', async () => {
+test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAgent 或实现 Agent', async () => {
   await withService([
     { status: 'passed', exitCode: 0, durationMs: 8, summary: '历史入口通过', artifacts: [] },
-  ], async ({ service, store, runner, runtime, job, workspace }) => {
+  ], async ({ service, store, runner, runtime, playwrightCli, job, workspace }) => {
     assert.ok(workspace)
     const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
     await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
@@ -733,14 +770,15 @@ test('已有有效 Execution Binding 时直接 Runner，不调用实现 Agent', 
     assert.equal(runner.calls.length, 1)
     assert.equal(runner.calls[0].package.manifest.entrypoint, 'tests/ui/status.spec.ts')
     assert.deepEqual(runtime.calls, [])
+    assert.deepEqual(playwrightCli.calls, [])
     assert.equal(store.revisions[0].source, 'agent')
   }, { workspace: true })
 })
 
-test('Workspace 历史入口首次失败后直接诊断，产品缺陷不修改 Workspace', async () => {
+test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷不修改 Workspace', async () => {
   await withService([
     { status: 'failed', exitCode: 1, durationMs: 8, summary: '业务断言失败', error: 'expected Ready', artifacts: [] },
-  ], async ({ service, store, runtime, job, workspace }) => {
+  ], async ({ service, store, runtime, playwrightCli, job, workspace }) => {
     assert.ok(workspace)
     const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
     await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
@@ -754,16 +792,18 @@ test('Workspace 历史入口首次失败后直接诊断，产品缺陷不修改 
     assert.equal(task.status, 'failed')
     assert.equal(store.task.runnerAttemptCount, 1)
     assert.deepEqual(runtime.calls.map(call => call.stage), ['failure_diagnosis'])
+    assert.deepEqual(playwrightCli.calls, ['failure_analysis'])
+    assert.equal(runtime.calls[0].uiExecution?.snapshot?.includes('状态页'), true)
     assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 0)
     assert.equal((await workspace.readEntry(store.run.projectVersionId, { entryFile: 'tests/ui/status.spec.ts' })), source)
   }, { workspace: true, diagnosisCategory: 'product_defect' })
 })
 
-test('Workspace script_defect 仅在诊断后修改代码并 Retry', async () => {
+test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async () => {
   await withService([
     { status: 'failed', exitCode: 1, durationMs: 8, summary: 'selector 不存在', error: 'locator not found', artifacts: [] },
     { status: 'passed', exitCode: 0, durationMs: 7, summary: '修复后通过', artifacts: [] },
-  ], async ({ service, store, runtime, job, workspace }) => {
+  ], async ({ service, store, runtime, playwrightCli, job, workspace }) => {
     assert.ok(workspace)
     const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
     await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
@@ -778,8 +818,38 @@ test('Workspace script_defect 仅在诊断后修改代码并 Retry', async () =>
     assert.equal(store.task.runnerAttemptCount, 2)
     assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 1)
     assert.deepEqual(runtime.calls.map(call => call.stage), ['failure_diagnosis', 'script_repair'])
+    assert.deepEqual(playwrightCli.calls, ['failure_analysis', 'script_repair'])
     assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
   }, { workspace: true, diagnosisCategory: 'script_defect' })
+})
+
+test('新 UI Case 先经 Playwright CLI snapshot，再由 Agent 写入当前 Workspace、建立 Binding 并 Runner', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '新入口通过', artifacts: [] },
+  ], async ({ service, store, runner, runtime, playwrightCli, job, workspace }) => {
+    assert.ok(workspace)
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.deepEqual(playwrightCli.calls, ['implementation'])
+    assert.equal(runtime.calls[0].stage, 'script_generation')
+    assert.equal(runtime.calls[0].uiExecution?.tool, 'playwright-cli')
+    assert.match(runtime.calls[0].uiExecution?.snapshot ?? '', /状态页/u)
+    const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
+    assert.equal(binding?.entryFile, `tests/${store.task.id}.spec.ts`)
+    assert.equal(binding?.bindingStatus, 'validated')
+    assert.equal(runner.calls.length, 1)
+  }, { workspace: true })
+})
+
+test('新 UI Case 无法获得 CLI snapshot 时不允许凭空生成脚本', async () => {
+  await withService([], async ({ service, runtime, playwrightCli, job }) => {
+    await assert.rejects(
+      service.processPreparedTask(job, lease, new AbortController().signal),
+      /TEST_EXECUTION_UI_PLAYWRIGHT_CLI_EXPLORATION_REQUIRED/u,
+    )
+    assert.deepEqual(playwrightCli.calls, ['implementation'])
+    assert.deepEqual(runtime.calls, [])
+  }, { workspace: true, playwrightCliAvailable: false })
 })
 
 test('TestExecutionService 首次真实失败固定同脚本重试，成功后确定性标记 flaky', async () => {
