@@ -116,7 +116,7 @@ test('TestDesign 拒绝缺少必填 content 的 Requirement Release', async () =
 function releaseContent(id: string, description: string): RequirementReleaseContent {
   return {
     requirements: [{ clientRequirementPointId: id, title: '机器基线需求', description, actor: '用户', action: '提交', object: '订单', conditions: [], businessRules: [], exceptions: [], acceptanceCriteria: [], evidenceRefs: [], coverageTarget: true }],
-    evidence: [], clarifications: [], testFocus: [],
+    evidence: [], clarifications: [],
   }
 }
 

@@ -29,10 +29,10 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.deepEqual(reviewer.properties.reviewerType.enum, ['requirement', 'coverage'])
 })
 
-test('Requirement Analysis coverageTarget Schema 升级会发布新的 Tool 绑定令牌', () => {
+test('Requirement Analysis 精简提交 Schema 会发布新的 Tool 绑定令牌', () => {
   assert.equal(
     builtInToolBindingToken('requirement-analysis.submit_result'),
-    'requirement-analysis.submit_result@1.3.0#e186573f01c63fffea1584cff29b8cd271919a8c7892289c419ccd47996bb4b5',
+    'requirement-analysis.submit_result@1.4.0#b79ba39bc155c12bacd53c14fc624f5df85becf2928e3075c48e6ad0ce2de6eb',
   )
 })
 

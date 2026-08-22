@@ -15,8 +15,8 @@ test('System Prompt 只包含 Enabled Skill Catalog，不包含任何 Skill 正�
   assert.match(prompt, /runtime_skill_catalog_contract authority="highest"/u)
   assert.match(prompt, /优先于 Agent Configuration、Session 历史或旧 Context Summary/u)
   assert.match(prompt, /当前 Agent 可用 Skills（发布配置目录；不包含 Skill 正文）/u)
-  assert.match(prompt, /- requirement\.analysis[\s\S]*description:[\s\S]*version: 1\.1\.0[\s\S]*tags:/u)
-  assert.match(prompt, /- test-case-design[\s\S]*version: 3\.0\.0/u)
+  assert.match(prompt, /- requirement\.analysis[\s\S]*description:[\s\S]*version: 1\.2\.0[\s\S]*tags:/u)
+  assert.match(prompt, /- test-case-design[\s\S]*version: 3\.1\.0/u)
   assert.match(prompt, /skill\.read/u)
   assert.doesNotMatch(prompt, /<<<TRUSTED_SKILL/u)
   assert.doesNotMatch(prompt, /# Requirement Analysis 方法论/u)
@@ -42,8 +42,8 @@ test('skill.read 返回当前绑定版本的 TRUSTED_SKILL 正文，并在同轮
   const firstData = first.data as SkillReadData
   assert.equal(first.replayed, undefined)
   assert.equal(firstData.skillKey, 'test-case-design')
-  assert.equal(firstData.version, '3.0.0')
-  assert.match(firstData.content, /^<<<TRUSTED_SKILL key="test-case-design" version="3\.0\.0">>>/u)
+  assert.equal(firstData.version, '3.1.0')
+  assert.match(firstData.content, /^<<<TRUSTED_SKILL key="test-case-design" version="3\.1\.0">>>/u)
   assert.match(firstData.content, /# Test case design/u)
   assert.match(firstData.content, /<<<END_TRUSTED_SKILL>>>$/u)
 
@@ -53,7 +53,7 @@ test('skill.read 返回当前绑定版本的 TRUSTED_SKILL 正文，并在同轮
   assert.equal(snapshotCalls, 1, '同一执行轮重复读取不能再次访问 Skill 存储')
 })
 
-test('Requirement Analysis Skill 将扩展测试风险留在 Test Focus，不把 Knowledge 升级为 Blocking', async () => {
+test('Requirement Analysis Skill 不把普通测试风险升级为 Clarification 或结构化中间产物', async () => {
   const { session } = await prepareSkills(['requirement.analysis'])
   const registry = new ToolRegistry()
   session.register(registry)
@@ -65,7 +65,7 @@ test('Requirement Analysis Skill 将扩展测试风险留在 Test Focus，不把
   assert.match(content, /不能通过“只测试当前 Requirement 已明确的部分”继续完成测试设计/u)
   assert.match(content, /纯空白、trim、Tab\/换行、最大长度、字符集和唯一性应作为输入规范化风险/u)
   assert.match(content, /Knowledge Reference 只能提醒风险/u)
-  assert.match(content, /普通测试风险不要为了记录而创建 `blocking=false` Clarification/u)
+  assert.match(content, /普通测试风险不要为了记录而创建 `blocking=false` Clarification，也不要创建替代性的结构化中间产物/u)
 })
 
 test('skill.read 拒绝未绑定 Skill、路径式输入和额外参数', async () => {

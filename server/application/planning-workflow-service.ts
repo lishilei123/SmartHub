@@ -585,7 +585,7 @@ function requirementReviewerTask(run: ReviewRun) {
     `Source Run：${run.id}`,
     `ProjectVersion：${run.projectVersionId}`,
     `固定 AssetVersion/Hash：${JSON.stringify(run.snapshot.assets.map(item => ({ assetVersionId: item.assetVersionId, contentSha256: item.assetContentHash })))}`,
-    '重点检查需求完整性、一致性、歧义、可验证性、Evidence 与 Test Focus。',
+    '重点检查需求完整性、一致性、歧义、可验证性、Evidence 与 Clarification。',
   ].join('\n')
 }
 

@@ -4,7 +4,6 @@ import type { RequirementAnalysisArtifact, RequirementAnalysisResult } from '../
 type ArtifactSource = Omit<RequirementAnalysisResult, 'artifacts'>
 
 export function renderRequirementAnalysisArtifacts(result: ArtifactSource): RequirementAnalysisArtifact[] {
-  const pointsById = new Map(result.requirementPoints.map(point => [point.clientRequirementPointId, point]))
   const evidenceById = new Map(result.evidence.map(item => [item.clientEvidenceId, item]))
   const answeredClarifications = result.clarifications.filter(item => item.status === 'answered')
   const dismissedClarifications = result.clarifications.filter(item => item.status === 'dismissed')
@@ -12,7 +11,7 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
     '# 需求分析报告', '',
     '## 1. 需求概述', '', safe(result.summary.overview), '',
     '## 2. 业务目标', '', ...(result.summary.businessGoals.length ? result.summary.businessGoals.map(item => `- ${safe(item)}`) : ['- 未在当前需求中明确说明。']), '',
-    '## 3. 核心业务流程', '', safe(result.analysisDocument || '结构化结果未附加独立流程说明；请结合正式需求点、Clarification 与 Test Focus 阅读。'), '',
+    '## 3. 核心业务流程', '', safe(result.analysisDocument || '结构化结果未附加独立流程说明；请结合正式需求点与 Clarification 阅读。'), '',
     '## 4. 正式需求点与来源', '',
     ...result.requirementPoints.flatMap(point => [
       `### ${safe(point.clientRequirementPointId)} · ${safe(point.title)}`, '',
@@ -46,13 +45,6 @@ export function renderRequirementAnalysisArtifacts(result: ArtifactSource): Requ
       ...dismissedClarifications.map(item => `- ${safe(item.id)} · ${safe(item.question)}；处置：${safe(item.answer ?? '')}`),
       '',
     ] : []),
-    '## 8. Test Focus', '',
-    ...result.testFocus.map(item => `- ${item.id} · ${safe(item.title)}：${safe(item.description)}`), '',
-    '## 9. Traceability', '',
-    ...result.testFocus.flatMap(focus => focus.requirementPointRefs.flatMap(reference => {
-      const point = pointsById.get(reference)
-      return point ? [`- ${focus.id} → ${reference} → ${point.evidenceRefs.join('、') || '无 Evidence'}`] : []
-    })),
   ].join('\n')
 
   return [artifact('requirement-analysis.md', analysis)]

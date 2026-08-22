@@ -14,7 +14,6 @@ export function buildRequirementRelease(input: {
     requirements: result.requirementPoints,
     evidence: result.evidence,
     clarifications: result.clarifications,
-    testFocus: result.testFocus,
   })
   const report = required(result.artifacts.find(item => item.fileName === 'requirement-analysis.md'), '需求分析报告不存在')
   return {

@@ -30,7 +30,7 @@ function runFixture(items: HistoricalCaseSnapshot['items'], requirements = [{ cl
   const historicalBase = { schemaVersion: 'historical-case-snapshot/v2' as const, items, ...(items.length ? { sourceProjectVersionId: 'project-version-source', sourceTestCaseLibraryVersionId: 'library-v1', sourceTestCaseLibraryVersionSha256: 'f'.repeat(64), sourceRequirementReleaseId: 'release-source', sourceRequirementReleaseContentSha256: 'e'.repeat(64) } : {}), requirementMappings, createdAt: now }
   return {
     id: 'run-delta', testDesignId: 'design-delta', projectVersionId: 'project-version-delta', status: 'running', stage: 'test_case_design', progress: 50, idempotencyKey: 'delta',
-    basisSnapshot: { schemaVersion: 'test-design-basis-snapshot/v3', projectVersionId: 'project-version-delta', requirementReleaseId: 'release-delta', verificationRunId: 'review-delta', requirementReleaseContentSha256: 'a'.repeat(64), content: { requirements, evidence: [], clarifications: [], testFocus: [] } as never, createdAt: now, snapshotSha256: 'b'.repeat(64) },
+    basisSnapshot: { schemaVersion: 'test-design-basis-snapshot/v3', projectVersionId: 'project-version-delta', requirementReleaseId: 'release-delta', verificationRunId: 'review-delta', requirementReleaseContentSha256: 'a'.repeat(64), content: { requirements, evidence: [], clarifications: [] } as never, createdAt: now, snapshotSha256: 'b'.repeat(64) },
     agentConfigurationSnapshot: {} as never, currentInputRefs: [], workspaceSnapshot: {} as never, formalWorkspaceFiles: [], retrievalSnapshot: { snapshotSha256: 'c'.repeat(64) } as never,
     historicalSnapshot: { ...historicalBase, snapshotSha256: canonicalSha256(historicalBase) }, ...(items.length ? { baseTestCaseLibraryVersionId: 'library-v1', baseTestCaseLibraryVersionSha256: 'f'.repeat(64) } : {}),
     nodeRuns: [], artifacts: [], gateDecisions: [], testCases: [], caseChangeProposals: [], coverageAudits: [], events: [], createdBy: principal.subjectId, createdAt: now,
@@ -346,7 +346,7 @@ function historicalBaselineFixture(inheritRequirementBindings: boolean, includeS
     testDesignState: { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [sourceRun, otherRun], libraryCases: [sourceCase], libraryVersions, suiteDrafts: [], suiteVersions: [], executionHandoffs: [] },
   } as unknown as DatabaseState
   const design = { id: 'design-v2', projectVersionId: 'project-version-v2', projectId: 'project-delta', name: 'V2 Design', objective: '验证版本继承', input: { name: 'V2 Design', objective: '验证版本继承', knowledgeAugmentation: { mode: 'disabled' as const } }, logicalInputSha256: 'd'.repeat(64), createdBy: principal.subjectId, createdAt: now }
-  const currentBasis = { schemaVersion: 'test-design-basis-snapshot/v3' as const, projectVersionId: 'project-version-v2', requirementReleaseId: 'release-v2', verificationRunId: 'review-v2', requirementReleaseContentSha256: canonicalSha256({ requirements: [currentRequirement] }), content: { requirements: [currentRequirement], evidence: [], clarifications: [], testFocus: [] }, createdAt: now, snapshotSha256: 'a'.repeat(64) }
+  const currentBasis = { schemaVersion: 'test-design-basis-snapshot/v3' as const, projectVersionId: 'project-version-v2', requirementReleaseId: 'release-v2', verificationRunId: 'review-v2', requirementReleaseContentSha256: canonicalSha256({ requirements: [currentRequirement] }), content: { requirements: [currentRequirement], evidence: [], clarifications: [] }, createdAt: now, snapshotSha256: 'a'.repeat(64) }
   return { state, design, currentBasis, sourceRun }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: requirement-analysis
-description: Analyze a fixed current requirement workspace as one continuous task, producing a traceable requirement baseline, clarifications, test focus, and self-check without treating historical knowledge as current facts.
+description: Analyze a fixed current requirement workspace as one continuous task, producing a traceable requirement baseline, necessary clarifications, and self-check without treating historical knowledge as current facts.
 ---
 
 # Requirement Analysis 方法论
@@ -25,7 +25,7 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 先检查全部需求集合，但不要把“需求未写全”直接等同于 Clarification。每个未定义项只能归入以下一种结果：
 
 1. **Blocking Clarification**：缺失的是必须由人工决定的核心业务事实；不回答就无法形成任何语义正确的核心 TestCase。
-2. **Test Focus / Risk**：边界、异常、历史风险、Knowledge 推荐维度或覆盖扩展；可基于当前 Requirement 已明确部分继续形成正确核心 Case。
+2. **Non-blocking test risk**：边界、异常、历史风险、Knowledge 推荐维度或覆盖扩展；可基于当前 Requirement 已明确部分继续形成正确核心 Case。这类风险不得包装成 Clarification 或新的结构化中间产物；后续测试设计会直接从 Requirement、Workspace 与 Knowledge 重新探索。
 3. **Ignore**：对当前版本没有实际测试价值，不输出。
 
 重点检查跨需求的业务规则、状态、权限、对象关系、术语、上下游与时序冲突。不得按需求点机械提问，也不得按固定数量凑数；不得擅自补写资料中不存在的结论。
@@ -55,19 +55,19 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 19. 可测试性和验收判定；
 20. 其他非功能要求。
 
-## 5. Test Focus
+## 5. 非阻断测试风险
 
-Test Focus 不是完整测试用例，也不是待人工处理的 Clarification。为高风险规则、关键状态、边界、异常、权限、并发、兼容性和 Knowledge 推荐维度给出可行动的测试关注点，并关联适用的 Requirement Point；整体关注点可以使用空引用数组。
+高风险规则、关键状态、边界、异常、权限、并发、兼容性和 Knowledge 推荐维度不等于待人工处理的 Clarification。需求分析只负责判断它们是否暴露了必须确认的核心业务事实；测试风险本身由后续 PlanningAgent 在 TestCase Design 阶段结合连续 Context、Workspace 和 Knowledge 自主展开。
 
-- 只要当前 Requirement 已能确定主流程的操作和 Expected Result，就先设计这些核心 Case；剩余未定义的覆盖扩展写入 Test Focus 或 summary.risks，不得阻断 Release。
-- Test Focus 必须明确“关注什么风险”，同时明确不得把未定义行为擅自断言为允许、禁止或特定 Expected Result。
+- 只要当前 Requirement 已能确定主流程的操作和 Expected Result，剩余未定义的覆盖扩展就不得阻断 Release，也不得新增结构化风险清单作为下游输入。
+- 不得把未定义行为擅自断言为允许、禁止或特定 Expected Result。
 - 例如“名称不能为空”已经支持正常非空名称与空字符串不能保存的核心 Case；纯空白、trim、Tab/换行、最大长度、字符集和唯一性应作为输入规范化风险，而不是 Blocking。
 - 例如状态机已经给出合法转换和禁止回退时，状态自环、终态后的非状态字段编辑等未定义行为属于扩展风险；不得自行推导允许或禁止。
 - Dashboard 已定义统计项目时，应关注源数据交叉验证和数据变化后的一致性；未定义刷新时点或复杂统计范围不能单独阻断。
 
 ## 6. Clarification
 
-- `clarifications[]` 主要保存需要人工处理的业务决策。普通测试风险不要为了记录而创建 `blocking=false` Clarification；优先写入 Test Focus、summary.risks 或 analysisDocument。保留 Service 对历史 `blocking=false` 数据的兼容，不重复提交历史项。
+- `clarifications[]` 只保存需要人工处理的业务决策。普通测试风险不要为了记录而创建 `blocking=false` Clarification，也不要创建替代性的结构化中间产物；后续 TestCase Design 会从正式 Requirement、Clarification、Workspace 与 Knowledge 直接重新探索。
 - 一个 Clarification 只有**同时**满足以下全部条件，才允许 `blocking=true`：
   1. 缺失的是当前产品的业务事实，不是测试方法、经验或最佳实践；
   2. Current Requirement、已回答的 Formal Clarification 与完整 Workspace 都无法确定该事实；
@@ -89,15 +89,15 @@ Test Focus 不是完整测试用例，也不是待人工处理的 Clarification�
 最终提交前在同一 Session 内检查：
 
 - 主要业务流程和输入目录中的关键 Requirement 是否覆盖；
-- 临时 RP ID 是否唯一有效，Test Focus 引用是否存在；
+- 临时 RP ID 是否唯一有效；
 - 是否存在明显重复 Requirement；
 - 是否把 Knowledge Reference 错当成 Current Requirement；
 - 是否遗漏跨 Requirement 冲突、整体闭环或关键边界；
 - Requirement Point 是否有逐字 `sourceTexts`；
 - 关键结论是否能够通过相关 Requirement Point 的 Evidence 或清楚的“缺失事实”追溯；
-- Summary、Test Focus 与分析文档是否相互一致。
-- Clarification 是否只包含仍需人工处理的业务决策；普通风险是否已转入 Test Focus / Risk。
-- 对每一个 `blocking=true` 自问：“如果用户不回答，我是否真的无法基于当前 Requirement 生成任何语义正确的核心测试？”答案是否定时，必须改为 Test Focus / Risk 或 Ignore。
+- Summary 与分析文档是否相互一致。
+- Clarification 是否只包含仍需人工处理的业务决策；普通风险是否没有被包装成非阻断问题或新的中间产物。
+- 对每一个 `blocking=true` 自问：“如果用户不回答，我是否真的无法基于当前 Requirement 生成任何语义正确的核心测试？”答案是否定时，必须移除该 Clarification。
 - 多个 blocking 问题是否其实是同一项核心业务决策，能够合并后一次询问。
 
 完成自检后只提交一次完整 `requirement-analysis/v1`。`clarifications` 只包含本轮新识别且仍待人工处理的问题；固定 Snapshot 中已有的 answered/dismissed 历史由服务端合并，不得重复提交；没有新问题时提交空数组。

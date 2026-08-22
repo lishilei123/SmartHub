@@ -384,11 +384,10 @@ export class RequirementAnalysisValidator {
     const issues: ValidationIssue[] = []
     if (!input || typeof input !== 'object') return { report: invalid('$', '结果必须是对象') }
     const raw = input as unknown as Record<string, unknown>
-    const allowedRoot = new Set(['summary', 'requirementPoints', 'clarifications', 'testFocus', 'analysisDocument'])
+    const allowedRoot = new Set(['summary', 'requirementPoints', 'clarifications', 'analysisDocument'])
     for (const key of Object.keys(raw)) if (!allowedRoot.has(key)) issues.push(issue(key, '不属于 requirement-analysis/v1 提交协议'))
     if (!Array.isArray(input.requirementPoints)) issues.push(issue('requirementPoints', '必须是数组'))
     if (!Array.isArray(input.clarifications)) issues.push(issue('clarifications', '必须是数组'))
-    if (!Array.isArray(input.testFocus)) issues.push(issue('testFocus', '必须是数组'))
     if (issues.length) return { report: { valid: false, issues } }
 
     const temporaryIds = new Set<string>()
@@ -455,29 +454,6 @@ export class RequirementAnalysisValidator {
       })
     })
     const clarifications = [...clarificationByKey.values()]
-
-    const testFocus: RequirementAnalysisResult['testFocus'] = []
-    const testFocusKeys = new Set<string>()
-    input.testFocus.forEach((item, position) => {
-      const path = `testFocus[${position}]`
-      if (!item || typeof item !== 'object') { issues.push(issue(path, 'Test Focus 必须是对象')); return }
-      const rawItem = item as unknown as Record<string, unknown>
-      for (const key of Object.keys(rawItem)) if (!['title', 'description', 'requirementPointRefs'].includes(key)) issues.push(issue(`${path}.${key}`, '不属于 Test Focus 协议'))
-      const title = typeof item.title === 'string' ? item.title.trim() : ''
-      const description = typeof item.description === 'string' ? item.description.trim() : ''
-      if (!title) issues.push(issue(`${path}.title`, '标题不能为空'))
-      if (!description) issues.push(issue(`${path}.description`, '说明不能为空'))
-      if (!Array.isArray(item.requirementPointRefs) || item.requirementPointRefs.some(reference => typeof reference !== 'string')) { issues.push(issue(`${path}.requirementPointRefs`, '必须是字符串数组')); return }
-      const refs = [...new Set(item.requirementPointRefs.map(reference => reference.trim()).filter(Boolean))]
-      const invalidRefs = refs.filter(reference => !referenceMap.has(reference))
-      if (invalidRefs.length) issues.push(issue(`${path}.requirementPointRefs`, `引用了不存在的需求点：${invalidRefs.join('、')}`))
-      if (!title || !description || invalidRefs.length) return
-      const formalRefs = refs.map(reference => referenceMap.get(reference)!)
-      const key = `${formalRefs.slice().sort().join(',')}:${title.toLocaleLowerCase()}:${description.toLocaleLowerCase().replace(/\s+/gu, ' ')}`
-      if (testFocusKeys.has(key)) return
-      testFocusKeys.add(key)
-      testFocus.push({ id: `TF-${String(testFocus.length + 1).padStart(3, '0')}`, title: title.slice(0, 300), description, requirementPointRefs: formalRefs })
-    })
     if (issues.length) return { report: { valid: false, issues } }
 
     const modelSummary = input.summary
@@ -496,7 +472,7 @@ export class RequirementAnalysisValidator {
       ...normalizedPoints.result,
       requirementPoints,
       summary: {
-        overview: typeof modelSummary?.overview === 'string' && modelSummary.overview.trim() ? modelSummary.overview.trim() : `本次分析形成 ${requirementPoints.length} 个需求点和 ${testFocus.length} 个 Test Focus。`,
+        overview: typeof modelSummary?.overview === 'string' && modelSummary.overview.trim() ? modelSummary.overview.trim() : `本次分析形成 ${requirementPoints.length} 个需求点。`,
         businessGoals: cleanStrings(modelSummary?.businessGoals),
         overallAssessment,
         score: Number.isFinite(modelSummary?.score) ? Math.min(100, Math.max(0, Number(modelSummary?.score))) : fallbackScore,
@@ -504,7 +480,6 @@ export class RequirementAnalysisValidator {
         risks: cleanStrings(modelSummary?.risks),
       },
       clarifications,
-      testFocus,
       ...(typeof input.analysisDocument === 'string' && input.analysisDocument.trim() ? { analysisDocument: input.analysisDocument.trim() } : {}),
     } satisfies Omit<RequirementAnalysisResult, 'artifacts'>
     const result: RequirementAnalysisResult = { ...core, artifacts: renderRequirementAnalysisArtifacts(core) }
@@ -532,17 +507,6 @@ export class RequirementAnalysisValidator {
         if (!isStrings(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用了不存在的需求点'))
         if (!['pending', 'answered', 'dismissed'].includes(item.status)) issues.push(issue(`${path}.status`, '状态不合法'))
         if (item.status !== 'pending' && (!item.answer?.trim() || !item.answeredAt || !item.answeredBy)) issues.push(issue(path, '已回答或已忽略的问题必须保留正式答复、时间和人员来源'))
-      })
-    }
-    if (!Array.isArray(input.testFocus)) issues.push(issue('testFocus', '必须是数组'))
-    else {
-      const ids = new Set<string>()
-      input.testFocus.forEach((item, position) => {
-        const path = `testFocus[${position}]`
-        if (!item.id || ids.has(item.id)) issues.push(issue(`${path}.id`, 'Test Focus ID 为空或重复'))
-        ids.add(item.id)
-        if (!item.title?.trim() || !item.description?.trim()) issues.push(issue(path, 'Test Focus 标题和说明不能为空'))
-        if (!isStrings(item.requirementPointRefs) || item.requirementPointRefs.some(reference => !pointIds.has(reference))) issues.push(issue(`${path}.requirementPointRefs`, '引用了不存在的需求点'))
       })
     }
     const expectedArtifactNames = new Set(['requirement-analysis.md'])

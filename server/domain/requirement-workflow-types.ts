@@ -1,5 +1,5 @@
 import type { AgentExecutionRecord } from './types.js'
-import type { CandidateEvidence, CandidateRequirementPoint, PlanningClarification, RequirementTestFocus } from './review-types.js'
+import type { CandidateEvidence, CandidateRequirementPoint, PlanningClarification } from './review-types.js'
 
 export type RequirementWorkflowStage = 'analysis' | 'clarification' | 'release'
 
@@ -24,7 +24,6 @@ export interface RequirementReleaseContent {
   requirements: CandidateRequirementPoint[]
   evidence: CandidateEvidence[]
   clarifications: PlanningClarification[]
-  testFocus: RequirementTestFocus[]
 }
 
 export interface RequirementReleasePackage {

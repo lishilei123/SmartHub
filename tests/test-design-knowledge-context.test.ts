@@ -32,9 +32,10 @@ test('冻结 Retrieval Hits 经确定性裁剪后直接进入 TestCase Design Ru
   assert.equal(parsed.knowledgeReferences.maxHits, TEST_DESIGN_RUNTIME_KNOWLEDGE_REFERENCE_LIMIT)
   assert.equal(parsed.knowledgeReferences.availableHitCount, retrieval.hits.length)
   assert.deepEqual(parsed.knowledgeReferences.hits, selected)
-  assert.equal(parsed.requirementRelease.content.testFocus, undefined)
-  assert.equal(parsed.design.userCoverageObjectives, undefined)
-  assert.match(parsed.instructions.join('\n'), /无需再次调用 knowledge\.search 才能获得既有 Retrieval/u)
+  assert.deepEqual(Object.keys(parsed.requirementRelease.content).sort(), ['clarifications', 'evidence', 'requirements'])
+  assert.match(parsed.instructions.join('\n'), /必须作为 Case 设计和 Self Review 的风险参考/u)
+  assert.match(parsed.instructions.join('\n'), /结果不理想时允许修改 Query 后继续搜索/u)
+  assert.match(parsed.instructions.join('\n'), /不得为每个 Requirement 机械搜索/u)
 })
 
 test('Retrieval Query 直接使用 Requirement、answered Clarification 与 TestDesign 正式输入', () => {
@@ -56,17 +57,15 @@ test('Retrieval Query 直接使用 Requirement、answered Clarification 与 Test
   assert.match(queries, /验证任务状态与查询一致性/u)
   assert.match(queries, /module 任务管理/u)
   assert.match(queries, /functional stability 测试风险/u)
-  assert.doesNotMatch(queries, /旧 Test Focus 不得参与检索/u)
   assert.doesNotMatch(queries, /未回答问题不得参与检索/u)
 })
 
-test('Test Focus 残留不再构造 TestDesign，TestCase v3 Schema 保持不变', () => {
-  assert.throws(() => validateCreateTestDesignInput({
+test('Requirement Analysis 与 Release 不再携带额外测试中间列表，TestCase v3 Schema 保持不变', () => {
+  assert.deepEqual(Object.keys(validateCreateTestDesignInput({
     name: '测试设计',
     objective: '验证正式需求与知识风险',
-    userCoverageObjectives: ['旧 Test Focus 映射'],
     knowledgeAugmentation: { mode: 'disabled' },
-  }), /userCoverageObjectives/u)
+  })).sort(), ['excludedScopes', 'executionMethods', 'focusDimensions', 'includedScopes', 'knowledgeAugmentation', 'name', 'objective'])
   assert.deepEqual(Object.keys(validateTestCaseContent({
     schemaVersion: 'test-case/v3',
     title: '完整 CRUD 业务闭环',
@@ -79,11 +78,12 @@ test('Test Focus 残留不再构造 TestDesign，TestCase v3 Schema 保持不变
     expectedResults: ['完整业务闭环符合 Requirement'],
   })).sort(), ['dimension', 'executionMethods', 'expectedResults', 'preconditions', 'priority', 'requirementRefs', 'schemaVersion', 'steps', 'title'])
 
-  const service = read('../server/application/test-design-service.ts')
-  const createPanel = read('../src/test-design/TestDesignCreatePanel.tsx')
+  const requirementTypes = read('../server/domain/requirement-workflow-types.ts')
   const types = read('../server/domain/test-design-types.ts')
-  assert.doesNotMatch(service, /result\.testFocus\.map|userCoverageObjectives/u)
-  assert.doesNotMatch(createPanel, /userCoverageObjectives|覆盖目标（每行一项）/u)
+  const toolConfig = JSON.parse(read('../server/tools/built-in-tools-config.json')) as { tools: Record<string, { parameters: { properties: Record<string, unknown>; required: string[] } }> }
+  assert.deepEqual(Object.keys(toolConfig.tools['requirement-analysis.submit_result'].parameters.properties).sort(), ['analysisDocument', 'clarifications', 'requirementPoints', 'summary'])
+  assert.deepEqual(toolConfig.tools['requirement-analysis.submit_result'].parameters.required, ['summary', 'requirementPoints', 'clarifications'])
+  assert.match(requirementTypes, /requirements: CandidateRequirementPoint\[\][\s\S]*evidence: CandidateEvidence\[\][\s\S]*clarifications: PlanningClarification\[\]/u)
   assert.doesNotMatch(types, /interface\s+(?:TestPoint|RiskContext)|type\s+(?:TestPoint|RiskContext)/u)
 })
 
@@ -95,8 +95,13 @@ test('Skill 保留自然闭环并要求独立风险拆分，Coverage UI 明确�
   assert.match(skill, /todo → in_progress → completed/u)
   assert.match(skill, /distinct risk hypothesis|fail independently/u)
   assert.match(skill, /Do not split merely to increase Case count/u)
-  assert.match(skill, /not formal product facts or mandatory Case-decomposition rules/u)
+  assert.match(skill, /not formal product facts and do not force Case decomposition/u)
   assert.match(skill, /“result is non-empty” is insufficient/u)
+  assert.match(skill, /invalid inputs, invalid state transitions, duplicate operations, query accuracy, data consistency, permission risks, historical defects/u)
+  assert.match(skill, /If the intent can fail independently and no existing Case covers it, add a separate Case/u)
+  assert.match(skill, /Call `knowledge\.read_chunk` only when a search hit needs fuller context/u)
+  assert.match(skill, /revise the query and continue searching/u)
+  assert.match(skill, /Do not call Knowledge tools once per Requirement/u)
   assert.doesNotMatch(skill, /minimumCaseCount|at least \d+ Cases|Requirement 数量.*固定倍数/u)
   assert.match(auditPanel, /需求追溯覆盖率/u)
   assert.match(auditPanel, /不表示异常、边界或组合场景已 100% 覆盖/u)
@@ -125,7 +130,6 @@ function requirementContent(): RequirementReleaseContent {
       { id: 'CL-ANSWERED', question: '完成态是否允许回退？', reason: '影响预期结果', category: 'business_rule', requirementPointRefs: ['RP-STATE'], blocking: true, status: 'answered', answer: '回退请求必须拒绝', createdAt: '2026-08-22T00:00:00.000Z' },
       { id: 'CL-PENDING', question: '未回答问题不得参与检索', reason: '尚无正式答案', category: 'other', requirementPointRefs: ['RP-STATE'], blocking: false, status: 'pending', createdAt: '2026-08-22T00:00:00.000Z' },
     ],
-    testFocus: [{ id: 'TF-LEGACY', title: '旧 Test Focus 不得参与检索', description: '历史兼容字段', requirementPointRefs: ['RP-STATE'] }],
   }
 }
 

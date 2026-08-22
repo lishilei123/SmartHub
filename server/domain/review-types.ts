@@ -175,19 +175,7 @@ export interface CandidateRequirementAnalysisV1 {
     coverageRationale?: string
   }>
   clarifications: CandidatePlanningClarification[]
-  testFocus: Array<{
-    title: string
-    description: string
-    requirementPointRefs: string[]
-  }>
   analysisDocument?: string
-}
-
-export interface RequirementTestFocus {
-  id: string
-  title: string
-  description: string
-  requirementPointRefs: string[]
 }
 
 export interface RequirementAnalysisArtifact {
@@ -203,7 +191,6 @@ export interface RequirementAnalysisResult extends CandidateRequirementPointExtr
     businessGoals: string[]
   }
   clarifications: PlanningClarification[]
-  testFocus: RequirementTestFocus[]
   analysisDocument?: string
   artifacts: RequirementAnalysisArtifact[]
 }

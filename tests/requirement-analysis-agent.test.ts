@@ -98,14 +98,13 @@ test('一次需求分析只执行一次 Pi Runtime，并只派生一份人类可
   const { response, store, runtimeCalls } = await successfulRun()
   assert.equal(runtimeCalls(), 1)
   assert.equal(response.result.requirementPoints.length, 2)
-  assert.equal(response.result.testFocus.length, 2)
   response.result.artifacts.forEach(artifact => {
     assert.equal(artifact.contentSha256, createHash('sha256').update(artifact.content).digest('hex'))
   })
   assert.equal(response.result.artifacts.length, 1)
   assert.equal(response.result.artifacts[0].fileName, 'requirement-analysis.md')
   assert.match(response.result.artifacts[0].content, /# 需求分析报告/u)
-  assert.match(response.result.artifacts[0].content, /## 8\. Test Focus/u)
+  assert.doesNotMatch(response.result.artifacts[0].content, /## 8\./u)
 
   const run = (await store.snapshot()).reviewRuns[0]
   assert.equal(run.status, 'succeeded')
@@ -159,7 +158,6 @@ test('Validator 只做结构、引用、Evidence 与 Artifact 安全校验，不
   const candidate: CandidateRequirementAnalysisV1 = {
     ...analysisCandidate(),
     summary: { overview: '需求基线清晰。', overallAssessment: 'pass', score: 100, strengths: [], risks: [], businessGoals: [] },
-    testFocus: [],
   }
   const normalized = await validator.normalize(candidate, run.snapshot, run.inputDeliveryManifest!)
   assert.equal(normalized.report.valid, true)
@@ -205,10 +203,10 @@ test('Validator 只拒绝可确定的错误 Blocking 声明，不用关键词猜
   assert.ok(coverageOnly.report.issues.some(issue => issue.path === 'clarifications[0].category'))
 })
 
-test('名称、状态机、Dashboard 和 Knowledge 风险保留为 Test Focus，不阻断 Requirement Release', async () => {
+test('非阻断测试风险不生成 Clarification 且不阻断 Requirement Release', async () => {
   const { response, store } = await successfulMiniTaskRun(nonBlockingRiskCandidate())
   assert.equal(response.result.clarifications.filter(item => item.blocking && item.status === 'pending').length, 0)
-  assert.deepEqual(response.result.testFocus.map(item => item.title), ['名称输入规范化风险', '状态机扩展风险', 'Dashboard 统计一致性', 'Knowledge 推荐的查询边界'])
+  assert.match(response.result.summary.risks.join('\n'), /名称输入规范化、状态机扩展、Dashboard 刷新时点和查询边界未定义/u)
 
   const run = (await store.snapshot()).reviewRuns[0]
   assert.equal(run.status, 'succeeded')
@@ -416,10 +414,6 @@ function analysisCandidate(): CandidateRequirementAnalysisV1 {
       { id: 'RP-002', title: '超时关闭订单', description: '超过十五分钟未支付的订单会自动关闭。', sourceTexts: ['订单超过十五分钟未支付时自动关闭。'], coverageTarget: true },
     ],
     clarifications: [],
-    testFocus: [
-      { title: '取消与超时竞态', description: '验证取消请求和超时任务并发时只有一个终态生效。', requirementPointRefs: ['RP-001', 'RP-002'] },
-      { title: '整体异常恢复', description: '验证关闭失败后的提示、重试与状态一致性。', requirementPointRefs: [] },
-    ],
     analysisDocument: '订单以待支付为起点，可由用户取消或超时任务关闭；两个关闭路径的终态、竞态与失败恢复需要统一定义。',
   }
 }
@@ -442,12 +436,6 @@ function nonBlockingRiskCandidate(): CandidateRequirementAnalysisV1 {
     ...candidate.summary,
     risks: ['名称输入规范化、状态机扩展、Dashboard 刷新时点和查询边界未定义；这些不改变已明确核心验收语义。'],
   }
-  candidate.testFocus = [
-    { title: '名称输入规范化风险', description: '当前“名称不能为空”只断言空字符串不能保存；纯空白、trim、长度和字符集作为扩展风险关注，不擅自增加业务 Expected Result。', requirementPointRefs: ['RP-002'] },
-    { title: '状态机扩展风险', description: '已明确转换可形成核心 Case；状态自环和终态后非状态字段编辑未定义，仅作为扩展风险关注。', requirementPointRefs: ['RP-004'] },
-    { title: 'Dashboard 统计一致性', description: '项目数、任务数与完成数应和源数据交叉验证；刷新时点未定义时不擅自断言。', requirementPointRefs: [] },
-    { title: 'Knowledge 推荐的查询边界', description: 'Knowledge 推荐组合查询和异常边界时仅增强测试维度，不将其提升为当前业务事实。', requirementPointRefs: ['RP-005'] },
-  ]
   return candidate
 }
 
@@ -481,7 +469,6 @@ function miniTaskCandidate(): CandidateRequirementAnalysisV1 {
       { id: 'RP-005', title: 'Dashboard', description: 'Dashboard 展示项目数、任务数、已完成数和未完成数。', sourceTexts: ['Dashboard 展示项目数、任务数、已完成数和未完成数。'], coverageTarget: true },
     ],
     clarifications: [],
-    testFocus: [],
     analysisDocument: '当前输入已明确基础操作与核心 Expected Result；未定义的覆盖扩展应保留为风险，不得擅自补写业务规则。',
   }
 }

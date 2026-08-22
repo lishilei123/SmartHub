@@ -191,11 +191,13 @@ function testDesignStageInstructions(stage: TestDesignStage) {
   const binding = TEST_DESIGN_STAGE_BINDINGS[stage]
   const stageRules = stage === 'test_case_design'
     ? [
-          'Requirement 是正式业务事实来源，但不是测试设计的场景边界。先保证正式 Requirement 的核心业务行为得到直接测试覆盖，再主动扩展异常、边界、权限、状态、并发、一致性、重复操作、恢复、性能、稳定性、兼容性、安全、历史缺陷与 Knowledge 风险场景。',
-          'Knowledge Reference 只提示风险，不是正式业务事实，也不强制 Case 粒度。Requirement 与一个自然测试目标共同决定是否合并正常闭环；可独立失败的异常、非法、边界和一致性风险再主动拆分。',
+          'Requirement 是正式业务事实来源，但不是测试设计的场景边界。先围绕独立 Test Intent 设计自然业务闭环，再主动扩展异常、边界、非法输入、非法状态、权限、并发、一致性、重复操作、恢复、查询准确性、性能、稳定性、兼容性、安全、历史缺陷与 Knowledge 风险场景。',
+          'Case 拆分单位是独立 Test Intent，不是 Requirement、步骤或接口数量。Create → Read → Update → Read → Delete → Read 和合法 todo → in_progress → completed 可以各自保持一条自然闭环；todo → completed、completed → in_progress、completed → todo、空字符串、纯空白、非法枚举、非法操作等能够独立失败的风险应主动拆分。禁止按最小数量或固定倍数凑 Case。',
+          'Knowledge Reference 只提示风险，不是正式业务事实，也不强制 Case 粒度。必须把 knowledgeReferences.hits 纳入设计和提交前 Self Review，但不要求每条引用或每个 Requirement 生成 Case。',
           'requirementRefs 仅表示 TestCase 对正式 Requirement 的直接追溯。Expected Result 直接来源于 Requirement 时填写对应 ID；风险或边界探索没有直接 Requirement 行为依据时必须使用 requirementRefs: []，不得为了 Coverage 强行绑定不相关 Requirement。',
           '允许发散但禁止编造产品业务规则、权限矩阵、性能阈值、错误码、错误文案、接口、URL、Selector、账号、环境或状态机。信息不足时只写安全、稳定、一致、无越权、无不可恢复错误等可确定底线，或把技术事实留到 TestExecution 配置。',
-          '从 functional、performance、stability、compatibility、security 五个方向思考，只生成有价值的场景；不要求每个维度都有 Case，也不提交适用性表。一个 Case 应有清晰可审核的测试目标；自然完整业务闭环可以合并，明显不同且可独立失败的测试意图可以拆分，这不是 Validator Gate。',
+          '从 functional、performance、stability、compatibility、security 五个方向思考，只生成有价值的场景；不要求每个维度都有 Case，也不提交适用性表。这是 PlanningAgent 的设计与 Self Review 方法，不是 Validator Gate。',
+          '提交前在当前 Planning Session 内执行一次 Self Review：重新检查异常路径、边界条件、非法输入、非法状态转换、重复操作、查询准确性、数据一致性、权限风险、历史缺陷，以及已读取 Knowledge 明确提示的风险。对每个发现同时核对本轮 Candidate Delta 与冻结 Historical Baseline；若它可独立失败且没有已有 Case 覆盖，补充独立 Case，否则不要为了增加数量机械补 Case。',
           '每条 Case 只提交一份自然语言 preconditions、steps、expectedResults。executionMethods 只选择 ui、api 或二者；不要区分 UI/API 两套步骤，也不要提交执行配置、数据需求、Coverage 内部模型、Finding、Confirmation 或历史 Proposal。',
           'cases[] 是本轮 Candidate Delta，不是当前版本完整用例库。历史用例完全未变化时允许提交 cases: []；不要为表达 reuse 而重新输出历史 Case，也不要输出 reuse、update、create、deprecate 等生命周期动作。',
           'historical-test-cases.json 中的 requirementRefs 属于其来源 Requirement Release，只用于理解历史测试意图；不得假设相同 RP 编号在当前 Release 中代表相同 Requirement。当前 Requirement direct trace 只能使用 Runtime 提供的当前 Requirement Release ID，跨版本 Requirement Mapping 由 Service 负责。',
@@ -208,9 +210,10 @@ function testDesignStageInstructions(stage: TestDesignStage) {
         ]
   const readingRules = stage === 'test_case_design'
     ? [
-        '正式 Requirement、Evidence 和 Clarification 已由 Runtime 在 requirementRelease.content 中直接提供；历史 Requirement Release 中的 Test Focus 不参与测试设计输入。不要到 Workspace 寻找其 JSON 或 Markdown 镜像。coreFactPaths 只列出需要自主读取的冻结历史资料。',
+        '正式 Requirement、Evidence 和 Clarification 已由 Runtime 在 requirementRelease.content 中直接提供；不要到 Workspace 寻找它们的 JSON 或 Markdown 镜像。coreFactPaths 只列出需要自主读取的冻结历史资料。',
         '若 coreFactPaths 中存在 historical-test-cases.json，它是本轮唯一的冻结历史用例库基线。可按需读取它来理解已有覆盖、避免无意义重复，并识别当前 Requirement 变化可能影响的既有场景；只输出新增或确实需要调整的 TestCase。未输出的历史 Case 默认继续保留，禁止用省略表达删除或废弃。不得用 branches/*/test-case-library/v*/ 下的其他正式投影重复建立历史基线。',
-        'knowledgeReferences.hits 是 Service 从本 Run 已冻结 retrievalSnapshot.hits 中去重、裁剪后的直接输入；必须先使用这些内容，无需再次调用 knowledge.search 才能获得既有 Retrieval。只有存在已命名且这些引用未覆盖的事实缺口或风险时，才用受限路径的 ls/find/grep 或 knowledge.search 定位最小必要范围。相同 contentHash 和所需行范围仍在当前 Context 时直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。',
+        '当前 Context 已经读取过的 Workspace / Knowledge 正文必须直接复用；相同 contentHash 和所需行范围仍可见时，不得因确认、Stage 切换、Self Review 或多个 Skill 的方法重叠而重读。knowledgeReferences.hits 是 Service 从本 Run 已冻结 retrievalSnapshot.hits 中去重、裁剪后的直接输入，必须作为 Case 设计和 Self Review 的风险参考，无需再次搜索才能获得既有 Retrieval。',
+        '只有存在已命名且 knowledgeReferences 与当前 Context 未解决的风险或事实缺口时，才自主调用 knowledge.search 定位最小必要范围；搜索命中需要完整上下文时再调用 knowledge.read_chunk。结果不理想时允许修改 Query 后继续搜索。不得为每个 Requirement 机械搜索，也不得为了流程完整而调用 Knowledge 工具。',
       ]
     : [
         '修复阶段优先读取 current-test-cases.json、Requirement Release 和 blocker 指明的资料。current-test-cases.json 只包含本轮 Candidate Delta；removeCaseRefs 只撤销本轮 Candidate，绝不删除或废弃 Historical Baseline。除 blocker 直接引用外，不回读历史用例库或共享知识。',

@@ -229,11 +229,11 @@
       }
     },
     "requirement-analysis.submit_result": {
-      "version": "1.3.0",
+      "version": "1.4.0",
       "piName": "requirement_analysis_submit_result",
       "label": "提交统一需求分析结果",
       "catalogName": "提交需求分析",
-      "description": "提交 requirement-analysis/v1。一次提交同时包含需求基线、结构化 Clarification、Test Focus、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
+      "description": "提交 requirement-analysis/v1。一次提交包含需求基线、必要的结构化 Clarification、摘要及可选分析文档；服务端生成正式 ID、Evidence、引用、覆盖和 Markdown Artifact。",
       "catalogDescription": "提交单 Agent 需求分析结果，由服务端统一校验和生成 Artifact。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -299,7 +299,7 @@
                   "type": "string",
                   "minLength": 6,
                   "maxLength": 32,
-                  "description": "本次提交内唯一的临时需求点 ID，格式 RP-001；Finding 和 Test Focus 使用它建立引用，正式 ID 由服务端生成。"
+                  "description": "本次提交内唯一的临时需求点 ID，格式 RP-001；Clarification 使用它建立引用，正式 ID 由服务端生成。"
                 },
                 "title": {
                   "type": "string",
@@ -390,40 +390,6 @@
               "additionalProperties": false
             }
           },
-          "testFocus": {
-            "type": "array",
-            "maxItems": 300,
-            "items": {
-              "type": "object",
-              "properties": {
-                "title": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 300
-                },
-                "description": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 4000
-                },
-                "requirementPointRefs": {
-                  "type": "array",
-                  "maxItems": 50,
-                  "items": {
-                    "type": "string",
-                    "minLength": 6,
-                    "maxLength": 32
-                  }
-                }
-              },
-              "required": [
-                "title",
-                "description",
-                "requirementPointRefs"
-              ],
-              "additionalProperties": false
-            }
-          },
           "analysisDocument": {
             "type": "string",
             "maxLength": 200000
@@ -432,8 +398,7 @@
         "required": [
           "summary",
           "requirementPoints",
-          "clarifications",
-          "testFocus"
+          "clarifications"
         ],
         "additionalProperties": false
       }

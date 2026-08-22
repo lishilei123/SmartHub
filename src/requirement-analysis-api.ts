@@ -58,7 +58,6 @@ export type RequirementAnalysisResult = {
   }
   requirementPoints: RequirementPoint[]
   clarifications: PlanningClarification[]
-  testFocus: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
   evidence: AnalysisEvidence[]
   coverage: {
     assets: Array<{
@@ -114,7 +113,6 @@ export type RequirementReleasePackage = {
     requirements: RequirementPoint[]
     evidence: AnalysisEvidence[]
     clarifications: PlanningClarification[]
-    testFocus: Array<{ id: string; title: string; description: string; requirementPointRefs: string[] }>
   }
   sourceAssetVersionIds: string[]
   generationExecution: AgentExecutionRecord

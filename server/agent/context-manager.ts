@@ -218,7 +218,7 @@ export function protectedCompactionInstructions(
     '仅总结运行上下文，不把摘要当作正式业务事实。',
     `压缩原因：${reason}。`,
     ...(detail ? [detail] : []),
-    '保留当前 Workflow Stage、当前目标、用户确认事项、已确认的需求分析与测试设计结论、当前 Workspace 引用、固定 Release/Snapshot 引用、未解决 Finding、Test Focus 和下一步动作。',
+    '保留当前 Workflow Stage、当前目标、用户确认事项、已确认的需求分析与测试设计结论、当前 Workspace 引用、固定 Release/Snapshot 引用、未解决 Finding 和下一步动作。',
     '正式 Requirement Release、TestCase、Version、Revision、Hash、Snapshot 内容不得从摘要恢复；后续 Stage 必须由 Service/PostgreSQL 重新读取固定事实。',
   ].join('\n')
 }

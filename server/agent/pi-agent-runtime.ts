@@ -910,7 +910,7 @@ function reviewerTool(
 
 function reviewerSystemPrompt(reviewerType: ReviewerExecutionInput['reviewerType']) {
   const focus = {
-    requirement: '需求完整性、一致性、歧义、可验证性与 Test Focus',
+    requirement: '需求完整性、一致性、歧义、可验证性与 Clarification',
     coverage: 'Requirement/TestCase 覆盖关系、遗漏、重复与阻塞项',
   }[reviewerType]
   return [
