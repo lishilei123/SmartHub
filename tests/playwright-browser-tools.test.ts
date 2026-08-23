@@ -150,6 +150,55 @@ async function invoke(
   }, new AbortController().signal)
 }
 
+async function observeReusableAuthentication(input: {
+  taskId: string
+  network: PlaywrightCliRequestSummary[]
+  destinationSnapshot: string
+}) {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-browser-auth-evidence-'))
+  try {
+    const cli = new FixtureBrowserCli()
+    cli.summaries.splice(0, cli.summaries.length, ...input.network)
+    const scoped = execution('script_generation', input.taskId)
+    scoped.task.input.caseContent = {
+      ...scoped.task.input.caseContent,
+      title: '新增项目',
+      preconditions: ['管理员已登录'],
+      steps: ['在账号框输入 "alice"', '在密码框输入 "secret-password"', '点击认证提交控件', '新增项目'],
+      expectedResults: ['项目新增成功'],
+    }
+    const authPolicy = resolveAuthSessionPolicy(scoped.task.input)
+    assert.deepEqual(authPolicy, { mode: 'reuse_authenticated', role: 'admin', stateKey: 'admin' })
+    let committed = false
+    const session = await new PlaywrightBrowserToolGateway(cli).openSession({
+      ...scoped,
+      authPolicy,
+      authState: {
+        savePath: join(root, 'admin.json'),
+        commit: async () => { committed = true },
+      },
+    }, new AbortController().signal)
+
+    cli.snapshotValue = [
+      'url: https://example.test/account/access',
+      '- heading "账户验证"',
+      '- textbox "账号" [ref=e2]',
+      '- textbox "密码" [ref=e3]',
+      '- button "Sign in" [ref=e1]',
+    ].join('\n')
+    await invoke(session, 'browser.snapshot', {})
+    await invoke(session, 'browser.fill', { target: 'e2', text: 'alice' })
+    await invoke(session, 'browser.fill', { target: 'e3', text: 'secret-password' })
+    cli.snapshotValue = input.destinationSnapshot
+    await invoke(session, 'browser.click', { target: 'e1' })
+    await session.close()
+
+    return { saved: cli.saved.length, committed }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
 test('Browser Tools 支持受控多轮 Agent Loop，并对测试数据、请求详情和截图输出脱敏', async () => {
   const cli = new FixtureBrowserCli()
   const session = await new PlaywrightBrowserToolGateway(cli).openSession(execution(), new AbortController().signal)
@@ -230,6 +279,79 @@ test('Browser Tools 通过 GovernedToolRuntime 计入调用上限与重复调用
   await session.close()
 })
 
+test('Browser Auth State 综合提交、页面与 Network 证据，并拒绝认证失败页面', async (context) => {
+  await context.test('标准 login API 成功后仍保存', async () => {
+    const result = await observeReusableAuthentication({
+      taskId: 'task-auth-standard',
+      network: [{
+        index: 1,
+        method: 'POST',
+        url: 'https://example.test/api/login',
+        status: 200,
+        resourceType: 'fetch',
+      }],
+      destinationSnapshot: 'url: https://example.test/projects\n- heading "项目"',
+    })
+    assert.deepEqual(result, { saved: 1, committed: true })
+  })
+
+  for (const candidate of [
+    { name: '非标准认证 API', path: '/gateway/account', taskId: 'task-auth-gateway' },
+    { name: 'GraphQL 登录', path: '/graphql', taskId: 'task-auth-graphql' },
+  ]) {
+    await context.test(`${candidate.name} 可由稳定业务页面补足成功证据`, async () => {
+      const result = await observeReusableAuthentication({
+        taskId: candidate.taskId,
+        network: [{
+          index: 1,
+          method: 'POST',
+          url: `https://example.test${candidate.path}`,
+          status: 200,
+          resourceType: 'fetch',
+        }],
+        destinationSnapshot: 'url: https://example.test/projects\n- navigation "主导航"\n- link "项目列表" [ref=e8]',
+      })
+      assert.deepEqual(result, { saved: 1, committed: true })
+    })
+  }
+
+  await context.test('无可识别认证请求时可由稳定业务页面保存', async () => {
+    const result = await observeReusableAuthentication({
+      taskId: 'task-auth-page-evidence',
+      network: [],
+      destinationSnapshot: 'url: https://example.test/projects\n- heading "项目"\n- button "新建项目" [ref=e8]',
+    })
+    assert.deepEqual(result, { saved: 1, committed: true })
+  })
+
+  for (const candidate of [
+    {
+      name: '密码错误并停留认证页',
+      taskId: 'task-auth-invalid-password',
+      snapshot: 'url: https://example.test/account/access\n- alert "密码错误"\n- textbox "密码" [ref=e3]\n- button "重试" [ref=e8]',
+    },
+    {
+      name: '登录失败跳转错误页',
+      taskId: 'task-auth-login-error',
+      snapshot: 'url: https://example.test/login-error\n- heading "请求未完成"\n- button "返回" [ref=e8]',
+    },
+    {
+      name: '账号锁定',
+      taskId: 'task-auth-account-locked',
+      snapshot: 'url: https://example.test/account/help\n- alert "Account is locked"\n- button "Contact support" [ref=e8]',
+    },
+  ]) {
+    await context.test(`${candidate.name} 不保存`, async () => {
+      const result = await observeReusableAuthentication({
+        taskId: candidate.taskId,
+        network: [],
+        destinationSnapshot: candidate.snapshot,
+      })
+      assert.deepEqual(result, { saved: 0, committed: false })
+    })
+  }
+})
+
 test('Auth Session Policy 只根据冻结 Case 语义区分业务复用、认证隔离与多角色', () => {
   const policy = (title: string, preconditions: string[], steps = ['执行目标操作']) => resolveAuthSessionPolicy({
     caseId: `case-${title}`,
@@ -270,6 +392,13 @@ test('Browser Exploration 在 Run 内按 Role 复用状态，Repair 同策略，
   try {
     const store = new LocalExecutionWorkspaceStore(root)
     const cli = new FixtureBrowserCli()
+    cli.summaries.splice(0, cli.summaries.length, {
+      index: 1,
+      method: 'POST',
+      url: 'https://example.test/gateway/account',
+      status: 200,
+      resourceType: 'fetch',
+    })
     const gateway = new PlaywrightBrowserToolGateway(cli)
     await assert.rejects(
       () => gateway.openSession({
@@ -333,7 +462,9 @@ test('Browser Exploration 在 Run 内按 Role 复用状态，Repair 同策略，
     const loginFailure = await openFor(execution('script_repair', 'task-login-failure'), '密码错误登录', [])
     assert.equal(loginFailure.scope.authPolicy.mode, 'fresh_anonymous')
     assert.equal(loginFailure.scope.authStateLoaded, false)
+    const loadedBeforeLoginFailure = cli.loaded.length
     await loginFailure.close()
+    assert.equal(cli.loaded.length, loadedBeforeLoginFailure)
 
     const loginSuccess = await openFor(execution('script_generation', 'task-login-success'), '登录成功', [])
     assert.equal(loginSuccess.scope.authPolicy.mode, 'fresh_anonymous')

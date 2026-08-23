@@ -125,7 +125,9 @@ class ControlledBrowserToolSession implements BrowserToolSession {
   private lastSnapshot = ''
   private authenticationSurfaceObserved = false
   private authenticationCredentialFillObserved = false
+  private authenticationSubmitObserved = false
   private successfulAuthenticationObserved = false
+  private stableAuthenticatedPageObserved = false
   private lastAction: {
     action: string
     actionType: HttpExplorationObservation['observedFrom']['actionType']
@@ -166,8 +168,9 @@ class ControlledBrowserToolSession implements BrowserToolSession {
         && this.authState?.savePath
         && this.authenticationSurfaceObserved
         && this.authenticationCredentialFillObserved
-        && this.successfulAuthenticationObserved
+        && this.authenticationSubmitObserved
         && authenticatedDestination(this.page, this.lastSnapshot)
+        && (this.successfulAuthenticationObserved || this.stableAuthenticatedPageObserved)
       ) {
         await this.cli.stateSave(this.sessionId, this.authState.savePath, AbortSignal.timeout(10_000))
         await this.authState.commit?.()
@@ -201,6 +204,9 @@ class ControlledBrowserToolSession implements BrowserToolSession {
           this.assertTargetSameOrigin(target)
           await this.cli.click(this.sessionId, target, signal)
           this.rememberAction(`click ${target}`, 'click')
+          if (this.authenticationSurfaceObserved && this.authenticationCredentialFillObserved) {
+            this.authenticationSubmitObserved = true
+          }
           const snapshot = await this.refreshSnapshot(signal)
           await this.collectNetwork(signal)
           return { data: { clicked: target, page: this.page, snapshot } }
@@ -290,6 +296,9 @@ class ControlledBrowserToolSession implements BrowserToolSession {
     const pageUrl = pageUrlFromSnapshot(snapshot)
     if (pageUrl) this.page = new URL(pageUrl).pathname || '/'
     if (authenticationEntry(this.page, snapshot)) this.authenticationSurfaceObserved = true
+    if (this.authenticationSubmitObserved) {
+      this.stableAuthenticatedPageObserved = stableAuthenticatedPage(this.page, snapshot)
+    }
     return snapshot
   }
 
@@ -378,7 +387,11 @@ class ControlledBrowserToolSession implements BrowserToolSession {
       candidate.observedFrom.sequence,
     ]) === key)) return
     this.observedNetwork.push(structuredClone(observation))
-    if (successfulAuthenticationObservation(observation)) {
+    if (
+      this.authenticationSubmitObserved
+      && observation.observedFrom.actionType === 'click'
+      && successfulAuthenticationObservation(observation)
+    ) {
       this.successfulAuthenticationObserved = true
     }
     if (this.observedNetwork.length > 100) this.observedNetwork.shift()
@@ -477,7 +490,12 @@ function successfulAuthenticationObservation(observation: HttpExplorationObserva
 }
 
 function authenticatedDestination(page: string, snapshot: string) {
-  return !authenticationEntry(page, snapshot)
+  return !authenticationEntry(page, snapshot) && !authenticationFailure(page, snapshot)
+}
+
+function stableAuthenticatedPage(page: string, snapshot: string) {
+  return authenticatedDestination(page, snapshot)
+    && /(?:^|\n)\s*-?\s*(?:button|link|textbox|input|checkbox|radio|combobox|listbox|menuitem|tab|treeitem)\b/iu.test(snapshot)
 }
 
 function authenticationEntry(page: string, snapshot: string) {
@@ -489,4 +507,11 @@ function authenticationEntry(page: string, snapshot: string) {
 
 function authenticationCredentialField(value: string) {
   return /(?:账号|账户|用户名|邮箱|手机|密码|口令|username|user\s*name|email|phone|password|passcode)/iu.test(value)
+}
+
+function authenticationFailure(page: string, snapshot: string) {
+  if (/(?:^|\/)(?:(?:login|sign[-_]?in|auth(?:entication)?|oauth|oidc|sso|callback)[-_/]?(?:error|failed|failure|denied)|access[-_]?denied|account[-_]?locked|unauthori[sz]ed|forbidden)(?:\/|$)/iu.test(page)) {
+    return true
+  }
+  return /(?:密码|口令|用户名|账号|账户|验证码)(?:错误|不正确|无效)|(?:登录|认证|身份验证)(?:失败|错误)|账号(?:已被)?锁定|账户(?:已被)?锁定|访问(?:被)?拒绝|无权访问|(?:invalid|incorrect|wrong)\s+(?:password|passcode|username|user\s*name|credentials?|captcha|verification\s*code)|(?:password|passcode|username|user\s*name|credentials?|captcha|verification\s*code)\s+(?:is\s+)?(?:invalid|incorrect|wrong)|(?:login|log[ -]?in|sign[ -]?in|authentication)\s+(?:has\s+)?(?:failed|failure|error|denied)|account\s+(?:is\s+)?locked|access\s+denied/iu.test(snapshot)
 }
