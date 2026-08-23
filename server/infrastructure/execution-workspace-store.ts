@@ -5,6 +5,10 @@ import {
   assertSafeExplorationResult,
   explorationContextKey,
 } from '../application/test-execution-exploration.js'
+import {
+  assertExecutionBindingEntry,
+  executionEntrySymbol,
+} from '../application/test-execution-validation.js'
 import type {
   ExecutionPackageFile,
   ProjectVersionExplorationResult,
@@ -74,18 +78,25 @@ export class LocalExecutionWorkspaceStore {
     }
     if (binding.projectVersionId !== projectVersionId || binding.caseId !== caseId) return null
     try {
+      binding = normalizeBinding(binding)
       const dependencies = await Promise.all(binding.dependencyFiles.map(async file => ({
         path: file.path,
         contentSha256: sha256(await this.readWorkspaceFile(root, file.path)),
       })))
+      const source = await this.readWorkspaceFile(root, binding.entryFile)
+      assertExecutionBindingEntry(source, binding.caseId, binding.entrySymbol)
       if (
         !dependencies.some(file => file.path === binding.entryFile && file.contentSha256 === binding.entrySha256)
         || dependencies.some((file, index) => file.contentSha256 !== binding.dependencyFiles[index].contentSha256)
         || executionBindingDependencySha256(dependencies) !== binding.dependencySha256
-      ) return { ...binding, bindingStatus: 'invalid' as const }
+      ) return await this.persistBindingStatus(binding, 'invalid')
       return binding
     } catch {
-      return { ...binding, bindingStatus: 'invalid' as const }
+      try {
+        return await this.persistBindingStatus(binding, 'invalid')
+      } catch {
+        return { ...binding, bindingStatus: 'invalid' as const }
+      }
     }
   }
 
@@ -112,6 +123,35 @@ export class LocalExecutionWorkspaceStore {
     await writeFile(temporary, JSON.stringify(safe, null, 2), { encoding: 'utf8' })
     await rename(temporary, target)
     return safe
+  }
+
+  async setBindingStatus(
+    projectVersionId: string,
+    caseId: string,
+    status: ExecutionBindingStatus,
+  ) {
+    const root = await this.ensure(projectVersionId)
+    const bindingPath = join(root, 'bindings', `${bindingName(caseId)}.json`)
+    const binding = JSON.parse(await readFile(bindingPath, 'utf8')) as CaseExecutionBinding
+    if (binding.projectVersionId !== projectVersionId || binding.caseId !== caseId) {
+      throw new Error('TEST_EXECUTION_BINDING_SCOPE_INVALID')
+    }
+    return this.persistBindingStatus(normalizeBinding(binding), status)
+  }
+
+  /** Run-scoped, non-versioned state used only by Playwright fixtures. */
+  async runtimeAuthRoot(projectVersionId: string, runId: string) {
+    const workspace = await this.ensure(projectVersionId)
+    const root = join(workspace, '.runtime-auth', safeIdentity(runId))
+    await mkdir(root, { recursive: true, mode: 0o700 })
+    return root
+  }
+
+  async cleanupRuntimeAuth(projectVersionId: string, runId: string) {
+    const workspace = this.workspaceRoot(projectVersionId)
+    const root = join(workspace, '.runtime-auth', safeIdentity(runId))
+    assertInside(workspace, root)
+    await rm(root, { recursive: true, force: true })
   }
 
   async listExplorationResults(projectVersionId: string) {
@@ -173,6 +213,8 @@ export class LocalExecutionWorkspaceStore {
     const target = this.workspaceRoot(targetProjectVersionId)
     await rm(target, { recursive: true, force: true })
     await cp(source, target, { recursive: true, force: false })
+    // Cookies and tokens are runtime state, never inherited version assets.
+    await rm(join(target, '.runtime-auth'), { recursive: true, force: true })
     const bindings = await this.bindingFiles(target)
     const inheritedAt = new Date().toISOString()
     for (const path of bindings) {
@@ -219,10 +261,13 @@ export class LocalExecutionWorkspaceStore {
       const directory = pending.pop()!
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         const absolute = join(directory, entry.name)
-        if (entry.isDirectory()) pending.push(absolute)
+        const path = relative(root, absolute).replaceAll('\\', '/')
+        if (entry.isDirectory()) {
+          if (path === '.runtime-auth' || path.startsWith('.runtime-auth/')) continue
+          pending.push(absolute)
+        }
         else if (entry.isFile()) {
-          const path = relative(root, absolute).replaceAll('\\', '/')
-          if (['bindings/', 'exploration/'].some(prefix => path.startsWith(prefix))) continue
+          if (['bindings/', 'exploration/', '.runtime-auth/'].some(prefix => path.startsWith(prefix))) continue
           const content = await readFile(absolute, 'utf8')
           files.push({ path, content, contentSha256: sha256(content), size: Buffer.byteLength(content, 'utf8') })
         }
@@ -253,6 +298,18 @@ export class LocalExecutionWorkspaceStore {
       .map(entry => join(directory, entry.name))
       .sort((left, right) => left.localeCompare(right, 'en'))
   }
+
+  private async persistBindingStatus(
+    binding: CaseExecutionBinding,
+    status: ExecutionBindingStatus,
+  ) {
+    if (binding.bindingStatus === status) return binding
+    return this.saveBinding({
+      ...binding,
+      bindingStatus: status,
+      updatedAt: new Date().toISOString(),
+    })
+  }
 }
 
 function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
@@ -266,7 +323,7 @@ function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
   if (
     !['ui', 'api'].includes(binding.executionType)
     || !binding.caseId
-    || !binding.entrySymbol
+    || binding.entrySymbol !== executionEntrySymbol(binding.caseId)
     || !/^[a-f0-9]{64}$/u.test(binding.entrySha256)
     || !/^[a-f0-9]{64}$/u.test(binding.caseContentSha256)
     || !dependencyFiles.length

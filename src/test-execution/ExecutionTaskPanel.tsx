@@ -1,5 +1,8 @@
 import {
   AlertTriangle,
+  Activity,
+  Braces,
+  Camera,
   CheckCircle2,
   Clock3,
   Code2,
@@ -8,9 +11,12 @@ import {
   GitCompare,
   Image,
   Library,
+  MousePointerClick,
+  Navigation,
   RotateCcw,
   ShieldAlert,
   TerminalSquare,
+  TextCursorInput,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { artifactUrl } from './api'
@@ -74,7 +80,7 @@ export function ExecutionTaskPanel({
     <section className="te-card te-task-detail">
       {!task && <div className="te-task-placeholder"><TerminalSquare /><h2>选择一个执行 Task</h2><p>查看不可变脚本、真实 Runner Attempt、诊断证据和 Artifact。</p></div>}
       {task && <>
-        <header className="te-task-header"><div><span className={`te-status-pill ${task.value.task.status}`}>{taskStatusLabel(task.value.task.status)}</span><h2>{task.value.task.input.caseContent.title}</h2><p>{task.value.task.input.caseContent.objective}</p></div>{retryable(task.value.task.status) && <button className="te-primary" disabled={Boolean(busy)} onClick={() => void onRetry()}><RotateCcw />{busy === 'retry' ? '正在排队…' : '人工重试'}</button>}</header>
+        <header className="te-task-header"><div><span className={`te-status-pill ${task.value.task.status}`}>{taskStatusLabel(task.value.task.status)}</span><h2>{task.value.task.input.caseContent.title}</h2><p>{task.value.task.input.caseContent.expectedResults.join(' · ')}</p></div>{retryable(task.value.task.status) && <button className="te-primary" disabled={Boolean(busy)} onClick={() => void onRetry()}><RotateCcw />{busy === 'retry' ? '正在排队…' : '人工重试'}</button>}</header>
         <div className="te-task-metrics">
           <Metric label="Runner Attempts" value={task.value.task.runnerAttemptCount} />
           <Metric label="Same-script retries" value={task.value.task.sameScriptRetryCount} />
@@ -85,7 +91,7 @@ export function ExecutionTaskPanel({
         {task.value.task.status === 'blocked' && <div className="te-state-message blocked"><FileWarning /><span><b>外部条件阻塞</b><small>{task.value.task.error}</small></span></div>}
         {task.value.task.status === 'waiting_manual' && <div className="te-state-message waiting_manual"><AlertTriangle /><span><b>等待人工处理</b><small>{task.value.task.error ?? '自动修复已收口，历史不会被重置。'}</small></span></div>}
         <nav className="te-tabs">
-          <button className={tab === 'attempts' ? 'active' : ''} onClick={() => setTab('attempts')}>Attempts <span>{task.value.attempts.length}</span></button>
+          <button className={tab === 'attempts' ? 'active' : ''} onClick={() => setTab('attempts')}>执行过程 <span>{task.value.events.length}</span></button>
           <button className={tab === 'diagnoses' ? 'active' : ''} onClick={() => setTab('diagnoses')}>诊断 <span>{task.value.diagnoses.length}</span></button>
           <button className={tab === 'scripts' ? 'active' : ''} onClick={() => setTab('scripts')}>脚本 Revision <span>{task.value.scriptRevisions.length}</span></button>
           <button className={tab === 'artifacts' ? 'active' : ''} onClick={() => setTab('artifacts')}>Artifacts <span>{task.value.artifacts.length}</span></button>
@@ -93,7 +99,7 @@ export function ExecutionTaskPanel({
         </nav>
 
         {tab === 'attempts' && <div className="te-timeline">
-          {task.value.attempts.map(item => <article key={item.id}><TaskIcon status={item.status === 'infrastructure_error' ? 'blocked' : item.status === 'passed' ? 'passed' : item.status === 'running' ? 'running' : item.status === 'cancelled' ? 'cancelled' : 'failed'} /><div><header><b>Attempt #{item.ordinal}</b><span className={`te-status-pill ${item.status}`}>{item.status}</span></header><p>{attemptKindLabel(item.kind)} · Revision {shortId(item.scriptRevisionId)}</p><small>{item.summary ?? item.error ?? 'Runner 正在执行'}{item.durationMs !== undefined ? ` · ${item.durationMs} ms` : ''}</small><code title={item.packageSha256}>{item.packageSha256}</code></div></article>)}
+          {task.value.attempts.map(item => <article key={item.id} className="te-attempt"><TaskIcon status={item.status === 'infrastructure_error' ? 'blocked' : item.status === 'passed' ? 'passed' : item.status === 'running' ? 'running' : item.status === 'cancelled' ? 'cancelled' : 'failed'} /><div><header><b>Attempt #{item.ordinal}</b><span className={`te-status-pill ${item.status}`}>{item.status}</span></header><p>{attemptKindLabel(item.kind)} · Revision {shortId(item.scriptRevisionId)}</p><small>{item.summary ?? item.error ?? 'Runner 正在执行'}{item.durationMs !== undefined ? ` · ${item.durationMs} ms` : ''}</small><code title={item.packageSha256}>{item.packageSha256}</code><ExecutionEventTimeline method={task.value.task.input.method} events={task.value.events.filter(event => event.attemptId === item.id)} artifacts={task.value.artifacts} /></div></article>)}
           {!task.value.attempts.length && <p className="te-empty">尚未创建真实 Runner Attempt</p>}
         </div>}
 
@@ -129,6 +135,49 @@ export function ExecutionTaskPanel({
       </>}
     </section>
   </div>
+}
+
+function ExecutionEventTimeline({
+  method,
+  events,
+  artifacts,
+}: {
+  method: ExecutionTask['input']['method']
+  events: ExecutionTaskDetail['events']
+  artifacts: ExecutionTaskDetail['artifacts']
+}) {
+  const byId = new Map(artifacts.map(artifact => [artifact.id, artifact]))
+  return <ol className={`te-execution-events ${method === 'api' ? 'api' : 'ui'}`}>
+    {events.slice().sort((left, right) => left.sequence - right.sequence).map(event => {
+      const linked = (event.artifactIds ?? []).flatMap(id => byId.get(id) ? [byId.get(id)!] : [])
+      return <li key={event.id} className={event.status}>
+        <span className="te-event-rail"><EventIcon type={event.type} /></span>
+        <div>
+          <header><b>{event.title}</b><em className={`te-status-pill ${event.status}`}>{eventStatusLabel(event.status)}</em></header>
+          {event.type === 'http' && <p className="te-http-summary"><strong>{event.metadata?.method}</strong><code>{event.metadata?.path}</code>{event.metadata?.httpStatus !== undefined && <span className={event.metadata.httpStatus >= 400 ? 'error' : ''}>{event.metadata.httpStatus}</span>}</p>}
+          {event.metadata?.queryFields?.length ? <small>Query 字段：{event.metadata.queryFields.join('、')}</small> : null}
+          <small>{new Date(event.startedAt).toLocaleTimeString('zh-CN')}{event.durationMs !== undefined ? ` · ${event.durationMs} ms` : ''} · Playwright Reporter</small>
+          {linked.length > 0 && <div className="te-event-artifacts">{linked.map(artifact => <a key={artifact.id} href={artifactUrl(artifact.id, artifact.type === 'screenshot' ? 'inline' : 'attachment')} target="_blank" rel="noreferrer"><ArtifactIcon type={artifact.type} />{artifact.type}</a>)}</div>}
+        </div>
+      </li>
+    })}
+    {!events.length && <li className="empty"><Activity /><span>该 Attempt 尚未收到结构化 Playwright Reporter 事件</span></li>}
+  </ol>
+}
+
+function EventIcon({ type }: { type: ExecutionTaskDetail['events'][number]['type'] }) {
+  if (type === 'navigate') return <Navigation />
+  if (type === 'click') return <MousePointerClick />
+  if (type === 'fill') return <TextCursorInput />
+  if (type === 'http') return <Braces />
+  if (type === 'assertion') return <CheckCircle2 />
+  if (type === 'screenshot') return <Camera />
+  if (type === 'failure') return <AlertTriangle />
+  return <Activity />
+}
+
+function eventStatusLabel(status: ExecutionTaskDetail['events'][number]['status']) {
+  return ({ running: '进行中', passed: '完成', failed: '失败', skipped: '跳过' })[status]
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {

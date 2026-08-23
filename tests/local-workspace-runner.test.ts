@@ -18,7 +18,7 @@ import type {
 } from '../server/domain/test-design-types.js'
 import { LocalExecutionArtifactStore } from '../server/infrastructure/execution-artifact-store.js'
 import { LocalExecutionWorkspaceStore } from '../server/infrastructure/execution-workspace-store.js'
-import { LocalWorkspaceRunner } from '../server/runner/local-workspace-runner.js'
+import { LocalWorkspaceRunner, parsePlaywrightJsonReport } from '../server/runner/local-workspace-runner.js'
 
 test('LocalWorkspaceRunner 使用当前 Run baseUrl 真实执行 Playwright request fixture API Case', async () => {
   const observed: Array<{ method?: string; url?: string; host?: string }> = []
@@ -51,8 +51,8 @@ export class AuthClient {
     const entrySource = `import { test, expect } from '@playwright/test'
 import { AuthClient } from '../../api/auth-client.js'
 
-test('TC_API_LOGIN_001', async ({ request }) => {
-  const response = await new AuthClient(request).login()
+test('未授权登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await test.step('POST /api/login', async () => new AuthClient(request).login())
   // smarthub:assert expected-1
   expect(response.status()).toBe(403)
 })
@@ -93,7 +93,8 @@ test('TC_API_LOGIN_001', async ({ request }) => {
       workspace: {
         root: workspace.root,
         entryFile,
-        entrySymbol: task.caseId,
+        entrySymbol: `[${task.caseId}]`,
+        authStateRoot: await workspaceStore.runtimeAuthRoot('project-version-api', 'run-local-api'),
       },
     }, new AbortController().signal)
     let runnerLog = ''
@@ -104,6 +105,8 @@ test('TC_API_LOGIN_001', async ({ request }) => {
       }
     }
     assert.equal(result.status, 'passed', runnerLog)
+    assert.equal(result.events?.some(event => event.type === 'http' && event.metadata?.method === 'POST' && event.metadata.path === '/api/login'), true, JSON.stringify(result.events))
+    assert.equal(result.events?.some(event => event.type === 'runner' && event.status === 'passed'), true)
     assert.deepEqual(observed, [{
       method: 'POST',
       url: '/api/login',
@@ -118,6 +121,72 @@ test('TC_API_LOGIN_001', async ({ request }) => {
     await rm(workspaceParent, { recursive: true, force: true })
     await rm(artifactRoot, { recursive: true, force: true })
   }
+})
+
+test('LocalWorkspaceRunner readiness 对缺失 Playwright 安装返回真实不可用状态', async () => {
+  const artifactRoot = await mkdtemp(join(process.cwd(), 'smarthub-local-artifacts-'))
+  try {
+    const runner = new LocalWorkspaceRunner(
+      new LocalExecutionArtifactStore(artifactRoot),
+      30_000,
+      undefined,
+      {
+        version: '1.50.0',
+        packagePath: join(artifactRoot, 'missing-package.json'),
+        cliPath: join(artifactRoot, 'missing-cli.js'),
+      },
+    )
+    const readiness = await runner.readiness()
+    assert.equal(readiness.ready, false)
+    assert.match(readiness.reason ?? '', /ENOENT/u)
+    assert.equal(readiness.snapshot.playwrightVersion, '1.50.0')
+  } finally {
+    await rm(artifactRoot, { recursive: true, force: true })
+  }
+})
+
+test('Playwright JSON Reporter 生成结构化 UI/API/失败事件并脱敏敏感输入与 Query 值', () => {
+  const report = parsePlaywrightJsonReport({
+    suites: [{
+      specs: [{
+        title: '失败流程 [case-events]',
+        tests: [{
+          results: [{
+            retry: 1,
+            status: 'failed',
+            startTime: '2026-08-23T08:00:00.000Z',
+            duration: 42,
+            steps: [
+              { category: 'pw:api', title: 'page.goto https://example.test/orders?token=secret-value', duration: 5 },
+              { category: 'pw:api', title: "locator('#password').fill super-secret", duration: 7 },
+              { category: 'pw:api', title: 'POST /api/orders?token=secret-value&view=detail -> 201', duration: 9 },
+              { category: 'expect', title: 'expect.toHaveText password=secret-value', duration: 11, error: { message: 'failed' } },
+            ],
+            attachments: [
+              { name: 'screenshot', contentType: 'image/png', path: 'test-results/failure.png' },
+              { name: 'trace', contentType: 'application/zip', path: 'test-results/trace.zip' },
+            ],
+          }],
+        }],
+      }],
+    }],
+  }, '[case-events]')
+  assert.deepEqual(report.attachments.map(item => item.contentType), ['image/png', 'application/zip'])
+  assert.deepEqual(report.events.map(event => event.sequence), [1, 2, 3, 4, 5, 6, 7])
+  assert.equal(report.events[0].type, 'retry')
+  assert.equal(report.events.some(event => event.type === 'navigate'), true)
+  assert.equal(report.events.some(event => event.type === 'fill' && event.title.includes('填写内容已脱敏')), true)
+  assert.deepEqual(report.events.find(event => event.type === 'http')?.metadata, {
+    source: 'playwright_json_reporter',
+    category: 'pw:api',
+    method: 'POST',
+    path: '/api/orders',
+    httpStatus: 201,
+    queryFields: ['token', 'view'],
+  })
+  assert.equal(report.events.some(event => event.type === 'assertion' && event.status === 'failed'), true)
+  assert.equal(report.events.some(event => event.type === 'failure' && event.status === 'failed'), true)
+  assert.doesNotMatch(JSON.stringify(report.events), /secret-value|super-secret/u)
 })
 
 function apiTask() {

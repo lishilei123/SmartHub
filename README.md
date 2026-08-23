@@ -1,6 +1,6 @@
 # SmartHub 需求分析、测试设计与测试执行闭环
 
-当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 按 Execute First 编排 ProjectVersion Execution Binding、受控执行 Agent 与非 Agentic Local Workspace Runner。UIExecutionAgent 保持 Playwright CLI-first，并把真实 UI 操作期间观察到的业务 API 脱敏沉淀为 ProjectVersion Exploration Context。PostgreSQL 保存 Run/Task/Revision/Attempt 等正式状态；ProjectVersion Workspace 独立保存自动化工程、Binding 与脱敏后的可复用 Exploration Context，Artifact Store 保存不可变执行产物。
+当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 按 Execute First 编排 ProjectVersion Execution Binding、受控执行 Agent 与非 Agentic Local Workspace Runner。UIExecutionAgent 保持 Playwright CLI-first，并把真实 UI 操作期间观察到的业务 API 脱敏沉淀为 ProjectVersion Exploration Context。PostgreSQL 保存 Run/Task/Revision/Attempt/ExecutionEvent 等正式状态；ProjectVersion Workspace 独立保存自动化工程、Binding 与脱敏后的可复用 Exploration Context，Artifact Store 保存不可变执行产物。
 
 ## 测试执行基础设施配置
 
@@ -16,6 +16,18 @@ UI 和 API Case 共用同一个 TypeScript + Playwright Test Execution Workspace
 
 Runner 通过临时 Playwright Config 把当前 `ExecutionRun.environment.baseUrl` 同时供给 `page` 和 `request`；Workspace 脚本禁止硬编码绝对 Host、Authorization/Cookie 与其他 HTTP Client。Validator 允许 `tests/api`、`tests/ui`、`api`、`pages`、`helpers`、`fixtures` 之间的安全静态相对导入，并在 Service 边界递归解析、校验和冻结实际执行的依赖闭包。Execution Binding 仍然只是 `Case → entryFile → entrySymbol`，但会附带闭包 Hash 用于拒绝共享 Client/Page Object 漂移；每个不可变 ScriptRevision 保存全部闭包源文件 Artifact，Runner 不会执行后续被静默修改的共享代码。Secret 只在 Runner 启动边界按白名单解析，不进入 Workspace、Manifest、Revision 或 Exploration Context。
 
+每个执行 Agent Session 严格使用 `execution:<runId>:<taskId>` 作用域。同一 Task 的生成、诊断与修复复用该 Session；不同 Task 即使属于同一 Run 也不共享 Agent 对话，但仍共享同一个 ProjectVersion Execution Workspace，因而可以复用其中正式的 Page Object、API Client、Fixture 与 Helper。
+
+Binding 的 `entrySymbol` 固定为 `[<caseId>]`，入口标题只能等于该符号或以空格加该符号结尾，并且依赖闭包中必须精确存在一个对应 Playwright `test`。缺失、重复、相似标题、Case 内容 Hash、执行方法、入口或依赖 Hash 漂移都会使 Binding 进入 `invalid`；继承 Binding 为 `needs_validation`，只有当前环境真实 Runner 通过后才升级为 `validated`。产品断言失败或环境失败本身不会自动把结构完整的 Binding 判为无效。
+
+普通已登录业务 Case 可以复用 Workspace 中已有的 Playwright Auth Fixture/`storageState`。Runner 只通过 Config metadata 暴露 Run-scoped `.runtime-auth/<runId>` 临时目录；它不进入 Workspace Snapshot、ScriptRevision、Artifact、Exploration Context、继承复制或 Agent Prompt，并在 Run 终态清理。登录、退出、匿名访问、会话/Token/Cookie 失效、角色切换、账号隔离、安全策略与多会话 Case 必须使用 fresh、anonymous、isolated-role 或 custom Context，Validator 拒绝其加载共享认证 Fixture/`storageState`。
+
+新生成的脚本使用 Playwright `test.step` 标注非敏感业务操作；Local Runner 只消费官方 JSON Reporter 的结构化结果，不解析自然语言 stdout。Service 按 Attempt 将 UI/API 操作、断言、重试、失败以及 Screenshot/Trace/Video 链接保存为不可变 ExecutionEvent；HTTP 事件只保留 Method、Path、Status 与 Query 字段名，填充值、Query 值、Header、Cookie、Token、账号、个人数据和原始请求/响应 Body 在 Runner 与 Service 边界双重脱敏。任务详情的“执行过程”按 Attempt 展示紧凑时间线，失败证据使用受控 Artifact 下载链接。
+
+`ScriptArtifact` 与 `ScriptRevision` 继续保存不可变历史、来源与 Hash，但不再作为跨 Task/Run 的脚本 Cache 输入。Binding 缺失或失效时固定进入 `Exploration Context → Knowledge/API Documentation → Existing Workspace → Agent Implement`；不会按 `cacheKey` 查找旧 ScriptRevision，也不会把历史 Revision 静默回放成当前可执行 Binding。
+
+Test Design 对创建、更新、删除、状态流转、持久化配置、跨页数据与异步最终状态要求可观察的业务闭环 Expected Result；执行 Validator 要求对应 API 回读或 UI 刷新/重进，并与受保护断言一起冻结。字段格式、必填、可见性、Tooltip 和即时校验等非持久化 Case 不机械追加长闭环；Agent 与 Repair 均不得编造接口、Selector、状态值、账号或等待阈值。
+
 ## 模块状态
 
 | 模块 | 当前状态 | 边界 |
@@ -29,12 +41,12 @@ Runner 通过临时 Playwright Config 把当前 `ExecutionRun.environment.baseUr
 ## 已实现
 
 - 测试执行：固定 `TestExecutionService → Execution Binding / Agent → ExecutionPackage → Local Workspace Runner` 边界，Service 独占状态、重试、诊断和修复决策；UIExecutionAgent 通过官方 Playwright CLI `requests/request` 能力观察业务 fetch/XHR，并在持久化前过滤静态资源、Analytics/Telemetry 和全部真实敏感值；API Case 无 Binding 时优先消费同版本 Context，UI Case 不得用 API 调用替代真实 UI；
-- TestScriptAgent 的受控能力已升级到 Agent/Skill `1.2.0` 与提交 Tool `1.1.0`，ScriptRepairAgent/Skill/Tool 升级到 `1.1.0`；升级现有部署后需要重新发布这两个 Agent 配置，旧发布版本不会被双读或自动回退；
+- PlanningAgent/TestCaseDesign Skill 已升级到 `2.9.0`/`3.3.0`，TestScriptAgent/Skill 已升级到 `1.3.0`，ScriptRepairAgent/Skill 已升级到 `1.2.0`；升级现有部署后需要重新发布这三个 Agent 配置，旧发布版本不会被双读或自动回退；对应提交 Tool 版本保持不变；
 - 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和三个 Agent 快照；
 - 测试设计：统一 `PlanningAgent`、`test-case-design/v3` Candidate、扁平 `test-case/v3`、显式 Requirement 引用、服务端 Coverage Audit、受控 v3 Repair、直接语义审核、正式用例库发布与 UI/API 方法级执行交接；Service 独占 Case ID、Revision、Hash、历史匹配和正式版本治理；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
-- 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；显式继承来源版本时会复制 Requirement Binding、Execution Workspace、Execution Binding 与 Exploration Context，继承 Context 标记为 `needs_validation` 并在目标版本独立演进；
+- 项目空间通过项目版本隔离：必须先创建或选择版本才能进入需求分析；版本可设为 `open`、`locked` 或 `archived`，后两种状态只读；显式继承来源版本时会复制 Requirement Binding、Execution Workspace、Execution Binding 与 Exploration Context，继承 Binding/Context 标记为 `needs_validation` 并在目标版本独立验证、演进；Run 临时认证状态不继承；
 - 页面启动时由后端解析并复用唯一的 SmartHub 默认知识库，不依赖浏览器 localStorage 决定数据归属，刷新、切换访问域名或开发模式重复挂载不会创建并切换到新空库；
 - UTF-8 Markdown/TXT 支持单文件上传、一次多选批量上传，也可通过 ZIP 批量导入；ZIP 保留子目录结构，并支持 Markdown 以相对路径引用其中的 PNG、JPG、GIF、WebP 和 SVG 图片；
 - 知识库目录创建、重命名、移动和递归删除持久化到 PostgreSQL；选中目录后上传会自动使用对应逻辑路径；
@@ -267,7 +279,7 @@ npm run build
 - `POST /api/knowledge-bases/:id/search`
 - `POST /api/knowledge-bases/:id/rebuild`
 
-当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。报告一期不新增数据库表或持久化报告快照：人工重试追加正式事实后会生成新的报告 Hash，但不会独立保留重试前文档；也不由 Agent 计算正式指标或生成发布建议。测试执行不提供 UI/API Timeline、步骤截图可视化或自动扩展 TestCase 范围；Exploration 只服务正式 TestCase Library 中既有 UI/API Case。
+当前交付不包含技术方案生成、开放式多 Agent 协作、Git/代码分析、跨运行报告趋势，以及 PDF/Word/Excel/图片等专用解析能力。报告一期不新增持久化报告快照：人工重试追加正式事实后会生成新的报告 Hash，但不会独立保留重试前文档；也不由 Agent 计算正式指标或生成发布建议。测试执行提供基于正式 ExecutionEvent/Artifact 的 Attempt 级 UI/API 时间线和失败 Screenshot/Trace/Video 链接，但不扩展 TestCase 范围；Exploration 只服务正式 TestCase Library 中既有 UI/API Case。
 
 需求分析采用独立 Worker 后台运行：启动接口创建分析 Run + Job 后立即返回 `202`，页面通过运行记录轮询真实状态。刷新、切换页面或关闭浏览器不会取消 Agent；只有显式调用取消接口才会将运行和 Job 标记为取消并中断当前 Worker。URL 固定 `page=requirement-analysis + projectVersionId + analysisId + runId + view`，并可附带 `findingId/evidenceId`；失败重试沿用同一 `analysisId`，刷新、分享及浏览器前进/后退会恢复同一显式作用域。
 

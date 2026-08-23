@@ -427,6 +427,8 @@ export interface TestExecutionAgentWorkspaceFile {
 
 export interface TestExecutionAgentWorkspaceProjection {
   runId: string
+  /** ExecutionTask is the model-session isolation boundary. */
+  taskId: string
   projectId: string
   projectName: string
   projectVersionId: string

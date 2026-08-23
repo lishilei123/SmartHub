@@ -39,6 +39,8 @@ export interface PlaywrightRunner {
       root: string
       entryFile: string
       entrySymbol: string
+      /** Run-scoped ephemeral directory; excluded from snapshots and inheritance. */
+      authStateRoot: string
     }
   }, signal: AbortSignal): Promise<SandboxExecutionResult>
 }

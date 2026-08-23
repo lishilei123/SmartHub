@@ -53,21 +53,23 @@ export class PiSessionRuntime {
   scopeFor(input: {
     snapshot: {
       runId: string
+      taskId?: string
       projectId: string
       projectVersionId: string
       agentDefinition: Pick<AgentDefinitionVersion, 'agentKey'>
     }
   }): PiSessionScope {
-    const agentKey = input.snapshot.agentDefinition.agentKey
-    if (agentKey === 'planning') {
+    if (input.snapshot.agentDefinition.agentKey === 'planning') {
       return {
         role: 'planning_parent',
         key: `planning:${input.snapshot.projectId}:${input.snapshot.projectVersionId}`,
       }
     }
+    const taskId = input.snapshot.taskId
+    if (!taskId) throw new Error('PI_EXECUTION_TASK_SCOPE_REQUIRED')
     return {
       role: 'execution_agent',
-      key: `execution:${agentKey}:${input.snapshot.runId}`,
+      key: `execution:${input.snapshot.runId}:${taskId}`,
     }
   }
 

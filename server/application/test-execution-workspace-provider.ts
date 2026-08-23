@@ -84,6 +84,7 @@ implements TestExecutionWorkspaceProvider {
     }
     return {
       runId: input.run.id,
+      taskId: input.task.id,
       projectId: input.run.projectId,
       projectName: input.run.projectId,
       projectVersionId: input.run.projectVersionId,

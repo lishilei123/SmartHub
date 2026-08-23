@@ -344,6 +344,47 @@ export interface ExecutionAttempt {
   error?: string
 }
 
+export type ExecutionEventType =
+  | 'runner'
+  | 'step'
+  | 'navigate'
+  | 'click'
+  | 'fill'
+  | 'assertion'
+  | 'http'
+  | 'screenshot'
+  | 'trace'
+  | 'video'
+  | 'failure'
+  | 'retry'
+
+export type ExecutionEventStatus = 'running' | 'passed' | 'failed' | 'skipped'
+
+/** Structured Runner observation. It never drives the execution state machine. */
+export interface ExecutionEvent {
+  id: string
+  runId: string
+  taskId: string
+  attemptId: string
+  sequence: number
+  type: ExecutionEventType
+  title: string
+  status: ExecutionEventStatus
+  startedAt: string
+  finishedAt?: string
+  durationMs?: number
+  artifactIds?: string[]
+  metadata?: Record<string, unknown>
+}
+
+/** Runner-side event before Service assigns aggregate IDs and Artifact IDs. */
+export type RunnerExecutionEvent = Omit<
+  ExecutionEvent,
+  'id' | 'runId' | 'taskId' | 'attemptId' | 'artifactIds'
+> & {
+  artifactSha256s?: string[]
+}
+
 export interface FailureDiagnosisEvidence {
   attemptId: string
   artifactId?: string

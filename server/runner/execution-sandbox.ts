@@ -26,6 +26,7 @@ import type {
   ExecutionEnvironmentSnapshot,
   ExecutionPackage,
   ExecutionRunnerSnapshot,
+  RunnerExecutionEvent,
 } from '../domain/test-execution-types.js'
 import type {
   ExecutionArtifactStore,
@@ -43,6 +44,7 @@ export type SandboxExecutionResult = {
   summary: string
   error?: string
   artifacts: RunnerArtifactObject[]
+  events?: RunnerExecutionEvent[]
 }
 
 export interface ExecutionSandbox {

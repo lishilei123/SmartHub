@@ -71,6 +71,7 @@ export async function processClaimedTestExecutionJob(input: {
   job: ExecutionJob
   store: TestExecutionStore
   service: Pick<TestExecutionService, 'processPreparedTask'>
+    & Partial<Pick<TestExecutionService, 'cleanupRunRuntimeState'>>
   workerId: string
   leaseMs: number
   activeControllers?: Set<AbortController>
@@ -135,15 +136,17 @@ export async function processClaimedTestExecutionJob(input: {
     if (!finished) {
       throw new Error('TEST_EXECUTION_JOB_FINALIZATION_REJECTED')
     }
+    await input.service.cleanupRunRuntimeState?.(input.job.runId)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (controller.signal.aborted) {
-      await input.store.finishJob(
+      const finished = await input.store.finishJob(
         input.job.id,
         lease,
         'cancelled',
         message,
       )
+      if (finished) await input.service.cleanupRunRuntimeState?.(input.job.runId)
     } else {
       const delay = Math.min(
         60_000,

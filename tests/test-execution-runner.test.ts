@@ -66,7 +66,7 @@ const task = {
 }
 const source = `import { test, expect } from '@playwright/test'
 
-test('case-status', async ({ page }) => {
+test('状态检查 [case-status]', async ({ page }) => {
   await page.goto('/status')
   // smarthub:assert expected-1
   await expect(page.locator('[data-testid="status"]')).toHaveText('Ready')

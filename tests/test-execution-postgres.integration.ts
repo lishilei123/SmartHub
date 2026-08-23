@@ -12,6 +12,7 @@ import {
 import type {
   ExecutionArtifact,
   ExecutionAttempt,
+  ExecutionEvent,
   ExecutionJob,
   ExecutionPackageManifest,
   ExecutionRun,
@@ -277,6 +278,15 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.deepEqual(
     (await firstStore.listAttempts(ids.task)).map(item => item.ordinal),
     [1, 2, 3],
+  )
+  const events = await firstStore.listEvents(ids.task, `${prefix}-attempt`)
+  assert.equal(events.length, 1)
+  assert.equal(events[0].type, 'failure')
+  assert.equal(events[0].artifactIds?.length, 1)
+  assert.deepEqual((await firstStore.getTaskDetail(ids.task))?.events, events)
+  await assert.rejects(
+    database.query('UPDATE smarthub.test_execution_events SET title=$2 WHERE id=$1', [events[0].id, '不可改写']),
+    /TEST_EXECUTION_EVENT_IMMUTABLE/u,
   )
   assert.equal(await secondStore.finishJob(reclaimed.id, lease(reclaimed), 'succeeded'), false)
   assert.equal(await secondStore.finishJob(reclaimed.id, lease(reclaimed), 'failed'), true)
@@ -935,6 +945,33 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
   const attempt: ExecutionAttempt = {
     id: `${prefix}-attempt`, runId: ids.run, taskId: ids.task, ordinal: 1, invocationKey: `${prefix}-invocation`, kind: 'initial', scriptRevisionId: revision.id, packageSha256: manifest.packageSha256, status: 'running', startedAt: now,
   }
+  const screenshotArtifact: ExecutionArtifact = {
+    id: `${prefix}-attempt-screenshot`,
+    runId: ids.run,
+    taskId: ids.task,
+    attemptId: attempt.id,
+    type: 'screenshot',
+    storagePath: `objects/44/${'4'.repeat(64)}`,
+    sha256: '4'.repeat(64),
+    size: 200,
+    mimeType: 'image/png',
+    createdAt: now,
+  }
+  const executionEvent: ExecutionEvent = {
+    id: `${prefix}-attempt-event`,
+    runId: ids.run,
+    taskId: ids.task,
+    attemptId: attempt.id,
+    sequence: 1,
+    type: 'failure',
+    title: '状态断言失败',
+    status: 'failed',
+    startedAt: now,
+    finishedAt: now,
+    durationMs: 0,
+    artifactIds: [screenshotArtifact.id],
+    metadata: { source: 'playwright_json_reporter' },
+  }
   const activeLease = lease(claimed)
   const ready = required(
     await secondStore.transactionWithLease(claimed.id, activeLease, async transaction => {
@@ -983,6 +1020,13 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
       ...attempt,
       startedAt: attempt.startedAt.replace(/Z$/u, '+00:00'),
     })
+    await transaction.appendArtifact(screenshotArtifact)
+    await transaction.appendExecutionEvents([executionEvent])
+    await transaction.appendExecutionEvents([{
+      ...executionEvent,
+      startedAt: executionEvent.startedAt.replace(/Z$/u, '+00:00'),
+      finishedAt: executionEvent.finishedAt?.replace(/Z$/u, '+00:00'),
+    }])
     await transaction.transitionTask({ taskId: ids.task, expectedStatus: 'ready', expectedStateVersion: ready.stateVersion, status: 'running', incrementRunnerAttempt: true })
   })
   assert.equal(await secondStore.finishJob(claimed.id, activeLease, 'succeeded'), false)
@@ -1512,7 +1556,7 @@ async function seedParents() {
   await database.query('INSERT INTO smarthub.project_versions (id,project_id,name,status,created_at,updated_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [ids.projectVersion, ids.project, `${prefix} version`, 'open', now, now, JSON.stringify({ id: ids.projectVersion, projectId: ids.project, name: `${prefix} version`, status: 'open', createdAt: now, updatedAt: now })])
   await database.query('INSERT INTO smarthub.library_test_cases (id,project_id,current_revision,status,created_at,updated_at,data) VALUES ($1,$2,1,$3,$4,$4,$5::jsonb)', [ids.libraryCase, ids.project, 'active', now, JSON.stringify({ id: ids.libraryCase, projectId: ids.project, currentRevision: 1, status: 'active', createdAt: now, updatedAt: now, revisions: [libraryCaseRevision] })])
   await database.query('INSERT INTO smarthub.library_test_case_revisions (case_id,revision,content_sha256,semantic_sha256,created_by,created_at,content,data) VALUES ($1,1,$2,$2,$3,$4,$5::jsonb,$6::jsonb)', [ids.libraryCase, caseContentSha256, 'integration-test', now, JSON.stringify(caseContent), JSON.stringify(libraryCaseRevision)])
-  await database.query('INSERT INTO smarthub.test_case_library_versions (id,project_id,version,name,source_run_id,content_sha256,published_by,published_at,data) VALUES ($1,$2,1,$3,$4,$5,$6,$7,$8::jsonb)', [ids.libraryVersion, ids.project, 'Execution library', librarySourceRunId, run.handoff.testCaseLibraryVersionSha256, 'integration-test', now, JSON.stringify({ id: ids.libraryVersion, projectId: ids.project, version: 1, name: 'Execution library', sourceRunId: librarySourceRunId, members: [libraryMember], contentSha256: run.handoff.testCaseLibraryVersionSha256, publishedBy: 'integration-test', publishedAt: now, projection: { status: 'succeeded', files: [] } })])
+  await database.query('INSERT INTO smarthub.test_case_library_versions (id,project_id,project_version_id,version,name,source_run_id,content_sha256,published_by,published_at,data) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9::jsonb)', [ids.libraryVersion, ids.project, ids.projectVersion, 'Execution library', librarySourceRunId, run.handoff.testCaseLibraryVersionSha256, 'integration-test', now, JSON.stringify({ id: ids.libraryVersion, projectId: ids.project, projectVersionId: ids.projectVersion, version: 1, name: 'Execution library', sourceRunId: librarySourceRunId, members: [libraryMember], contentSha256: run.handoff.testCaseLibraryVersionSha256, publishedBy: 'integration-test', publishedAt: now, projection: { status: 'succeeded', files: [] } })])
   await database.query('INSERT INTO smarthub.test_case_library_version_members (version_id,case_id,case_revision,ordinal,content_sha256,frozen_content,execution_readiness) VALUES ($1,$2,1,0,$3,$4::jsonb,$5)', [ids.libraryVersion, ids.libraryCase, caseContentSha256, JSON.stringify(caseContent), 'ready'])
   await database.query('INSERT INTO smarthub.test_execution_handoffs (id,project_version_id,test_case_library_version_id,execution_mode,strategy,content_sha256,created_by,created_at,content,data) VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8::jsonb,$8::jsonb)', [ids.handoff, ids.projectVersion, ids.libraryVersion, 'full', run.handoff.handoffSha256, 'integration-test', now, JSON.stringify({ id: ids.handoff, projectId: ids.project, projectVersionId: ids.projectVersion, testCaseLibraryVersionId: ids.libraryVersion, mode: 'full', members: [handoffMember], contentSha256: run.handoff.handoffSha256, createdBy: 'integration-test', createdAt: now })])
   await database.query('INSERT INTO smarthub.test_execution_handoff_members (handoff_id,stage,ordinal,source_version_id,case_id,case_revision,method,dedup_key,dimension,execution_spec,content_sha256,data) VALUES ($1,$2,0,$3,$4,1,$5,$6,$7,$8::jsonb,$9,$10::jsonb)', [ids.handoff, 'full', ids.libraryVersion, ids.libraryCase, 'ui', handoffMember.dedupKey, 'functional', JSON.stringify(executionSpec), caseContentSha256, JSON.stringify(handoffMember)])

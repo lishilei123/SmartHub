@@ -43,7 +43,7 @@ const caseContent: TestCaseContent = {
   dimension: 'functional',
   requirementRefs: ['point-status'],
   priority: 'P0',
-  preconditions: [],
+  preconditions: ['已登录'],
   executionMethods: ['ui'],
   steps: ['打开状态页'],
   expectedResults: ['状态显示 Ready'],
@@ -81,7 +81,7 @@ const handoffMember: TestExecutionHandoffMember = {
 
 const validSource = `import { test, expect } from '@playwright/test'
 
-test('case-status', async ({ page }) => {
+test('状态检查 [case-status]', async ({ page }) => {
   await page.goto('/status')
   // smarthub:assert expected-1
   await expect(page.locator('[data-testid="status"]')).toHaveText('Ready')
@@ -279,6 +279,20 @@ test('ExecutionPackage 使用固定入口、内容 Hash、断言契约与规范�
   )
 })
 
+test('ExecutionPackage 入口必须以固定 Case 符号结尾且只能精确命中一个 test', () => {
+  const task = taskInput()
+  for (const source of [
+    validSource.replace('状态检查 [case-status]', '状态检查 case-status'),
+    validSource.replace('[case-status]', '[case-status-similar]'),
+    `${validSource}\n${validSource.replace('状态检查 [case-status]', '另一个状态检查 [case-status]')}`,
+  ]) {
+    assert.throws(
+      () => buildExecutionPackage({ candidate: candidate(source), task, environmentSignature: 'env' }),
+      error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+    )
+  }
+})
+
 test('ExecutionPackage 拒绝路径逃逸、额外入口、动态导入与 Node 运行时能力', () => {
   const task = taskInput()
   assert.throws(
@@ -316,7 +330,7 @@ export class AuthClient {
   const entrySource = `import { test, expect } from '@playwright/test'
 import { AuthClient } from '../../api/auth-client.js'
 
-test('TC_API_LOGIN_001', async ({ request }) => {
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
   const response = await new AuthClient(request).login()
   // smarthub:assert expected-1
   expect(response.status()).toBe(403)
@@ -344,7 +358,7 @@ test('API Validator 拒绝其他 HTTP Client、硬编码 Host、fetch 与不安�
   const entryFile = 'tests/api/login.spec.ts'
   const entry = (extraImport: string, requestExpression: string) => `import { test, expect } from '@playwright/test'
 ${extraImport}
-test('TC_API_LOGIN_001', async ({ request }) => {
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
   const response = ${requestExpression}
   // smarthub:assert expected-1
   expect(response.status()).toBe(403)
@@ -393,7 +407,7 @@ test('TC_API_LOGIN_001', async ({ request }) => {
 test('UI Case 必须使用 page 完成 UI 目标，但允许 request 辅助准备', () => {
   const task = taskInput()
   const requestOnly = `import { test, expect } from '@playwright/test'
-test('case-status', async ({ request }) => {
+test('状态检查 [case-status]', async ({ request }) => {
   const response = await request.get('/api/status')
   // smarthub:assert expected-1
   expect(response.ok()).toBeTruthy()
@@ -404,7 +418,7 @@ test('case-status', async ({ request }) => {
     error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
   )
   const mixed = `import { test, expect } from '@playwright/test'
-test('case-status', async ({ page, request }) => {
+test('状态检查 [case-status]', async ({ page, request }) => {
   await request.post('/api/setup')
   await page.goto('/status')
   // smarthub:assert expected-1
@@ -416,11 +430,150 @@ test('case-status', async ({ page, request }) => {
   )
 })
 
+test('普通业务 Case 可复用 Run 临时认证 Fixture，认证敏感 Case 必须使用 fresh/anonymous Context', () => {
+  const sharedFixture = `import { test as base, expect } from '@playwright/test'
+export const test = base.extend({
+  storageState: async ({}, use, testInfo) => {
+    const directory = (testInfo.config.metadata as { smarthubAuthState: { directory: string } }).smarthubAuthState.directory
+    await use(directory + '/shared.json')
+  },
+})
+export { expect }
+`
+  const ordinaryEntry = `import { test, expect } from '../../fixtures/auth-fixture.js'
+test('状态检查 [case-status]', async ({ page }) => {
+  await page.goto('/status')
+  // smarthub:assert expected-1
+  await expect(page.locator('[data-testid="status"]')).toHaveText('Ready')
+})
+`
+  assert.doesNotThrow(() => buildExecutionPackage({
+    candidate: {
+      ...candidate(ordinaryEntry),
+      files: [
+        { path: 'fixtures/auth-fixture.ts', content: sharedFixture },
+        { path: 'tests/ui/task-status.spec.ts', content: ordinaryEntry },
+      ],
+    },
+    task: taskInput(),
+    environmentSignature: 'env',
+  }))
+
+  const authTask = apiTaskInput()
+  const sharedAuthEntry = `import { test, expect } from '../../fixtures/auth-fixture.js'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await request.post('/api/login')
+  // smarthub:assert expected-1
+  expect(response.status()).toBe(403)
+})
+`
+  assert.throws(() => buildExecutionPackage({
+    candidate: {
+      schemaVersion: 'test-script-generation/v1', taskId: authTask.taskId,
+      entryFile: 'tests/api/login.spec.ts',
+      files: [
+        { path: 'fixtures/auth-fixture.ts', content: sharedFixture },
+        { path: 'tests/api/login.spec.ts', content: sharedAuthEntry },
+      ],
+      summary: '错误复用共享认证态',
+    },
+    task: authTask,
+    environmentSignature: 'env',
+  }), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+
+  const anonymousEntry = `import { test, expect } from '@playwright/test'
+test.use({ storageState: undefined })
+test('匿名访问 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await request.get('/api/session')
+  // smarthub:assert expected-1
+  expect(response.status()).toBe(403)
+})
+`
+  assert.doesNotThrow(() => buildExecutionPackage({
+    candidate: {
+      schemaVersion: 'test-script-generation/v1', taskId: authTask.taskId,
+      entryFile: 'tests/api/login.spec.ts', files: [{ path: 'tests/api/login.spec.ts', content: anonymousEntry }],
+      summary: '显式匿名 Context',
+    },
+    task: authTask,
+    environmentSignature: 'env',
+  }))
+  assert.throws(() => buildExecutionPackage({
+    candidate: {
+      schemaVersion: 'test-script-generation/v1', taskId: authTask.taskId,
+      entryFile: 'tests/api/login.spec.ts',
+      files: [{ path: 'tests/api/login.spec.ts', content: anonymousEntry.replace('storageState: undefined', "storageState: 'shared.json'") }],
+      summary: '匿名 Case 错误加载共享状态',
+    },
+    task: authTask,
+    environmentSignature: 'env',
+  }), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+})
+
+test('持久化 Expected Result 强制 API 回读，Repair 不能删除业务闭环', () => {
+  const persistentContent: TestCaseContent = {
+    ...caseContent,
+    title: '更新状态并回读',
+    executionMethods: ['api'],
+    steps: ['更新状态'],
+    expectedResults: ['状态持久化，重新查询后仍为 done'],
+  }
+  const persistentSha256 = canonicalSha256(persistentContent)
+  const task = {
+    ...freezeExecutionTaskInput({
+      libraryMember: {
+        ...libraryMember,
+        caseId: 'case-persisted-status',
+        contentSha256: persistentSha256,
+        frozenContent: persistentContent,
+      },
+      handoffMember: {
+        ...handoffMember,
+        caseId: 'case-persisted-status',
+        method: 'api',
+        dedupKey: 'case-persisted-status:3:api',
+        contentSha256: persistentSha256,
+        executionSpec: { schemaVersion: 'test-script-input/v1', method: 'api', testCase: persistentContent },
+      },
+    }),
+    taskId: 'task-persisted-status',
+  }
+  const entryFile = 'tests/api/persisted-status.spec.ts'
+  const source = (readBack: boolean) => `import { test, expect } from '@playwright/test'
+test('更新状态并回读 [case-persisted-status]', async ({ request }) => {
+  const mutation = await request.post('/api/status', { data: { status: 'done' } })
+  ${readBack ? "const persisted = await request.get('/api/status')" : 'const persisted = mutation'}
+  // smarthub:assert expected-1
+  expect(await persisted.json()).toMatchObject({ status: 'done' })
+})
+`
+  const build = (content: string, schemaVersion: ExecutionPackageCandidate['schemaVersion'], baselineAssertions?: ReturnType<typeof buildExecutionPackage>['manifest']['assertions']) => buildExecutionPackage({
+    candidate: {
+      schemaVersion,
+      taskId: task.taskId,
+      ...(schemaVersion === 'script-repair/v1' ? { parentScriptRevisionId: 'revision-persisted-1' } : {}),
+      entryFile,
+      files: [{ path: entryFile, content }],
+      summary: '持久化闭环',
+    },
+    task,
+    environmentSignature: 'env',
+    ...(baselineAssertions ? { baselineAssertions, parentScriptRevisionId: 'revision-persisted-1' } : {}),
+  })
+  assert.throws(() => build(source(false), 'test-script-generation/v1'), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+  const baseline = build(source(true), 'test-script-generation/v1')
+  assert.throws(() => build(source(false), 'script-repair/v1', baseline.manifest.assertions), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+  assert.throws(
+    () => build(source(false).replace("const mutation = await request.post('/api/status', { data: { status: 'done' } })", "await request.get('/api/status')\n  const mutation = await request.post('/api/status', { data: { status: 'done' } })"), 'test-script-generation/v1'),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
+})
+
 test('API Repair 不能将受保护 HTTP 403 业务断言改为 200', () => {
   const task = apiTaskInput()
   const entryFile = 'tests/api/login.spec.ts'
   const source = (status: number) => `import { test, expect } from '@playwright/test'
-test('TC_API_LOGIN_001', async ({ request }) => {
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
   const response = await request.post('/api/login')
   // smarthub:assert expected-1
   expect(response.status()).toBe(${status})

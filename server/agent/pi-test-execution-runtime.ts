@@ -299,6 +299,8 @@ export function buildTestExecutionAgentTask(
       '进入 script_generation 表示 Service 已确认当前 Case 没有可直接执行的有效 Execution Binding；不得覆盖或重写其他已有 Binding。',
       'API Case 无 Binding 时，先读取 /exploration/context.json 中当前 ProjectVersion 的真实环境观察，再查询受控 Knowledge/API 文档，最后结合 execution/ 下已有 API Client 与工程代码实现；已有相关 Endpoint/Method/Schema 时优先复用，不得从零猜测或重复发明。',
       'API Case 统一使用 Playwright Test：普通请求优先使用 request fixture；共享 BaseURL、认证、Headers、Cookie、数据准备或请求操作时，公共 Client 必须接收 fixture 提供的 APIRequestContext。禁止 axios、superagent、undici、node:http、node:https、fetch polyfill、Postman/Newman 或独立 APIRunner。',
+      `Playwright Test 标题必须以稳定 Case Symbol ${JSON.stringify(`[${input.task.input.caseId}]`)} 结尾；一个 Binding 只能对应一个该标题。`,
+      '使用 Playwright test.step 标注有业务意义的 UI/API 操作、回读和最终断言，标题只写稳定的操作名或 Method + Path，不得包含 Query 值、请求/响应 Body、账号、Token、Cookie、个人数据、Selector dump 或原始输出；正式事件只来自 Playwright JSON Reporter。',
       '实现 API Case 前按 execution/api、execution/helpers、execution/fixtures、execution/tests/api 的顺序查找已有公共能力。按业务操作复用 Client，不得一 Case 创建一个 Client；公共 Client 负责请求/响应/复用操作，业务断言与 verification anchor 保持在 Case Entry 附近。',
       'page 与 request 只能使用当前 ExecutionRun 冻结 BaseURL；脚本必须使用相对 URL，不得写死 Host，也不得用 Exploration Context 或 API 文档中的 origin 覆盖本次 Run 环境。认证只能引用冻结 Test Data、现有受控 Fixture、Environment 或 Runtime Secret，不得把 Authorization、Cookie、Token 或真实 Secret 写入 Workspace。',
       'UI Case、Failure Analysis 与 Repair 先检查 execution/ 下已有 tests、pages、helpers、fixtures、api 与 bindings；优先复用公共能力。',
@@ -312,6 +314,8 @@ export function buildTestExecutionAgentTask(
       '不得调用 Shell、SSH、数据库、任意网络、其他 Agent 或 Runner。真实环境验证由 Local Runner 在提交候选后执行。',
       'Agent 文本不能作为系统命令直接执行。',
       '不得修改正式 TestCase、Expected Result、Verification Check、断言意义、测试目标或需求规则。',
+      'Expected Result 已要求创建后查询、更新后刷新/重进、删除后确认不存在或异步最终状态时，脚本必须实现对应闭环断言；不得只断言 HTTP 2xx、按钮提示或操作成功。Repair 不得删除或弱化该闭环。',
+      '普通已登录业务 Case可以复用 Workspace 已有 Playwright Auth Fixture/storageState；登录、退出、未登录、会话或 Token/Cookie 失效、角色切换、账号隔离、安全策略和多会话 Case 必须使用 fresh/anonymous/isolated/custom Context。真实 Auth State 只允许写入 Runner 注入的 Run-scoped 临时目录，不得写入 Workspace 源码、Revision、Artifact、Knowledge、Exploration Context 或 Prompt。',
       `完成后只能调用 ${binding.submitToolId} 提交结构化候选。`,
     ],
   })
@@ -337,6 +341,9 @@ function validateStageInput(
 ) {
   if (input.task.runId !== input.run.id || input.workspace.runId !== input.run.id) {
     throw new Error('TEST_EXECUTION_AGENT_RUN_SCOPE_MISMATCH')
+  }
+  if (input.workspace.taskId !== input.task.id) {
+    throw new Error('TEST_EXECUTION_AGENT_TASK_SCOPE_MISMATCH')
   }
   if (
     input.workspace.projectId !== input.run.projectId

@@ -422,6 +422,7 @@ function executionTaskFixture(runId: string): ExecutionTask {
 function executionWorkspaceFixture(run: ExecutionRun): TestExecutionAgentRuntimeInput['workspace'] {
   return {
     runId: run.id,
+    taskId: 'task-1',
     projectId: run.projectId,
     projectName: '项目',
     projectVersionId: run.projectVersionId,

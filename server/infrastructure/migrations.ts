@@ -2753,6 +2753,61 @@ const migrations: Migration[] = [{
       RETURN NEW;
     END $$;
   `,
+}, {
+  version: 36,
+  name: 'persist-structured-test-execution-events',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.test_execution_events (
+      id text PRIMARY KEY,
+      run_id text NOT NULL,
+      task_id text NOT NULL,
+      attempt_id text NOT NULL,
+      sequence integer NOT NULL CHECK (sequence > 0),
+      event_type text NOT NULL CHECK (event_type IN ('runner','step','navigate','click','fill','assertion','http','screenshot','trace','video','failure','retry')),
+      title text NOT NULL CHECK (length(title) BETWEEN 1 AND 500),
+      status text NOT NULL CHECK (status IN ('running','passed','failed','skipped')),
+      started_at timestamptz NOT NULL,
+      finished_at timestamptz,
+      duration_ms bigint CHECK (duration_ms IS NULL OR duration_ms >= 0),
+      artifact_ids jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(artifact_ids)='array'),
+      metadata jsonb,
+      UNIQUE (attempt_id, sequence),
+      FOREIGN KEY (attempt_id, run_id, task_id)
+        REFERENCES smarthub.test_execution_attempts(id, run_id, task_id)
+        ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS test_execution_events_task_idx
+      ON smarthub.test_execution_events (task_id, attempt_id, sequence);
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_event_write()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_EVENT_IMMUTABLE';
+      END IF;
+      IF EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements_text(NEW.artifact_ids) artifact_ref(id)
+        LEFT JOIN smarthub.test_execution_artifacts artifact
+          ON artifact.id=artifact_ref.id
+         AND artifact.run_id=NEW.run_id
+         AND artifact.task_id=NEW.task_id
+         AND artifact.attempt_id=NEW.attempt_id
+        WHERE artifact.id IS NULL
+      ) OR (
+        SELECT count(*) FROM jsonb_array_elements_text(NEW.artifact_ids)
+      ) <> (
+        SELECT count(DISTINCT value) FROM jsonb_array_elements_text(NEW.artifact_ids)
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_EVENT_ARTIFACT_SCOPE_INVALID';
+      END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS test_execution_events_write_ck ON smarthub.test_execution_events;
+    CREATE TRIGGER test_execution_events_write_ck
+      BEFORE INSERT OR UPDATE OR DELETE ON smarthub.test_execution_events
+      FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_event_write();
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

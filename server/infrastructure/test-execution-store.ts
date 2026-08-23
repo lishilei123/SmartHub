@@ -15,6 +15,7 @@ import type {
   CaseMaintenanceProposal,
   ExecutionArtifact,
   ExecutionAttempt,
+  ExecutionEvent,
   ExecutionJob,
   ExecutionRun,
   ExecutionRunStatus,
@@ -74,6 +75,7 @@ export interface TestExecutionTransaction {
   appendScriptArtifact(artifact: ScriptArtifact): Promise<ScriptArtifact>
   appendScriptRevision(revision: ScriptRevision): Promise<void>
   appendAttempt(attempt: ExecutionAttempt): Promise<void>
+  appendExecutionEvents(events: readonly ExecutionEvent[]): Promise<void>
   finalizeAttempt(input: {
     attemptId: string
     status: Exclude<ExecutionAttempt['status'], 'running'>
@@ -93,6 +95,7 @@ export interface ExecutionTaskDetailSnapshot {
   run: ExecutionRun
   task: ExecutionTask
   attempts: ExecutionAttempt[]
+  events: ExecutionEvent[]
   diagnoses: FailureDiagnosis[]
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
@@ -147,6 +150,7 @@ export interface TestExecutionStore {
   getTask(taskId: string): Promise<ExecutionTask | null>
   getTaskDetail(taskId: string): Promise<ExecutionTaskDetailSnapshot | null>
   listAttempts(taskId: string): Promise<ExecutionAttempt[]>
+  listEvents(taskId: string, attemptId?: string): Promise<ExecutionEvent[]>
   listDiagnoses(taskId: string): Promise<FailureDiagnosis[]>
   listMaintenanceProposals(runId: string): Promise<CaseMaintenanceProposal[]>
   listTaskMaintenanceProposals(taskId: string): Promise<CaseMaintenanceProposal[]>
@@ -159,9 +163,8 @@ export interface TestExecutionStore {
     decidedBy: string
     decidedAt: string
   }): Promise<CaseMaintenanceProposal>
-  getScriptArtifactByCacheKey(cacheKey: string): Promise<ScriptArtifact | null>
+  getScriptArtifact(artifactId: string): Promise<ScriptArtifact | null>
   getScriptRevision(revisionId: string): Promise<ScriptRevision | null>
-  getCacheSourceRevision(scriptArtifactId: string): Promise<ScriptRevision | null>
   listScriptRevisions(taskId: string): Promise<ScriptRevision[]>
   getArtifact(artifactId: string): Promise<ExecutionArtifact | null>
   listArtifacts(taskId: string, attemptId?: string): Promise<ExecutionArtifact[]>
@@ -311,8 +314,9 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       }
       const run = await getRun(client, task.runId)
       if (!run) throw new Error('TEST_EXECUTION_RUN_NOT_FOUND')
-      const [attempts, diagnoses, revisions, artifacts, proposals] = await Promise.all([
+      const [attempts, events, diagnoses, revisions, artifacts, proposals] = await Promise.all([
         client.query<AttemptRow>('SELECT * FROM smarthub.test_execution_attempts WHERE task_id=$1 ORDER BY ordinal', [task.id]),
+        client.query<ExecutionEventRow>('SELECT * FROM smarthub.test_execution_events WHERE task_id=$1 ORDER BY attempt_id,sequence', [task.id]),
         client.query<DiagnosisRow>(`${diagnosisSelectSql}
           WHERE diagnosis.task_id=$1 ORDER BY diagnosis.created_at,diagnosis.id
         `, [task.id]),
@@ -331,6 +335,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         run,
         task,
         attempts: attempts.rows.map(attemptFromRow),
+        events: events.rows.map(executionEventFromRow),
         diagnoses: diagnoses.rows.map(diagnosisFromRow),
         scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
         artifacts: artifacts.rows.map(artifactFromRow),
@@ -455,6 +460,13 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
   async listAttempts(taskId: string) {
     const result = await this.pool.query<AttemptRow>('SELECT * FROM smarthub.test_execution_attempts WHERE task_id=$1 ORDER BY ordinal', [taskId])
     return result.rows.map(attemptFromRow)
+  }
+
+  async listEvents(taskId: string, attemptId?: string) {
+    const result = attemptId
+      ? await this.pool.query<ExecutionEventRow>('SELECT * FROM smarthub.test_execution_events WHERE task_id=$1 AND attempt_id=$2 ORDER BY sequence', [taskId, attemptId])
+      : await this.pool.query<ExecutionEventRow>('SELECT * FROM smarthub.test_execution_events WHERE task_id=$1 ORDER BY attempt_id,sequence', [taskId])
+    return result.rows.map(executionEventFromRow)
   }
 
   async listDiagnoses(taskId: string) {
@@ -623,22 +635,13 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     throw new Error('TEST_EXECUTION_MAINTENANCE_PROPOSAL_STATE_CONFLICT')
   }
 
-  async getScriptArtifactByCacheKey(cacheKey: string) {
-    const result = await this.pool.query<ScriptArtifactRow>('SELECT * FROM smarthub.test_execution_script_artifacts WHERE cache_key=$1', [cacheKey])
+  async getScriptArtifact(artifactId: string) {
+    const result = await this.pool.query<ScriptArtifactRow>('SELECT * FROM smarthub.test_execution_script_artifacts WHERE id=$1', [artifactId])
     return result.rows[0] ? scriptArtifactFromRow(result.rows[0]) : null
   }
 
   async getScriptRevision(revisionId: string) {
     const result = await this.pool.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE id=$1', [revisionId])
-    return result.rows[0] ? scriptRevisionFromRow(result.rows[0]) : null
-  }
-
-  async getCacheSourceRevision(scriptArtifactId: string) {
-    const result = await this.pool.query<ScriptRevisionRow>(`
-      SELECT * FROM smarthub.test_execution_script_revisions
-      WHERE script_artifact_id=$1 AND generation_source<>'cache'
-      ORDER BY created_at,id LIMIT 1
-    `, [scriptArtifactId])
     return result.rows[0] ? scriptRevisionFromRow(result.rows[0]) : null
   }
 
@@ -1180,6 +1183,10 @@ function transactionFor(client: PoolClient, scope: ExecutionLeaseScope, cancella
       requireNormal()
       assertLeaseAggregate(scope, attempt.runId, attempt.taskId)
       return insertAttempt(client, attempt)
+    },
+    appendExecutionEvents: events => {
+      for (const event of events) assertLeaseAggregate(scope, event.runId, event.taskId)
+      return insertExecutionEvents(client, events, scope)
     },
     finalizeAttempt: input => {
       if (cancellation !== (input.status === 'cancelled')) throw new Error('TEST_EXECUTION_CANCELLATION_ATTEMPT_INVALID')
@@ -1870,7 +1877,7 @@ async function insertScriptRevision(client: PoolClient, revision: ScriptRevision
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)
     ON CONFLICT DO NOTHING
     RETURNING *
-  `, [revision.id, revision.runId, revision.taskId, revision.scriptArtifactId, revision.revision, revision.parentRevisionId ?? null, revision.cacheSourceRevisionId ?? null, revision.source, revision.repairReason ?? null, JSON.stringify(revision.generatedBy), JSON.stringify(revision.package), canonicalJson(packageBase), JSON.stringify(revision.sourceArtifacts), revision.sourceArtifactId, revision.contentSha256, revision.protectedAssertionSha256, canonicalJson(revision.package.assertions), revision.createdAt])
+  `, [revision.id, revision.runId, revision.taskId, revision.scriptArtifactId, revision.revision, revision.parentRevisionId ?? null, revision.cacheSourceRevisionId ?? null, revision.source, revision.repairReason ?? null, JSON.stringify(revision.generatedBy), JSON.stringify(revision.package), canonicalJson(packageBase), revision.package.packageSha256, JSON.stringify(revision.sourceArtifacts), revision.sourceArtifactId, revision.contentSha256, revision.protectedAssertionSha256, canonicalJson(revision.package.assertions), revision.createdAt])
   if (inserted.rows[0]) return
   const conflicts = await client.query<ScriptRevisionRow>(`
     SELECT * FROM smarthub.test_execution_script_revisions
@@ -2061,6 +2068,78 @@ async function insertAttempt(client: PoolClient, attempt: ExecutionAttempt) {
   `, [attempt.id, attempt.invocationKey, attempt.taskId, attempt.ordinal])
   if (conflicts.rows.length !== 1 || !sameAttemptInvocation(attemptFromRow(conflicts.rows[0]), attempt)) {
     throw new Error('TEST_EXECUTION_ATTEMPT_CONFLICT')
+  }
+}
+
+async function insertExecutionEvents(
+  client: PoolClient,
+  events: readonly ExecutionEvent[],
+  scope: ExecutionLeaseScope,
+) {
+  if (!events.length) return
+  const sequences = new Set<number>()
+  for (const event of events) {
+    const artifactIds = [...new Set(event.artifactIds ?? [])]
+    if (
+      event.runId !== scope.runId
+      || event.taskId !== scope.taskId
+      || !event.id
+      || !event.attemptId
+      || !Number.isSafeInteger(event.sequence)
+      || event.sequence < 1
+      || sequences.has(event.sequence)
+      || !event.title.trim()
+      || event.title.length > 500
+      || !['running', 'passed', 'failed', 'skipped'].includes(event.status)
+      || event.durationMs !== undefined && (!Number.isSafeInteger(event.durationMs) || event.durationMs < 0)
+      || artifactIds.length !== (event.artifactIds?.length ?? 0)
+    ) throw new Error('TEST_EXECUTION_EVENT_INVALID')
+    sequences.add(event.sequence)
+    const attempt = await client.query(`
+      SELECT 1 FROM smarthub.test_execution_attempts
+      WHERE id=$1 AND run_id=$2 AND task_id=$3
+      FOR SHARE
+    `, [event.attemptId, scope.runId, scope.taskId])
+    if (!attempt.rows[0]) throw new Error('TEST_EXECUTION_EVENT_ATTEMPT_SCOPE_INVALID')
+    if (artifactIds.length) {
+      const artifacts = await client.query<{ id: string }>(`
+        SELECT id FROM smarthub.test_execution_artifacts
+        WHERE id=ANY($1::text[]) AND run_id=$2 AND task_id=$3 AND attempt_id=$4
+      `, [artifactIds, scope.runId, scope.taskId, event.attemptId])
+      if (artifacts.rows.length !== artifactIds.length) {
+        throw new Error('TEST_EXECUTION_EVENT_ARTIFACT_SCOPE_INVALID')
+      }
+    }
+    const inserted = await client.query<ExecutionEventRow>(`
+      INSERT INTO smarthub.test_execution_events
+        (id,run_id,task_id,attempt_id,sequence,event_type,title,status,started_at,finished_at,duration_ms,artifact_ids,metadata)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb)
+      ON CONFLICT DO NOTHING
+      RETURNING *
+    `, [
+      event.id,
+      event.runId,
+      event.taskId,
+      event.attemptId,
+      event.sequence,
+      event.type,
+      event.title,
+      event.status,
+      event.startedAt,
+      event.finishedAt ?? null,
+      event.durationMs ?? null,
+      JSON.stringify(artifactIds),
+      JSON.stringify(event.metadata ?? null),
+    ])
+    if (inserted.rows[0]) continue
+    const conflicts = await client.query<ExecutionEventRow>(`
+      SELECT * FROM smarthub.test_execution_events
+      WHERE id=$1 OR (attempt_id=$2 AND sequence=$3)
+    `, [event.id, event.attemptId, event.sequence])
+    if (
+      conflicts.rows.length !== 1
+      || !sameCanonicalRecord(executionEventFromRow(conflicts.rows[0]), event)
+    ) throw new Error('TEST_EXECUTION_EVENT_CONFLICT')
   }
 }
 
@@ -2405,6 +2484,27 @@ type AttemptRow = {
 }
 function attemptFromRow(row: AttemptRow): ExecutionAttempt {
   return { id: row.id, runId: row.run_id, taskId: row.task_id, ordinal: Number(row.ordinal), invocationKey: row.invocation_key, kind: row.attempt_kind, scriptRevisionId: row.script_revision_id, packageSha256: row.package_sha256, status: row.status, startedAt: iso(row.started_at), ...(row.finished_at ? { finishedAt: iso(row.finished_at) } : {}), ...(row.duration_ms !== null ? { durationMs: Number(row.duration_ms) } : {}), ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}), ...(row.summary ? { summary: row.summary } : {}), ...(row.error ? { error: row.error } : {}) }
+}
+
+type ExecutionEventRow = {
+  id: string; run_id: string; task_id: string; attempt_id: string; sequence: number; event_type: ExecutionEvent['type']; title: string; status: ExecutionEvent['status']; started_at: Date | string; finished_at: Date | string | null; duration_ms: number | string | null; artifact_ids: string[]; metadata: Record<string, unknown> | null
+}
+function executionEventFromRow(row: ExecutionEventRow): ExecutionEvent {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    attemptId: row.attempt_id,
+    sequence: Number(row.sequence),
+    type: row.event_type,
+    title: row.title,
+    status: row.status,
+    startedAt: iso(row.started_at),
+    ...(row.finished_at ? { finishedAt: iso(row.finished_at) } : {}),
+    ...(row.duration_ms !== null ? { durationMs: Number(row.duration_ms) } : {}),
+    ...(row.artifact_ids.length ? { artifactIds: structuredClone(row.artifact_ids) } : {}),
+    ...(row.metadata ? { metadata: structuredClone(row.metadata) } : {}),
+  }
 }
 
 function sameCanonicalRecord(existing: unknown, candidate: unknown) {

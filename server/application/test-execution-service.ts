@@ -5,6 +5,7 @@ import type {
   ExecutionArtifact,
   ExecutionAttempt,
   ExecutionAttemptKind,
+  ExecutionEvent,
   ExecutionEnvironmentSnapshot,
   ExecutionJob,
   ExecutionPackage,
@@ -48,6 +49,7 @@ import {
   assertExecutionPackageIntegrity,
   automaticRepairAllowed,
   buildExecutionPackage,
+  executionEntrySymbol,
   freezeExecutionTaskInput,
   scriptCacheKey,
   scriptMaintenanceSemanticSha256,
@@ -211,6 +213,7 @@ export class TestExecutionService {
       run: snapshot.run,
       task: snapshot.task,
       attempts: snapshot.attempts,
+      events: snapshot.events,
       diagnoses: snapshot.diagnoses,
       scriptRevisions: snapshot.scriptRevisions,
       artifacts: snapshot.artifacts.map(publicArtifact),
@@ -552,7 +555,12 @@ export class TestExecutionService {
       if (!run || !task || task.runId !== run.id) {
         throw new Error('TEST_EXECUTION_JOB_SCOPE_INVALID')
       }
-      if (terminalTaskStatus(task.status)) return task
+      if (terminalTaskStatus(task.status)) {
+        if (task.status === 'passed') {
+          await this.validatePassedWorkspaceBinding(run, task)
+        }
+        return task
+      }
       switch (task.status) {
         case 'pending':
           await this.prepareScript(job, lease, run, task, signal)
@@ -676,60 +684,25 @@ export class TestExecutionService {
         })
         return
       }
+      if (binding && binding.bindingStatus !== 'invalid') {
+        await this.executionWorkspace.setBindingStatus(
+          run.projectVersionId,
+          task.input.caseId,
+          'invalid',
+        )
+      }
     }
-    const cacheKey = taskScriptCacheKey(run, task)
-    const cached = await this.store.getScriptArtifactByCacheKey(cacheKey)
-    if (!cached) {
-      await requiredLeaseTransaction(
-        this.store,
-        job.id,
-        lease,
-        transaction => transaction.transitionTask({
-          taskId: task.id,
-          expectedStatus: 'pending',
-          expectedStateVersion: task.stateVersion,
-          status: 'script_generating',
-        }),
-      )
-      return
-    }
-    const sourceRevision = required(
-      await this.store.getCacheSourceRevision(cached.id),
-      'TEST_EXECUTION_SCRIPT_CACHE_SOURCE_NOT_FOUND',
-      '脚本缓存缺少不可变来源 Revision',
-    )
-    const sourceFiles = await this.readRevisionFiles(sourceRevision)
-    const sourceEntry = required(
-      sourceFiles.find(file => file.path === sourceRevision.package.entrypoint),
-      'TEST_EXECUTION_SCRIPT_CACHE_ARTIFACT_NOT_FOUND',
-      '脚本缓存缺少不可变入口源码 Artifact',
-    )
-    const executionPackage = buildExecutionPackage({
-      candidate: {
-        schemaVersion: 'test-script-generation/v1',
-        taskId: task.id,
-        entryFile: sourceRevision.package.entrypoint,
-        files: [{ path: sourceEntry.path, content: sourceEntry.content }],
-        summary: '复用服务端校验的脚本缓存',
-      },
-      task: { ...task.input, taskId: task.id },
-      environmentSignature: run.environment.signature,
-      workspaceFiles: sourceFiles,
-    })
-    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
-    await this.persistScriptRevision({
-      job,
+    await requiredLeaseTransaction(
+      this.store,
+      job.id,
       lease,
-      run,
-      task,
-      expectedStatus: 'pending',
-      scriptArtifact: cached,
-      executionPackage,
-      source: 'cache',
-      cacheSourceRevisionId: sourceRevision.id,
-      generatedBy: run.agents.testScript,
-      incrementRepair: false,
-    })
+      transaction => transaction.transitionTask({
+        taskId: task.id,
+        expectedStatus: 'pending',
+        expectedStateVersion: task.stateVersion,
+        status: 'script_generating',
+      }),
+    )
     if (signal.aborted) throw abortError(signal)
   }
 
@@ -898,9 +871,9 @@ export class TestExecutionService {
       return
     }
     const scriptArtifact = required(
-      await this.store.getScriptArtifactByCacheKey(taskScriptCacheKey(run, task)),
+      await this.store.getScriptArtifact(parent.scriptArtifactId),
       'TEST_EXECUTION_SCRIPT_ARTIFACT_NOT_FOUND',
-      '当前 ScriptRevision 缺少脚本缓存身份',
+      '当前 ScriptRevision 缺少 ScriptArtifact 身份',
     )
     await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
     await this.persistScriptRevision({
@@ -927,8 +900,7 @@ export class TestExecutionService {
     expectedStatus: 'pending' | 'script_generating' | 'repairing'
     scriptArtifact: ScriptArtifact
     executionPackage: ExecutionPackage
-    source: 'agent' | 'cache' | 'repair'
-    cacheSourceRevisionId?: string
+    source: 'agent' | 'repair'
     generatedBy: FrozenExecutionAgentSnapshot
     parent?: ScriptRevision
     repairReason?: string
@@ -989,9 +961,6 @@ export class TestExecutionService {
           scriptArtifactId: scriptArtifact.id,
           revision: revisionNumber,
           ...(input.parent ? { parentRevisionId: input.parent.id } : {}),
-          ...(input.cacheSourceRevisionId
-            ? { cacheSourceRevisionId: input.cacheSourceRevisionId }
-            : {}),
           source: input.source,
           ...(input.repairReason ? { repairReason: input.repairReason } : {}),
           generatedBy: structuredClone(input.generatedBy),
@@ -1098,7 +1067,8 @@ export class TestExecutionService {
         job.id,
         lease,
         async transaction => {
-          await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
+          const artifacts = await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
+          await transaction.appendExecutionEvents(normalizeRunnerExecutionEvents({ run, task, attemptId, result, artifacts, finishedAt }))
           await transaction.finalizeAttempt({
             attemptId,
             status: 'cancelled',
@@ -1129,7 +1099,8 @@ export class TestExecutionService {
         job.id,
         lease,
         async transaction => {
-          await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
+          const artifacts = await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
+          await transaction.appendExecutionEvents(normalizeRunnerExecutionEvents({ run, task, attemptId, result, artifacts, finishedAt }))
           await transaction.finalizeAttempt({
             attemptId,
             status: 'infrastructure_error',
@@ -1187,7 +1158,8 @@ export class TestExecutionService {
       job.id,
       lease,
       async transaction => {
-        await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
+        const artifacts = await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
+        await transaction.appendExecutionEvents(normalizeRunnerExecutionEvents({ run, task, attemptId, result, artifacts, finishedAt }))
         await transaction.finalizeAttempt({
           attemptId,
           status: result.status,
@@ -1471,7 +1443,7 @@ export class TestExecutionService {
       caseId: task.input.caseId,
       executionType: executableMethod(task),
       entryFile: entry.path,
-      entrySymbol: task.input.caseId,
+      entrySymbol: executionEntrySymbol(task.input.caseId),
       bindingStatus,
       entrySha256: entry.contentSha256,
       dependencyFiles,
@@ -1494,8 +1466,58 @@ export class TestExecutionService {
     ) {
       throw new Error('TEST_EXECUTION_WORKSPACE_BINDING_DRIFT')
     }
-    const snapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
-    return { workspace: { root: snapshot.root, entryFile: binding.entryFile, entrySymbol: binding.entrySymbol } }
+    const [snapshot, authStateRoot] = await Promise.all([
+      this.executionWorkspace.snapshot(run.projectVersionId),
+      this.executionWorkspace.runtimeAuthRoot(run.projectVersionId, run.id),
+    ])
+    return {
+      workspace: {
+        root: snapshot.root,
+        entryFile: binding.entryFile,
+        entrySymbol: binding.entrySymbol,
+        authStateRoot,
+      },
+    }
+  }
+
+  private async validatePassedWorkspaceBinding(run: ExecutionRun, task: ExecutionTask) {
+    if (!this.executionWorkspace) return
+    const revision = await this.currentRevision(task)
+    const binding = await this.executionWorkspace.resolveBinding(
+      run.projectVersionId,
+      task.input.caseId,
+    )
+    if (
+      !binding
+      || binding.bindingStatus === 'invalid'
+      || binding.executionType !== executableMethod(task)
+      || binding.entrySha256 !== revision.contentSha256
+      || binding.caseContentSha256 !== task.input.caseContentSha256
+      || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
+    ) {
+      if (binding && binding.bindingStatus !== 'invalid') {
+        await this.executionWorkspace.setBindingStatus(
+          run.projectVersionId,
+          task.input.caseId,
+          'invalid',
+        )
+      }
+      throw new Error('TEST_EXECUTION_WORKSPACE_BINDING_VALIDATION_FAILED')
+    }
+    if (binding.bindingStatus === 'needs_validation' || binding.bindingStatus === 'inherited') {
+      await this.executionWorkspace.setBindingStatus(
+        run.projectVersionId,
+        task.input.caseId,
+        'validated',
+      )
+    }
+  }
+
+  async cleanupRunRuntimeState(runId: string) {
+    if (!this.executionWorkspace) return
+    const run = await this.getRun(runId)
+    if (!['succeeded', 'failed', 'partial', 'cancelled'].includes(run.status)) return
+    await this.executionWorkspace.cleanupRuntimeAuth(run.projectVersionId, run.id)
   }
 
   private async uiExecutionContext(
@@ -1849,8 +1871,9 @@ async function appendRunnerArtifacts(
   }>,
   createdAt: string,
 ) {
+  const appended: ExecutionArtifact[] = []
   for (const [index, artifact] of artifacts.entries()) {
-    await transaction.appendArtifact({
+    const value: ExecutionArtifact = {
       id: stableIdentity('test_execution_artifact', {
         runId,
         taskId,
@@ -1864,8 +1887,105 @@ async function appendRunnerArtifacts(
       attemptId,
       ...artifact,
       createdAt,
-    })
+    }
+    await transaction.appendArtifact(value)
+    appended.push(value)
   }
+  return appended
+}
+
+function normalizeRunnerExecutionEvents(input: {
+  run: ExecutionRun
+  task: ExecutionTask
+  attemptId: string
+  result: Awaited<ReturnType<PlaywrightRunner['execute']>>
+  artifacts: readonly ExecutionArtifact[]
+  finishedAt: string
+}): ExecutionEvent[] {
+  const bySha256 = new Map(input.artifacts.map(artifact => [artifact.sha256, artifact.id]))
+  const source = input.result.events?.length ? input.result.events : [{
+    sequence: 1,
+    type: 'runner' as const,
+    title: input.result.status === 'passed' ? 'Runner 执行完成' : 'Runner 执行未通过',
+    status: input.result.status === 'passed' ? 'passed' as const : input.result.status === 'cancelled' ? 'skipped' as const : 'failed' as const,
+    startedAt: new Date(Date.parse(input.finishedAt) - input.result.durationMs).toISOString(),
+    finishedAt: input.finishedAt,
+    durationMs: input.result.durationMs,
+    metadata: { source: 'runner_result' },
+  }]
+  return source.map((event, index) => {
+    const sequence = index + 1
+    const startedAt = safeExecutionEventTimestamp(event.startedAt, input.finishedAt)
+    const durationMs = Number.isSafeInteger(event.durationMs) && event.durationMs! >= 0
+      ? Math.min(event.durationMs!, 24 * 60 * 60 * 1_000)
+      : undefined
+    const finishedAt = event.finishedAt
+      ? safeExecutionEventTimestamp(event.finishedAt, input.finishedAt)
+      : durationMs === undefined
+        ? undefined
+        : new Date(Date.parse(startedAt) + durationMs).toISOString()
+    const artifactIds = [...new Set((event.artifactSha256s ?? []).map(sha256 => {
+      const artifactId = bySha256.get(sha256)
+      if (!artifactId) throw new Error('TEST_EXECUTION_EVENT_ARTIFACT_NOT_FOUND')
+      return artifactId
+    }))]
+    const title = redactExecutionEventText(event.title).slice(0, 500)
+    if (!title) throw new Error('TEST_EXECUTION_EVENT_TITLE_REQUIRED')
+    return {
+      id: stableIdentity('test_execution_event', {
+        attemptId: input.attemptId,
+        sequence,
+        type: event.type,
+        title,
+      }),
+      runId: input.run.id,
+      taskId: input.task.id,
+      attemptId: input.attemptId,
+      sequence,
+      type: event.type,
+      title,
+      status: event.status,
+      startedAt,
+      ...(finishedAt ? { finishedAt } : {}),
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(artifactIds.length ? { artifactIds } : {}),
+      ...(event.metadata ? { metadata: redactExecutionMetadata(event.metadata) as Record<string, unknown> } : {}),
+    }
+  })
+}
+
+function safeExecutionEventTimestamp(value: string, fallback: string) {
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : fallback
+}
+
+function redactExecutionMetadata(value: unknown, key = '', depth = 0): unknown {
+  if (depth > 6) return '<REDACTED_DEPTH>'
+  if (/authorization|cookie|password|token|api.?key|secret|session|csrf/iu.test(key)) return '<REDACTED>'
+  if (typeof value === 'string') return redactExecutionEventText(value).slice(0, 2_000)
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'boolean' || value === null) return value
+  if (Array.isArray(value)) return value.slice(0, 100).map(item => redactExecutionMetadata(item, key, depth + 1))
+  if (!value || typeof value !== 'object') return undefined
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .slice(0, 100)
+    .map(([childKey, child]) => [childKey, redactExecutionMetadata(child, childKey, depth + 1)]))
+}
+
+function redactExecutionEventText(value: string) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/gu, ' ')
+    .replace(/https?:\/\/[^\s"')]+/giu, raw => {
+      try { return new URL(raw).pathname } catch { return '<redacted-url>' }
+    })
+    .replace(/\/[A-Za-z0-9._~%/-]+\?[^\s"')]+/giu, raw => {
+      try { return new URL(raw, 'https://smarthub.invalid').pathname } catch { return '<redacted-path>' }
+    })
+    .replace(
+      /\b(authorization|cookie|set-cookie|password|token|api[_ -]?key|secret|session|csrf)\b\s*[:=]\s*[^\s,;]+/giu,
+      '$1=<REDACTED>',
+    )
+    .trim()
 }
 
 function lineDifference(fromSource: string, toSource: string) {

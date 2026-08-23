@@ -35,6 +35,7 @@ import type {
   CaseMaintenanceProposal,
   ExecutionArtifact,
   ExecutionAttempt,
+  ExecutionEvent,
   ExecutionEnvironmentSnapshot,
   ExecutionJob,
   ExecutionPackage,
@@ -109,7 +110,7 @@ const handoffMember: TestExecutionHandoffMember = {
 function scriptSource(locator = 'status', caseId = 'case-status') {
   return `import { test, expect } from '@playwright/test'
 
-test('${caseId}', async ({ page }) => {
+test('状态检查 [${caseId}]', async ({ page }) => {
   await page.goto('/status')
   // smarthub:assert expected-1
   await expect(page.locator('[data-testid="${locator}"]')).toHaveText('Ready')
@@ -121,7 +122,7 @@ function apiScriptSource(caseId: string) {
   return `import { test, expect } from '@playwright/test'
 import { AuthClient } from '../../api/auth-client.js'
 
-test('${caseId}', async ({ request }) => {
+test('API 状态检查 [${caseId}]', async ({ request }) => {
   const response = await new AuthClient(request).login()
   // smarthub:assert expected-1
   expect(response.ok()).toBeTruthy()
@@ -288,6 +289,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
   task: ExecutionTask
   job: ExecutionJob
   attempts: ExecutionAttempt[] = []
+  events: ExecutionEvent[] = []
   diagnoses: FailureDiagnosis[] = []
   artifacts: ExecutionArtifact[] = []
   scriptArtifacts: ScriptArtifact[] = []
@@ -342,6 +344,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
       run: structuredClone(this.run),
       task: structuredClone(this.task),
       attempts: this.attempts.map(item => structuredClone(item)),
+      events: this.events.map(item => structuredClone(item)),
       diagnoses: this.diagnoses.map(item => structuredClone(item)),
       scriptRevisions: this.revisions.map(item => structuredClone(item)),
       artifacts: this.artifacts.map(item => structuredClone(item)),
@@ -352,6 +355,12 @@ class InMemoryExecutionStore implements TestExecutionStore {
   async listAttempts(taskId: string) {
     return this.attempts
       .filter(item => item.taskId === taskId)
+      .map(item => structuredClone(item))
+  }
+
+  async listEvents(taskId: string, attemptId?: string) {
+    return this.events
+      .filter(item => item.taskId === taskId && (!attemptId || item.attemptId === attemptId))
       .map(item => structuredClone(item))
   }
 
@@ -403,20 +412,13 @@ class InMemoryExecutionStore implements TestExecutionStore {
     return structuredClone(this.maintenanceProposals[index])
   }
 
-  async getScriptArtifactByCacheKey(cacheKey: string) {
-    const artifact = this.scriptArtifacts.find(item => item.cacheKey === cacheKey)
+  async getScriptArtifact(artifactId: string) {
+    const artifact = this.scriptArtifacts.find(item => item.id === artifactId)
     return artifact ? structuredClone(artifact) : null
   }
 
   async getScriptRevision(revisionId: string) {
     const revision = this.revisions.find(item => item.id === revisionId)
-    return revision ? structuredClone(revision) : null
-  }
-
-  async getCacheSourceRevision(scriptArtifactId: string) {
-    const revision = this.revisions.find(item =>
-      item.scriptArtifactId === scriptArtifactId
-      && item.source !== 'cache')
     return revision ? structuredClone(revision) : null
   }
 
@@ -545,6 +547,12 @@ class InMemoryExecutionStore implements TestExecutionStore {
         assert.equal(attempt.status, 'running')
         assert.equal(this.attempts.some(item => item.id === attempt.id), false)
         this.attempts.push(structuredClone(attempt))
+      },
+      appendExecutionEvents: async events => {
+        for (const event of events) {
+          assert.equal(this.events.some(item => item.id === event.id), false)
+          this.events.push(structuredClone(event))
+        }
       },
       finalizeAttempt: async input => {
         const index = this.attempts.findIndex(item => item.id === input.attemptId)
@@ -859,7 +867,7 @@ test('已有有效 API Execution Binding 时 Execute First 直接运行 request 
       caseId: store.task.input.caseId,
       executionType: 'api',
       entryFile,
-      entrySymbol: store.task.input.caseId,
+      entrySymbol: `[${store.task.input.caseId}]`,
       bindingStatus: 'validated',
       entrySha256: dependencyFiles[1].contentSha256,
       dependencyFiles,
@@ -894,7 +902,7 @@ test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAge
       caseId: store.task.input.caseId,
       executionType: 'ui',
       entryFile: 'tests/ui/status.spec.ts',
-      entrySymbol: store.task.input.caseId,
+      entrySymbol: `[${store.task.input.caseId}]`,
       bindingStatus: 'validated',
       entrySha256,
       ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
@@ -912,6 +920,84 @@ test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAge
   }, { workspace: true })
 })
 
+test('继承 Binding 真实通过后升级 validated，真实失败不自动判 invalid', async () => {
+  const bindInheritedEntry = async (
+    workspace: LocalExecutionWorkspaceStore,
+    store: InMemoryExecutionStore,
+  ) => {
+    const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'ui',
+      entryFile: 'tests/ui/status.spec.ts',
+      entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'needs_validation',
+      entrySha256,
+      ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+  }
+
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '继承入口通过', artifacts: [] },
+  ], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    await bindInheritedEntry(workspace, store)
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.deepEqual(runtime.calls, [])
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+  }, { workspace: true })
+
+  await withService([
+    { status: 'failed', exitCode: 1, durationMs: 8, summary: '产品行为失败', error: 'expected Ready', artifacts: [] },
+  ], async ({ service, store, job, workspace }) => {
+    assert.ok(workspace)
+    await bindInheritedEntry(workspace, store)
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'failed')
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'needs_validation')
+  }, { workspace: true, diagnosisCategory: 'product_defect' })
+})
+
+test('Binding 方法不匹配先标记 invalid，再由 Agent 生成独立有效入口', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '新入口通过', artifacts: [] },
+  ], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const entrySha256 = createHash('sha256').update(source, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'api',
+      entryFile: 'tests/ui/status.spec.ts',
+      entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'needs_validation',
+      entrySha256,
+      ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+    const recordedStatuses: string[] = []
+    const original = workspace.setBindingStatus.bind(workspace)
+    workspace.setBindingStatus = async (projectVersionId, caseId, status) => {
+      recordedStatuses.push(status)
+      return original(projectVersionId, caseId, status)
+    }
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.equal(recordedStatuses[0], 'invalid')
+    assert.equal(runtime.calls.some(call => call.stage === 'script_generation'), true)
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+  }, { workspace: true })
+})
+
 test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷不修改 Workspace', async () => {
   await withService([
     { status: 'failed', exitCode: 1, durationMs: 8, summary: '业务断言失败', error: 'expected Ready', artifacts: [] },
@@ -921,7 +1007,7 @@ test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷�
     await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
     await workspace.saveBinding({
       projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
-      executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: store.task.input.caseId,
+      executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: `[${store.task.input.caseId}]`,
       bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
       ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
       createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
@@ -947,7 +1033,7 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
     await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
     await workspace.saveBinding({
       projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
-      executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: store.task.input.caseId,
+      executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: `[${store.task.input.caseId}]`,
       bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
       ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
       createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
@@ -1179,6 +1265,69 @@ test('TestExecutionService 首次真实失败固定同脚本重试，成功后�
   })
 })
 
+test('Runner 结构化失败事件按 Attempt 持久化、关联截图与 Trace 并在 Service 边界脱敏', async () => {
+  const screenshotSha256 = 'a'.repeat(64)
+  const traceSha256 = 'b'.repeat(64)
+  const runnerFailure: SandboxExecutionResult = {
+    status: 'failed',
+    exitCode: 1,
+    durationMs: 25,
+    summary: '断言失败',
+    error: 'expected Ready',
+    artifacts: [
+      { type: 'screenshot', storagePath: 'objects/a.png', sha256: screenshotSha256, size: 8, mimeType: 'image/png' },
+      { type: 'trace', storagePath: 'objects/b.zip', sha256: traceSha256, size: 16, mimeType: 'application/zip' },
+    ],
+    events: [
+      {
+        sequence: 1,
+        type: 'http',
+        title: 'POST https://example.test/api/orders?token=secret-value -> 500 token=secret-value',
+        status: 'failed',
+        startedAt: '2026-08-13T11:59:59.975Z',
+        durationMs: 20,
+        artifactSha256s: [screenshotSha256, traceSha256],
+        metadata: {
+          method: 'POST',
+          path: '/api/orders?session=secret-session',
+          queryFields: ['token'],
+          authorization: 'Bearer secret-token',
+          nested: { cookie: 'secret-cookie' },
+        },
+      },
+      {
+        sequence: 2,
+        type: 'failure',
+        title: '业务断言失败 password=secret-password',
+        status: 'failed',
+        startedAt: '2026-08-13T11:59:59.995Z',
+        finishedAt: '2026-08-13T12:00:00.000Z',
+        durationMs: 5,
+        artifactSha256s: [screenshotSha256, traceSha256],
+      },
+    ],
+  }
+  await withService([runnerFailure, structuredClone(runnerFailure)], async ({ service, store, job }) => {
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'failed')
+    const detail = await service.taskDetail(store.task.id)
+    assert.deepEqual(detail.events.map(event => event.sequence), [1, 2, 1, 2])
+    assert.deepEqual([...new Set(detail.events.map(event => event.attemptId))], store.attempts.map(attempt => attempt.id))
+    assert.equal(detail.events.every(event => event.artifactIds?.length === 2), true)
+    assert.deepEqual(detail.events[0].metadata, {
+      method: 'POST',
+      path: '/api/orders',
+      queryFields: ['token'],
+      authorization: '<REDACTED>',
+      nested: { cookie: '<REDACTED>' },
+    })
+    assert.equal(detail.events[0].title, 'POST /api/orders -> 500 token=<REDACTED>')
+    assert.equal(detail.events[1].title, '业务断言失败 password=<REDACTED>')
+    assert.doesNotMatch(JSON.stringify(detail.events), /secret-value|secret-session|secret-token|secret-cookie|secret-password/u)
+    assert.deepEqual(detail.artifacts.filter(artifact => artifact.type !== 'script').map(artifact => artifact.type), ['screenshot', 'trace', 'screenshot', 'trace'])
+  }, { diagnosisCategory: 'product_defect' })
+})
+
 test('TestExecutionService 两次真实失败后才诊断，并在两次自动修复上限收口', async () => {
   const failures = Array.from({ length: 6 }, (_, index): SandboxExecutionResult => ({
     status: 'failed',
@@ -1345,7 +1494,7 @@ test('TestExecutionService 维护建议 accepted/rejected 使用服务端审计�
   }
 })
 
-test('TestExecutionService 缓存复用 Revision 显式保存原始非缓存 Revision 来源', async () => {
+test('TestExecutionService Binding 缺失时进入 Agent Implement，不回放旧 ScriptArtifact Cache', async () => {
   await withService([
     {
       status: 'passed',
@@ -1358,7 +1507,7 @@ test('TestExecutionService 缓存复用 Revision 显式保存原始非缓存 Rev
       status: 'passed',
       exitCode: 0,
       durationMs: 7,
-      summary: '缓存脚本通过',
+      summary: '新 Workspace 脚本通过',
       artifacts: [],
     },
   ], async ({ service, store, runtime, job }) => {
@@ -1374,6 +1523,7 @@ test('TestExecutionService 缓存复用 Revision 显式保存原始非缓存 Rev
     store.run = {
       ...next.run,
       id: 'run-cache-replay',
+      projectVersionId: 'project-version-without-binding',
       idempotencyKey: 'idempotency-cache-replay',
     }
     store.task = {
@@ -1395,17 +1545,11 @@ test('TestExecutionService 缓存复用 Revision 显式保存原始非缓存 Rev
     )
     assert.equal(replayed.status, 'passed')
     assert.equal(runtime.calls.filter(call =>
-      call.stage === 'script_generation').length, 1)
-    const cachedRevision = store.revisions.at(-1)!
-    assert.equal(cachedRevision.source, 'cache')
-    assert.equal(
-      cachedRevision.cacheSourceRevisionId,
-      sourceRevision.id,
-    )
-    assert.equal(
-      cachedRevision.scriptArtifactId,
-      sourceRevision.scriptArtifactId,
-    )
+      call.stage === 'script_generation').length, 2)
+    const implementedRevision = store.revisions.at(-1)!
+    assert.equal(implementedRevision.source, 'agent')
+    assert.equal(implementedRevision.cacheSourceRevisionId, undefined)
+    assert.notEqual(implementedRevision.id, sourceRevision.id)
   })
 })
 

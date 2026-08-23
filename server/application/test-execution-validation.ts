@@ -383,6 +383,31 @@ export function buildExecutionPackage(input: {
   }
 }
 
+/** Stable Playwright title suffix owned by the Execution Binding. */
+export function executionEntrySymbol(caseId: string) {
+  return `[${safeIdentity(caseId, 'caseId')}]`
+}
+
+/**
+ * Revalidates a persisted Binding against the current entry source. This is
+ * intentionally AST based: a comment, helper string or partial Case ID is not
+ * an executable Playwright entry.
+ */
+export function assertExecutionBindingEntry(
+  source: string,
+  caseId: string,
+  entrySymbol: string,
+) {
+  const expected = executionEntrySymbol(caseId)
+  if (entrySymbol !== expected) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_BINDING_ENTRY_SYMBOL_INVALID',
+      `Execution Binding entrySymbol 必须为 ${expected}`,
+    )
+  }
+  entryTestCallback(parseWorkspaceSource(source), caseId)
+}
+
 export function assertExecutionPackageIntegrity(input: {
   package: ExecutionPackage
   task: FrozenExecutionTaskInput & { taskId: string }
@@ -672,6 +697,8 @@ function validateEntrypointSource(
 ): ExecutionAssertionContract[] {
   const ast = parseWorkspaceSource(source)
   const callback = entryTestCallback(ast, caseId)
+  assertAuthIsolation(ast, executionSpec)
+  assertBusinessClosure(ast, executionSpec)
   const fixtures = callbackFixtureNames(callback)
   if (executionSpec.method === 'api' && !fixtures.has('request')) {
     rejectSource('API Case 必须使用 Playwright Test request fixture / APIRequestContext')
@@ -713,6 +740,87 @@ function validateEntrypointSource(
       }),
     }
   })
+}
+
+function assertAuthIsolation(
+  ast: ReturnType<typeof parse>,
+  executionSpec: TestCaseExecutionSpec,
+) {
+  if (!authIsolationRequired(executionSpec.testCase)) return
+  let sharedFixtureImport = false
+  let configuredStorageState = false
+  walkAst(ast, node => {
+    if (node.type === 'ImportDeclaration' && String(node.source.value) !== '@playwright/test') {
+      sharedFixtureImport ||= node.specifiers.some(specifier =>
+        specifier.local.name === 'test'
+        || specifier.type === 'ImportSpecifier'
+          && (specifier.imported.type === 'Identifier'
+            ? specifier.imported.name === 'test'
+            : specifier.imported.value === 'test'))
+    }
+    if (
+      node.type === 'CallExpression'
+      && node.callee.type === 'MemberExpression'
+      && !node.callee.computed
+      && node.callee.object.type === 'Identifier'
+      && node.callee.object.name === 'test'
+      && node.callee.property.type === 'Identifier'
+      && node.callee.property.name === 'use'
+      && node.arguments[0]?.type === 'ObjectExpression'
+    ) {
+      configuredStorageState ||= node.arguments[0].properties.some(property =>
+        property.type === 'ObjectProperty'
+        && propertyName(property.key) === 'storageState'
+        && property.value.type !== 'NullLiteral'
+        && !(property.value.type === 'Identifier' && property.value.name === 'undefined'))
+    }
+  })
+  if (sharedFixtureImport || configuredStorageState) {
+    rejectSource('登录、退出、未登录、会话失效、角色切换或账号隔离 Case 必须使用 fresh/anonymous/isolated Context，不能加载共享认证 Fixture/storageState')
+  }
+}
+
+function authIsolationRequired(testCase: TestCaseContent) {
+  const intent = [testCase.title, ...testCase.steps, ...testCase.expectedResults]
+    .join('\n')
+    .toLocaleLowerCase()
+    .replace(/(?:成功)?登录后|after\s+(?:logging\s+in|login)/giu, '')
+  return /(?:登录|登出|退出登录|未登录|未经认证|匿名访问|会话失效|会话过期|token\s*过期|cookie\s*失效|角色切换|账号隔离|登录安全|多会话|\blog\s*in\b|\blogin\b|\blogout\b|unauthenticated|anonymous|session\s*expir|token\s*expir|cookie\s*expir|role\s*switch|account\s*isolation|multi[- ]session)/iu.test(intent)
+}
+
+function assertBusinessClosure(
+  ast: ReturnType<typeof parse>,
+  executionSpec: TestCaseExecutionSpec,
+) {
+  const expected = executionSpec.testCase.expectedResults.join('\n').toLocaleLowerCase()
+  const requiresReadBack = /(?:查询确认|查询成功|再次查询|重新查询|刷新后|重新进入|重新打开|仍为|仍然|持久化|最终状态|不存在|删除后|read\s*back|re-?query|reload|refresh|re-?enter|persisted|eventual\s+state|no\s+longer\s+exists)/iu.test(expected)
+  if (!requiresReadBack) return
+  const mutationPositions: number[] = []
+  const readBackPositions: number[] = []
+  walkAst(ast, node => {
+    if (
+      node.type !== 'CallExpression'
+      || node.callee.type !== 'MemberExpression'
+      || node.callee.computed
+      || node.callee.property.type !== 'Identifier'
+    ) return
+    const method = node.callee.property.name.toLocaleLowerCase()
+    const position = node.start ?? -1
+    if (executionSpec.method === 'api') {
+      if (/^(?:post|put|patch|delete|create|update|remove|save|submit|transition|complete|cancel|approve|reject|publish|archive|restore|assign|set[a-z0-9_]*)$/u.test(method)) mutationPositions.push(position)
+      if (/^(?:get|read|find|detail|query|list|fetch|reload|refresh)$/u.test(method)) readBackPositions.push(position)
+    } else {
+      if (/^(?:click|dblclick|fill|press|presssequentially|check|uncheck|selectoption|setchecked|dragto)$/u.test(method)) mutationPositions.push(position)
+      if (/^(?:reload|goto|waitforurl)$/u.test(method)) readBackPositions.push(position)
+    }
+  })
+  const readBackObserved = mutationPositions.some(mutation =>
+    readBackPositions.some(readBack => readBack > mutation))
+  if (!readBackObserved) {
+    rejectSource(executionSpec.method === 'api'
+      ? 'Expected Result 要求持久化业务闭环，API 脚本必须包含后续读取/查询并通过受保护断言验证最终状态'
+      : 'Expected Result 要求持久化业务闭环，UI 脚本必须刷新、重新进入或重新导航并通过受保护断言验证最终状态')
+  }
 }
 
 function parseWorkspaceSource(source: string) {
@@ -795,6 +903,7 @@ function workspaceSourcePath(path: string) {
 }
 
 function entryTestCallback(ast: ReturnType<typeof parse>, caseId: string): Node {
+  const entrySymbol = executionEntrySymbol(caseId)
   const callbacks: Node[] = []
   walkAst(ast, node => {
     if (
@@ -803,11 +912,7 @@ function entryTestCallback(ast: ReturnType<typeof parse>, caseId: string): Node 
       || node.callee.name !== 'test'
       || node.arguments[0]?.type !== 'StringLiteral'
     ) return
-    if (
-      node.arguments[0].value !== caseId
-      && node.arguments[0].value.endsWith(caseId)
-    ) rejectSource(`入口文件存在与 Case ID ${caseId} 执行选择冲突的 Playwright test 标题`)
-    if (!entryTitleMatches(node.arguments[0].value, caseId)) return
+    if (!entryTitleMatches(node.arguments[0].value, entrySymbol)) return
     const callback = node.arguments[1]
     if (
       callback?.type === 'ArrowFunctionExpression'
@@ -815,13 +920,13 @@ function entryTestCallback(ast: ReturnType<typeof parse>, caseId: string): Node 
     ) callbacks.push(callback)
   })
   if (callbacks.length !== 1) {
-    rejectSource(`入口文件必须且只能包含一个标题引用 Case ID ${caseId} 的 Playwright test`)
+    rejectSource(`入口文件必须且只能包含一个以 ${entrySymbol} 结尾的 Playwright test`)
   }
   return callbacks[0]
 }
 
-function entryTitleMatches(title: string, caseId: string) {
-  return title === caseId
+function entryTitleMatches(title: string, entrySymbol: string) {
+  return title === entrySymbol || title.endsWith(` ${entrySymbol}`)
 }
 
 function callbackFixtureNames(callback: Node) {

@@ -185,7 +185,13 @@ export type ExecutionTask = {
     stage: string
     caseId: string
     caseRevision: number
-    caseContent: { title: string; objective: string }
+    caseContent: {
+      schemaVersion: 'test-case/v3'
+      title: string
+      preconditions: string[]
+      steps: string[]
+      expectedResults: string[]
+    }
     caseContentSha256: string
     method: TestExecutionMethod
     dimension: string
@@ -224,6 +230,30 @@ export type ExecutionAttempt = {
   exitCode?: number
   summary?: string
   error?: string
+}
+
+export type ExecutionEvent = {
+  id: string
+  runId: string
+  taskId: string
+  attemptId: string
+  sequence: number
+  type: 'runner' | 'step' | 'navigate' | 'click' | 'fill' | 'assertion' | 'http' | 'screenshot' | 'trace' | 'video' | 'failure' | 'retry'
+  title: string
+  status: 'running' | 'passed' | 'failed' | 'skipped'
+  startedAt: string
+  finishedAt?: string
+  durationMs?: number
+  artifactIds?: string[]
+  metadata?: {
+    source?: string
+    category?: string
+    method?: string
+    path?: string
+    httpStatus?: number
+    queryFields?: string[]
+    retry?: number
+  }
 }
 
 export type FailureDiagnosis = {
@@ -295,6 +325,7 @@ export type ExecutionTaskDetail = {
   run: ExecutionRun
   task: ExecutionTask
   attempts: ExecutionAttempt[]
+  events: ExecutionEvent[]
   diagnoses: FailureDiagnosis[]
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]

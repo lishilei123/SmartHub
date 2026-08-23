@@ -108,10 +108,14 @@ test('测试执行 Worker 按 Task 业务终态完成 Job，不把 failed/waitin
   ] as const) {
     const state = workerStore({ task })
     const heartbeat = heartbeatHarness()
+    const cleanedRuns: string[] = []
     await processClaimedTestExecutionJob({
       job: executionJob(),
       store: state.store,
-      service: { async processPreparedTask() { return task } },
+      service: {
+        async processPreparedTask() { return task },
+        async cleanupRunRuntimeState(runId) { cleanedRuns.push(runId) },
+      },
       workerId: 'worker-1',
       leaseMs: 60_000,
       scheduleHeartbeat: heartbeat.scheduleHeartbeat,
@@ -121,6 +125,7 @@ test('测试执行 Worker 按 Task 业务终态完成 Job，不把 failed/waitin
       ...(task.error ? { error: task.error } : {}),
     }])
     assert.deepEqual(state.releases, [])
+    assert.deepEqual(cleanedRuns, ['run-1'])
     assert.equal(heartbeat.cleared(), true)
   }
 })

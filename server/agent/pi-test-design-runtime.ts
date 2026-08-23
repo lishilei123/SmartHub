@@ -193,6 +193,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
     ? [
           'Requirement 是正式业务事实来源，但不是测试设计的场景边界。先围绕独立 Test Intent 设计自然业务闭环，再主动扩展异常、边界、非法输入、非法状态、权限、并发、一致性、重复操作、恢复、查询准确性、性能、稳定性、兼容性、安全、历史缺陷与 Knowledge 风险场景。',
           'Case 拆分单位是独立 Test Intent，不是 Requirement、步骤或接口数量。Create → Read → Update → Read → Delete → Read 和合法 todo → in_progress → completed 可以各自保持一条自然闭环；todo → completed、in_progress → todo、completed → in_progress、completed → todo、空字符串、纯空白、非法枚举、非法操作等能够独立失败的风险应主动拆分。禁止按最小数量或固定倍数凑 Case。',
+          'Case 发生创建、更新、删除、状态流转、持久化配置、跨页面数据或异步最终状态变化时，Expected Result 必须描述回读、刷新、重新进入或最终查询后可观察的稳定业务字段或不存在状态，不能只写操作成功。字段格式、必填、可见性、Tooltip、即时前端校验等非持久化 Case 不机械追加闭环，也不得编造接口、Selector、状态值、等待阈值或账号。',
           '合法枚举集合只证明值属于业务集合，不证明该值在任意操作或生命周期阶段都允许输入。对状态字段必须联合枚举、当前状态、状态转换规则和当前操作判断；Requirement 同时定义状态集合与状态机时，不得通过创建时直接指定 in_progress 或 completed 来验证合法状态，优先通过 todo → in_progress → completed 合法流转验证。priority 若无状态机约束，可直接验证 high、medium、low。',
           '存在明确状态机时，Self Review 必须检查每条有业务意义的合法路径，以及可由正式 Requirement 直接确定为非法的反向、跳级边是否遗漏。对 todo → in_progress → completed，in_progress → todo 是可独立失败的明确回退风险；用例应验证拒绝回退且持久化状态仍保持 in_progress，requirementRefs 关联正式状态顺序 Requirement。不穷举数学意义的全部状态组合。',
           'Knowledge Reference 只提示风险，不是正式业务事实，也不强制 Case 粒度。必须把 knowledgeReferences.hits 纳入设计和提交前 Self Review，但不要求每条引用或每个 Requirement 生成 Case。',
