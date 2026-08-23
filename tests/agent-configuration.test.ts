@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, type Api, type Model } from '@earendil-works/pi-ai'
+import type { StreamFn } from '@earendil-works/pi-agent-core'
+import { PiAgentRuntimeAdapter } from '../server/agent/pi-agent-runtime.js'
 import { PiTestDesignRuntimeAdapter } from '../server/agent/pi-test-design-runtime.js'
 import {
   PiTestExecutionRuntimeAdapter,
@@ -12,6 +15,8 @@ import type { AgentExecutionInput } from '../server/domain/agent-types.js'
 import type { ExecutionRun, ExecutionTask } from '../server/domain/test-execution-types.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 import { materializeRequiredAgentCapabilities } from '../src/agent-configuration-api.js'
+import { BROWSER_TOOL_IDS, type BrowserToolSession } from '../server/tools/playwright-browser-tools.js'
+import { defaultBuiltInToolConfigResolver } from '../server/tools/built-in-tool-config.js'
 
 async function fixture() {
   const store = new JsonStore(null)
@@ -49,6 +54,7 @@ test('统一 PlanningAgent 发布 Workspace、Knowledge、Skill 与全部提交�
   const { service } = await fixture()
   const initial = (await service.get('planning')).agents.planning!
   assert.deepEqual(initial.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
+  assert.equal(initial.requiredToolIds.some(toolId => toolId.startsWith('browser.')), false)
   assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
   assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
   assert.ok(initial.draft.definition.skillKeys.includes('requirement.analysis'))
@@ -199,7 +205,7 @@ test('两个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
   const expected = {
     executionImplementation: {
       definitionKey: 'execution-implementation',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'execution_implementation.submit_result'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'browser.snapshot', 'browser.click', 'browser.fill', 'browser.get_locator', 'browser.requests', 'browser.request_detail', 'browser.screenshot', 'execution_implementation.submit_result'],
       skills: ['test-script-generation', 'script-repair'],
     },
     failureAnalysis: {
@@ -216,7 +222,7 @@ test('两个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
     assert.deepEqual(agent.requiredMcpServerKeys, [])
     const unexpectedTool = agentKey === 'executionImplementation'
       ? 'failure_analysis.submit_result'
-      : 'knowledge.search'
+      : 'browser.click'
     await assert.rejects(() => service.save('test_execution', {
       agentKey,
       revision: agent.draft.revision,
@@ -291,7 +297,7 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
   const workspace = executionWorkspaceFixture(run)
   const stageCapabilities = {
     script_generation: {
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'execution_implementation.submit_result'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', ...BROWSER_TOOL_IDS, 'execution_implementation.submit_result'],
       skills: ['test-script-generation'],
     },
     failure_diagnosis: {
@@ -299,7 +305,7 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
       skills: ['failure-analysis'],
     },
     script_repair: {
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'execution_implementation.submit_result'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', ...BROWSER_TOOL_IDS, 'execution_implementation.submit_result'],
       skills: ['script-repair'],
     },
   } as const
@@ -317,11 +323,28 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
 
   for (const stage of Object.keys(TEST_EXECUTION_STAGE_BINDINGS) as Array<keyof typeof TEST_EXECUTION_STAGE_BINDINGS>) {
     const binding = TEST_EXECUTION_STAGE_BINDINGS[stage]
+    const browserSession: BrowserToolSession | undefined = stage === 'failure_diagnosis' ? undefined : {
+      scope: {
+        runId: run.id,
+        taskId: task.id,
+        projectVersionId: run.projectVersionId,
+        environmentSignature: run.environment.signature,
+        baseUrl: run.environment.baseUrl,
+        stage,
+      },
+      runtimeToolBindings: () => BROWSER_TOOL_IDS.map(toolId => ({
+        descriptor: defaultBuiltInToolConfigResolver.toDescriptor(toolId),
+        handler: async () => ({ data: { ok: true } }),
+      })),
+      observations: () => [],
+      close: async () => undefined,
+    }
     await runtime.execute({
       stage,
       run,
       task,
       workspace,
+      ...(browserSession ? { browserSession } : {}),
       stageContext: stage === 'failure_diagnosis'
         ? { scriptRevisionId: 'revision-1', attemptIds: ['attempt-1', 'attempt-2'], artifactIds: ['artifact-1'] }
         : stage === 'script_repair'
@@ -342,6 +365,8 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
     assert.deepEqual(input.snapshot.agentDefinition.enabledSkills, stageCapabilities[stage].skills)
     assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.search'), stage === 'script_generation')
     assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.read_chunk'), stage === 'script_generation')
+    assert.equal(input.executionProfile?.allowedToolIds.includes('browser.snapshot'), stage !== 'failure_diagnosis')
+    assert.equal(input.executionProfile?.runtimeToolBindings?.length ?? 0, stage === 'failure_diagnosis' ? 0 : BROWSER_TOOL_IDS.length)
     assert.equal(input.executionProfile?.allowedToolIds.some(toolId => /runner|shell|ssh|database|http/u.test(toolId)), false)
     if (stage === 'script_repair') {
       assert.match(input.executionProfile!.initialTask, /不得重新进行需求分析、测试设计或通过 Knowledge 搜索扩大修复范围/u)
@@ -354,6 +379,87 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
   assert.equal('executionSessionKey' in captured[0].snapshot && captured[0].snapshot.executionSessionKey, `execution-implementation:${run.id}:${task.id}`)
   assert.equal('executionSessionKey' in captured[1].snapshot && captured[1].snapshot.executionSessionKey, `execution-diagnosis:${run.id}:${task.id}:revision-1`)
   assert.equal('executionSessionKey' in captured[2].snapshot && captured[2].snapshot.executionSessionKey, `execution-implementation:${run.id}:${task.id}`)
+})
+
+test('ExecutionImplementationAgent 在单次 invocation 中完成 Browser 多轮观察、Workspace 读取与 Submit', async () => {
+  const { store, service } = await fixture()
+  for (const agentKey of ['executionImplementation', 'failureAnalysis'] as const) {
+    const initial = (await service.get('test_execution')).agents[agentKey]!
+    const saved = await service.save('test_execution', {
+      agentKey,
+      revision: initial.draft.revision,
+      routing: { ...initial.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
+      definition: initial.draft.definition,
+    })
+    await service.publish('test_execution', { agentKey, revision: saved.revision })
+  }
+  const faux = fauxProvider()
+  const candidate = {
+    entryFile: 'tests/ui/status.spec.ts',
+    files: [{
+      path: 'tests/ui/status.spec.ts',
+      content: `import { test, expect } from '@playwright/test'\ntest('状态检查 [case-1]', async ({ page }) => { await page.goto('/'); await expect(page.getByRole('status')).toHaveText('Ready') })\n`,
+    }],
+  }
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall('browser_snapshot', {}), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('browser_click', { target: 'e1' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('browser_snapshot', {}), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('read', { path: 'branches/V1.0/execution/run-1/task.json' }), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('browser_requests', {}), { stopReason: 'toolUse' }),
+    fauxAssistantMessage(fauxToolCall('execution_implementation_submit_result', candidate), { stopReason: 'toolUse' }),
+  ])
+  const pi = new PiAgentRuntimeAdapter(store, {
+    model: faux.getModel() as Model<Api>,
+    streamFn: faux.provider.streamSimple.bind(faux.provider) as StreamFn,
+  })
+  const runtime = new PiTestExecutionRuntimeAdapter(store, pi, service)
+  const run = executionRunFixture(await runtime.freezeConfigurations())
+  const task = executionTaskFixture(run.id)
+  const browserCalls: string[] = []
+  const browserSession: BrowserToolSession = {
+    scope: {
+      runId: run.id,
+      taskId: task.id,
+      projectVersionId: run.projectVersionId,
+      environmentSignature: run.environment.signature,
+      baseUrl: run.environment.baseUrl,
+      stage: 'script_generation',
+    },
+    runtimeToolBindings: () => BROWSER_TOOL_IDS.map(toolId => ({
+      descriptor: defaultBuiltInToolConfigResolver.toDescriptor(toolId),
+      handler: async () => {
+        browserCalls.push(toolId)
+        return { data: toolId === 'browser.snapshot' ? { snapshot: '- button "状态" [ref=e1]' } : { ok: true } }
+      },
+    })),
+    observations: () => [],
+    close: async () => undefined,
+  }
+  const output = await runtime.execute({
+    stage: 'script_generation',
+    run,
+    task,
+    workspace: executionWorkspaceFixture(run),
+    browserSession,
+    validateCandidate: async value => ({ valid: true, result: value, issues: [] }),
+  }, new AbortController().signal)
+
+  assert.deepEqual(browserCalls, [
+    'browser.snapshot',
+    'browser.click',
+    'browser.snapshot',
+    'browser.requests',
+  ])
+  assert.equal(output.candidate.entryFile, candidate.entryFile)
+  assert.deepEqual(output.execution.events.filter(event => event.type === 'tool_execution_start').map(event => event.toolId), [
+    'browser_snapshot',
+    'browser_click',
+    'browser_snapshot',
+    'read',
+    'browser_requests',
+    'execution_implementation_submit_result',
+  ])
 })
 
 test('测试执行 Agent 模型参数漂移会破坏 frozen snapshot 就绪契约', async () => {

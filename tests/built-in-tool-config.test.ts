@@ -7,8 +7,8 @@ import { ToolRegistry } from '../server/tools/registry.js'
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
 test('checked-in built-in Tool config excludes retired requirement repair submissions', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 12)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 11)
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 19)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 18)
   assert.ok(defaultBuiltInToolConfigResolver.keys().every(key => !key.startsWith('skill.')))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
@@ -22,6 +22,8 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').piName, 'execution_implementation_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').piName, 'failure_analysis_submit_result')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('browser.snapshot').piName, 'browser_snapshot')
+  assert.equal(defaultBuiltInToolConfigResolver.has('browser.evaluate'), false)
   const reviewer = defaultBuiltInToolConfigResolver.toDescriptor('reviewer.submit_result').parameters as unknown as {
     properties: { reviewerType: { enum: string[] } }
   }

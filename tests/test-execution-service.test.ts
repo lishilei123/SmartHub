@@ -28,9 +28,15 @@ import type {
 } from '../server/agent/pi-test-execution-runtime.js'
 import {
   UIExecutionAgent,
+  type PlaywrightBrowserCliAdapter,
   type PlaywrightCliToolAdapter,
+  type PlaywrightCliRequestSummary,
   type UiExecutionBrowserContext,
 } from '../server/agent/ui-execution-agent.js'
+import {
+  PlaywrightBrowserToolGateway,
+} from '../server/tools/playwright-browser-tools.js'
+import type { TestExecutionAgentSnapshot } from '../server/domain/agent-types.js'
 import type {
   CaseMaintenanceProposal,
   ExecutionArtifact,
@@ -593,7 +599,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
 }
 
 class ScriptAgentRuntime implements TestExecutionAgentRuntime {
-  calls: Array<Pick<TestExecutionAgentRuntimeInput, 'stage' | 'stageContext' | 'uiExecution' | 'workspace'>> = []
+  calls: Array<Pick<TestExecutionAgentRuntimeInput, 'stage' | 'stageContext' | 'uiExecution' | 'workspace'> & { browserToolIds: string[] }> = []
   repairOrdinal = 0
 
   constructor(
@@ -601,6 +607,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
     private readonly options: {
       diagnosisCategory?: FailureDiagnosis['category']
       repairSource?: (ordinal: number) => string
+      runtimeFailure?: string
     } = {},
   ) {}
 
@@ -613,11 +620,51 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
   }
 
   async execute(input: TestExecutionAgentRuntimeInput): Promise<TestExecutionAgentRuntimeOutput> {
+    const browserToolIds = input.browserSession?.runtimeToolBindings().map(binding => binding.descriptor.id) ?? []
+    if (input.browserSession) {
+      const bindings = new Map(input.browserSession.runtimeToolBindings().map(binding => [binding.descriptor.id, binding]))
+      const invoke = async (toolId: string, argumentsValue: Record<string, unknown>) => {
+        const binding = bindings.get(toolId)
+        assert.ok(binding)
+        return binding.handler({
+          toolId,
+          toolCallId: `fixture-${toolId}`,
+          arguments: argumentsValue,
+          context: {
+            snapshot: {
+              runId: input.run.id,
+              taskId: input.task.id,
+              projectId: input.run.projectId,
+              projectVersionId: input.run.projectVersionId,
+              browserAuthorization: {
+                runId: input.run.id,
+                taskId: input.task.id,
+                projectVersionId: input.run.projectVersionId,
+                environmentSignature: input.run.environment.signature,
+                stage: input.stage as 'script_generation' | 'script_repair',
+              },
+            } as TestExecutionAgentSnapshot,
+            allowedToolIds: new Set(browserToolIds),
+          },
+        }, new AbortController().signal)
+      }
+      await invoke('browser.snapshot', {})
+      if (input.stage === 'script_generation') {
+        await invoke('browser.click', { target: 'e1' })
+        const requests = await invoke('browser.requests', {})
+        const requestRef = (requests.data as { requests?: Array<{ requestRef: string }> }).requests?.[0]?.requestRef
+        if (requestRef) await invoke('browser.request_detail', { requestRef })
+      } else if (input.stage === 'script_repair') {
+        await invoke('browser.get_locator', { target: 'e1' })
+      }
+    }
+    if (this.options.runtimeFailure) throw new Error(this.options.runtimeFailure)
     this.calls.push(structuredClone({
       stage: input.stage,
       workspace: input.workspace,
       ...(input.stageContext ? { stageContext: input.stageContext } : {}),
       ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
+      browserToolIds,
     }))
     let candidate: Record<string, unknown>
     let schemaVersion: TestExecutionAgentRuntimeOutput['schemaVersion']
@@ -687,8 +734,10 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
   }
 }
 
-class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter {
+class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter, PlaywrightBrowserCliAdapter {
   calls: Array<UiExecutionBrowserContext['phase']> = []
+  browserCalls: string[] = []
+  private readonly sessions = new Set<string>()
 
   constructor(
     private readonly available = true,
@@ -715,6 +764,73 @@ class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter {
         error: 'PLAYWRIGHT_CLI_UNAVAILABLE',
       }),
     }
+  }
+
+  async open(session: string) {
+    this.browserCalls.push('open')
+    if (!this.available) throw new Error('PLAYWRIGHT_CLI_OPEN_FAILED_EXIT_1')
+    this.sessions.add(session)
+  }
+
+  async close(session: string) {
+    this.browserCalls.push('close')
+    this.sessions.delete(session)
+  }
+
+  async snapshot(session: string) {
+    this.requireSession(session)
+    this.browserCalls.push('snapshot')
+    return 'url: https://example.test/status\n- button "状态" [ref=e1]\n- textbox "账号" [ref=e2]'
+  }
+
+  async click(session: string, target: string) {
+    this.requireSession(session)
+    this.browserCalls.push(`click:${target}`)
+    return 'clicked'
+  }
+
+  async fill(session: string, target: string) {
+    this.requireSession(session)
+    this.browserCalls.push(`fill:${target}`)
+    return 'filled'
+  }
+
+  async generateLocator(session: string, target: string) {
+    this.requireSession(session)
+    this.browserCalls.push(`locator:${target}`)
+    return `page.getByRole('button', { name: '状态' })`
+  }
+
+  async screenshot(session: string) {
+    this.requireSession(session)
+    this.browserCalls.push('screenshot')
+    return 'ephemeral-screenshot'
+  }
+
+  async listRequests(session: string): Promise<PlaywrightCliRequestSummary[]> {
+    this.requireSession(session)
+    this.browserCalls.push('requests')
+    return this.networkCandidates.map((candidate, index) => ({
+      index,
+      method: String(candidate.method ?? 'GET'),
+      url: String(candidate.url ?? 'https://example.test/'),
+      ...(candidate.responseStatus ? { status: candidate.responseStatus } : {}),
+      ...(candidate.resourceType ? { resourceType: candidate.resourceType } : {}),
+    }))
+  }
+
+  async requestDetail(
+    session: string,
+    summary: PlaywrightCliRequestSummary,
+    observedFrom: Pick<RawUiNetworkObservation, 'page' | 'action' | 'actionType' | 'sequence'>,
+  ) {
+    this.requireSession(session)
+    this.browserCalls.push(`request:${summary.index}`)
+    return { ...structuredClone(this.networkCandidates[summary.index] ?? {}), ...observedFrom }
+  }
+
+  private requireSession(session: string) {
+    if (!this.sessions.has(session)) throw new Error('FIXTURE_BROWSER_SESSION_NOT_FOUND')
   }
 }
 
@@ -770,6 +886,7 @@ async function withService(
     playwrightCliAvailable?: boolean
     networkCandidates?: RawUiNetworkObservation[]
     rejectMaintenanceProposalWrites?: boolean
+    runtimeFailure?: string
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
@@ -809,6 +926,8 @@ async function withService(
       () => '2026-08-13T12:00:00.000Z',
       workspace,
       new UIExecutionAgent(playwrightCli),
+      undefined,
+      new PlaywrightBrowserToolGateway(playwrightCli),
     )
     await operation({ service, store, runner, runtime, playwrightCli, job: value.job, workspace })
   } finally {
@@ -1037,7 +1156,9 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
     assert.equal(store.task.runnerAttemptCount, 2)
     assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 1)
     assert.deepEqual(runtime.calls.map(call => call.stage), ['failure_diagnosis', 'script_repair'])
-    assert.deepEqual(playwrightCli.calls, ['failure_analysis', 'script_repair'])
+    assert.deepEqual(playwrightCli.calls, ['failure_analysis'])
+    assert.equal(playwrightCli.browserCalls.filter(call => call === 'open').length, 1)
+    assert.equal(playwrightCli.browserCalls.includes('locator:e1'), true)
     const repairCall = runtime.calls[1]
     assert.equal(repairCall.stageContext?.parentScriptRevisionId, store.revisions[0].id)
     assert.equal(repairCall.stageContext?.diagnosisId, store.diagnoses[0].id)
@@ -1055,17 +1176,34 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
   }, { workspace: true, diagnosisCategory: 'script_defect' })
 })
 
-test('新 UI Case 先经 Playwright CLI snapshot，再由 Agent 写入当前 Workspace、建立 Binding 并 Runner', async () => {
+test('新 UI Case 由 ExecutionImplementationAgent 多轮调用 Browser Tools 后写入 Workspace、建立 Binding 并 Runner', async () => {
   await withService([
     { status: 'passed', exitCode: 0, durationMs: 8, summary: '新入口通过', artifacts: [] },
   ], async ({ service, store, runner, runtime, playwrightCli, job, workspace }) => {
     assert.ok(workspace)
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
     assert.equal(task.status, 'passed')
-    assert.deepEqual(playwrightCli.calls, ['implementation'])
+    assert.deepEqual(playwrightCli.calls, [])
     assert.equal(runtime.calls[0].stage, 'script_generation')
-    assert.equal(runtime.calls[0].uiExecution?.tool, 'playwright-cli')
-    assert.match(runtime.calls[0].uiExecution?.snapshot ?? '', /状态页/u)
+    assert.equal(runtime.calls[0].uiExecution, undefined)
+    assert.deepEqual(runtime.calls[0].browserToolIds, [
+      'browser.snapshot',
+      'browser.click',
+      'browser.fill',
+      'browser.get_locator',
+      'browser.requests',
+      'browser.request_detail',
+      'browser.screenshot',
+    ])
+    assert.deepEqual(playwrightCli.browserCalls, [
+      'open',
+      'snapshot',
+      'click:e1',
+      'snapshot',
+      'requests',
+      'requests',
+      'close',
+    ])
     const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
     assert.equal(binding?.entryFile, `tests/ui/${store.task.id}.spec.ts`)
     assert.equal(binding?.bindingStatus, 'validated')
@@ -1084,17 +1222,15 @@ test('UI Exploration 将 Action 关联业务 API 脱敏沉淀到当前 ProjectVe
     assert.equal(result.sourceCaseId, store.task.input.caseId)
     assert.equal(result.method, 'POST')
     assert.equal(result.path, '/api/login')
-    assert.equal(result.observedFrom.action, 'click 登录')
+    assert.equal(result.observedFrom.action, 'click e1')
     assert.equal(result.requestHeaders.authorization, '<REDACTED>')
     assert.equal(result.requestSchema?.properties?.password.redacted, true)
     assert.equal(result.responseSchema?.properties?.token.redacted, true)
     assert.equal(result.validationStatus, 'validated')
-    const projected = runtime.calls[0].workspace.workspaceFiles.find(
+    assert.doesNotMatch(JSON.stringify(result), /real-password|real-token|real-authorization|real-session/u)
+    assert.equal(runtime.calls[0].workspace.workspaceFiles.some(
       file => file.logicalPath === 'exploration/context.json',
-    )
-    assert.ok(projected)
-    assert.equal(projected.content.includes('real-password'), false)
-    assert.equal(projected.content.includes('real-token'), false)
+    ), false)
   }, {
     workspace: true,
     networkCandidates: [{
@@ -1214,16 +1350,33 @@ test('API Case 无 Binding 时优先获得当前 ProjectVersion Exploration Cont
   }, { workspace: true })
 })
 
-test('新 UI Case 无法获得 CLI snapshot 时不允许凭空生成脚本', async () => {
+test('新 UI Case 无法创建受控 Browser Session 时不允许凭空生成脚本', async () => {
   await withService([], async ({ service, runtime, playwrightCli, job }) => {
     await assert.rejects(
       service.processPreparedTask(job, lease, new AbortController().signal),
-      /TEST_EXECUTION_UI_PLAYWRIGHT_CLI_EXPLORATION_REQUIRED/u,
+      /PLAYWRIGHT_CLI_OPEN_FAILED_EXIT_1/u,
     )
-    assert.deepEqual(playwrightCli.calls, ['implementation'])
+    assert.deepEqual(playwrightCli.calls, [])
+    assert.deepEqual(playwrightCli.browserCalls, ['open', 'close'])
     assert.deepEqual(runtime.calls, [])
   }, { workspace: true, playwrightCliAvailable: false })
 })
+
+for (const runtimeFailure of ['MODEL_EXECUTION_FAILED', 'AGENT_DEADLINE_EXCEEDED', 'AGENT_CANCELLED']) {
+  test(`ExecutionImplementationAgent ${runtimeFailure} 时 Service 仍关闭 Browser Session`, async () => {
+    await withService([], async ({ service, store, runner, playwrightCli, job }) => {
+      await assert.rejects(
+        service.processPreparedTask(job, lease, new AbortController().signal),
+        new RegExp(runtimeFailure, 'u'),
+      )
+      assert.equal(playwrightCli.browserCalls[0], 'open')
+      assert.equal(playwrightCli.browserCalls.at(-1), 'close')
+      assert.equal(store.task.status, 'script_generating')
+      assert.equal(store.attempts.length, 0)
+      assert.equal(runner.calls.length, 0)
+    }, { workspace: true, runtimeFailure })
+  })
+}
 
 test('TestExecutionService 首次真实失败固定同脚本重试，成功后确定性标记 flaky', async () => {
   await withService([

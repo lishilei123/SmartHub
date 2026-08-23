@@ -16,6 +16,7 @@ import type {
   FailureDiagnosis,
   FrozenExecutionTestDataSnapshot,
   FrozenExecutionAgentSnapshot,
+  HttpExplorationObservation,
   ProjectVersionExplorationResult,
   ScriptArtifact,
   ScriptRevision,
@@ -29,6 +30,11 @@ import type {
   TestExecutionAgentRuntimeOutput,
 } from '../agent/pi-test-execution-runtime.js'
 import type { UIExecutionAgent, UiExecutionAgentPhase } from '../agent/ui-execution-agent.js'
+import type {
+  BrowserToolGateway,
+  BrowserToolSession,
+  BrowserToolStage,
+} from '../tools/playwright-browser-tools.js'
 import type { ExecutionArtifactStore } from '../infrastructure/execution-artifact-store.js'
 import { executionArtifactBody } from '../infrastructure/execution-artifact-store.js'
 import type {
@@ -131,6 +137,7 @@ export class TestExecutionService {
     private readonly executionWorkspace?: LocalExecutionWorkspaceStore,
     private readonly uiExecutionAgent?: UIExecutionAgent,
     private readonly knowledgeResolver?: TestExecutionKnowledgeResolver,
+    private readonly browserTools?: BrowserToolGateway,
   ) {}
 
   async readiness() {
@@ -709,28 +716,33 @@ export class TestExecutionService {
     task: ExecutionTask,
     signal: AbortSignal,
   ) {
-    const uiExecution = await this.uiExecutionContext(run, task, 'implementation', signal, true)
     const workspace = await this.workspace(run, task)
     const workspaceFiles = this.executionWorkspace
       ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
       : []
-    const output = await this.agentRuntime.execute({
-      stage: 'script_generation',
+    const output = await this.withBrowserSession(
       run,
       task,
-      workspace,
-      ...(uiExecution ? { uiExecution } : {}),
-      validateCandidate: candidateValidator(candidate => {
-        const normalized = packageCandidate(candidate, 'test-script-generation/v1')
-        buildExecutionPackage({
-          candidate: normalized,
-          task: { ...task.input, taskId: task.id },
-          environmentSignature: run.environment.signature,
-          workspaceFiles,
-        })
-        return normalized
-      }),
-    }, signal)
+      'script_generation',
+      signal,
+      browserSession => this.agentRuntime.execute({
+        stage: 'script_generation',
+        run,
+        task,
+        workspace,
+        ...(browserSession ? { browserSession } : {}),
+        validateCandidate: candidateValidator(candidate => {
+          const normalized = packageCandidate(candidate, 'test-script-generation/v1')
+          buildExecutionPackage({
+            candidate: normalized,
+            task: { ...task.input, taskId: task.id },
+            environmentSignature: run.environment.signature,
+            workspaceFiles,
+          })
+          return normalized
+        }),
+      }, signal),
+    )
     assertAgentOutputSchema(output, 'test-script-generation/v1')
     const executionPackage = buildExecutionPackage({
       candidate: packageCandidate(output.candidate, 'test-script-generation/v1'),
@@ -801,23 +813,6 @@ export class TestExecutionService {
     const artifacts = (await Promise.all(
       attempts.map(attempt => this.store.listArtifacts(task.id, attempt.id)),
     )).flat()
-    const uiExecution = await this.uiExecutionContext(run, task, 'script_repair', signal)
-    if (task.input.method === 'ui' && uiExecution && !uiExecution.available) {
-      await requiredLeaseTransaction(
-        this.store,
-        job.id,
-        lease,
-        transaction => transaction.transitionTask({
-          taskId: task.id,
-          expectedStatus: 'repairing',
-          expectedStateVersion: task.stateVersion,
-          status: 'waiting_manual',
-          error: 'TEST_EXECUTION_UI_PLAYWRIGHT_CLI_UNAVAILABLE',
-          finishedAt: this.clock(),
-        }),
-      )
-      return
-    }
     const workspace = await this.workspace(
       run,
       task,
@@ -840,21 +835,27 @@ export class TestExecutionService {
       })
       return normalized
     }
-    const output = await this.agentRuntime.execute({
-      stage: 'script_repair',
+    const output = await this.withBrowserSession(
       run,
       task,
-      workspace,
-      ...(uiExecution ? { uiExecution } : {}),
-      stageContext: {
-        parentScriptRevisionId: parent.id,
-        diagnosisId: diagnosis.id,
-        attemptIds: attempts.map(attempt => attempt.id),
-        artifactIds: artifacts.map(artifact => artifact.id),
-        repairCount: task.repairCount,
-      },
-      validateCandidate: candidateValidator(build),
-    }, signal)
+      'script_repair',
+      signal,
+      browserSession => this.agentRuntime.execute({
+        stage: 'script_repair',
+        run,
+        task,
+        workspace,
+        ...(browserSession ? { browserSession } : {}),
+        stageContext: {
+          parentScriptRevisionId: parent.id,
+          diagnosisId: diagnosis.id,
+          attemptIds: attempts.map(attempt => attempt.id),
+          artifactIds: artifacts.map(artifact => artifact.id),
+          repairCount: task.repairCount,
+        },
+        validateCandidate: candidateValidator(build),
+      }, signal),
+    )
     assertAgentOutputSchema(output, 'script-repair/v1')
     const executionPackage = buildExecutionPackage({
       candidate: build(output.candidate),
@@ -1507,6 +1508,58 @@ export class TestExecutionService {
     const run = await this.getRun(runId)
     if (!['succeeded', 'failed', 'partial', 'cancelled'].includes(run.status)) return
     await this.executionWorkspace.cleanupRuntimeAuth(run.projectVersionId, run.id)
+  }
+
+  private async withBrowserSession<T>(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    stage: BrowserToolStage,
+    signal: AbortSignal,
+    operation: (session?: BrowserToolSession) => Promise<T>,
+  ) {
+    if (task.input.method !== 'ui') return operation()
+    if (!this.browserTools) throw new Error('TEST_EXECUTION_BROWSER_TOOLS_REQUIRED')
+    const session = await this.browserTools.openSession({ run, task, stage }, signal)
+    let primaryError: unknown
+    try {
+      return await operation(session)
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      try {
+        await this.persistBrowserObservations(run, task, session.observations())
+      } catch (error) {
+        if (!primaryError) throw error
+      } finally {
+        try {
+          await session.close()
+        } catch (error) {
+          if (!primaryError) throw error
+        }
+      }
+    }
+  }
+
+  private async persistBrowserObservations(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    observations: readonly HttpExplorationObservation[],
+  ) {
+    if (!this.executionWorkspace || !observations.length) return
+    const observedAt = this.clock()
+    await this.executionWorkspace.saveExplorationResults(
+      run.projectVersionId,
+      observations.map(observation => createProjectVersionExplorationResult({
+        projectVersionId: run.projectVersionId,
+        sourceCaseId: task.input.caseId,
+        environmentSignature: run.environment.signature,
+        sourceRunId: run.id,
+        sourceTaskId: task.id,
+        observedAt,
+        observation,
+      })),
+    )
   }
 
   private async uiExecutionContext(

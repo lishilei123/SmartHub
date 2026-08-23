@@ -1,14 +1,14 @@
 # SmartHub 需求分析、测试设计与测试执行闭环
 
-当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 按 Execute First 编排 ProjectVersion Execution Binding、受控执行 Agent 与非 Agentic Local Workspace Runner。`ExecutionImplementationAgent` 保持 Playwright CLI-first，并把真实 UI 操作期间观察到的业务 API 脱敏沉淀为 ProjectVersion Exploration Context。PostgreSQL 保存 Run/Task/Revision/Attempt/ExecutionEvent 等正式状态；ProjectVersion Workspace 独立保存自动化工程、Binding 与脱敏后的可复用 Exploration Context，Artifact Store 保存不可变执行产物。
+当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 按 Execute First 编排 ProjectVersion Execution Binding、受控执行 Agent 与非 Agentic Local Workspace Runner。`ExecutionImplementationAgent` 保持 Playwright CLI-first，并可在 generation/repair invocation 内按需、多轮调用 SmartHub Browser Tools；真实 UI 操作期间观察到的业务 API 经脱敏后沉淀为 ProjectVersion Exploration Context。PostgreSQL 保存 Run/Task/Revision/Attempt/ExecutionEvent 等正式状态；ProjectVersion Workspace 独立保存自动化工程、Binding 与脱敏后的可复用 Exploration Context，Artifact Store 保存不可变执行产物。
 
 ## 测试执行基础设施配置
 
 执行基础设施的已发布配置继续保留不可变版本与历史快照；当前主执行链使用 ProjectVersion Local Workspace Runner，由用户在创建 Run 时提交被测系统 BaseURL。真实密钥仍只允许由部署环境注入，绝不保存或回显；Network Exploration 仅保留字段结构、必要非敏感 Header 和 `<REDACTED>` 标记。
 
-执行侧只冻结两个 Agent：`ExecutionImplementationAgent` 与 `FailureAnalysisAgent`。前者绑定 `test-script-generation`、`script-repair` 两个 Skill，并在 generation/repair Stage 中由 Runtime 只投影当前 Skill；两个实现阶段共用 `execution_implementation.submit_result@1.0.0`，诊断仍使用独立提交 Tool。Agent 只能使用服务端发布配置固定的 Workspace/Knowledge/提交 Tool 与 Skill，不允许增加 MCP 或额外能力。
+执行侧只冻结两个 Agent：`ExecutionImplementationAgent` 与 `FailureAnalysisAgent`。前者绑定 `test-script-generation`、`script-repair` 两个 Skill，并在 generation/repair Stage 中由 Runtime 只投影当前 Skill；两个实现阶段共用 `execution_implementation.submit_result@1.0.0`，并只在 UI Case 的当前 invocation 中获得 `browser.snapshot/click/fill/get_locator/requests/request_detail/screenshot`。`FailureAnalysisAgent` 仍使用独立提交 Tool，默认看不到 Browser 修改型 Tool。Agent 只能使用服务端发布配置固定的 Workspace/Knowledge/Browser/提交 Tool 与 Skill，不允许增加 MCP 或额外能力。
 
-测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库与套件。执行 Run 自动选择当前项目版本最新正式用例库并冻结其中全部可执行用例、环境签名、Knowledge Index、Runner 和两个 Agent 配置快照；已有有效 Binding 直接执行，无 Binding 才按 `Exploration Context → 固定 Knowledge/API 文档 → Existing Workspace → Implement` 实现。每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史。
+测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库与套件。执行 Run 自动选择当前项目版本最新正式用例库并冻结其中全部可执行用例、环境签名、Knowledge Index、Runner 和两个 Agent 配置快照；已有有效 Binding 直接执行，无 Binding 时由实现 Agent 先复用 `Existing Workspace / Exploration Context / 固定 Knowledge`，信息不足才按需调用当前受控 Browser Session。每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史。
 
 测试执行 Agent 只提交新产生的智能结果：`ExecutionImplementationAgent` 在生成与修复阶段提交同一严格闭合协议 `entryFile + files + optional summary`，`FailureAnalysisAgent` 提交 `category + reason + evidence`。`runId`、`taskId`、Stage、Schema、Revision、Attempt、Artifact、Hash、Snapshot、repairCount、`repairable`、`recommendedAction` 和下一状态均由 `TestExecutionService` 结合当前正式事实生成；Runner PASS 后直接结束。Service 仍保留两次自动修复上限，并只允许 `script_defect` / `selector_changed` 进入受控 Script Repair。`MaintenanceProposal` 仅保留为可选历史资产治理能力，不再由 PASS 主链自动创建，也不再出现在 Run/Task 主流程区域。
 
@@ -26,7 +26,7 @@ Binding 的 `entrySymbol` 固定为 `[<caseId>]`，入口标题只能等于该�
 
 新生成的脚本使用 Playwright `test.step` 标注非敏感业务操作；Local Runner 只消费官方 JSON Reporter 的结构化结果，不解析自然语言 stdout。Service 按 Attempt 将 UI/API 操作、断言、重试、失败以及 Screenshot/Trace/Video 链接保存为不可变 ExecutionEvent；HTTP 事件只保留 Method、Path、Status 与 Query 字段名，填充值、Query 值、Header、Cookie、Token、账号、个人数据和原始请求/响应 Body 在 Runner 与 Service 边界双重脱敏。任务详情的“执行过程”按 Attempt 展示紧凑时间线，失败证据使用受控 Artifact 下载链接。
 
-`ScriptArtifact` 与 `ScriptRevision` 继续保存不可变历史、来源与 Hash，但不再作为跨 Task/Run 的脚本 Cache 输入。Binding 缺失或失效时固定进入 `Exploration Context → Knowledge/API Documentation → Existing Workspace → Agent Implement`；不会按 `cacheKey` 查找旧 ScriptRevision，也不会把历史 Revision 静默回放成当前可执行 Binding。
+`ScriptArtifact` 与 `ScriptRevision` 继续保存不可变历史、来源与 Hash，但不再作为跨 Task/Run 的脚本 Cache 输入。Binding 缺失或失效时固定进入 `Existing Workspace / Exploration Context / Knowledge → Agent 按需 Browser Explore → Implement`；不会按 `cacheKey` 查找旧 ScriptRevision，也不会把历史 Revision 静默回放成当前可执行 Binding。
 
 Test Design 对创建、更新、删除、状态流转、持久化配置、跨页数据与异步最终状态要求可观察的业务闭环 Expected Result；执行 Validator 要求对应 API 回读或 UI 刷新/重进，并与受保护断言一起冻结。字段格式、必填、可见性、Tooltip 和即时校验等非持久化 Case 不机械追加长闭环；Agent 与 Repair 均不得编造接口、Selector、状态值、账号或等待阈值。
 
@@ -35,15 +35,15 @@ Test Design 对创建、更新、删除、状态流转、持久化配置、跨�
 | 模块 | 当前状态 | 边界 |
 | --- | --- | --- |
 | 知识库、需求分析、测试设计 | 已实现 | 已接入真实 API、持久化数据、Agent Workflow 和服务端治理。 |
-| 测试执行 | 已实现 | 以当前 ProjectVersion 最新正式用例库的全部用例为唯一执行范围；Service 冻结输入与 Knowledge Index，优先执行 Binding；无 Binding 时复用脱敏 Exploration Context 与共享 Workspace，再交给 Local Workspace Runner。 |
+| 测试执行 | 已实现 | 以当前 ProjectVersion 最新正式用例库的全部用例为唯一执行范围；Service 冻结输入与 Knowledge Index，优先执行 Binding；无 Binding 时实现 Agent 复用脱敏 Exploration Context 与共享 Workspace，并可按需多轮调用受控 Browser Tools，提交后经 Validator 再交给 Local Workspace Runner。 |
 | 报告与诊断 | 已实现 | 绑定单个 `ExecutionRun`，从 PostgreSQL 正式事实确定性投影指标、九类诊断、非通过明细与完整追溯，并提供 canonical JSON 和 Markdown 导出。 |
 
 左侧“测试执行”展示 PostgreSQL 中的真实 Run/Task、就绪状态、冻结快照和不可变历史，不生成示例进度；“报告与诊断”只读汇总同一 Run 的正式事实，不调用 Agent 或 Runner，也不修改执行状态。
 
 ## 已实现
 
-- 测试执行：固定 `TestExecutionService → Execution Binding / Agent → ExecutionPackage → Local Workspace Runner` 边界，Service 独占状态、重试、诊断和修复决策；`ExecutionImplementationAgent` 通过官方 Playwright CLI `requests/request` 能力观察业务 fetch/XHR，并在持久化前过滤静态资源、Analytics/Telemetry 和全部真实敏感值；API Case 无 Binding 时优先消费同版本 Context，UI Case 不得用 API 调用替代真实 UI；
-- PlanningAgent/TestCaseDesign Skill 为 `2.9.0`/`3.3.0`；ExecutionImplementationAgent 为 `1.0.0` 并绑定 TestScriptGeneration/ScriptRepair Skill `1.4.0`/`1.3.0`，FailureAnalysisAgent/Skill 为 `1.1.0`。升级现有部署后需要重新发布两个执行 Agent 配置；迁移 37 只切换正式快照约束与 Revision 校验，不对旧 Agent 做双写或运行时回退；
+- 测试执行：固定 `TestExecutionService → Execution Binding / Agent → Validator → ExecutionPackage → Local Workspace Runner` 边界，Service 独占状态、重试、诊断和修复决策；Service 为每个 `runId/taskId/stage` invocation 创建并最终关闭受控 Browser Session，`ExecutionImplementationAgent` 通过官方 Playwright CLI Adapter 主动调用结构化 Browser Tools；请求观察在持久化前过滤静态资源、Analytics/Telemetry、跨源请求和全部真实敏感值；API Case 无 Binding 时优先消费同版本 Context，UI Case 不得用 API 调用替代真实 UI；
+- PlanningAgent/TestCaseDesign Skill 为 `2.9.0`/`3.3.0`；ExecutionImplementationAgent 为 `1.1.0` 并绑定 TestScriptGeneration/ScriptRepair Skill `1.5.0`/`1.4.0`，FailureAnalysisAgent/Skill 为 `1.1.0`。升级现有部署后需要重新发布 `ExecutionImplementationAgent` 配置，使 Toolset/Skill Hash 包含 Browser Tools；`FailureAnalysisAgent` 的权限未因本次改造扩大。迁移 37 只切换正式快照约束与 Revision 校验，不对旧 Agent 做双写或运行时回退；
 - 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和两个 Agent 快照；
 - 测试设计：统一 `PlanningAgent`、`test-case-design/v3` Candidate、扁平 `test-case/v3`、显式 Requirement 引用、服务端 Coverage Audit、受控 v3 Repair、直接语义审核、正式用例库发布与 UI/API 方法级执行交接；Service 独占 Case ID、Revision、Hash、历史匹配和正式版本治理；
 

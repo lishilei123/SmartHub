@@ -58,6 +58,11 @@ export interface ToolPolicyError {
 
 export interface ToolExecutionResult {
   data: unknown
+  /** Optional model-facing rich content; never copied into execution-event details. */
+  modelContent?: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; data: string; mimeType: string }
+  >
   terminate?: boolean
   replayed?: boolean
   policyError?: ToolPolicyError

@@ -1,4 +1,5 @@
 import type { AgentCandidateResult, PlanningClarification } from './review-types.js'
+import type { ToolDescriptor, ToolHandler } from './tool-types.js'
 
 export type AgentReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type RequirementInputMode = 'full_context' | 'segmented_context' | 'agent_directory'
@@ -312,6 +313,8 @@ export interface AgentExecutionInput {
     schemaVersion: string
     agentLabel: string
     initialTask: string
+    /** Invocation-scoped handlers bound by a Service-owned capability session. */
+    runtimeToolBindings?: Array<{ descriptor: ToolDescriptor; handler: ToolHandler }>
     validateCandidate: (candidate: Record<string, unknown>, manifest: InputDeliveryManifest) => Promise<{ valid: boolean; result?: AgentCandidateResult | Record<string, unknown>; issues: Array<{ path: string; message: string }> }>
   }
   onEvent?: (event: AgentExecutionEvent) => void | Promise<void>
@@ -445,6 +448,14 @@ export interface TestExecutionAgentSnapshot
   agentDefinition: AgentDefinitionVersion
   /** Runtime-only Pi Session scope; it is not a model-owned workflow field. */
   executionSessionKey: string
+  /** Runtime authorization identity checked by invocation-scoped Browser Tools. */
+  browserAuthorization?: {
+    runId: string
+    taskId: string
+    projectVersionId: string
+    environmentSignature: string
+    stage: 'script_generation' | 'script_repair'
+  }
   taskSha256: string
   createdAt: string
 }

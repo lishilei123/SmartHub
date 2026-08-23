@@ -37,6 +37,7 @@ import { LocalWorkspaceRunner } from './runner/local-workspace-runner.js'
 import { LocalExecutionWorkspaceStore } from './infrastructure/execution-workspace-store.js'
 import { PlaywrightCliAdapter, UIExecutionAgent } from './agent/ui-execution-agent.js'
 import { StateStoreTestExecutionKnowledgeResolver } from './application/test-execution-knowledge.js'
+import { PlaywrightBrowserToolGateway } from './tools/playwright-browser-tools.js'
 
 const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -111,7 +112,9 @@ export const testExecutionWorkspaceProvider = testExecutionStore
     )
   : undefined
 export const playwrightRunner: PlaywrightRunner = new LocalWorkspaceRunner(executionArtifactStore)
-export const uiExecutionAgent = new UIExecutionAgent(new PlaywrightCliAdapter())
+export const playwrightCliAdapter = new PlaywrightCliAdapter()
+export const uiExecutionAgent = new UIExecutionAgent(playwrightCliAdapter)
+export const playwrightBrowserTools = new PlaywrightBrowserToolGateway(playwrightCliAdapter)
 export const testExecutionKnowledgeResolver = new StateStoreTestExecutionKnowledgeResolver(stateStore)
 export const testExecutionService =
   testExecutionStore && testExecutionWorkspaceProvider
@@ -127,6 +130,7 @@ export const testExecutionService =
         executionWorkspaceStore,
         uiExecutionAgent,
         testExecutionKnowledgeResolver,
+        playwrightBrowserTools,
       )
     : undefined
 export const testReportService = testExecutionStore

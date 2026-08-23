@@ -498,6 +498,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       deliveryManifest.toolReads ??= []
       deliveryManifest.toolReads.push(structuredClone(observation))
     }, piDocumentWorkspace, this.knowledge)
+    for (const binding of workspaceProfile.runtimeToolBindings ?? []) {
+      if (!stage.allowedToolIds.includes(binding.descriptor.id)) {
+        throw new Error(`RUNTIME_TOOL_BINDING_NOT_ALLOWED: ${binding.descriptor.id}`)
+      }
+      registry.register(binding.descriptor, binding.handler)
+    }
     skillSession.register(registry)
     const skillPrompt = skillSession.renderPrompt()
     const capabilityLoad = await new AgentCapabilityLoader(this.store, this.skillPackages).load(
@@ -826,7 +832,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
           ? replayedModelResult(descriptor.id, result.data)
           : result.data
         return {
-          content: [{ type: 'text', text: JSON.stringify(modelResult) }],
+          content: result.modelContent ?? [{ type: 'text', text: JSON.stringify(modelResult) }],
           details: {
             toolId: descriptor.id,
             version: descriptor.version,

@@ -37,6 +37,10 @@ import { agentCatalogEntryByDefinition } from './agent-catalog.js'
 import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
 import { buildTestExecutionDirectoryInputPlan } from './requirement-context-assembler.js'
 import type { UiExecutionBrowserContext } from './ui-execution-agent.js'
+import {
+  BROWSER_TOOL_IDS,
+  type BrowserToolSession,
+} from '../tools/playwright-browser-tools.js'
 
 const TEST_EXECUTION_WORKSPACE_TOOL_IDS = [
   'workspace.read_file',
@@ -63,6 +67,7 @@ export const TEST_EXECUTION_STAGE_BINDINGS = {
     runtimeToolIds: [
       ...TEST_EXECUTION_WORKSPACE_TOOL_IDS,
       ...TEST_EXECUTION_KNOWLEDGE_TOOL_IDS,
+      ...BROWSER_TOOL_IDS,
     ],
   },
   failure_diagnosis: {
@@ -85,7 +90,7 @@ export const TEST_EXECUTION_STAGE_BINDINGS = {
     submitToolId: 'execution_implementation.submit_result',
     schemaVersion: 'script-repair/v1',
     agentLabel: 'ExecutionImplementationAgent',
-    runtimeToolIds: [...TEST_EXECUTION_WORKSPACE_TOOL_IDS],
+    runtimeToolIds: [...TEST_EXECUTION_WORKSPACE_TOOL_IDS, ...BROWSER_TOOL_IDS],
   },
 } as const
 
@@ -118,6 +123,8 @@ export interface TestExecutionAgentRuntimeInput {
   workspace: TestExecutionAgentWorkspaceProjection
   /** Ephemeral output from the Service-owned Playwright CLI capability. */
   uiExecution?: UiExecutionBrowserContext
+  /** Service-owned invocation session; its opaque CLI identity is never sent to the model. */
+  browserSession?: BrowserToolSession
   stageContext?: TestExecutionAgentStageContext
   validateCandidate: CandidateValidation
 }
@@ -223,6 +230,7 @@ export class PiTestExecutionRuntimeAdapter {
     })
     const events: AgentExecutionEvent[] = []
     try {
+      const allowedToolIds = runtimeToolIds(input, binding)
       const output = await this.piRuntime.execute({
         snapshot,
         model,
@@ -230,11 +238,14 @@ export class PiTestExecutionRuntimeAdapter {
         executionProfile: {
           mode: 'workspace_tools',
           workflowStage: input.stage,
-          allowedToolIds: [...binding.runtimeToolIds, binding.submitToolId],
+          allowedToolIds: [...allowedToolIds, binding.submitToolId],
           submitToolId: binding.submitToolId,
           schemaVersion: binding.schemaVersion,
           agentLabel: binding.agentLabel,
           initialTask: task,
+          ...(input.browserSession ? {
+            runtimeToolBindings: input.browserSession.runtimeToolBindings(),
+          } : {}),
           validateCandidate: input.validateCandidate,
         },
         onEvent: event => { events.push(event) },
@@ -315,7 +326,7 @@ function stageAssignment(stage: TestExecutionAgentStage) {
 
 function stageInstructions(stage: TestExecutionAgentStage, caseId: string, submitToolId: string) {
   const common = [
-    '只使用冻结 TestCase、只读 Workspace 与已交付的受控上下文；不得编造 API、Selector、凭据、业务规则或预期结果。',
+    '只使用冻结 TestCase、只读 Workspace 与当前 Runtime 明确授权的上下文；不得编造 API、Selector、凭据、业务规则或预期结果。',
     '不得修改 TestCase、Expected Result、Verification Check、受保护断言语义或测试目标。',
     '不得调用 Shell、数据库、任意网络、其他 Agent 或 Runner；Service 和 Runner 负责流程与真实执行。',
   ]
@@ -326,8 +337,11 @@ function stageInstructions(stage: TestExecutionAgentStage, caseId: string, submi
   ]
   const implementation = [
     ...common,
+    '实现阶段可使用只读 Workspace、Knowledge、已有 Runtime Observation 与当前 invocation 明确授权的 Browser Tools。',
     `Playwright Test 标题必须以稳定 Case Symbol ${JSON.stringify(`[${caseId}]`)} 结尾。`,
     '优先复用 execution/ 下已有 tests、pages、api、helpers 和 fixtures；API 使用 request/APIRequestContext，UI 必须完成真实 UI 操作与页面断言。',
+    '先复用 Workspace 和已有 Observation；只有实现所需信息不足时才按需、多轮调用 Browser Tools。Browser Observation 是运行时观察事实，不是 Requirement Truth。',
+    'Browser Tools 只用于受控探索，不是 Runner；不得把工具观察解释为 PASS/FAIL，也不得据此改变 Expected Result 或弱化断言。',
     '只提交需要新增或修改的 Workspace 文件；summary 仅用于简短说明。',
   ]
   if (stage === 'script_repair') implementation.push(
@@ -346,6 +360,15 @@ function buildAgentSnapshot(
     ...structuredClone(input.workspace),
     agentDefinition: stageAgentDefinition(configuration.agentDefinition, bindingForStage(input.stage)),
     executionSessionKey: executionSessionKey(input),
+    ...(input.browserSession ? {
+      browserAuthorization: {
+        runId: input.run.id,
+        taskId: input.task.id,
+        projectVersionId: input.run.projectVersionId,
+        environmentSignature: input.run.environment.signature,
+        stage: input.stage as 'script_generation' | 'script_repair',
+      },
+    } : {}),
     taskSha256: canonicalSha256(task),
     createdAt: new Date().toISOString(),
   }
@@ -411,6 +434,19 @@ function validateStageInput(
   if (frozen.agentKey !== binding.agentKey) {
     throw new Error('TEST_EXECUTION_AGENT_STAGE_SNAPSHOT_MISMATCH')
   }
+  if (input.browserSession) {
+    const scope = input.browserSession.scope
+    if (
+      input.stage === 'failure_diagnosis'
+      || input.task.input.method !== 'ui'
+      || scope.runId !== input.run.id
+      || scope.taskId !== input.task.id
+      || scope.projectVersionId !== input.run.projectVersionId
+      || scope.environmentSignature !== input.run.environment.signature
+      || scope.baseUrl !== input.run.environment.baseUrl
+      || scope.stage !== input.stage
+    ) throw new Error('TEST_EXECUTION_BROWSER_SESSION_SCOPE_MISMATCH')
+  }
   if (input.stage === 'failure_diagnosis') {
     if (
       !input.stageContext?.scriptRevisionId
@@ -426,6 +462,12 @@ function validateStageInput(
       throw new Error('TEST_EXECUTION_REPAIR_LIMIT_REACHED')
     }
   }
+}
+
+function runtimeToolIds(input: TestExecutionAgentRuntimeInput, binding: StageBinding) {
+  return binding.runtimeToolIds.filter(toolId =>
+    !BROWSER_TOOL_IDS.includes(toolId as typeof BROWSER_TOOL_IDS[number])
+    || Boolean(input.browserSession))
 }
 
 function freezeAgent(

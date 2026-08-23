@@ -41,6 +41,28 @@ export interface PlaywrightCliToolAdapter {
   }, signal: AbortSignal): Promise<PlaywrightCliExplorationContext>
 }
 
+export interface PlaywrightBrowserCliAdapter {
+  open(session: string, baseUrl: string, signal: AbortSignal): Promise<void>
+  close(session: string, signal: AbortSignal): Promise<void>
+  snapshot(session: string, signal: AbortSignal): Promise<string>
+  click(session: string, target: string, signal: AbortSignal): Promise<string>
+  fill(session: string, target: string, text: string, signal: AbortSignal): Promise<string>
+  generateLocator(session: string, target: string, signal: AbortSignal): Promise<string>
+  screenshot(
+    session: string,
+    target: string | undefined,
+    signal: AbortSignal,
+    options?: { filename?: string },
+  ): Promise<string>
+  listRequests(session: string, signal: AbortSignal): Promise<PlaywrightCliRequestSummary[]>
+  requestDetail(
+    session: string,
+    summary: PlaywrightCliRequestSummary,
+    observedFrom: Pick<RawUiNetworkObservation, 'page' | 'action' | 'actionType' | 'sequence'>,
+    signal: AbortSignal,
+  ): Promise<RawUiNetworkObservation>
+}
+
 /**
  * SmartHub's UI capability agent.  It owns only the controlled invocation of
  * Playwright CLI; it never creates a Test Plan or decides a TestCase result.
@@ -75,7 +97,7 @@ export class UIExecutionAgent {
  * navigate, snapshot, locator discovery, interactions and screenshots. The
  * Service, not this adapter, controls execution state and repair permission.
  */
-export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter {
+export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter, PlaywrightBrowserCliAdapter {
   private readonly seenRequestIndexes = new Map<string, Set<number>>()
 
   constructor(private readonly options: {
@@ -129,6 +151,22 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter {
     }
   }
 
+  async open(session: string, baseUrl: string, signal: AbortSignal) {
+    await this.command(session, 'open', [baseUrl], signal)
+  }
+
+  async close(session: string, signal: AbortSignal) {
+    try {
+      await this.command(session, 'close', [], signal)
+    } finally {
+      this.seenRequestIndexes.delete(session)
+    }
+  }
+
+  async snapshot(session: string, signal: AbortSignal) {
+    return this.command(session, 'snapshot', [], signal)
+  }
+
   /** Available to the capability agent when a discovered ref must be exercised. */
   async click(session: string, target: string, signal: AbortSignal) {
     return this.command(session, 'click', [target], signal)
@@ -144,9 +182,50 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter {
     return this.command(session, 'generate-locator', [target], signal)
   }
 
-  /** Captures a screenshot through the official CLI when failure diagnosis needs it. */
-  async screenshot(session: string, target: string | undefined, signal: AbortSignal) {
-    return this.command(session, 'screenshot', target ? [target] : [], signal)
+  /** Captures a screenshot through the official CLI for a controlled runtime observation. */
+  async screenshot(
+    session: string,
+    target: string | undefined,
+    signal: AbortSignal,
+    options: { filename?: string } = {},
+  ) {
+    return this.command(session, 'screenshot', [
+      ...(target ? [target] : []),
+      ...(options.filename ? ['--filename', options.filename] : []),
+    ], signal)
+  }
+
+  async listRequests(session: string, signal: AbortSignal) {
+    return parsePlaywrightCliRequestSummaries(
+      await this.command(session, 'requests', [], signal),
+    )
+  }
+
+  async requestDetail(
+    session: string,
+    summary: PlaywrightCliRequestSummary,
+    observedFrom: Pick<RawUiNetworkObservation, 'page' | 'action' | 'actionType' | 'sequence'>,
+    signal: AbortSignal,
+  ): Promise<RawUiNetworkObservation> {
+    const detail = await this.command(session, 'request', [String(summary.index)], signal)
+    const parsed = parsePlaywrightCliRequestDetail(detail, summary)
+    const [requestHeaders, requestBody, responseHeaders, responseBody] = await Promise.all([
+      this.command(session, 'request-headers', [String(summary.index)], signal, { json: false }).catch(() => ''),
+      this.command(session, 'request-body', [String(summary.index)], signal, { json: false }).catch(() => undefined),
+      this.command(session, 'response-headers', [String(summary.index)], signal, { json: false }).catch(() => ''),
+      this.command(session, 'response-body', [String(summary.index)], signal, { json: false }).catch(() => undefined),
+    ])
+    return {
+      ...observedFrom,
+      method: parsed.method,
+      url: parsed.url,
+      resourceType: parsed.resourceType,
+      requestHeaders,
+      ...(requestBody === undefined ? {} : { requestBody: boundedOutput(requestBody) }),
+      responseStatus: parsed.status,
+      responseHeaders,
+      ...(responseBody === undefined ? {} : { responseBody: boundedOutput(responseBody) }),
+    }
   }
 
   /**

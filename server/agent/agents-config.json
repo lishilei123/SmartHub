@@ -70,10 +70,10 @@
       "agentType": "execution_implementation",
       "modelScene": "test_execution",
       "resultSchemaVersion": "execution-implementation/v1",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "promptKey": "execution-implementation-default",
-      "systemPrompt": "你是 SmartHub 的 ExecutionImplementationAgent。你根据 TestExecutionService 明确指定的 Workflow Stage，实现或修复冻结 TestCase 对应的 Playwright 自动化代码，不能切换 Workflow。script_generation 根据冻结 TestCase、Execution Workspace 和必要的 Exploration / Knowledge Context 实现代码；script_repair 根据已确认的 FailureDiagnosis、当前 ScriptRevision 和失败证据，只修复证据支持的实现问题。优先复用已有 tests/pages/api/helpers/fixtures；API 使用 Playwright request / APIRequestContext，UI 必须通过 page 完成真实 UI 目标。不得编造 API、Selector、账号、Token、环境、业务规则或 Expected Result，不得修改 TestCase、Expected Result、Verification Check 和受保护断言语义，不得通过删除或弱化断言、改变预期或跳过失败步骤让测试通过。不得调用 Runner、Shell、数据库、任意网络、MCP 或其他 Agent。最终只通过 execution_implementation_submit_result 提交 entryFile、需要新增或修改的 files，以及可选的简短 summary；Task、Revision、parentRevision、repairCount、Hash、Package、Artifact 和流程状态由 Service 管理。",
-      "taskTemplate": "读取当前 Stage 的冻结 TestCase、正式执行事实、必要上下文与 Execution Workspace，按 Stage 对应 Skill 实现或修复 Playwright 代码。只提交变更文件，不执行代码或推进流程。",
+      "systemPrompt": "你是 SmartHub 的 ExecutionImplementationAgent。你根据 TestExecutionService 明确指定的 Workflow Stage，实现或修复冻结 TestCase 对应的 Playwright 自动化代码，不能切换 Workflow。script_generation 根据冻结 TestCase、Execution Workspace、Knowledge、历史 Runtime Observation 和当前 Runtime 授权的 Browser Tools 实现代码；script_repair 根据已确认的 FailureDiagnosis、当前 ScriptRevision、失败证据和按需 Browser Observation，只修复证据支持的实现问题。先复用已有 tests/pages/api/helpers/fixtures 与 Observation；只有实现信息不足时才主动、多轮调用 Browser Tools，不能为了拥有工具而机械探索。Browser Observation 是运行时观察事实，不是 Requirement Truth，不得根据页面当前偶发现象修改 Expected Result。API 使用 Playwright request / APIRequestContext，UI 必须通过 page 完成真实 UI 目标。不得编造 API、Selector、账号、Token、环境、业务规则或 Expected Result，不得修改 TestCase、Expected Result、Verification Check 和受保护断言语义，不得通过删除或弱化断言、改变预期或跳过失败步骤让测试通过。Browser Tools 不是 Runner；不得调用 Runner、Shell、数据库、任意网络、任意 JavaScript evaluate、MCP 或其他 Agent。最终只通过 execution_implementation_submit_result 提交 entryFile、需要新增或修改的 files，以及可选的简短 summary；Task、Revision、parentRevision、repairCount、Hash、Package、Artifact、PASS/FAIL 和流程状态由 Service、Validator 与 Runner 管理。",
+      "taskTemplate": "读取当前 Stage 的冻结 TestCase、正式执行事实、必要上下文与 Execution Workspace；先复用已有信息，不足时按需使用当前 Runtime 授权的 Browser Tools 获取最小必要观察，再按 Stage 对应 Skill 实现或修复 Playwright 代码。只提交变更文件，不执行 Runner 或推进流程。",
       "tools": [
         "workspace.read_file@1.0.0",
         "workspace.grep_files@1.0.0",
@@ -81,6 +81,13 @@
         "workspace.list_directory@1.0.0",
         "knowledge.search@1.1.0",
         "knowledge.read_chunk@1.1.0",
+        "browser.snapshot@1.0.0",
+        "browser.click@1.0.0",
+        "browser.fill@1.0.0",
+        "browser.get_locator@1.0.0",
+        "browser.requests@1.0.0",
+        "browser.request_detail@1.0.0",
+        "browser.screenshot@1.0.0",
         "execution_implementation.submit_result@1.0.0"
       ],
       "limits": {
@@ -98,15 +105,15 @@
       "skills": [
         {
           "skillKey": "test-script-generation",
-          "version": "1.4.0",
+          "version": "1.5.0",
           "enabled": true,
-          "configurationHash": "fa09dddc785e121eb3cc347a4de8480db6bfa78c428047cdedc56e272bd96046"
+          "configurationHash": "7ce25089a3b2272e5a976bbcde952255983438904d8aec313a621971a29b66ac"
         },
         {
           "skillKey": "script-repair",
-          "version": "1.3.0",
+          "version": "1.4.0",
           "enabled": true,
-          "configurationHash": "72695efa03400a9290e9ebf85467d8cfa910abc338eafdbe928d77be1e8e49e0"
+          "configurationHash": "ce3d8557f302d2007ba216538319a7be046dd5adec458d13aaf96cb2ebf9b4e8"
         }
       ],
       "mcps": []

@@ -13,6 +13,16 @@ const KNOWLEDGE_TOOLS = [
   'knowledge.read_chunk',
 ] as const
 
+const BROWSER_TOOLS = [
+  'browser.snapshot',
+  'browser.click',
+  'browser.fill',
+  'browser.get_locator',
+  'browser.requests',
+  'browser.request_detail',
+  'browser.screenshot',
+] as const
+
 export interface AgentCatalogEntry {
   configurationKey: AgentConfigurationAgentKey
   definitionKey: AgentDefinitionVersion['agentKey']
@@ -51,10 +61,10 @@ export const AGENT_CATALOG = {
     scene: 'test_execution',
     label: '执行实现 Agent',
     identifier: 'ExecutionImplementationAgent',
-    requiredToolIds: [...WORKSPACE_TOOLS, ...KNOWLEDGE_TOOLS, 'execution_implementation.submit_result'],
+    requiredToolIds: [...WORKSPACE_TOOLS, ...KNOWLEDGE_TOOLS, ...BROWSER_TOOLS, 'execution_implementation.submit_result'],
     requiredSkillKeys: ['test-script-generation', 'script-repair'],
     requiredMcpServerKeys: [],
-    runtimeToolIds: [...WORKSPACE_TOOLS, ...KNOWLEDGE_TOOLS],
+    runtimeToolIds: [...WORKSPACE_TOOLS, ...KNOWLEDGE_TOOLS, ...BROWSER_TOOLS],
     exactCapabilities: true,
   },
   failureAnalysis: {

@@ -23,9 +23,9 @@ const builtInSkills: SkillResource[] = [
   builtInSkill('test-design-baseline', '测试设计基线', '从冻结 Requirement Release、正式用例库或套件建立测试设计事实和变化基线。', '1.2.0', 'server/skills/test-design-baseline/SKILL.md', [], ['测试设计', '基线', 'workspace']),
   builtInSkill('test-case-design', '测试用例设计', '基于冻结 Requirement Release 生成统一、可审阅的 TestCase v3 语义候选。', '3.3.0', 'server/skills/test-case-design/SKILL.md', [], ['测试设计', '测试用例', 'TestCase v3']),
   builtInSkill('test-design-repair', '测试设计修复', '根据确定性 Coverage Audit 对 TestCase v3 集合执行最小 upsert/remove 修复。', '3.0.0', 'server/skills/test-design-repair/SKILL.md', [], ['测试设计', '修复', 'coverage', 'TestCase v3']),
-  builtInSkill('test-script-generation', '测试脚本生成', '结合 ProjectVersion Exploration Context、固定 Knowledge 与 Execution Workspace 实现 Playwright UI 或 API Case。', '1.4.0', 'server/skills/test-script-generation/SKILL.md', [], ['测试执行', 'Playwright', '脚本生成']),
+  builtInSkill('test-script-generation', '测试脚本生成', '结合 ProjectVersion Exploration Context、固定 Knowledge、Execution Workspace 与受控 Browser Tools 实现 Playwright UI 或 API Case。', '1.5.0', 'server/skills/test-script-generation/SKILL.md', ['browser.snapshot', 'browser.click', 'browser.fill', 'browser.get_locator', 'browser.requests', 'browser.request_detail', 'browser.screenshot'], ['测试执行', 'Playwright', '脚本生成']),
   builtInSkill('failure-analysis', '执行失败分析', '根据终态 Attempt 与不可变证据提交最小失败分类。', '1.1.0', 'server/skills/failure-analysis/SKILL.md', [], ['测试执行', '诊断', '失败分析']),
-  builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下提交最小 Playwright 源码修复。', '1.3.0', 'server/skills/script-repair/SKILL.md', [], ['测试执行', 'Playwright', '脚本修复']),
+  builtInSkill('script-repair', '测试脚本修复', '在受保护断言语义不变的前提下，结合失败证据与受控 Browser Tools 提交最小 Playwright 源码修复。', '1.4.0', 'server/skills/script-repair/SKILL.md', ['browser.snapshot', 'browser.click', 'browser.fill', 'browser.get_locator', 'browser.requests', 'browser.request_detail', 'browser.screenshot'], ['测试执行', 'Playwright', '脚本修复']),
 ]
 const builtInResources: AiResource[] = [...builtInTools, ...builtInSkills]
 const allowedSourceRoots = ['server/tools', 'ai/tools'] as const
