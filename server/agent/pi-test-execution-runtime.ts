@@ -38,6 +38,18 @@ import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
 import { buildTestExecutionDirectoryInputPlan } from './requirement-context-assembler.js'
 import type { UiExecutionBrowserContext } from './ui-execution-agent.js'
 
+const TEST_EXECUTION_WORKSPACE_TOOL_IDS = [
+  'workspace.read_file',
+  'workspace.grep_files',
+  'workspace.find_files',
+  'workspace.list_directory',
+] as const
+
+const TEST_EXECUTION_KNOWLEDGE_TOOL_IDS = [
+  'knowledge.search',
+  'knowledge.read_chunk',
+] as const
+
 export const TEST_EXECUTION_STAGE_BINDINGS = {
   script_generation: {
     agentKey: 'execution-implementation',
@@ -48,6 +60,10 @@ export const TEST_EXECUTION_STAGE_BINDINGS = {
     submitToolId: 'execution_implementation.submit_result',
     schemaVersion: 'test-script-generation/v1',
     agentLabel: 'ExecutionImplementationAgent',
+    runtimeToolIds: [
+      ...TEST_EXECUTION_WORKSPACE_TOOL_IDS,
+      ...TEST_EXECUTION_KNOWLEDGE_TOOL_IDS,
+    ],
   },
   failure_diagnosis: {
     agentKey: 'failure-analysis',
@@ -58,6 +74,7 @@ export const TEST_EXECUTION_STAGE_BINDINGS = {
     submitToolId: 'failure_analysis.submit_result',
     schemaVersion: 'failure-analysis/v1',
     agentLabel: 'FailureAnalysisAgent',
+    runtimeToolIds: [...TEST_EXECUTION_WORKSPACE_TOOL_IDS],
   },
   script_repair: {
     agentKey: 'execution-implementation',
@@ -68,6 +85,7 @@ export const TEST_EXECUTION_STAGE_BINDINGS = {
     submitToolId: 'execution_implementation.submit_result',
     schemaVersion: 'script-repair/v1',
     agentLabel: 'ExecutionImplementationAgent',
+    runtimeToolIds: [...TEST_EXECUTION_WORKSPACE_TOOL_IDS],
   },
 } as const
 
@@ -212,7 +230,7 @@ export class PiTestExecutionRuntimeAdapter {
         executionProfile: {
           mode: 'workspace_tools',
           workflowStage: input.stage,
-          allowedToolIds: [...agentCatalogEntryByDefinition(binding.agentKey).runtimeToolIds, binding.submitToolId],
+          allowedToolIds: [...binding.runtimeToolIds, binding.submitToolId],
           submitToolId: binding.submitToolId,
           schemaVersion: binding.schemaVersion,
           agentLabel: binding.agentLabel,
@@ -312,7 +330,10 @@ function stageInstructions(stage: TestExecutionAgentStage, caseId: string, submi
     '优先复用 execution/ 下已有 tests、pages、api、helpers 和 fixtures；API 使用 request/APIRequestContext，UI 必须完成真实 UI 操作与页面断言。',
     '只提交需要新增或修改的 Workspace 文件；summary 仅用于简短说明。',
   ]
-  if (stage === 'script_repair') implementation.push('只修改诊断支持的实现问题；不得删除、绕过或弱化受保护断言和业务闭环。')
+  if (stage === 'script_repair') implementation.push(
+    '当前 Stage 只根据已确认的 FailureDiagnosis、当前 ScriptRevision、Runner Evidence 和 Execution Workspace 修复实现问题；不得重新进行需求分析、测试设计或通过 Knowledge 搜索扩大修复范围。',
+    '只修改诊断支持的实现问题；不得删除、绕过或弱化受保护断言和业务闭环。',
+  )
   return [...implementation, `完成后只调用 ${submitToolId} 提交 entryFile、files，可选 summary。`]
 }
 

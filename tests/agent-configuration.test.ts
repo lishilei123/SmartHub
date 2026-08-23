@@ -289,6 +289,20 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
   const run = executionRunFixture(agents)
   const task = executionTaskFixture(run.id)
   const workspace = executionWorkspaceFixture(run)
+  const stageCapabilities = {
+    script_generation: {
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'execution_implementation.submit_result'],
+      skills: ['test-script-generation'],
+    },
+    failure_diagnosis: {
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'failure_analysis.submit_result'],
+      skills: ['failure-analysis'],
+    },
+    script_repair: {
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'execution_implementation.submit_result'],
+      skills: ['script-repair'],
+    },
+  } as const
 
   const supersededId = agents.executionImplementation.configurationId
   const current = (await service.get('test_execution')).agents.executionImplementation
@@ -324,21 +338,14 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
       ['runId', 'projectVersionId', 'stageContext', 'stageContract', 'environment', 'runner'].filter(key => key in agentTask),
       [],
     )
-    assert.deepEqual(input.executionProfile?.allowedToolIds, [
-      'workspace.read_file',
-      'workspace.grep_files',
-      'workspace.find_files',
-      'workspace.list_directory',
-      ...(binding.agentKey === 'execution-implementation'
-        ? ['knowledge.search', 'knowledge.read_chunk']
-        : []),
-      binding.submitToolId,
-    ])
-    assert.equal(
-      input.executionProfile?.allowedToolIds.includes('knowledge.search'),
-      binding.agentKey === 'execution-implementation',
-    )
+    assert.deepEqual(input.executionProfile?.allowedToolIds, stageCapabilities[stage].tools)
+    assert.deepEqual(input.snapshot.agentDefinition.enabledSkills, stageCapabilities[stage].skills)
+    assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.search'), stage === 'script_generation')
+    assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.read_chunk'), stage === 'script_generation')
     assert.equal(input.executionProfile?.allowedToolIds.some(toolId => /runner|shell|ssh|database|http/u.test(toolId)), false)
+    if (stage === 'script_repair') {
+      assert.match(input.executionProfile!.initialTask, /不得重新进行需求分析、测试设计或通过 Knowledge 搜索扩大修复范围/u)
+    }
   }
   const superseded = await service.getVersion(supersededId)
   assert.equal(captured[0].snapshot.agentDefinition.systemPrompt, superseded.agentDefinition.systemPrompt)
