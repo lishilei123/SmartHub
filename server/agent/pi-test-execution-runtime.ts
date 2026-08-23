@@ -11,6 +11,7 @@ import type {
   AgentExecutionContext,
   AgentExecutionEvent,
   AgentExecutionOutput,
+  AgentDefinitionVersion,
   AgentModelConnection,
   InputDeliveryManifest,
   TestExecutionAgentSnapshot,
@@ -39,31 +40,34 @@ import type { UiExecutionBrowserContext } from './ui-execution-agent.js'
 
 export const TEST_EXECUTION_STAGE_BINDINGS = {
   script_generation: {
-    agentKey: 'test-script',
-    snapshotKey: 'testScript',
-    agentType: 'test_script',
+    agentKey: 'execution-implementation',
+    snapshotKey: 'executionImplementation',
+    agentType: 'execution_implementation',
+    configurationSchemaVersion: 'execution-implementation/v1',
     skillKey: 'test-script-generation',
-    submitToolId: 'test_script.submit_result',
+    submitToolId: 'execution_implementation.submit_result',
     schemaVersion: 'test-script-generation/v1',
-    agentLabel: 'TestScriptAgent',
+    agentLabel: 'ExecutionImplementationAgent',
   },
   failure_diagnosis: {
     agentKey: 'failure-analysis',
     snapshotKey: 'failureAnalysis',
     agentType: 'failure_analysis',
+    configurationSchemaVersion: 'failure-analysis/v1',
     skillKey: 'failure-analysis',
     submitToolId: 'failure_analysis.submit_result',
     schemaVersion: 'failure-analysis/v1',
     agentLabel: 'FailureAnalysisAgent',
   },
   script_repair: {
-    agentKey: 'script-repair',
-    snapshotKey: 'scriptRepair',
-    agentType: 'script_repair',
+    agentKey: 'execution-implementation',
+    snapshotKey: 'executionImplementation',
+    agentType: 'execution_implementation',
+    configurationSchemaVersion: 'execution-implementation/v1',
     skillKey: 'script-repair',
-    submitToolId: 'script_repair.submit_result',
+    submitToolId: 'execution_implementation.submit_result',
     schemaVersion: 'script-repair/v1',
-    agentLabel: 'ScriptRepairAgent',
+    agentLabel: 'ExecutionImplementationAgent',
   },
 } as const
 
@@ -116,9 +120,8 @@ export interface TestExecutionAgentRuntimeOutput {
 }
 
 const EXECUTION_AGENT_KEYS = [
-  'test-script',
+  'execution-implementation',
   'failure-analysis',
-  'script-repair',
 ] as const
 
 export class PiTestExecutionRuntimeAdapter {
@@ -174,9 +177,8 @@ export class PiTestExecutionRuntimeAdapter {
       return [agentKey, freezeAgent(configuration, resolveModel(state, configuration), agentKey)]
     }))
     return {
-      testScript: required(frozen.get('test-script'), 'TEST_SCRIPT_AGENT_SNAPSHOT_REQUIRED'),
+      executionImplementation: required(frozen.get('execution-implementation'), 'EXECUTION_IMPLEMENTATION_AGENT_SNAPSHOT_REQUIRED'),
       failureAnalysis: required(frozen.get('failure-analysis'), 'FAILURE_ANALYSIS_AGENT_SNAPSHOT_REQUIRED'),
-      scriptRepair: required(frozen.get('script-repair'), 'SCRIPT_REPAIR_AGENT_SNAPSHOT_REQUIRED'),
     }
   }
 
@@ -321,10 +323,51 @@ function buildAgentSnapshot(
 ): TestExecutionAgentSnapshot {
   return {
     ...structuredClone(input.workspace),
-    agentDefinition: structuredClone(configuration.agentDefinition),
+    agentDefinition: stageAgentDefinition(configuration.agentDefinition, bindingForStage(input.stage)),
+    executionSessionKey: executionSessionKey(input),
     taskSha256: canonicalSha256(task),
     createdAt: new Date().toISOString(),
   }
+}
+
+function bindingForStage(stage: TestExecutionAgentStage) {
+  return TEST_EXECUTION_STAGE_BINDINGS[stage]
+}
+
+function stageAgentDefinition(
+  definition: AgentDefinitionVersion,
+  binding: StageBinding,
+): AgentDefinitionVersion {
+  const selected = definition.skillBindings.filter(
+    skill => skill.enabled && skill.skillKey === binding.skillKey,
+  )
+  if (selected.length !== 1) throw new Error(`${binding.agentLabel} 当前 Stage Skill 快照无效`)
+  const {
+    contentSha256: _contentSha256,
+    skillBindings: _skillBindings,
+    enabledSkills: _enabledSkills,
+    ...base
+  } = definition
+  const projected = {
+    ...structuredClone(base),
+    skillBindings: structuredClone(selected),
+    enabledSkills: selected.map(skill => skill.skillKey),
+  }
+  return {
+    ...projected,
+    contentSha256: createHash('sha256').update(JSON.stringify(projected)).digest('hex'),
+  }
+}
+
+function executionSessionKey(input: TestExecutionAgentRuntimeInput) {
+  if (input.stage === 'failure_diagnosis') {
+    const revisionId = required(
+      input.stageContext?.scriptRevisionId,
+      'TEST_EXECUTION_DIAGNOSIS_REVISION_SESSION_REQUIRED',
+    )
+    return `execution-diagnosis:${input.run.id}:${input.task.id}:${revisionId}`
+  }
+  return `execution-implementation:${input.run.id}:${input.task.id}`
 }
 
 function validateStageInput(
@@ -440,7 +483,7 @@ function validateConfiguration(
     || definition.agentKey !== binding.agentKey
     || definition.agentType !== binding.agentType
     || definition.modelScene !== 'test_execution'
-    || definition.resultSchemaVersion !== binding.schemaVersion
+    || definition.resultSchemaVersion !== binding.configurationSchemaVersion
   ) throw new Error(`${binding.agentLabel} 配置类型不兼容`)
 
   const expectedTools = [...catalog.runtimeToolIds, binding.submitToolId]
@@ -450,22 +493,24 @@ function validateConfiguration(
   if (definition.mcpBindings.length) {
     throw new Error(`${binding.agentLabel} 不允许绑定 MCP`)
   }
-  const skillBindings = definition.skillBindings
+  const skillBindings = definition.skillBindings.filter(skill => skill.enabled)
+  const requiredSkillKeys = catalog.requiredSkillKeys
   if (
-    skillBindings.length !== 1
-    || !skillBindings[0].enabled
-    || skillBindings[0].skillKey !== binding.skillKey
+    skillBindings.length !== requiredSkillKeys.length
+    || !requiredSkillKeys.every(skillKey => skillBindings.some(binding => binding.skillKey === skillKey))
   ) throw new Error(`${binding.agentLabel} Skill 白名单必须精确匹配当前 Agent`)
 
-  const skill = state.aiResources.find(
-    (item): item is SkillResource => item.kind === 'skill' && item.key === binding.skillKey,
-  )
-  if (
-    !skill
-    || !skill.enabled
-    || skill.version !== skillBindings[0].version
-    || !matchesSkillConfigurationHash(skill, skillBindings[0].configurationHash)
-  ) throw new Error(`${binding.agentLabel} Skill ${binding.skillKey} 与发布快照不一致`)
+  for (const skillBinding of skillBindings) {
+    const skill = state.aiResources.find(
+      (item): item is SkillResource => item.kind === 'skill' && item.key === skillBinding.skillKey,
+    )
+    if (
+      !skill
+      || !skill.enabled
+      || skill.version !== skillBinding.version
+      || !matchesSkillConfigurationHash(skill, skillBinding.configurationHash)
+    ) throw new Error(`${binding.agentLabel} Skill ${skillBinding.skillKey} 与发布快照不一致`)
+  }
 
   const tools = state.aiResources.filter((item): item is ToolResource => item.kind === 'tool')
   for (const toolId of expectedTools) {

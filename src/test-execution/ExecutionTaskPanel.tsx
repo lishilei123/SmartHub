@@ -10,7 +10,6 @@ import {
   FileWarning,
   GitCompare,
   Image,
-  Library,
   MousePointerClick,
   Navigation,
   RotateCcw,
@@ -20,11 +19,9 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { artifactUrl } from './api'
-import { shortId } from './ExecutionRunPanel'
 import type {
   ExecutionTask,
   ExecutionTaskDetail,
-  MaintenanceProposalDetail,
   ScriptRevisionDiff,
   Versioned,
 } from './types'
@@ -32,34 +29,23 @@ import type {
 export function ExecutionTaskPanel({
   tasks,
   task,
-  maintenanceProposal,
   diff,
   busy,
   onOpen,
   onRetry,
   onCompare,
-  onOpenMaintenanceProposal,
-  onDecideMaintenance,
-  onOpenFormalCase,
 }: {
   tasks: ExecutionTask[]
   task: Versioned<ExecutionTaskDetail> | null
-  maintenanceProposal: Versioned<MaintenanceProposalDetail> | null
   diff: ScriptRevisionDiff | null
   busy: string
   onOpen: (taskId: string) => Promise<ExecutionTaskDetail | undefined>
   onRetry: () => Promise<void>
   onCompare: (fromRevisionId: string, toRevisionId: string) => Promise<void>
-  onOpenMaintenanceProposal: (proposalId: string) => Promise<MaintenanceProposalDetail | undefined>
-  onDecideMaintenance: (decision: 'accepted' | 'rejected') => Promise<unknown>
-  onOpenFormalCase: (caseId: string) => void
 }) {
-  const [tab, setTab] = useState<'attempts' | 'diagnoses' | 'scripts' | 'artifacts' | 'maintenance'>('attempts')
+  const [tab, setTab] = useState<'attempts' | 'diagnoses' | 'scripts' | 'artifacts'>('attempts')
   const [fromRevisionId, setFromRevisionId] = useState('')
   const [toRevisionId, setToRevisionId] = useState('')
-  const selectedMaintenanceProposal = maintenanceProposal?.value.proposal.taskId === task?.value.task.id
-    ? maintenanceProposal
-    : null
   useEffect(() => {
     const revisions = task?.value.scriptRevisions ?? []
     setFromRevisionId(revisions.at(-2)?.id ?? revisions[0]?.id ?? '')
@@ -95,7 +81,6 @@ export function ExecutionTaskPanel({
           <button className={tab === 'diagnoses' ? 'active' : ''} onClick={() => setTab('diagnoses')}>诊断 <span>{task.value.diagnoses.length}</span></button>
           <button className={tab === 'scripts' ? 'active' : ''} onClick={() => setTab('scripts')}>脚本历史 <span>{task.value.scriptRevisions.length}</span></button>
           <button className={tab === 'artifacts' ? 'active' : ''} onClick={() => setTab('artifacts')}>运行产物 <span>{task.value.artifacts.length}</span></button>
-          <button className={tab === 'maintenance' ? 'active' : ''} onClick={() => setTab('maintenance')}>用例维护 <span>{task.value.maintenanceProposals.length}</span></button>
         </nav>
 
         {tab === 'attempts' && <div className="te-timeline">
@@ -120,18 +105,6 @@ export function ExecutionTaskPanel({
           {!task.value.artifacts.length && <p className="te-empty">Runner 尚未产生 Artifact</p>}
         </div>}
 
-        {tab === 'maintenance' && <div className="te-maintenance-workbench">
-          <div className="te-maintenance-list">{task.value.maintenanceProposals.map(item => <button key={item.id} className={selectedMaintenanceProposal?.value.proposal.id === item.id ? 'active' : ''} onClick={() => void onOpenMaintenanceProposal(item.id)}><Library /><span><b>{item.summary}</b><small>Case r{item.caseRevision} · {new Date(item.createdAt).toLocaleString('zh-CN')}</small><code>{shortId(item.id)}</code></span><em className={`te-status-pill ${item.status}`}>{maintenanceStatusLabel(item.status)}</em></button>)}</div>
-          {!task.value.maintenanceProposals.length && <p className="te-empty">本 Task 未产生用例维护建议</p>}
-          {selectedMaintenanceProposal && <article className="te-maintenance-detail">
-            <header><div><span className={`te-status-pill ${selectedMaintenanceProposal.value.proposal.status}`}>{maintenanceStatusLabel(selectedMaintenanceProposal.value.proposal.status)}</span><h3>{selectedMaintenanceProposal.value.proposal.summary}</h3><p>{selectedMaintenanceProposal.value.proposal.proposedChange}</p></div></header>
-            <dl><div><dt>Diagnosis</dt><dd>{diagnosisLabel(selectedMaintenanceProposal.value.diagnosis.category)} · {selectedMaintenanceProposal.value.diagnosis.summary}</dd></div><div><dt>Script Revision</dt><dd>r{selectedMaintenanceProposal.value.originalScriptRevision.revision} → r{selectedMaintenanceProposal.value.repairScriptRevision.revision}</dd></div><div><dt>失败 Attempts</dt><dd>{selectedMaintenanceProposal.value.failureAttempts.map(item => `#${item.ordinal}`).join('、')}</dd></div><div><dt>post_repair</dt><dd>Attempt #{selectedMaintenanceProposal.value.postRepairAttempt.ordinal} · passed</dd></div><div><dt>Baseline Case</dt><dd>{shortId(selectedMaintenanceProposal.value.baselineCase.caseId)} · r{selectedMaintenanceProposal.value.baselineCase.revision}</dd></div><div><dt>Library Version</dt><dd title={selectedMaintenanceProposal.value.baselineLibraryVersion.sha256}>{shortId(selectedMaintenanceProposal.value.baselineLibraryVersion.id)}</dd></div><div><dt>创建时间</dt><dd>{new Date(selectedMaintenanceProposal.value.proposal.createdAt).toLocaleString('zh-CN')}</dd></div>{selectedMaintenanceProposal.value.proposal.decidedBy && <div><dt>审批</dt><dd>{selectedMaintenanceProposal.value.proposal.decidedBy} · {new Date(selectedMaintenanceProposal.value.proposal.decidedAt!).toLocaleString('zh-CN')}</dd></div>}</dl>
-            <div className="te-diff"><header><b>修复前后 Diff</b><span>受保护断言已校验</span></header><pre>{selectedMaintenanceProposal.value.diff.changes.removed.lines.map((line, index) => <span className="removed" key={`maintenance-removed-${index}`}>- {line}{'\n'}</span>)}{selectedMaintenanceProposal.value.diff.changes.added.lines.map((line, index) => <span className="added" key={`maintenance-added-${index}`}>+ {line}{'\n'}</span>)}</pre></div>
-            {selectedMaintenanceProposal.value.proposal.status === 'pending' && <footer><button className="te-primary" disabled={Boolean(busy)} onClick={() => void onDecideMaintenance('accepted')}>接受建议</button><button className="te-danger" disabled={Boolean(busy)} onClick={() => void onDecideMaintenance('rejected')}>拒绝建议</button></footer>}
-            {selectedMaintenanceProposal.value.proposal.status === 'accepted' && <footer><strong>已确认需要维护</strong><button className="te-secondary" onClick={() => onOpenFormalCase(selectedMaintenanceProposal.value.proposal.caseId)}>打开正式用例</button></footer>}
-            {selectedMaintenanceProposal.value.proposal.status === 'rejected' && <footer><strong>已拒绝</strong></footer>}
-          </article>}
-        </div>}
       </>}
     </section>
   </div>
@@ -205,10 +178,6 @@ function attemptKindLabel(kind: ExecutionTaskDetail['attempts'][number]['kind'])
 
 function diagnosisLabel(category: string) {
   return ({ product_defect: '产品缺陷', script_defect: '脚本缺陷', selector_changed: '选择器变化', environment_defect: '环境缺陷', test_data_defect: '测试数据缺陷', flaky: 'Flaky', assertion_mismatch: '断言不匹配', timeout: '超时', unknown: '未知' } as Record<string, string>)[category] ?? category
-}
-
-function maintenanceStatusLabel(status: 'pending' | 'accepted' | 'rejected') {
-  return ({ pending: '待确认', accepted: '已确认需要维护', rejected: '已拒绝' })[status]
 }
 
 function retryable(status: ExecutionTask['status']) {

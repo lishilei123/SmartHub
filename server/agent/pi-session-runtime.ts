@@ -57,6 +57,7 @@ export class PiSessionRuntime {
       projectId: string
       projectVersionId: string
       agentDefinition: Pick<AgentDefinitionVersion, 'agentKey'>
+      executionSessionKey?: string
     }
   }): PiSessionScope {
     if (input.snapshot.agentDefinition.agentKey === 'planning') {
@@ -67,9 +68,11 @@ export class PiSessionRuntime {
     }
     const taskId = input.snapshot.taskId
     if (!taskId) throw new Error('PI_EXECUTION_TASK_SCOPE_REQUIRED')
+    const executionSessionKey = input.snapshot.executionSessionKey
+    if (!executionSessionKey) throw new Error('PI_EXECUTION_SESSION_SCOPE_REQUIRED')
     return {
       role: 'execution_agent',
-      key: `execution:${input.snapshot.runId}:${taskId}`,
+      key: executionSessionKey,
     }
   }
 

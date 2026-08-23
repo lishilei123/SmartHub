@@ -37,7 +37,7 @@ export type TestReportListItem = {
 }
 
 export type TestReport = {
-  schemaVersion: 'test-execution-report/v2'
+  schemaVersion: 'test-execution-report/v3'
   statisticsAt: string
   reportSha256: string
   run: {
@@ -164,8 +164,8 @@ export type TestReport = {
       imageReference: string
       imageDigest: string
     }
-    agents: Record<'testScript' | 'failureAnalysis' | 'scriptRepair', {
-      agentKey: 'test-script' | 'failure-analysis' | 'script-repair'
+    agents: Record<'executionImplementation' | 'failureAnalysis', {
+      agentKey: 'execution-implementation' | 'failure-analysis'
       configurationId: string
       configurationVersion: number
       configurationSha256: string

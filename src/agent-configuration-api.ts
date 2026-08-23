@@ -3,9 +3,8 @@ const apiBase = 'http://127.0.0.1:8787/api'
 export type AgentModelReference = { sourceId: string; modelId: string }
 export type AgentConfigurationAgentKey =
   | 'planning'
-  | 'testScript'
+  | 'executionImplementation'
   | 'failureAnalysis'
-  | 'scriptRepair'
 export type AgentConfigurationScene =
   | 'planning'
   | 'test_execution'
@@ -77,9 +76,8 @@ const scenePaths: Record<AgentConfigurationScene, string> = {
 
 const agentScenes: Record<AgentConfigurationAgentKey, AgentConfigurationScene> = {
   planning: 'planning',
-  testScript: 'test_execution',
+  executionImplementation: 'test_execution',
   failureAnalysis: 'test_execution',
-  scriptRepair: 'test_execution',
 }
 
 export function materializeRequiredAgentCapabilities(

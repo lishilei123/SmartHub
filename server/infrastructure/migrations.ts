@@ -2808,6 +2808,64 @@ const migrations: Migration[] = [{
       BEFORE INSERT OR UPDATE OR DELETE ON smarthub.test_execution_events
       FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_event_write();
   `,
+}, {
+  version: 37,
+  name: 'unify-test-execution-implementation-agent',
+  sql: `
+    DO $$
+    DECLARE definition text;
+    DECLARE updated_definition text;
+    BEGIN
+      definition := pg_get_functiondef(
+        'smarthub.validate_test_execution_script_revision_insert()'::regprocedure
+      );
+      updated_definition := replace(
+        replace(
+          replace(
+            replace(
+              definition,
+              '{agents,testScript,configurationVersion}',
+              '{agents,executionImplementation,configurationVersion}'
+            ),
+            '{agents,testScript,configurationSha256}',
+            '{agents,executionImplementation,configurationSha256}'
+          ),
+          'run.snapshot->''agents''->''scriptRepair''',
+          'run.snapshot->''agents''->''executionImplementation'''
+        ),
+        'run.snapshot->''agents''->''testScript''',
+        'run.snapshot->''agents''->''executionImplementation'''
+      );
+      IF updated_definition = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_IMPLEMENTATION_AGENT_TRIGGER_MIGRATION_MISMATCH';
+      END IF;
+      EXECUTE updated_definition;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_run_agents_insert()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE agent_keys text[];
+    BEGIN
+      IF jsonb_typeof(NEW.snapshot->'agents') IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_RUN_AGENT_SNAPSHOT_INVALID';
+      END IF;
+      SELECT array_agg(agent_key ORDER BY agent_key)
+        INTO agent_keys
+      FROM jsonb_object_keys(NEW.snapshot->'agents') AS agent_keys(agent_key);
+      IF agent_keys IS DISTINCT FROM ARRAY['executionImplementation','failureAnalysis']::text[]
+        OR NEW.snapshot #>> '{agents,executionImplementation,agentKey}' IS DISTINCT FROM 'execution-implementation'
+        OR NEW.snapshot #>> '{agents,failureAnalysis,agentKey}' IS DISTINCT FROM 'failure-analysis'
+      THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_RUN_AGENT_SNAPSHOT_INVALID';
+      END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS test_execution_runs_agents_insert_ck
+      ON smarthub.test_execution_runs;
+    CREATE TRIGGER test_execution_runs_agents_insert_ck
+      BEFORE INSERT ON smarthub.test_execution_runs
+      FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_run_agents_insert();
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

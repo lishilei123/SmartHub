@@ -136,8 +136,8 @@ test('Agent 配置读取使用窄查询而不加载完整状态快照', async ()
   assert.equal('requirementAnalysis' in planning.agents, false)
   assert.equal('testDesign' in planning.agents, false)
   assert.equal(testExecution.scene, 'test_execution')
-  assert.deepEqual(Object.keys(testExecution.agents), ['testScript', 'failureAnalysis', 'scriptRepair'])
-  assert.equal(testExecution.agents.testScript!.draft.revision, 0)
+  assert.deepEqual(Object.keys(testExecution.agents), ['executionImplementation', 'failureAnalysis'])
+  assert.equal(testExecution.agents.executionImplementation!.draft.revision, 0)
 })
 
 test('Agent 配置拒绝移除必需提交工具、过期 revision 和不可用模型', async () => {
@@ -192,34 +192,29 @@ test('测试设计始终冻结最新发布的 PlanningAgent 并保持 Runtime �
   assert.equal(frozen.configurationSha256, latest.contentSha256)
 })
 
-test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同版本', async () => {
+test('两个测试执行 Agent 独立发布、精确能力就绪并冻结不同版本', async () => {
   const { store, service } = await fixture()
   const states = await service.get('test_execution')
-  assert.deepEqual(Object.keys(states.agents), ['testScript', 'failureAnalysis', 'scriptRepair'])
+  assert.deepEqual(Object.keys(states.agents), ['executionImplementation', 'failureAnalysis'])
   const expected = {
-    testScript: {
-      definitionKey: 'test-script',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'test_script.submit_result'],
-      skill: 'test-script-generation',
+    executionImplementation: {
+      definitionKey: 'execution-implementation',
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'execution_implementation.submit_result'],
+      skills: ['test-script-generation', 'script-repair'],
     },
     failureAnalysis: {
       definitionKey: 'failure-analysis',
       tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'failure_analysis.submit_result'],
-      skill: 'failure-analysis',
-    },
-    scriptRepair: {
-      definitionKey: 'script-repair',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'script_repair.submit_result'],
-      skill: 'script-repair',
+      skills: ['failure-analysis'],
     },
   } as const
 
   for (const [agentKey, contract] of Object.entries(expected) as Array<[keyof typeof expected, typeof expected[keyof typeof expected]]>) {
     const agent = states.agents[agentKey]!
     assert.deepEqual(agent.requiredToolIds, contract.tools)
-    assert.deepEqual(agent.requiredSkillKeys, [contract.skill])
+    assert.deepEqual(agent.requiredSkillKeys, contract.skills)
     assert.deepEqual(agent.requiredMcpServerKeys, [])
-    const unexpectedTool = agentKey === 'testScript'
+    const unexpectedTool = agentKey === 'executionImplementation'
       ? 'failure_analysis.submit_result'
       : 'knowledge.search'
     await assert.rejects(() => service.save('test_execution', {
@@ -238,7 +233,7 @@ test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
     assert.equal(published.scene, 'test_execution')
     assert.equal(published.agentDefinition.agentKey, contract.definitionKey)
     assert.deepEqual(published.agentDefinition.toolIds, contract.tools)
-    assert.deepEqual(published.agentDefinition.skillBindings.map(binding => binding.skillKey), [contract.skill])
+    assert.deepEqual(published.agentDefinition.skillBindings.map(binding => binding.skillKey), contract.skills)
     assert.deepEqual(published.agentDefinition.mcpBindings, [])
   }
 
@@ -246,15 +241,13 @@ test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
   const readiness = await runtime.readiness()
   assert.equal(readiness.ready, true)
   assert.deepEqual(readiness.agents.map(agent => [agent.agentKey, agent.ready]), [
-    ['test-script', true],
+    ['execution-implementation', true],
     ['failure-analysis', true],
-    ['script-repair', true],
   ])
   const frozen = await runtime.freezeConfigurations()
-  assert.equal(frozen.testScript.agentKey, 'test-script')
+  assert.equal(frozen.executionImplementation.agentKey, 'execution-implementation')
   assert.equal(frozen.failureAnalysis.agentKey, 'failure-analysis')
-  assert.equal(frozen.scriptRepair.agentKey, 'script-repair')
-  assert.equal(new Set(Object.values(frozen).map(snapshot => snapshot.configurationId)).size, 3)
+  assert.equal(new Set(Object.values(frozen).map(snapshot => snapshot.configurationId)).size, 2)
   for (const snapshot of Object.values(frozen)) {
     assert.match(snapshot.snapshotSha256, /^[a-f0-9]{64}$/u)
     assert.equal(snapshot.model.baseUrlSha256.length, 64)
@@ -265,7 +258,7 @@ test('三个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
 
 test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 supersede 前版本', async () => {
   const { store, service } = await fixture()
-  const keys = ['testScript', 'failureAnalysis', 'scriptRepair'] as const
+  const keys = ['executionImplementation', 'failureAnalysis'] as const
   for (const agentKey of keys) {
     const initial = (await service.get('test_execution')).agents[agentKey]!
     const saved = await service.save('test_execution', {
@@ -297,15 +290,15 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
   const task = executionTaskFixture(run.id)
   const workspace = executionWorkspaceFixture(run)
 
-  const supersededId = agents.testScript.configurationId
-  const current = (await service.get('test_execution')).agents.testScript
+  const supersededId = agents.executionImplementation.configurationId
+  const current = (await service.get('test_execution')).agents.executionImplementation
   const changed = await service.save('test_execution', {
-    agentKey: 'testScript',
+    agentKey: 'executionImplementation',
     revision: current.draft.revision,
     routing: current.draft.routing,
     definition: { ...current.draft.definition, systemPrompt: `${current.draft.definition.systemPrompt}\n新版本。` },
   })
-  const active = await service.publish('test_execution', { agentKey: 'testScript', revision: changed.revision })
+  const active = await service.publish('test_execution', { agentKey: 'executionImplementation', revision: changed.revision })
   assert.notEqual(active.id, supersededId)
 
   for (const stage of Object.keys(TEST_EXECUTION_STAGE_BINDINGS) as Array<keyof typeof TEST_EXECUTION_STAGE_BINDINGS>) {
@@ -336,34 +329,40 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
       'workspace.grep_files',
       'workspace.find_files',
       'workspace.list_directory',
-      ...(binding.agentKey === 'test-script'
+      ...(binding.agentKey === 'execution-implementation'
         ? ['knowledge.search', 'knowledge.read_chunk']
         : []),
       binding.submitToolId,
     ])
     assert.equal(
       input.executionProfile?.allowedToolIds.includes('knowledge.search'),
-      binding.agentKey === 'test-script',
+      binding.agentKey === 'execution-implementation',
     )
     assert.equal(input.executionProfile?.allowedToolIds.some(toolId => /runner|shell|ssh|database|http/u.test(toolId)), false)
   }
-  assert.equal(captured[0].snapshot.agentDefinition.contentSha256, (await service.getVersion(supersededId)).agentDefinition.contentSha256)
+  const superseded = await service.getVersion(supersededId)
+  assert.equal(captured[0].snapshot.agentDefinition.systemPrompt, superseded.agentDefinition.systemPrompt)
+  assert.deepEqual(captured[0].snapshot.agentDefinition.enabledSkills, ['test-script-generation'])
+  assert.deepEqual(captured[2].snapshot.agentDefinition.enabledSkills, ['script-repair'])
+  assert.equal('executionSessionKey' in captured[0].snapshot && captured[0].snapshot.executionSessionKey, `execution-implementation:${run.id}:${task.id}`)
+  assert.equal('executionSessionKey' in captured[1].snapshot && captured[1].snapshot.executionSessionKey, `execution-diagnosis:${run.id}:${task.id}:revision-1`)
+  assert.equal('executionSessionKey' in captured[2].snapshot && captured[2].snapshot.executionSessionKey, `execution-implementation:${run.id}:${task.id}`)
 })
 
 test('测试执行 Agent 模型参数漂移会破坏 frozen snapshot 就绪契约', async () => {
   const { store, service } = await fixture()
-  const initial = (await service.get('test_execution')).agents.testScript
+  const initial = (await service.get('test_execution')).agents.executionImplementation
   const saved = await service.save('test_execution', {
-    agentKey: 'testScript',
+    agentKey: 'executionImplementation',
     revision: initial.draft.revision,
     routing: { ...initial.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
     definition: initial.draft.definition,
   })
-  await service.publish('test_execution', { agentKey: 'testScript', revision: saved.revision })
+  await service.publish('test_execution', { agentKey: 'executionImplementation', revision: saved.revision })
   const runtime = new PiTestExecutionRuntimeAdapter(store, null as never, service)
   const readiness = await runtime.readiness()
   assert.equal(readiness.ready, false)
-  assert.equal(readiness.agents.find(agent => agent.agentKey === 'test-script')?.ready, true)
+  assert.equal(readiness.agents.find(agent => agent.agentKey === 'execution-implementation')?.ready, true)
   assert.equal(readiness.agents.find(agent => agent.agentKey === 'failure-analysis')?.ready, false)
 })
 

@@ -254,9 +254,8 @@ function fixture() {
     environment,
     runner: runnerSnapshot,
     agents: {
-      testScript: agentSnapshot('test-script'),
+      executionImplementation: agentSnapshot('execution-implementation'),
       failureAnalysis: agentSnapshot('failure-analysis'),
-      scriptRepair: agentSnapshot('script-repair'),
     },
     status: 'queued',
     stateVersion: 0,
@@ -295,6 +294,8 @@ class InMemoryExecutionStore implements TestExecutionStore {
   scriptArtifacts: ScriptArtifact[] = []
   revisions: ScriptRevision[] = []
   maintenanceProposals: CaseMaintenanceProposal[] = []
+  rejectMaintenanceProposalWrites = false
+  maintenanceProposalWriteAttempts = 0
 
   constructor(value: ReturnType<typeof fixture>) {
     this.run = structuredClone(value.run)
@@ -566,6 +567,10 @@ class InMemoryExecutionStore implements TestExecutionStore {
         this.diagnoses.push(structuredClone(diagnosis))
       },
       appendMaintenanceProposal: async proposal => {
+        this.maintenanceProposalWriteAttempts += 1
+        if (this.rejectMaintenanceProposalWrites) {
+          throw new Error('MAINTENANCE_PROPOSAL_WRITE_MUST_NOT_BLOCK_PASS')
+        }
         const existing = this.maintenanceProposals.find(item =>
           item.id === proposal.id
           || item.taskId === proposal.taskId
@@ -619,7 +624,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
     let agentKey: TestExecutionAgentRuntimeOutput['execution']['agentKey']
     if (input.stage === 'script_generation') {
       schemaVersion = 'test-script-generation/v1'
-      agentKey = 'test-script'
+      agentKey = 'execution-implementation'
       const entryFile = `tests/${input.task.input.method}/${input.task.id}.spec.ts`
       const generationFiles = [{
         path: entryFile,
@@ -646,7 +651,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
       }
     } else {
       schemaVersion = 'script-repair/v1'
-      agentKey = 'script-repair'
+      agentKey = 'execution-implementation'
       this.repairOrdinal += 1
       const entryFile = `tests/${input.task.input.method}/${input.task.id}.spec.ts`
       candidate = {
@@ -764,12 +769,14 @@ async function withService(
     workspace?: boolean
     playwrightCliAvailable?: boolean
     networkCandidates?: RawUiNetworkObservation[]
+    rejectMaintenanceProposalWrites?: boolean
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
   try {
     const value = fixture()
     const store = new InMemoryExecutionStore(value)
+    store.rejectMaintenanceProposalWrites = options.rejectMaintenanceProposalWrites ?? false
     const artifactStore = new LocalExecutionArtifactStore(root)
     const runner = new SequenceRunner(results)
     const runtime = new ScriptAgentRuntime(value.run.agents, options)
@@ -1003,7 +1010,7 @@ test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷�
     assert.equal(runtime.calls[0].uiExecution?.snapshot?.includes('状态页'), true)
     assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 0)
     assert.equal(store.diagnoses[0].repairable, false)
-    assert.equal(store.diagnoses[0].recommendedAction, '记录产品缺陷，不调用 ScriptRepairAgent')
+    assert.equal(store.diagnoses[0].recommendedAction, '记录产品缺陷，不进入脚本修复 Stage')
     assert.equal(store.diagnoses[0].attemptIds[0], store.attempts[0].id)
     assert.equal(store.diagnoses[0].evidence[0].attemptId, store.attempts[0].id)
     assert.equal((await workspace.readEntry(store.run.projectVersionId, { entryFile: 'tests/ui/status.spec.ts' })), source)
@@ -1386,7 +1393,7 @@ test('TestExecutionService 两次真实失败后才诊断，并在两次自动�
 })
 
 for (const diagnosisCategory of ['script_defect', 'selector_changed'] as const) {
-  test(`TestExecutionService ${diagnosisCategory} repair 经真实 post_repair PASS 后创建唯一维护建议`, async () => {
+  test(`TestExecutionService ${diagnosisCategory} repair 经真实 post_repair PASS 后直接结束且 Proposal 写入失败也不阻塞`, async () => {
     await withService([
       { status: 'failed', exitCode: 1, durationMs: 10, summary: '首次失败', error: 'locator 未匹配', artifacts: [] },
       { status: 'failed', exitCode: 1, durationMs: 11, summary: '重试失败', error: 'locator 未匹配', artifacts: [] },
@@ -1394,26 +1401,15 @@ for (const diagnosisCategory of ['script_defect', 'selector_changed'] as const) 
     ], async ({ service, store, job }) => {
       const task = await service.processPreparedTask(job, lease, new AbortController().signal)
       assert.equal(task.status, 'passed')
-      assert.equal(store.maintenanceProposals.length, 1)
-      const proposal = store.maintenanceProposals[0]
+      assert.equal(store.maintenanceProposals.length, 0)
+      assert.equal(store.maintenanceProposalWriteAttempts, 0)
       const original = store.revisions[0]
       const repair = store.revisions[1]
-      assert.equal(proposal.status, 'pending')
-      assert.equal(proposal.taskId, task.id)
-      assert.equal(proposal.diagnosisId, store.diagnoses[0].id)
-      assert.equal(proposal.scriptRevisionId, repair.id)
       assert.equal(repair.parentRevisionId, original.id)
       assert.equal(repair.protectedAssertionSha256, original.protectedAssertionSha256)
       assert.equal(store.attempts.at(-1)?.kind, 'post_repair')
       assert.equal(store.attempts.at(-1)?.status, 'passed')
-      assert.equal(proposal.baselineLibraryVersionId, store.run.handoff.testCaseLibraryVersionId)
-      assert.match(proposal.proposedChange, /不得修改 Expected Result、Verification Check、matcher、Requirement/u)
-
-      const replay = await store.transactionWithLease(job.id, lease, transaction =>
-        transaction.appendMaintenanceProposal(structuredClone(proposal)))
-      assert.deepEqual(replay, proposal)
-      assert.equal(store.maintenanceProposals.length, 1)
-    }, { diagnosisCategory })
+    }, { diagnosisCategory, rejectMaintenanceProposalWrites: true })
   })
 }
 
@@ -1452,37 +1448,6 @@ test('TestExecutionService repair 修改受保护断言时在 Runner 前拒绝�
     diagnosisCategory: 'script_defect',
     repairSource: () => source.replace("toHaveText('Ready')", "toHaveText('Changed')"),
   })
-})
-
-test('TestExecutionService 维护建议 accepted/rejected 使用服务端审计且终态拒绝再次决策', async () => {
-  for (const decision of ['accepted', 'rejected'] as const) {
-    await withService([
-      { status: 'failed', exitCode: 1, durationMs: 10, summary: '首次失败', error: '执行失败', artifacts: [] },
-      { status: 'failed', exitCode: 1, durationMs: 11, summary: '重试失败', error: '执行失败', artifacts: [] },
-      { status: 'passed', exitCode: 0, durationMs: 8, summary: '修复后通过', artifacts: [] },
-    ], async ({ service, store, job }) => {
-      await service.processPreparedTask(job, lease, new AbortController().signal)
-      const pending = store.maintenanceProposals[0]
-      const decided = await service.decideMaintenanceProposal({
-        proposalId: pending.id,
-        decision,
-        decidedBy: 'operator-1',
-      })
-      assert.equal(decided.status, decision)
-      assert.equal(decided.decidedBy, 'operator-1')
-      assert.equal(decided.decidedAt, '2026-08-13T12:00:00.000Z')
-      await assert.rejects(
-        service.decideMaintenanceProposal({
-          proposalId: pending.id,
-          decision: decision === 'accepted' ? 'rejected' : 'accepted',
-          decidedBy: 'operator-2',
-        }),
-        (error: unknown) => error instanceof Error
-          && 'code' in error
-          && error.code === 'TEST_EXECUTION_MAINTENANCE_PROPOSAL_STATE_CONFLICT',
-      )
-    }, { diagnosisCategory: 'script_defect' })
-  }
 })
 
 test('TestExecutionService Binding 缺失时进入 Agent Implement，不回放旧 ScriptArtifact Cache', async () => {

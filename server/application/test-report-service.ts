@@ -239,7 +239,7 @@ export function buildTestExecutionReport(
   })
 
   const content: TestExecutionReportContent = {
-    schemaVersion: 'test-execution-report/v2',
+    schemaVersion: 'test-execution-report/v3',
     statisticsAt,
     run: {
       id: run.id,
@@ -368,9 +368,8 @@ export function buildTestExecutionReport(
       },
       runner: structuredClone(run.runner),
       agents: {
-        testScript: agentTraceability(run.agents.testScript),
+        executionImplementation: agentTraceability(run.agents.executionImplementation),
         failureAnalysis: agentTraceability(run.agents.failureAnalysis),
-        scriptRepair: agentTraceability(run.agents.scriptRepair),
       },
     },
   }

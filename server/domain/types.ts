@@ -126,9 +126,8 @@ export type AgentConfigurationScene = 'planning' | 'test_execution'
 export type AgentConfigurationStatus = 'active' | 'superseded'
 export type AgentConfigurationAgentKey =
   | 'planning'
-  | 'testScript'
+  | 'executionImplementation'
   | 'failureAnalysis'
-  | 'scriptRepair'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
   primaryModel: AgentModelReference | null
@@ -336,7 +335,7 @@ export interface ToolApproval {
   consumedAt?: string
 }
 export interface AgentExecutionRecord {
-  agentKey?: 'planning' | 'test-script' | 'failure-analysis' | 'script-repair'
+  agentKey?: 'planning' | 'execution-implementation' | 'failure-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number

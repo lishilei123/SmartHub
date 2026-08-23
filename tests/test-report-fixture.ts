@@ -37,9 +37,8 @@ function agent(agentKey: FrozenExecutionAgentSnapshot['agentKey']): FrozenExecut
 }
 
 const agents = {
-  testScript: agent('test-script'),
+  executionImplementation: agent('execution-implementation'),
   failureAnalysis: agent('failure-analysis'),
-  scriptRepair: agent('script-repair'),
 }
 
 function task(
@@ -125,7 +124,7 @@ function revision(taskValue: ExecutionTask, number: number, source: ScriptRevisi
     ...(number > 1 ? { parentRevisionId: `${taskValue.id}-revision-${number - 1}` } : {}),
     source,
     ...(source === 'repair' ? { repairReason: '修复失败定位器' } : {}),
-    generatedBy: source === 'repair' ? agents.scriptRepair : agents.testScript,
+    generatedBy: agents.executionImplementation,
     package: packageValue,
     sourceArtifacts: [{
       path: packageValue.entrypoint,

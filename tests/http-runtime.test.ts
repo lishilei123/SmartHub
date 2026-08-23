@@ -99,7 +99,7 @@ test('Agent 配置接口返回统一 PlanningAgent 并按场景隔离保存', as
 
     const testExecution = await loadAgentConfiguration(baseUrl, 'test-execution')
     assert.equal(testExecution.scene, 'test_execution')
-    assert.deepEqual(Object.keys(testExecution.agents), ['testScript', 'failureAnalysis', 'scriptRepair'])
+    assert.deepEqual(Object.keys(testExecution.agents), ['executionImplementation', 'failureAnalysis'])
 
     const skillResponse = await fetch(`${baseUrl}/ai-resources/skill`, {
       method: 'POST',

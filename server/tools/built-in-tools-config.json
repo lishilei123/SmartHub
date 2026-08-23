@@ -491,18 +491,18 @@
         "additionalProperties": false
       }
     },
-    "test_script.submit_result": {
-      "version": "2.0.0",
-      "piName": "test_script_submit_result",
-      "label": "提交测试脚本候选",
-      "catalogName": "提交测试脚本候选",
-      "description": "提交 Playwright Workspace 源码候选；Service 自动绑定当前 Task 并在构建 ExecutionPackage 前校验入口、依赖闭包、AST、执行方式和受保护断言。",
-      "catalogDescription": "提交只读测试执行 Stage 生成的 Playwright 源码候选。",
+    "execution_implementation.submit_result": {
+      "version": "1.0.0",
+      "piName": "execution_implementation_submit_result",
+      "label": "提交执行实现候选",
+      "catalogName": "提交执行实现候选",
+      "description": "提交 script_generation 或 script_repair Stage 的 Playwright Workspace 源码候选；Service 根据当前 Stage 自动绑定身份、版本和对应 Validator。",
+      "catalogDescription": "提交测试执行实现 Stage 的 Playwright 源码候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
       "idempotent": false,
       "sourcePath": "server/tools/requirement-tools.ts",
-      "handlerKey": "test_script.submit_result",
+      "handlerKey": "execution_implementation.submit_result",
       "catalogVisible": true,
       "parameters": {
         "type": "object",
@@ -594,65 +594,6 @@
           "category",
           "reason",
           "evidence"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "script_repair.submit_result": {
-      "version": "2.0.0",
-      "piName": "script_repair_submit_result",
-      "label": "提交测试脚本修复候选",
-      "catalogName": "提交测试脚本修复候选",
-      "description": "提交 Playwright Workspace 修复源码；Service 自动绑定 parent Revision、Diagnosis 和修复次数，并校验依赖闭包、AST 与受保护断言继承。",
-      "catalogDescription": "提交只读脚本修复 Stage 的 Playwright 源码候选。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/requirement-tools.ts",
-      "handlerKey": "script_repair.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "entryFile": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 500
-          },
-          "files": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "properties": {
-                "path": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 500
-                },
-                "content": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 524288
-                }
-              },
-              "required": [
-                "path",
-                "content"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "summary": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 500
-          }
-        },
-        "required": [
-          "entryFile",
-          "files"
         ],
         "additionalProperties": false
       }

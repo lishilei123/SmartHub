@@ -101,7 +101,7 @@ export type ExecutionArtifactType =
   | 'completion_manifest'
 
 export interface FrozenExecutionAgentSnapshot {
-  agentKey: 'test-script' | 'failure-analysis' | 'script-repair'
+  agentKey: 'execution-implementation' | 'failure-analysis'
   configurationId: string
   configurationVersion: number
   configurationSha256: string
@@ -175,9 +175,8 @@ export interface ExecutionRun {
   testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
   agents: {
-    testScript: FrozenExecutionAgentSnapshot
+    executionImplementation: FrozenExecutionAgentSnapshot
     failureAnalysis: FrozenExecutionAgentSnapshot
-    scriptRepair: FrozenExecutionAgentSnapshot
   }
   status: ExecutionRunStatus
   stateVersion: number
@@ -301,8 +300,8 @@ export interface ScriptArtifact {
   /** Prevents cache reuse across different frozen runtime data bindings. */
   taskInputSha256?: string
   environmentSignature: string
-  testScriptAgentVersion: number
-  testScriptAgentConfigurationSha256: string
+  executionImplementationAgentVersion: number
+  executionImplementationAgentConfigurationSha256: string
   createdAt: string
 }
 

@@ -189,14 +189,13 @@ export interface TestReportTraceability {
     imageDigest: string
   }
   agents: {
-    testScript: TestReportAgentTraceability
+    executionImplementation: TestReportAgentTraceability
     failureAnalysis: TestReportAgentTraceability
-    scriptRepair: TestReportAgentTraceability
   }
 }
 
 export interface TestExecutionReportContent {
-  schemaVersion: 'test-execution-report/v2'
+  schemaVersion: 'test-execution-report/v3'
   statisticsAt: string
   run: {
     id: string

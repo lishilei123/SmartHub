@@ -7,8 +7,8 @@ import { ToolRegistry } from '../server/tools/registry.js'
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
 test('checked-in built-in Tool config excludes retired requirement repair submissions', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 13)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 12)
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 12)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 11)
   assert.ok(defaultBuiltInToolConfigResolver.keys().every(key => !key.startsWith('skill.')))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
@@ -20,9 +20,8 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.match(listDirectory.properties.path.description, /空字符串/u)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').piName, 'test_script_submit_result')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').piName, 'execution_implementation_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').piName, 'failure_analysis_submit_result')
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').piName, 'script_repair_submit_result')
   const reviewer = defaultBuiltInToolConfigResolver.toDescriptor('reviewer.submit_result').parameters as unknown as {
     properties: { reviewerType: { enum: string[] } }
   }
@@ -37,7 +36,7 @@ test('Requirement Analysis 精简提交 Schema 会发布新的 Tool 绑定令牌
 })
 
 test('测试执行候选工具只向 Agent 暴露最小智能结果', () => {
-  const script = defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').parameters as unknown as {
+  const implementation = defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').parameters as unknown as {
     additionalProperties: boolean
     required: string[]
     properties: { files: { maxItems: number; items: { properties: { content: { maxLength: number } } } } }
@@ -47,29 +46,18 @@ test('测试执行候选工具只向 Agent 暴露最小智能结果', () => {
     required: string[]
     properties: { evidence: { maxLength: number }; category: { enum: string[] } }
   }
-  const repair = defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').parameters as unknown as {
-    additionalProperties: boolean
-    required: string[]
-    properties: { files: { maxItems: number; items: { properties: { content: { maxLength: number } } } } }
-  }
-  assert.equal(script.additionalProperties, false)
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').version, '2.0.0')
-  assert.deepEqual(Object.keys(script.properties).sort(), ['entryFile', 'files', 'summary'])
-  assert.deepEqual(script.required, ['entryFile', 'files'])
-  assert.equal(script.properties.files.maxItems, 16)
-  assert.equal(script.properties.files.items.properties.content.maxLength, 524_288)
+  assert.equal(implementation.additionalProperties, false)
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').version, '1.0.0')
+  assert.deepEqual(Object.keys(implementation.properties).sort(), ['entryFile', 'files', 'summary'])
+  assert.deepEqual(implementation.required, ['entryFile', 'files'])
+  assert.equal(implementation.properties.files.maxItems, 16)
+  assert.equal(implementation.properties.files.items.properties.content.maxLength, 524_288)
   assert.equal(diagnosis.additionalProperties, false)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').version, '2.0.0')
   assert.deepEqual(Object.keys(diagnosis.properties).sort(), ['category', 'evidence', 'reason'])
   assert.deepEqual(diagnosis.required, ['category', 'reason', 'evidence'])
   assert.equal(diagnosis.properties.evidence.maxLength, 4_000)
   assert.deepEqual(diagnosis.properties.category.enum, ['product_defect', 'script_defect', 'selector_changed', 'environment_defect', 'test_data_defect', 'flaky', 'assertion_mismatch', 'timeout', 'unknown'])
-  assert.equal(repair.additionalProperties, false)
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').version, '2.0.0')
-  assert.deepEqual(Object.keys(repair.properties).sort(), ['entryFile', 'files', 'summary'])
-  assert.deepEqual(repair.required, ['entryFile', 'files'])
-  assert.equal(repair.properties.files.maxItems, 16)
-  assert.equal(repair.properties.files.items.properties.content.maxLength, 524_288)
 })
 
 test('resolver copies outputs and descriptors register through the governed registry', () => {

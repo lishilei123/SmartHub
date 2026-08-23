@@ -16,18 +16,17 @@ test('Agent 配置页面不提供模型温度', () => {
   assert.doesNotMatch(source, /模型温度|routing\.temperature|updateRouting\('temperature'/u)
 })
 
-test('Agent 配置页面展示一个 PlanningAgent 与三个测试执行 Agent', () => {
+test('Agent 配置页面展示一个 PlanningAgent 与两个测试执行 Agent', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
 
   for (const identifier of [
     'PlanningAgent',
-    'TestScriptAgent',
+    'ExecutionImplementationAgent',
     'FailureAnalysisAgent',
-    'ScriptRepairAgent',
   ]) assert.match(source, new RegExp(`identifier: '${identifier}'`, 'u'))
   assert.doesNotMatch(source, /identifier: '(?:RequirementAnalysisAgent|TestDesignAgent)'/u)
   assert.match(source, /\{ label: '测试策划', agentKeys: \['planning'\] \}/u)
-  assert.match(source, /\{ label: '测试执行', agentKeys: \['testScript', 'failureAnalysis', 'scriptRepair'\] \}/u)
+  assert.match(source, /\{ label: '测试执行', agentKeys: \['executionImplementation', 'failureAnalysis'\] \}/u)
   assert.match(source, /exactCapabilities: true/u)
 })
 

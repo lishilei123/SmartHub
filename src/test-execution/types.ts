@@ -122,7 +122,7 @@ export type ExecutionHandoff = {
 }
 
 export type FrozenExecutionAgentSnapshot = {
-  agentKey: 'test-script' | 'failure-analysis' | 'script-repair'
+  agentKey: 'execution-implementation' | 'failure-analysis'
   configurationId: string
   configurationVersion: number
   configurationSha256: string
@@ -161,9 +161,8 @@ export type ExecutionRun = {
   testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
   agents: {
-    testScript: FrozenExecutionAgentSnapshot
+    executionImplementation: FrozenExecutionAgentSnapshot
     failureAnalysis: FrozenExecutionAgentSnapshot
-    scriptRepair: FrozenExecutionAgentSnapshot
   }
   status: ExecutionRunStatus
   stateVersion: number

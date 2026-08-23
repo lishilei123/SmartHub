@@ -17,12 +17,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'planning' | 'test-script' | 'failure-analysis' | 'script-repair'
-  agentType: 'planning' | 'test_script' | 'failure_analysis' | 'script_repair'
+  agentKey: 'planning' | 'execution-implementation' | 'failure-analysis'
+  agentType: 'planning' | 'execution_implementation' | 'failure_analysis'
   version: string
   status: 'published'
   modelScene: 'planning' | 'test_execution'
-  resultSchemaVersion: 'planning/v1' | 'test-script-generation/v1' | 'failure-analysis/v1' | 'script-repair/v1'
+  resultSchemaVersion: 'planning/v1' | 'execution-implementation/v1' | 'failure-analysis/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -443,6 +443,8 @@ export interface TestExecutionAgentWorkspaceProjection {
 export interface TestExecutionAgentSnapshot
   extends TestExecutionAgentWorkspaceProjection {
   agentDefinition: AgentDefinitionVersion
+  /** Runtime-only Pi Session scope; it is not a model-owned workflow field. */
+  executionSessionKey: string
   taskSha256: string
   createdAt: string
 }

@@ -148,7 +148,7 @@ const run: ExecutionRun = {
     signature: 'f'.repeat(64),
   },
   runner: { runnerVersion: '1.0.0', playwrightVersion: '1.58.2', imageReference: 'runner@sha256:test', imageDigest: `sha256:${'1'.repeat(64)}` },
-  agents: { testScript: agentSnapshot('test-script'), failureAnalysis: agentSnapshot('failure-analysis'), scriptRepair: agentSnapshot('script-repair') },
+  agents: { executionImplementation: agentSnapshot('execution-implementation'), failureAnalysis: agentSnapshot('failure-analysis') },
   status: 'queued',
   stateVersion: 0,
   idempotencyKey: `${prefix}-idempotency`,
@@ -915,7 +915,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     id: `${prefix}-source-artifact`, runId: ids.run, taskId: ids.task, type: 'script', storagePath: `objects/33/${'3'.repeat(64)}`, sha256: '3'.repeat(64), size: 100, mimeType: 'text/typescript', createdAt: now,
   }
   const scriptArtifactBase = {
-    caseId: ids.libraryCase, caseRevision: 1, method: 'ui' as const, caseContentSha256, executionSpecSha256: frozenInput.executionSpecSha256, environmentSignature: run.environment.signature, testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'a'.repeat(64),
+    caseId: ids.libraryCase, caseRevision: 1, method: 'ui' as const, caseContentSha256, executionSpecSha256: frozenInput.executionSpecSha256, environmentSignature: run.environment.signature, executionImplementationAgentVersion: 1, executionImplementationAgentConfigurationSha256: 'a'.repeat(64),
   }
   const scriptArtifact: ScriptArtifact = {
     id: `${prefix}-script-artifact`, cacheKey: scriptCacheKey(scriptArtifactBase), ...scriptArtifactBase, createdAt: now,
@@ -940,7 +940,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     packageSha256: canonicalSha256(manifestBase),
   }
   const revision: ScriptRevision = {
-    id: `${prefix}-script-revision`, runId: ids.run, taskId: ids.task, scriptArtifactId: scriptArtifact.id, revision: 1, source: 'agent', generatedBy: run.agents.testScript, package: manifest, sourceArtifacts: [{ path: manifest.entrypoint, artifactId: sourceArtifact.id }], sourceArtifactId: sourceArtifact.id, contentSha256: '3'.repeat(64), protectedAssertionSha256: manifest.protectedAssertionSha256, createdAt: now,
+    id: `${prefix}-script-revision`, runId: ids.run, taskId: ids.task, scriptArtifactId: scriptArtifact.id, revision: 1, source: 'agent', generatedBy: run.agents.executionImplementation, package: manifest, sourceArtifacts: [{ path: manifest.entrypoint, artifactId: sourceArtifact.id }], sourceArtifactId: sourceArtifact.id, contentSha256: '3'.repeat(64), protectedAssertionSha256: manifest.protectedAssertionSha256, createdAt: now,
   }
   const attempt: ExecutionAttempt = {
     id: `${prefix}-attempt`, runId: ids.run, taskId: ids.task, ordinal: 1, invocationKey: `${prefix}-invocation`, kind: 'initial', scriptRevisionId: revision.id, packageSha256: manifest.packageSha256, status: 'running', startedAt: now,
@@ -1092,7 +1092,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     parentRevisionId: revision.id,
     source: 'repair',
     repairReason: '验证诊断 revision 归属',
-    generatedBy: run.agents.scriptRepair,
+    generatedBy: run.agents.executionImplementation,
     package: alternateManifest,
     sourceArtifacts: [{ path: alternateManifest.entrypoint, artifactId: alternateSourceArtifact.id }],
     sourceArtifactId: alternateSourceArtifact.id,
@@ -1353,7 +1353,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
         scriptArtifact.id,
         alternateRevision.id,
         '验证数据库拒绝伪造 package hash',
-        JSON.stringify(run.agents.scriptRepair),
+        JSON.stringify(run.agents.executionImplementation),
         JSON.stringify(forgedManifest),
         canonicalJson(forgedManifestBase),
         forgedPackageSha256,
@@ -1456,8 +1456,8 @@ async function appendRunningAttempt(
     caseContentSha256,
     executionSpecSha256: frozenInput.executionSpecSha256,
     environmentSignature: run.environment.signature,
-    testScriptAgentVersion: 1,
-    testScriptAgentConfigurationSha256: 'a'.repeat(64),
+    executionImplementationAgentVersion: 1,
+    executionImplementationAgentConfigurationSha256: 'a'.repeat(64),
   }
   const scriptArtifact: ScriptArtifact = {
     id: `${prefix}-script-artifact`,
@@ -1491,7 +1491,7 @@ async function appendRunningAttempt(
     scriptArtifactId: scriptArtifact.id,
     revision: 1,
     source: 'agent',
-    generatedBy: run.agents.testScript,
+    generatedBy: run.agents.executionImplementation,
     package: manifest,
     sourceArtifacts: [{ path: manifest.entrypoint, artifactId: sourceArtifact.id }],
     sourceArtifactId: sourceArtifact.id,

@@ -11,7 +11,7 @@ import { reportSourceFixture, reportSourceReader } from './test-report-fixture.j
 
 test('报告 Service 按正式口径计算概览、效率、首次质量、稳定性和自愈', () => {
   const report = buildTestExecutionReport(reportSourceFixture())
-  assert.equal(report.schemaVersion, 'test-execution-report/v2')
+  assert.equal(report.schemaVersion, 'test-execution-report/v3')
   assert.equal(report.statisticsAt, '2026-08-14T00:00:26.000Z')
   assert.deepEqual(report.overview, {
     totalCases: 9,

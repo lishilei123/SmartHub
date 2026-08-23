@@ -268,12 +268,12 @@ test('ExecutionPackage 使用固定入口、内容 Hash、断言契约与规范�
   assert.equal(first.manifest.assertions[0].verificationCheckKey, 'expected-1')
   assert.equal(first.files[0].contentSha256, createHash('sha256').update(validSource).digest('hex'))
   assert.notEqual(
-    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, environmentSignature: 'one', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
-    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, environmentSignature: 'two', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
+    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, environmentSignature: 'one', executionImplementationAgentVersion: 1, executionImplementationAgentConfigurationSha256: 'b'.repeat(64) }),
+    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, environmentSignature: 'two', executionImplementationAgentVersion: 1, executionImplementationAgentConfigurationSha256: 'b'.repeat(64) }),
   )
   assert.notEqual(
-    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, taskInputSha256: 'c'.repeat(64), environmentSignature: 'one', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
-    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, taskInputSha256: 'd'.repeat(64), environmentSignature: 'one', testScriptAgentVersion: 1, testScriptAgentConfigurationSha256: 'b'.repeat(64) }),
+    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, taskInputSha256: 'c'.repeat(64), environmentSignature: 'one', executionImplementationAgentVersion: 1, executionImplementationAgentConfigurationSha256: 'b'.repeat(64) }),
+    scriptCacheKey({ caseId: 'case-status', caseRevision: 3, method: 'ui', caseContentSha256: contentSha256, executionSpecSha256: task.executionSpecSha256, taskInputSha256: 'd'.repeat(64), environmentSignature: 'one', executionImplementationAgentVersion: 1, executionImplementationAgentConfigurationSha256: 'b'.repeat(64) }),
   )
 })
 

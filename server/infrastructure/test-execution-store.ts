@@ -1851,8 +1851,8 @@ async function insertScriptArtifact(client: PoolClient, artifact: ScriptArtifact
     executionSpecSha256: artifact.executionSpecSha256,
     ...(artifact.taskInputSha256 ? { taskInputSha256: artifact.taskInputSha256 } : {}),
     environmentSignature: artifact.environmentSignature,
-    testScriptAgentVersion: artifact.testScriptAgentVersion,
-    testScriptAgentConfigurationSha256: artifact.testScriptAgentConfigurationSha256,
+    executionImplementationAgentVersion: artifact.executionImplementationAgentVersion,
+    executionImplementationAgentConfigurationSha256: artifact.executionImplementationAgentConfigurationSha256,
   })
   if (artifact.cacheKey !== expectedCacheKey) throw new Error('TEST_EXECUTION_SCRIPT_CACHE_KEY_MISMATCH')
   const inserted = await client.query<ScriptArtifactRow>(`
@@ -1860,7 +1860,7 @@ async function insertScriptArtifact(client: PoolClient, artifact: ScriptArtifact
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
     ON CONFLICT (cache_key) DO NOTHING
     RETURNING *
-  `, [artifact.id, artifact.cacheKey, artifact.caseId, artifact.caseRevision, artifact.method, artifact.caseContentSha256, artifact.executionSpecSha256, artifact.taskInputSha256 ?? null, artifact.environmentSignature, artifact.testScriptAgentVersion, artifact.testScriptAgentConfigurationSha256, artifact.createdAt])
+  `, [artifact.id, artifact.cacheKey, artifact.caseId, artifact.caseRevision, artifact.method, artifact.caseContentSha256, artifact.executionSpecSha256, artifact.taskInputSha256 ?? null, artifact.environmentSignature, artifact.executionImplementationAgentVersion, artifact.executionImplementationAgentConfigurationSha256, artifact.createdAt])
   if (inserted.rows[0]) return scriptArtifactFromRow(inserted.rows[0])
   const existing = await client.query<ScriptArtifactRow>('SELECT * FROM smarthub.test_execution_script_artifacts WHERE cache_key=$1', [artifact.cacheKey])
   if (!existing.rows[0]) throw new Error('TEST_EXECUTION_SCRIPT_ARTIFACT_CONFLICT')
@@ -1897,14 +1897,12 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
     case_content_sha256: string
     execution_spec_sha256: string
     environment_signature: string
-    test_script_agent_snapshot: ScriptRevision['generatedBy']
-    script_repair_agent_snapshot: ScriptRevision['generatedBy']
+    execution_implementation_agent_snapshot: ScriptRevision['generatedBy']
   }>(`
     SELECT task.input_sha256,task.case_id,task.case_revision,task.method,
            task.case_content_sha256,task.execution_spec_sha256,
            run.environment_signature,
-           run.snapshot->'agents'->'testScript' AS test_script_agent_snapshot,
-           run.snapshot->'agents'->'scriptRepair' AS script_repair_agent_snapshot
+           run.snapshot->'agents'->'executionImplementation' AS execution_implementation_agent_snapshot
     FROM smarthub.test_execution_tasks task
     JOIN smarthub.test_execution_runs run ON run.id=task.run_id
     WHERE task.id=$1 AND task.run_id=$2
@@ -1927,13 +1925,9 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
     || cached.execution_spec_sha256 !== scope.execution_spec_sha256
     || cached.task_input_sha256 !== null && cached.task_input_sha256 !== scope.input_sha256
     || cached.environment_signature !== scope.environment_signature
-    || Number(cached.test_script_agent_version) !== scope.test_script_agent_snapshot.configurationVersion
-    || cached.test_script_agent_configuration_sha256 !== scope.test_script_agent_snapshot.configurationSha256
-    || canonicalSha256(
-      revision.source === 'repair'
-        ? scope.script_repair_agent_snapshot
-        : scope.test_script_agent_snapshot,
-    ) !== canonicalSha256(revision.generatedBy)
+    || Number(cached.test_script_agent_version) !== scope.execution_implementation_agent_snapshot.configurationVersion
+    || cached.test_script_agent_configuration_sha256 !== scope.execution_implementation_agent_snapshot.configurationSha256
+    || canonicalSha256(scope.execution_implementation_agent_snapshot) !== canonicalSha256(revision.generatedBy)
     || revision.package.taskInputSha256 !== scope.input_sha256
     || revision.package.caseId !== scope.case_id
     || revision.package.caseRevision !== Number(scope.case_revision)
@@ -2462,7 +2456,7 @@ type ScriptArtifactRow = {
   id: string; cache_key: string; case_id: string; case_revision: number; method: ScriptArtifact['method']; case_content_sha256: string; execution_spec_sha256: string; task_input_sha256: string | null; environment_signature: string; test_script_agent_version: number; test_script_agent_configuration_sha256: string; created_at: Date | string
 }
 function scriptArtifactFromRow(row: ScriptArtifactRow): ScriptArtifact {
-  return { id: row.id, cacheKey: row.cache_key, caseId: row.case_id, caseRevision: Number(row.case_revision), method: row.method, caseContentSha256: row.case_content_sha256, executionSpecSha256: row.execution_spec_sha256, ...(row.task_input_sha256 ? { taskInputSha256: row.task_input_sha256 } : {}), environmentSignature: row.environment_signature, testScriptAgentVersion: Number(row.test_script_agent_version), testScriptAgentConfigurationSha256: row.test_script_agent_configuration_sha256, createdAt: iso(row.created_at) }
+  return { id: row.id, cacheKey: row.cache_key, caseId: row.case_id, caseRevision: Number(row.case_revision), method: row.method, caseContentSha256: row.case_content_sha256, executionSpecSha256: row.execution_spec_sha256, ...(row.task_input_sha256 ? { taskInputSha256: row.task_input_sha256 } : {}), environmentSignature: row.environment_signature, executionImplementationAgentVersion: Number(row.test_script_agent_version), executionImplementationAgentConfigurationSha256: row.test_script_agent_configuration_sha256, createdAt: iso(row.created_at) }
 }
 
 type ScriptRevisionRow = {

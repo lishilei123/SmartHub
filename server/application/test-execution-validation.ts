@@ -302,8 +302,8 @@ export function scriptCacheKey(input: Omit<ScriptArtifact, 'id' | 'cacheKey' | '
     executionSpecSha256: input.executionSpecSha256,
     ...(input.taskInputSha256 ? { taskInputSha256: input.taskInputSha256 } : {}),
     environmentSignature: input.environmentSignature,
-    testScriptAgentVersion: input.testScriptAgentVersion,
-    testScriptAgentConfigurationSha256: input.testScriptAgentConfigurationSha256,
+    executionImplementationAgentVersion: input.executionImplementationAgentVersion,
+    executionImplementationAgentConfigurationSha256: input.executionImplementationAgentConfigurationSha256,
   })
 }
 

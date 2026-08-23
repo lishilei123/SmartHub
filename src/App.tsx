@@ -36,13 +36,12 @@ type JobStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
 type SearchLocation = { assetId: string; assetVersionId: string; startLine: number; endLine: number; nonce: number }
 const agentConfigurationMetadata: Record<AgentConfigurationAgentKey, { label: string; identifier: string; sceneLabel: string; protocolLabel: string; publishTarget: string; runtimeToolIds: string[]; exactCapabilities: boolean }> = {
   planning: { label: 'PlanningAgent', identifier: 'PlanningAgent', sceneLabel: '测试策划', protocolLabel: 'Planning + Project Workspace v1', publishTarget: '新的需求分析与测试设计任务', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'], exactCapabilities: false },
-  testScript: { label: '测试脚本 Agent', identifier: 'TestScriptAgent', sceneLabel: '测试执行', protocolLabel: '测试脚本生成 v1', publishTarget: '新测试执行运行', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'test_script.submit_result'], exactCapabilities: true },
+  executionImplementation: { label: '执行实现 Agent', identifier: 'ExecutionImplementationAgent', sceneLabel: '测试执行', protocolLabel: '生成 + 修复 v1', publishTarget: '新测试执行运行', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'knowledge.search', 'knowledge.read_chunk', 'execution_implementation.submit_result'], exactCapabilities: true },
   failureAnalysis: { label: '失败分析 Agent', identifier: 'FailureAnalysisAgent', sceneLabel: '测试执行', protocolLabel: '失败分析 v1', publishTarget: '新测试执行诊断', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'failure_analysis.submit_result'], exactCapabilities: true },
-  scriptRepair: { label: '脚本修复 Agent', identifier: 'ScriptRepairAgent', sceneLabel: '测试执行', protocolLabel: '脚本修复 v1', publishTarget: '新测试执行修复', runtimeToolIds: ['workspace.list_directory', 'workspace.find_files', 'workspace.grep_files', 'workspace.read_file', 'script_repair.submit_result'], exactCapabilities: true },
 }
 const agentConfigurationGroups: Array<{ label: string; agentKeys: AgentConfigurationAgentKey[] }> = [
   { label: '测试策划', agentKeys: ['planning'] },
-  { label: '测试执行', agentKeys: ['testScript', 'failureAnalysis', 'scriptRepair'] },
+  { label: '测试执行', agentKeys: ['executionImplementation', 'failureAnalysis'] },
 ]
 const retrievalModeLabel = (mode: string) => mode === 'hybrid' ? '混合检索' : mode === 'vector' ? '向量检索' : '关键词检索'
 

@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { InputDeliveryManifest, TestExecutionAgentWorkspaceProjection } from '../domain/agent-types.js'
 import type {
-  CaseMaintenanceProposal,
   ExecutionArtifact,
   ExecutionAttempt,
   ExecutionAttemptKind,
@@ -52,7 +51,6 @@ import {
   executionEntrySymbol,
   freezeExecutionTaskInput,
   scriptCacheKey,
-  scriptMaintenanceSemanticSha256,
   unsupportedExecutionMethodReason,
   validateFailureDiagnosisCandidate,
 } from './test-execution-validation.js'
@@ -671,14 +669,14 @@ export class TestExecutionService {
             method: executableMethod(task), caseContentSha256: task.input.caseContentSha256,
             executionSpecSha256: task.input.executionSpecSha256, taskInputSha256: task.input.inputSha256,
             environmentSignature: run.environment.signature,
-            testScriptAgentVersion: run.agents.testScript.configurationVersion,
-            testScriptAgentConfigurationSha256: run.agents.testScript.configurationSha256,
+            executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
+            executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
             createdAt: this.clock(),
           },
           // The immutable revision records the entry actually executed. It is
           // not a ScriptArtifact cache replay: the source of truth is the
           // ProjectVersion workspace binding.
-          source: 'agent', generatedBy: run.agents.testScript, incrementRepair: false,
+          source: 'agent', generatedBy: run.agents.executionImplementation, incrementRepair: false,
         })
         return
       }
@@ -759,13 +757,13 @@ export class TestExecutionService {
         executionSpecSha256: task.input.executionSpecSha256,
         taskInputSha256: task.input.inputSha256,
         environmentSignature: run.environment.signature,
-        testScriptAgentVersion: run.agents.testScript.configurationVersion,
-        testScriptAgentConfigurationSha256: run.agents.testScript.configurationSha256,
+        executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
+        executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
         createdAt,
       },
       executionPackage,
       source: 'agent',
-      generatedBy: run.agents.testScript,
+      generatedBy: run.agents.executionImplementation,
       incrementRepair: false,
     })
   }
@@ -896,7 +894,7 @@ export class TestExecutionService {
       scriptArtifact,
       executionPackage,
       source: 'repair',
-      generatedBy: run.agents.scriptRepair,
+      generatedBy: run.agents.executionImplementation,
       parent,
       repairReason: diagnosis.summary,
       incrementRepair: true,
@@ -1136,34 +1134,6 @@ export class TestExecutionService {
     }
 
     const failedAttempts = revisionAttempts.filter(item => item.status === 'failed')
-    let passingRepairProposal: CaseMaintenanceProposal | null = null
-    if (result.status === 'passed' && kind === 'post_repair' && revision.parentRevisionId) {
-      const scriptRevisions = await this.store.listScriptRevisions(task.id)
-      const original = scriptRevisions.find(item => item.id === revision.parentRevisionId)
-      if (original) {
-        const originalPackage = await this.reconstructPackage(run, task, original)
-        const originalEntry = required(
-          originalPackage.files.find(file => file.path === originalPackage.manifest.entrypoint),
-          'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING',
-          '原始执行包缺少入口源码',
-        )
-        const repairEntry = required(
-          executionPackage.files.find(file => file.path === executionPackage.manifest.entrypoint),
-          'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING',
-          '修复执行包缺少入口源码',
-        )
-        passingRepairProposal = maintenanceProposalForPassingRepair({
-          run,
-          task,
-          repairRevision: revision,
-          diagnoses: await this.store.listDiagnoses(task.id),
-          scriptRevisions,
-          originalSource: originalEntry.content,
-          repairSource: repairEntry.content,
-          createdAt: finishedAt,
-        })
-      }
-    }
     await requiredLeaseTransaction(
       this.store,
       job.id,
@@ -1198,9 +1168,6 @@ export class TestExecutionService {
               success: { ...attempt, status: 'passed', finishedAt },
               createdAt: finishedAt,
             }))
-          }
-          if (passingRepairProposal) {
-            await transaction.appendMaintenanceProposal(passingRepairProposal)
           }
           return transaction.transitionTask({
             taskId: task.id,
@@ -1750,8 +1717,8 @@ function taskScriptCacheKey(run: ExecutionRun, task: ExecutionTask) {
     executionSpecSha256: task.input.executionSpecSha256,
     taskInputSha256: task.input.inputSha256,
     environmentSignature: run.environment.signature,
-    testScriptAgentVersion: run.agents.testScript.configurationVersion,
-    testScriptAgentConfigurationSha256: run.agents.testScript.configurationSha256,
+    executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
+    executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
   })
 }
 
@@ -1799,7 +1766,7 @@ function failureDiagnosisPolicy(
     }
   }
   const actions: Record<Exclude<FailureDiagnosis['category'], 'script_defect' | 'selector_changed'>, string> = {
-    product_defect: '记录产品缺陷，不调用 ScriptRepairAgent',
+    product_defect: '记录产品缺陷，不进入脚本修复 Stage',
     environment_defect: '检查执行环境后人工重试',
     test_data_defect: '补齐或修正测试数据后人工重试',
     flaky: '保留失败证据并人工判断是否重试',
@@ -1808,63 +1775,6 @@ function failureDiagnosisPolicy(
     unknown: '保留失败证据并等待人工处理',
   }
   return { repairable: false, recommendedAction: actions[category] }
-}
-
-function maintenanceProposalForPassingRepair(input: {
-  run: ExecutionRun
-  task: ExecutionTask
-  repairRevision: ScriptRevision
-  diagnoses: readonly FailureDiagnosis[]
-  scriptRevisions: readonly ScriptRevision[]
-  originalSource: string
-  repairSource: string
-  createdAt: string
-}): CaseMaintenanceProposal | null {
-  const repair = input.repairRevision
-  if (repair.source !== 'repair' || !repair.parentRevisionId) return null
-  const original = input.scriptRevisions.find(revision => revision.id === repair.parentRevisionId)
-  const diagnosis = [...input.diagnoses]
-    .reverse()
-    .find(item => item.scriptRevisionId === repair.parentRevisionId)
-  if (
-    !original
-    || !diagnosis
-    || !automaticRepairAllowed(diagnosis, 0)
-    || !['script_defect', 'selector_changed'].includes(diagnosis.category)
-    || repair.runId !== input.run.id
-    || repair.taskId !== input.task.id
-    || original.runId !== input.run.id
-    || original.taskId !== input.task.id
-    || diagnosis.runId !== input.run.id
-    || diagnosis.taskId !== input.task.id
-    || repair.protectedAssertionSha256 !== original.protectedAssertionSha256
-    || canonicalSha256(repair.package.assertions) !== canonicalSha256(original.package.assertions)
-    || scriptMaintenanceSemanticSha256(input.repairSource)
-      !== scriptMaintenanceSemanticSha256(input.originalSource)
-  ) return null
-
-  const id = stableIdentity('test_execution_case_maintenance_proposal', {
-    taskId: input.task.id,
-    diagnosisId: diagnosis.id,
-    scriptRevisionId: repair.id,
-  })
-  return {
-    id,
-    runId: input.run.id,
-    taskId: input.task.id,
-    caseId: input.task.input.caseId,
-    caseRevision: input.task.input.caseRevision,
-    diagnosisId: diagnosis.id,
-    scriptRevisionId: repair.id,
-    status: 'pending',
-    summary: diagnosis.category === 'selector_changed'
-      ? '已验证 selector 修复，建议人工维护正式测试用例的自动化执行表达'
-      : '已验证脚本缺陷修复，建议人工维护正式测试用例的自动化执行表达',
-    proposedChange: '请人工比较原 Script Revision 与已通过真实 Runner 验证的 repair Revision，仅维护 selector、automation hint 或脚本执行表达；不得修改 Expected Result、Verification Check、matcher、Requirement 或任何业务断言与业务语义。',
-    baselineLibraryVersionId: input.run.handoff.testCaseLibraryVersionId,
-    baselineLibraryVersionSha256: input.run.handoff.testCaseLibraryVersionSha256,
-    createdAt: input.createdAt,
-  }
 }
 
 function deterministicFlakyDiagnosis(input: {
@@ -1894,7 +1804,7 @@ function deterministicFlakyDiagnosis(input: {
       { attemptId: input.success.id, observation: '同一 ScriptRevision 与 package hash 的固定重试成功' },
     ],
     repairable: false,
-    recommendedAction: '记录 flaky，不调用 ScriptRepairAgent',
+    recommendedAction: '记录 flaky，不进入脚本修复 Stage',
     source: 'deterministic',
     createdAt: input.createdAt,
   }
@@ -2142,11 +2052,10 @@ async function requiredLeaseTransaction<T>(
 }
 
 function assertAgentSnapshots(agents: ExecutionRun['agents']) {
-  const values = [agents.testScript, agents.failureAnalysis, agents.scriptRepair]
+  const values = [agents.executionImplementation, agents.failureAnalysis]
   const expected: FrozenExecutionAgentSnapshot['agentKey'][] = [
-    'test-script',
+    'execution-implementation',
     'failure-analysis',
-    'script-repair',
   ]
   values.forEach((snapshot, index) => {
     const { snapshotSha256, ...base } = snapshot

@@ -13,7 +13,6 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import type {
-  CaseMaintenanceProposal,
   ExecutionEnvironment,
   ExecutionReadiness,
   ExecutionRun,
@@ -25,32 +24,25 @@ export function ExecutionRunPanel({
   environments,
   runs,
   run,
-  maintenanceProposals,
-  maintenanceFilter,
   busy,
   loading,
   onRefresh,
   onCreate,
   onOpen,
   onCancel,
-  onToggleMaintenanceFilter,
 }: {
   readiness: ExecutionReadiness | null
   environments: ExecutionEnvironment[]
   runs: ExecutionRun[]
   run: Versioned<ExecutionRun> | null
-  maintenanceProposals: CaseMaintenanceProposal[]
-  maintenanceFilter: boolean
   busy: string
   loading: boolean
   onRefresh: () => Promise<void>
   onCreate: (baseUrl: string) => Promise<ExecutionRun | undefined>
   onOpen: (runId: string) => Promise<ExecutionRun | undefined>
   onCancel: () => Promise<void>
-  onToggleMaintenanceFilter: () => void
 }) {
   const [baseUrl, setBaseUrl] = useState('')
-  const pendingMaintenanceCount = maintenanceProposals.filter(item => item.status === 'pending').length
 
   return <div className="te-run-column">
     <section className="te-card te-readiness">
@@ -83,11 +75,6 @@ export function ExecutionRunPanel({
       </div>
     </section>
 
-    {run && <section className="te-card te-maintenance-summary">
-      <header><div><h2>用例维护</h2><p>当前 Run 的建议只确认是否需要人工维护，不自动修改正式用例。</p></div><button className={maintenanceFilter ? 'te-primary' : 'te-secondary'} onClick={onToggleMaintenanceFilter}>待确认 {pendingMaintenanceCount}</button></header>
-      <div className="te-task-metrics"><Metric label="全部建议" value={maintenanceProposals.length} /><Metric label="待确认" value={pendingMaintenanceCount} /><Metric label="已确认" value={maintenanceProposals.filter(item => item.status === 'accepted').length} /><Metric label="已拒绝" value={maintenanceProposals.filter(item => item.status === 'rejected').length} /></div>
-    </section>}
-
     {run && <section className="te-card te-run-snapshot">
       <header><div><h2>本次执行</h2><p>查看目标环境、执行时间与必要运行信息。</p></div>{['queued', 'running'].includes(run.value.status) && <button className="te-danger" disabled={Boolean(busy) || Boolean(run.value.cancelRequestedAt)} onClick={() => void onCancel()}><Square />{run.value.cancelRequestedAt ? '已请求取消' : busy === 'cancel' ? '正在取消…' : '取消执行'}</button>}</header>
       <dl>
@@ -100,10 +87,6 @@ export function ExecutionRunPanel({
       <details className="te-developer-details"><summary>开发者信息</summary><dl><div><dt>冻结用例库</dt><dd>{shortId(run.value.handoff.testCaseLibraryVersionId)}</dd></div><div><dt>Runner</dt><dd>{run.value.runner.runnerVersion} · Playwright {run.value.runner.playwrightVersion}</dd></div><div><dt>Workspace</dt><dd>{run.value.runner.imageReference === 'local-workspace' ? 'ProjectVersion 隔离 Workspace' : run.value.runner.imageReference}</dd></div><div><dt>Agent 配置</dt><dd>{Object.values(run.value.agents).map(agent => `${agent.agentKey} v${agent.configurationVersion}`).join(' · ')}</dd></div></dl></details>
     </section>}
   </div>
-}
-
-function Metric({ label, value }: { label: string; value: number }) {
-  return <div><span>{label}</span><b>{value}</b></div>
 }
 
 function ReadinessItem({ icon, label, ready, reason }: { icon: React.ReactNode; label: string; ready?: boolean; reason?: string }) {
