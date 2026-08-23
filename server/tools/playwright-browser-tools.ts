@@ -3,6 +3,11 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TestExecutionAgentSnapshot } from '../domain/agent-types.js'
+import {
+  resolveAuthSessionPolicy,
+  type AuthSessionPolicy,
+  type RuntimeAuthStateAccess,
+} from '../application/test-execution-auth-session.js'
 import type {
   ExecutionRun,
   ExecutionTask,
@@ -36,6 +41,8 @@ export interface BrowserToolSessionScope {
   environmentSignature: string
   baseUrl: string
   stage: BrowserToolStage
+  authPolicy: AuthSessionPolicy
+  authStateLoaded: boolean
 }
 
 export interface BrowserToolSession {
@@ -50,6 +57,8 @@ export interface BrowserToolGateway {
     run: ExecutionRun
     task: ExecutionTask
     stage: BrowserToolStage
+    authPolicy: AuthSessionPolicy
+    authState?: RuntimeAuthStateAccess
   }, signal: AbortSignal): Promise<BrowserToolSession>
 }
 
@@ -60,16 +69,35 @@ export class PlaywrightBrowserToolGateway implements BrowserToolGateway {
     run: ExecutionRun
     task: ExecutionTask
     stage: BrowserToolStage
+    authPolicy: AuthSessionPolicy
+    authState?: RuntimeAuthStateAccess
   }, signal: AbortSignal): Promise<BrowserToolSession> {
     if (input.task.input.method !== 'ui') throw new Error('BROWSER_TOOL_UI_CASE_REQUIRED')
     if (input.task.runId !== input.run.id) throw new Error('BROWSER_TOOL_TASK_SCOPE_INVALID')
+    const expectedAuthPolicy = resolveAuthSessionPolicy(input.task.input)
+    if (
+      input.authPolicy.mode !== expectedAuthPolicy.mode
+      || input.authPolicy.role !== expectedAuthPolicy.role
+      || input.authPolicy.stateKey !== expectedAuthPolicy.stateKey
+    ) throw new Error('BROWSER_AUTH_SESSION_POLICY_INVALID')
+    if (
+      (['fresh_anonymous', 'custom'].includes(input.authPolicy.mode) && input.authState)
+      || (input.authPolicy.mode === 'isolated_role' && input.authState?.savePath)
+    ) throw new Error('BROWSER_AUTH_STATE_NOT_ALLOWED')
     const baseUrl = controlledBaseUrl(input.run.environment.baseUrl)
     const sessionId = `smarthub-${hash(`${input.run.id}:${input.task.id}:${input.stage}:${randomUUID()}`).slice(0, 32)}`
     const screenshotRoot = await mkdtemp(join(tmpdir(), 'smarthub-browser-session-'))
     try {
-      await this.cli.open(sessionId, baseUrl, signal)
+      if (input.authState?.loadPath) {
+        await this.cli.open(sessionId, undefined, signal)
+        await this.cli.stateLoad(sessionId, input.authState.loadPath, signal)
+        await this.cli.open(sessionId, baseUrl, signal)
+      } else {
+        await this.cli.open(sessionId, baseUrl, signal)
+      }
     } catch (error) {
       await this.cli.close(sessionId, AbortSignal.timeout(5_000)).catch(() => undefined)
+      await input.authState?.discard?.().catch(() => undefined)
       await rm(screenshotRoot, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
@@ -80,7 +108,9 @@ export class PlaywrightBrowserToolGateway implements BrowserToolGateway {
       environmentSignature: input.run.environment.signature,
       baseUrl,
       stage: input.stage,
-    }, authorizedFillValues(input.task), screenshotRoot)
+      authPolicy: structuredClone(input.authPolicy),
+      authStateLoaded: Boolean(input.authState?.loadPath),
+    }, authorizedFillValues(input.task), screenshotRoot, input.authState)
   }
 }
 
@@ -92,6 +122,10 @@ class ControlledBrowserToolSession implements BrowserToolSession {
   private sequence = 0
   private screenshotSequence = 0
   private page = '/'
+  private lastSnapshot = ''
+  private authenticationSurfaceObserved = false
+  private authenticationCredentialFillObserved = false
+  private successfulAuthenticationObserved = false
   private lastAction: {
     action: string
     actionType: HttpExplorationObservation['observedFrom']['actionType']
@@ -104,6 +138,7 @@ class ControlledBrowserToolSession implements BrowserToolSession {
     readonly scope: BrowserToolSessionScope,
     private readonly allowedFillValues: ReadonlySet<string>,
     private readonly screenshotRoot: string,
+    private readonly authState?: RuntimeAuthStateAccess,
   ) {
     this.page = new URL(scope.baseUrl).pathname || '/'
   }
@@ -126,11 +161,28 @@ class ControlledBrowserToolSession implements BrowserToolSession {
     this.requestRefs.clear()
     let closeError: unknown
     try {
-      await this.cli.close(this.sessionId, AbortSignal.timeout(5_000))
+      if (
+        this.scope.authPolicy.mode === 'reuse_authenticated'
+        && this.authState?.savePath
+        && this.authenticationSurfaceObserved
+        && this.authenticationCredentialFillObserved
+        && this.successfulAuthenticationObserved
+        && authenticatedDestination(this.page, this.lastSnapshot)
+      ) {
+        await this.cli.stateSave(this.sessionId, this.authState.savePath, AbortSignal.timeout(10_000))
+        await this.authState.commit?.()
+      }
     } catch (error) {
       closeError = error
     } finally {
-      await rm(this.screenshotRoot, { recursive: true, force: true })
+      try {
+        await this.cli.close(this.sessionId, AbortSignal.timeout(5_000))
+      } catch (error) {
+        closeError ??= error
+      } finally {
+        await this.authState?.discard?.().catch(() => undefined)
+        await rm(this.screenshotRoot, { recursive: true, force: true })
+      }
     }
     if (closeError) throw closeError
   }
@@ -157,6 +209,10 @@ class ControlledBrowserToolSession implements BrowserToolSession {
           const target = this.observedTarget(args.target)
           const text = String(args.text ?? '')
           if (!this.allowedFillValues.has(text)) throw new Error('BROWSER_FILL_VALUE_NOT_AUTHORIZED')
+          const observed = this.elementRefs.get(target) ?? ''
+          if (this.authenticationSurfaceObserved && authenticationCredentialField(observed)) {
+            this.authenticationCredentialFillObserved = true
+          }
           await this.cli.fill(this.sessionId, target, text, signal)
           this.rememberAction(`fill ${target}`, 'fill')
           const snapshot = await this.refreshSnapshot(signal)
@@ -225,6 +281,7 @@ class ControlledBrowserToolSession implements BrowserToolSession {
 
   private async refreshSnapshot(signal: AbortSignal) {
     const snapshot = safeBrowserText(await this.cli.snapshot(this.sessionId, signal), 64 * 1024)
+    this.lastSnapshot = snapshot
     this.elementRefs.clear()
     for (const line of snapshot.split(/\r?\n/u)) {
       for (const ref of observedElementRefs(line)) this.elementRefs.set(ref, line)
@@ -232,6 +289,7 @@ class ControlledBrowserToolSession implements BrowserToolSession {
     assertSnapshotSameOrigin(snapshot, this.scope.baseUrl)
     const pageUrl = pageUrlFromSnapshot(snapshot)
     if (pageUrl) this.page = new URL(pageUrl).pathname || '/'
+    if (authenticationEntry(this.page, snapshot)) this.authenticationSurfaceObserved = true
     return snapshot
   }
 
@@ -320,6 +378,9 @@ class ControlledBrowserToolSession implements BrowserToolSession {
       candidate.observedFrom.sequence,
     ]) === key)) return
     this.observedNetwork.push(structuredClone(observation))
+    if (successfulAuthenticationObservation(observation)) {
+      this.successfulAuthenticationObserved = true
+    }
     if (this.observedNetwork.length > 100) this.observedNetwork.shift()
   }
 }
@@ -406,4 +467,26 @@ function safeBrowserText(value: string, maximum: number) {
 
 function hash(value: string) {
   return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function successfulAuthenticationObservation(observation: HttpExplorationObservation) {
+  return ['POST', 'PUT', 'PATCH'].includes(observation.method)
+    && Number(observation.responseStatus) >= 200
+    && Number(observation.responseStatus) < 400
+    && /(?:^|\/)(?:auth(?:entication)?|login|sign[-_]?in|session|token)(?:\/|$)/iu.test(observation.path)
+}
+
+function authenticatedDestination(page: string, snapshot: string) {
+  return !authenticationEntry(page, snapshot)
+}
+
+function authenticationEntry(page: string, snapshot: string) {
+  if (/(?:^|\/)(?:login|sign[-_]?in|auth)(?:\/|$)/iu.test(page)) return true
+  const passwordInput = /(?:textbox|input)[^\n]*(?:密码|口令|password|passcode)/iu.test(snapshot)
+  const loginAction = /(?:button|link)[^\n]*(?:登录|sign[ -]?in|log[ -]?in)/iu.test(snapshot)
+  return passwordInput && loginAction
+}
+
+function authenticationCredentialField(value: string) {
+  return /(?:账号|账户|用户名|邮箱|手机|密码|口令|username|user\s*name|email|phone|password|passcode)/iu.test(value)
 }

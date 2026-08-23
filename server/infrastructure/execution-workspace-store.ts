@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import type {
+  RuntimeAuthStateAccess,
+  RuntimeAuthStateScope,
+} from '../application/test-execution-auth-session.js'
 import {
   assertSafeExplorationResult,
   explorationContextKey,
@@ -145,6 +149,55 @@ export class LocalExecutionWorkspaceStore {
     const root = join(workspace, '.runtime-auth', safeIdentity(runId))
     await mkdir(root, { recursive: true, mode: 0o700 })
     return root
+  }
+
+  async runtimeAuthStateAccess(
+    scope: RuntimeAuthStateScope,
+    options: { writable: boolean },
+  ): Promise<RuntimeAuthStateAccess> {
+    const root = await this.runtimeAuthRoot(scope.projectVersionId, scope.runId)
+    const stateKey = safeIdentity(scope.stateKey)
+    const statePath = join(root, `${stateKey}.json`)
+    const metadataPath = join(root, `.${stateKey}.scope.json`)
+    const expected = runtimeAuthMetadata(scope)
+    let loadPath: string | undefined
+    try {
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as RuntimeAuthStateMetadata
+      if (!sameRuntimeAuthMetadata(metadata, expected)) throw new Error('TEST_EXECUTION_RUNTIME_AUTH_SCOPE_INVALID')
+      await assertRuntimeAuthState(statePath, scope.baseUrl)
+      loadPath = statePath
+    } catch {
+      loadPath = undefined
+    }
+
+    if (!options.writable) return loadPath ? { loadPath } : {}
+    const savePath = join(root, `.${stateKey}.${randomUUID()}.pending.json`)
+    let committed = false
+    return {
+      ...(loadPath ? { loadPath } : {}),
+      savePath,
+      commit: async () => {
+        if (committed) return
+        await assertRuntimeAuthState(savePath, scope.baseUrl)
+        await chmod(savePath, 0o600).catch(() => undefined)
+        const temporaryMetadata = `${metadataPath}.${randomUUID()}.tmp`
+        await writeFile(temporaryMetadata, JSON.stringify(expected, null, 2), {
+          encoding: 'utf8',
+          mode: 0o600,
+        })
+        try {
+          await rename(savePath, statePath)
+          await rename(temporaryMetadata, metadataPath)
+          committed = true
+        } finally {
+          await rm(temporaryMetadata, { force: true }).catch(() => undefined)
+          await rm(savePath, { force: true }).catch(() => undefined)
+        }
+      },
+      discard: async () => {
+        if (!committed) await rm(savePath, { force: true })
+      },
+    }
   }
 
   async cleanupRuntimeAuth(projectVersionId: string, runId: string) {
@@ -366,3 +419,65 @@ function assertInside(root: string, target: string) {
   if (result === '' || result === '..' || result.startsWith('../') || result.startsWith('..\\') || isAbsolute(result)) throw new Error('TEST_EXECUTION_WORKSPACE_PATH_INVALID')
 }
 function sha256(value: string) { return createHash('sha256').update(value, 'utf8').digest('hex') }
+
+interface RuntimeAuthStateMetadata {
+  schemaVersion: 'runtime-auth-scope/v1'
+  projectVersionId: string
+  runId: string
+  environmentSignature: string
+  origin: string
+  role: string
+  stateKey: string
+}
+
+function runtimeAuthMetadata(scope: RuntimeAuthStateScope): RuntimeAuthStateMetadata {
+  return {
+    schemaVersion: 'runtime-auth-scope/v1',
+    projectVersionId: scope.projectVersionId,
+    runId: scope.runId,
+    environmentSignature: scope.environmentSignature,
+    origin: new URL(scope.baseUrl).origin,
+    role: scope.role,
+    stateKey: scope.stateKey,
+  }
+}
+
+function sameRuntimeAuthMetadata(left: RuntimeAuthStateMetadata, right: RuntimeAuthStateMetadata) {
+  return left.schemaVersion === right.schemaVersion
+    && left.projectVersionId === right.projectVersionId
+    && left.runId === right.runId
+    && left.environmentSignature === right.environmentSignature
+    && left.origin === right.origin
+    && left.role === right.role
+    && left.stateKey === right.stateKey
+}
+
+async function assertRuntimeAuthState(path: string, baseUrl: string) {
+  const source = await readFile(path, 'utf8')
+  if (!source || Buffer.byteLength(source, 'utf8') > 5 * 1024 * 1024) {
+    throw new Error('TEST_EXECUTION_RUNTIME_AUTH_STATE_INVALID')
+  }
+  const state = JSON.parse(source) as {
+    cookies?: Array<{ domain?: unknown }>
+    origins?: Array<{ origin?: unknown; localStorage?: unknown }>
+  }
+  if (!state || !Array.isArray(state.cookies) || !Array.isArray(state.origins)) {
+    throw new Error('TEST_EXECUTION_RUNTIME_AUTH_STATE_INVALID')
+  }
+  if (state.cookies.length > 1_000 || state.origins.length > 100) {
+    throw new Error('TEST_EXECUTION_RUNTIME_AUTH_STATE_INVALID')
+  }
+  const base = new URL(baseUrl)
+  for (const cookie of state.cookies) {
+    const domain = String(cookie.domain ?? '').replace(/^\./u, '').toLocaleLowerCase()
+    const host = base.hostname.toLocaleLowerCase()
+    if (!domain || host !== domain && !host.endsWith(`.${domain}`)) {
+      throw new Error('TEST_EXECUTION_RUNTIME_AUTH_ORIGIN_INVALID')
+    }
+  }
+  for (const originState of state.origins) {
+    if (String(originState.origin ?? '') !== base.origin || !Array.isArray(originState.localStorage)) {
+      throw new Error('TEST_EXECUTION_RUNTIME_AUTH_ORIGIN_INVALID')
+    }
+  }
+}

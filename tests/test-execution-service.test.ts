@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -770,6 +770,17 @@ class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
     this.browserCalls.push('open')
     if (!this.available) throw new Error('PLAYWRIGHT_CLI_OPEN_FAILED_EXIT_1')
     this.sessions.add(session)
+  }
+
+  async stateLoad(session: string) {
+    this.requireSession(session)
+    this.browserCalls.push('state-load')
+  }
+
+  async stateSave(session: string, path: string) {
+    this.requireSession(session)
+    this.browserCalls.push('state-save')
+    await writeFile(path, JSON.stringify({ cookies: [], origins: [] }), { encoding: 'utf8' })
   }
 
   async close(session: string) {

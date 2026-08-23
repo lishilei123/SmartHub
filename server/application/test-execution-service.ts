@@ -49,6 +49,7 @@ import {
   type CaseExecutionBinding,
 } from '../infrastructure/execution-workspace-store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
+import { resolveAuthSessionPolicy } from './test-execution-auth-session.js'
 import { createProjectVersionExplorationResult } from './test-execution-exploration.js'
 import {
   assertExecutionPackageIntegrity,
@@ -1519,7 +1520,27 @@ export class TestExecutionService {
   ) {
     if (task.input.method !== 'ui') return operation()
     if (!this.browserTools) throw new Error('TEST_EXECUTION_BROWSER_TOOLS_REQUIRED')
-    const session = await this.browserTools.openSession({ run, task, stage }, signal)
+    const authPolicy = resolveAuthSessionPolicy(task.input)
+    const authState = this.executionWorkspace
+      && authPolicy.stateKey
+      && authPolicy.role
+      && ['reuse_authenticated', 'isolated_role'].includes(authPolicy.mode)
+      ? await this.executionWorkspace.runtimeAuthStateAccess({
+          projectVersionId: run.projectVersionId,
+          runId: run.id,
+          environmentSignature: run.environment.signature,
+          baseUrl: run.environment.baseUrl,
+          role: authPolicy.role,
+          stateKey: authPolicy.stateKey,
+        }, { writable: authPolicy.mode === 'reuse_authenticated' })
+      : undefined
+    const session = await this.browserTools.openSession({
+      run,
+      task,
+      stage,
+      authPolicy,
+      ...(authState ? { authState } : {}),
+    }, signal)
     let primaryError: unknown
     try {
       return await operation(session)

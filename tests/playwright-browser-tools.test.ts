@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
-import { access, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
+import { resolveAuthSessionPolicy } from '../server/application/test-execution-auth-session.js'
 import type { TestExecutionAgentSnapshot } from '../server/domain/agent-types.js'
 import type { ExecutionRun, ExecutionTask } from '../server/domain/test-execution-types.js'
 import type {
@@ -16,9 +19,13 @@ import {
 } from '../server/tools/playwright-browser-tools.js'
 import { ToolRegistry } from '../server/tools/registry.js'
 import { GovernedToolRuntime } from '../server/tools/runtime.js'
+import { LocalExecutionWorkspaceStore } from '../server/infrastructure/execution-workspace-store.js'
 
 class FixtureBrowserCli implements PlaywrightBrowserCliAdapter {
   opened: string[] = []
+  openedUrls: Array<string | undefined> = []
+  loaded: string[] = []
+  saved: string[] = []
   closed: string[] = []
   screenshotFilenames: string[] = []
   snapshotValue = 'url: https://example.test/app\n- button "提交" [ref=e1]\n- textbox "账号" [ref=e2]'
@@ -27,7 +34,15 @@ class FixtureBrowserCli implements PlaywrightBrowserCliAdapter {
     { index: 2, method: 'GET', url: 'https://analytics.invalid/collect', status: 204, resourceType: 'xhr' },
   ]
 
-  async open(session: string) { this.opened.push(session) }
+  async open(session: string, baseUrl?: string) {
+    this.opened.push(session)
+    this.openedUrls.push(baseUrl)
+  }
+  async stateLoad(_session: string, path: string) { this.loaded.push(path) }
+  async stateSave(_session: string, path: string) {
+    this.saved.push(path)
+    await writeFile(path, JSON.stringify({ cookies: [], origins: [] }), { encoding: 'utf8' })
+  }
   async close(session: string) { this.closed.push(session) }
   async snapshot() { return this.snapshotValue }
   async click(_session: string, target: string) { return `clicked ${target}` }
@@ -99,7 +114,7 @@ function execution(stage: BrowserToolStage = 'script_generation', taskId = 'task
       executionSpec: {},
     },
   } as ExecutionTask
-  return { run, task, stage }
+  return { run, task, stage, authPolicy: { mode: 'fresh_anonymous' as const } }
 }
 
 function requestContext(session: BrowserToolSession, overrides: Partial<TestExecutionAgentSnapshot> = {}) {
@@ -213,4 +228,148 @@ test('Browser Tools 通过 GovernedToolRuntime 计入调用上限与重复调用
   await execute('browser.requests', {})
   await assert.rejects(() => execute('browser.get_locator', { target: 'e1' }), /AGENT_TOOL_LIMIT_EXCEEDED/u)
   await session.close()
+})
+
+test('Auth Session Policy 只根据冻结 Case 语义区分业务复用、认证隔离与多角色', () => {
+  const policy = (title: string, preconditions: string[], steps = ['执行目标操作']) => resolveAuthSessionPolicy({
+    caseId: `case-${title}`,
+    caseContent: {
+      schemaVersion: 'test-case/v3',
+      title,
+      dimension: 'functional',
+      requirementRefs: [],
+      priority: 'P1',
+      executionMethods: ['ui'],
+      preconditions,
+      steps,
+      expectedResults: ['结果符合预期'],
+    },
+    executionSpec: {} as ExecutionTask['input']['executionSpec'],
+  })
+
+  assert.deepEqual(policy('新增项目', ['管理员已登录']), {
+    mode: 'reuse_authenticated', role: 'admin', stateKey: 'admin',
+  })
+  assert.deepEqual(policy('删除项目', ['普通用户已登录']), {
+    mode: 'reuse_authenticated', role: 'user', stateKey: 'user',
+  })
+  assert.deepEqual(policy('密码错误登录', []), { mode: 'fresh_anonymous' })
+  assert.deepEqual(policy('登录成功', []), { mode: 'fresh_anonymous' })
+  assert.deepEqual(policy('退出登录', ['管理员已登录']), {
+    mode: 'isolated_role', role: 'admin', stateKey: 'admin',
+  })
+  assert.deepEqual(policy('普通用户访问管理员页面', ['普通用户已登录']), {
+    mode: 'isolated_role', role: 'user', stateKey: 'user',
+  })
+  assert.deepEqual(policy('角色切换', ['管理员已登录']), { mode: 'custom' })
+  assert.deepEqual(policy('公开首页', []), { mode: 'fresh_anonymous' })
+})
+
+test('Browser Exploration 在 Run 内按 Role 复用状态，Repair 同策略，认证 Case 与其他 Run 不加载', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-browser-auth-policy-'))
+  try {
+    const store = new LocalExecutionWorkspaceStore(root)
+    const cli = new FixtureBrowserCli()
+    const gateway = new PlaywrightBrowserToolGateway(cli)
+    await assert.rejects(
+      () => gateway.openSession({
+        ...execution(),
+        authPolicy: { mode: 'reuse_authenticated', role: 'default', stateKey: 'default' },
+      }, new AbortController().signal),
+      /BROWSER_AUTH_SESSION_POLICY_INVALID/u,
+    )
+    const openFor = async (input: ReturnType<typeof execution>, title: string, preconditions: string[]) => {
+      input.task.input.caseContent = {
+        ...input.task.input.caseContent,
+        title,
+        preconditions,
+        steps: ['在账号框输入 "alice"', '执行目标操作'],
+        expectedResults: ['操作成功'],
+      }
+      const authPolicy = resolveAuthSessionPolicy(input.task.input)
+      const authState = authPolicy.role && authPolicy.stateKey
+        ? await store.runtimeAuthStateAccess({
+            projectVersionId: input.run.projectVersionId,
+            runId: input.run.id,
+            environmentSignature: input.run.environment.signature,
+            baseUrl: input.run.environment.baseUrl,
+            role: authPolicy.role,
+            stateKey: authPolicy.stateKey,
+          }, { writable: authPolicy.mode === 'reuse_authenticated' })
+        : undefined
+      return gateway.openSession({ ...input, authPolicy, ...(authState ? { authState } : {}) }, new AbortController().signal)
+    }
+
+    const createProject = await openFor(execution('script_generation', 'task-create'), '新增项目', ['管理员已登录'])
+    assert.equal(createProject.scope.authStateLoaded, false)
+    cli.snapshotValue = 'url: https://example.test/login\n- button "登录" [ref=e1]\n- textbox "账号" [ref=e2]'
+    await invoke(createProject, 'browser.snapshot', {})
+    await invoke(createProject, 'browser.fill', { target: 'e2', text: 'alice' })
+    cli.snapshotValue = 'url: https://example.test/app\n- button "提交" [ref=e1]'
+    await invoke(createProject, 'browser.click', { target: 'e1' })
+    await createProject.close()
+    assert.equal(cli.saved.length, 1)
+    assert.match(cli.saved[0], /\.runtime-auth[\\/]run-browser-1[\\/]\.admin\./u)
+
+    const deleteProject = await openFor(execution('script_generation', 'task-delete'), '删除项目', ['管理员已登录'])
+    assert.equal(deleteProject.scope.authStateLoaded, true)
+    assert.match(cli.loaded.at(-1) ?? '', /\.runtime-auth[\\/]run-browser-1[\\/]admin\.json$/u)
+    assert.deepEqual(cli.openedUrls.slice(-2), [undefined, 'https://example.test/'])
+    await deleteProject.close()
+
+    const repairProject = await openFor(execution('script_repair', 'task-repair'), '删除项目', ['管理员已登录'])
+    assert.equal(repairProject.scope.authPolicy.mode, 'reuse_authenticated')
+    assert.equal(repairProject.scope.authStateLoaded, true)
+    await repairProject.close()
+
+    const logout = await openFor(execution('script_repair', 'task-logout'), '退出登录', ['管理员已登录'])
+    assert.equal(logout.scope.authPolicy.mode, 'isolated_role')
+    assert.equal(logout.scope.authStateLoaded, true)
+    await invoke(logout, 'browser.snapshot', {})
+    await invoke(logout, 'browser.click', { target: 'e1' })
+    await logout.close()
+    assert.equal(cli.saved.length, 1)
+
+    const loginFailure = await openFor(execution('script_repair', 'task-login-failure'), '密码错误登录', [])
+    assert.equal(loginFailure.scope.authPolicy.mode, 'fresh_anonymous')
+    assert.equal(loginFailure.scope.authStateLoaded, false)
+    await loginFailure.close()
+
+    const loginSuccess = await openFor(execution('script_generation', 'task-login-success'), '登录成功', [])
+    assert.equal(loginSuccess.scope.authPolicy.mode, 'fresh_anonymous')
+    assert.equal(loginSuccess.scope.authStateLoaded, false)
+    await loginSuccess.close()
+
+    const userBusiness = await openFor(execution('script_generation', 'task-user'), '查询项目', ['普通用户已登录'])
+    cli.snapshotValue = 'url: https://example.test/login\n- button "登录" [ref=e1]\n- textbox "账号" [ref=e2]'
+    await invoke(userBusiness, 'browser.snapshot', {})
+    await invoke(userBusiness, 'browser.fill', { target: 'e2', text: 'alice' })
+    cli.snapshotValue = 'url: https://example.test/app\n- button "提交" [ref=e1]'
+    await invoke(userBusiness, 'browser.click', { target: 'e1' })
+    await userBusiness.close()
+    assert.equal(cli.saved.length, 2)
+    assert.match(cli.saved[1], /\.runtime-auth[\\/]run-browser-1[\\/]\.user\./u)
+
+    const otherRunInput = execution('script_generation', 'task-other-run')
+    otherRunInput.run.id = 'run-browser-2'
+    otherRunInput.task.runId = otherRunInput.run.id
+    const otherRun = await openFor(otherRunInput, '删除项目', ['管理员已登录'])
+    assert.equal(otherRun.scope.authStateLoaded, false)
+    await otherRun.close()
+    await assert.rejects(() => access(join(root, 'version-browser-1', '.runtime-auth', 'run-browser-2', 'admin.json')))
+
+    const otherEnvironmentInput = execution('script_generation', 'task-other-environment')
+    otherEnvironmentInput.run.environment.signature = 'b'.repeat(64)
+    const otherEnvironment = await openFor(otherEnvironmentInput, '删除项目', ['管理员已登录'])
+    assert.equal(otherEnvironment.scope.authStateLoaded, false)
+    await otherEnvironment.close()
+
+    const otherVersionInput = execution('script_generation', 'task-other-version')
+    otherVersionInput.run.projectVersionId = 'version-browser-2'
+    const otherVersion = await openFor(otherVersionInput, '删除项目', ['管理员已登录'])
+    assert.equal(otherVersion.scope.authStateLoaded, false)
+    await otherVersion.close()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

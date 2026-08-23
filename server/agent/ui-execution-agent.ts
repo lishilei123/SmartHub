@@ -42,7 +42,9 @@ export interface PlaywrightCliToolAdapter {
 }
 
 export interface PlaywrightBrowserCliAdapter {
-  open(session: string, baseUrl: string, signal: AbortSignal): Promise<void>
+  open(session: string, baseUrl: string | undefined, signal: AbortSignal): Promise<void>
+  stateLoad(session: string, path: string, signal: AbortSignal): Promise<void>
+  stateSave(session: string, path: string, signal: AbortSignal): Promise<void>
   close(session: string, signal: AbortSignal): Promise<void>
   snapshot(session: string, signal: AbortSignal): Promise<string>
   click(session: string, target: string, signal: AbortSignal): Promise<string>
@@ -151,8 +153,16 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
     }
   }
 
-  async open(session: string, baseUrl: string, signal: AbortSignal) {
-    await this.command(session, 'open', [baseUrl], signal)
+  async open(session: string, baseUrl: string | undefined, signal: AbortSignal) {
+    await this.command(session, 'open', baseUrl ? [baseUrl] : [], signal)
+  }
+
+  async stateLoad(session: string, path: string, signal: AbortSignal) {
+    await this.command(session, 'state-load', [path], signal)
+  }
+
+  async stateSave(session: string, path: string, signal: AbortSignal) {
+    await this.command(session, 'state-save', [path], signal)
   }
 
   async close(session: string, signal: AbortSignal) {
