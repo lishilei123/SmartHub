@@ -492,11 +492,11 @@
       }
     },
     "test_script.submit_result": {
-      "version": "1.1.0",
+      "version": "2.0.0",
       "piName": "test_script_submit_result",
       "label": "提交测试脚本候选",
       "catalogName": "提交测试脚本候选",
-      "description": "提交 test-script-generation/v1 Playwright Workspace 候选；服务端校验固定入口、相对依赖闭包、Hash、AST、执行方式和受保护断言后才可构建 ExecutionPackage。",
+      "description": "提交 Playwright Workspace 源码候选；Service 自动绑定当前 Task 并在构建 ExecutionPackage 前校验入口、依赖闭包、AST、执行方式和受保护断言。",
       "catalogDescription": "提交只读测试执行 Stage 生成的 Playwright 源码候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -507,14 +507,6 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": {
-            "const": "test-script-generation/v1"
-          },
-          "taskId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
           "entryFile": {
             "type": "string",
             "minLength": 1,
@@ -536,11 +528,6 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 524288
-                },
-                "contentSha256": {
-                  "type": "string",
-                  "minLength": 64,
-                  "maxLength": 64
                 }
               },
               "required": [
@@ -553,25 +540,22 @@
           "summary": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 8000
+            "maxLength": 500
           }
         },
         "required": [
-          "schemaVersion",
-          "taskId",
           "entryFile",
-          "files",
-          "summary"
+          "files"
         ],
         "additionalProperties": false
       }
     },
     "failure_analysis.submit_result": {
-      "version": "1.0.0",
+      "version": "2.0.0",
       "piName": "failure_analysis_submit_result",
       "label": "提交执行失败诊断候选",
       "catalogName": "提交执行失败诊断候选",
-      "description": "提交 failure-analysis/v1 候选；服务端校验任务、ScriptRevision、终态 Attempt、Artifact 证据和确定性修复策略。",
+      "description": "提交失败分类、简短原因和关键证据；Service 自动绑定当前 ScriptRevision、Attempt、Artifact 并计算修复策略。",
       "catalogDescription": "提交只读失败分析 Stage 的证据化诊断候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -582,29 +566,6 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": {
-            "const": "failure-analysis/v1"
-          },
-          "taskId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
-          "scriptRevisionId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
-          "attemptIds": {
-            "type": "array",
-            "minItems": 2,
-            "maxItems": 20,
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            }
-          },
           "category": {
             "enum": [
               "product_defect",
@@ -618,76 +579,31 @@
               "unknown"
             ]
           },
-          "confidence": {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1
-          },
-          "summary": {
+          "reason": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 12000
+            "maxLength": 4000
           },
           "evidence": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 50,
-            "items": {
-              "type": "object",
-              "properties": {
-                "attemptId": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 200
-                },
-                "artifactId": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 200
-                },
-                "observation": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 8000
-                }
-              },
-              "required": [
-                "attemptId",
-                "observation"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "repairable": {
-            "type": "boolean"
-          },
-          "recommendedAction": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 8000
+            "maxLength": 4000
           }
         },
         "required": [
-          "schemaVersion",
-          "taskId",
-          "scriptRevisionId",
-          "attemptIds",
           "category",
-          "confidence",
-          "summary",
-          "evidence",
-          "repairable",
-          "recommendedAction"
+          "reason",
+          "evidence"
         ],
         "additionalProperties": false
       }
     },
     "script_repair.submit_result": {
-      "version": "1.1.0",
+      "version": "2.0.0",
       "piName": "script_repair_submit_result",
       "label": "提交测试脚本修复候选",
       "catalogName": "提交测试脚本修复候选",
-      "description": "提交 script-repair/v1 Playwright Workspace 修复候选；服务端校验 parent Revision、入口依赖闭包、诊断、修复限额、AST 和受保护断言继承。",
+      "description": "提交 Playwright Workspace 修复源码；Service 自动绑定 parent Revision、Diagnosis 和修复次数，并校验依赖闭包、AST 与受保护断言继承。",
       "catalogDescription": "提交只读脚本修复 Stage 的 Playwright 源码候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -698,19 +614,6 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": {
-            "const": "script-repair/v1"
-          },
-          "taskId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
-          "parentScriptRevisionId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
           "entryFile": {
             "type": "string",
             "minLength": 1,
@@ -732,11 +635,6 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 524288
-                },
-                "contentSha256": {
-                  "type": "string",
-                  "minLength": 64,
-                  "maxLength": 64
                 }
               },
               "required": [
@@ -749,16 +647,12 @@
           "summary": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 8000
+            "maxLength": 500
           }
         },
         "required": [
-          "schemaVersion",
-          "taskId",
-          "parentScriptRevisionId",
           "entryFile",
-          "files",
-          "summary"
+          "files"
         ],
         "additionalProperties": false
       }

@@ -89,8 +89,6 @@ const runnerSnapshot: ExecutionRunnerSnapshot = {
 function executionPackage() {
   return buildExecutionPackage({
     candidate: {
-      schemaVersion: 'test-script-generation/v1',
-      taskId: task.taskId,
       entryFile: 'tests/ui/task-status.spec.ts',
       files: [{ path: 'tests/ui/task-status.spec.ts', content: source }],
       summary: '状态检查脚本',
@@ -219,7 +217,7 @@ test('PlaywrightRunner 拒绝 package 篡改和 Runner drift，且拒绝发生�
       runner: runnerSnapshot,
     }, new AbortController().signal),
     error => error instanceof TestExecutionValidationError
-      && error.code === 'TEST_EXECUTION_PACKAGE_CONTENT_HASH_MISMATCH',
+      && error.code === 'TEST_EXECUTION_PACKAGE_INTEGRITY_INVALID',
   )
   await assert.rejects(
     runner.execute({

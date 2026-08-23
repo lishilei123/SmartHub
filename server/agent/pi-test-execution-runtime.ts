@@ -253,22 +253,17 @@ export function buildTestExecutionAgentTask(
     file => file.logicalPath === 'exploration/context.json',
   )
   return canonicalJson({
-    schemaVersion: 'test-execution-agent-task/v1',
+    schemaVersion: 'test-execution-agent-task/v2',
     agent: binding.agentLabel,
-    stage: input.stage,
-    runId: input.run.id,
-    projectVersionId: input.run.projectVersionId,
-    task: {
-      taskId: input.task.id,
-      status: input.task.status,
-      input: input.task.input,
-      currentScriptRevisionId: input.task.currentScriptRevisionId,
-      repairCount: input.task.repairCount,
-    },
-    environment: { signature: input.run.environment.signature },
-    runner: {
-      runnerVersion: input.run.runner.runnerVersion,
-      playwrightVersion: input.run.runner.playwrightVersion,
+    assignment: stageAssignment(input.stage),
+    testCase: input.task.input.caseContent,
+    execution: {
+      method: input.task.input.method,
+      dimension: input.task.input.dimension,
+      specification: input.task.input.executionSpec,
+      ...(input.task.input.testDataBindings?.length
+        ? { testDataBindings: input.task.input.testDataBindings }
+        : {}),
     },
     workspace: {
       root: `/${workspace.rootLogicalPath ?? workspace.logicalPath}`,
@@ -288,37 +283,35 @@ export function buildTestExecutionAgentTask(
       } : {}),
     },
     ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
-    stageContext: input.stageContext ?? {},
-    stageContract: {
-      allowedSkill: binding.skillKey,
-      submitTool: binding.submitToolId,
-      schemaVersion: binding.schemaVersion,
-    },
-    instructions: [
-      'Workflow Stage 已由 TestExecutionService 固定，不能自行切换。',
-      '进入 script_generation 表示 Service 已确认当前 Case 没有可直接执行的有效 Execution Binding；不得覆盖或重写其他已有 Binding。',
-      'API Case 无 Binding 时，先读取 /exploration/context.json 中当前 ProjectVersion 的真实环境观察，再查询受控 Knowledge/API 文档，最后结合 execution/ 下已有 API Client 与工程代码实现；已有相关 Endpoint/Method/Schema 时优先复用，不得从零猜测或重复发明。',
-      'API Case 统一使用 Playwright Test：普通请求优先使用 request fixture；共享 BaseURL、认证、Headers、Cookie、数据准备或请求操作时，公共 Client 必须接收 fixture 提供的 APIRequestContext。禁止 axios、superagent、undici、node:http、node:https、fetch polyfill、Postman/Newman 或独立 APIRunner。',
-      `Playwright Test 标题必须以稳定 Case Symbol ${JSON.stringify(`[${input.task.input.caseId}]`)} 结尾；一个 Binding 只能对应一个该标题。`,
-      '使用 Playwright test.step 标注有业务意义的 UI/API 操作、回读和最终断言，标题只写稳定的操作名或 Method + Path，不得包含 Query 值、请求/响应 Body、账号、Token、Cookie、个人数据、Selector dump 或原始输出；正式事件只来自 Playwright JSON Reporter。',
-      '实现 API Case 前按 execution/api、execution/helpers、execution/fixtures、execution/tests/api 的顺序查找已有公共能力。按业务操作复用 Client，不得一 Case 创建一个 Client；公共 Client 负责请求/响应/复用操作，业务断言与 verification anchor 保持在 Case Entry 附近。',
-      'page 与 request 只能使用当前 ExecutionRun 冻结 BaseURL；脚本必须使用相对 URL，不得写死 Host，也不得用 Exploration Context 或 API 文档中的 origin 覆盖本次 Run 环境。认证只能引用冻结 Test Data、现有受控 Fixture、Environment 或 Runtime Secret，不得把 Authorization、Cookie、Token 或真实 Secret 写入 Workspace。',
-      'UI Case、Failure Analysis 与 Repair 先检查 execution/ 下已有 tests、pages、helpers、fixtures、api 与 bindings；优先复用公共能力。',
-      'Exploration Context 是当前版本 Runtime Observed Knowledge，不是 Requirement Truth。它与 Knowledge/API 文档不一致时必须保留并指出差异，判断文档过期、环境版本差异、产品问题或探索失效；不得静默用其中一方覆盖另一方。needs_validation/inherited 结果可以辅助实现，但不能伪装成当前环境已验证事实。',
-      '当 uiExecution 存在时，它是 UIExecutionAgent 用 Playwright CLI 对当前 BaseURL 的即时观察；只能基于其中真实 snapshot/locator hint 编写或修复 UI 自动化，不得凭空编造 selector。它不是另一套 Test Plan，也不能改变 TestCase 测试意图。',
-      'UI Case 即使观察到对应 API，也必须继续通过真实 UI 完成输入、交互和页面断言；禁止改成直接调用 API 后宣称 UI Case 通过。',
-      '允许 page + request 混合测试，但 request 只能承担与冻结测试意图一致的 Setup/Cleanup 或辅助操作；如果 Case 测试 UI 创建、输入或交互，就必须由 page 完成该目标。',
-      'Exploration Context 只包含脱敏后的字段结构；不得尝试恢复、记录或输出 Authorization、Cookie、Token、Password、Session、API Key、个人数据等真实值。',
-      '使用当前冻结工作区中已经交付的受控知识上下文；文档与真实环境不一致时必须如实记录，不得编造 selector、API 或凭据。',
-      '只读取当前 run/task 的冻结工作区；不得解析 latest、current 或 active 业务输入。',
-      '不得调用 Shell、SSH、数据库、任意网络、其他 Agent 或 Runner。真实环境验证由 Local Runner 在提交候选后执行。',
-      'Agent 文本不能作为系统命令直接执行。',
-      '不得修改正式 TestCase、Expected Result、Verification Check、断言意义、测试目标或需求规则。',
-      'Expected Result 已要求创建后查询、更新后刷新/重进、删除后确认不存在或异步最终状态时，脚本必须实现对应闭环断言；不得只断言 HTTP 2xx、按钮提示或操作成功。Repair 不得删除或弱化该闭环。',
-      '普通已登录业务 Case可以复用 Workspace 已有 Playwright Auth Fixture/storageState；登录、退出、未登录、会话或 Token/Cookie 失效、角色切换、账号隔离、安全策略和多会话 Case 必须使用 fresh/anonymous/isolated/custom Context。真实 Auth State 只允许写入 Runner 注入的 Run-scoped 临时目录，不得写入 Workspace 源码、Revision、Artifact、Knowledge、Exploration Context 或 Prompt。',
-      `完成后只能调用 ${binding.submitToolId} 提交结构化候选。`,
-    ],
+    instructions: stageInstructions(input.stage, input.task.input.caseId, binding.submitToolId),
   })
+}
+
+function stageAssignment(stage: TestExecutionAgentStage) {
+  if (stage === 'script_generation') return '根据冻结 TestCase 和 Execution Workspace 实现 Playwright 自动化代码'
+  if (stage === 'failure_diagnosis') return '根据当前失败 Attempt 和 Runner Evidence 客观判断失败类型'
+  return '根据已确认的 FailureDiagnosis 修复 Playwright 实现'
+}
+
+function stageInstructions(stage: TestExecutionAgentStage, caseId: string, submitToolId: string) {
+  const common = [
+    '只使用冻结 TestCase、只读 Workspace 与已交付的受控上下文；不得编造 API、Selector、凭据、业务规则或预期结果。',
+    '不得修改 TestCase、Expected Result、Verification Check、受保护断言语义或测试目标。',
+    '不得调用 Shell、数据库、任意网络、其他 Agent 或 Runner；Service 和 Runner 负责流程与真实执行。',
+  ]
+  if (stage === 'failure_diagnosis') return [
+    ...common,
+    '只根据当前失败 Attempt、Execution Event 与 Artifact 证据分类；不得修改脚本或决定是否修复。',
+    `完成后只调用 ${submitToolId} 提交 category、reason、evidence。`,
+  ]
+  const implementation = [
+    ...common,
+    `Playwright Test 标题必须以稳定 Case Symbol ${JSON.stringify(`[${caseId}]`)} 结尾。`,
+    '优先复用 execution/ 下已有 tests、pages、api、helpers 和 fixtures；API 使用 request/APIRequestContext，UI 必须完成真实 UI 操作与页面断言。',
+    '只提交需要新增或修改的 Workspace 文件；summary 仅用于简短说明。',
+  ]
+  if (stage === 'script_repair') implementation.push('只修改诊断支持的实现问题；不得删除、绕过或弱化受保护断言和业务闭环。')
+  return [...implementation, `完成后只调用 ${submitToolId} 提交 entryFile、files，可选 summary。`]
 }
 
 function buildAgentSnapshot(

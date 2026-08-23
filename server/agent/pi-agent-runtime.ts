@@ -789,7 +789,12 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       ...(stage.isGovernedCandidate && descriptor.id === stage.submitToolId ? {
         prepareArguments: (args: unknown) => {
           const value = args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {}
-          return value.schemaVersion === undefined ? { ...value, schemaVersion: stage.schemaVersion } : value
+          const properties = descriptor.parameters && typeof descriptor.parameters === 'object'
+            ? (descriptor.parameters as { properties?: Record<string, unknown> }).properties
+            : undefined
+          return properties && 'schemaVersion' in properties && value.schemaVersion === undefined
+            ? { ...value, schemaVersion: stage.schemaVersion }
+            : value
         },
       } : {}),
       execute: async (toolCallId, args, toolSignal) => {

@@ -36,7 +36,7 @@ test('Requirement Analysis 精简提交 Schema 会发布新的 Tool 绑定令牌
   )
 })
 
-test('测试执行候选工具使用闭合身份与服务端一致的大小边界', () => {
+test('测试执行候选工具只向 Agent 暴露最小智能结果', () => {
   const script = defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').parameters as unknown as {
     additionalProperties: boolean
     required: string[]
@@ -44,7 +44,8 @@ test('测试执行候选工具使用闭合身份与服务端一致的大小边�
   }
   const diagnosis = defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').parameters as unknown as {
     additionalProperties: boolean
-    properties: { evidence: { maxItems: number }; category: { enum: string[] } }
+    required: string[]
+    properties: { evidence: { maxLength: number }; category: { enum: string[] } }
   }
   const repair = defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').parameters as unknown as {
     additionalProperties: boolean
@@ -52,15 +53,21 @@ test('测试执行候选工具使用闭合身份与服务端一致的大小边�
     properties: { files: { maxItems: number; items: { properties: { content: { maxLength: number } } } } }
   }
   assert.equal(script.additionalProperties, false)
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').version, '2.0.0')
+  assert.deepEqual(Object.keys(script.properties).sort(), ['entryFile', 'files', 'summary'])
+  assert.deepEqual(script.required, ['entryFile', 'files'])
   assert.equal(script.properties.files.maxItems, 16)
-  assert.ok(script.required.includes('entryFile'))
   assert.equal(script.properties.files.items.properties.content.maxLength, 524_288)
   assert.equal(diagnosis.additionalProperties, false)
-  assert.equal(diagnosis.properties.evidence.maxItems, 50)
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').version, '2.0.0')
+  assert.deepEqual(Object.keys(diagnosis.properties).sort(), ['category', 'evidence', 'reason'])
+  assert.deepEqual(diagnosis.required, ['category', 'reason', 'evidence'])
+  assert.equal(diagnosis.properties.evidence.maxLength, 4_000)
   assert.deepEqual(diagnosis.properties.category.enum, ['product_defect', 'script_defect', 'selector_changed', 'environment_defect', 'test_data_defect', 'flaky', 'assertion_mismatch', 'timeout', 'unknown'])
   assert.equal(repair.additionalProperties, false)
-  assert.ok(repair.required.includes('parentScriptRevisionId'))
-  assert.ok(repair.required.includes('entryFile'))
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').version, '2.0.0')
+  assert.deepEqual(Object.keys(repair.properties).sort(), ['entryFile', 'files', 'summary'])
+  assert.deepEqual(repair.required, ['entryFile', 'files'])
   assert.equal(repair.properties.files.maxItems, 16)
   assert.equal(repair.properties.files.items.properties.content.maxLength, 524_288)
 })

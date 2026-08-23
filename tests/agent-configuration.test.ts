@@ -324,6 +324,13 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
     }, new AbortController().signal)
     const input = captured.at(-1)!
     assert.equal(input.snapshot.agentDefinition.agentKey, binding.agentKey)
+    const agentTask = JSON.parse(input.executionProfile!.initialTask) as Record<string, unknown>
+    assert.equal(agentTask.schemaVersion, 'test-execution-agent-task/v2')
+    assert.equal(typeof agentTask.assignment, 'string')
+    assert.deepEqual(
+      ['runId', 'projectVersionId', 'stageContext', 'stageContract', 'environment', 'runner'].filter(key => key in agentTask),
+      [],
+    )
     assert.deepEqual(input.executionProfile?.allowedToolIds, [
       'workspace.read_file',
       'workspace.grep_files',

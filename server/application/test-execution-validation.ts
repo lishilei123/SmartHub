@@ -12,6 +12,7 @@ import type {
   ExecutionRunStatus,
   ExecutionTaskStatus,
   FailureDiagnosis,
+  FailureDiagnosisCandidate,
   FailureDiagnosisCategory,
   FrozenExecutionTestDataSnapshot,
   FrozenExecutionTaskInput,
@@ -312,27 +313,7 @@ export function buildExecutionPackage(input: {
   environmentSignature: string
   workspaceFiles?: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[]
   baselineAssertions?: readonly ExecutionAssertionContract[]
-  parentScriptRevisionId?: string
 }): ExecutionPackage {
-  const repairing = input.baselineAssertions !== undefined
-  const expectedSchemaVersion = repairing ? 'script-repair/v1' : 'test-script-generation/v1'
-  if (input.candidate.schemaVersion !== expectedSchemaVersion) {
-    throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_SCHEMA_INVALID', '脚本候选 schemaVersion 无效')
-  }
-  if (input.candidate.taskId !== input.task.taskId) {
-    throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_TASK_MISMATCH', '脚本候选引用了错误任务')
-  }
-  if (
-    repairing
-      ? !input.parentScriptRevisionId
-        || input.candidate.parentScriptRevisionId !== input.parentScriptRevisionId
-      : input.candidate.parentScriptRevisionId !== undefined
-  ) {
-    throw new TestExecutionValidationError(
-      'TEST_EXECUTION_PACKAGE_PARENT_REVISION_MISMATCH',
-      '脚本候选引用了错误的 parent ScriptRevision',
-    )
-  }
   if (!['ui', 'api'].includes(input.task.method)) {
     throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_UNSUPPORTED', '不支持的方法不能创建执行包')
   }
@@ -416,8 +397,6 @@ export function assertExecutionPackageIntegrity(input: {
 }) {
   const rebuilt = buildExecutionPackage({
     candidate: {
-      schemaVersion: 'test-script-generation/v1',
-      taskId: input.task.taskId,
       entryFile: input.package.manifest.entrypoint,
       files: input.package.files
         .filter(file => file.path === input.package.manifest.entrypoint),
@@ -441,83 +420,35 @@ export function assertExecutionPackageIntegrity(input: {
 
 export function validateFailureDiagnosisCandidate(
   value: unknown,
-  context: { taskId: string; scriptRevisionId: string; attemptIds: readonly string[]; artifactIds: readonly string[] },
-): Pick<FailureDiagnosis, 'category' | 'confidence' | 'summary' | 'evidence' | 'repairable' | 'recommendedAction'> {
+): FailureDiagnosisCandidate {
   const candidate = record(value, '诊断候选必须是对象')
-  if (candidate.schemaVersion !== 'failure-analysis/v1') {
+  if (candidate.schemaVersion !== undefined && candidate.schemaVersion !== 'failure-analysis/v1') {
     throw new TestExecutionValidationError(
       'TEST_EXECUTION_DIAGNOSIS_SCHEMA_INVALID',
       '诊断候选 schemaVersion 无效',
     )
   }
-  if (text(candidate.taskId, 'taskId') !== context.taskId) {
+  const allowed = new Set(['schemaVersion', 'category', 'reason', 'evidence'])
+  if (Object.keys(candidate).some(key => !allowed.has(key))) {
     throw new TestExecutionValidationError(
-      'TEST_EXECUTION_DIAGNOSIS_TASK_MISMATCH',
-      '诊断候选引用了错误任务',
-    )
-  }
-  if (
-    text(candidate.scriptRevisionId, 'scriptRevisionId')
-      !== context.scriptRevisionId
-  ) {
-    throw new TestExecutionValidationError(
-      'TEST_EXECUTION_DIAGNOSIS_REVISION_MISMATCH',
-      '诊断候选引用了错误 ScriptRevision',
-    )
-  }
-  if (!Array.isArray(candidate.attemptIds)) {
-    throw new TestExecutionValidationError(
-      'TEST_EXECUTION_DIAGNOSIS_ATTEMPTS_INVALID',
-      '诊断候选必须引用当前固定的 Attempt 集',
-    )
-  }
-  const candidateAttemptIds = candidate.attemptIds.map(
-    (attemptId, index) => text(attemptId, `attemptIds[${index}]`),
-  )
-  if (
-    candidateAttemptIds.length !== context.attemptIds.length
-    || new Set(candidateAttemptIds).size !== candidateAttemptIds.length
-    || candidateAttemptIds.some(
-      attemptId => !context.attemptIds.includes(attemptId),
-    )
-  ) {
-    throw new TestExecutionValidationError(
-      'TEST_EXECUTION_DIAGNOSIS_ATTEMPTS_MISMATCH',
-      '诊断候选引用了错误的 Attempt 集',
+      'TEST_EXECUTION_DIAGNOSIS_SYSTEM_FIELD_FORBIDDEN',
+      '诊断候选不能提交任务、Revision、Attempt、Artifact 或修复策略字段',
     )
   }
   const category = text(candidate.category, 'category') as FailureDiagnosisCategory
   if (!diagnosisCategories.has(category)) throw new TestExecutionValidationError('TEST_EXECUTION_DIAGNOSIS_CATEGORY_INVALID', '诊断分类无效')
-  const confidence = Number(candidate.confidence)
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new TestExecutionValidationError('TEST_EXECUTION_DIAGNOSIS_CONFIDENCE_INVALID', '诊断置信度必须在 0 到 1 之间')
-  if (!Array.isArray(candidate.evidence) || !candidate.evidence.length || candidate.evidence.length > 50) throw new TestExecutionValidationError('TEST_EXECUTION_DIAGNOSIS_EVIDENCE_INVALID', '诊断证据必须包含 1 到 50 项')
-  const attemptIds = new Set(context.attemptIds)
-  const artifactIds = new Set(context.artifactIds)
-  const evidence = candidate.evidence.map((entry, index) => {
-    const item = record(entry, `evidence[${index}] 必须是对象`)
-    const attemptId = text(item.attemptId, `evidence[${index}].attemptId`)
-    const artifactId = item.artifactId === undefined ? undefined : text(item.artifactId, `evidence[${index}].artifactId`)
-    if (!attemptIds.has(attemptId) || artifactId && !artifactIds.has(artifactId)) throw new TestExecutionValidationError('TEST_EXECUTION_DIAGNOSIS_EVIDENCE_FOREIGN', '诊断证据引用了当前任务之外的执行事实')
-    return { attemptId, ...(artifactId ? { artifactId } : {}), observation: text(item.observation, `evidence[${index}].observation`, 4_000) }
-  })
-  const repairable = candidate.repairable
-  if (typeof repairable !== 'boolean') throw new TestExecutionValidationError('TEST_EXECUTION_DIAGNOSIS_REPAIRABLE_INVALID', 'repairable 必须是布尔值')
   return {
     category,
-    confidence,
-    summary: text(candidate.summary, 'summary', 4_000),
-    evidence,
-    repairable,
-    recommendedAction: text(candidate.recommendedAction, 'recommendedAction', 4_000),
+    reason: text(candidate.reason, 'reason', 4_000),
+    evidence: text(candidate.evidence, 'evidence', 4_000),
   }
 }
 
-export function automaticRepairAllowed(diagnosis: Pick<FailureDiagnosis, 'category' | 'repairable'>, repairCount: number) {
+export function automaticRepairAllowed(diagnosis: Pick<FailureDiagnosis, 'category'>, repairCount: number) {
   if (!Number.isInteger(repairCount) || repairCount < 0) {
     throw new TestExecutionValidationError('TEST_EXECUTION_REPAIR_COUNT_INVALID', '修复次数无效')
   }
-  return diagnosis.repairable
-    && repairCount < 2
+  return repairCount < 2
     && ['script_defect', 'selector_changed'].includes(diagnosis.category)
 }
 
@@ -581,7 +512,6 @@ function normalizeCandidateFiles(candidateFiles: ExecutionPackageCandidate['file
       throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_SIZE_INVALID', '执行包超过大小限制')
     }
     const contentSha256 = sha256(candidate.content)
-    if (candidate.contentSha256 && candidate.contentSha256 !== contentSha256) throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_CONTENT_HASH_MISMATCH', `执行包文件 Hash 不一致：${path}`)
     return { path, content: candidate.content, contentSha256, size }
   }).sort((left, right) => left.path.localeCompare(right.path, 'en'))
 }

@@ -595,7 +595,6 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
     private readonly agents: ExecutionRun['agents'],
     private readonly options: {
       diagnosisCategory?: FailureDiagnosis['category']
-      repairable?: boolean
       repairSource?: (ordinal: number) => string
     } = {},
   ) {}
@@ -632,8 +631,6 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
         generationFiles.push({ path: 'api/auth-client.ts', content: apiClientSource })
       }
       candidate = {
-        schemaVersion,
-        taskId: input.task.id,
         entryFile,
         files: generationFiles,
         summary: '生成状态检查脚本',
@@ -643,19 +640,9 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
       agentKey = 'failure-analysis'
       assert.ok((input.stageContext?.attemptIds?.length ?? 0) >= 1)
       candidate = {
-        schemaVersion,
-        taskId: input.task.id,
-        scriptRevisionId: input.stageContext?.scriptRevisionId,
-        attemptIds: input.stageContext?.attemptIds,
         category: this.options.diagnosisCategory ?? 'selector_changed',
-        confidence: 0.95,
-        summary: '页面选择器已变化',
-        evidence: input.stageContext?.attemptIds?.map(attemptId => ({
-          attemptId,
-          observation: '同一脚本选择器无法匹配元素',
-        })),
-        repairable: this.options.repairable ?? true,
-        recommendedAction: '更新 locator，保留断言语义',
+        reason: '页面选择器已变化',
+        evidence: '同一脚本选择器无法匹配元素',
       }
     } else {
       schemaVersion = 'script-repair/v1'
@@ -663,9 +650,6 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
       this.repairOrdinal += 1
       const entryFile = `tests/${input.task.input.method}/${input.task.id}.spec.ts`
       candidate = {
-        schemaVersion,
-        taskId: input.task.id,
-        parentScriptRevisionId: input.stageContext?.parentScriptRevisionId,
         entryFile,
         files: [{
           path: entryFile,
@@ -776,7 +760,6 @@ async function withService(
   options: {
     environmentReadiness?: { ready: boolean; reason?: string }
     diagnosisCategory?: FailureDiagnosis['category']
-    repairable?: boolean
     repairSource?: (ordinal: number) => string
     workspace?: boolean
     playwrightCliAvailable?: boolean
@@ -1019,6 +1002,10 @@ test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷�
     assert.deepEqual(playwrightCli.calls, ['failure_analysis'])
     assert.equal(runtime.calls[0].uiExecution?.snapshot?.includes('状态页'), true)
     assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 0)
+    assert.equal(store.diagnoses[0].repairable, false)
+    assert.equal(store.diagnoses[0].recommendedAction, '记录产品缺陷，不调用 ScriptRepairAgent')
+    assert.equal(store.diagnoses[0].attemptIds[0], store.attempts[0].id)
+    assert.equal(store.diagnoses[0].evidence[0].attemptId, store.attempts[0].id)
     assert.equal((await workspace.readEntry(store.run.projectVersionId, { entryFile: 'tests/ui/status.spec.ts' })), source)
   }, { workspace: true, diagnosisCategory: 'product_defect' })
 })
@@ -1044,6 +1031,10 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
     assert.equal(store.revisions.filter(revision => revision.source === 'repair').length, 1)
     assert.deepEqual(runtime.calls.map(call => call.stage), ['failure_diagnosis', 'script_repair'])
     assert.deepEqual(playwrightCli.calls, ['failure_analysis', 'script_repair'])
+    assert.equal(store.diagnoses[0].repairable, true)
+    assert.equal(store.diagnoses[0].confidence, 0.5)
+    assert.match(store.diagnoses[0].recommendedAction, /服务端.*受控脚本修复/u)
+    assert.equal(store.revisions.find(revision => revision.source === 'repair')?.parentRevisionId, store.revisions[0].id)
     assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
   }, { workspace: true, diagnosisCategory: 'script_defect' })
 })

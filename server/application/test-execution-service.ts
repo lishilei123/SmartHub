@@ -654,8 +654,6 @@ export class TestExecutionService {
         const source = await this.executionWorkspace.readEntry(run.projectVersionId, binding)
         const executionPackage = buildExecutionPackage({
           candidate: {
-            schemaVersion: 'test-script-generation/v1',
-            taskId: task.id,
             entryFile: binding.entryFile,
             files: [{ path: binding.entryFile, content: source }],
             summary: '复用 ProjectVersion Execution Workspace 入口',
@@ -724,16 +722,20 @@ export class TestExecutionService {
       task,
       workspace,
       ...(uiExecution ? { uiExecution } : {}),
-      validateCandidate: candidateValidator(candidate => buildExecutionPackage({
-        candidate: packageCandidate(candidate),
-        task: { ...task.input, taskId: task.id },
-        environmentSignature: run.environment.signature,
-        workspaceFiles,
-      })),
+      validateCandidate: candidateValidator(candidate => {
+        const normalized = packageCandidate(candidate, 'test-script-generation/v1')
+        buildExecutionPackage({
+          candidate: normalized,
+          task: { ...task.input, taskId: task.id },
+          environmentSignature: run.environment.signature,
+          workspaceFiles,
+        })
+        return normalized
+      }),
     }, signal)
     assertAgentOutputSchema(output, 'test-script-generation/v1')
     const executionPackage = buildExecutionPackage({
-      candidate: packageCandidate(output.candidate),
+      candidate: packageCandidate(output.candidate, 'test-script-generation/v1'),
       task: { ...task.input, taskId: task.id },
       environmentSignature: run.environment.signature,
       workspaceFiles,
@@ -829,14 +831,17 @@ export class TestExecutionService {
     const workspaceFiles = this.executionWorkspace
       ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
       : []
-    const build = (candidate: Record<string, unknown>) => buildExecutionPackage({
-      candidate: packageCandidate(candidate),
-      task: { ...task.input, taskId: task.id },
-      environmentSignature: run.environment.signature,
-      workspaceFiles,
-      baselineAssertions: parent.package.assertions,
-      parentScriptRevisionId: parent.id,
-    })
+    const build = (candidate: Record<string, unknown>) => {
+      const normalized = packageCandidate(candidate, 'script-repair/v1')
+      buildExecutionPackage({
+        candidate: normalized,
+        task: { ...task.input, taskId: task.id },
+        environmentSignature: run.environment.signature,
+        workspaceFiles,
+        baselineAssertions: parent.package.assertions,
+      })
+      return normalized
+    }
     const output = await this.agentRuntime.execute({
       stage: 'script_repair',
       run,
@@ -853,7 +858,13 @@ export class TestExecutionService {
       validateCandidate: candidateValidator(build),
     }, signal)
     assertAgentOutputSchema(output, 'script-repair/v1')
-    const executionPackage = build(output.candidate)
+    const executionPackage = buildExecutionPackage({
+      candidate: build(output.candidate),
+      task: { ...task.input, taskId: task.id },
+      environmentSignature: run.environment.signature,
+      workspaceFiles,
+      baselineAssertions: parent.package.assertions,
+    })
     if (executionPackage.manifest.packageSha256 === parent.package.packageSha256) {
       await requiredLeaseTransaction(
         this.store,
@@ -1231,14 +1242,10 @@ export class TestExecutionService {
     const diagnoses = await this.store.listDiagnoses(task.id)
     const uiExecution = await this.uiExecutionContext(run, task, 'failure_analysis', signal)
     const workspace = await this.workspace(run, task, revision, attempts, diagnoses, artifacts)
-    const context = {
-      taskId: task.id,
-      scriptRevisionId: revision.id,
-      attemptIds: attempts.map(attempt => attempt.id),
-      artifactIds: artifacts.map(artifact => artifact.id),
-    }
+    const attemptIds = attempts.map(attempt => attempt.id)
+    const artifactIds = artifacts.map(artifact => artifact.id)
     const validate = (candidate: Record<string, unknown>) =>
-      validateFailureDiagnosisCandidate(candidate, context)
+      validateFailureDiagnosisCandidate(candidate)
     const output = await this.agentRuntime.execute({
       stage: 'failure_diagnosis',
       run,
@@ -1247,24 +1254,39 @@ export class TestExecutionService {
       ...(uiExecution ? { uiExecution } : {}),
       stageContext: {
         scriptRevisionId: revision.id,
-        attemptIds: context.attemptIds,
-        artifactIds: context.artifactIds,
+        attemptIds,
+        artifactIds,
       },
       validateCandidate: candidateValidator(validate),
     }, signal)
     assertAgentOutputSchema(output, 'failure-analysis/v1')
     const candidate = validate(output.candidate)
+    const policy = failureDiagnosisPolicy(candidate.category)
+    const evidenceAttempt = attempts.at(-1)!
+    const evidenceArtifact = artifacts.find(artifact =>
+      artifact.attemptId === evidenceAttempt.id && artifact.type === 'log')
+      ?? artifacts.find(artifact => artifact.attemptId === evidenceAttempt.id)
     const diagnosis: FailureDiagnosis = {
       id: stableIdentity('test_execution_diagnosis', {
         taskId: task.id,
         scriptRevisionId: revision.id,
-        attemptIds: context.attemptIds,
+        attemptIds,
       }),
       runId: run.id,
       taskId: task.id,
       scriptRevisionId: revision.id,
-      attemptIds: context.attemptIds,
-      ...candidate,
+      attemptIds,
+      category: candidate.category,
+      // Kept for persisted v1 compatibility. The Agent no longer self-reports
+      // probabilistic confidence, so Service records a neutral value.
+      confidence: 0.5,
+      summary: candidate.reason,
+      evidence: [{
+        attemptId: evidenceAttempt.id,
+        ...(evidenceArtifact ? { artifactId: evidenceArtifact.id } : {}),
+        observation: candidate.evidence,
+      }],
+      ...policy,
       source: 'agent',
       agent: structuredClone(run.agents.failureAnalysis),
       createdAt: this.clock(),
@@ -1754,7 +1776,7 @@ function attemptKind(
 }
 
 function diagnosisTaskStatus(
-  diagnosis: Pick<FailureDiagnosis, 'category' | 'repairable'>,
+  diagnosis: Pick<FailureDiagnosis, 'category'>,
   repairCount: number,
 ): 'repairing' | 'failed' | 'blocked' | 'waiting_manual' {
   if (automaticRepairAllowed(diagnosis, repairCount)) return 'repairing'
@@ -1765,6 +1787,27 @@ function diagnosisTaskStatus(
     || diagnosis.category === 'timeout'
   ) return 'blocked'
   return 'waiting_manual'
+}
+
+function failureDiagnosisPolicy(
+  category: FailureDiagnosis['category'],
+): Pick<FailureDiagnosis, 'repairable' | 'recommendedAction'> {
+  if (category === 'script_defect' || category === 'selector_changed') {
+    return {
+      repairable: true,
+      recommendedAction: '服务端将在修复次数限制内尝试受控脚本修复',
+    }
+  }
+  const actions: Record<Exclude<FailureDiagnosis['category'], 'script_defect' | 'selector_changed'>, string> = {
+    product_defect: '记录产品缺陷，不调用 ScriptRepairAgent',
+    environment_defect: '检查执行环境后人工重试',
+    test_data_defect: '补齐或修正测试数据后人工重试',
+    flaky: '保留失败证据并人工判断是否重试',
+    assertion_mismatch: '核对正式预期；禁止自动修改受保护断言',
+    timeout: '检查环境、等待条件或性能约束后人工重试',
+    unknown: '保留失败证据并等待人工处理',
+  }
+  return { repairable: false, recommendedAction: actions[category] }
 }
 
 function maintenanceProposalForPassingRepair(input: {
@@ -2031,10 +2074,7 @@ function assertAgentOutputSchema(
   output: TestExecutionAgentRuntimeOutput,
   expected: TestExecutionAgentRuntimeOutput['schemaVersion'],
 ) {
-  if (
-    output.schemaVersion !== expected
-    || output.candidate.schemaVersion !== expected
-  ) {
+  if (output.schemaVersion !== expected) {
     throw new Error('TEST_EXECUTION_AGENT_OUTPUT_SCHEMA_MISMATCH')
   }
 }
@@ -2059,31 +2099,34 @@ function candidateValidator<T>(validate: (candidate: Record<string, unknown>) =>
 
 function packageCandidate(
   candidate: Record<string, unknown>,
+  expectedSchemaVersion: 'test-script-generation/v1' | 'script-repair/v1',
 ): ExecutionPackageCandidate {
+  if (candidate.schemaVersion !== undefined && candidate.schemaVersion !== expectedSchemaVersion) {
+    throw new Error('TEST_EXECUTION_AGENT_OUTPUT_SCHEMA_MISMATCH')
+  }
+  const allowed = new Set(['schemaVersion', 'entryFile', 'files', 'summary'])
+  if (Object.keys(candidate).some(key => !allowed.has(key))) {
+    throw new Error('TEST_EXECUTION_PACKAGE_CANDIDATE_SYSTEM_FIELD_FORBIDDEN')
+  }
   const files = Array.isArray(candidate.files)
     ? candidate.files.map(value => {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
           throw new Error('TEST_EXECUTION_PACKAGE_CANDIDATE_INVALID')
         }
         const file = value as Record<string, unknown>
+        if (Object.keys(file).some(key => !['path', 'content'].includes(key))) {
+          throw new Error('TEST_EXECUTION_PACKAGE_CANDIDATE_SYSTEM_FIELD_FORBIDDEN')
+        }
         return {
           path: String(file.path ?? ''),
           content: typeof file.content === 'string' ? file.content : '',
-          ...(file.contentSha256 === undefined
-            ? {}
-            : { contentSha256: String(file.contentSha256) }),
         }
       })
     : []
   return {
-    schemaVersion: String(candidate.schemaVersion ?? '') as ExecutionPackageCandidate['schemaVersion'],
-    taskId: String(candidate.taskId ?? ''),
-    ...(candidate.parentScriptRevisionId === undefined
-      ? {}
-      : { parentScriptRevisionId: String(candidate.parentScriptRevisionId) }),
     entryFile: String(candidate.entryFile ?? ''),
     files,
-    summary: String(candidate.summary ?? ''),
+    ...(candidate.summary === undefined ? {} : { summary: String(candidate.summary) }),
   }
 }
 

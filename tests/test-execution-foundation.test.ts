@@ -125,10 +125,8 @@ function apiTaskInput(): FrozenExecutionTaskInput & { taskId: string } {
   }
 }
 
-function candidate(source = validSource, schemaVersion: ExecutionPackageCandidate['schemaVersion'] = 'test-script-generation/v1'): ExecutionPackageCandidate {
+function candidate(source = validSource): ExecutionPackageCandidate {
   return {
-    schemaVersion,
-    taskId: 'task-status',
     entryFile: 'tests/ui/task-status.spec.ts',
     files: [{ path: 'tests/ui/task-status.spec.ts', content: source }],
     summary: '执行状态检查',
@@ -338,8 +336,6 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
 `
   const executionPackage = buildExecutionPackage({
     candidate: {
-      schemaVersion: 'test-script-generation/v1',
-      taskId: task.taskId,
       entryFile,
       files: [{ path: entryFile, content: entrySource }],
       summary: '复用 AuthClient 的 API Case',
@@ -366,8 +362,6 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
 `
   const build = (source: string, workspaceFiles: Array<{ path: string; content: string }> = []) => buildExecutionPackage({
     candidate: {
-      schemaVersion: 'test-script-generation/v1',
-      taskId: task.taskId,
       entryFile,
       files: [{ path: entryFile, content: source }],
       summary: 'API Validator',
@@ -469,7 +463,6 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
 `
   assert.throws(() => buildExecutionPackage({
     candidate: {
-      schemaVersion: 'test-script-generation/v1', taskId: authTask.taskId,
       entryFile: 'tests/api/login.spec.ts',
       files: [
         { path: 'fixtures/auth-fixture.ts', content: sharedFixture },
@@ -491,7 +484,6 @@ test('匿名访问 [TC_API_LOGIN_001]', async ({ request }) => {
 `
   assert.doesNotThrow(() => buildExecutionPackage({
     candidate: {
-      schemaVersion: 'test-script-generation/v1', taskId: authTask.taskId,
       entryFile: 'tests/api/login.spec.ts', files: [{ path: 'tests/api/login.spec.ts', content: anonymousEntry }],
       summary: '显式匿名 Context',
     },
@@ -500,7 +492,6 @@ test('匿名访问 [TC_API_LOGIN_001]', async ({ request }) => {
   }))
   assert.throws(() => buildExecutionPackage({
     candidate: {
-      schemaVersion: 'test-script-generation/v1', taskId: authTask.taskId,
       entryFile: 'tests/api/login.spec.ts',
       files: [{ path: 'tests/api/login.spec.ts', content: anonymousEntry.replace('storageState: undefined', "storageState: 'shared.json'") }],
       summary: '匿名 Case 错误加载共享状态',
@@ -547,24 +538,21 @@ test('更新状态并回读 [case-persisted-status]', async ({ request }) => {
   expect(await persisted.json()).toMatchObject({ status: 'done' })
 })
 `
-  const build = (content: string, schemaVersion: ExecutionPackageCandidate['schemaVersion'], baselineAssertions?: ReturnType<typeof buildExecutionPackage>['manifest']['assertions']) => buildExecutionPackage({
+  const build = (content: string, baselineAssertions?: ReturnType<typeof buildExecutionPackage>['manifest']['assertions']) => buildExecutionPackage({
     candidate: {
-      schemaVersion,
-      taskId: task.taskId,
-      ...(schemaVersion === 'script-repair/v1' ? { parentScriptRevisionId: 'revision-persisted-1' } : {}),
       entryFile,
       files: [{ path: entryFile, content }],
       summary: '持久化闭环',
     },
     task,
     environmentSignature: 'env',
-    ...(baselineAssertions ? { baselineAssertions, parentScriptRevisionId: 'revision-persisted-1' } : {}),
+    ...(baselineAssertions ? { baselineAssertions } : {}),
   })
-  assert.throws(() => build(source(false), 'test-script-generation/v1'), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
-  const baseline = build(source(true), 'test-script-generation/v1')
-  assert.throws(() => build(source(false), 'script-repair/v1', baseline.manifest.assertions), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+  assert.throws(() => build(source(false)), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+  const baseline = build(source(true))
+  assert.throws(() => build(source(false), baseline.manifest.assertions), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
   assert.throws(
-    () => build(source(false).replace("const mutation = await request.post('/api/status', { data: { status: 'done' } })", "await request.get('/api/status')\n  const mutation = await request.post('/api/status', { data: { status: 'done' } })"), 'test-script-generation/v1'),
+    () => build(source(false).replace("const mutation = await request.post('/api/status', { data: { status: 'done' } })", "await request.get('/api/status')\n  const mutation = await request.post('/api/status', { data: { status: 'done' } })")),
     error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
   )
 })
@@ -580,16 +568,15 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
 })
 `
   const baseline = buildExecutionPackage({
-    candidate: { schemaVersion: 'test-script-generation/v1', taskId: task.taskId, entryFile, files: [{ path: entryFile, content: source(403) }], summary: 'baseline' },
+    candidate: { entryFile, files: [{ path: entryFile, content: source(403) }], summary: 'baseline' },
     task,
     environmentSignature: 'env',
   })
   assert.throws(() => buildExecutionPackage({
-    candidate: { schemaVersion: 'script-repair/v1', taskId: task.taskId, parentScriptRevisionId: 'revision-api-1', entryFile, files: [{ path: entryFile, content: source(200) }], summary: 'weaken assertion' },
+    candidate: { entryFile, files: [{ path: entryFile, content: source(200) }], summary: 'weaken assertion' },
     task,
     environmentSignature: 'env',
     baselineAssertions: baseline.manifest.assertions,
-    parentScriptRevisionId: 'revision-api-1',
   }), error => validationCode(error, 'TEST_EXECUTION_PROTECTED_ASSERTION_CHANGED'))
 })
 
@@ -598,69 +585,43 @@ test('脚本修复可变更 selector，但不能更改受保护断言语义', ()
   const baseline = buildExecutionPackage({ candidate: candidate(), task, environmentSignature: 'env' })
   const selectorRepair = validSource.replace('[data-testid="status"]', '[aria-label="service status"]')
   assert.doesNotThrow(() => buildExecutionPackage({
-    candidate: { ...candidate(selectorRepair, 'script-repair/v1'), parentScriptRevisionId: 'script-revision-1' },
+    candidate: candidate(selectorRepair),
     task,
     environmentSignature: 'env',
     baselineAssertions: baseline.manifest.assertions,
-    parentScriptRevisionId: 'script-revision-1',
   }))
-  assert.throws(
-    () => buildExecutionPackage({
-      candidate: { ...candidate(selectorRepair, 'script-repair/v1'), parentScriptRevisionId: 'foreign-revision' },
-      task,
-      environmentSignature: 'env',
-      baselineAssertions: baseline.manifest.assertions,
-      parentScriptRevisionId: 'script-revision-1',
-    }),
-    error => validationCode(error, 'TEST_EXECUTION_PACKAGE_PARENT_REVISION_MISMATCH'),
-  )
   const weakened = validSource.replace("toHaveText('Ready')", "toContainText('Ready')")
   assert.throws(
-    () => buildExecutionPackage({ candidate: { ...candidate(weakened, 'script-repair/v1'), parentScriptRevisionId: 'script-revision-1' }, task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions, parentScriptRevisionId: 'script-revision-1' }),
+    () => buildExecutionPackage({ candidate: candidate(weakened), task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions }),
     error => validationCode(error, 'TEST_EXECUTION_PROTECTED_ASSERTION_CHANGED'),
   )
   const changedExpected = validSource.replace("toHaveText('Ready')", "toHaveText('Anything')")
   assert.throws(
-    () => buildExecutionPackage({ candidate: { ...candidate(changedExpected, 'script-repair/v1'), parentScriptRevisionId: 'script-revision-1' }, task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions, parentScriptRevisionId: 'script-revision-1' }),
+    () => buildExecutionPackage({ candidate: candidate(changedExpected), task, environmentSignature: 'env', baselineAssertions: baseline.manifest.assertions }),
     error => validationCode(error, 'TEST_EXECUTION_PROTECTED_ASSERTION_CHANGED'),
   )
 })
 
-test('诊断证据只允许引用当前任务事实，自动修复策略由服务端固定', () => {
+test('FailureAnalysisAgent 只提交最小分类，自动修复策略由服务端固定', () => {
   const diagnosisCandidate = {
-    schemaVersion: 'failure-analysis/v1',
-    taskId: 'task-status',
-    scriptRevisionId: 'revision-1',
-    attemptIds: ['attempt-1'],
     category: 'selector_changed',
-    confidence: 0.92,
-    summary: '登录按钮 selector 已变化',
-    evidence: [{ attemptId: 'attempt-1', artifactId: 'artifact-log-1', observation: '两次执行均无法定位旧 selector' }],
-    repairable: true,
-    recommendedAction: '更新 selector',
+    reason: '登录按钮 selector 已变化',
+    evidence: 'Playwright 无法定位原登录按钮',
   }
-  const context = { taskId: 'task-status', scriptRevisionId: 'revision-1', attemptIds: ['attempt-1'], artifactIds: ['artifact-log-1'] }
-  const diagnosis = validateFailureDiagnosisCandidate(diagnosisCandidate, context)
+  const diagnosis = validateFailureDiagnosisCandidate(diagnosisCandidate)
+  assert.deepEqual(diagnosis, diagnosisCandidate)
   assert.equal(automaticRepairAllowed(diagnosis, 0), true)
   assert.equal(automaticRepairAllowed(diagnosis, 2), false)
-  assert.equal(automaticRepairAllowed({ category: 'product_defect', repairable: true }, 0), false)
-  assert.equal(automaticRepairAllowed({ category: 'assertion_mismatch', repairable: true }, 0), false)
-  assert.equal(automaticRepairAllowed({ category: 'unknown', repairable: true }, 0), false)
+  assert.equal(automaticRepairAllowed({ category: 'product_defect' }, 0), false)
+  assert.equal(automaticRepairAllowed({ category: 'assertion_mismatch' }, 0), false)
+  assert.equal(automaticRepairAllowed({ category: 'unknown' }, 0), false)
   assert.throws(
-    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, evidence: [{ attemptId: 'foreign-attempt', observation: '外部事实' }] }, { ...context, artifactIds: [] }),
-    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_EVIDENCE_FOREIGN'),
+    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, repairable: true }),
+    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_SYSTEM_FIELD_FORBIDDEN'),
   )
   assert.throws(
-    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, schemaVersion: 'failure-analysis/v0' }, context),
+    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, schemaVersion: 'failure-analysis/v0' }),
     error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_SCHEMA_INVALID'),
-  )
-  assert.throws(
-    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, taskId: 'foreign-task' }, context),
-    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_TASK_MISMATCH'),
-  )
-  assert.throws(
-    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, attemptIds: ['foreign-attempt'] }, context),
-    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_ATTEMPTS_MISMATCH'),
   )
 })
 

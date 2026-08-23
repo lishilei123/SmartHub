@@ -68,7 +68,7 @@ export function ExecutionRunPanel({
     <section className="te-card te-create-card">
       <header><div><h2>创建测试执行</h2><p>服务端会在创建 Run 时冻结当前项目版本最新正式用例库中的全部可执行用例。</p></div></header>
       <div className="te-handoff-preview"><div><span>执行范围</span><b>全部正式用例</b></div><div><span>冻结时机</span><b>创建 Run</b></div></div>
-      <label>被测系统地址<input type="url" list="test-execution-addresses" value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="https://staging.example.com" autoComplete="url" /><small>可直接填写；服务端仅接受已登记 OCI 运行网络的地址，并在创建 Run 时冻结。</small></label>
+      <label>被测系统地址<input type="url" list="test-execution-addresses" value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="https://staging.example.com" autoComplete="url" /><small>服务端校验 http/https 地址，并在创建执行时冻结目标环境。</small></label>
       <datalist id="test-execution-addresses">{environments.map(item => <option key={item.environmentId} value={item.baseUrl} label={item.name} />)}</datalist>
       <button className="te-primary" disabled={!readiness?.ready || !baseUrl.trim() || Boolean(busy)} onClick={() => void onCreate(baseUrl)}><Play />{busy === 'create' ? '正在冻结执行输入…' : '创建执行 Run'}</button>
     </section>
@@ -89,16 +89,15 @@ export function ExecutionRunPanel({
     </section>}
 
     {run && <section className="te-card te-run-snapshot">
-      <header><div><h2>Run 冻结快照</h2><p>开始后不再解析 latest、current 或 active。</p></div>{['queued', 'running'].includes(run.value.status) && <button className="te-danger" disabled={Boolean(busy) || Boolean(run.value.cancelRequestedAt)} onClick={() => void onCancel()}><Square />{run.value.cancelRequestedAt ? '已请求取消' : busy === 'cancel' ? '正在取消…' : '取消 Run'}</button>}</header>
+      <header><div><h2>本次执行</h2><p>查看目标环境、执行时间与必要运行信息。</p></div>{['queued', 'running'].includes(run.value.status) && <button className="te-danger" disabled={Boolean(busy) || Boolean(run.value.cancelRequestedAt)} onClick={() => void onCancel()}><Square />{run.value.cancelRequestedAt ? '已请求取消' : busy === 'cancel' ? '正在取消…' : '取消执行'}</button>}</header>
       <dl>
         <div><dt>执行范围</dt><dd>全部正式用例</dd></div>
-        <div><dt>冻结用例库</dt><dd title={run.value.handoff.testCaseLibraryVersionSha256}>{shortId(run.value.handoff.testCaseLibraryVersionId)}</dd></div>
-        <div><dt>Environment</dt><dd>{run.value.environment.name} · {shortId(run.value.environment.signature)}</dd></div>
-        <div><dt>Test data</dt><dd>{run.value.testData ? `需求 V${run.value.testData.sourceSetVersion} · ${run.value.testData.bindings.length} 项供给 · ${shortId(run.value.testData.contentSha256)}` : '无额外数据需求'}</dd></div>
-        <div><dt>Runner</dt><dd>{run.value.runner.runnerVersion} · Playwright {run.value.runner.playwrightVersion}</dd></div>
-        <div><dt>Execution workspace</dt><dd>{run.value.runner.imageReference === 'local-workspace' ? 'ProjectVersion 隔离 · 可持续复用' : `Legacy OCI image · ${run.value.runner.imageReference}`}</dd></div>
-        <div><dt>Agent snapshots</dt><dd>{Object.values(run.value.agents).map(agent => `${agent.agentKey} v${agent.configurationVersion}`).join(' · ')}</dd></div>
+        <div><dt>目标环境</dt><dd>{run.value.environment.name} · {run.value.environment.baseUrl}</dd></div>
+        <div><dt>创建时间</dt><dd>{new Date(run.value.createdAt).toLocaleString('zh-CN')}</dd></div>
+        <div><dt>执行耗时</dt><dd>{runDuration(run.value)}</dd></div>
+        <div><dt>测试数据</dt><dd>{run.value.testData ? `需求 V${run.value.testData.sourceSetVersion} · ${run.value.testData.bindings.length} 项供给` : '无额外数据需求'}</dd></div>
       </dl>
+      <details className="te-developer-details"><summary>开发者信息</summary><dl><div><dt>冻结用例库</dt><dd>{shortId(run.value.handoff.testCaseLibraryVersionId)}</dd></div><div><dt>Runner</dt><dd>{run.value.runner.runnerVersion} · Playwright {run.value.runner.playwrightVersion}</dd></div><div><dt>Workspace</dt><dd>{run.value.runner.imageReference === 'local-workspace' ? 'ProjectVersion 隔离 Workspace' : run.value.runner.imageReference}</dd></div><div><dt>Agent 配置</dt><dd>{Object.values(run.value.agents).map(agent => `${agent.agentKey} v${agent.configurationVersion}`).join(' · ')}</dd></div></dl></details>
     </section>}
   </div>
 }
@@ -121,4 +120,12 @@ export function runStatusLabel(status: ExecutionRun['status']) {
 
 export function shortId(value: string) {
   return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value
+}
+
+function runDuration(run: ExecutionRun) {
+  if (!run.startedAt) return '尚未开始'
+  if (!run.finishedAt) return '执行中'
+  const durationMs = Math.max(0, Date.parse(run.finishedAt) - Date.parse(run.startedAt))
+  if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)} 秒`
+  return `${Math.floor(durationMs / 60_000)} 分 ${Math.round(durationMs % 60_000 / 1_000)} 秒`
 }

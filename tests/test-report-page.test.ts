@@ -62,8 +62,8 @@ test('诊断与失败明细使用语义表格、正式空状态和安全 Artifac
   ]
   for (const category of categories) assert.match(diagnosis, new RegExp(category, 'u'))
   assert.match(diagnosis, /<table>/u)
-  assert.match(failures, /无正式诊断/u)
-  assert.match(failures, /无正式建议/u)
+  assert.match(failures, /暂无失败诊断/u)
+  assert.match(failures, /等待执行结果/u)
   assert.match(failures, /artifactUrl\(artifact\.id, 'inline'\)/u)
   assert.match(failures, /artifactUrl\(artifact\.id\)/u)
   assert.match(api, /test-execution-artifacts/u)

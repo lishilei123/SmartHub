@@ -274,17 +274,20 @@ export interface ExecutionPackage {
 }
 
 export interface ExecutionPackageCandidate {
-  schemaVersion: 'test-script-generation/v1' | 'script-repair/v1'
-  taskId: string
-  parentScriptRevisionId?: string
   /** Persistent ProjectVersion workspace entry owned by the Execution Binding. */
   entryFile: string
   files: Array<{
     path: string
     content: string
-    contentSha256?: string
   }>
-  summary: string
+  summary?: string
+}
+
+/** Intelligent classification only. Service owns all execution identities and policy. */
+export interface FailureDiagnosisCandidate {
+  category: FailureDiagnosisCategory
+  reason: string
+  evidence: string
 }
 
 export interface ScriptArtifact {

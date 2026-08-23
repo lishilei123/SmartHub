@@ -59,8 +59,6 @@ test('未授权登录 [TC_API_LOGIN_001]', async ({ request }) => {
 `
     const executionPackage = buildExecutionPackage({
       candidate: {
-        schemaVersion: 'test-script-generation/v1',
-        taskId: task.taskId,
         entryFile,
         files: [
           { path: clientFile, content: clientSource },
