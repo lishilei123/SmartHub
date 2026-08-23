@@ -39,6 +39,7 @@ test('Requirement Analysis 精简提交 Schema 会发布新的 Tool 绑定令牌
 test('测试执行候选工具使用闭合身份与服务端一致的大小边界', () => {
   const script = defaultBuiltInToolConfigResolver.toDescriptor('test_script.submit_result').parameters as unknown as {
     additionalProperties: boolean
+    required: string[]
     properties: { files: { maxItems: number; items: { properties: { content: { maxLength: number } } } } }
   }
   const diagnosis = defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').parameters as unknown as {
@@ -48,16 +49,19 @@ test('测试执行候选工具使用闭合身份与服务端一致的大小边�
   const repair = defaultBuiltInToolConfigResolver.toDescriptor('script_repair.submit_result').parameters as unknown as {
     additionalProperties: boolean
     required: string[]
-    properties: { files: { items: { properties: { content: { maxLength: number } } } } }
+    properties: { files: { maxItems: number; items: { properties: { content: { maxLength: number } } } } }
   }
   assert.equal(script.additionalProperties, false)
-  assert.equal(script.properties.files.maxItems, 1)
+  assert.equal(script.properties.files.maxItems, 16)
+  assert.ok(script.required.includes('entryFile'))
   assert.equal(script.properties.files.items.properties.content.maxLength, 524_288)
   assert.equal(diagnosis.additionalProperties, false)
   assert.equal(diagnosis.properties.evidence.maxItems, 50)
   assert.deepEqual(diagnosis.properties.category.enum, ['product_defect', 'script_defect', 'selector_changed', 'environment_defect', 'test_data_defect', 'flaky', 'assertion_mismatch', 'timeout', 'unknown'])
   assert.equal(repair.additionalProperties, false)
   assert.ok(repair.required.includes('parentScriptRevisionId'))
+  assert.ok(repair.required.includes('entryFile'))
+  assert.equal(repair.properties.files.maxItems, 16)
   assert.equal(repair.properties.files.items.properties.content.maxLength, 524_288)
 })
 

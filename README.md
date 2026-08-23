@@ -10,6 +10,12 @@
 
 测试设计运行启动时只冻结当前 ProjectVersion 明确绑定的 Requirement Release，并把 `releaseId`、`verificationRunId`、`RequirementRelease.content`、Release Content Hash 与完整 Workspace 文件清单写入不可变 Run Snapshot。人工发布后创建不可变正式用例库与套件。执行 Run 自动选择当前项目版本最新正式用例库并冻结其中全部可执行用例、环境签名、Knowledge Index、Runner 和三个 Agent 配置快照；已有有效 Binding 直接执行，无 Binding 才按 `Exploration Context → 固定 Knowledge/API 文档 → Existing Workspace → Implement` 实现。每次真实 Runner 启动、新脚本 Revision、失败诊断与修复都保留独立历史。
 
+## 统一 Playwright API 执行
+
+UI 和 API Case 共用同一个 TypeScript + Playwright Test Execution Workspace 与 `LocalWorkspaceRunner`，不存在独立 APIRunner。UI Case 必须使用 `page` 完成 UI 目标；API Case 默认使用 Playwright Test `request` fixture。需共享认证、Header、数据准备或请求操作时，`execution/api/*` 内的 Client 只接收 fixture 传入的 `APIRequestContext`，业务断言仍保留在 `tests/api/*` Case Entry 中。UI/API 混合 Case 可使用 `request` 准备或清理数据，但不能替代 `page` 验证 Test Intent。
+
+Runner 通过临时 Playwright Config 把当前 `ExecutionRun.environment.baseUrl` 同时供给 `page` 和 `request`；Workspace 脚本禁止硬编码绝对 Host、Authorization/Cookie 与其他 HTTP Client。Validator 允许 `tests/api`、`tests/ui`、`api`、`pages`、`helpers`、`fixtures` 之间的安全静态相对导入，并在 Service 边界递归解析、校验和冻结实际执行的依赖闭包。Execution Binding 仍然只是 `Case → entryFile → entrySymbol`，但会附带闭包 Hash 用于拒绝共享 Client/Page Object 漂移；每个不可变 ScriptRevision 保存全部闭包源文件 Artifact，Runner 不会执行后续被静默修改的共享代码。Secret 只在 Runner 启动边界按白名单解析，不进入 Workspace、Manifest、Revision 或 Exploration Context。
+
 ## 模块状态
 
 | 模块 | 当前状态 | 边界 |
@@ -23,7 +29,7 @@
 ## 已实现
 
 - 测试执行：固定 `TestExecutionService → Execution Binding / Agent → ExecutionPackage → Local Workspace Runner` 边界，Service 独占状态、重试、诊断和修复决策；UIExecutionAgent 通过官方 Playwright CLI `requests/request` 能力观察业务 fetch/XHR，并在持久化前过滤静态资源、Analytics/Telemetry 和全部真实敏感值；API Case 无 Binding 时优先消费同版本 Context，UI Case 不得用 API 调用替代真实 UI；
-- TestScriptAgent 的受控能力已升级到 `test-script-generation@1.1.0` 与固定 Knowledge 工具；升级现有部署后需要重新发布该 Agent 配置，旧发布版本不会被双读或自动回退；
+- TestScriptAgent 的受控能力已升级到 Agent/Skill `1.2.0` 与提交 Tool `1.1.0`，ScriptRepairAgent/Skill/Tool 升级到 `1.1.0`；升级现有部署后需要重新发布这两个 Agent 配置，旧发布版本不会被双读或自动回退；
 - 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和三个 Agent 快照；
 - 测试设计：统一 `PlanningAgent`、`test-case-design/v3` Candidate、扁平 `test-case/v3`、显式 Requirement 引用、服务端 Coverage Audit、受控 v3 Repair、直接语义审核、正式用例库发布与 UI/API 方法级执行交接；Service 独占 Case ID、Revision、Hash、历史匹配和正式版本治理；
 

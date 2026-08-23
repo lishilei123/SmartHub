@@ -930,7 +930,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     packageSha256: canonicalSha256(manifestBase),
   }
   const revision: ScriptRevision = {
-    id: `${prefix}-script-revision`, runId: ids.run, taskId: ids.task, scriptArtifactId: scriptArtifact.id, revision: 1, source: 'agent', generatedBy: run.agents.testScript, package: manifest, sourceArtifactId: sourceArtifact.id, contentSha256: '3'.repeat(64), protectedAssertionSha256: manifest.protectedAssertionSha256, createdAt: now,
+    id: `${prefix}-script-revision`, runId: ids.run, taskId: ids.task, scriptArtifactId: scriptArtifact.id, revision: 1, source: 'agent', generatedBy: run.agents.testScript, package: manifest, sourceArtifacts: [{ path: manifest.entrypoint, artifactId: sourceArtifact.id }], sourceArtifactId: sourceArtifact.id, contentSha256: '3'.repeat(64), protectedAssertionSha256: manifest.protectedAssertionSha256, createdAt: now,
   }
   const attempt: ExecutionAttempt = {
     id: `${prefix}-attempt`, runId: ids.run, taskId: ids.task, ordinal: 1, invocationKey: `${prefix}-invocation`, kind: 'initial', scriptRevisionId: revision.id, packageSha256: manifest.packageSha256, status: 'running', startedAt: now,
@@ -1050,6 +1050,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
     repairReason: '验证诊断 revision 归属',
     generatedBy: run.agents.scriptRepair,
     package: alternateManifest,
+    sourceArtifacts: [{ path: alternateManifest.entrypoint, artifactId: alternateSourceArtifact.id }],
     sourceArtifactId: alternateSourceArtifact.id,
     contentSha256: alternateSourceArtifact.sha256,
   }
@@ -1108,10 +1109,10 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
         INSERT INTO smarthub.test_execution_script_revisions (
           id,run_id,task_id,script_artifact_id,revision,parent_revision_id,
           generation_source,repair_reason,generated_by,package_manifest,
-          package_canonical,package_sha256,source_artifact_id,content_sha256,
+          package_canonical,package_sha256,source_artifacts,source_artifact_id,content_sha256,
           protected_assertion_sha256,protected_assertions_canonical,created_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15,$16,$17
+          $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13::jsonb,$14,$15,$16,$17,$18
         )
       `, [
         changedAssertionRevision.id,
@@ -1126,6 +1127,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
         JSON.stringify(changedAssertionRevision.package),
         canonicalJson(changedAssertionManifestBase),
         changedAssertionRevision.package.packageSha256,
+        JSON.stringify(changedAssertionRevision.sourceArtifacts),
         changedAssertionRevision.sourceArtifactId,
         changedAssertionRevision.contentSha256,
         changedAssertionRevision.protectedAssertionSha256,
@@ -1294,11 +1296,11 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
         INSERT INTO smarthub.test_execution_script_revisions (
           id,run_id,task_id,script_artifact_id,revision,parent_revision_id,
           generation_source,repair_reason,generated_by,package_manifest,
-          package_canonical,package_sha256,source_artifact_id,content_sha256,
+          package_canonical,package_sha256,source_artifacts,source_artifact_id,content_sha256,
           protected_assertion_sha256,protected_assertions_canonical,created_at
         ) VALUES (
           $1,$2,$3,$4,3,$5,'repair',$6,$7::jsonb,$8::jsonb,
-          $9,$10,$11,$12,$13,$14,$15
+          $9,$10,$11::jsonb,$12,$13,$14,$15,$16
         )
       `, [
         `${prefix}-forged-script-revision`,
@@ -1311,6 +1313,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
         JSON.stringify(forgedManifest),
         canonicalJson(forgedManifestBase),
         forgedPackageSha256,
+        JSON.stringify([{ path: forgedManifest.entrypoint, artifactId: forgedSourceArtifact.id }]),
         forgedSourceArtifact.id,
         forgedSourceArtifact.sha256,
         forgedManifest.protectedAssertionSha256,
@@ -1446,6 +1449,7 @@ async function appendRunningAttempt(
     source: 'agent',
     generatedBy: run.agents.testScript,
     package: manifest,
+    sourceArtifacts: [{ path: manifest.entrypoint, artifactId: sourceArtifact.id }],
     sourceArtifactId: sourceArtifact.id,
     contentSha256: sourceArtifact.sha256,
     protectedAssertionSha256: manifest.protectedAssertionSha256,

@@ -251,7 +251,12 @@ export type ScriptRevision = {
   repairReason?: string
   contentSha256: string
   protectedAssertionSha256: string
-  package: { packageSha256: string; entrypoint: string }
+  package: {
+    packageSha256: string
+    entrypoint: string
+    files: Array<{ path: string; contentSha256: string; size: number }>
+  }
+  sourceArtifacts: Array<{ path: string; artifactId: string }>
   createdAt: string
 }
 

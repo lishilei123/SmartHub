@@ -9,6 +9,7 @@ import type {
   ExecutionJob,
   ExecutionPackage,
   ExecutionPackageCandidate,
+  ExecutionPackageFile,
   ExecutionRun,
   ExecutionTask,
   ExecutionTestDataBinding,
@@ -36,7 +37,11 @@ import type {
   TestExecutionTransaction,
 } from '../infrastructure/test-execution-store.js'
 import type { PlaywrightRunner } from '../runner/playwright-runner.js'
-import { LocalExecutionWorkspaceStore, type CaseExecutionBinding } from '../infrastructure/execution-workspace-store.js'
+import {
+  executionBindingDependencySha256,
+  LocalExecutionWorkspaceStore,
+  type CaseExecutionBinding,
+} from '../infrastructure/execution-workspace-store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { createProjectVersionExplorationResult } from './test-execution-exploration.js'
 import {
@@ -292,26 +297,17 @@ export class TestExecutionService {
       '目标 ScriptRevision 不存在',
       404,
     )
-    const [fromArtifact, toArtifact] = await Promise.all([
-      this.store.getArtifact(from.sourceArtifactId),
-      this.store.getArtifact(to.sourceArtifactId),
-    ])
-    const [fromSource, toSource] = await Promise.all([
-      this.readScriptSource(required(
-        fromArtifact,
-        'TEST_EXECUTION_SCRIPT_SOURCE_ARTIFACT_NOT_FOUND',
-        '起始 ScriptRevision 缺少源码 Artifact',
-      )),
-      this.readScriptSource(required(
-        toArtifact,
-        'TEST_EXECUTION_SCRIPT_SOURCE_ARTIFACT_NOT_FOUND',
-        '目标 ScriptRevision 缺少源码 Artifact',
-      )),
+    const [fromFiles, toFiles] = await Promise.all([
+      this.readRevisionFiles(from),
+      this.readRevisionFiles(to),
     ])
     return {
       fromRevision: from,
       toRevision: to,
-      changes: lineDifference(fromSource, toSource),
+      changes: lineDifference(
+        revisionSourceBundle(fromFiles),
+        revisionSourceBundle(toFiles),
+      ),
     }
   }
 
@@ -640,7 +636,13 @@ export class TestExecutionService {
         run.projectVersionId,
         task.input.caseId,
       )
-      if (binding && binding.bindingStatus !== 'invalid' && binding.executionType === executableMethod(task)) {
+      if (
+        binding
+        && binding.bindingStatus !== 'invalid'
+        && binding.executionType === executableMethod(task)
+        && binding.caseContentSha256 === task.input.caseContentSha256
+      ) {
+        const workspaceSnapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
         const source = await this.executionWorkspace.readEntry(run.projectVersionId, binding)
         const executionPackage = buildExecutionPackage({
           candidate: {
@@ -652,6 +654,7 @@ export class TestExecutionService {
           },
           task: { ...task.input, taskId: task.id },
           environmentSignature: run.environment.signature,
+          workspaceFiles: workspaceSnapshot.files,
         })
         const cacheKey = taskScriptCacheKey(run, task)
         await this.persistScriptRevision({
@@ -695,21 +698,23 @@ export class TestExecutionService {
       'TEST_EXECUTION_SCRIPT_CACHE_SOURCE_NOT_FOUND',
       '脚本缓存缺少不可变来源 Revision',
     )
-    const sourceArtifact = required(
-      await this.store.getArtifact(sourceRevision.sourceArtifactId),
+    const sourceFiles = await this.readRevisionFiles(sourceRevision)
+    const sourceEntry = required(
+      sourceFiles.find(file => file.path === sourceRevision.package.entrypoint),
       'TEST_EXECUTION_SCRIPT_CACHE_ARTIFACT_NOT_FOUND',
-      '脚本缓存缺少不可变源码 Artifact',
+      '脚本缓存缺少不可变入口源码 Artifact',
     )
-    const source = await this.readScriptSource(sourceArtifact)
     const executionPackage = buildExecutionPackage({
       candidate: {
         schemaVersion: 'test-script-generation/v1',
         taskId: task.id,
-        files: [{ path: taskEntrypoint(task.id), content: source }],
+        entryFile: sourceRevision.package.entrypoint,
+        files: [{ path: sourceEntry.path, content: sourceEntry.content }],
         summary: '复用服务端校验的脚本缓存',
       },
       task: { ...task.input, taskId: task.id },
       environmentSignature: run.environment.signature,
+      workspaceFiles: sourceFiles,
     })
     await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
     await this.persistScriptRevision({
@@ -737,6 +742,9 @@ export class TestExecutionService {
   ) {
     const uiExecution = await this.uiExecutionContext(run, task, 'implementation', signal, true)
     const workspace = await this.workspace(run, task)
+    const workspaceFiles = this.executionWorkspace
+      ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
+      : []
     const output = await this.agentRuntime.execute({
       stage: 'script_generation',
       run,
@@ -747,6 +755,7 @@ export class TestExecutionService {
         candidate: packageCandidate(candidate),
         task: { ...task.input, taskId: task.id },
         environmentSignature: run.environment.signature,
+        workspaceFiles,
       })),
     }, signal)
     assertAgentOutputSchema(output, 'test-script-generation/v1')
@@ -754,6 +763,7 @@ export class TestExecutionService {
       candidate: packageCandidate(output.candidate),
       task: { ...task.input, taskId: task.id },
       environmentSignature: run.environment.signature,
+      workspaceFiles,
     })
     const createdAt = this.clock()
     const cacheKey = taskScriptCacheKey(run, task)
@@ -843,10 +853,14 @@ export class TestExecutionService {
       [diagnosis],
       artifacts,
     )
+    const workspaceFiles = this.executionWorkspace
+      ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
+      : []
     const build = (candidate: Record<string, unknown>) => buildExecutionPackage({
       candidate: packageCandidate(candidate),
       task: { ...task.input, taskId: task.id },
       environmentSignature: run.environment.signature,
+      workspaceFiles,
       baselineAssertions: parent.package.assertions,
       parentScriptRevisionId: parent.id,
     })
@@ -867,7 +881,7 @@ export class TestExecutionService {
     }, signal)
     assertAgentOutputSchema(output, 'script-repair/v1')
     const executionPackage = build(output.candidate)
-    if (executionPackage.files[0].contentSha256 === parent.contentSha256) {
+    if (executionPackage.manifest.packageSha256 === parent.package.packageSha256) {
       await requiredLeaseTransaction(
         this.store,
         job.id,
@@ -921,40 +935,54 @@ export class TestExecutionService {
     incrementRepair: boolean
   }) {
     const file = required(input.executionPackage.files.find(candidate => candidate.path === input.executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
-    const stored = await this.artifactStore.put({
-      body: executionArtifactBody(file.content),
-      mimeType: 'text/typescript; charset=utf-8',
-      expectedSha256: file.contentSha256,
-      maximumBytes: 512 * 1024,
-    })
     const createdAt = this.clock()
-    const sourceArtifact: ExecutionArtifact = {
-      id: stableIdentity('test_execution_artifact', {
+    const storedFiles = await Promise.all(input.executionPackage.files.map(async packageFile => {
+      const stored = await this.artifactStore.put({
+        body: executionArtifactBody(packageFile.content),
+        mimeType: 'text/typescript; charset=utf-8',
+        expectedSha256: packageFile.contentSha256,
+        maximumBytes: 512 * 1024,
+      })
+      const artifact: ExecutionArtifact = {
+        id: stableIdentity('test_execution_artifact', {
+          runId: input.run.id,
+          taskId: input.task.id,
+          type: 'script',
+          sha256: stored.sha256,
+        }),
         runId: input.run.id,
         taskId: input.task.id,
         type: 'script',
-        sha256: stored.sha256,
-      }),
-      runId: input.run.id,
-      taskId: input.task.id,
-      type: 'script',
-      ...stored,
-      createdAt,
-    }
+        ...stored,
+        createdAt,
+      }
+      return { path: packageFile.path, artifact }
+    }))
+    const sourceArtifact = required(
+      storedFiles.find(item => item.path === file.path)?.artifact,
+      'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING',
+      '执行包缺少入口源码 Artifact',
+    )
+    const sourceArtifacts = storedFiles.map(item => ({
+      path: item.path,
+      artifactId: item.artifact.id,
+    }))
     const revisionNumber = input.parent ? input.parent.revision + 1 : 1
     await requiredLeaseTransaction(
       this.store,
       input.job.id,
       input.lease,
       async transaction => {
-        await transaction.appendArtifact(sourceArtifact)
+        for (const artifact of new Map(storedFiles.map(item => [item.artifact.id, item.artifact])).values()) {
+          await transaction.appendArtifact(artifact)
+        }
         const scriptArtifact = await transaction.appendScriptArtifact(input.scriptArtifact)
         const revision: ScriptRevision = {
           id: stableIdentity('test_execution_script_revision', {
             runId: input.run.id,
             taskId: input.task.id,
             revision: revisionNumber,
-            contentSha256: file.contentSha256,
+            packageSha256: input.executionPackage.manifest.packageSha256,
           }),
           runId: input.run.id,
           taskId: input.task.id,
@@ -968,6 +996,7 @@ export class TestExecutionService {
           ...(input.repairReason ? { repairReason: input.repairReason } : {}),
           generatedBy: structuredClone(input.generatedBy),
           package: structuredClone(input.executionPackage.manifest),
+          sourceArtifacts,
           sourceArtifactId: sourceArtifact.id,
           contentSha256: file.contentSha256,
           protectedAssertionSha256: input.executionPackage.manifest.protectedAssertionSha256,
@@ -1131,14 +1160,24 @@ export class TestExecutionService {
       const original = scriptRevisions.find(item => item.id === revision.parentRevisionId)
       if (original) {
         const originalPackage = await this.reconstructPackage(run, task, original)
+        const originalEntry = required(
+          originalPackage.files.find(file => file.path === originalPackage.manifest.entrypoint),
+          'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING',
+          '原始执行包缺少入口源码',
+        )
+        const repairEntry = required(
+          executionPackage.files.find(file => file.path === executionPackage.manifest.entrypoint),
+          'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING',
+          '修复执行包缺少入口源码',
+        )
         passingRepairProposal = maintenanceProposalForPassingRepair({
           run,
           task,
           repairRevision: revision,
           diagnoses: await this.store.listDiagnoses(task.id),
           scriptRevisions,
-          originalSource: originalPackage.files[0].content,
-          repairSource: executionPackage.files[0].content,
+          originalSource: originalEntry.content,
+          repairSource: repairEntry.content,
           createdAt: finishedAt,
         })
       }
@@ -1293,20 +1332,9 @@ export class TestExecutionService {
     task: ExecutionTask,
     revision: ScriptRevision,
   ) {
-    const sourceArtifact = required(
-      await this.store.getArtifact(revision.sourceArtifactId),
-      'TEST_EXECUTION_SCRIPT_SOURCE_ARTIFACT_NOT_FOUND',
-      'ScriptRevision 缺少源码 Artifact',
-    )
-    const source = await this.readScriptSource(sourceArtifact)
     const executionPackage: ExecutionPackage = {
       manifest: structuredClone(revision.package),
-      files: [{
-        path: revision.package.entrypoint,
-        content: source,
-        contentSha256: sourceArtifact.sha256,
-        size: sourceArtifact.size,
-      }],
+      files: await this.readRevisionFiles(revision),
     }
     return assertExecutionPackageIntegrity({
       package: executionPackage,
@@ -1314,6 +1342,33 @@ export class TestExecutionService {
       environmentSignature: run.environment.signature,
       expectedPackageSha256: revision.package.packageSha256,
     })
+  }
+
+  private async readRevisionFiles(revision: ScriptRevision) {
+    if (
+      revision.sourceArtifacts.length !== revision.package.files.length
+      || revision.sourceArtifacts.some((item, index) => item.path !== revision.package.files[index].path)
+    ) throw new Error('TEST_EXECUTION_SCRIPT_SOURCE_ARTIFACT_INVALID')
+    return await Promise.all(revision.sourceArtifacts.map(async (reference, index) => {
+      const manifestFile = revision.package.files[index]
+      const artifact = required(
+        await this.store.getArtifact(reference.artifactId),
+        'TEST_EXECUTION_SCRIPT_SOURCE_ARTIFACT_NOT_FOUND',
+        `ScriptRevision 缺少源码 Artifact：${reference.path}`,
+      )
+      if (
+        artifact.runId !== revision.runId
+        || artifact.taskId !== revision.taskId
+        || artifact.sha256 !== manifestFile.contentSha256
+        || artifact.size !== manifestFile.size
+      ) throw new Error('TEST_EXECUTION_SCRIPT_SOURCE_ARTIFACT_INVALID')
+      return {
+        path: reference.path,
+        content: await this.readScriptSource(artifact),
+        contentSha256: artifact.sha256,
+        size: artifact.size,
+      }
+    }))
   }
 
   private async readScriptSource(artifact: ExecutionArtifact) {
@@ -1406,6 +1461,10 @@ export class TestExecutionService {
     if (!this.executionWorkspace) return
     await this.executionWorkspace.writeFiles(run.projectVersionId, executionPackage.files)
     const entry = required(executionPackage.files.find(file => file.path === executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
+    const dependencyFiles = executionPackage.manifest.files.map(file => ({
+      path: file.path,
+      contentSha256: file.contentSha256,
+    }))
     const now = this.clock()
     await this.executionWorkspace.saveBinding({
       projectVersionId: run.projectVersionId,
@@ -1415,6 +1474,8 @@ export class TestExecutionService {
       entrySymbol: task.input.caseId,
       bindingStatus,
       entrySha256: entry.contentSha256,
+      dependencyFiles,
+      dependencySha256: executionBindingDependencySha256(dependencyFiles),
       caseContentSha256: task.input.caseContentSha256,
       createdAt: now,
       updatedAt: now,
@@ -1424,7 +1485,13 @@ export class TestExecutionService {
   private async workspaceRunTarget(run: ExecutionRun, task: ExecutionTask, revision: ScriptRevision) {
     if (!this.executionWorkspace) return {}
     const binding = await this.executionWorkspace.resolveBinding(run.projectVersionId, task.input.caseId)
-    if (!binding || binding.bindingStatus === 'invalid' || binding.entrySha256 !== revision.contentSha256) {
+    if (
+      !binding
+      || binding.bindingStatus === 'invalid'
+      || binding.entrySha256 !== revision.contentSha256
+      || binding.caseContentSha256 !== task.input.caseContentSha256
+      || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
+    ) {
       throw new Error('TEST_EXECUTION_WORKSPACE_BINDING_DRIFT')
     }
     const snapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
@@ -1830,6 +1897,12 @@ function lineDifference(fromSource: string, toSource: string) {
   }
 }
 
+function revisionSourceBundle(files: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[]) {
+  return files
+    .flatMap(file => [`// smarthub:file ${file.path}`, file.content])
+    .join('\n')
+}
+
 function sha256(value: string | Buffer) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -1888,6 +1961,7 @@ function packageCandidate(
     ...(candidate.parentScriptRevisionId === undefined
       ? {}
       : { parentScriptRevisionId: String(candidate.parentScriptRevisionId) }),
+    entryFile: String(candidate.entryFile ?? ''),
     files,
     summary: String(candidate.summary ?? ''),
   }

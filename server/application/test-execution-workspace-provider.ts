@@ -61,7 +61,9 @@ implements TestExecutionWorkspaceProvider {
       ),
     ]
     if (input.scriptRevision) {
-      const source = await this.readRevisionSource(input)
+      const sources = await this.readRevisionSources(input)
+      const source = sources.find(file => file.path === input.scriptRevision!.package.entrypoint)
+      if (!source) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
       files.push(
         workspaceJson(
           `${rootLogicalPath}/script-revision.json`,
@@ -71,8 +73,13 @@ implements TestExecutionWorkspaceProvider {
         workspaceFile(
           `${rootLogicalPath}/current.spec.ts`,
           '当前受保护 Playwright 脚本',
-          source,
+          source.content,
         ),
+        ...sources.map(file => workspaceFile(
+          `${rootLogicalPath}/revision-source/${file.path}`,
+          `当前 ScriptRevision 依赖 · ${file.path}`,
+          file.content,
+        )),
       )
     }
     return {
@@ -99,47 +106,53 @@ implements TestExecutionWorkspaceProvider {
     }
   }
 
-  private async readRevisionSource(input: {
+  private async readRevisionSources(input: {
     run: ExecutionRun
     task: ExecutionTask
     scriptRevision?: ScriptRevision
   }) {
     const revision = input.scriptRevision!
-    const artifact = await this.store.getArtifact(revision.sourceArtifactId)
     if (
-      !artifact
-      || artifact.runId !== input.run.id
-      || artifact.taskId !== input.task.id
-      || artifact.attemptId
-      || artifact.type !== 'script'
-      || artifact.sha256 !== revision.contentSha256
+      revision.sourceArtifacts.length !== revision.package.files.length
+      || revision.sourceArtifacts.some((file, index) => file.path !== revision.package.files[index].path)
+      || revision.sourceArtifacts.find(file => file.path === revision.package.entrypoint)?.artifactId !== revision.sourceArtifactId
     ) {
       throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
     }
-    const metadata = await this.artifactStore.stat(artifact.storagePath)
-    if (metadata.sha256 !== artifact.sha256 || metadata.size !== artifact.size) {
-      throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_DRIFT')
-    }
-    const stream = await this.artifactStore.open(artifact.storagePath)
-    const chunks: Buffer[] = []
-    let bytes = 0
-    for await (const value of stream) {
-      const chunk = Buffer.from(value)
-      bytes += chunk.length
-      if (bytes > 512 * 1024) {
-        throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_TOO_LARGE')
+    let packageBytes = 0
+    return await Promise.all(revision.sourceArtifacts.map(async (reference, index) => {
+      const manifestFile = revision.package.files[index]
+      const artifact = await this.store.getArtifact(reference.artifactId)
+      if (
+        !artifact
+        || artifact.runId !== input.run.id
+        || artifact.taskId !== input.task.id
+        || artifact.attemptId
+        || artifact.type !== 'script'
+        || artifact.sha256 !== manifestFile.contentSha256
+        || artifact.size !== manifestFile.size
+      ) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
+      const metadata = await this.artifactStore.stat(artifact.storagePath)
+      if (metadata.sha256 !== artifact.sha256 || metadata.size !== artifact.size) {
+        throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_DRIFT')
       }
-      chunks.push(chunk)
-    }
-    const source = Buffer.concat(chunks).toString('utf8')
-    if (
-      !source
-      || bytes !== artifact.size
-      || sha256(source) !== artifact.sha256
-    ) {
-      throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
-    }
-    return source
+      const stream = await this.artifactStore.open(artifact.storagePath)
+      const chunks: Buffer[] = []
+      let bytes = 0
+      for await (const value of stream) {
+        const chunk = Buffer.from(value)
+        bytes += chunk.length
+        if (bytes > 512 * 1024) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_TOO_LARGE')
+        chunks.push(chunk)
+      }
+      packageBytes += bytes
+      if (packageBytes > 4 * 1024 * 1024) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_TOO_LARGE')
+      const source = Buffer.concat(chunks).toString('utf8')
+      if (!source || bytes !== artifact.size || sha256(source) !== artifact.sha256) {
+        throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
+      }
+      return { path: reference.path, content: source }
+    }))
   }
 }
 

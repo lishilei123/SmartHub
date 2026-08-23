@@ -66,7 +66,7 @@ const task = {
 }
 const source = `import { test, expect } from '@playwright/test'
 
-test('status', async ({ page }) => {
+test('case-status', async ({ page }) => {
   await page.goto('/status')
   // smarthub:assert expected-1
   await expect(page.locator('[data-testid="status"]')).toHaveText('Ready')
@@ -91,7 +91,8 @@ function executionPackage() {
     candidate: {
       schemaVersion: 'test-script-generation/v1',
       taskId: task.taskId,
-      files: [{ path: 'tests/task-status.spec.ts', content: source }],
+      entryFile: 'tests/ui/task-status.spec.ts',
+      files: [{ path: 'tests/ui/task-status.spec.ts', content: source }],
       summary: '状态检查脚本',
     },
     task,

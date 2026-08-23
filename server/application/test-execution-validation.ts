@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { posix } from 'node:path'
 import { parse } from '@babel/parser'
 import type { Node } from '@babel/types'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
@@ -24,9 +25,10 @@ import type {
 } from '../domain/test-design-types.js'
 
 export const EXECUTION_PACKAGE_LIMITS = {
-  maximumFiles: 4,
+  maximumCandidateFiles: 16,
+  maximumFiles: 100,
   maximumFileBytes: 512 * 1024,
-  maximumPackageBytes: 1024 * 1024,
+  maximumPackageBytes: 4 * 1024 * 1024,
 } as const
 
 export const UNSUPPORTED_EXECUTION_METHODS: ReadonlyMap<string, string> = new Map([
@@ -81,7 +83,17 @@ const diagnosisCategories = new Set<FailureDiagnosisCategory>([
   'unknown',
 ])
 
-const allowedStaticImports = new Set(['@playwright/test', './smarthub-fixture.js'])
+const allowedExternalStaticImports = new Set(['@playwright/test'])
+const allowedWorkspaceSourceRoots = new Set(['tests', 'api', 'pages', 'helpers', 'fixtures'])
+const forbiddenHttpClientModules = new Set([
+  'axios',
+  'superagent',
+  'undici',
+  'node:http',
+  'node:https',
+  'http',
+  'https',
+])
 const maintenanceLocatorMethods = new Set([
   'locator',
   'frameLocator',
@@ -102,21 +114,10 @@ const forbiddenIdentifiers = new Set([
   'Buffer',
   'WebAssembly',
 ])
-const forbiddenModulePrefixes = [
-  'node:',
-  'child_process',
-  'fs',
-  'net',
-  'tls',
-  'dns',
-  'dgram',
-  'cluster',
-  'worker_threads',
-  'module',
-  'vm',
-  'os',
-]
-
+const forbiddenHttpRuntimeIdentifiers = new Set([
+  'fetch',
+  'XMLHttpRequest',
+])
 export class TestExecutionValidationError extends Error {
   constructor(
     readonly code: string,
@@ -309,6 +310,7 @@ export function buildExecutionPackage(input: {
   candidate: ExecutionPackageCandidate
   task: FrozenExecutionTaskInput & { taskId: string }
   environmentSignature: string
+  workspaceFiles?: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[]
   baselineAssertions?: readonly ExecutionAssertionContract[]
   parentScriptRevisionId?: string
 }): ExecutionPackage {
@@ -334,19 +336,30 @@ export function buildExecutionPackage(input: {
   if (!['ui', 'api'].includes(input.task.method)) {
     throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_UNSUPPORTED', '不支持的方法不能创建执行包')
   }
-  const legacyEntrypoint = input.candidate.entryFile === undefined
-  const entrypoint = legacyEntrypoint
-    ? `tests/${safeIdentity(input.task.taskId, 'taskId')}.spec.ts`
-    : safePackagePath(input.candidate.entryFile!)
-  const files = normalizePackageFiles(input.candidate.files)
-  const entry = files.find(file => file.path === entrypoint)
-  if (!entry || legacyEntrypoint && (files.length !== 1 || files[0].path !== entrypoint)) {
+  const entrypoint = safePackagePath(input.candidate.entryFile)
+  if (!entrypoint.startsWith(`tests/${input.task.method}/`)) {
     throw new TestExecutionValidationError(
       'TEST_EXECUTION_PACKAGE_ENTRYPOINT_INVALID',
-      legacyEntrypoint ? `执行包必须且只能包含固定入口 ${entrypoint}` : `执行包必须包含入口 ${entrypoint}`,
+      `执行入口必须位于 tests/${input.task.method}/`,
     )
   }
-  const assertions = validateEntrypointSource(entry.content, input.task.executionSpec)
+  const files = resolveExecutionPackageFiles({
+    candidateFiles: input.candidate.files,
+    workspaceFiles: input.workspaceFiles ?? [],
+    entrypoint,
+  })
+  const entry = files.find(file => file.path === entrypoint)
+  if (!entry) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_PACKAGE_ENTRYPOINT_INVALID',
+      `执行包必须包含入口 ${entrypoint}`,
+    )
+  }
+  const assertions = validateEntrypointSource(
+    entry.content,
+    input.task.executionSpec,
+    input.task.caseId,
+  )
   if (input.baselineAssertions) assertProtectedAssertions(input.baselineAssertions, assertions)
   const protectedAssertionSha256 = canonicalSha256(assertions)
   const manifestBase = {
@@ -381,11 +394,13 @@ export function assertExecutionPackageIntegrity(input: {
       schemaVersion: 'test-script-generation/v1',
       taskId: input.task.taskId,
       entryFile: input.package.manifest.entrypoint,
-      files: input.package.files,
+      files: input.package.files
+        .filter(file => file.path === input.package.manifest.entrypoint),
       summary: 'Runner boundary validation',
     },
     task: input.task,
     environmentSignature: input.environmentSignature,
+    workspaceFiles: input.package.files,
   })
   if (
     canonicalSha256(rebuilt) !== canonicalSha256(input.package)
@@ -525,20 +540,19 @@ function maintenanceLocatorToken(value: unknown) {
     && (value.type === 'StringLiteral' || value.type === 'RegExpLiteral')
 }
 
-function normalizePackageFiles(candidateFiles: ExecutionPackageCandidate['files']): ExecutionPackageFile[] {
-  if (!Array.isArray(candidateFiles) || !candidateFiles.length || candidateFiles.length > EXECUTION_PACKAGE_LIMITS.maximumFiles) {
+function normalizeCandidateFiles(candidateFiles: ExecutionPackageCandidate['files']): ExecutionPackageFile[] {
+  if (!Array.isArray(candidateFiles) || !candidateFiles.length || candidateFiles.length > EXECUTION_PACKAGE_LIMITS.maximumCandidateFiles) {
     throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_FILE_COUNT_INVALID', '执行包文件数无效')
   }
   const paths = new Set<string>()
-  let totalBytes = 0
   return candidateFiles.map(candidate => {
     const path = safePackagePath(candidate.path)
+    assertWorkspaceSourcePath(path)
     if (paths.has(path.toLocaleLowerCase())) throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_PATH_DUPLICATE', `执行包路径重复：${path}`)
     paths.add(path.toLocaleLowerCase())
     if (typeof candidate.content !== 'string' || candidate.content.includes('\0')) throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_CONTENT_INVALID', `执行包文件内容无效：${path}`)
     const size = Buffer.byteLength(candidate.content, 'utf8')
-    totalBytes += size
-    if (!size || size > EXECUTION_PACKAGE_LIMITS.maximumFileBytes || totalBytes > EXECUTION_PACKAGE_LIMITS.maximumPackageBytes) {
+    if (!size || size > EXECUTION_PACKAGE_LIMITS.maximumFileBytes) {
       throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_SIZE_INVALID', '执行包超过大小限制')
     }
     const contentSha256 = sha256(candidate.content)
@@ -547,25 +561,126 @@ function normalizePackageFiles(candidateFiles: ExecutionPackageCandidate['files'
   }).sort((left, right) => left.path.localeCompare(right.path, 'en'))
 }
 
-function validateEntrypointSource(source: string, executionSpec: TestCaseExecutionSpec): ExecutionAssertionContract[] {
-  let ast: ReturnType<typeof parse>
-  try {
-    ast = parse(source, { sourceType: 'module', plugins: ['typescript'], errorRecovery: false })
-  } catch (cause) {
-    throw new TestExecutionValidationError('TEST_EXECUTION_SCRIPT_SYNTAX_INVALID', cause instanceof Error ? cause.message : '执行脚本语法无效')
+function resolveExecutionPackageFiles(input: {
+  candidateFiles: ExecutionPackageCandidate['files']
+  workspaceFiles: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[]
+  entrypoint: string
+}) {
+  const candidateFiles = normalizeCandidateFiles(input.candidateFiles)
+  const sources = new Map<string, string>()
+  for (const file of input.workspaceFiles) {
+    const path = safePackagePath(file.path)
+    if (!workspaceSourcePath(path)) continue
+    if (typeof file.content !== 'string' || file.content.includes('\0')) {
+      throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_CONTENT_INVALID', `Workspace 文件内容无效：${path}`)
+    }
+    sources.set(path, file.content)
   }
-  const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null }>()
+  for (const file of candidateFiles) sources.set(file.path, file.content)
+
+  const pending = [input.entrypoint]
+  const included = new Set<string>()
+  while (pending.length) {
+    const path = pending.pop()!
+    if (included.has(path)) continue
+    const source = sources.get(path)
+    if (source === undefined) {
+      throw new TestExecutionValidationError(
+        'TEST_EXECUTION_WORKSPACE_IMPORT_UNRESOLVED',
+        `Workspace 源文件不存在：${path}`,
+      )
+    }
+    included.add(path)
+    const inspected = inspectWorkspaceSource(path, source)
+    for (const specifier of inspected.relativeImports) {
+      const dependency = resolveWorkspaceImport(path, specifier, sources)
+      if (!included.has(dependency)) pending.push(dependency)
+    }
+  }
+  const unreachableCandidate = candidateFiles.find(file => !included.has(file.path))
+  if (unreachableCandidate) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_WORKSPACE_FILE_UNREACHABLE',
+      `候选文件未被入口依赖闭包引用：${unreachableCandidate.path}`,
+    )
+  }
+
+  let totalBytes = 0
+  const files = [...included]
+    .sort((left, right) => left.localeCompare(right, 'en'))
+    .map(path => {
+      const content = sources.get(path)!
+      const size = Buffer.byteLength(content, 'utf8')
+      totalBytes += size
+      if (!size || size > EXECUTION_PACKAGE_LIMITS.maximumFileBytes || totalBytes > EXECUTION_PACKAGE_LIMITS.maximumPackageBytes) {
+        throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_SIZE_INVALID', '执行包超过大小限制')
+      }
+      return { path, content, contentSha256: sha256(content), size }
+    })
+  if (files.length > EXECUTION_PACKAGE_LIMITS.maximumFiles) {
+    throw new TestExecutionValidationError('TEST_EXECUTION_PACKAGE_FILE_COUNT_INVALID', '执行包依赖闭包文件数无效')
+  }
+  return files
+}
+
+function inspectWorkspaceSource(path: string, source: string) {
+  const ast = parseWorkspaceSource(source)
+  const relativeImports: string[] = []
   walkAst(ast, (node, parent) => {
-    if (node.type === 'ImportDeclaration') {
-      const module = String(node.source.value)
-      if (!allowedStaticImports.has(module)) rejectSource(`不允许导入模块 ${module}`)
-      if (node.importKind === 'type') return
+    const staticModule = staticModuleSpecifier(node)
+    if (staticModule !== undefined) {
+      if (staticModule.startsWith('.')) relativeImports.push(staticModule)
+      else if (!allowedExternalStaticImports.has(staticModule)) {
+        const reason = forbiddenHttpClientModules.has(staticModule)
+          ? `API HTTP 请求只能使用 @playwright/test，禁止导入 ${staticModule}`
+          : `不允许导入模块 ${staticModule}`
+        rejectSource(reason)
+      }
     }
     if (node.type === 'ImportExpression' || node.type === 'CallExpression' && node.callee.type === 'Import') rejectSource('不允许动态 import')
     if (node.type === 'Identifier' && forbiddenIdentifiers.has(node.name) && isRuntimeIdentifier(node, parent)) rejectSource(`不允许访问 ${node.name}`)
+    if (node.type === 'Identifier' && forbiddenHttpRuntimeIdentifiers.has(node.name) && isRuntimeIdentifier(node, parent)) {
+      rejectSource(`API HTTP 请求只能使用 @playwright/test，禁止访问 ${node.name}`)
+    }
     if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && forbiddenIdentifiers.has(node.callee.name)) rejectSource(`不允许调用 ${node.callee.name}`)
+    if (
+      path.startsWith('api/')
+      && node.type === 'CallExpression'
+      && node.callee.type === 'Identifier'
+      && node.callee.name === 'expect'
+    ) rejectSource('API Client 只负责请求与复用操作，业务断言必须保留在 Case Entry')
     if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && forbiddenIdentifiers.has(node.callee.name)) rejectSource(`不允许构造 ${node.callee.name}`)
-    if (node.type === 'StringLiteral' && parent?.type === 'ImportDeclaration' && forbiddenModulePrefixes.some(prefix => node.value === prefix || node.value.startsWith(`${prefix}/`))) rejectSource(`不允许导入模块 ${node.value}`)
+    const literal = staticTextLiteral(node)
+    if (literal && /^https?:\/\//iu.test(literal)) {
+      rejectSource('Playwright page/request 必须使用当前 ExecutionRun baseUrl，禁止硬编码绝对 Host')
+    }
+    if (
+      node.type === 'ObjectProperty'
+      && !node.computed
+      && propertyName(node.key)
+      && /^(?:authorization|cookie)$/iu.test(propertyName(node.key)!)
+      && staticTextLiteral(node.value)?.trim()
+    ) rejectSource('禁止在 Execution Workspace 写死 Authorization 或 Cookie')
+  })
+  return { ast, relativeImports }
+}
+
+function validateEntrypointSource(
+  source: string,
+  executionSpec: TestCaseExecutionSpec,
+  caseId: string,
+): ExecutionAssertionContract[] {
+  const ast = parseWorkspaceSource(source)
+  const callback = entryTestCallback(ast, caseId)
+  const fixtures = callbackFixtureNames(callback)
+  if (executionSpec.method === 'api' && !fixtures.has('request')) {
+    rejectSource('API Case 必须使用 Playwright Test request fixture / APIRequestContext')
+  }
+  if (executionSpec.method === 'ui' && !fixtures.has('page')) {
+    rejectSource('UI Case 必须使用 Playwright page 完成真实 UI 测试目标')
+  }
+  const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null }>()
+  walkAst(callback, (node) => {
     if (node.type === 'ExpressionStatement') {
       const comments = [...(node.leadingComments ?? []), ...(node.innerComments ?? [])]
       const anchorComment = comments.map(comment => comment.value.match(/smarthub:assert\s+([A-Za-z0-9._-]+)/u)?.[1]).find(Boolean)
@@ -598,6 +713,147 @@ function validateEntrypointSource(source: string, executionSpec: TestCaseExecuti
       }),
     }
   })
+}
+
+function parseWorkspaceSource(source: string) {
+  try {
+    return parse(source, {
+      sourceType: 'module',
+      plugins: ['typescript', 'jsx'],
+      errorRecovery: false,
+    })
+  } catch (cause) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_SCRIPT_SYNTAX_INVALID',
+      cause instanceof Error ? cause.message : '执行脚本语法无效',
+    )
+  }
+}
+
+function staticModuleSpecifier(node: Node) {
+  if (
+    node.type === 'ImportDeclaration'
+    || node.type === 'ExportNamedDeclaration'
+    || node.type === 'ExportAllDeclaration'
+  ) return node.source ? String(node.source.value) : undefined
+  if (
+    node.type === 'TSImportEqualsDeclaration'
+    && node.moduleReference.type === 'TSExternalModuleReference'
+  ) return String(node.moduleReference.expression.value)
+  return undefined
+}
+
+function resolveWorkspaceImport(
+  importer: string,
+  specifier: string,
+  sources: ReadonlyMap<string, string>,
+) {
+  const base = posix.normalize(posix.join(posix.dirname(importer), specifier))
+  if (
+    posix.isAbsolute(base)
+    || base === '..'
+    || base.startsWith('../')
+  ) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_WORKSPACE_IMPORT_ESCAPE',
+      `相对导入越过 Execution Workspace：${importer} -> ${specifier}`,
+    )
+  }
+  const withoutJsExtension = base.replace(/\.(?:mjs|cjs|js)$/iu, '')
+  const candidates = [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${withoutJsExtension}.ts`,
+    `${withoutJsExtension}.tsx`,
+    `${base}/index.ts`,
+    `${base}/index.tsx`,
+  ]
+  const target = [...new Set(candidates)].find(candidate => sources.has(candidate))
+  if (!target || !workspaceSourcePath(target)) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_WORKSPACE_IMPORT_UNRESOLVED',
+      `相对导入无法解析到安全 Workspace 源文件：${importer} -> ${specifier}`,
+    )
+  }
+  return target
+}
+
+function assertWorkspaceSourcePath(path: string) {
+  if (!workspaceSourcePath(path)) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_PACKAGE_PATH_INVALID',
+      `执行源码只能位于 tests、api、pages、helpers 或 fixtures：${path}`,
+    )
+  }
+}
+
+function workspaceSourcePath(path: string) {
+  const [root] = path.split('/')
+  return allowedWorkspaceSourceRoots.has(root)
+    && /\.(?:ts|tsx)$/iu.test(path)
+}
+
+function entryTestCallback(ast: ReturnType<typeof parse>, caseId: string): Node {
+  const callbacks: Node[] = []
+  walkAst(ast, node => {
+    if (
+      node.type !== 'CallExpression'
+      || node.callee.type !== 'Identifier'
+      || node.callee.name !== 'test'
+      || node.arguments[0]?.type !== 'StringLiteral'
+    ) return
+    if (
+      node.arguments[0].value !== caseId
+      && node.arguments[0].value.endsWith(caseId)
+    ) rejectSource(`入口文件存在与 Case ID ${caseId} 执行选择冲突的 Playwright test 标题`)
+    if (!entryTitleMatches(node.arguments[0].value, caseId)) return
+    const callback = node.arguments[1]
+    if (
+      callback?.type === 'ArrowFunctionExpression'
+      || callback?.type === 'FunctionExpression'
+    ) callbacks.push(callback)
+  })
+  if (callbacks.length !== 1) {
+    rejectSource(`入口文件必须且只能包含一个标题引用 Case ID ${caseId} 的 Playwright test`)
+  }
+  return callbacks[0]
+}
+
+function entryTitleMatches(title: string, caseId: string) {
+  return title === caseId
+}
+
+function callbackFixtureNames(callback: Node) {
+  const result = new Set<string>()
+  if (
+    callback.type !== 'ArrowFunctionExpression'
+    && callback.type !== 'FunctionExpression'
+  ) return result
+  const parameter = callback.params[0]
+  if (parameter?.type !== 'ObjectPattern') return result
+  for (const property of parameter.properties) {
+    if (property.type !== 'ObjectProperty') continue
+    const name = propertyName(property.key)
+    if (name) result.add(name)
+  }
+  return result
+}
+
+function propertyName(node: Node) {
+  return node.type === 'Identifier'
+    ? node.name
+    : node.type === 'StringLiteral'
+      ? node.value
+      : undefined
+}
+
+function staticTextLiteral(node: Node) {
+  if (node.type === 'StringLiteral') return node.value
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
+    return node.quasis.map(quasi => quasi.value.cooked ?? quasi.value.raw).join('')
+  }
+  return undefined
 }
 
 function assertProtectedAssertions(baseline: readonly ExecutionAssertionContract[], candidate: readonly ExecutionAssertionContract[]) {

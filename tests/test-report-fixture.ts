@@ -127,6 +127,10 @@ function revision(taskValue: ExecutionTask, number: number, source: ScriptRevisi
     ...(source === 'repair' ? { repairReason: '修复失败定位器' } : {}),
     generatedBy: source === 'repair' ? agents.scriptRepair : agents.testScript,
     package: packageValue,
+    sourceArtifacts: [{
+      path: packageValue.entrypoint,
+      artifactId: `${taskValue.id}-source-${number}`,
+    }],
     sourceArtifactId: `${taskValue.id}-source-${number}`,
     contentSha256: packageValue.files[0].contentSha256,
     protectedAssertionSha256: packageValue.protectedAssertionSha256,

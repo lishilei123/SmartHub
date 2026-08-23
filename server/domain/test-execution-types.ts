@@ -277,8 +277,8 @@ export interface ExecutionPackageCandidate {
   schemaVersion: 'test-script-generation/v1' | 'script-repair/v1'
   taskId: string
   parentScriptRevisionId?: string
-  /** Persistent workspace entry. Legacy candidates omit it and use the task entry. */
-  entryFile?: string
+  /** Persistent ProjectVersion workspace entry owned by the Execution Binding. */
+  entryFile: string
   files: Array<{
     path: string
     content: string
@@ -315,6 +315,11 @@ export interface ScriptRevision {
   repairReason?: string
   generatedBy: FrozenExecutionAgentSnapshot
   package: ExecutionPackageManifest
+  /** Immutable source Artifact for every file in the executed dependency closure. */
+  sourceArtifacts: Array<{
+    path: string
+    artifactId: string
+  }>
   sourceArtifactId: string
   contentSha256: string
   protectedAssertionSha256: string

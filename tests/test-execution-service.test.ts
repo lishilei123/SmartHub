@@ -53,7 +53,10 @@ import type {
 import {
   LocalExecutionArtifactStore,
 } from '../server/infrastructure/execution-artifact-store.js'
-import { LocalExecutionWorkspaceStore } from '../server/infrastructure/execution-workspace-store.js'
+import {
+  executionBindingDependencySha256,
+  LocalExecutionWorkspaceStore,
+} from '../server/infrastructure/execution-workspace-store.js'
 import type {
   CreateExecutionAggregateInput,
   ExecutionJobLease,
@@ -103,10 +106,10 @@ const handoffMember: TestExecutionHandoffMember = {
   executionSpec,
   contentSha256: caseContentSha256,
 }
-function scriptSource(locator = 'status') {
+function scriptSource(locator = 'status', caseId = 'case-status') {
   return `import { test, expect } from '@playwright/test'
 
-test('status', async ({ page }) => {
+test('${caseId}', async ({ page }) => {
   await page.goto('/status')
   // smarthub:assert expected-1
   await expect(page.locator('[data-testid="${locator}"]')).toHaveText('Ready')
@@ -114,7 +117,69 @@ test('status', async ({ page }) => {
 `
 }
 
+function apiScriptSource(caseId: string) {
+  return `import { test, expect } from '@playwright/test'
+import { AuthClient } from '../../api/auth-client.js'
+
+test('${caseId}', async ({ request }) => {
+  const response = await new AuthClient(request).login()
+  // smarthub:assert expected-1
+  expect(response.ok()).toBeTruthy()
+})
+`
+}
+
+const apiClientSource = `import type { APIRequestContext } from '@playwright/test'
+
+export class AuthClient {
+  constructor(private readonly request: APIRequestContext) {}
+  login() { return this.request.post('/api/login', { data: {} }) }
+}
+`
+
 const source = scriptSource()
+
+function singleFileBindingDependency(path: string, content: string) {
+  const dependencyFiles = [{
+    path,
+    contentSha256: createHash('sha256').update(content, 'utf8').digest('hex'),
+  }]
+  return {
+    dependencyFiles,
+    dependencySha256: executionBindingDependencySha256(dependencyFiles),
+  }
+}
+
+function frozenApiInput(caseId = 'TC_API_LOGIN_001') {
+  const apiCaseContent: TestCaseContent = {
+    ...caseContent,
+    title: '正确账号登录 API',
+    executionMethods: ['api'],
+    steps: ['调用登录接口'],
+    expectedResults: ['返回登录成功'],
+  }
+  const apiContentSha256 = canonicalSha256(apiCaseContent)
+  return freezeExecutionTaskInput({
+    libraryMember: {
+      ...libraryMember,
+      caseId,
+      contentSha256: apiContentSha256,
+      frozenContent: apiCaseContent,
+    },
+    handoffMember: {
+      ...handoffMember,
+      caseId,
+      dedupKey: `${caseId}:1:api`,
+      method: 'api',
+      contentSha256: apiContentSha256,
+      executionSpec: {
+        schemaVersion: 'test-script-input/v1',
+        method: 'api',
+        testCase: apiCaseContent,
+      },
+    },
+  })
+}
 
 const runnerSnapshot = {
   runnerVersion: '1.0.0',
@@ -548,10 +613,21 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
     if (input.stage === 'script_generation') {
       schemaVersion = 'test-script-generation/v1'
       agentKey = 'test-script'
+      const entryFile = `tests/${input.task.input.method}/${input.task.id}.spec.ts`
+      const generationFiles = [{
+        path: entryFile,
+        content: input.task.input.method === 'api'
+          ? apiScriptSource(input.task.input.caseId)
+          : scriptSource('status', input.task.input.caseId),
+      }]
+      if (input.task.input.method === 'api') {
+        generationFiles.push({ path: 'api/auth-client.ts', content: apiClientSource })
+      }
       candidate = {
         schemaVersion,
         taskId: input.task.id,
-        files: [{ path: `tests/${input.task.id}.spec.ts`, content: source }],
+        entryFile,
+        files: generationFiles,
         summary: '生成状态检查脚本',
       }
     } else if (input.stage === 'failure_diagnosis') {
@@ -577,14 +653,16 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
       schemaVersion = 'script-repair/v1'
       agentKey = 'script-repair'
       this.repairOrdinal += 1
+      const entryFile = `tests/${input.task.input.method}/${input.task.id}.spec.ts`
       candidate = {
         schemaVersion,
         taskId: input.task.id,
         parentScriptRevisionId: input.stageContext?.parentScriptRevisionId,
+        entryFile,
         files: [{
-          path: `tests/${input.task.id}.spec.ts`,
+          path: entryFile,
           content: this.options.repairSource?.(this.repairOrdinal)
-            ?? scriptSource(`status-v${this.repairOrdinal + 1}`),
+            ?? scriptSource(`status-v${this.repairOrdinal + 1}`, input.task.input.caseId),
         }],
         summary: `第 ${this.repairOrdinal} 次修复选择器`,
       }
@@ -760,6 +838,50 @@ test('TestExecutionService 将环境配置和 secret 来源纳入总 readiness',
   })
 })
 
+test('已有有效 API Execution Binding 时 Execute First 直接运行 request fixture 依赖闭包', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '历史 API 入口通过', artifacts: [] },
+  ], async ({ service, store, runner, runtime, playwrightCli, job, workspace }) => {
+    assert.ok(workspace)
+    store.task = { ...store.task, input: frozenApiInput() }
+    const entryFile = 'tests/api/login.spec.ts'
+    const entrySource = apiScriptSource(store.task.input.caseId)
+    const dependencyFiles = [
+      { path: 'api/auth-client.ts', contentSha256: createHash('sha256').update(apiClientSource, 'utf8').digest('hex') },
+      { path: entryFile, contentSha256: createHash('sha256').update(entrySource, 'utf8').digest('hex') },
+    ]
+    await workspace.writeFiles(store.run.projectVersionId, [
+      { path: 'api/auth-client.ts', content: apiClientSource },
+      { path: entryFile, content: entrySource },
+    ])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'api',
+      entryFile,
+      entrySymbol: store.task.input.caseId,
+      bindingStatus: 'validated',
+      entrySha256: dependencyFiles[1].contentSha256,
+      dependencyFiles,
+      dependencySha256: executionBindingDependencySha256(dependencyFiles),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.deepEqual(runtime.calls, [])
+    assert.deepEqual(playwrightCli.calls, [])
+    assert.equal(runner.calls.length, 1)
+    assert.equal(runner.calls[0].package.manifest.method, 'api')
+    assert.deepEqual(runner.calls[0].package.files.map(file => file.path), [
+      'api/auth-client.ts',
+      entryFile,
+    ])
+  }, { workspace: true })
+})
+
 test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAgent 或实现 Agent', async () => {
   await withService([
     { status: 'passed', exitCode: 0, durationMs: 8, summary: '历史入口通过', artifacts: [] },
@@ -775,6 +897,7 @@ test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAge
       entrySymbol: store.task.input.caseId,
       bindingStatus: 'validated',
       entrySha256,
+      ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
       caseContentSha256: store.task.input.caseContentSha256,
       createdAt: '2026-08-13T12:00:00.000Z',
       updatedAt: '2026-08-13T12:00:00.000Z',
@@ -800,6 +923,7 @@ test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷�
       projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
       executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: store.task.input.caseId,
       bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
+      ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
       createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
     })
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
@@ -825,6 +949,7 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
       projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
       executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: store.task.input.caseId,
       bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
+      ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
       createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
     })
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
@@ -849,7 +974,7 @@ test('新 UI Case 先经 Playwright CLI snapshot，再由 Agent 写入当前 Wor
     assert.equal(runtime.calls[0].uiExecution?.tool, 'playwright-cli')
     assert.match(runtime.calls[0].uiExecution?.snapshot ?? '', /状态页/u)
     const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
-    assert.equal(binding?.entryFile, `tests/${store.task.id}.spec.ts`)
+    assert.equal(binding?.entryFile, `tests/ui/${store.task.id}.spec.ts`)
     assert.equal(binding?.bindingStatus, 'validated')
     assert.equal(runner.calls.length, 1)
   }, { workspace: true })
@@ -983,6 +1108,16 @@ test('API Case 无 Binding 时优先获得当前 ProjectVersion Exploration Cont
       path: '/api/login',
       validationStatus: 'validated',
     }])
+    const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
+    assert.equal(binding?.entryFile, `tests/api/${store.task.id}.spec.ts`)
+    assert.deepEqual(binding?.dependencyFiles.map(file => file.path), [
+      'api/auth-client.ts',
+      `tests/api/${store.task.id}.spec.ts`,
+    ])
+    assert.deepEqual(store.revisions[0].sourceArtifacts.map(file => file.path), [
+      'api/auth-client.ts',
+      `tests/api/${store.task.id}.spec.ts`,
+    ])
   }, { workspace: true })
 })
 

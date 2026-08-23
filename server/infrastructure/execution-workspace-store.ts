@@ -14,7 +14,8 @@ export type ExecutionBindingStatus = 'inherited' | 'validated' | 'needs_validati
 
 /**
  * The only durable relationship the platform keeps between a formal Case and
- * automation code.  Dependencies below this entry remain a code/AST concern.
+ * automation code. Dependencies remain a code/AST concern; their paths and
+ * hashes are frozen only to detect closure drift, never as separate bindings.
  */
 export interface CaseExecutionBinding {
   projectVersionId: string
@@ -24,6 +25,8 @@ export interface CaseExecutionBinding {
   entrySymbol: string
   bindingStatus: ExecutionBindingStatus
   entrySha256: string
+  dependencyFiles: Array<Pick<ExecutionPackageFile, 'path' | 'contentSha256'>>
+  dependencySha256: string
   caseContentSha256: string
   createdAt: string
   updatedAt: string
@@ -71,8 +74,15 @@ export class LocalExecutionWorkspaceStore {
     }
     if (binding.projectVersionId !== projectVersionId || binding.caseId !== caseId) return null
     try {
-      const source = await this.readWorkspaceFile(root, binding.entryFile)
-      if (sha256(source) !== binding.entrySha256) return { ...binding, bindingStatus: 'invalid' as const }
+      const dependencies = await Promise.all(binding.dependencyFiles.map(async file => ({
+        path: file.path,
+        contentSha256: sha256(await this.readWorkspaceFile(root, file.path)),
+      })))
+      if (
+        !dependencies.some(file => file.path === binding.entryFile && file.contentSha256 === binding.entrySha256)
+        || dependencies.some((file, index) => file.contentSha256 !== binding.dependencyFiles[index].contentSha256)
+        || executionBindingDependencySha256(dependencies) !== binding.dependencySha256
+      ) return { ...binding, bindingStatus: 'invalid' as const }
       return binding
     } catch {
       return { ...binding, bindingStatus: 'invalid' as const }
@@ -247,10 +257,38 @@ export class LocalExecutionWorkspaceStore {
 
 function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
   const entryFile = safePath(binding.entryFile)
-  if (!['ui', 'api'].includes(binding.executionType) || !binding.caseId || !binding.entrySymbol || !/^[a-f0-9]{64}$/u.test(binding.entrySha256) || !/^[a-f0-9]{64}$/u.test(binding.caseContentSha256)) {
+  if (!Array.isArray(binding.dependencyFiles)) {
     throw new Error('TEST_EXECUTION_BINDING_INVALID')
   }
-  return { ...binding, entryFile }
+  const dependencyFiles = binding.dependencyFiles
+    .map(file => ({ path: safePath(file.path), contentSha256: file.contentSha256 }))
+    .sort((left, right) => left.path.localeCompare(right.path, 'en'))
+  if (
+    !['ui', 'api'].includes(binding.executionType)
+    || !binding.caseId
+    || !binding.entrySymbol
+    || !/^[a-f0-9]{64}$/u.test(binding.entrySha256)
+    || !/^[a-f0-9]{64}$/u.test(binding.caseContentSha256)
+    || !dependencyFiles.length
+    || new Set(dependencyFiles.map(file => file.path.toLocaleLowerCase())).size !== dependencyFiles.length
+    || dependencyFiles.some(file => !/^[a-f0-9]{64}$/u.test(file.contentSha256))
+    || !dependencyFiles.some(file => file.path === entryFile && file.contentSha256 === binding.entrySha256)
+    || executionBindingDependencySha256(dependencyFiles) !== binding.dependencySha256
+  ) {
+    throw new Error('TEST_EXECUTION_BINDING_INVALID')
+  }
+  return {
+    ...binding,
+    entryFile,
+    dependencyFiles,
+    dependencySha256: executionBindingDependencySha256(dependencyFiles),
+  }
+}
+
+export function executionBindingDependencySha256(
+  files: readonly Pick<ExecutionPackageFile, 'path' | 'contentSha256'>[],
+) {
+  return sha256(JSON.stringify(files.map(file => [file.path, file.contentSha256])))
 }
 
 function bindingName(caseId: string) { return sha256(caseId).slice(0, 32) }

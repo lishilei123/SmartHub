@@ -492,11 +492,11 @@
       }
     },
     "test_script.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "test_script_submit_result",
       "label": "提交测试脚本候选",
       "catalogName": "提交测试脚本候选",
-      "description": "提交 test-script-generation/v1 单入口 Playwright 源码候选；服务端校验固定任务、路径、Hash、AST、依赖和受保护断言后才可构建 ExecutionPackage。",
+      "description": "提交 test-script-generation/v1 Playwright Workspace 候选；服务端校验固定入口、相对依赖闭包、Hash、AST、执行方式和受保护断言后才可构建 ExecutionPackage。",
       "catalogDescription": "提交只读测试执行 Stage 生成的 Playwright 源码候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -515,10 +515,15 @@
             "minLength": 1,
             "maxLength": 200
           },
+          "entryFile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
           "files": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 1,
+            "maxItems": 16,
             "items": {
               "type": "object",
               "properties": {
@@ -554,6 +559,7 @@
         "required": [
           "schemaVersion",
           "taskId",
+          "entryFile",
           "files",
           "summary"
         ],
@@ -677,11 +683,11 @@
       }
     },
     "script_repair.submit_result": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "script_repair_submit_result",
       "label": "提交测试脚本修复候选",
       "catalogName": "提交测试脚本修复候选",
-      "description": "提交 script-repair/v1 单入口源码候选；服务端校验 parent Revision、诊断、修复限额、AST 和受保护断言继承。",
+      "description": "提交 script-repair/v1 Playwright Workspace 修复候选；服务端校验 parent Revision、入口依赖闭包、诊断、修复限额、AST 和受保护断言继承。",
       "catalogDescription": "提交只读脚本修复 Stage 的 Playwright 源码候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -705,10 +711,15 @@
             "minLength": 1,
             "maxLength": 200
           },
+          "entryFile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
           "files": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 1,
+            "maxItems": 16,
             "items": {
               "type": "object",
               "properties": {
@@ -745,6 +756,7 @@
           "schemaVersion",
           "taskId",
           "parentScriptRevisionId",
+          "entryFile",
           "files",
           "summary"
         ],

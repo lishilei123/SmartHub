@@ -2618,6 +2618,141 @@ const migrations: Migration[] = [{
     CREATE INDEX IF NOT EXISTS test_execution_infrastructure_configuration_active_idx
       ON smarthub.test_execution_infrastructure_configuration_versions (status, version DESC);
   `,
+}, {
+  version: 35,
+  name: 'freeze-test-execution-workspace-dependency-closure',
+  sql: `
+    ALTER TABLE smarthub.test_execution_script_revisions
+      ADD COLUMN IF NOT EXISTS source_artifacts jsonb;
+    UPDATE smarthub.test_execution_script_revisions
+      SET source_artifacts=jsonb_build_array(jsonb_build_object(
+        'path', package_manifest->>'entrypoint',
+        'artifactId', source_artifact_id
+      ))
+      WHERE source_artifacts IS NULL;
+    ALTER TABLE smarthub.test_execution_script_revisions
+      ALTER COLUMN source_artifacts SET NOT NULL;
+    ALTER TABLE smarthub.test_execution_script_revisions
+      DROP CONSTRAINT IF EXISTS test_execution_script_revisions_task_id_content_sha256_key;
+    ALTER TABLE smarthub.test_execution_script_revisions
+      ADD CONSTRAINT test_execution_script_revisions_task_package_key
+      UNIQUE (task_id, package_sha256);
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_script_revision_insert()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE previous_revision integer;
+    DECLARE parent_protected_assertion_sha256 char(64);
+    DECLARE parent_assertions jsonb;
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM smarthub.test_execution_tasks task
+        JOIN smarthub.test_execution_runs run ON run.id=task.run_id
+        JOIN smarthub.test_execution_script_artifacts artifact ON artifact.id=NEW.script_artifact_id
+        JOIN smarthub.test_execution_artifacts source
+          ON source.id=NEW.source_artifact_id
+         AND source.run_id=NEW.run_id
+         AND source.task_id=NEW.task_id
+         AND source.sha256=NEW.content_sha256
+        WHERE task.id=NEW.task_id AND task.run_id=NEW.run_id
+          AND artifact.case_id=task.case_id
+          AND artifact.case_revision=task.case_revision
+          AND artifact.method=task.method
+          AND artifact.case_content_sha256=task.case_content_sha256
+          AND artifact.execution_spec_sha256=task.execution_spec_sha256
+          AND artifact.environment_signature=run.environment_signature
+          AND artifact.test_script_agent_version=(run.snapshot #>> '{agents,testScript,configurationVersion}')::integer
+          AND artifact.test_script_agent_configuration_sha256=run.snapshot #>> '{agents,testScript,configurationSha256}'
+          AND NEW.generated_by=CASE
+            WHEN NEW.generation_source='repair' THEN run.snapshot->'agents'->'scriptRepair'
+            ELSE run.snapshot->'agents'->'testScript'
+          END
+          AND NEW.package_manifest->>'taskId'=task.id
+          AND NEW.package_manifest->>'caseId'=task.case_id
+          AND (NEW.package_manifest->>'caseRevision')::integer=task.case_revision
+          AND NEW.package_manifest->>'method'=task.method
+          AND NEW.package_manifest->>'taskInputSha256'=task.input_sha256
+          AND NEW.package_manifest->>'caseContentSha256'=task.case_content_sha256
+          AND NEW.package_manifest->>'executionSpecSha256'=task.execution_spec_sha256
+          AND NEW.package_manifest->>'environmentSignature'=run.environment_signature
+          AND NEW.package_manifest->>'entrypoint' ~ '^tests/[A-Za-z0-9._/-]+\\.tsx?$'
+          AND position('..' in NEW.package_manifest->>'entrypoint')=0
+          AND jsonb_typeof(NEW.package_manifest->'files')='array'
+          AND jsonb_array_length(NEW.package_manifest->'files') BETWEEN 1 AND 100
+          AND jsonb_typeof(NEW.source_artifacts)='array'
+          AND jsonb_array_length(NEW.source_artifacts)=jsonb_array_length(NEW.package_manifest->'files')
+          AND NEW.source_artifact_id=(
+            SELECT source_reference.value->>'artifactId'
+            FROM jsonb_array_elements(NEW.source_artifacts) WITH ORDINALITY source_reference(value, ordinal)
+            WHERE source_reference.value->>'path'=NEW.package_manifest->>'entrypoint'
+            LIMIT 1
+          )
+          AND NEW.package_manifest->>'packageSha256'=NEW.package_sha256
+          AND NEW.package_canonical::jsonb=NEW.package_manifest-'packageSha256'
+          AND encode(digest(convert_to(NEW.package_canonical, 'UTF8'), 'sha256'), 'hex')=NEW.package_sha256
+          AND NEW.package_manifest->>'protectedAssertionSha256'=NEW.protected_assertion_sha256
+          AND jsonb_typeof(NEW.package_manifest->'assertions')='array'
+          AND NEW.protected_assertions_canonical::jsonb=NEW.package_manifest->'assertions'
+          AND encode(digest(convert_to(NEW.protected_assertions_canonical, 'UTF8'), 'sha256'), 'hex')=NEW.protected_assertion_sha256
+          AND source.artifact_type='script'
+          AND source.attempt_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(NEW.package_manifest->'files') WITH ORDINALITY manifest_file(value, ordinal)
+            LEFT JOIN LATERAL jsonb_array_elements(NEW.source_artifacts) WITH ORDINALITY source_reference(value, ordinal)
+              ON source_reference.ordinal=manifest_file.ordinal
+            LEFT JOIN smarthub.test_execution_artifacts dependency
+              ON dependency.id=source_reference.value->>'artifactId'
+             AND dependency.run_id=NEW.run_id
+             AND dependency.task_id=NEW.task_id
+            WHERE source_reference.value->>'path' IS DISTINCT FROM manifest_file.value->>'path'
+               OR dependency.id IS NULL
+               OR dependency.artifact_type<>'script'
+               OR dependency.attempt_id IS NOT NULL
+               OR dependency.sha256 IS DISTINCT FROM manifest_file.value->>'contentSha256'
+               OR dependency.byte_size IS DISTINCT FROM (manifest_file.value->>'size')::bigint
+          )
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_SOURCE_MISMATCH';
+      END IF;
+      IF NEW.generation_source='cache' THEN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM smarthub.test_execution_script_revisions source_revision
+          WHERE source_revision.id=NEW.cache_source_revision_id
+            AND source_revision.script_artifact_id=NEW.script_artifact_id
+            AND source_revision.generation_source<>'cache'
+            AND source_revision.content_sha256=NEW.content_sha256
+            AND source_revision.protected_assertion_sha256=NEW.protected_assertion_sha256
+            AND source_revision.package_manifest->'files'=NEW.package_manifest->'files'
+            AND source_revision.package_manifest->>'entrypoint'=NEW.package_manifest->>'entrypoint'
+        ) THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_INVALID';
+        END IF;
+      ELSIF NEW.cache_source_revision_id IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_FORBIDDEN';
+      END IF;
+      IF NEW.generation_source='repair' THEN
+        IF NEW.parent_revision_id IS NULL OR NEW.revision <= 1 THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID';
+        END IF;
+        SELECT revision,protected_assertion_sha256,package_manifest->'assertions'
+          INTO previous_revision,parent_protected_assertion_sha256,parent_assertions
+        FROM smarthub.test_execution_script_revisions
+        WHERE id=NEW.parent_revision_id AND run_id=NEW.run_id AND task_id=NEW.task_id;
+        IF previous_revision IS DISTINCT FROM NEW.revision-1 THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID';
+        END IF;
+        IF NEW.protected_assertion_sha256 IS DISTINCT FROM parent_protected_assertion_sha256
+          OR NEW.package_manifest->'assertions' IS DISTINCT FROM parent_assertions THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_ASSERTIONS_CHANGED';
+        END IF;
+      ELSIF NEW.parent_revision_id IS NOT NULL OR NEW.revision <> 1 THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID';
+      END IF;
+      RETURN NEW;
+    END $$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

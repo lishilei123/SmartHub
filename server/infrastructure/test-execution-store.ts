@@ -1167,9 +1167,10 @@ function transactionFor(client: PoolClient, scope: ExecutionLeaseScope, cancella
         revision.package.protectedAssertionSha256 !== revision.protectedAssertionSha256
         || canonicalSha256(revision.package.assertions) !== revision.protectedAssertionSha256
         || canonicalSha256(manifestBase) !== packageSha256
-        || revision.package.files.length !== 1
-        || revision.package.files[0].path !== revision.package.entrypoint
-        || revision.package.files[0].contentSha256 !== revision.contentSha256
+        || revision.package.files.length !== revision.sourceArtifacts.length
+        || revision.sourceArtifacts.some((source, index) => source.path !== revision.package.files[index].path)
+        || revision.sourceArtifacts.find(source => source.path === revision.package.entrypoint)?.artifactId !== revision.sourceArtifactId
+        || revision.package.files.find(file => file.path === revision.package.entrypoint)?.contentSha256 !== revision.contentSha256
       ) {
         throw new Error('TEST_EXECUTION_SCRIPT_REVISION_HASH_MISMATCH')
       }
@@ -1865,16 +1866,16 @@ async function insertScriptRevision(client: PoolClient, revision: ScriptRevision
   await validateScriptRevisionSources(client, revision)
   const { packageSha256, ...packageBase } = revision.package
   const inserted = await client.query<ScriptRevisionRow>(`
-    INSERT INTO smarthub.test_execution_script_revisions (id,run_id,task_id,script_artifact_id,revision,parent_revision_id,cache_source_revision_id,generation_source,repair_reason,generated_by,package_manifest,package_canonical,package_sha256,source_artifact_id,content_sha256,protected_assertion_sha256,protected_assertions_canonical,created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,$15,$16,$17,$18)
+    INSERT INTO smarthub.test_execution_script_revisions (id,run_id,task_id,script_artifact_id,revision,parent_revision_id,cache_source_revision_id,generation_source,repair_reason,generated_by,package_manifest,package_canonical,package_sha256,source_artifacts,source_artifact_id,content_sha256,protected_assertion_sha256,protected_assertions_canonical,created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)
     ON CONFLICT DO NOTHING
     RETURNING *
-  `, [revision.id, revision.runId, revision.taskId, revision.scriptArtifactId, revision.revision, revision.parentRevisionId ?? null, revision.cacheSourceRevisionId ?? null, revision.source, revision.repairReason ?? null, JSON.stringify(revision.generatedBy), JSON.stringify(revision.package), canonicalJson(packageBase), packageSha256, revision.sourceArtifactId, revision.contentSha256, revision.protectedAssertionSha256, canonicalJson(revision.package.assertions), revision.createdAt])
+  `, [revision.id, revision.runId, revision.taskId, revision.scriptArtifactId, revision.revision, revision.parentRevisionId ?? null, revision.cacheSourceRevisionId ?? null, revision.source, revision.repairReason ?? null, JSON.stringify(revision.generatedBy), JSON.stringify(revision.package), canonicalJson(packageBase), JSON.stringify(revision.sourceArtifacts), revision.sourceArtifactId, revision.contentSha256, revision.protectedAssertionSha256, canonicalJson(revision.package.assertions), revision.createdAt])
   if (inserted.rows[0]) return
   const conflicts = await client.query<ScriptRevisionRow>(`
     SELECT * FROM smarthub.test_execution_script_revisions
-    WHERE id=$1 OR (task_id=$2 AND revision=$3) OR (task_id=$2 AND content_sha256=$4)
-  `, [revision.id, revision.taskId, revision.revision, revision.contentSha256])
+    WHERE id=$1 OR (task_id=$2 AND revision=$3) OR (task_id=$2 AND package_sha256=$4)
+  `, [revision.id, revision.taskId, revision.revision, revision.package.packageSha256])
   if (conflicts.rows.length !== 1 || !sameCanonicalRecord(scriptRevisionFromRow(conflicts.rows[0]), revision)) {
     throw new Error('TEST_EXECUTION_SCRIPT_REVISION_CONFLICT')
   }
@@ -1945,6 +1946,33 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
   if (source.rows[0]?.artifact_type !== 'script' || source.rows[0].attempt_id !== null) {
     throw new Error('TEST_EXECUTION_SCRIPT_REVISION_SOURCE_ARTIFACT_INVALID')
   }
+  if (
+    revision.sourceArtifacts.length !== revision.package.files.length
+    || revision.sourceArtifacts.some((reference, index) => reference.path !== revision.package.files[index].path)
+    || revision.sourceArtifacts.find(reference => reference.path === revision.package.entrypoint)?.artifactId !== revision.sourceArtifactId
+  ) throw new Error('TEST_EXECUTION_SCRIPT_REVISION_SOURCE_ARTIFACT_INVALID')
+  const sourceRows = await client.query<{
+    id: string
+    artifact_type: ExecutionArtifact['type']
+    attempt_id: string | null
+    sha256: string
+    byte_size: number | string
+  }>(`
+    SELECT id,artifact_type,attempt_id,sha256,byte_size
+    FROM smarthub.test_execution_artifacts
+    WHERE run_id=$1 AND task_id=$2 AND id=ANY($3::text[])
+    FOR SHARE
+  `, [revision.runId, revision.taskId, revision.sourceArtifacts.map(reference => reference.artifactId)])
+  const sourceById = new Map(sourceRows.rows.map(row => [row.id, row]))
+  if (revision.sourceArtifacts.some((reference, index) => {
+    const row = sourceById.get(reference.artifactId)
+    const file = revision.package.files[index]
+    return !row
+      || row.artifact_type !== 'script'
+      || row.attempt_id !== null
+      || row.sha256 !== file.contentSha256
+      || Number(row.byte_size) !== file.size
+  })) throw new Error('TEST_EXECUTION_SCRIPT_REVISION_SOURCE_ARTIFACT_INVALID')
 
   if (revision.source === 'cache') {
     if (!revision.cacheSourceRevisionId) {
@@ -1955,9 +1983,10 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
       generation_source: ScriptRevision['source']
       content_sha256: string
       protected_assertion_sha256: string
+      package_manifest: ScriptRevision['package']
     }>(`
       SELECT script_artifact_id,generation_source,content_sha256,
-             protected_assertion_sha256
+             protected_assertion_sha256,package_manifest
       FROM smarthub.test_execution_script_revisions
       WHERE id=$1 FOR SHARE
     `, [revision.cacheSourceRevisionId])
@@ -1969,6 +1998,9 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
       || sourceRevisionRow.content_sha256 !== revision.contentSha256
       || sourceRevisionRow.protected_assertion_sha256
         !== revision.protectedAssertionSha256
+      || canonicalSha256(sourceRevisionRow.package_manifest.files)
+        !== canonicalSha256(revision.package.files)
+      || sourceRevisionRow.package_manifest.entrypoint !== revision.package.entrypoint
     ) {
       throw new Error('TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_INVALID')
     }
@@ -2355,10 +2387,10 @@ function scriptArtifactFromRow(row: ScriptArtifactRow): ScriptArtifact {
 }
 
 type ScriptRevisionRow = {
-  id: string; run_id: string; task_id: string; script_artifact_id: string; revision: number; parent_revision_id: string | null; cache_source_revision_id: string | null; generation_source: ScriptRevision['source']; repair_reason: string | null; generated_by: ScriptRevision['generatedBy']; package_manifest: ScriptRevision['package']; package_sha256: string; source_artifact_id: string; content_sha256: string; protected_assertion_sha256: string; created_at: Date | string
+  id: string; run_id: string; task_id: string; script_artifact_id: string; revision: number; parent_revision_id: string | null; cache_source_revision_id: string | null; generation_source: ScriptRevision['source']; repair_reason: string | null; generated_by: ScriptRevision['generatedBy']; package_manifest: ScriptRevision['package']; package_sha256: string; source_artifacts: ScriptRevision['sourceArtifacts']; source_artifact_id: string; content_sha256: string; protected_assertion_sha256: string; created_at: Date | string
 }
 function scriptRevisionFromRow(row: ScriptRevisionRow): ScriptRevision {
-  return { id: row.id, runId: row.run_id, taskId: row.task_id, scriptArtifactId: row.script_artifact_id, revision: Number(row.revision), ...(row.parent_revision_id ? { parentRevisionId: row.parent_revision_id } : {}), ...(row.cache_source_revision_id ? { cacheSourceRevisionId: row.cache_source_revision_id } : {}), source: row.generation_source, ...(row.repair_reason ? { repairReason: row.repair_reason } : {}), generatedBy: structuredClone(row.generated_by), package: structuredClone(row.package_manifest), sourceArtifactId: row.source_artifact_id, contentSha256: row.content_sha256, protectedAssertionSha256: row.protected_assertion_sha256, createdAt: iso(row.created_at) }
+  return { id: row.id, runId: row.run_id, taskId: row.task_id, scriptArtifactId: row.script_artifact_id, revision: Number(row.revision), ...(row.parent_revision_id ? { parentRevisionId: row.parent_revision_id } : {}), ...(row.cache_source_revision_id ? { cacheSourceRevisionId: row.cache_source_revision_id } : {}), source: row.generation_source, ...(row.repair_reason ? { repairReason: row.repair_reason } : {}), generatedBy: structuredClone(row.generated_by), package: structuredClone(row.package_manifest), sourceArtifacts: structuredClone(row.source_artifacts), sourceArtifactId: row.source_artifact_id, contentSha256: row.content_sha256, protectedAssertionSha256: row.protected_assertion_sha256, createdAt: iso(row.created_at) }
 }
 
 type ArtifactRow = {
