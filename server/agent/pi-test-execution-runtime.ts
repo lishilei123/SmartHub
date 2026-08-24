@@ -37,11 +37,6 @@ import { defaultBuiltInToolConfigResolver } from '../tools/built-in-tool-config.
 import { agentCatalogEntryByDefinition } from './agent-catalog.js'
 import { piVersion, type PiAgentRuntimeAdapter } from './pi-agent-runtime.js'
 import { buildTestExecutionDirectoryInputPlan } from './requirement-context-assembler.js'
-import type { UiExecutionBrowserContext } from './ui-execution-agent.js'
-import {
-  BROWSER_TOOL_IDS,
-  type BrowserToolSession,
-} from '../tools/playwright-browser-tools.js'
 
 const TEST_EXECUTION_WORKSPACE_TOOL_IDS = [
   'workspace.read_file',
@@ -50,27 +45,7 @@ const TEST_EXECUTION_WORKSPACE_TOOL_IDS = [
   'workspace.list_directory',
 ] as const
 
-const TEST_EXECUTION_KNOWLEDGE_TOOL_IDS = [
-  'knowledge.search',
-  'knowledge.read_chunk',
-] as const
-
 export const TEST_EXECUTION_STAGE_BINDINGS = {
-  script_generation: {
-    agentKey: 'execution-implementation',
-    snapshotKey: 'executionImplementation',
-    agentType: 'execution_implementation',
-    configurationSchemaVersion: 'execution-implementation/v1',
-    skillKey: 'test-script-generation',
-    submitToolId: 'execution_implementation.submit_result',
-    schemaVersion: 'test-script-generation/v1',
-    agentLabel: 'ExecutionImplementationAgent',
-    runtimeToolIds: [
-      ...TEST_EXECUTION_WORKSPACE_TOOL_IDS,
-      ...TEST_EXECUTION_KNOWLEDGE_TOOL_IDS,
-      ...BROWSER_TOOL_IDS,
-    ],
-  },
   agent_evaluation: {
     agentKey: 'failure-analysis',
     snapshotKey: 'failureAnalysis',
@@ -93,17 +68,6 @@ export const TEST_EXECUTION_STAGE_BINDINGS = {
     agentLabel: 'FailureAnalysisAgent',
     runtimeToolIds: [...TEST_EXECUTION_WORKSPACE_TOOL_IDS],
   },
-  script_repair: {
-    agentKey: 'execution-implementation',
-    snapshotKey: 'executionImplementation',
-    agentType: 'execution_implementation',
-    configurationSchemaVersion: 'execution-implementation/v1',
-    skillKey: 'script-repair',
-    submitToolId: 'execution_implementation.submit_result',
-    schemaVersion: 'script-repair/v1',
-    agentLabel: 'ExecutionImplementationAgent',
-    runtimeToolIds: [...TEST_EXECUTION_WORKSPACE_TOOL_IDS, ...BROWSER_TOOL_IDS],
-  },
 } as const
 
 export type TestExecutionAgentStage = keyof typeof TEST_EXECUTION_STAGE_BINDINGS
@@ -120,12 +84,6 @@ type CandidateValidation = (
 }>
 
 export interface TestExecutionAgentStageContext {
-  scriptRevisionId?: string
-  parentScriptRevisionId?: string
-  diagnosisId?: string
-  attemptIds?: string[]
-  artifactIds?: string[]
-  repairCount?: number
   agentExecution?: AgentExecutionAggregateResult
 }
 
@@ -134,10 +92,6 @@ export interface TestExecutionAgentRuntimeInput {
   run: ExecutionRun
   task: ExecutionTask
   workspace: TestExecutionAgentWorkspaceProjection
-  /** Ephemeral output from the Service-owned Playwright CLI capability. */
-  uiExecution?: UiExecutionBrowserContext
-  /** Service-owned invocation session; its opaque CLI identity is never sent to the model. */
-  browserSession?: BrowserToolSession
   stageContext?: TestExecutionAgentStageContext
   validateCandidate: CandidateValidation
 }
@@ -157,10 +111,7 @@ export interface TestExecutionAgentRuntimeOutput {
   }
 }
 
-const EXECUTION_AGENT_KEYS = [
-  'execution-implementation',
-  'failure-analysis',
-] as const
+const EXECUTION_AGENT_KEYS = ['failure-analysis'] as const
 
 export class PiTestExecutionRuntimeAdapter {
   constructor(
@@ -194,20 +145,10 @@ export class PiTestExecutionRuntimeAdapter {
     return { ready: agents.every(agent => agent.ready), agents }
   }
 
-  async freezeConfiguration(): Promise<ExecutionRun['agents']> {
-    return this.freezeConfigurations()
-  }
+  async freezeConfiguration(): Promise<ExecutionRun['agents']> { return this.freezeSelectedConfigurations() }
 
-  async freezeFailureAnalysisConfiguration(): Promise<ExecutionRun['agents']> {
-    return this.freezeSelectedConfigurations(['failure-analysis'])
-  }
-
-  async freezeConfigurations(): Promise<ExecutionRun['agents']> {
-    return this.freezeSelectedConfigurations(EXECUTION_AGENT_KEYS)
-  }
-
-  private async freezeSelectedConfigurations(agentKeys: readonly typeof EXECUTION_AGENT_KEYS[number][]): Promise<ExecutionRun['agents']> {
-    const configurations = await Promise.all(agentKeys.map(async agentKey => {
+  private async freezeSelectedConfigurations(): Promise<ExecutionRun['agents']> {
+    const configurations = await Promise.all(EXECUTION_AGENT_KEYS.map(async agentKey => {
       const configuration = await this.configurations.resolveActive(agentKey)
       if (!configuration) {
         throw new Error(
@@ -223,7 +164,6 @@ export class PiTestExecutionRuntimeAdapter {
       return [agentKey, freezeAgent(configuration, resolveModel(state, configuration), agentKey)]
     }))
     return {
-      ...(frozen.has('execution-implementation') ? { executionImplementation: frozen.get('execution-implementation')! } : {}),
       failureAnalysis: required(frozen.get('failure-analysis'), 'FAILURE_ANALYSIS_AGENT_SNAPSHOT_REQUIRED'),
     }
   }
@@ -267,9 +207,6 @@ export class PiTestExecutionRuntimeAdapter {
           schemaVersion: binding.schemaVersion,
           agentLabel: binding.agentLabel,
           initialTask: task,
-          ...(input.browserSession ? {
-            runtimeToolBindings: input.browserSession.runtimeToolBindings(),
-          } : {}),
           validateCandidate: input.validateCandidate,
         },
         onEvent: event => { events.push(event) },
@@ -304,9 +241,6 @@ export function buildTestExecutionAgentTask(
   binding = TEST_EXECUTION_STAGE_BINDINGS[input.stage],
 ) {
   const workspace = input.workspace.documentWorkspace
-  const explorationContext = input.workspace.workspaceFiles.find(
-    file => file.logicalPath === 'exploration/context.json',
-  )
   return canonicalJson({
     schemaVersion: 'test-execution-agent-task/v2',
     agent: binding.agentLabel,
@@ -330,35 +264,22 @@ export function buildTestExecutionAgentTask(
         ? `/${workspace.agentLogicalPath}`
         : undefined,
       fileCount: input.workspace.workspaceFiles.length,
-      ...(explorationContext ? {
-        explorationContext: {
-          logicalPath: '/exploration/context.json',
-          contentSha256: explorationContext.contentSha256,
-          authority: 'runtime_observed_knowledge',
-        },
-      } : {}),
     },
-    ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
-    instructions: stageInstructions(input, input.task.input.caseId, binding.submitToolId),
+    instructions: stageInstructions(input.stage, binding.submitToolId),
   })
 }
 
 function stageAssignment(input: Pick<TestExecutionAgentRuntimeInput, 'stage' | 'task'>) {
-  const stage = input.stage
-  if (stage === 'script_generation') return '根据冻结 TestCase 和 Execution Workspace 实现 Playwright 自动化代码'
-  if (stage === 'agent_evaluation') return '逐项评估确定性 Assertion 无法判断的 Task Completion、Semantic 与 Safety 标准'
-  if (stage === 'failure_diagnosis') return input.task.input.method === 'agent'
-    ? '根据确定性 Assertion、Trace 与可用 Workspace 资料解释失败事实并提出 Root Cause Candidate'
-    : '根据当前失败 Attempt 和 Runner Evidence 客观判断失败类型'
-  return '根据已确认的 FailureDiagnosis 修复 Playwright 实现'
+  return input.stage === 'agent_evaluation'
+    ? '逐项评估确定性 Assertion 无法判断的 Task Completion、Semantic 与 Safety 标准'
+    : '根据确定性 Assertion、Trace 与可用 Workspace 资料解释失败事实并提出 Root Cause Candidate'
 }
 
-function stageInstructions(input: Pick<TestExecutionAgentRuntimeInput, 'stage' | 'task'>, caseId: string, submitToolId: string) {
-  const stage = input.stage
+function stageInstructions(stage: TestExecutionAgentStage, submitToolId: string) {
   const common = [
-    '只使用冻结 TestCase、只读 Workspace 与当前 Runtime 明确授权的上下文；不得编造 API、Selector、凭据、业务规则或预期结果。',
-    '不得修改 TestCase、Expected Result、Verification Check、受保护断言语义或测试目标。',
-    '不得调用 Shell、数据库、任意网络、其他 Agent 或 Runner；Service 和 Runner 负责流程与真实执行。',
+    '只使用冻结 Agent Test、只读 Workspace 与当前 Runtime 明确授权的上下文；不得编造 Tool、MCP、凭据、业务规则或预期结果。',
+    '不得修改 TestCase、Expected Outcome、断言语义或测试目标。',
+    '不得调用 Shell、数据库、任意网络、其他 Agent 或 AgentRunner；Service 和 AgentRunner 负责流程与真实执行。',
   ]
   if (stage === 'agent_evaluation') return [
     ...common,
@@ -366,28 +287,12 @@ function stageInstructions(input: Pick<TestExecutionAgentRuntimeInput, 'stage' |
     '每个 Repeat、每个标准必须单独返回 PASS、FAIL 或 NOT_EVALUABLE。证据不足或不可见时必须 NOT_EVALUABLE；不得用总分替代。',
     `完成后只调用 ${submitToolId} 提交 results。`,
   ]
-  if (stage === 'failure_diagnosis') return [
+  return [
     ...common,
-    input.task.input.method === 'agent'
-      ? '先读取确定性 failed assertions、failure facts、actual output、Trace 与 Runtime error；只解释这些事实并结合实际存在的 Workspace 资料提出候选原因。看不到的资料必须标记 unavailable。'
-      : '只根据当前失败 Attempt、Execution Event 与 Artifact 证据分类；不得修改脚本或决定是否修复。',
+    '先读取确定性 failed assertions、failure facts、actual output、Trace 与 Runtime error；只解释这些事实并结合实际存在的 Workspace 资料提出候选原因。看不到的资料必须标记 unavailable。',
     'Deterministic Code identifies facts；LLM 输出只能是 Root Cause Candidate，不得认定正式 Root Cause。',
     `完成后只调用 ${submitToolId} 提交 category、reason、evidence。`,
   ]
-  const implementation = [
-    ...common,
-    '实现阶段可使用只读 Workspace、Knowledge、已有 Runtime Observation 与当前 invocation 明确授权的 Browser Tools。',
-    `Playwright Test 标题必须以稳定 Case Symbol ${JSON.stringify(`[${caseId}]`)} 结尾。`,
-    '优先复用 execution/ 下已有 tests、pages、api、helpers 和 fixtures；API 使用 request/APIRequestContext，UI 必须完成真实 UI 操作与页面断言。',
-    '先复用 Workspace 和已有 Observation；只有实现所需信息不足时才按需、多轮调用 Browser Tools。Browser Observation 是运行时观察事实，不是 Requirement Truth。',
-    'Browser Tools 只用于受控探索，不是 Runner；不得把工具观察解释为 PASS/FAIL，也不得据此改变 Expected Result 或弱化断言。',
-    '只提交需要新增或修改的 Workspace 文件；summary 仅用于简短说明。',
-  ]
-  if (stage === 'script_repair') implementation.push(
-    '当前 Stage 只根据已确认的 FailureDiagnosis、当前 ScriptRevision、Runner Evidence 和 Execution Workspace 修复实现问题；不得重新进行需求分析、测试设计或通过 Knowledge 搜索扩大修复范围。',
-    '只修改诊断支持的实现问题；不得删除、绕过或弱化受保护断言和业务闭环。',
-  )
-  return [...implementation, `完成后只调用 ${submitToolId} 提交 entryFile、files，可选 summary。`]
 }
 
 function buildAgentSnapshot(
@@ -399,15 +304,6 @@ function buildAgentSnapshot(
     ...structuredClone(input.workspace),
     agentDefinition: stageAgentDefinition(configuration.agentDefinition, bindingForStage(input.stage)),
     executionSessionKey: executionSessionKey(input),
-    ...(input.browserSession ? {
-      browserAuthorization: {
-        runId: input.run.id,
-        taskId: input.task.id,
-        projectVersionId: input.run.projectVersionId,
-        environmentSignature: input.run.environment.signature,
-        stage: input.stage as 'script_generation' | 'script_repair',
-      },
-    } : {}),
     taskSha256: canonicalSha256(task),
     createdAt: new Date().toISOString(),
   }
@@ -444,12 +340,7 @@ function stageAgentDefinition(
 
 function executionSessionKey(input: TestExecutionAgentRuntimeInput) {
   if (input.stage === 'agent_evaluation') return `agent-execution-evaluation:${input.run.id}:${input.task.id}`
-  if (input.stage === 'failure_diagnosis') {
-    if (input.task.input.method === 'agent') return `agent-execution-diagnosis:${input.run.id}:${input.task.id}`
-    const revisionId = required(input.stageContext?.scriptRevisionId, 'TEST_EXECUTION_DIAGNOSIS_REVISION_SESSION_REQUIRED')
-    return `execution-diagnosis:${input.run.id}:${input.task.id}:${revisionId}`
-  }
-  return `execution-implementation:${input.run.id}:${input.task.id}`
+  return `agent-execution-diagnosis:${input.run.id}:${input.task.id}`
 }
 
 function validateStageInput(
@@ -472,44 +363,15 @@ function validateStageInput(
   if (frozen.agentKey !== binding.agentKey) {
     throw new Error('TEST_EXECUTION_AGENT_STAGE_SNAPSHOT_MISMATCH')
   }
-  if (input.browserSession) {
-    const scope = input.browserSession.scope
-    if (
-      input.stage === 'failure_diagnosis'
-      || input.task.input.method !== 'ui'
-      || scope.runId !== input.run.id
-      || scope.taskId !== input.task.id
-      || scope.projectVersionId !== input.run.projectVersionId
-      || scope.environmentSignature !== input.run.environment.signature
-      || scope.baseUrl !== input.run.environment.baseUrl
-      || scope.stage !== input.stage
-    ) throw new Error('TEST_EXECUTION_BROWSER_SESSION_SCOPE_MISMATCH')
-  }
   if (input.stage === 'agent_evaluation') {
     if (!input.stageContext?.agentExecution || input.stageContext.agentExecution.taskId !== input.task.id) throw new Error('AGENT_TEST_EVALUATION_CONTEXT_REQUIRED')
   }
   if (input.stage === 'failure_diagnosis') {
-    if (input.task.input.method === 'agent') {
-      if (!input.stageContext?.agentExecution || input.stageContext.agentExecution.taskId !== input.task.id) throw new Error('AGENT_TEST_FAILURE_ANALYSIS_CONTEXT_REQUIRED')
-    } else if (!input.stageContext?.scriptRevisionId || !input.stageContext.attemptIds || input.stageContext.attemptIds.length < 1) {
-      throw new Error('TEST_EXECUTION_DIAGNOSIS_CONTEXT_REQUIRED')
-    }
-  }
-  if (input.stage === 'script_repair') {
-    if (!input.stageContext?.parentScriptRevisionId || !input.stageContext.diagnosisId) {
-      throw new Error('TEST_EXECUTION_REPAIR_CONTEXT_REQUIRED')
-    }
-    if ((input.stageContext.repairCount ?? input.task.repairCount) >= 2) {
-      throw new Error('TEST_EXECUTION_REPAIR_LIMIT_REACHED')
-    }
+    if (!input.stageContext?.agentExecution || input.stageContext.agentExecution.taskId !== input.task.id) throw new Error('AGENT_TEST_FAILURE_ANALYSIS_CONTEXT_REQUIRED')
   }
 }
 
-function runtimeToolIds(input: TestExecutionAgentRuntimeInput, binding: StageBinding) {
-  return binding.runtimeToolIds.filter(toolId =>
-    !BROWSER_TOOL_IDS.includes(toolId as typeof BROWSER_TOOL_IDS[number])
-    || Boolean(input.browserSession))
-}
+function runtimeToolIds(_input: TestExecutionAgentRuntimeInput, binding: StageBinding) { return binding.runtimeToolIds }
 
 function freezeAgent(
   configuration: AgentConfigurationVersion,

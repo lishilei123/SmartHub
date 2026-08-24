@@ -23,21 +23,9 @@ import { PiTestDesignRuntimeAdapter } from './agent/pi-test-design-runtime.js'
 import { PiTestExecutionRuntimeAdapter } from './agent/pi-test-execution-runtime.js'
 import { TestExecutionService } from './application/test-execution-service.js'
 import { TestReportService } from './application/test-report-service.js'
-import {
-  LocalBaseUrlExecutionEnvironmentResolver,
-} from './application/test-execution-environment.js'
-import { TestExecutionInfrastructureConfigurationService } from './application/test-execution-infrastructure-configuration-service.js'
 import { FrozenTestExecutionWorkspaceProvider } from './application/test-execution-workspace-provider.js'
-import { LocalExecutionArtifactStore } from './infrastructure/execution-artifact-store.js'
 import { PostgresTestExecutionStore } from './infrastructure/test-execution-store.js'
-import {
-  type PlaywrightRunner,
-} from './runner/playwright-runner.js'
-import { LocalWorkspaceRunner } from './runner/local-workspace-runner.js'
-import { LocalExecutionWorkspaceStore } from './infrastructure/execution-workspace-store.js'
-import { PlaywrightCliAdapter, UIExecutionAgent } from './agent/ui-execution-agent.js'
 import { StateStoreTestExecutionKnowledgeResolver } from './application/test-execution-knowledge.js'
-import { PlaywrightBrowserToolGateway } from './tools/playwright-browser-tools.js'
 import { AgentUnderTestService } from './application/agent-under-test-service.js'
 import { AgentRunner, UnavailableAgentSemanticEvaluator } from './runner/agent-runner.js'
 
@@ -48,10 +36,6 @@ const dataFile = process.env.SMARTHUB_DATA_FILE ?? resolve(dataRoot, 'smarthub.j
 const documentRoot = process.env.SMARTHUB_DOCUMENT_ROOT ?? resolve(dataRoot, 'knowledge-bases')
 const modelRoot = process.env.SMARTHUB_MODEL_ROOT ?? resolve(dataRoot, 'models')
 const skillRoot = process.env.SMARTHUB_SKILL_ROOT ?? resolve(dataRoot, 'skills')
-const executionArtifactRoot = process.env.SMARTHUB_EXECUTION_ARTIFACT_ROOT
-  ?? resolve(dataRoot, 'test-execution-artifacts')
-const executionWorkspaceRoot = process.env.SMARTHUB_EXECUTION_WORKSPACE_ROOT
-  ?? resolve(dataRoot, 'test-execution-workspaces')
 const production = process.env.NODE_ENV === 'production'
 const databaseUrl = process.env.SMARTHUB_FORCE_JSON_STORE === 'true' ? undefined : process.env.DATABASE_URL
 
@@ -88,17 +72,11 @@ export const planningWorkflowService = new PlanningWorkflowService(
   testDesignService,
 )
 requirementAnalysisService.onRequirementReleaseReady(async runId => { await planningWorkflowService.requirementReleaseReady(runId) })
-export const executionWorkspaceStore = new LocalExecutionWorkspaceStore(executionWorkspaceRoot)
-export const projectVersionService = new ProjectVersionService(stateStore, service, executionWorkspaceStore)
+export const projectVersionService = new ProjectVersionService(stateStore, service)
 export const agentUnderTestService = new AgentUnderTestService(stateStore)
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore
 
-export const testExecutionInfrastructureConfigurationService =
-  new TestExecutionInfrastructureConfigurationService(stateStore)
-export const executionEnvironmentCatalog = new LocalBaseUrlExecutionEnvironmentResolver()
-export const executionArtifactStore =
-  new LocalExecutionArtifactStore(executionArtifactRoot)
 export const testExecutionStore = databaseUrl
   ? new PostgresTestExecutionStore(databaseUrl)
   : undefined
@@ -108,16 +86,7 @@ export const testExecutionAgentRuntime =
     piAgentRuntime,
     agentConfigurationService,
   )
-export const testExecutionWorkspaceProvider = testExecutionStore
-  ? new FrozenTestExecutionWorkspaceProvider(
-      testExecutionStore,
-      executionArtifactStore,
-    )
-  : undefined
-export const playwrightRunner: PlaywrightRunner = new LocalWorkspaceRunner(executionArtifactStore)
-export const playwrightCliAdapter = new PlaywrightCliAdapter()
-export const uiExecutionAgent = new UIExecutionAgent(playwrightCliAdapter)
-export const playwrightBrowserTools = new PlaywrightBrowserToolGateway(playwrightCliAdapter)
+export const testExecutionWorkspaceProvider = testExecutionStore ? new FrozenTestExecutionWorkspaceProvider() : undefined
 export const agentRunner = new AgentRunner(new UnavailableAgentSemanticEvaluator())
 export const testExecutionKnowledgeResolver = new StateStoreTestExecutionKnowledgeResolver(stateStore)
 export const testExecutionService =
@@ -126,17 +95,10 @@ export const testExecutionService =
         testDesignService,
         testExecutionStore,
         testExecutionAgentRuntime,
-        executionArtifactStore,
         testExecutionWorkspaceProvider,
-        executionEnvironmentCatalog,
-        playwrightRunner,
-        undefined,
-        executionWorkspaceStore,
-        uiExecutionAgent,
-        testExecutionKnowledgeResolver,
-        playwrightBrowserTools,
         agentUnderTestService,
         agentRunner,
+        testExecutionKnowledgeResolver,
       )
     : undefined
 export const testReportService = testExecutionStore

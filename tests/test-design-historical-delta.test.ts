@@ -13,10 +13,12 @@ const principal = { subjectId: 'delta-test-owner', displayName: 'Delta 测试负
 
 function caseContent(title: string, requirementRefs: string[] = ['RP-001'], overrides: Partial<TestCaseContent> = {}): TestCaseContent {
   return {
-    schemaVersion: 'test-case/v3', title, dimension: 'functional', priority: 'P1', requirementRefs, executionMethods: ['api'],
-    preconditions: ['用户已登录'], steps: [`执行 ${title}`], expectedResults: [`${title} 成功`], ...overrides,
+    schemaVersion: 'test-case/v3', title, dimension: 'functional', priority: 'P1', requirementRefs, executionMethods: ['agent'],
+    preconditions: ['被测 Agent 已配置'], steps: [`执行 ${title}`], expectedResults: [`${title} 成功`], agentTestSpec: agentSpec(title), ...overrides,
   }
 }
+
+function agentSpec(title: string) { return { input: title, expectedOutcome: `${title} 成功`, requiredTools: [], forbiddenTools: [], requiredActions: [], forbiddenActions: [], argumentAssertions: [], sequenceConstraints: [], businessAssertions: [], artifactAssertions: [], semanticAssertions: [], safetyAssertions: [], executionConstraints: { timeoutMs: 30_000, maxSteps: 20, repeatCount: 1 } } }
 
 function historicalItem(caseId: string, revision: number, content: TestCaseContent) {
   return { id: `history-${caseId}-${revision}`, kind: 'test_case_library' as const, sourceId: `library-v1:${caseId}:${revision}`, contentSha256: canonicalSha256(content), semanticSha256: testCaseSemanticSha256(content), content: structuredClone(content), sourceRequirementReleaseId: 'release-source', sourceRequirementRefs: [...content.requirementRefs], locator: { sourceProjectVersionId: 'project-version-source', testCaseLibraryVersionId: 'library-v1', caseId, revision, status: 'active' } }

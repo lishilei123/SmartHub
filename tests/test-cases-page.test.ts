@@ -7,7 +7,8 @@ import { routeTestDesign } from '../server/http/test-design-routes.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
-const content = { schemaVersion: 'test-case/v3' as const, title: '继承后修改的登录校验', dimension: 'functional' as const, priority: 'P1' as const, requirementRefs: ['REQ-2'], executionMethods: ['ui'] as Array<'ui' | 'api'>, preconditions: ['已登录'], steps: ['提交表单'], expectedResults: ['显示成功'] }
+const agentTestSpec = { input: '提交任务', expectedOutcome: '任务成功', requiredTools: [], forbiddenTools: [], requiredActions: [], forbiddenActions: [], argumentAssertions: [], sequenceConstraints: [], businessAssertions: [], artifactAssertions: [], semanticAssertions: [], safetyAssertions: [], executionConstraints: { timeoutMs: 30_000, maxSteps: 20, repeatCount: 1 } }
+const content = { schemaVersion: 'test-case/v3' as const, title: '继承后修改的任务校验', dimension: 'functional' as const, priority: 'P1' as const, requirementRefs: ['REQ-2'], executionMethods: ['agent'] as const, preconditions: ['被测 Agent 已配置'], steps: ['提交任务'], expectedResults: ['任务成功'], agentTestSpec }
 const traceability = { sourceRequirementReleaseId: 'release-v2', requirementRefs: [{ requirementReleaseId: 'release-v2', requirementId: 'REQ-2' }] }
 
 test('正式测试用例读取按 ProjectVersion 选择最新 LibraryVersion，并保留历史修改来源', async () => {
@@ -56,6 +57,6 @@ test('测试用例页面位于测试策划和测试执行之间，并按版本�
   assert.match(app, /\.\/test-cases\/TestCasesPage/u)
   assert.match(app, /page === 'test-cases'/u)
   assert.match(api, /project-versions\/\$\{encodeURIComponent\(projectVersionId\)\}\/test-cases/u)
-  assert.match(page, /setFilters\(emptyFilters\); setSelected\(null\)/u)
+  assert.match(page, /setFilters\(emptyFilters\);\s*setSelected\(null\)/u)
   for (const label of ['当前版本新增', '历史复用', '历史修改', '当前版本暂无已发布测试用例']) assert.match(page, new RegExp(label, 'u'))
 })

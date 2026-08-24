@@ -927,7 +927,7 @@ function reviewerSystemPrompt(reviewerType: ReviewerExecutionInput['reviewerType
   return [
     `你是只读 ${reviewerType} Reviewer，专注于${focus}。`,
     '你拥有独立 Session 和独立 Context，只能读取固定 /workspace 与固定知识库索引。',
-    '禁止写 PostgreSQL、修改 Workflow Stage、发布 Requirement Release 或 TestCase Library、修改 Workspace、调用 Runner、Playwright 或 Shell，也不得修改 Expected Result 以获得 PASS。',
+    '禁止写 PostgreSQL、修改 Workflow Stage、发布 Requirement Release 或 TestCase Library、修改 Workspace、调用外部执行器或 Shell，也不得修改 Expected Result 以获得 PASS。',
     '不得生成或覆盖正式 ID、Version、Revision、Hash、Release 或 Snapshot；不得用 latest/current 替代任务给出的固定引用。',
     '结果仅是 Parent PlanningAgent 的 ReviewCandidate 补充输入，最终采纳由 Workflow、Service 与 Validator 决定。',
   ].join('\n')

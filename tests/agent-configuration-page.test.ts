@@ -16,17 +16,17 @@ test('Agent 配置页面不提供模型温度', () => {
   assert.doesNotMatch(source, /模型温度|routing\.temperature|updateRouting\('temperature'/u)
 })
 
-test('Agent 配置页面展示一个 PlanningAgent 与两个测试执行 Agent', () => {
+test('Agent 配置页面只展示 PlanningAgent 与 FailureAnalysisAgent', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
 
   for (const identifier of [
     'PlanningAgent',
-    'ExecutionImplementationAgent',
     'FailureAnalysisAgent',
   ]) assert.match(source, new RegExp(`identifier: '${identifier}'`, 'u'))
   assert.doesNotMatch(source, /identifier: '(?:RequirementAnalysisAgent|TestDesignAgent)'/u)
   assert.match(source, /\{ label: '测试策划', agentKeys: \['planning'\] \}/u)
-  assert.match(source, /\{ label: '测试执行', agentKeys: \['executionImplementation', 'failureAnalysis'\] \}/u)
+  assert.match(source, /\{ label: '测试执行', agentKeys: \['failureAnalysis'\] \}/u)
+  assert.doesNotMatch(source, /ExecutionImplementationAgent|executionImplementation/u)
   assert.match(source, /exactCapabilities: true/u)
 })
 
@@ -41,13 +41,7 @@ test('Agent 配置 API 从 planning 与 test_execution 聚合并按 Agent 选择
   assert.match(source, /planning: 'planning'/u)
 })
 
-test('执行基础设施配置在设置页通过服务端版本发布，不回显密钥值', () => {
+test('设置页不再暴露历史执行基础设施配置', () => {
   const page = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
-  const api = readFileSync(new URL('../src/test-execution-infrastructure-api.ts', import.meta.url), 'utf8')
-  assert.match(page, /name: '执行基础设施'/u)
-  assert.match(page, /登记执行环境/u)
-  assert.match(page, /OCI Playwright Runner/u)
-  assert.match(page, /后续 Run 将冻结该版本/u)
-  assert.match(api, /test-execution-infrastructure-configuration/u)
-  assert.doesNotMatch(page, /secret-value/u)
+  assert.doesNotMatch(page, /执行基础设施|OCI Playwright Runner|test-execution-infrastructure/u)
 })

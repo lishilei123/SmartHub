@@ -7,8 +7,8 @@ import { ToolRegistry } from '../server/tools/registry.js'
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
 test('checked-in built-in Tool config excludes retired requirement repair submissions', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 20)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 19)
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 12)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 11)
   assert.ok(defaultBuiltInToolConfigResolver.keys().every(key => !key.startsWith('skill.')))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
@@ -20,9 +20,9 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   assert.match(listDirectory.properties.path.description, /空字符串/u)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').piName, 'execution_implementation_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').piName, 'failure_analysis_submit_result')
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('browser.snapshot').piName, 'browser_snapshot')
+  assert.equal(defaultBuiltInToolConfigResolver.has('execution_implementation.submit_result'), false)
+  assert.equal(defaultBuiltInToolConfigResolver.keys().some(key => key.startsWith('browser.')), false)
   assert.equal(defaultBuiltInToolConfigResolver.has('browser.evaluate'), false)
   const reviewer = defaultBuiltInToolConfigResolver.toDescriptor('reviewer.submit_result').parameters as unknown as {
     properties: { reviewerType: { enum: string[] } }
@@ -37,23 +37,12 @@ test('Requirement Analysis 精简提交 Schema 会发布新的 Tool 绑定令牌
   )
 })
 
-test('测试执行候选工具只向 Agent 暴露最小智能结果', () => {
-  const implementation = defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').parameters as unknown as {
-    additionalProperties: boolean
-    required: string[]
-    properties: { files: { maxItems: number; items: { properties: { content: { maxLength: number } } } } }
-  }
+test('失败分析候选工具只向 Agent 暴露最小智能结果', () => {
   const diagnosis = defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').parameters as unknown as {
     additionalProperties: boolean
     required: string[]
     properties: { evidence: { maxLength: number }; category: { enum: string[] } }
   }
-  assert.equal(implementation.additionalProperties, false)
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').version, '1.0.0')
-  assert.deepEqual(Object.keys(implementation.properties).sort(), ['entryFile', 'files', 'summary'])
-  assert.deepEqual(implementation.required, ['entryFile', 'files'])
-  assert.equal(implementation.properties.files.maxItems, 16)
-  assert.equal(implementation.properties.files.items.properties.content.maxLength, 524_288)
   assert.equal(diagnosis.additionalProperties, false)
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').version, '2.1.0')
   assert.deepEqual(Object.keys(diagnosis.properties).sort(), ['category', 'evidence', 'reason'])
@@ -96,13 +85,14 @@ test('测试用例提交工具声明闭合的扁平 TestCase v3', () => {
   const schema = defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').parameters as any
   const caseSchema = schema.properties.cases.items
   assert.equal(caseSchema.additionalProperties, false)
-  assert.deepEqual(caseSchema.required, ['ref', 'schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults'])
-  assert.deepEqual(Object.keys(caseSchema.properties).sort(), [...caseSchema.required, 'agentTestSpec'].sort())
+  assert.deepEqual(caseSchema.required, ['ref', 'schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults', 'agentTestSpec'])
+  assert.deepEqual(Object.keys(caseSchema.properties).sort(), [...caseSchema.required].sort())
   assert.equal(caseSchema.properties.schemaVersion.const, 'test-case/v3')
   assert.equal(caseSchema.properties.requirementRefs.minItems, undefined)
   assert.equal(caseSchema.properties.requirementRefs.uniqueItems, true)
-  assert.equal(caseSchema.properties.executionMethods.uniqueItems, true)
-  assert.deepEqual(caseSchema.properties.executionMethods.items.enum, ['ui', 'api', 'agent'])
+  assert.equal(caseSchema.properties.executionMethods.minItems, 1)
+  assert.equal(caseSchema.properties.executionMethods.maxItems, 1)
+  assert.equal(caseSchema.properties.executionMethods.items.const, 'agent')
 })
 
 test('测试设计修复工具只声明 v3 patch 字段', () => {

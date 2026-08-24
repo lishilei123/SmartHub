@@ -51,7 +51,7 @@ test('测试用例编辑携带 If-Match 并将人工审核通过写入单条 Rev
     requests.push({ path: new URL(String(input)).pathname, method: init?.method ?? 'GET', etag: new Headers(init?.headers).get('if-match') ?? '', body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
     return Response.json({ id: 'case-1', currentRevision: 2, reviewState: 'approved', revisions: [], reviewActions: [] }, { headers: { etag: '"case:case-1:2:new"' } })
   }
-  const content = { schemaVersion: 'test-case/v3', title: '编辑后的用例', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P1', preconditions: [], executionMethods: ['ui'], steps: ['打开页面'], expectedResults: ['页面可用'] } as const
+  const content = { schemaVersion: 'test-case/v3', title: '编辑后的 Agent 用例', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P1', preconditions: [], executionMethods: ['agent'], steps: ['提交任务'], expectedResults: ['任务完成'], agentTestSpec: { input: '提交任务', expectedOutcome: '任务完成', requiredTools: [], forbiddenTools: [], requiredActions: [], forbiddenActions: [], argumentAssertions: [], sequenceConstraints: [], businessAssertions: [], artifactAssertions: [], semanticAssertions: [], safetyAssertions: [], executionConstraints: { timeoutMs: 30_000, maxSteps: 20, repeatCount: 1 } } } as const
   try {
     await patchCase('pv-1', 'design-1', 'run-1', 'case-1', '"case:case-1:1:old"', content, '人工修订')
     await reviewCase('pv-1', 'design-1', 'run-1', 'case-1', 'approve', 2, '人工审核通过')

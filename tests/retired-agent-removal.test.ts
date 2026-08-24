@@ -7,7 +7,7 @@ import { AgentConfigurationService } from '../server/application/agent-configura
 import { AiResourceService } from '../server/application/ai-resource-service.js'
 import { JsonStore } from '../server/infrastructure/store.js'
 
-test('源码配置只保留一个 PlanningAgent 和两个测试执行 Agent', async () => {
+test('源码配置只保留 PlanningAgent 与 FailureAnalysisAgent', async () => {
   const agents = JSON.parse(await readFile(new URL('../server/agent/agents-config.json', import.meta.url), 'utf8')) as { agents: Record<string, unknown> }
   const tools = JSON.parse(await readFile(new URL('../server/tools/built-in-tools-config.json', import.meta.url), 'utf8')) as { tools: Record<string, unknown> }
   const runtime = await readFile(new URL('../server/agent/pi-agent-runtime.ts', import.meta.url), 'utf8')
@@ -18,12 +18,12 @@ test('源码配置只保留一个 PlanningAgent 和两个测试执行 Agent', as
   assert.equal('technical-solution-extraction' in agents.agents, false)
   assert.equal('technical-solution-review' in agents.agents, false)
   assert.equal('test-design' in agents.agents, false)
-  assert.equal('execution-implementation' in agents.agents, true)
+  assert.equal('execution-implementation' in agents.agents, false)
   assert.equal('failure-analysis' in agents.agents, true)
   assert.equal('test-script' in agents.agents, false)
   assert.equal('script-repair' in agents.agents, false)
   assert.equal('requirement-analysis.submit_result' in tools.tools, true)
-  assert.equal('execution_implementation.submit_result' in tools.tools, true)
+  assert.equal('execution_implementation.submit_result' in tools.tools, false)
   assert.equal('failure_analysis.submit_result' in tools.tools, true)
   assert.equal('test_script.submit_result' in tools.tools, false)
   assert.equal('script_repair.submit_result' in tools.tools, false)
@@ -97,12 +97,12 @@ test('当前 JSON Agent 配置只写入 planning 与 test_execution 两个 scene
     definition: planningDraft.definition,
   })
 
-  const executionImplementation = execution.agents.executionImplementation!.draft
+  const failureAnalysis = execution.agents.failureAnalysis!.draft
   await service.save('test_execution', {
-    agentKey: 'executionImplementation',
-    revision: executionImplementation.revision,
-    routing: executionImplementation.routing,
-    definition: executionImplementation.definition,
+    agentKey: 'failureAnalysis',
+    revision: failureAnalysis.revision,
+    routing: failureAnalysis.routing,
+    definition: failureAnalysis.definition,
   })
 
   const drafts = store.read().agentConfigurationDrafts
@@ -111,10 +111,7 @@ test('当前 JSON Agent 配置只写入 planning 与 test_execution 两个 scene
     'test_execution',
   ])
   assert.deepEqual(Object.keys(drafts[0].agents), ['planning'])
-  assert.deepEqual(Object.keys(drafts[1].agents), [
-    'executionImplementation',
-    'failureAnalysis',
-  ])
+  assert.deepEqual(Object.keys(drafts[1].agents), ['failureAnalysis'])
 })
 
 test('PostgreSQL 迁移删除已退役 Agent 的历史配置与工具资源', async () => {

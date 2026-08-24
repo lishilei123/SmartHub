@@ -84,7 +84,7 @@ function planningConfiguration(agentDefinition: AgentDefinitionVersion): AgentCo
 }
 
 function coverageRun(agentDefinition: AgentDefinitionVersion, configuration: AgentConfigurationVersion): TestDesignWorkflowRun {
-  const caseContent: TestCaseContent = { schemaVersion: 'test-case/v3', title: '当前用例', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P0', preconditions: [], executionMethods: ['api'], steps: ['执行当前用例'], expectedResults: ['结果符合预期'] }
+  const caseContent: TestCaseContent = { schemaVersion: 'test-case/v3', title: '当前用例', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P0', preconditions: [], executionMethods: ['agent'], steps: ['执行当前用例'], expectedResults: ['结果符合预期'], agentTestSpec: { input: '执行当前用例', expectedOutcome: '结果符合预期', requiredTools: [], forbiddenTools: [], requiredActions: [], forbiddenActions: [], argumentAssertions: [], sequenceConstraints: [], businessAssertions: [], artifactAssertions: [], semanticAssertions: [], safetyAssertions: [], executionConstraints: { timeoutMs: 30_000, maxSteps: 20, repeatCount: 1 } } }
   const caseSha256 = canonicalSha256(caseContent)
   const testCases = [{ id: 'case-current', runId: 'test-design-run-1', origin: 'ai' as const, candidateRef: 'TC-1', currentRevision: 1, reviewState: 'in_review' as const, revisions: [{ revision: 1, content: caseContent, contentSha256: caseSha256, semanticSha256: caseSha256, diff: [], editorId: 'agent', reason: '生成', createdAt: '2026-08-21T01:00:00.000Z' }], reviewActions: [] }]
   const caseSetSha256 = canonicalSha256([{ caseId: 'case-current', revision: 1, contentSha256: caseSha256 }])

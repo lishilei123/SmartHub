@@ -31,7 +31,6 @@
     "@emnapi/runtime": "1.11.3",
     "@huggingface/transformers": "3.8.1",
     "@modelcontextprotocol/client": "2.0.0",
-    "@playwright/test": "^1.58.2",
     "@vitejs/plugin-react": "latest",
     "glob": "13.0.6",
     "js-tiktoken": "^1.0.21",

@@ -2,26 +2,16 @@ import type { AgentTestSpec, TestCaseContent } from './types'
 
 export function TestCaseEditor({ value, onChange }: { value: TestCaseContent; onChange: (value: TestCaseContent) => void }) {
   const patch = (next: Partial<TestCaseContent>) => onChange({ ...value, ...next })
-  const toggleMethod = (method: 'ui' | 'api' | 'agent') => {
-    if (method === 'agent') {
-      patch({ executionMethods: ['agent'], agentTestSpec: value.agentTestSpec ?? emptyAgentTestSpec() })
-      return
-    }
-    const selected = value.executionMethods.includes(method)
-    const current = value.executionMethods.filter(item => item !== 'agent')
-    const executionMethods = selected ? current.filter(item => item !== method) : [...current, method]
-    patch({ executionMethods: (['ui', 'api'] as const).filter(item => executionMethods.includes(item)) })
-  }
   return <div className="tdw-form-grid">
     <label className="wide">标题<input value={value.title} onChange={event => patch({ title: event.target.value })} /></label>
     <label>测试类型<select value={value.dimension} onChange={event => patch({ dimension: event.target.value as TestCaseContent['dimension'] })}>{['functional', 'performance', 'stability', 'compatibility', 'security'].map(item => <option key={item} value={item}>{dimensionLabel(item as TestCaseContent['dimension'])}</option>)}</select></label>
     <label>优先级<select value={value.priority} onChange={event => patch({ priority: event.target.value as TestCaseContent['priority'] })}>{['P0', 'P1', 'P2', 'P3'].map(item => <option key={item}>{item}</option>)}</select></label>
-    <fieldset className="wide"><legend>执行方式</legend><label><input type="radio" checked={value.executionMethods.includes('agent')} onChange={() => toggleMethod('agent')} /> Agent</label><label><input type="checkbox" checked={value.executionMethods.includes('ui')} onChange={() => toggleMethod('ui')} /> UI（历史链）</label><label><input type="checkbox" checked={value.executionMethods.includes('api')} onChange={() => toggleMethod('api')} /> API（历史链）</label></fieldset>
+    <fieldset className="wide"><legend>执行方式</legend><label><input type="radio" checked readOnly /> Agent Test</label></fieldset>
     <LineEditor label="关联需求" hint="每行一个 Requirement ID；留空表示扩展风险测试。" values={value.requirementRefs} onChange={requirementRefs => patch({ requirementRefs })} />
     <LineEditor label="前置条件" values={value.preconditions} onChange={preconditions => patch({ preconditions })} />
     <LineEditor label="执行步骤" values={value.steps} onChange={steps => patch({ steps })} />
     <LineEditor label="预期结果" values={value.expectedResults} onChange={expectedResults => patch({ expectedResults })} />
-    {value.executionMethods.includes('agent') && <AgentSpecEditor value={value.agentTestSpec ?? emptyAgentTestSpec()} onChange={agentTestSpec => patch({ agentTestSpec })} />}
+    <AgentSpecEditor value={value.agentTestSpec} onChange={agentTestSpec => patch({ agentTestSpec })} />
   </div>
 }
 
@@ -48,7 +38,7 @@ function AgentSpecEditor({ value, onChange }: { value: AgentTestSpec; onChange: 
 function criterionLines(lines: string[]) { return lines.flatMap(line => { const [criterion, expected] = line.split(/\s*::\s*/u); return criterion && expected ? [{ criterion, expected }] : [] }) }
 function emptyAgentTestSpec(): AgentTestSpec { return { input: '', expectedOutcome: '', requiredTools: [], forbiddenTools: [], requiredActions: [], forbiddenActions: [], argumentAssertions: [], sequenceConstraints: [], businessAssertions: [], artifactAssertions: [], semanticAssertions: [], safetyAssertions: [], executionConstraints: { timeoutMs: 30000, maxSteps: 50, repeatCount: 1 } } }
 export function createEmptyTestCase(): TestCaseContent { return { schemaVersion: 'test-case/v3', title: '', dimension: 'functional', priority: 'P1', requirementRefs: [], executionMethods: ['agent'], preconditions: [], steps: [], expectedResults: [], agentTestSpec: emptyAgentTestSpec() } }
-export function testCaseEditorValid(value: TestCaseContent) { return Boolean(value.schemaVersion === 'test-case/v3' && value.title.trim() && value.executionMethods.length && value.steps.some(item => item.trim()) && value.expectedResults.some(item => item.trim()) && (!value.executionMethods.includes('agent') || value.executionMethods.length === 1 && value.agentTestSpec?.expectedOutcome.trim())) }
+export function testCaseEditorValid(value: TestCaseContent) { return Boolean(value.schemaVersion === 'test-case/v3' && value.title.trim() && value.executionMethods.length === 1 && value.executionMethods[0] === 'agent' && value.steps.some(item => item.trim()) && value.expectedResults.some(item => item.trim()) && value.agentTestSpec.expectedOutcome.trim()) }
 export function executionPendingItems(_value: TestCaseContent) { return [] }
 export function actualExecutionMethod(value: TestCaseContent) { return value.executionMethods.map(item => item.toUpperCase()).join(' + ') }
 export function dimensionLabel(value: TestCaseContent['dimension']) { return ({ functional: '功能', performance: '性能', stability: '稳定性', compatibility: '兼容性', security: '安全' } as const)[value] }

@@ -66,15 +66,14 @@ export function TestExecutionPage({
 
   return <main className="te-shell">
     <header className="te-page-header">
-      <div className="te-page-title"><span><Play /></span><div><h1>测试执行</h1><p>{projectVersion.name} · Deterministic Service + governed Agents + Local Execution Workspace Runner</p></div></div>
-      <div className="te-boundary"><ShieldCheck /><span><small>执行边界</small><b>Agent candidate → Server validation → Runner</b></span></div>
+      <div className="te-page-title"><span><Play /></span><div><h1>Agent Test 执行</h1><p>{projectVersion.name} · Deterministic Service + AgentRunner</p></div></div>
+      <div className="te-boundary"><ShieldCheck /><span><small>执行边界</small><b>Agent Case → Server validation → AgentRunner</b></span></div>
       <button className="te-secondary" onClick={onManageVersions}><Settings2 />项目版本</button>
     </header>
     {model.error && <div className="te-global-error"><b>执行数据未完整加载</b><span>{model.error}</span><button onClick={() => void model.loadCollection()}><RefreshCw />重试</button></div>}
     <div className="te-layout">
       <ExecutionRunPanel
         readiness={model.readiness}
-        environments={model.environments}
         agentsUnderTest={model.agentsUnderTest}
         runs={model.runs}
         run={model.run}
@@ -93,11 +92,9 @@ export function TestExecutionPage({
       <ExecutionTaskPanel
         tasks={model.tasks}
         task={model.task}
-        diff={model.diff}
         busy={model.busy}
         onOpen={openTask}
         onRetry={model.retry}
-        onCompare={model.compareRevisions}
       />
     </div>
   </main>
@@ -108,7 +105,6 @@ function updateExecutionRoute(runId: string, taskId?: string) {
   url.searchParams.set('executionRunId', runId)
   if (taskId) url.searchParams.set('executionTaskId', taskId)
   else url.searchParams.delete('executionTaskId')
-  url.searchParams.delete('executionMaintenanceProposalId')
   window.history.replaceState({}, '', url)
 }
 

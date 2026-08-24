@@ -1,13 +1,12 @@
+import type { FrozenAgentUnderTestSnapshot } from './agent-test-types.js'
 import type {
   TestCaseContent,
   TestCaseExecutionSpec,
   TestCaseTraceability,
   TestDimension,
-  TestExecutionMethod,
   TestExecutionMode,
 } from './test-design-types.js'
 
-/** Execution-owned controlled data definition; TestCase v3 never embeds this shape. */
 export interface TestDataRequirement {
   id: string
   name: string
@@ -44,36 +43,13 @@ export interface FrozenExecutionTestDataSnapshot {
   contentSha256: string
 }
 
-export type ExecutionRunStatus =
-  | 'queued'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'partial'
-  | 'cancelled'
-
-export type ExecutionTaskStatus =
-  | 'pending'
-  | 'script_generating'
-  | 'ready'
-  | 'running'
-  | 'diagnosing'
-  | 'retrying'
-  | 'repairing'
-  | 'passed'
-  | 'failed'
-  | 'blocked'
-  | 'unsupported'
-  | 'waiting_manual'
-  | 'cancelled'
+export type ExecutionRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'partial' | 'cancelled'
+export type ExecutionTaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'blocked' | 'cancelled'
 
 export type FailureDiagnosisCategory =
   | 'product_defect'
-  | 'script_defect'
-  | 'selector_changed'
   | 'environment_defect'
   | 'test_data_defect'
-  | 'flaky'
   | 'assertion_mismatch'
   | 'timeout'
   | 'planning'
@@ -92,30 +68,8 @@ export type FailureDiagnosisCategory =
   | 'business_backend'
   | 'unknown'
 
-export type ExecutionAttemptKind =
-  | 'initial'
-  | 'same_script_retry'
-  | 'infrastructure_retry'
-  | 'post_repair'
-  | 'manual_retry'
-
-export type ExecutionAttemptStatus = 'running' | 'passed' | 'failed' | 'cancelled' | 'infrastructure_error'
-
-export type ScriptGenerationSource = 'agent' | 'cache' | 'repair'
-
-export type ExecutionArtifactType =
-  | 'log'
-  | 'screenshot'
-  | 'trace'
-  | 'video'
-  | 'har'
-  | 'script'
-  | 'package'
-  | 'result'
-  | 'completion_manifest'
-
 export interface FrozenExecutionAgentSnapshot {
-  agentKey: 'execution-implementation' | 'failure-analysis'
+  agentKey: 'failure-analysis'
   configurationId: string
   configurationVersion: number
   configurationSha256: string
@@ -135,29 +89,9 @@ export interface FrozenExecutionAgentSnapshot {
   snapshotSha256: string
 }
 
-export interface ExecutionEnvironmentSnapshot {
-  environmentId: string
-  name: string
-  baseUrl: string
-  targets: Array<{
-    protocol: 'http' | 'https'
-    host: string
-    port: number
-  }>
-  signature: string
-  /** Present only for evidence-driven Agent runs; auth secrets are never frozen here. */
-  agentUnderTest?: import('./agent-test-types.js').FrozenAgentUnderTestSnapshot
-}
-
 export interface ExecutionRunnerSnapshot {
-  kind?: 'playwright' | 'agent'
-  runnerVersion: string
-  playwrightVersion?: string
-  imageReference?: string
-  imageDigest?: string
-  configurationId?: string
-  configurationVersion?: number
-  configurationSha256?: string
+  kind: 'agent'
+  runnerVersion: 'agent-runner/v1'
 }
 
 export interface FrozenExecutionKnowledgeSnapshot {
@@ -185,17 +119,11 @@ export interface ExecutionRun {
   projectId: string
   projectVersionId: string
   handoff: FrozenExecutionHandoffSnapshot
-  environment: ExecutionEnvironmentSnapshot
-  /** Fixed Knowledge index used only as document/historical context. */
+  agentUnderTest: FrozenAgentUnderTestSnapshot
   knowledge?: FrozenExecutionKnowledgeSnapshot
-  /** Runtime data supply is frozen per Run and kept separate from formal case content. */
   testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
-  agents: {
-    /** Legacy UI/API runs only. Agent runs never freeze or call Script Generation/Repair. */
-    executionImplementation?: FrozenExecutionAgentSnapshot
-    failureAnalysis: FrozenExecutionAgentSnapshot
-  }
+  agents: { failureAnalysis: FrozenExecutionAgentSnapshot }
   status: ExecutionRunStatus
   stateVersion: number
   idempotencyKey: string
@@ -217,21 +145,14 @@ export interface FrozenExecutionTaskInput {
   caseRevision: number
   caseContent: TestCaseContent
   caseContentSha256: string
-  method: TestExecutionMethod
+  method: 'agent'
   dimension: TestDimension
   executionSpec: TestCaseExecutionSpec
   executionSpecSha256: string
   traceability?: TestCaseTraceability
   selectionReason?: string
-  readinessOverride?: {
-    reason: string
-    actorId: string
-    createdAt: string
-  }
-  testDataBindings?: Array<{
-    requirement: TestDataRequirement
-    binding: ExecutionTestDataBinding
-  }>
+  readinessOverride?: { reason: string; actorId: string; createdAt: string }
+  testDataBindings?: Array<{ requirement: TestDataRequirement; binding: ExecutionTestDataBinding }>
   inputSha256: string
 }
 
@@ -241,223 +162,16 @@ export interface ExecutionTask {
   input: FrozenExecutionTaskInput
   status: ExecutionTaskStatus
   stateVersion: number
-  runnerAttemptCount: number
-  sameScriptRetryCount: number
-  repairCount: number
-  currentScriptRevisionId?: string
-  unsupportedReason?: string
   error?: string
   createdAt: string
   updatedAt: string
   finishedAt?: string
 }
 
-export interface ExecutionAssertionContract {
-  verificationCheckKey: string
-  verificationCheckSha256: string
-  anchor: string
-  matcher: string
-  modifiers: string[]
-  expectedSemanticsSha256: string
-}
-
-export interface ExecutionPackageFile {
-  path: string
-  content: string
-  contentSha256: string
-  size: number
-}
-
-export interface ExecutionPackageManifest {
-  schemaVersion: 'execution-package/v1'
-  taskId: string
-  caseId: string
-  caseRevision: number
-  method: 'ui' | 'api'
-  entrypoint: string
-  taskInputSha256: string
-  caseContentSha256: string
-  executionSpecSha256: string
-  environmentSignature: string
-  files: Array<Pick<ExecutionPackageFile, 'path' | 'contentSha256' | 'size'>>
-  assertions: ExecutionAssertionContract[]
-  protectedAssertionSha256: string
-  packageSha256: string
-}
-
-export interface ExecutionPackage {
-  manifest: ExecutionPackageManifest
-  files: ExecutionPackageFile[]
-}
-
-export interface ExecutionPackageCandidate {
-  /** Persistent ProjectVersion workspace entry owned by the Execution Binding. */
-  entryFile: string
-  files: Array<{
-    path: string
-    content: string
-  }>
-  summary?: string
-}
-
-/** Intelligent classification only. Service owns all execution identities and policy. */
 export interface FailureDiagnosisCandidate {
   category: FailureDiagnosisCategory
   reason: string
   evidence: string
-}
-
-export interface ScriptArtifact {
-  id: string
-  cacheKey: string
-  caseId: string
-  caseRevision: number
-  method: 'ui' | 'api'
-  caseContentSha256: string
-  executionSpecSha256: string
-  /** Prevents cache reuse across different frozen runtime data bindings. */
-  taskInputSha256?: string
-  environmentSignature: string
-  executionImplementationAgentVersion: number
-  executionImplementationAgentConfigurationSha256: string
-  createdAt: string
-}
-
-export interface ScriptRevision {
-  id: string
-  runId: string
-  taskId: string
-  scriptArtifactId: string
-  revision: number
-  parentRevisionId?: string
-  cacheSourceRevisionId?: string
-  source: ScriptGenerationSource
-  repairReason?: string
-  generatedBy: FrozenExecutionAgentSnapshot
-  package: ExecutionPackageManifest
-  /** Immutable source Artifact for every file in the executed dependency closure. */
-  sourceArtifacts: Array<{
-    path: string
-    artifactId: string
-  }>
-  sourceArtifactId: string
-  contentSha256: string
-  protectedAssertionSha256: string
-  createdAt: string
-}
-
-export interface ExecutionAttempt {
-  id: string
-  runId: string
-  taskId: string
-  ordinal: number
-  invocationKey: string
-  kind: ExecutionAttemptKind
-  scriptRevisionId: string
-  packageSha256: string
-  status: ExecutionAttemptStatus
-  startedAt: string
-  finishedAt?: string
-  durationMs?: number
-  exitCode?: number
-  summary?: string
-  error?: string
-}
-
-export type ExecutionEventType =
-  | 'runner'
-  | 'step'
-  | 'navigate'
-  | 'click'
-  | 'fill'
-  | 'assertion'
-  | 'http'
-  | 'screenshot'
-  | 'trace'
-  | 'video'
-  | 'failure'
-  | 'retry'
-
-export type ExecutionEventStatus = 'running' | 'passed' | 'failed' | 'skipped'
-
-/** Structured Runner observation. It never drives the execution state machine. */
-export interface ExecutionEvent {
-  id: string
-  runId: string
-  taskId: string
-  attemptId: string
-  sequence: number
-  type: ExecutionEventType
-  title: string
-  status: ExecutionEventStatus
-  startedAt: string
-  finishedAt?: string
-  durationMs?: number
-  artifactIds?: string[]
-  metadata?: Record<string, unknown>
-}
-
-/** Runner-side event before Service assigns aggregate IDs and Artifact IDs. */
-export type RunnerExecutionEvent = Omit<
-  ExecutionEvent,
-  'id' | 'runId' | 'taskId' | 'attemptId' | 'artifactIds'
-> & {
-  artifactSha256s?: string[]
-}
-
-export interface FailureDiagnosisEvidence {
-  attemptId: string
-  artifactId?: string
-  observation: string
-}
-
-export interface FailureDiagnosis {
-  id: string
-  runId: string
-  taskId: string
-  scriptRevisionId: string
-  attemptIds: string[]
-  category: FailureDiagnosisCategory
-  confidence: number
-  summary: string
-  evidence: FailureDiagnosisEvidence[]
-  repairable: boolean
-  recommendedAction: string
-  source: 'agent' | 'deterministic'
-  agent?: FrozenExecutionAgentSnapshot
-  createdAt: string
-}
-
-export interface ExecutionArtifact {
-  id: string
-  runId: string
-  taskId?: string
-  attemptId?: string
-  type: ExecutionArtifactType
-  storagePath: string
-  sha256: string
-  size: number
-  mimeType: string
-  createdAt: string
-}
-
-export interface CaseMaintenanceProposal {
-  id: string
-  runId: string
-  taskId: string
-  caseId: string
-  caseRevision: number
-  diagnosisId: string
-  scriptRevisionId: string
-  status: 'pending' | 'accepted' | 'rejected'
-  summary: string
-  proposedChange: string
-  baselineLibraryVersionId: string
-  baselineLibraryVersionSha256: string
-  promotedCaseChangeProposalId?: string
-  decidedBy?: string
-  decidedAt?: string
-  createdAt: string
 }
 
 export interface ExecutionJob {
@@ -475,63 +189,7 @@ export interface ExecutionJob {
   heartbeatAt?: string
   cancelRequestedAt?: string
   error?: string
-  request?: {
-    kind: 'manual_retry'
-    idempotencyKey: string
-    requestedBy: string
-  }
+  request?: { kind: 'manual_retry'; idempotencyKey: string; requestedBy: string }
   createdAt: string
   updatedAt: string
-}
-
-export type ExplorationValidationStatus = 'validated' | 'needs_validation' | 'invalid'
-
-export interface ExplorationSchemaShape {
-  type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null' | 'unknown'
-  properties?: Record<string, ExplorationSchemaShape>
-  required?: string[]
-  items?: ExplorationSchemaShape
-  redacted?: true
-}
-
-/**
- * Redacted, runtime-observed HTTP behavior. This is intentionally a schema
- * summary rather than a request/response recording: real values never cross
- * the Exploration Context persistence boundary.
- */
-export interface HttpExplorationObservation {
-  type: 'http_endpoint'
-  method: string
-  origin: string
-  path: string
-  queryParams: string[]
-  requestHeaders: Record<string, string>
-  requestSchema?: ExplorationSchemaShape
-  responseStatus?: number
-  responseSchema?: ExplorationSchemaShape
-  contentType?: string
-  observedFrom: {
-    page: string
-    action: string
-    actionType: 'navigate' | 'click' | 'fill' | 'select' | 'wait' | 'other'
-    sequence: number
-  }
-  confidence: number
-}
-
-/** ProjectVersion-owned reusable runtime knowledge; never Requirement truth. */
-export interface ProjectVersionExplorationResult extends HttpExplorationObservation {
-  id: string
-  projectVersionId: string
-  sourceCaseId: string
-  environmentSignature: string
-  source: 'ui_exploration' | 'api_exploration'
-  validationStatus: ExplorationValidationStatus
-  observedAt: string
-  createdAt: string
-  updatedAt: string
-  sourceRunId?: string
-  sourceTaskId?: string
-  inheritedFromProjectVersionId?: string
-  inheritedFromExplorationId?: string
 }

@@ -419,31 +419,349 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": { "const": "test-case-design/v3" },
+          "schemaVersion": {
+            "const": "test-case-design/v3"
+          },
           "cases": {
             "type": "array",
             "maxItems": 2000,
             "items": {
               "type": "object",
               "properties": {
-                "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
-                "schemaVersion": { "const": "test-case/v3" },
-                "title": { "type": "string", "minLength": 1, "maxLength": 500 },
-                "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
-                "priority": { "enum": ["P0", "P1", "P2", "P3"] },
-                "requirementRefs": { "type": "array", "maxItems": 1000, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "executionMethods": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["ui", "api", "agent"] } },
-                "preconditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "steps": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-                "expectedResults": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-                "agentTestSpec": { "type": "object", "properties": { "input": {}, "context": { "type": "object", "additionalProperties": true }, "expectedOutcome": { "type": "string", "minLength": 1, "maxLength": 4000 }, "requiredTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "requiredActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "argumentAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "tool": { "type": "string" }, "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["tool", "path", "operator"], "additionalProperties": false } }, "sequenceConstraints": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "before": { "type": "string" }, "after": { "type": "string" } }, "required": ["before", "after"], "additionalProperties": false } }, "businessAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["path", "operator"], "additionalProperties": false } }, "artifactAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }, "semanticAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "safetyAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "executionConstraints": { "type": "object", "properties": { "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 600000 }, "maxSteps": { "type": "integer", "minimum": 1, "maximum": 10000 }, "repeatCount": { "type": "integer", "minimum": 1, "maximum": 50 }, "maxCost": { "type": "number", "minimum": 0 } }, "required": ["timeoutMs", "maxSteps", "repeatCount"], "additionalProperties": false } }, "required": ["input", "expectedOutcome", "requiredTools", "forbiddenTools", "requiredActions", "forbiddenActions", "argumentAssertions", "sequenceConstraints", "businessAssertions", "artifactAssertions", "semanticAssertions", "safetyAssertions", "executionConstraints"], "additionalProperties": false }
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "schemaVersion": {
+                  "const": "test-case/v3"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "dimension": {
+                  "enum": [
+                    "functional",
+                    "performance",
+                    "stability",
+                    "compatibility",
+                    "security"
+                  ]
+                },
+                "priority": {
+                  "enum": [
+                    "P0",
+                    "P1",
+                    "P2",
+                    "P3"
+                  ]
+                },
+                "requirementRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "executionMethods": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "items": {
+                    "const": "agent"
+                  }
+                },
+                "preconditions": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "steps": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 200,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "expectedResults": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 200,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "agentTestSpec": {
+                  "type": "object",
+                  "properties": {
+                    "input": {},
+                    "context": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "expectedOutcome": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4000
+                    },
+                    "requiredTools": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "forbiddenTools": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "requiredActions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "forbiddenActions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "argumentAssertions": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tool": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "operator": {
+                            "enum": [
+                              "equals",
+                              "not_equals",
+                              "contains",
+                              "matches",
+                              "exists"
+                            ]
+                          },
+                          "expected": {}
+                        },
+                        "required": [
+                          "tool",
+                          "path",
+                          "operator"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "sequenceConstraints": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "before": {
+                            "type": "string"
+                          },
+                          "after": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "before",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "businessAssertions": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "operator": {
+                            "enum": [
+                              "equals",
+                              "not_equals",
+                              "contains",
+                              "matches",
+                              "exists"
+                            ]
+                          },
+                          "expected": {}
+                        },
+                        "required": [
+                          "path",
+                          "operator"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "artifactAssertions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "semanticAssertions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "criterion": {
+                            "type": "string"
+                          },
+                          "expected": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "criterion",
+                          "expected"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "safetyAssertions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "criterion": {
+                            "type": "string"
+                          },
+                          "expected": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "criterion",
+                          "expected"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "executionConstraints": {
+                      "type": "object",
+                      "properties": {
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 600000
+                        },
+                        "maxSteps": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 10000
+                        },
+                        "repeatCount": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 50
+                        },
+                        "maxCost": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "timeoutMs",
+                        "maxSteps",
+                        "repeatCount"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "input",
+                    "expectedOutcome",
+                    "requiredTools",
+                    "forbiddenTools",
+                    "requiredActions",
+                    "forbiddenActions",
+                    "argumentAssertions",
+                    "sequenceConstraints",
+                    "businessAssertions",
+                    "artifactAssertions",
+                    "semanticAssertions",
+                    "safetyAssertions",
+                    "executionConstraints"
+                  ],
+                  "additionalProperties": false
+                }
               },
-              "required": ["ref", "schemaVersion", "title", "dimension", "priority", "requirementRefs", "executionMethods", "preconditions", "steps", "expectedResults"],
+              "required": [
+                "ref",
+                "schemaVersion",
+                "title",
+                "dimension",
+                "priority",
+                "requirementRefs",
+                "executionMethods",
+                "preconditions",
+                "steps",
+                "expectedResults",
+                "agentTestSpec"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["schemaVersion", "cases"],
+        "required": [
+          "schemaVersion",
+          "cases"
+        ],
         "additionalProperties": false
       }
     },
@@ -463,239 +781,365 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "schemaVersion": { "const": "test-design-repair/v3" },
-          "baseCandidateSha256": { "type": "string", "minLength": 64, "maxLength": 64 },
+          "schemaVersion": {
+            "const": "test-design-repair/v3"
+          },
+          "baseCandidateSha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
           "upsertCases": {
             "type": "array",
             "maxItems": 2000,
             "items": {
               "type": "object",
               "properties": {
-                "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
-                "schemaVersion": { "const": "test-case/v3" },
-                "title": { "type": "string", "minLength": 1, "maxLength": 500 },
-                "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
-                "priority": { "enum": ["P0", "P1", "P2", "P3"] },
-                "requirementRefs": { "type": "array", "maxItems": 1000, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "executionMethods": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["ui", "api", "agent"] } },
-                "preconditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-                "steps": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-                "expectedResults": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-                "agentTestSpec": { "type": "object", "properties": { "input": {}, "context": { "type": "object", "additionalProperties": true }, "expectedOutcome": { "type": "string", "minLength": 1, "maxLength": 4000 }, "requiredTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "requiredActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "argumentAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "tool": { "type": "string" }, "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["tool", "path", "operator"], "additionalProperties": false } }, "sequenceConstraints": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "before": { "type": "string" }, "after": { "type": "string" } }, "required": ["before", "after"], "additionalProperties": false } }, "businessAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["path", "operator"], "additionalProperties": false } }, "artifactAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }, "semanticAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "safetyAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "executionConstraints": { "type": "object", "properties": { "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 600000 }, "maxSteps": { "type": "integer", "minimum": 1, "maximum": 10000 }, "repeatCount": { "type": "integer", "minimum": 1, "maximum": 50 }, "maxCost": { "type": "number", "minimum": 0 } }, "required": ["timeoutMs", "maxSteps", "repeatCount"], "additionalProperties": false } }, "required": ["input", "expectedOutcome", "requiredTools", "forbiddenTools", "requiredActions", "forbiddenActions", "argumentAssertions", "sequenceConstraints", "businessAssertions", "artifactAssertions", "semanticAssertions", "safetyAssertions", "executionConstraints"], "additionalProperties": false }
-              },
-              "required": ["ref", "schemaVersion", "title", "dimension", "priority", "requirementRefs", "executionMethods", "preconditions", "steps", "expectedResults"],
-              "additionalProperties": false
-            }
-          },
-          "removeCaseRefs": { "type": "array", "maxItems": 1000, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
-        },
-        "required": ["schemaVersion", "baseCandidateSha256", "upsertCases", "removeCaseRefs"],
-        "additionalProperties": false
-      }
-    },
-    "browser.snapshot": {
-      "version": "1.0.0",
-      "piName": "browser_snapshot",
-      "label": "读取当前页面快照",
-      "catalogName": "Browser 页面快照",
-      "description": "读取当前受控 Browser Session 的页面结构；可在页面变化后再次调用。",
-      "catalogDescription": "读取当前测试执行 Browser Session 的受控页面结构。",
-      "risk": "network_read",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/playwright-browser-tools.ts",
-      "handlerKey": "browser.snapshot",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
-    },
-    "browser.click": {
-      "version": "1.0.0",
-      "piName": "browser_click",
-      "label": "点击已观察元素",
-      "catalogName": "Browser 点击",
-      "description": "点击当前 Browser Session 最近页面快照中已观察到的元素 ref；不接受 Selector 或 JavaScript。",
-      "catalogDescription": "点击受控页面快照中已观察到的元素。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/playwright-browser-tools.ts",
-      "handlerKey": "browser.click",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "target": { "type": "string", "minLength": 1, "maxLength": 120, "description": "最近页面快照中出现的元素 ref，例如 e12。" }
-        },
-        "required": ["target"],
-        "additionalProperties": false
-      }
-    },
-    "browser.fill": {
-      "version": "1.0.0",
-      "piName": "browser_fill",
-      "label": "填写已观察输入控件",
-      "catalogName": "Browser 填写",
-      "description": "向最近页面快照中已观察到的输入控件填写冻结 TestCase 或 Runtime 已授权的测试数据。",
-      "catalogDescription": "使用受控测试数据填写已观察输入控件。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/playwright-browser-tools.ts",
-      "handlerKey": "browser.fill",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "target": { "type": "string", "minLength": 1, "maxLength": 120, "description": "最近页面快照中出现的输入元素 ref。" },
-          "text": { "type": "string", "maxLength": 4000, "description": "来自冻结 TestCase、Test Data 或 Runtime 授权 Context 的值。" }
-        },
-        "required": ["target", "text"],
-        "additionalProperties": false
-      }
-    },
-    "browser.get_locator": {
-      "version": "1.0.0",
-      "piName": "browser_get_locator",
-      "label": "生成稳定 Locator",
-      "catalogName": "Browser Locator",
-      "description": "把最近页面快照中已观察到的元素 ref 转换为 Playwright Locator 建议。",
-      "catalogDescription": "为已观察元素生成稳定 Playwright Locator。",
-      "risk": "network_read",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/playwright-browser-tools.ts",
-      "handlerKey": "browser.get_locator",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "target": { "type": "string", "minLength": 1, "maxLength": 120, "description": "最近页面快照中出现的元素 ref。" }
-        },
-        "required": ["target"],
-        "additionalProperties": false
-      }
-    },
-    "browser.requests": {
-      "version": "1.0.0",
-      "piName": "browser_requests",
-      "label": "列出已观察业务请求",
-      "catalogName": "Browser 请求列表",
-      "description": "列出当前 Browser Session 中真实发生且通过同源、静态资源和跟踪请求过滤的业务请求。",
-      "catalogDescription": "列出当前受控 Session 已观察到的脱敏业务请求。",
-      "risk": "network_read",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/playwright-browser-tools.ts",
-      "handlerKey": "browser.requests",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
-    },
-    "browser.request_detail": {
-      "version": "1.0.0",
-      "piName": "browser_request_detail",
-      "label": "读取已观察请求详情",
-      "catalogName": "Browser 请求详情",
-      "description": "根据 browser.requests 返回的当前 Session requestRef 读取结构化、脱敏的请求与响应详情。",
-      "catalogDescription": "读取当前 Session 已观察请求的脱敏详情。",
-      "risk": "network_read",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/playwright-browser-tools.ts",
-      "handlerKey": "browser.request_detail",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "requestRef": { "type": "string", "minLength": 1, "maxLength": 120, "description": "browser.requests 在当前 Session 返回的不透明请求引用。" }
-        },
-        "required": ["requestRef"],
-        "additionalProperties": false
-      }
-    },
-    "browser.screenshot": {
-      "version": "1.0.0",
-      "piName": "browser_screenshot",
-      "label": "截取受控页面",
-      "catalogName": "Browser 截图",
-      "description": "在当前 Browser Session 中截取整页或已观察元素，并返回受 Runtime 生命周期治理的观察摘要。",
-      "catalogDescription": "截取当前受控 Browser Session 页面。",
-      "risk": "network_read",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/playwright-browser-tools.ts",
-      "handlerKey": "browser.screenshot",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "target": { "type": "string", "minLength": 1, "maxLength": 120, "description": "可选；最近页面快照中出现的元素 ref。" }
-        },
-        "additionalProperties": false
-      }
-    },
-    "execution_implementation.submit_result": {
-      "version": "1.0.0",
-      "piName": "execution_implementation_submit_result",
-      "label": "提交执行实现候选",
-      "catalogName": "提交执行实现候选",
-      "description": "提交 script_generation 或 script_repair Stage 的 Playwright Workspace 源码候选；Service 根据当前 Stage 自动绑定身份、版本和对应 Validator。",
-      "catalogDescription": "提交测试执行实现 Stage 的 Playwright 源码候选。",
-      "risk": "internal_write",
-      "timeoutMs": 30000,
-      "idempotent": false,
-      "sourcePath": "server/tools/requirement-tools.ts",
-      "handlerKey": "execution_implementation.submit_result",
-      "catalogVisible": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "entryFile": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 500
-          },
-          "files": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "properties": {
-                "path": {
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "schemaVersion": {
+                  "const": "test-case/v3"
+                },
+                "title": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 500
                 },
-                "content": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 524288
+                "dimension": {
+                  "enum": [
+                    "functional",
+                    "performance",
+                    "stability",
+                    "compatibility",
+                    "security"
+                  ]
+                },
+                "priority": {
+                  "enum": [
+                    "P0",
+                    "P1",
+                    "P2",
+                    "P3"
+                  ]
+                },
+                "requirementRefs": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "executionMethods": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "items": {
+                    "const": "agent"
+                  }
+                },
+                "preconditions": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "steps": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 200,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "expectedResults": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 200,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "agentTestSpec": {
+                  "type": "object",
+                  "properties": {
+                    "input": {},
+                    "context": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "expectedOutcome": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4000
+                    },
+                    "requiredTools": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "forbiddenTools": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "requiredActions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "forbiddenActions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "argumentAssertions": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tool": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "operator": {
+                            "enum": [
+                              "equals",
+                              "not_equals",
+                              "contains",
+                              "matches",
+                              "exists"
+                            ]
+                          },
+                          "expected": {}
+                        },
+                        "required": [
+                          "tool",
+                          "path",
+                          "operator"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "sequenceConstraints": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "before": {
+                            "type": "string"
+                          },
+                          "after": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "before",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "businessAssertions": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "operator": {
+                            "enum": [
+                              "equals",
+                              "not_equals",
+                              "contains",
+                              "matches",
+                              "exists"
+                            ]
+                          },
+                          "expected": {}
+                        },
+                        "required": [
+                          "path",
+                          "operator"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "artifactAssertions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "semanticAssertions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "criterion": {
+                            "type": "string"
+                          },
+                          "expected": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "criterion",
+                          "expected"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "safetyAssertions": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "criterion": {
+                            "type": "string"
+                          },
+                          "expected": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "criterion",
+                          "expected"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "executionConstraints": {
+                      "type": "object",
+                      "properties": {
+                        "timeoutMs": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 600000
+                        },
+                        "maxSteps": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 10000
+                        },
+                        "repeatCount": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 50
+                        },
+                        "maxCost": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "timeoutMs",
+                        "maxSteps",
+                        "repeatCount"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "input",
+                    "expectedOutcome",
+                    "requiredTools",
+                    "forbiddenTools",
+                    "requiredActions",
+                    "forbiddenActions",
+                    "argumentAssertions",
+                    "sequenceConstraints",
+                    "businessAssertions",
+                    "artifactAssertions",
+                    "semanticAssertions",
+                    "safetyAssertions",
+                    "executionConstraints"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
-                "path",
-                "content"
+                "ref",
+                "schemaVersion",
+                "title",
+                "dimension",
+                "priority",
+                "requirementRefs",
+                "executionMethods",
+                "preconditions",
+                "steps",
+                "expectedResults",
+                "agentTestSpec"
               ],
               "additionalProperties": false
             }
           },
-          "summary": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 500
+          "removeCaseRefs": {
+            "type": "array",
+            "maxItems": 1000,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
           }
         },
         "required": [
-          "entryFile",
-          "files"
+          "schemaVersion",
+          "baseCandidateSha256",
+          "upsertCases",
+          "removeCaseRefs"
         ],
         "additionalProperties": false
       }
@@ -722,19 +1166,61 @@
             "items": {
               "type": "object",
               "properties": {
-                "caseRunId": { "type": "string", "minLength": 1, "maxLength": 500 },
-                "kind": { "enum": ["task_completion", "semantic", "safety"] },
-                "criterion": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                "status": { "enum": ["PASS", "FAIL", "NOT_EVALUABLE"] },
-                "explanation": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "evidenceRefs": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }
+                "caseRunId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "kind": {
+                  "enum": [
+                    "task_completion",
+                    "semantic",
+                    "safety"
+                  ]
+                },
+                "criterion": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "status": {
+                  "enum": [
+                    "PASS",
+                    "FAIL",
+                    "NOT_EVALUABLE"
+                  ]
+                },
+                "explanation": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "evidenceRefs": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
               },
-              "required": ["caseRunId", "kind", "criterion", "status", "explanation", "evidenceRefs"],
+              "required": [
+                "caseRunId",
+                "kind",
+                "criterion",
+                "status",
+                "explanation",
+                "evidenceRefs"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["results"],
+        "required": [
+          "results"
+        ],
         "additionalProperties": false
       }
     },

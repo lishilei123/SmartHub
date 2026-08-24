@@ -10,17 +10,10 @@ export interface ProjectVersionWorkspaceCleaner {
   queueProjectVersionWorkspaceCleanup(projectId: string, projectVersionName: string): Promise<ProjectVersionWorkspaceCleanup>
 }
 
-export interface ProjectVersionExecutionWorkspaceManager {
-  ensure(projectVersionId: string): Promise<unknown>
-  inherit(sourceProjectVersionId: string, targetProjectVersionId: string): Promise<void>
-  remove(projectVersionId: string): Promise<void>
-}
-
 export class ProjectVersionService {
   constructor(
     private readonly store: StateStore,
     private readonly workspaceCleaner?: ProjectVersionWorkspaceCleaner,
-    private readonly executionWorkspace?: ProjectVersionExecutionWorkspaceManager,
   ) {}
 
   async list() {
@@ -47,13 +40,6 @@ export class ProjectVersionService {
       }
       return version
     })
-    if (this.executionWorkspace) {
-      if (input.sourceProjectVersionId && input.inheritRequirementBindings) {
-        await this.executionWorkspace.inherit(input.sourceProjectVersionId, version.id)
-      } else {
-        await this.executionWorkspace.ensure(version.id)
-      }
-    }
     return version
   }
 
@@ -110,7 +96,6 @@ export class ProjectVersionService {
     const workspaceCleanup = this.workspaceCleaner
       ? await this.workspaceCleaner.queueProjectVersionWorkspaceCleanup(deleted.projectId, deleted.name)
       : { taskIds: [], directories: 0, assets: 0 }
-    await this.executionWorkspace?.remove(deleted.id)
     const { projectId: _projectId, ...result } = deleted
     return { ...result, workspaceCleanupTaskIds: workspaceCleanup.taskIds, deletedWorkspaceDirectories: workspaceCleanup.directories, deletedWorkspaceAssets: workspaceCleanup.assets }
   }

@@ -18,12 +18,12 @@ export interface AgentExecutionLimits {
 }
 
 export interface AgentDefinitionVersion {
-  agentKey: 'planning' | 'execution-implementation' | 'failure-analysis'
+  agentKey: 'planning' | 'failure-analysis'
   agentType: 'planning' | 'execution_implementation' | 'failure_analysis'
   version: string
   status: 'published'
   modelScene: 'planning' | 'test_execution'
-  resultSchemaVersion: 'planning/v1' | 'execution-implementation/v1' | 'failure-analysis/v1'
+  resultSchemaVersion: 'planning/v1' | 'failure-analysis/v1'
   systemPrompt: string
   taskTemplate: string
   promptRef: { promptKey: string; version: string; contentSha256: string }
@@ -307,7 +307,7 @@ export interface AgentExecutionInput {
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
-    workflowStage: 'analysis' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'agent_evaluation' | 'failure_diagnosis' | 'script_repair'
+    workflowStage: 'analysis' | 'test_case_design' | 'test_design_repair' | 'agent_evaluation' | 'failure_diagnosis'
     allowedToolIds: string[]
     submitToolId: string
     schemaVersion: string
@@ -448,14 +448,6 @@ export interface TestExecutionAgentSnapshot
   agentDefinition: AgentDefinitionVersion
   /** Runtime-only Pi Session scope; it is not a model-owned workflow field. */
   executionSessionKey: string
-  /** Runtime authorization identity checked by invocation-scoped Browser Tools. */
-  browserAuthorization?: {
-    runId: string
-    taskId: string
-    projectVersionId: string
-    environmentSignature: string
-    stage: 'script_generation' | 'script_repair'
-  }
   taskSha256: string
   createdAt: string
 }

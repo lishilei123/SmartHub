@@ -1,87 +1,17 @@
 import { createHash } from 'node:crypto'
-import type {
-  TestExecutionAgentWorkspaceFile,
-  TestExecutionAgentWorkspaceProjection,
-} from '../domain/agent-types.js'
-import type {
-  ExecutionArtifact,
-  ExecutionAttempt,
-  ExecutionRun,
-  ExecutionTask,
-  FailureDiagnosis,
-  ScriptRevision,
-} from '../domain/test-execution-types.js'
-import type { ExecutionArtifactStore } from '../infrastructure/execution-artifact-store.js'
-import type { TestExecutionStore } from '../infrastructure/test-execution-store.js'
+import type { TestExecutionAgentWorkspaceProjection } from '../domain/agent-types.js'
+import type { ExecutionRun, ExecutionTask } from '../domain/test-execution-types.js'
 import { canonicalJson } from './canonical-json.js'
 import type { TestExecutionWorkspaceProvider } from './test-execution-service.js'
 
-export class FrozenTestExecutionWorkspaceProvider
-implements TestExecutionWorkspaceProvider {
-  constructor(
-    private readonly store: TestExecutionStore,
-    private readonly artifactStore: ExecutionArtifactStore,
-  ) {}
-
-  async project(input: {
-    run: ExecutionRun
-    task: ExecutionTask
-    scriptRevision?: ScriptRevision
-    attempts: readonly ExecutionAttempt[]
-    diagnoses: readonly FailureDiagnosis[]
-    artifacts: readonly ExecutionArtifact[]
-  }): Promise<TestExecutionAgentWorkspaceProjection> {
-    assertScope(input)
-    const rootLogicalPath = executionRoot(input.run.id, input.task.id)
+export class FrozenTestExecutionWorkspaceProvider implements TestExecutionWorkspaceProvider {
+  async project(input: { run: ExecutionRun; task: ExecutionTask }): Promise<TestExecutionAgentWorkspaceProjection> {
+    if (input.task.runId !== input.run.id) throw new Error('TEST_EXECUTION_WORKSPACE_TASK_SCOPE_INVALID')
+    const rootLogicalPath = `test-execution/${input.run.id}/${input.task.id}`
     const files = [
-      workspaceJson(
-        `${rootLogicalPath}/run.json`,
-        '冻结执行运行',
-        frozenRunView(input.run),
-      ),
-      workspaceJson(
-        `${rootLogicalPath}/task.json`,
-        '冻结执行任务',
-        input.task,
-      ),
-      workspaceJson(
-        `${rootLogicalPath}/attempts.json`,
-        '不可变 Runner Attempts',
-        orderedAttempts(input.attempts),
-      ),
-      workspaceJson(
-        `${rootLogicalPath}/diagnoses.json`,
-        '不可变失败诊断',
-        orderedDiagnoses(input.diagnoses),
-      ),
-      workspaceJson(
-        `${rootLogicalPath}/artifacts.json`,
-        '执行 Artifact 元数据',
-        orderedArtifacts(input.artifacts),
-      ),
+      workspaceJson(`${rootLogicalPath}/run.json`, '冻结 Agent Test Run', frozenRunView(input.run)),
+      workspaceJson(`${rootLogicalPath}/task.json`, '冻结 Agent Test Task', input.task),
     ]
-    if (input.scriptRevision) {
-      const sources = await this.readRevisionSources(input)
-      const source = sources.find(file => file.path === input.scriptRevision!.package.entrypoint)
-      if (!source) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
-      files.push(
-        workspaceJson(
-          `${rootLogicalPath}/script-revision.json`,
-          '当前 ScriptRevision',
-          input.scriptRevision,
-        ),
-        workspaceFile(
-          `${rootLogicalPath}/current.spec.ts`,
-          '当前受保护 Playwright 脚本',
-          source.content,
-        ),
-        ...sources.map(file => workspaceFile(
-          `${rootLogicalPath}/revision-source/${file.path}`,
-          `当前 ScriptRevision 依赖 · ${file.path}`,
-          file.content,
-        )),
-      )
-    }
     return {
       runId: input.run.id,
       taskId: input.task.id,
@@ -89,8 +19,8 @@ implements TestExecutionWorkspaceProvider {
       projectName: input.run.projectId,
       projectVersionId: input.run.projectVersionId,
       projectVersionName: input.run.projectVersionId,
-      knowledgeBaseId: input.run.knowledge?.knowledgeBaseId ?? `test-execution:${input.run.projectId}`,
-      indexVersionId: input.run.knowledge?.indexVersionId ?? `test-execution:${input.run.handoff.handoffSha256}`,
+      knowledgeBaseId: input.run.knowledge?.knowledgeBaseId ?? `agent-test:${input.run.projectId}`,
+      indexVersionId: input.run.knowledge?.indexVersionId ?? `agent-test:${input.run.handoff.handoffSha256}`,
       assets: [],
       documentWorkspace: {
         mode: 'agent_directory',
@@ -102,103 +32,8 @@ implements TestExecutionWorkspaceProvider {
         layoutVersion: 'workspace/v1',
         candidateAssetVersionIds: [],
       },
-      workspaceFiles: files.sort((left, right) =>
-        left.logicalPath.localeCompare(right.logicalPath, 'en')),
+      workspaceFiles: files,
     }
-  }
-
-  private async readRevisionSources(input: {
-    run: ExecutionRun
-    task: ExecutionTask
-    scriptRevision?: ScriptRevision
-  }) {
-    const revision = input.scriptRevision!
-    if (
-      revision.sourceArtifacts.length !== revision.package.files.length
-      || revision.sourceArtifacts.some((file, index) => file.path !== revision.package.files[index].path)
-      || revision.sourceArtifacts.find(file => file.path === revision.package.entrypoint)?.artifactId !== revision.sourceArtifactId
-    ) {
-      throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
-    }
-    let packageBytes = 0
-    return await Promise.all(revision.sourceArtifacts.map(async (reference, index) => {
-      const manifestFile = revision.package.files[index]
-      const artifact = await this.store.getArtifact(reference.artifactId)
-      if (
-        !artifact
-        || artifact.runId !== input.run.id
-        || artifact.taskId !== input.task.id
-        || artifact.attemptId
-        || artifact.type !== 'script'
-        || artifact.sha256 !== manifestFile.contentSha256
-        || artifact.size !== manifestFile.size
-      ) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
-      const metadata = await this.artifactStore.stat(artifact.storagePath)
-      if (metadata.sha256 !== artifact.sha256 || metadata.size !== artifact.size) {
-        throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_DRIFT')
-      }
-      const stream = await this.artifactStore.open(artifact.storagePath)
-      const chunks: Buffer[] = []
-      let bytes = 0
-      for await (const value of stream) {
-        const chunk = Buffer.from(value)
-        bytes += chunk.length
-        if (bytes > 512 * 1024) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_TOO_LARGE')
-        chunks.push(chunk)
-      }
-      packageBytes += bytes
-      if (packageBytes > 4 * 1024 * 1024) throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_TOO_LARGE')
-      const source = Buffer.concat(chunks).toString('utf8')
-      if (!source || bytes !== artifact.size || sha256(source) !== artifact.sha256) {
-        throw new Error('TEST_EXECUTION_WORKSPACE_SCRIPT_ARTIFACT_INVALID')
-      }
-      return { path: reference.path, content: source }
-    }))
-  }
-}
-
-function assertScope(input: {
-  run: ExecutionRun
-  task: ExecutionTask
-  scriptRevision?: ScriptRevision
-  attempts: readonly ExecutionAttempt[]
-  diagnoses: readonly FailureDiagnosis[]
-  artifacts: readonly ExecutionArtifact[]
-}) {
-  if (input.task.runId !== input.run.id) {
-    throw new Error('TEST_EXECUTION_WORKSPACE_TASK_SCOPE_INVALID')
-  }
-  if (
-    input.scriptRevision
-    && (
-      input.scriptRevision.runId !== input.run.id
-      || input.scriptRevision.taskId !== input.task.id
-      || input.scriptRevision.id !== input.task.currentScriptRevisionId
-    )
-  ) {
-    throw new Error('TEST_EXECUTION_WORKSPACE_REVISION_SCOPE_INVALID')
-  }
-  if (input.attempts.some(attempt =>
-    attempt.runId !== input.run.id
-    || attempt.taskId !== input.task.id
-    || (
-      input.scriptRevision
-      && attempt.scriptRevisionId !== input.scriptRevision.id
-    ))) {
-    throw new Error('TEST_EXECUTION_WORKSPACE_ATTEMPT_SCOPE_INVALID')
-  }
-  if (input.diagnoses.some(diagnosis =>
-    diagnosis.runId !== input.run.id
-    || diagnosis.taskId !== input.task.id)) {
-    throw new Error('TEST_EXECUTION_WORKSPACE_DIAGNOSIS_SCOPE_INVALID')
-  }
-  const attemptIds = new Set(input.attempts.map(attempt => attempt.id))
-  if (input.artifacts.some(artifact =>
-    artifact.runId !== input.run.id
-    || artifact.taskId !== input.task.id
-    || !artifact.attemptId
-    || !attemptIds.has(artifact.attemptId))) {
-    throw new Error('TEST_EXECUTION_WORKSPACE_ARTIFACT_SCOPE_INVALID')
   }
 }
 
@@ -208,7 +43,7 @@ function frozenRunView(run: ExecutionRun) {
     projectId: run.projectId,
     projectVersionId: run.projectVersionId,
     handoff: run.handoff,
-    environment: run.environment,
+    agentUnderTest: run.agentUnderTest,
     ...(run.knowledge ? { knowledge: run.knowledge } : {}),
     runner: run.runner,
     agents: run.agents,
@@ -222,71 +57,12 @@ function frozenRunView(run: ExecutionRun) {
   }
 }
 
-function orderedAttempts(attempts: readonly ExecutionAttempt[]) {
-  return attempts
-    .slice()
-    .sort((left, right) => left.ordinal - right.ordinal)
-}
-
-function orderedDiagnoses(diagnoses: readonly FailureDiagnosis[]) {
-  return diagnoses
-    .slice()
-    .sort((left, right) =>
-      left.createdAt.localeCompare(right.createdAt)
-      || left.id.localeCompare(right.id))
-}
-
-function orderedArtifacts(artifacts: readonly ExecutionArtifact[]) {
-  return artifacts
-    .map(artifact => ({
-      id: artifact.id,
-      runId: artifact.runId,
-      taskId: artifact.taskId,
-      attemptId: artifact.attemptId,
-      type: artifact.type,
-      sha256: artifact.sha256,
-      size: artifact.size,
-      mimeType: artifact.mimeType,
-      createdAt: artifact.createdAt,
-    }))
-    .sort((left, right) =>
-      String(left.attemptId).localeCompare(String(right.attemptId))
-      || left.type.localeCompare(right.type)
-      || left.id.localeCompare(right.id))
-}
-
-function workspaceJson(
-  logicalPath: string,
-  displayName: string,
-  value: unknown,
-) {
-  return workspaceFile(logicalPath, displayName, canonicalJson(value))
-}
-
-function workspaceFile(
-  logicalPath: string,
-  displayName: string,
-  content: string,
-): TestExecutionAgentWorkspaceFile {
+function workspaceJson(logicalPath: string, displayName: string, value: unknown) {
+  const content = canonicalJson(value)
   return {
     logicalPath,
     displayName,
     content,
-    contentSha256: sha256(content),
+    contentSha256: createHash('sha256').update(content, 'utf8').digest('hex'),
   }
-}
-
-function executionRoot(runId: string, taskId: string) {
-  return `test-execution/${safePathIdentity(runId)}/${safePathIdentity(taskId)}`
-}
-
-function safePathIdentity(value: string) {
-  if (!/^[A-Za-z0-9._-]{1,200}$/u.test(value)) {
-    throw new Error('TEST_EXECUTION_WORKSPACE_IDENTITY_INVALID')
-  }
-  return value
-}
-
-function sha256(value: string) {
-  return createHash('sha256').update(value, 'utf8').digest('hex')
 }

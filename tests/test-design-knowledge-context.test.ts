@@ -13,6 +13,7 @@ import type { RetrievalSnapshot, TestDesign, TestDesignWorkflowRun, TestDesignWo
 import type { RequirementReleaseContent } from '../server/domain/requirement-workflow-types.js'
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
+const agentSpec = () => ({ input: '执行 CRUD 任务', expectedOutcome: '完整业务闭环符合 Requirement', requiredTools: [], forbiddenTools: [], requiredActions: [], forbiddenActions: [], argumentAssertions: [], sequenceConstraints: [], businessAssertions: [], artifactAssertions: [], semanticAssertions: [], safetyAssertions: [], executionConstraints: { timeoutMs: 30_000, maxSteps: 20, repeatCount: 1 } })
 
 test('冻结 Retrieval Hits 经确定性裁剪后直接进入 TestCase Design Runtime 上下文', () => {
   const retrieval = retrievalSnapshot()
@@ -39,7 +40,7 @@ test('冻结 Retrieval Hits 经确定性裁剪后直接进入 TestCase Design Ru
   assert.match(parsed.instructions.join('\n'), /合法枚举集合只证明值属于业务集合/u)
   assert.match(parsed.instructions.join('\n'), /in_progress → todo 是可独立失败的明确回退风险/u)
   assert.match(parsed.instructions.join('\n'), /必须返回 A 且不返回 B/u)
-  assert.match(parsed.instructions.join('\n'), /默认使用一条 Case 并选择 executionMethods: \[ui, api\]/u)
+  assert.match(parsed.instructions.join('\n'), /executionMethods 必须固定为 \[agent\]/u)
 })
 
 test('Retrieval Query 直接使用 Requirement、answered Clarification 与 TestDesign 正式输入', () => {
@@ -50,7 +51,7 @@ test('Retrieval Query 直接使用 Requirement、answered Clarification 与 Test
     includedScopes: [{ kind: 'module', value: '任务管理' }],
     excludedScopes: [{ kind: 'module', value: '历史归档' }],
     focusDimensions: ['functional', 'stability'],
-    executionMethods: ['ui', 'api'],
+    executionMethods: ['agent'],
     knowledgeAugmentation: { mode: 'disabled' },
   }, content)
   const queries = plan.map(item => item.query).join('\n')
@@ -76,11 +77,12 @@ test('Requirement Analysis 与 Release 不再携带额外测试中间列表，Te
     dimension: 'functional',
     priority: 'P1',
     requirementRefs: ['RP-STATE'],
-    executionMethods: ['ui', 'api'],
+    executionMethods: ['agent'],
     preconditions: ['已登录'],
     steps: ['Create → Read → Update → Read → Delete → Read'],
     expectedResults: ['完整业务闭环符合 Requirement'],
-  })).sort(), ['dimension', 'executionMethods', 'expectedResults', 'preconditions', 'priority', 'requirementRefs', 'schemaVersion', 'steps', 'title'])
+    agentTestSpec: agentSpec(),
+  })).sort(), ['agentTestSpec', 'dimension', 'executionMethods', 'expectedResults', 'preconditions', 'priority', 'requirementRefs', 'schemaVersion', 'steps', 'title'])
 
   const requirementTypes = read('../server/domain/requirement-workflow-types.ts')
   const types = read('../server/domain/test-design-types.ts')
@@ -110,7 +112,7 @@ test('Skill 区分枚举与状态机、补齐明确非法边并强化查询正�
   assert.match(skill, /Do not generate a mathematical Requirement × state-combination matrix/u)
   assert.match(skill, /searching that keyword must return A and exclude B/u)
   assert.match(skill, /Do not invent fuzzy matching, case sensitivity, trimming, tokenization, or searched fields/u)
-  assert.match(skill, /Agent Case 使用 `executionMethods: \[agent\]`/u)
+  assert.match(skill, /每个 Case 必须使用 `executionMethods: \[agent\]`/u)
   assert.match(skill, /partial order rather than a fabricated complete Trace/u)
   assert.match(skill, /Call `knowledge\.read_chunk` only when a search hit needs fuller context/u)
   assert.match(skill, /revise the query and continue searching/u)
@@ -186,7 +188,7 @@ function run(retrievalSnapshot: RetrievalSnapshot): TestDesignWorkflowRun {
 }
 
 function design(): TestDesign {
-  return { id: 'design-knowledge', projectVersionId: 'project-version-1', projectId: 'project-1', name: '知识增强测试设计', objective: '验证任务状态与查询一致性', input: { name: '知识增强测试设计', objective: '验证任务状态与查询一致性', includedScopes: [], excludedScopes: [], focusDimensions: ['functional'], executionMethods: ['ui', 'api'], knowledgeAugmentation: { mode: 'fixed_index', indexVersionId: 'index-1' } }, logicalInputSha256: 'd'.repeat(64), createdBy: 'tester', createdAt: '2026-08-22T00:00:00.000Z' }
+  return { id: 'design-knowledge', projectVersionId: 'project-version-1', projectId: 'project-1', name: '知识增强测试设计', objective: '验证任务状态与查询一致性', input: { name: '知识增强测试设计', objective: '验证任务状态与查询一致性', includedScopes: [], excludedScopes: [], focusDimensions: ['functional'], executionMethods: ['agent'], knowledgeAugmentation: { mode: 'fixed_index', indexVersionId: 'index-1' } }, logicalInputSha256: 'd'.repeat(64), createdBy: 'tester', createdAt: '2026-08-22T00:00:00.000Z' }
 }
 
 function workspace(): TestDesignWorkspaceSnapshot {

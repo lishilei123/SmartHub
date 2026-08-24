@@ -202,7 +202,7 @@ function testDesignStageInstructions(stage: TestDesignStage) {
           '从 functional、performance、stability、compatibility、security 五个方向思考，只生成有价值的场景；不要求每个维度都有 Case，也不提交适用性表。这是 PlanningAgent 的设计与 Self Review 方法，不是 Validator Gate。',
           '提交前在当前 Planning Session 内执行一次 Self Review：重新检查异常路径、边界条件、非法输入、明确状态机的合法路径与反向/跳级非法边、重复操作、查询准确性、数据一致性、权限风险、历史缺陷，以及已读取 Knowledge 明确提示的风险。对每个发现同时核对本轮 Candidate Delta 与冻结 Historical Baseline；若它可独立失败且没有已有 Case 覆盖，补充独立 Case，否则不要为了增加数量机械补 Case。',
           '筛选、搜索、查询 Case 已构造正样本和负样本时，Expected Result 必须同时验证应命中数据存在、返回数据符合已明确条件、不匹配数据未混入。如 Task A 含唯一关键字、Task B 不含，搜索必须返回 A 且不返回 B；Requirement 未定义时不得编造模糊匹配、大小写、trim、分词或搜索字段规则。',
-          '每条 Case 只提交一份自然语言 preconditions、steps、expectedResults。executionMethods 只选择 ui、api 或二者。UI 与 API 的业务 Test Intent 和 Expected Result 相同时，默认使用一条 Case 并选择 executionMethods: [ui, api]；只在 UI 独有二次确认、明确存在不同约束，或 Knowledge/历史缺陷提示前后端校验漂移等独立风险时才拆分。不要区分 UI/API 两套步骤，也不要提交执行配置、数据需求、Coverage 内部模型、Finding、Confirmation 或历史 Proposal。',
+          '每条 Case 只提交一份自然语言 preconditions、steps、expectedResults，executionMethods 必须固定为 [agent]，并提交完整可验证的 agentTestSpec。不要提交被测 Agent endpoint、认证配置、Coverage 内部模型、Finding、Confirmation 或历史 Proposal。',
           'cases[] 是本轮 Candidate Delta，不是当前版本完整用例库。历史用例完全未变化时允许提交 cases: []；不要为表达 reuse 而重新输出历史 Case，也不要输出 reuse、update、create、deprecate 等生命周期动作。',
           'historical-test-cases.json 中的 requirementRefs 属于其来源 Requirement Release，只用于理解历史测试意图；不得假设相同 RP 编号在当前 Release 中代表相同 Requirement。当前 Requirement direct trace 只能使用 Runtime 提供的当前 Requirement Release ID，跨版本 Requirement Mapping 由 Service 负责。',
         ]

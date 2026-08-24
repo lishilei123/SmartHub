@@ -126,7 +126,6 @@ export type AgentConfigurationScene = 'planning' | 'test_execution'
 export type AgentConfigurationStatus = 'active' | 'superseded'
 export type AgentConfigurationAgentKey =
   | 'planning'
-  | 'executionImplementation'
   | 'failureAnalysis'
 export interface AgentModelReference { sourceId: string; modelId: string }
 export interface AgentRoutingConfiguration {
@@ -165,38 +164,6 @@ export interface AgentConfigurationVersion {
   status: AgentConfigurationStatus
   routing: AgentRoutingConfiguration
   agentDefinition: import('./agent-types.js').AgentDefinitionVersion
-  contentSha256: string
-  createdAt: string
-  publishedBy: string
-}
-
-export interface TestExecutionEnvironmentProfile {
-  environmentId: string
-  name: string
-  baseUrl: string
-  targets: Array<{ protocol: 'http' | 'https'; host: string; port: number }>
-  networkName: string
-  /** Runner-visible name -> server process environment-variable name. */
-  secretEnvironmentVariables?: Readonly<Record<string, string>>
-}
-
-export interface TestExecutionRunnerConfiguration {
-  containerRuntime: 'docker' | 'podman'
-  runnerVersion: string
-  playwrightVersion: string
-  imageReference: string
-  imageDigest: string
-  entrypoint?: string
-  workingRoot?: string
-}
-
-/** Server-owned immutable release of runner and environment configuration. */
-export interface TestExecutionInfrastructureConfigurationVersion {
-  id: string
-  version: number
-  status: 'active' | 'superseded'
-  environments: TestExecutionEnvironmentProfile[]
-  runner?: TestExecutionRunnerConfiguration
   contentSha256: string
   createdAt: string
   publishedBy: string
@@ -335,12 +302,12 @@ export interface ToolApproval {
   consumedAt?: string
 }
 export interface AgentExecutionRecord {
-  agentKey?: 'planning' | 'execution-implementation' | 'failure-analysis'
+  agentKey?: 'planning' | 'failure-analysis'
   turns: number
   toolCalls: number
   toolErrors?: number
   framework?: { name: 'pi-agent-core' | 'pi-coding-agent'; version: string }
-  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'agent_evaluation' | 'failure_diagnosis' | 'script_repair'
+  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_case_design' | 'test_design_repair' | 'agent_evaluation' | 'failure_diagnosis'
   context?: import('./agent-types.js').AgentExecutionContext
   events: AgentExecutionEvent[]
 }
@@ -411,7 +378,7 @@ export interface ReviewRun {
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; agentUnderTests: import('./agent-test-types.js').AgentUnderTest[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; testExecutionInfrastructureConfigurationVersions: TestExecutionInfrastructureConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; agentUnderTests: import('./agent-test-types.js').AgentUnderTest[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

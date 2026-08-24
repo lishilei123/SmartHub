@@ -18,7 +18,7 @@ export function validateCreateTestDesignInput(value: unknown): CreateTestDesignI
     includedScopes: optionalScopeRules(input.includedScopes),
     excludedScopes: optionalScopeRules(input.excludedScopes),
     focusDimensions: optionalDimensions(input.focusDimensions, ['functional', 'performance', 'stability', 'compatibility', 'security']),
-    executionMethods: optionalExecutionMethods(input.executionMethods, ['ui', 'api']),
+    executionMethods: optionalExecutionMethods(input.executionMethods, ['agent']),
     knowledgeAugmentation: validateAugmentation(input.knowledgeAugmentation ?? { mode: 'disabled' }),
   }
 }
@@ -28,10 +28,7 @@ export function validateTestCaseContent(value: unknown): TestCaseContent {
   rejectUnknown(input, ['schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults', 'agentTestSpec'], 'TEST_CASE_SCHEMA_INVALID')
   if (input.schemaVersion !== 'test-case/v3') fail('TEST_CASE_SCHEMA_INVALID', 'schemaVersion 必须为 test-case/v3', 422)
   const methods = executionMethods(input.executionMethods)
-  const agentTestSpec = input.agentTestSpec === undefined ? undefined : validateAgentTestSpec(input.agentTestSpec)
-  if (methods.includes('agent') !== Boolean(agentTestSpec) || (agentTestSpec && (methods.length !== 1 || methods[0] !== 'agent'))) {
-    fail('TEST_CASE_SCHEMA_INVALID', 'Agent TestCase 必须同时提供 agentTestSpec 且 executionMethods 只能为 agent', 422)
-  }
+  const agentTestSpec = validateAgentTestSpec(input.agentTestSpec)
   return {
     schemaVersion: 'test-case/v3',
     title: requiredText(input.title, 'title', 500, 'TEST_CASE_SCHEMA_INVALID'),
@@ -42,7 +39,7 @@ export function validateTestCaseContent(value: unknown): TestCaseContent {
     preconditions: texts(input.preconditions, 'preconditions', 100, 2_000, 'TEST_CASE_SCHEMA_INVALID'),
     steps: nonEmptyTexts(input.steps, 'steps', 200, 4_000),
     expectedResults: nonEmptyTexts(input.expectedResults, 'expectedResults', 200, 4_000),
-    ...(agentTestSpec ? { agentTestSpec } : {}),
+    agentTestSpec,
   }
 }
 
@@ -97,8 +94,8 @@ export function validateCaseDependencyGraph(_cases: Array<{ id: string; content:
 export function etag(kind: 'tree' | 'case', id: string, revision: number, hash: string) { return `\"${kind}:${id}:r${revision}:${hash}\"` }
 export function assertEtag(actual: string | undefined, expected: string, code: string) { if (!actual || actual !== expected) fail(code, 'If-Match 与当前 Revision 不一致', 409) }
 
-function optionalExecutionMethods(value: unknown, fallback: Array<'ui' | 'api' | 'agent'> = []): Array<'ui' | 'api' | 'agent'> { if (value === undefined) return [...fallback]; if (!Array.isArray(value) || value.some(item => item !== 'ui' && item !== 'api' && item !== 'agent')) fail('TEST_DESIGN_INPUT_INVALID', 'executionMethods 只能包含 ui、api、agent', 422); return [...new Set(value)] as Array<'ui' | 'api' | 'agent'> }
-function executionMethods(value: unknown): Array<'ui' | 'api' | 'agent'> { if (!Array.isArray(value) || value.length < 1 || value.length > 2 || value.some(item => item !== 'ui' && item !== 'api' && item !== 'agent')) fail('TEST_CASE_SCHEMA_INVALID', 'executionMethods 必须包含有效执行方式', 422); if (new Set(value).size !== value.length) fail('TEST_CASE_SCHEMA_INVALID', 'executionMethods 不能重复', 422); return value as Array<'ui' | 'api' | 'agent'> }
+function optionalExecutionMethods(value: unknown, fallback: Array<'agent'> = []): Array<'agent'> { if (value === undefined) return [...fallback]; if (!Array.isArray(value) || value.length !== 1 || value[0] !== 'agent') fail('TEST_DESIGN_INPUT_INVALID', 'executionMethods 只能为 [agent]', 422); return ['agent'] }
+function executionMethods(value: unknown): Array<'agent'> { if (!Array.isArray(value) || value.length !== 1 || value[0] !== 'agent') fail('TEST_CASE_SCHEMA_INVALID', 'executionMethods 必须且只能为 [agent]', 422); return ['agent'] }
 
 function validateAgentTestSpec(value: unknown): AgentTestSpec {
   const input = object(value, 'TEST_CASE_SCHEMA_INVALID', 'agentTestSpec 必须是对象')

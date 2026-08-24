@@ -53,10 +53,3 @@ export function reportExportUrl(
   const suffix = format === 'json' ? 'export.json' : 'report.md'
   return `${apiBase}${scope(projectVersionId)}/${encodeURIComponent(runId)}/${suffix}`
 }
-
-export function artifactUrl(
-  artifactId: string,
-  disposition: 'inline' | 'attachment' = 'attachment',
-) {
-  return `${apiBase}/test-execution-artifacts/${encodeURIComponent(artifactId)}?disposition=${disposition}`
-}

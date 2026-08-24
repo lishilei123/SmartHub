@@ -5,7 +5,7 @@ import type { RequirementReleaseContent } from './requirement-workflow-types.js'
 import type { AgentTestSpec } from './agent-test-types.js'
 
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
-export type TestExecutionMethod = 'ui' | 'api' | 'agent'
+export type TestExecutionMethod = 'agent'
 export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
 export type WorkflowStatus = 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled'
 export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled' | 'stale'
@@ -217,14 +217,13 @@ export interface TestCaseContent {
   preconditions: string[]
   steps: string[]
   expectedResults: string[]
-  /** Present only for evidence-driven Agent testing. Historical UI/API v3 cases remain valid. */
-  agentTestSpec?: AgentTestSpec
+  agentTestSpec: AgentTestSpec
 }
 
 /** Execution-stage projection freezes the v3 case and its selected execution channel. */
 export interface TestCaseExecutionSpec {
-  schemaVersion: 'test-script-input/v1' | 'agent-test-input/v1'
-  method: TestExecutionMethod
+  schemaVersion: 'agent-test-input/v1'
+  method: 'agent'
   testCase: TestCaseContent
 }
 

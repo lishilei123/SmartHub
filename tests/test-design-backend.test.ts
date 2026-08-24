@@ -12,13 +12,16 @@ function content(overrides: Partial<TestCaseContent> = {}): TestCaseContent {
     dimension: 'functional',
     priority: 'P1',
     requirementRefs: ['REQ-1'],
-    executionMethods: ['ui', 'api'],
+    executionMethods: ['agent'],
     preconditions: ['用户已登录'],
     steps: ['输入任务标题并提交'],
     expectedResults: ['任务创建成功并返回唯一标识'],
+    agentTestSpec: agentSpec(),
     ...overrides,
   }
 }
+
+function agentSpec() { return { input: '创建任务', expectedOutcome: '任务创建成功', requiredTools: [], forbiddenTools: [], requiredActions: [], forbiddenActions: [], argumentAssertions: [], sequenceConstraints: [], businessAssertions: [], artifactAssertions: [], semanticAssertions: [], safetyAssertions: [], executionConstraints: { timeoutMs: 30_000, maxSteps: 20, repeatCount: 1 } } }
 
 function candidateCase(ref: string, value = content()) { return { ref, ...value } }
 
@@ -28,11 +31,11 @@ function effectiveCase(id: string, value: TestCaseContent): EffectiveTestCase {
 }
 
 test('TestCase v3 只接受统一语义字段，且扩展测试允许空 requirementRefs', () => {
-  const extended = validateTestCaseContent(content({ requirementRefs: [], executionMethods: ['api'] }))
+  const extended = validateTestCaseContent(content({ requirementRefs: [] }))
   assert.deepEqual(extended.requirementRefs, [])
-  assert.deepEqual(extended.executionMethods, ['api'])
+  assert.deepEqual(extended.executionMethods, ['agent'])
   assert.throws(() => validateTestCaseContent({ ...content(), executionSpec: {} }), /TEST_CASE_SCHEMA_INVALID/u)
-  assert.throws(() => validateTestCaseContent({ ...content(), executionMethods: ['ui', 'ui'] }), /executionMethods 不能重复/u)
+  assert.throws(() => validateTestCaseContent({ ...content(), executionMethods: ['agent', 'agent'] }), /executionMethods/u)
 })
 
 test('test-case-design/v3 Candidate 根和 Case 都是闭合结构', () => {

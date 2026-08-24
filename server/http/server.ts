@@ -5,8 +5,7 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfigurationScene, AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, agentUnderTestService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
-import type { TestExecutionInfrastructureConfigurationInput } from '../application/test-execution-infrastructure-configuration-service.js'
+import { accessControl, agentConfigurationService, agentUnderTestService, aiResourceService, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
@@ -14,14 +13,14 @@ import { routeTestDesign } from './test-design-routes.js'
 import { TestDesignError } from '../application/test-design-validation.js'
 import { TestExecutionServiceError } from '../application/test-execution-service.js'
 import { TestExecutionValidationError } from '../application/test-execution-validation.js'
-import { routeTestExecution } from './test-execution-routes.js'
+import { handleTestExecutionRoute } from './test-execution-routes.js'
 import { TestReportServiceError } from '../application/test-report-service.js'
 import { routeTestReport } from './test-report-routes.js'
 import { AgentUnderTestServiceError, type AgentUnderTestInput } from '../application/agent-under-test-service.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, agentUnderTestService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService }
+export { agentConfigurationService, agentUnderTestService, aiResourceService, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionService, testExecutionStore, testReportService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -87,22 +86,18 @@ async function route(request: IncomingMessage, response: ServerResponse, control
       return send(response, 201, await agentConfigurationService.publish(scene, { agentKey: String(body.agentKey) as AgentConfigurationInput['agentKey'], revision: Number(body.revision), publishedBy: principal.displayName }))
     }
   }
-  if (url.pathname === '/api/test-execution-infrastructure-configuration') {
-    if (method === 'GET') return send(response, 200, await testExecutionInfrastructureConfigurationService.get())
-    if (method === 'PUT') return send(response, 201, await testExecutionInfrastructureConfigurationService.publish(await json(request) as TestExecutionInfrastructureConfigurationInput, principal.displayName))
-  }
-  if (await routeTestExecution(request, response, {
+  if (await handleTestExecutionRoute({
     method,
     url,
+    request,
+    response,
     principal,
     controls,
     service: testExecutionService,
-    artifactStore: executionArtifactStore,
     resolveProjectVersion: loadProjectVersion,
     readiness: async () => testExecutionService
       ? testExecutionService.readiness()
       : unavailableTestExecutionReadiness(),
-    environments: async () => await executionEnvironmentCatalog.listSnapshots(),
     handoffs: async projectVersionId =>
       testDesignService.listLibraryHandoffs(projectVersionId),
   })) return
@@ -390,22 +385,15 @@ function installAwaitedShutdown(server: ReturnType<typeof createServer>) {
 }
 
 async function unavailableTestExecutionReadiness() {
-  const [artifactStore, environment, agents, runner] = await Promise.all([
-    executionArtifactStore.readiness(),
-    executionEnvironmentCatalog.readiness(),
-    testExecutionAgentRuntime.readiness(),
-    playwrightRunner.readiness(),
-  ])
+  const agents = await testExecutionAgentRuntime.readiness()
   return {
     ready: false,
     store: {
       ready: false,
       reason: 'TEST_EXECUTION_POSTGRES_UNAVAILABLE',
     },
-    artifactStore,
-    environment,
     agents,
-    runner,
+    runner: { ready: true, snapshot: { kind: 'agent', runnerVersion: 'agent-runner/v1' } },
   }
 }
 

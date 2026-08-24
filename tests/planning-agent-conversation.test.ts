@@ -17,6 +17,6 @@ test('PlanningAgent 的测试设计 Runtime 只声明 TestCase v3 与显式 Requ
   const runtime = readFileSync(new URL('../server/agent/pi-test-design-runtime.ts', import.meta.url), 'utf8')
   assert.match(runtime, /test-case-design\/v3/u)
   assert.match(runtime, /风险或边界探索没有直接 Requirement 行为依据时必须使用 requirementRefs: \[\]/u)
-  assert.match(runtime, /executionMethods 只选择 ui、api 或二者/u)
+  assert.match(runtime, /executionMethods 必须固定为 \[agent\]/u)
   assert.doesNotMatch(runtime, /scenarioClaims|coverageClaims|dimensionAssessments/u)
 })

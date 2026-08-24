@@ -3158,6 +3158,219 @@ const migrations: Migration[] = [{
       RETURN NEW;
     END $$;
   `,
+}, {
+  version: 39,
+  name: 'remove-legacy-playwright-execution',
+  sql: `
+    DROP TRIGGER IF EXISTS test_execution_runs_aggregate_ck ON smarthub.test_execution_runs;
+    DROP TRIGGER IF EXISTS test_execution_tasks_aggregate_ck ON smarthub.test_execution_tasks;
+    DROP TRIGGER IF EXISTS test_execution_jobs_aggregate_ck ON smarthub.test_execution_jobs;
+    DROP TRIGGER IF EXISTS test_execution_runs_write_ck ON smarthub.test_execution_runs;
+    DROP TRIGGER IF EXISTS test_execution_runs_agents_insert_ck ON smarthub.test_execution_runs;
+    DROP TRIGGER IF EXISTS test_execution_tasks_write_ck ON smarthub.test_execution_tasks;
+    DROP TRIGGER IF EXISTS test_execution_jobs_write_ck ON smarthub.test_execution_jobs;
+
+    CREATE TEMP TABLE legacy_execution_runs ON COMMIT DROP AS
+      SELECT run.id
+      FROM smarthub.test_execution_runs run
+      WHERE NOT (run.snapshot ? 'agentUnderTest')
+         OR EXISTS (SELECT 1 FROM smarthub.test_execution_tasks task WHERE task.run_id=run.id AND task.method<>'agent');
+
+    DROP TRIGGER IF EXISTS agent_execution_failure_analyses_immutable_ck ON smarthub.agent_execution_failure_analyses;
+    DROP TRIGGER IF EXISTS agent_execution_results_immutable_ck ON smarthub.agent_execution_results;
+    DROP TRIGGER IF EXISTS agent_execution_assertion_results_immutable_ck ON smarthub.agent_execution_assertion_results;
+    DROP TRIGGER IF EXISTS agent_execution_evaluation_results_immutable_ck ON smarthub.agent_execution_evaluation_results;
+    DROP TRIGGER IF EXISTS agent_execution_failure_facts_immutable_ck ON smarthub.agent_execution_failure_facts;
+    DROP TRIGGER IF EXISTS agent_execution_trace_events_immutable_ck ON smarthub.agent_execution_trace_events;
+    DROP TRIGGER IF EXISTS agent_execution_case_runs_immutable_ck ON smarthub.agent_execution_case_runs;
+    DELETE FROM smarthub.agent_execution_failure_analyses WHERE run_id IN (SELECT id FROM legacy_execution_runs);
+    DELETE FROM smarthub.agent_execution_results WHERE run_id IN (SELECT id FROM legacy_execution_runs);
+    DELETE FROM smarthub.agent_execution_assertion_results WHERE case_run_id IN (SELECT id FROM smarthub.agent_execution_case_runs WHERE run_id IN (SELECT id FROM legacy_execution_runs));
+    DELETE FROM smarthub.agent_execution_evaluation_results WHERE case_run_id IN (SELECT id FROM smarthub.agent_execution_case_runs WHERE run_id IN (SELECT id FROM legacy_execution_runs));
+    DELETE FROM smarthub.agent_execution_failure_facts WHERE case_run_id IN (SELECT id FROM smarthub.agent_execution_case_runs WHERE run_id IN (SELECT id FROM legacy_execution_runs));
+    DELETE FROM smarthub.agent_execution_trace_events WHERE run_id IN (SELECT id FROM legacy_execution_runs);
+    DELETE FROM smarthub.agent_execution_case_runs WHERE run_id IN (SELECT id FROM legacy_execution_runs);
+    DELETE FROM smarthub.test_execution_jobs WHERE run_id IN (SELECT id FROM legacy_execution_runs);
+    DELETE FROM smarthub.test_execution_tasks WHERE run_id IN (SELECT id FROM legacy_execution_runs);
+    DELETE FROM smarthub.test_execution_runs WHERE id IN (SELECT id FROM legacy_execution_runs);
+    DELETE FROM smarthub.test_execution_handoffs handoff
+      WHERE EXISTS (SELECT 1 FROM smarthub.test_execution_handoff_members member WHERE member.handoff_id=handoff.id AND member.method<>'agent');
+
+    DROP TABLE IF EXISTS smarthub.test_execution_events CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_case_maintenance_proposals CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_diagnosis_evidence CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_diagnosis_attempts CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_diagnoses CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_attempts CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_script_revisions CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_script_artifacts CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_artifacts CASCADE;
+    DROP TABLE IF EXISTS smarthub.test_execution_infrastructure_configuration_versions CASCADE;
+
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_event_write() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_script_revision_insert() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_attempt_write() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_task_attempts() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_task_revisions() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_diagnosis_insert() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_diagnosis_attempt_terminal() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_diagnosis_children() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_maintenance_proposal_insert() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.validate_test_execution_maintenance_proposal_update() CASCADE;
+    DROP FUNCTION IF EXISTS smarthub.reject_test_execution_history_update() CASCADE;
+
+    ALTER TABLE smarthub.test_execution_runs ADD COLUMN agent_under_test_id text;
+    ALTER TABLE smarthub.test_execution_runs ADD COLUMN agent_under_test_version integer;
+    ALTER TABLE smarthub.test_execution_runs ADD COLUMN agent_under_test_configuration_sha256 char(64);
+    UPDATE smarthub.test_execution_runs SET
+      agent_under_test_id=snapshot #>> '{agentUnderTest,id}',
+      agent_under_test_version=(snapshot #>> '{agentUnderTest,version}')::integer,
+      agent_under_test_configuration_sha256=snapshot #>> '{agentUnderTest,configurationSha256}';
+    ALTER TABLE smarthub.test_execution_runs ALTER COLUMN agent_under_test_id SET NOT NULL;
+    ALTER TABLE smarthub.test_execution_runs ALTER COLUMN agent_under_test_version SET NOT NULL;
+    ALTER TABLE smarthub.test_execution_runs ALTER COLUMN agent_under_test_configuration_sha256 SET NOT NULL;
+    ALTER TABLE smarthub.test_execution_runs DROP COLUMN environment_id;
+    ALTER TABLE smarthub.test_execution_runs DROP COLUMN environment_signature;
+
+    ALTER TABLE smarthub.test_execution_tasks DROP CONSTRAINT IF EXISTS test_execution_tasks_method_check;
+    ALTER TABLE smarthub.test_execution_tasks ADD CONSTRAINT test_execution_tasks_method_check CHECK (method='agent');
+    ALTER TABLE smarthub.test_execution_tasks DROP CONSTRAINT IF EXISTS test_execution_tasks_status_check;
+    ALTER TABLE smarthub.test_execution_tasks ADD CONSTRAINT test_execution_tasks_status_check CHECK (status IN ('pending','running','passed','failed','blocked','cancelled'));
+    ALTER TABLE smarthub.test_execution_tasks DROP COLUMN runner_attempt_count CASCADE;
+    ALTER TABLE smarthub.test_execution_tasks DROP COLUMN same_script_retry_count CASCADE;
+    ALTER TABLE smarthub.test_execution_tasks DROP COLUMN repair_count CASCADE;
+    ALTER TABLE smarthub.test_execution_tasks DROP COLUMN current_script_revision_id CASCADE;
+    ALTER TABLE smarthub.test_execution_tasks DROP COLUMN unsupported_reason CASCADE;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_run_write()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF TG_OP='DELETE' THEN RAISE EXCEPTION 'TEST_EXECUTION_RUN_IMMUTABLE'; END IF;
+      IF TG_OP='INSERT' THEN
+        IF NEW.status<>'queued' OR NEW.state_version<>0 OR NEW.started_at IS NOT NULL OR NEW.finished_at IS NOT NULL OR NEW.cancel_requested_at IS NOT NULL
+          OR NEW.snapshot->>'id' IS DISTINCT FROM NEW.id
+          OR NEW.snapshot->>'projectId' IS DISTINCT FROM NEW.project_id
+          OR NEW.snapshot->>'projectVersionId' IS DISTINCT FROM NEW.project_version_id
+          OR NEW.snapshot #>> '{handoff,handoffId}' IS DISTINCT FROM NEW.handoff_id
+          OR NEW.snapshot #>> '{handoff,handoffSha256}' IS DISTINCT FROM NEW.handoff_sha256
+          OR NEW.snapshot #>> '{handoff,testCaseLibraryVersionId}' IS DISTINCT FROM NEW.test_case_library_version_id
+          OR NEW.snapshot #>> '{handoff,testCaseLibraryVersionSha256}' IS DISTINCT FROM NEW.test_case_library_version_sha256
+          OR NEW.snapshot #>> '{handoff,memberSnapshotSha256}' IS DISTINCT FROM NEW.member_snapshot_sha256
+          OR NEW.snapshot #>> '{agentUnderTest,id}' IS DISTINCT FROM NEW.agent_under_test_id
+          OR (NEW.snapshot #>> '{agentUnderTest,version}')::integer IS DISTINCT FROM NEW.agent_under_test_version
+          OR NEW.snapshot #>> '{agentUnderTest,configurationSha256}' IS DISTINCT FROM NEW.agent_under_test_configuration_sha256
+          OR NEW.snapshot #>> '{runner,kind}' IS DISTINCT FROM 'agent'
+          OR NEW.snapshot #>> '{runner,runnerVersion}' IS DISTINCT FROM 'agent-runner/v1'
+          OR NEW.snapshot #>> '{agents,failureAnalysis,agentKey}' IS DISTINCT FROM 'failure-analysis'
+          OR (SELECT array_agg(key ORDER BY key) FROM jsonb_object_keys(NEW.snapshot->'agents') key) IS DISTINCT FROM ARRAY['failureAnalysis']::text[]
+          OR NEW.snapshot_canonical::jsonb IS DISTINCT FROM NEW.snapshot
+          OR encode(digest(convert_to(NEW.snapshot_canonical,'UTF8'),'sha256'),'hex') IS DISTINCT FROM NEW.snapshot_sha256
+          OR NEW.create_request_canonical::jsonb IS DISTINCT FROM jsonb_build_object('schemaVersion','agent-test-execution-create-request/v1','projectVersionId',NEW.project_version_id,'handoffId',NEW.handoff_id,'agentUnderTestId',NEW.agent_under_test_id,'agentUnderTestVersion',NEW.agent_under_test_version,'createdBy',NEW.created_by)
+          OR encode(digest(convert_to(NEW.create_request_canonical,'UTF8'),'sha256'),'hex') IS DISTINCT FROM NEW.create_request_sha256
+        THEN RAISE EXCEPTION 'AGENT_TEST_EXECUTION_RUN_SNAPSHOT_INVALID'; END IF;
+        RETURN NEW;
+      END IF;
+      IF ROW(NEW.project_id,NEW.project_version_id,NEW.handoff_id,NEW.handoff_sha256,NEW.test_case_library_version_id,NEW.test_case_library_version_sha256,NEW.suite_version_id,NEW.suite_version_sha256,NEW.execution_mode,NEW.member_snapshot_sha256,NEW.agent_under_test_id,NEW.agent_under_test_version,NEW.agent_under_test_configuration_sha256,NEW.snapshot_sha256,NEW.aggregate_sha256,NEW.create_request_sha256,NEW.create_request_canonical,NEW.idempotency_key,NEW.task_count,NEW.created_by,NEW.created_at,NEW.snapshot,NEW.snapshot_canonical)
+        IS DISTINCT FROM ROW(OLD.project_id,OLD.project_version_id,OLD.handoff_id,OLD.handoff_sha256,OLD.test_case_library_version_id,OLD.test_case_library_version_sha256,OLD.suite_version_id,OLD.suite_version_sha256,OLD.execution_mode,OLD.member_snapshot_sha256,OLD.agent_under_test_id,OLD.agent_under_test_version,OLD.agent_under_test_configuration_sha256,OLD.snapshot_sha256,OLD.aggregate_sha256,OLD.create_request_sha256,OLD.create_request_canonical,OLD.idempotency_key,OLD.task_count,OLD.created_by,OLD.created_at,OLD.snapshot,OLD.snapshot_canonical)
+        OR NEW.state_version<>OLD.state_version+1 THEN RAISE EXCEPTION 'TEST_EXECUTION_RUN_SNAPSHOT_IMMUTABLE'; END IF;
+      IF NOT ((OLD.status='queued' AND NEW.status IN ('running','cancelled')) OR (OLD.status='running' AND NEW.status IN ('succeeded','failed','partial','cancelled')) OR (OLD.status IN ('failed','partial') AND NEW.status='running') OR (NEW.status=OLD.status AND OLD.status IN ('queued','running') AND OLD.cancel_requested_at IS NULL AND NEW.cancel_requested_at IS NOT NULL)) THEN RAISE EXCEPTION 'TEST_EXECUTION_RUN_TRANSITION_INVALID'; END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_execution_runs_write_ck BEFORE INSERT OR UPDATE OR DELETE ON smarthub.test_execution_runs FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_run_write();
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_task_write()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE result_status text;
+    BEGIN
+      IF TG_OP='DELETE' THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_IMMUTABLE'; END IF;
+      IF TG_OP='INSERT' THEN
+        IF NEW.method<>'agent' OR NEW.status<>'pending' OR NEW.state_version<>0 THEN RAISE EXCEPTION 'AGENT_TEST_EXECUTION_TASK_INITIAL_STATE_INVALID'; END IF;
+        RETURN NEW;
+      END IF;
+      IF ROW(NEW.run_id,NEW.ordinal,NEW.dedup_key,NEW.source_version_id,NEW.case_id,NEW.case_revision,NEW.method,NEW.dimension,NEW.case_content_sha256,NEW.execution_spec_sha256,NEW.input_sha256,NEW.created_at,NEW.frozen_input)
+        IS DISTINCT FROM ROW(OLD.run_id,OLD.ordinal,OLD.dedup_key,OLD.source_version_id,OLD.case_id,OLD.case_revision,OLD.method,OLD.dimension,OLD.case_content_sha256,OLD.execution_spec_sha256,OLD.input_sha256,OLD.created_at,OLD.frozen_input)
+        OR NEW.state_version<>OLD.state_version+1 THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_SNAPSHOT_IMMUTABLE'; END IF;
+      IF NOT ((OLD.status='pending' AND NEW.status IN ('running','cancelled')) OR (OLD.status='running' AND NEW.status IN ('passed','failed','blocked','cancelled')) OR (OLD.status IN ('failed','blocked') AND NEW.status='pending')) THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_INVALID'; END IF;
+      IF NEW.status IN ('passed','failed','blocked') THEN
+        SELECT status INTO result_status FROM smarthub.agent_execution_results WHERE task_id=NEW.id;
+        IF result_status IS NULL OR (NEW.status='passed' AND result_status<>'PASS') OR (NEW.status='failed' AND result_status NOT IN ('FAIL','ERROR')) OR (NEW.status='blocked' AND result_status<>'NOT_EVALUABLE') THEN RAISE EXCEPTION 'AGENT_EXECUTION_TASK_RESULT_MISMATCH'; END IF;
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_execution_tasks_write_ck BEFORE INSERT OR UPDATE OR DELETE ON smarthub.test_execution_tasks FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_task_write();
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_job_write()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF TG_OP='DELETE' THEN RAISE EXCEPTION 'TEST_EXECUTION_JOB_IMMUTABLE'; END IF;
+      IF TG_OP='INSERT' THEN IF NEW.status<>'queued' OR NEW.attempt_count<>0 OR NEW.fencing_token<>0 THEN RAISE EXCEPTION 'TEST_EXECUTION_JOB_INITIAL_STATE_INVALID'; END IF; RETURN NEW; END IF;
+      IF ROW(NEW.run_id,NEW.task_id,NEW.max_attempts,NEW.created_at) IS DISTINCT FROM ROW(OLD.run_id,OLD.task_id,OLD.max_attempts,OLD.created_at) THEN RAISE EXCEPTION 'TEST_EXECUTION_JOB_SNAPSHOT_IMMUTABLE'; END IF;
+      IF OLD.status IN ('succeeded','failed','cancelled') OR NOT ((OLD.status='queued' AND NEW.status IN ('running','cancelled')) OR (OLD.status='running' AND NEW.status IN ('running','queued','succeeded','failed','cancelled'))) THEN RAISE EXCEPTION 'TEST_EXECUTION_JOB_TRANSITION_INVALID'; END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_execution_jobs_write_ck BEFORE INSERT OR UPDATE OR DELETE ON smarthub.test_execution_jobs FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_job_write();
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_aggregate_completeness()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_run_id text; DECLARE declared integer; DECLARE tasks integer; DECLARE jobs integer; DECLARE run_status text; DECLARE aggregate_status text;
+    BEGIN
+      target_run_id:=CASE WHEN TG_TABLE_NAME='test_execution_runs' THEN NEW.id ELSE COALESCE(NEW.run_id,OLD.run_id) END;
+      SELECT task_count,status INTO declared,run_status FROM smarthub.test_execution_runs WHERE id=target_run_id;
+      IF NOT FOUND THEN RETURN NEW; END IF;
+      SELECT count(*),CASE WHEN bool_or(status IN ('pending','running')) THEN 'running' WHEN bool_and(status='cancelled') THEN 'cancelled' WHEN bool_and(status='passed') THEN 'succeeded' WHEN bool_and(status='failed') THEN 'failed' ELSE 'partial' END INTO tasks,aggregate_status FROM smarthub.test_execution_tasks WHERE run_id=target_run_id;
+      SELECT count(*) INTO jobs FROM smarthub.test_execution_jobs WHERE run_id=target_run_id;
+      IF tasks<>declared OR jobs<>declared OR NOT ((run_status='queued' AND aggregate_status='running') OR run_status=aggregate_status) THEN RAISE EXCEPTION 'TEST_EXECUTION_AGGREGATE_INCOMPLETE'; END IF;
+      RETURN NEW;
+    END $$;
+    CREATE CONSTRAINT TRIGGER test_execution_runs_aggregate_ck AFTER INSERT OR UPDATE ON smarthub.test_execution_runs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_aggregate_completeness();
+    CREATE CONSTRAINT TRIGGER test_execution_tasks_aggregate_ck AFTER INSERT OR UPDATE OR DELETE ON smarthub.test_execution_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_aggregate_completeness();
+    CREATE CONSTRAINT TRIGGER test_execution_jobs_aggregate_ck AFTER INSERT OR UPDATE OR DELETE ON smarthub.test_execution_jobs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_aggregate_completeness();
+
+    CREATE TRIGGER agent_execution_case_runs_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_case_runs FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_trace_events_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_trace_events FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_assertion_results_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_assertion_results FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_evaluation_results_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_evaluation_results FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_failure_facts_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_failure_facts FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_failure_analyses_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_failure_analyses FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_results_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_results FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+  `,
+}, {
+  version: 40,
+  name: 'remove-legacy-playwright-agent-configuration',
+  sql: `
+    DELETE FROM smarthub.agent_configuration_versions
+    WHERE agent_key IN ('executionImplementation', 'testScript', 'scriptRepair')
+       OR data->>'agentKey' IN ('executionImplementation', 'testScript', 'scriptRepair')
+       OR data->'agentDefinition'->>'agentKey' IN ('execution-implementation', 'test-script', 'script-repair');
+
+    UPDATE smarthub.agent_configuration_drafts
+    SET data = jsonb_set(
+          data,
+          '{agents}',
+          COALESCE(data->'agents', '{}'::jsonb)
+            - 'executionImplementation'
+            - 'testScript'
+            - 'scriptRepair',
+          true
+        ),
+        updated_at = now()
+    WHERE COALESCE(data->'agents', '{}'::jsonb) ?| ARRAY['executionImplementation', 'testScript', 'scriptRepair'];
+
+    DELETE FROM smarthub.ai_resources
+    WHERE built_in
+      AND resource_key IN (
+        'test-script-generation',
+        'script-repair',
+        'browser.snapshot',
+        'browser.click',
+        'browser.fill',
+        'browser.get_locator',
+        'browser.requests',
+        'browser.request_detail',
+        'browser.screenshot',
+        'execution_implementation.submit_result'
+      );
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

@@ -1,7 +1,7 @@
 import type { AgentExecutionContext, PlanningSubAgentRunRecord } from '../planning-api'
 
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
-export type ExecutionMethod = 'ui' | 'api' | 'agent'
+export type ExecutionMethod = 'agent'
 export type TestExecutionMethod = ExecutionMethod
 export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
 export type ReviewState = 'draft' | 'in_review' | 'approved' | 'rejected' | 'needs_revision'
@@ -109,7 +109,7 @@ export type TestCaseContent = {
   preconditions: string[]
   steps: string[]
   expectedResults: string[]
-  agentTestSpec?: AgentTestSpec
+  agentTestSpec: AgentTestSpec
 }
 
 export type AgentValueAssertionOperator = 'equals' | 'not_equals' | 'contains' | 'matches' | 'exists'
@@ -148,7 +148,7 @@ export type TestDesignCase = {
 
 export type TestDesignCoverageAudit = { id: string; requirementReleaseId: string; status: 'valid' | 'stale'; caseSetSha256: string; inputSha256: string; statistics: { totalBasis: number; coveredBasis: number; totalCases: number }; blockers: Array<{ code: string; message: string; subjectId?: string; resolution: 'agent_repair' | 'human_decision' | 'manual_edit' | 'execution_handoff'; details?: { reasons?: string[] } }>; advisories: Array<{ code: string; message: string; subjectId?: string; details?: { reasons?: string[] } }>; createdAt: string }
 export type WorkspaceProjection = { status: 'pending' | 'succeeded' | 'failed'; files: Array<{ logicalPath: string; contentSha256: string; assetVersionId?: string }>; error?: string }
-export type TestCaseExecutionSpec = { schemaVersion: 'test-script-input/v1' | 'agent-test-input/v1'; method: ExecutionMethod; testCase: TestCaseContent }
+export type TestCaseExecutionSpec = { schemaVersion: 'agent-test-input/v1'; method: 'agent'; testCase: TestCaseContent }
 
 export type CaseChangeOperation = 'reuse' | 'update' | 'create' | 'deprecate' | 'reference'
 export type CaseChangeDecision = 'pending' | 'accepted' | 'rejected' | 'keep_original' | 'reference' | 'deprecated'

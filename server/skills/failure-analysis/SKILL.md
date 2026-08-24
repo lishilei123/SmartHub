@@ -5,7 +5,7 @@ description: Explain deterministic execution failure facts from immutable eviden
 
 # Failure analysis
 
-1. For Agent Test, read failed deterministic assertions and failure facts first, then actual output, expected outcome, immutable Trace, Runtime error and environment evidence. Use Prompt, Tool/MCP docs, Workflow, Model Info, Agent YAML and Knowledge only when those files actually exist in the frozen Workspace. Missing material is `unavailable`, never an inferred fact. Legacy script tasks may still use their frozen ScriptRevision and terminal attempts.
+1. Read failed deterministic assertions and failure facts first, then actual output, expected outcome, immutable Trace, Runtime error and environment evidence. Use Prompt, Tool/MCP docs, Workflow, Model Info, Agent YAML and Knowledge only when those files actually exist in the frozen Workspace. Missing material is `unavailable`, never an inferred fact.
 2. Distinguish Planning, Tool Selection, Tool Argument, Tool Sequence, Prompt, Context, Model, Tool Schema, MCP, Workflow, Knowledge, Memory, Runtime and Business Backend candidates. Do not infer a root cause without cited immutable evidence.
 3. Deterministic Code identifies facts; the LLM explains those facts. A `SEQUENCE_VIOLATION`, missing required Tool under complete Trace, HTTP error or timeout is a formal fact. Any explanation is only a confidence-ranked Root Cause Candidate and cannot become a confirmed Root Cause without human confirmation.
 4. Do not decide PASS/FAIL/NOT_EVALUABLE, `repairable`, the next workflow Stage, or modify the tested Agent. Service, Runner and Assertion Engine own those decisions.

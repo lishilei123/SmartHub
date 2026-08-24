@@ -407,7 +407,7 @@ export class TestDesignService {
     const state = await this.store.snapshot(); const aggregate = readDesignState(state)
     return aggregate.libraryCases.filter(item => item.projectId === projectId).filter(item => {
       const content = currentLibraryRevision(item).content
-      return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || content.executionMethods.includes(filters.executionMethod as 'ui' | 'api')) && (!filters.priority || content.priority === filters.priority) && (!filters.status || item.status === filters.status)
+      return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || content.executionMethods.includes(filters.executionMethod as TestExecutionMethod)) && (!filters.priority || content.priority === filters.priority) && (!filters.status || item.status === filters.status)
     }).sort(newest).map(item => presentLibraryCase(item))
   }
 
@@ -1394,7 +1394,7 @@ function executionMethodForContent(content: TestCaseContent): TestExecutionMetho
 function executionMethodsForContent(content: TestCaseContent): TestExecutionMethod[] { return [...content.executionMethods] }
 function executionSpecForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod) {
   if (!content.executionMethods.includes(executionMethod)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '冻结 TestCase Revision 未选择该执行方式', 422)
-  return { schemaVersion: executionMethod === 'agent' ? 'agent-test-input/v1' as const : 'test-script-input/v1' as const, method: executionMethod, testCase: structuredClone(content) }
+  return { schemaVersion: 'agent-test-input/v1' as const, method: executionMethod, testCase: structuredClone(content) }
 }
 function executionConfigurationForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } { return content.executionMethods.includes(executionMethod) ? { status: 'ready', issues: [] } : { status: 'blocked', issues: ['TestCase 未选择该执行方式'] } }
 function executionConfiguration(content: TestCaseContent): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } {
@@ -1607,7 +1607,7 @@ function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' |
       if (rawExecutionMethods !== undefined && !Array.isArray(rawExecutionMethods)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 必须是数组`, 422)
       const executionMethods = Array.isArray(rawExecutionMethods)
         ? rawExecutionMethods.map((method, methodIndex) => {
-          if (method !== 'ui' && method !== 'api' && method !== 'agent') throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods[${methodIndex}] 只能是 ui、api 或 agent`, 422)
+          if (method !== 'agent') throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods[${methodIndex}] 只能是 agent`, 422)
           return method as TestExecutionMethod
         })
         : undefined
@@ -1633,7 +1633,7 @@ function validateSuiteMembers(aggregate: TestDesignState, projectId: string, tes
     return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: canonicalSuiteExecutionMethods(selectedMethods), ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
   })
 }
-function canonicalSuiteExecutionMethods(methods: TestExecutionMethod[]) { return (['ui', 'api', 'agent'] as const).filter((method): method is TestExecutionMethod => methods.includes(method)) }
+function canonicalSuiteExecutionMethods(methods: TestExecutionMethod[]) { return (['agent'] as const).filter((method): method is TestExecutionMethod => methods.includes(method)) }
 function suiteMemberExecutionMethods(member: TestSuiteVersionMember, _frozenContent: TestCaseContent): TestExecutionMethod[] { return canonicalSuiteExecutionMethods(member.executionMethods) }
 function suiteDraftEtag(draft: TestSuiteDraft) { return `"suite-draft:${draft.id}:${canonicalSha256({ contentSha256: draft.contentSha256, status: draft.status, updatedAt: draft.updatedAt })}"` }
 function versionMemberDiff<T extends { caseId: string; revision: number }>(left: T[], right: T[]) { const before = new Map(left.map(item => [item.caseId, item])); const after = new Map(right.map(item => [item.caseId, item])); return [...new Set([...before.keys(), ...after.keys()])].sort().map(caseId => { const from = before.get(caseId); const to = after.get(caseId); return { caseId, change: !from ? 'added' as const : !to ? 'removed' as const : canonicalSha256(from) === canonicalSha256(to) ? 'unchanged' as const : 'modified' as const, ...(from ? { from: structuredClone(from) } : {}), ...(to ? { to: structuredClone(to) } : {}) } }).filter(item => item.change !== 'unchanged') }
@@ -1706,7 +1706,7 @@ function presentRun(run: TestDesignWorkflowRun, detail = false) { const value = 
 function presentCase(testCase: TestCase, detail = false) { const revision = currentCaseRevision(testCase); const value = { id: testCase.id, runId: testCase.runId, origin: testCase.origin, currentRevision: testCase.currentRevision, reviewState: testCase.reviewState, content: structuredClone(revision.content), contentSha256: revision.contentSha256, etag: etag('case', testCase.id, revision.revision, revision.contentSha256), ...(detail ? { revisions: structuredClone(testCase.revisions), reviewActions: structuredClone(testCase.reviewActions), tombstonedAt: testCase.tombstonedAt } : {}) }; return value }
 function required<T>(value: T | null | undefined, code: string, message: string): T { if (value == null) throw new TestDesignError(code, message, code.endsWith('_NOT_FOUND') ? 404 : 409); return value }
 function cleanRequired(value: unknown, label: string, max: number) { if (typeof value !== 'string' || !value.trim() || value.length > max) throw new TestDesignError('TEST_DESIGN_INPUT_INVALID', `${label} 不能为空且不能超过 ${max} 个字符`, 422); return value.trim() }
-function testExecutionMethod(value: unknown, label: string): TestExecutionMethod { if (value !== 'ui' && value !== 'api') throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', `${label} 只能是 ui 或 api`, 422); return value }
+function testExecutionMethod(value: unknown, label: string): TestExecutionMethod { if (value !== 'agent') throw new TestDesignError('TEST_EXECUTION_CASE_NOT_READY', `${label} 只能是 agent`, 422); return value }
 function newest(left: { createdAt?: string; publishedAt?: string }, right: { createdAt?: string; publishedAt?: string }) { return String(right.createdAt ?? right.publishedAt).localeCompare(String(left.createdAt ?? left.publishedAt)) }
 function now() { return new Date().toISOString() }
 function errorCode(message: string) { return /^([A-Z][A-Z0-9_]+):/u.exec(message)?.[1] ?? 'TEST_DESIGN_RUN_FAILED' }

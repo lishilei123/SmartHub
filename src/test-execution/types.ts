@@ -1,28 +1,4 @@
-export type ExecutionRunStatus =
-  | 'queued'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'partial'
-  | 'cancelled'
-
-export type ExecutionTaskStatus =
-  | 'pending'
-  | 'script_generating'
-  | 'ready'
-  | 'running'
-  | 'diagnosing'
-  | 'retrying'
-  | 'repairing'
-  | 'passed'
-  | 'failed'
-  | 'blocked'
-  | 'unsupported'
-  | 'waiting_manual'
-  | 'cancelled'
-
-export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
-export type TestExecutionMethod = 'ui' | 'api' | 'agent' | 'performance_tool' | 'long_running' | 'environment_matrix'
+export type Versioned<T> = { value: T; etag: string }
 
 export type AgentUnderTest = {
   id: string
@@ -32,364 +8,65 @@ export type AgentUnderTest = {
   description?: string
   enabled: boolean
   currentVersion: number
-  endpoint: string
-  protocol: 'http' | 'sse'
-  authenticationConfig: { type: 'none' } | { type: 'bearer_env'; environmentVariable: string } | { type: 'api_key_env'; headerName: string; environmentVariable: string }
-  requestMapping: { method: 'POST'; inputField: string; contextField?: string; sessionIdField?: string; headers?: Record<string, string> }
-  responseMapping: { outputPath: string; tracePath?: string; tokenUsagePath?: string; costPath?: string; traceCompleteness?: 'complete' | 'partial' }
-  documentationRefs: string[]
+  versions: Array<{
+    version: number
+    endpoint: string
+    protocol: 'http' | 'sse'
+    authenticationConfig: { type: 'none' } | { type: 'bearer_env'; environmentVariable: string } | { type: 'api_key_env'; headerName: string; environmentVariable: string }
+    requestMapping: { method: 'POST'; inputField: string; contextField?: string; sessionIdField?: string; headers?: Record<string, string> }
+    responseMapping: { outputPath: string; tracePath?: string; tokenUsagePath?: string; costPath?: string; traceCompleteness?: 'complete' | 'partial' }
+    documentationRefs: string[]
+    configurationSha256: string
+    createdAt: string
+    createdBy: string
+  }>
   createdAt: string
   updatedAt: string
 }
 
-export type TestDataRequirement = {
-  id: string
-  name: string
-  entityType: string
-  featureTags: string[]
-  requirementRefs?: string[]
-  caseIds: string[]
-  fieldConstraints: Record<string, string>
-  relationships: string[]
-  quantity: number
-  initialState: string
-  preparationHint: string
-  sensitivity: 'public' | 'internal' | 'sensitive'
-  isolation: string
-  resetAndCleanup: string
-  readiness: 'ready' | 'needs_confirmation' | 'blocked'
-  readinessReason?: string
-}
-
-export type ExecutionTestDataBinding = {
-  requirementId: string
-  sourceType: 'fixture' | 'generator' | 'data_reference'
-  sourceRef: string
-  preparationNote?: string
-}
-
-export type ExecutionTestDataSnapshot = {
-  sourceSetId: string
-  sourceSetVersion: number
-  sourceSetSha256: string
-  requirements: TestDataRequirement[]
-  contentSha256: string
-}
-
-export type FrozenExecutionTestDataSnapshot = {
-  sourceSetId: string
-  sourceSetVersion: number
-  sourceSetSha256: string
-  requirementSnapshotSha256: string
-  requirements: TestDataRequirement[]
-  bindings: ExecutionTestDataBinding[]
-  contentSha256: string
-}
-
+export type FrozenAgentUnderTest = { id: string; name: string; version: number; endpoint: string; protocol: 'http' | 'sse'; configurationSha256: string }
 export type ExecutionReadiness = {
   ready: boolean
   store: { ready: boolean; reason?: string }
-  artifactStore: { ready: boolean; reason?: string }
-  environment: { ready: boolean; reason?: string }
-  agents: {
-    ready: boolean
-    agents: Array<{ agentKey: string; ready: boolean; reason?: string }>
-  }
-  runner: {
-    ready: boolean
-    reason?: string
-    snapshot: ExecutionRunnerSnapshot
-  }
-  agent?: { ready: boolean; reason?: string }
+  agents: { ready: boolean; agents: Array<{ agentKey: string; ready: boolean; reason?: string }> }
+  runner: { ready: boolean; snapshot: { kind: 'agent'; runnerVersion: 'agent-runner/v1' } }
+  agent: { ready: boolean; reason?: string }
 }
-
-export type ExecutionEnvironment = {
-  environmentId: string
-  name: string
-  baseUrl: string
-  targets: Array<{
-    protocol: 'http' | 'https'
-    host: string
-    port: number
-  }>
-  signature: string
-  agentUnderTest?: { id: string; name: string; version: number; protocol: 'http' | 'sse' }
-}
-
-export type ExecutionHandoff = {
-  id: string
-  projectId: string
-  projectVersionId: string
-  testCaseLibraryVersionId: string
-  suiteVersionId?: string
-  mode: TestExecutionMode
-  members: Array<{
-    stage: TestExecutionMode
-    ordinal: number
-    sourceVersionId: string
-    caseId: string
-    revision: number
-    method: TestExecutionMethod
-    reason: string
-    dimension: string
-    selectionReason: string
-    contentSha256: string
-  }>
-  testDataSnapshot?: ExecutionTestDataSnapshot
-  contentSha256: string
-  createdBy: string
-  createdAt: string
-}
-
-export type FrozenExecutionAgentSnapshot = {
-  agentKey: 'execution-implementation' | 'failure-analysis'
-  configurationId: string
-  configurationVersion: number
-  configurationSha256: string
-  definitionSha256: string
-  model: {
-    modelName: string
-    providerType: string
-  }
-  snapshotSha256: string
-}
-
-export type ExecutionRunnerSnapshot = {
-  kind?: 'playwright' | 'agent'
-  runnerVersion: string
-  playwrightVersion?: string
-  imageReference?: string
-  imageDigest?: string
-}
-
+export type ExecutionRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'partial' | 'cancelled'
+export type ExecutionTaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'blocked' | 'cancelled'
 export type ExecutionRun = {
-  id: string
-  projectId: string
-  projectVersionId: string
-  handoff: {
-    handoffId: string
-    handoffSha256: string
-    projectId: string
-    projectVersionId: string
-    testCaseLibraryVersionId: string
-    testCaseLibraryVersionSha256: string
-    suiteVersionId?: string
-    suiteVersionSha256?: string
-    mode: TestExecutionMode
-    memberSnapshotSha256: string
-  }
-  environment: ExecutionEnvironment
-  testData?: FrozenExecutionTestDataSnapshot
-  runner: ExecutionRunnerSnapshot
-  agents: {
-    executionImplementation?: FrozenExecutionAgentSnapshot
-    failureAnalysis: FrozenExecutionAgentSnapshot
-  }
-  status: ExecutionRunStatus
-  stateVersion: number
-  idempotencyKey: string
-  taskCount: number
-  createdBy: string
-  createdAt: string
-  startedAt?: string
-  finishedAt?: string
-  cancelRequestedAt?: string
-  error?: string
+  id: string; projectId: string; projectVersionId: string
+  handoff: { handoffId: string; testCaseLibraryVersionId: string; testCaseLibraryVersionSha256: string; mode: string }
+  agentUnderTest: FrozenAgentUnderTest
+  runner: { kind: 'agent'; runnerVersion: 'agent-runner/v1' }
+  agents: { failureAnalysis: { agentKey: 'failure-analysis'; configurationVersion: number; configurationSha256: string } }
+  testData?: { sourceSetVersion: number; bindings: unknown[] }
+  status: ExecutionRunStatus; stateVersion: number; taskCount: number; createdAt: string
+  startedAt?: string; finishedAt?: string; cancelRequestedAt?: string; error?: string
 }
-
 export type ExecutionTask = {
-  id: string
-  runId: string
+  id: string; runId: string
   input: {
-    ordinal: number
-    stage: string
-    caseId: string
-    caseRevision: number
-    caseContent: {
-      schemaVersion: 'test-case/v3'
-      title: string
-      preconditions: string[]
-      steps: string[]
-      expectedResults: string[]
-      agentTestSpec?: import('../test-design/types').AgentTestSpec
-    }
-    caseContentSha256: string
-    method: TestExecutionMethod
-    dimension: string
-    executionSpecSha256: string
-    testDataBindings?: Array<{
-      requirement: TestDataRequirement
-      binding: ExecutionTestDataBinding
-    }>
-    inputSha256: string
+    ordinal: number; caseId: string; caseRevision: number
+    caseContent: { title: string; preconditions: string[]; steps: string[]; expectedResults: string[] }
+    method: 'agent'; dimension: string
+    executionSpec: { schemaVersion: 'agent-test-input/v1'; agentTestSpec: unknown }
   }
-  status: ExecutionTaskStatus
-  stateVersion: number
-  runnerAttemptCount: number
-  sameScriptRetryCount: number
-  repairCount: number
-  currentScriptRevisionId?: string
-  unsupportedReason?: string
-  error?: string
-  createdAt: string
-  updatedAt: string
-  finishedAt?: string
+  status: ExecutionTaskStatus; stateVersion: number; error?: string; createdAt: string; updatedAt: string; finishedAt?: string
 }
-
-export type ExecutionAttempt = {
-  id: string
-  runId: string
-  taskId: string
-  ordinal: number
-  kind: 'initial' | 'same_script_retry' | 'infrastructure_retry' | 'post_repair' | 'manual_retry'
-  scriptRevisionId: string
-  packageSha256: string
-  status: 'running' | 'passed' | 'failed' | 'cancelled' | 'infrastructure_error'
-  startedAt: string
-  finishedAt?: string
-  durationMs?: number
-  exitCode?: number
-  summary?: string
-  error?: string
+export type AgentAssertionResult = { id: string; ordinal: number; type: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE'; code: string; message: string; evidenceRefs: string[] }
+export type AgentEvaluationResult = { id: string; ordinal: number; kind: string; criterion: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE'; explanation: string; evidenceRefs: string[] }
+export type TraceEvent = { id: string; sequence: number; type: string; timestamp: string; source: string; name?: string; durationMs?: number }
+export type AgentCaseRun = {
+  id: string; repeatOrdinal: number; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE' | 'ERROR'; actualOutput?: unknown
+  assertionResults: AgentAssertionResult[]; evaluationResults: AgentEvaluationResult[]; traceEvents: TraceEvent[]; evidenceRefs: string[]
+  latencyMs: number; stepCount: number; tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }; cost?: number; error?: string
 }
-
-export type ExecutionEvent = {
-  id: string
-  runId: string
-  taskId: string
-  attemptId: string
-  sequence: number
-  type: 'runner' | 'step' | 'navigate' | 'click' | 'fill' | 'assertion' | 'http' | 'screenshot' | 'trace' | 'video' | 'failure' | 'retry'
-  title: string
-  status: 'running' | 'passed' | 'failed' | 'skipped'
-  startedAt: string
-  finishedAt?: string
-  durationMs?: number
-  artifactIds?: string[]
-  metadata?: {
-    source?: string
-    category?: string
-    method?: string
-    path?: string
-    httpStatus?: number
-    queryFields?: string[]
-    retry?: number
-  }
+export type AgentExecutionAggregateResult = {
+  taskId: string; runId: string; status: AgentCaseRun['status']; caseRuns: AgentCaseRun[]
+  successRate: number; failureRate: number; notEvaluableRate: number; errorRate: number; averageLatencyMs: number
+  tokenUsage?: AgentCaseRun['tokenUsage']; cost?: number
+  failureAnalysis?: { category: string; reason: string; evidence: string; source: 'agent'; agentSnapshotRef: string }
+  failureAnalysisError?: string; evaluationError?: string; createdAt: string
 }
-
-export type FailureDiagnosis = {
-  id: string
-  taskId: string
-  scriptRevisionId: string
-  attemptIds: string[]
-  category: string
-  confidence: number
-  summary: string
-  evidence: Array<{ attemptId: string; artifactId?: string; observation: string }>
-  repairable: boolean
-  recommendedAction: string
-  source: 'agent' | 'deterministic'
-  createdAt: string
-}
-
-export type ScriptRevision = {
-  id: string
-  taskId: string
-  revision: number
-  parentRevisionId?: string
-  cacheSourceRevisionId?: string
-  source: 'agent' | 'cache' | 'repair'
-  repairReason?: string
-  contentSha256: string
-  protectedAssertionSha256: string
-  package: {
-    packageSha256: string
-    entrypoint: string
-    files: Array<{ path: string; contentSha256: string; size: number }>
-  }
-  sourceArtifacts: Array<{ path: string; artifactId: string }>
-  createdAt: string
-}
-
-export type ExecutionArtifact = {
-  id: string
-  runId: string
-  taskId?: string
-  attemptId?: string
-  type: string
-  sha256: string
-  size: number
-  mimeType: string
-  createdAt: string
-}
-
-export type CaseMaintenanceProposal = {
-  id: string
-  runId: string
-  taskId: string
-  caseId: string
-  caseRevision: number
-  diagnosisId: string
-  scriptRevisionId: string
-  status: 'pending' | 'accepted' | 'rejected'
-  summary: string
-  proposedChange: string
-  baselineLibraryVersionId: string
-  baselineLibraryVersionSha256: string
-  promotedCaseChangeProposalId?: string
-  decidedBy?: string
-  decidedAt?: string
-  createdAt: string
-}
-
-export type ExecutionTaskDetail = {
-  run: ExecutionRun
-  task: ExecutionTask
-  attempts: ExecutionAttempt[]
-  events: ExecutionEvent[]
-  diagnoses: FailureDiagnosis[]
-  scriptRevisions: ScriptRevision[]
-  artifacts: ExecutionArtifact[]
-  maintenanceProposals: CaseMaintenanceProposal[]
-  agentExecutionResult?: AgentExecutionAggregateResult
-}
-
-export type AgentTraceEvent = { id: string; caseRunId: string; sequence: number; type: string; timestamp: string; source: string; name?: string; input?: unknown; output?: unknown; metadata?: Record<string, unknown>; durationMs?: number }
-export type AgentExecutionCaseRun = { id: string; repeatOrdinal: number; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE' | 'ERROR'; actualOutput?: unknown; assertionResults: Array<{ id: string; type: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE'; code: string; message: string; evidenceRefs: string[] }>; evaluationResults: Array<{ id: string; kind: string; criterion: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE'; explanation: string; evidenceRefs: string[] }>; traceEvents: AgentTraceEvent[]; latencyMs: number; tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }; cost?: number; stepCount: number; failureFacts: Array<{ code: string; message: string; evidenceRefs: string[] }>; error?: string }
-export type AgentExecutionAggregateResult = { taskId: string; runId: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE' | 'ERROR'; caseRuns: AgentExecutionCaseRun[]; successRate: number; failureRate: number; notEvaluableRate: number; errorRate: number; averageLatencyMs: number; tokenUsage?: { totalTokens?: number }; cost?: number; failureAnalysis?: { category: string; reason: string; evidence: string; source: 'agent'; agentSnapshotRef: string }; failureAnalysisError?: string; evaluationError?: string; createdAt: string }
-
-export type ScriptRevisionDiff = {
-  fromRevision: ScriptRevision
-  toRevision: ScriptRevision
-  changes: {
-    unchangedPrefixLines: number
-    removed: { startLine: number; lines: string[] }
-    added: { startLine: number; lines: string[] }
-    unchangedSuffixLines: number
-  }
-}
-
-export type MaintenanceProposalDetail = {
-  proposal: CaseMaintenanceProposal
-  run: ExecutionRun
-  task: ExecutionTask
-  diagnosis: FailureDiagnosis
-  failureAttempts: ExecutionAttempt[]
-  originalScriptRevision: ScriptRevision
-  repairScriptRevision: ScriptRevision
-  postRepairAttempt: ExecutionAttempt
-  baselineCase: {
-    caseId: string
-    revision: number
-    content: { title: string; objective: string }
-    contentSha256: string
-  }
-  baselineLibraryVersion: { id: string; sha256: string }
-  diff: ScriptRevisionDiff
-}
-
-export type Versioned<T> = {
-  value: T
-  etag: string
-  decisionEtag?: string
-}
+export type ExecutionTaskDetail = { run: ExecutionRun; task: ExecutionTask; agentExecutionResult?: AgentExecutionAggregateResult }
