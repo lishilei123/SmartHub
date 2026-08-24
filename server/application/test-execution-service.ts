@@ -51,6 +51,7 @@ import {
 } from '../infrastructure/execution-workspace-store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { resolveAuthSessionPolicy } from './test-execution-auth-session.js'
+import { governedExecutionEntryFile } from './test-execution-entry.js'
 import { createProjectVersionExplorationResult } from './test-execution-exploration.js'
 import {
   assertExecutionPackageIntegrity,
@@ -734,6 +735,7 @@ export class TestExecutionService {
     const workspaceFiles = this.executionWorkspace
       ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
       : []
+    const entryFile = governedExecutionEntryFile(task.input)
     const output = await this.withBrowserSession(
       run,
       task,
@@ -748,7 +750,7 @@ export class TestExecutionService {
         validateCandidate: candidateValidator(candidate => {
           const normalized = governedPackageCandidate(
             packageCandidate(candidate, 'test-script-generation/v1'),
-            task.input,
+            entryFile,
           )
           buildExecutionPackage({
             candidate: normalized,
@@ -764,7 +766,7 @@ export class TestExecutionService {
     const executionPackage = buildExecutionPackage({
       candidate: governedPackageCandidate(
         packageCandidate(output.candidate, 'test-script-generation/v1'),
-        task.input,
+        entryFile,
       ),
       task: { ...task.input, taskId: task.id },
       environmentSignature: run.environment.signature,
@@ -772,7 +774,7 @@ export class TestExecutionService {
     })
     const createdAt = this.clock()
     const cacheKey = taskScriptCacheKey(run, task)
-    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
+    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated', workspaceFiles)
     await this.persistScriptRevision({
       job,
       lease,
@@ -851,7 +853,7 @@ export class TestExecutionService {
     const build = (candidate: Record<string, unknown>) => {
       const normalized = governedPackageCandidate(
         packageCandidate(candidate, 'script-repair/v1'),
-        task.input,
+        parent.package.entrypoint,
       )
       buildExecutionPackage({
         candidate: normalized,
@@ -876,6 +878,7 @@ export class TestExecutionService {
         stageContext: {
           parentScriptRevisionId: parent.id,
           diagnosisId: diagnosis.id,
+          entryFile: parent.package.entrypoint,
           attemptIds: attempts.map(attempt => attempt.id),
           artifactIds: artifacts.map(artifact => artifact.id),
           repairCount: task.repairCount,
@@ -912,7 +915,7 @@ export class TestExecutionService {
       'TEST_EXECUTION_SCRIPT_ARTIFACT_NOT_FOUND',
       '当前 ScriptRevision 缺少 ScriptArtifact 身份',
     )
-    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated')
+    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated', workspaceFiles)
     await this.persistScriptRevision({
       job,
       lease,
@@ -1474,6 +1477,7 @@ export class TestExecutionService {
     task: ExecutionTask,
     executionPackage: ExecutionPackage,
     bindingStatus: CaseExecutionBinding['bindingStatus'],
+    baselineFiles: readonly Pick<ExecutionPackageFile, 'path' | 'contentSha256'>[],
   ) {
     if (!this.executionWorkspace) return
     const entry = required(executionPackage.files.find(file => file.path === executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
@@ -1495,7 +1499,7 @@ export class TestExecutionService {
       caseContentSha256: task.input.caseContentSha256,
       createdAt: now,
       updatedAt: now,
-    }, executionPackage.files)
+    }, executionPackage.files, baselineFiles)
   }
 
   private async workspaceRunTarget(
@@ -1505,16 +1509,6 @@ export class TestExecutionService {
     signal: AbortSignal,
   ) {
     if (!this.executionWorkspace) return {}
-    const binding = await this.executionWorkspace.resolveBinding(run.projectVersionId, task.input.caseId)
-    if (
-      !binding
-      || binding.bindingStatus === 'invalid'
-      || binding.entrySha256 !== revision.contentSha256
-      || binding.caseContentSha256 !== task.input.caseContentSha256
-      || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
-    ) {
-      throw new Error('TEST_EXECUTION_WORKSPACE_BINDING_DRIFT')
-    }
     const authPolicy = resolveAuthSessionPolicy(task.input)
     const [snapshot, authStateRoot] = await Promise.all([
       this.executionWorkspace.snapshot(run.projectVersionId),
@@ -1555,8 +1549,8 @@ export class TestExecutionService {
     return {
       workspace: {
         root: snapshot.root,
-        entryFile: binding.entryFile,
-        entrySymbol: binding.entrySymbol,
+        entryFile: revision.package.entrypoint,
+        entrySymbol: executionEntrySymbol(task.input.caseId),
         authStateRoot,
         ...(authStatePath ? { authStatePath } : {}),
         ...(apiAuthorization ? { apiAuthorization } : {}),
@@ -2223,21 +2217,12 @@ function packageCandidate(
 
 function governedPackageCandidate(
   candidate: ExecutionPackageCandidate,
-  task: Pick<FrozenExecutionTaskInput, 'caseId' | 'method'>,
+  entryFile: string,
 ): ExecutionPackageCandidate {
-  if (!['ui', 'api'].includes(task.method)) return candidate
-  const governedEntryFile = `tests/${task.method}/case-${sha256(task.caseId).slice(0, 32)}.spec.ts`
-  if (candidate.entryFile === governedEntryFile) return candidate
-  if (candidate.files.some(file => file.path === governedEntryFile)) {
-    throw new Error('TEST_EXECUTION_PACKAGE_GOVERNED_ENTRY_CONFLICT')
+  if (candidate.entryFile !== entryFile) {
+    throw new Error(`TEST_EXECUTION_PACKAGE_GOVERNED_ENTRY_REQUIRED: ${entryFile}`)
   }
-  return {
-    ...candidate,
-    entryFile: governedEntryFile,
-    files: candidate.files.map(file => file.path === candidate.entryFile
-      ? { ...file, path: governedEntryFile }
-      : file),
-  }
+  return candidate
 }
 
 async function requiredLeaseTransaction<T>(

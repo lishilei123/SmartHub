@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
 import { parse } from '@babel/parser'
-import type { Node } from '@babel/types'
+import type { CallExpression, Node } from '@babel/types'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import type {
   ExecutionAssertionContract,
@@ -397,6 +397,24 @@ export function assertExecutionBindingEntry(
     )
   }
   entryTestCallback(parseWorkspaceSource(source), caseId)
+}
+
+/**
+ * Protects one Case-owned Playwright declaration when several Cases share a
+ * spec. Imports and file-level helpers may evolve, but publishing another Case
+ * must not rewrite this Case's title, callback or assertions.
+ */
+export function executionEntrySourceSha256(source: string, caseId: string) {
+  const entry = entryTestCall(parseWorkspaceSource(source), caseId)
+  if (!Number.isInteger(entry.start) || !Number.isInteger(entry.end)) {
+    throw new TestExecutionValidationError(
+      'TEST_EXECUTION_BINDING_ENTRY_RANGE_INVALID',
+      'Execution Binding 入口源码范围无效',
+    )
+  }
+  return createHash('sha256')
+    .update(source.slice(entry.start!, entry.end!), 'utf8')
+    .digest('hex')
 }
 
 export function assertExecutionPackageIntegrity(input: {
@@ -879,9 +897,9 @@ function workspaceSourcePath(path: string) {
     && /\.(?:ts|tsx)$/iu.test(path)
 }
 
-function entryTestCallback(ast: ReturnType<typeof parse>, caseId: string): Node {
+function entryTestCall(ast: ReturnType<typeof parse>, caseId: string): CallExpression {
   const entrySymbol = executionEntrySymbol(caseId)
-  const callbacks: Node[] = []
+  const entries: CallExpression[] = []
   walkAst(ast, node => {
     if (
       node.type !== 'CallExpression'
@@ -894,12 +912,17 @@ function entryTestCallback(ast: ReturnType<typeof parse>, caseId: string): Node 
     if (
       callback?.type === 'ArrowFunctionExpression'
       || callback?.type === 'FunctionExpression'
-    ) callbacks.push(callback)
+    ) entries.push(node)
   })
-  if (callbacks.length !== 1) {
+  if (entries.length !== 1) {
     rejectSource(`入口文件必须且只能包含一个以 ${entrySymbol} 结尾的 Playwright test`)
   }
-  return callbacks[0]
+  return entries[0]
+}
+
+function entryTestCallback(ast: ReturnType<typeof parse>, caseId: string): Node {
+  const entry = entryTestCall(ast, caseId)
+  return entry.arguments[1] as Node
 }
 
 function entryTitleMatches(title: string, entrySymbol: string) {

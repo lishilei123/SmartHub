@@ -108,6 +108,13 @@ test('未授权登录 [TC_API_LOGIN_001]', async ({ request }) => {
         authStateRoot: await workspaceStore.runtimeAuthRoot('project-version-api', 'run-local-api'),
       },
     }
+    // A later shared-Workspace publication must not rewrite this Attempt's
+    // immutable ScriptRevision package before launch.
+    await writeFile(
+      join(workspace.root, ...entryFile.split('/')),
+      `import { test } from '@playwright/test'\ntest('漂移入口 [OTHER_CASE]', async () => {})\n`,
+      { encoding: 'utf8' },
+    )
     const result = await runner.execute(runnerInput, new AbortController().signal)
     let runnerLog = ''
     const log = result.artifacts[0]

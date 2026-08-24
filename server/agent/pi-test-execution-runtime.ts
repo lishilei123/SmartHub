@@ -7,6 +7,7 @@ import {
   toolsetContentHash,
 } from '../application/ai-resource-hash.js'
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
+import { governedExecutionEntryFile } from '../application/test-execution-entry.js'
 import type {
   AgentExecutionContext,
   AgentExecutionEvent,
@@ -115,6 +116,8 @@ export interface TestExecutionAgentStageContext {
   attemptIds?: string[]
   artifactIds?: string[]
   repairCount?: number
+  /** Service-owned physical entry; required when repairing a legacy Binding path. */
+  entryFile?: string
 }
 
 export interface TestExecutionAgentRuntimeInput {
@@ -284,6 +287,9 @@ export function buildTestExecutionAgentTask(
   const explorationContext = input.workspace.workspaceFiles.find(
     file => file.logicalPath.endsWith('/exploration/context.json'),
   )
+  const entryFile = input.stage === 'failure_diagnosis'
+    ? undefined
+    : input.stageContext?.entryFile ?? governedExecutionEntryFile(input.task.input)
   return canonicalJson({
     schemaVersion: 'test-execution-agent-task/v2',
     agent: binding.agentLabel,
@@ -293,6 +299,12 @@ export function buildTestExecutionAgentTask(
       method: input.task.input.method,
       dimension: input.task.input.dimension,
       specification: input.task.input.executionSpec,
+      ...(entryFile ? {
+        entry: {
+          file: entryFile,
+          symbol: `[${input.task.input.caseId}]`,
+        },
+      } : {}),
       ...(input.task.input.testDataBindings?.length
         ? { testDataBindings: input.task.input.testDataBindings }
         : {}),
@@ -315,7 +327,7 @@ export function buildTestExecutionAgentTask(
       } : {}),
     },
     ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
-    instructions: stageInstructions(input.stage, input.task.input.caseId, binding.submitToolId),
+    instructions: stageInstructions(input.stage, input.task.input.caseId, binding.submitToolId, entryFile),
   })
 }
 
@@ -325,7 +337,12 @@ function stageAssignment(stage: TestExecutionAgentStage) {
   return '根据已确认的 FailureDiagnosis 修复 Playwright 实现'
 }
 
-function stageInstructions(stage: TestExecutionAgentStage, caseId: string, submitToolId: string) {
+function stageInstructions(
+  stage: TestExecutionAgentStage,
+  caseId: string,
+  submitToolId: string,
+  entryFile?: string,
+) {
   const common = [
     '只使用冻结 TestCase、只读 Workspace 与当前 Runtime 明确授权的上下文；不得编造 API、Selector、凭据、业务规则或预期结果。',
     '不得修改 TestCase、Expected Result、Verification Check、受保护断言语义或测试目标。',
@@ -340,6 +357,7 @@ function stageInstructions(stage: TestExecutionAgentStage, caseId: string, submi
     ...common,
     '实现阶段可使用只读 Workspace、Knowledge、已有 Runtime Observation 与当前 invocation 明确授权的 Browser Tools。',
     `Playwright Test 标题必须以稳定 Case Symbol ${JSON.stringify(`[${caseId}]`)} 结尾。`,
+    `entryFile 必须为 Service 指定的 ${JSON.stringify(entryFile)}；如果文件已存在，保留其中其他 Case 的 test 声明，只新增或修复当前 Case。`,
     '优先复用 execution/ 下已有 tests、pages、api、helpers 和 fixtures；API 使用 request/APIRequestContext，UI 必须完成真实 UI 操作与页面断言。',
     '先复用 Workspace 和已有 Observation；只有实现所需信息不足时才按需、多轮调用 Browser Tools。Browser Observation 是运行时观察事实，不是 Requirement Truth。',
     'Browser Tools 只用于受控探索，不是 Runner；不得把工具观察解释为 PASS/FAIL，也不得据此改变 Expected Result 或弱化断言。',
@@ -456,7 +474,11 @@ function validateStageInput(
     ) throw new Error('TEST_EXECUTION_DIAGNOSIS_CONTEXT_REQUIRED')
   }
   if (input.stage === 'script_repair') {
-    if (!input.stageContext?.parentScriptRevisionId || !input.stageContext.diagnosisId) {
+    if (
+      !input.stageContext?.parentScriptRevisionId
+      || !input.stageContext.diagnosisId
+      || !input.stageContext.entryFile
+    ) {
       throw new Error('TEST_EXECUTION_REPAIR_CONTEXT_REQUIRED')
     }
     if ((input.stageContext.repairCount ?? input.task.repairCount) >= 2) {

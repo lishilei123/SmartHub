@@ -348,7 +348,7 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
       stageContext: stage === 'failure_diagnosis'
         ? { scriptRevisionId: 'revision-1', attemptIds: ['attempt-1', 'attempt-2'], artifactIds: ['artifact-1'] }
         : stage === 'script_repair'
-          ? { parentScriptRevisionId: 'revision-1', diagnosisId: 'diagnosis-1', repairCount: 0 }
+          ? { parentScriptRevisionId: 'revision-1', diagnosisId: 'diagnosis-1', repairCount: 0, entryFile: 'tests/ui/status.spec.ts' }
           : undefined,
       validateCandidate: async candidate => ({ valid: true, result: candidate, issues: [] }),
     }, new AbortController().signal)

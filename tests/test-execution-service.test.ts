@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
+import { governedExecutionEntryFile } from '../server/application/test-execution-entry.js'
 import {
   TestExecutionInfrastructureError,
   TestExecutionService,
@@ -726,7 +727,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
     if (input.stage === 'script_generation') {
       schemaVersion = 'test-script-generation/v1'
       agentKey = 'execution-implementation'
-      const entryFile = `tests/${input.task.input.method}/${input.task.id}.spec.ts`
+      const entryFile = governedExecutionEntryFile(input.task.input)
       const generationFiles = [{
         path: entryFile,
         content: input.task.input.method === 'api'
@@ -754,7 +755,7 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
       schemaVersion = 'script-repair/v1'
       agentKey = 'execution-implementation'
       this.repairOrdinal += 1
-      const entryFile = `tests/${input.task.input.method}/${input.task.id}.spec.ts`
+      const entryFile = input.stageContext?.entryFile ?? governedExecutionEntryFile(input.task.input)
       candidate = {
         entryFile,
         files: [{
@@ -1458,10 +1459,7 @@ test('新 UI Case 由 ExecutionImplementationAgent 多轮调用 Browser Tools �
       'close',
     ])
     const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
-    assert.equal(
-      binding?.entryFile,
-      `tests/ui/case-${createHash('sha256').update(store.task.input.caseId, 'utf8').digest('hex').slice(0, 32)}.spec.ts`,
-    )
+    assert.equal(binding?.entryFile, governedExecutionEntryFile(store.task.input))
     assert.equal(binding?.bindingStatus, 'validated')
     assert.equal(runner.calls.length, 1)
   }, { workspace: true })
@@ -1595,7 +1593,7 @@ test('API Case 无 Binding 时优先获得当前 ProjectVersion Exploration Cont
       validationStatus: 'validated',
     }])
     const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
-    const governedEntry = `tests/api/case-${createHash('sha256').update(store.task.input.caseId, 'utf8').digest('hex').slice(0, 32)}.spec.ts`
+    const governedEntry = governedExecutionEntryFile(store.task.input)
     assert.equal(binding?.entryFile, governedEntry)
     assert.deepEqual(binding?.dependencyFiles.map(file => file.path), [
       'api/auth-client.ts',

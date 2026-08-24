@@ -4,7 +4,6 @@ import { createReadStream } from 'node:fs'
 import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, relative, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
 import JSZip, { type JSZipObject } from 'jszip'
 import type {
   ExecutionEventStatus,
@@ -32,7 +31,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
   ) {
     this.playwright = playwright ?? localPlaywrightInstallation()
     this.value = {
-      runnerVersion: 'local-workspace/v3',
+      runnerVersion: 'local-workspace/v4',
       playwrightVersion: this.playwright.version,
       imageReference: 'local-workspace',
       imageDigest: `sha256:${'0'.repeat(64)}`,
@@ -68,14 +67,12 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
       expectedPackageSha256: input.expectedPackageSha256,
     })
     const workspaceRoot = resolve(input.workspace.root)
-    const entry = resolve(workspaceRoot, ...input.workspace.entryFile.split('/'))
     const authStateRoot = resolve(input.workspace.authStateRoot)
     const authStatePath = relative(workspaceRoot, authStateRoot).replaceAll('\\', '/')
     const authStateFile = input.workspace.authStatePath
       ? resolve(input.workspace.authStatePath)
       : undefined
     const apiAuthorization = input.workspace.apiAuthorization
-    if (!inside(workspaceRoot, entry)) throw new Error('TEST_EXECUTION_WORKSPACE_ENTRY_INVALID')
     if (!inside(workspaceRoot, authStateRoot) || !/^\.runtime-auth\/[A-Za-z0-9._-]{1,200}$/u.test(authStatePath)) {
       throw new Error('TEST_EXECUTION_AUTH_STATE_SCOPE_INVALID')
     }
@@ -101,13 +98,6 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
     const runtimeApiAuthorization = apiAuthorization && authStateFile
       ? await readRuntimeApiAuthorization(authStateFile, apiAuthorization, input.environment.baseUrl)
       : undefined
-    await access(entry)
-    for (const file of executionPackage.files) {
-      const target = resolve(workspaceRoot, ...file.path.split('/'))
-      if (!inside(workspaceRoot, target)) throw new Error('TEST_EXECUTION_WORKSPACE_DEPENDENCY_INVALID')
-      const content = await readFile(target, 'utf8')
-      if (sha256(content) !== file.contentSha256) throw new Error('TEST_EXECUTION_WORKSPACE_DEPENDENCY_DRIFT')
-    }
     if (signal.aborted) return cancelled()
     const secretEnvironment = normalizeSecretEnvironment(await this.secretResolver.resolveForLaunch({
       environmentId: input.environment.environmentId,
@@ -116,15 +106,29 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
     }, signal))
     if (signal.aborted) return cancelled()
     const started = Date.now()
-    const runtimeRoot = await mkdtemp(join(tmpdir(), 'smarthub-playwright-config-'))
+    // Execute the immutable ScriptRevision package, not the mutable shared
+    // ProjectVersion workspace. Keeping the temporary root beside ProjectVersion
+    // workspaces preserves normal Node module resolution up to the repository.
+    const runtimeRoot = await mkdtemp(join(dirname(workspaceRoot), '.runtime-execution-'))
     try {
+      const executionRoot = join(runtimeRoot, 'workspace')
       const configPath = join(runtimeRoot, 'playwright.config.mjs')
       const reporterPath = join(runtimeRoot, 'playwright-report.json')
+      await mkdir(executionRoot, { recursive: true })
+      for (const file of executionPackage.files) {
+        const target = resolve(executionRoot, ...file.path.split('/'))
+        if (!inside(executionRoot, target)) throw new Error('TEST_EXECUTION_WORKSPACE_DEPENDENCY_INVALID')
+        await mkdir(dirname(target), { recursive: true })
+        await writeFile(target, file.content, { encoding: 'utf8' })
+      }
+      const entry = resolve(executionRoot, ...input.workspace.entryFile.split('/'))
+      if (!inside(executionRoot, entry)) throw new Error('TEST_EXECUTION_WORKSPACE_ENTRY_INVALID')
+      await access(entry)
       await mkdir(authStateRoot, { recursive: true, mode: 0o700 })
       await writeFile(
         configPath,
         localPlaywrightConfig(
-          workspaceRoot,
+          executionRoot,
           join(runtimeRoot, 'test-results'),
           reporterPath,
           authStateRoot,
@@ -143,7 +147,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         `${escapeRegExp(input.workspace.entrySymbol)}$`,
       ]
       const child = spawn(process.execPath, args, {
-        cwd: workspaceRoot,
+        cwd: executionRoot,
         shell: false,
         windowsHide: true,
         env: {

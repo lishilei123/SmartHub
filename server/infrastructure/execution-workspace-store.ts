@@ -13,6 +13,7 @@ import {
 import {
   assertExecutionBindingEntry,
   executionEntrySymbol,
+  executionEntrySourceSha256,
 } from '../application/test-execution-validation.js'
 import type {
   ExecutionPackageFile,
@@ -172,10 +173,81 @@ export class LocalExecutionWorkspaceStore {
   async saveBindingImplementation(
     binding: CaseExecutionBinding,
     files: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[],
+    baselineFiles?: readonly Pick<ExecutionPackageFile, 'path' | 'contentSha256'>[],
   ) {
     return this.withMutation(binding.projectVersionId, async () => {
-      await this.writeBindingFiles(binding.projectVersionId, binding.caseId, files)
-      return this.saveBinding(binding)
+      const root = await this.ensure(binding.projectVersionId)
+      const safeBinding = normalizeBinding(binding)
+      const candidates = new Map(files.map(file => {
+        const path = safePath(file.path)
+        return [path, { content: file.content, contentSha256: sha256(file.content) }] as const
+      }))
+      if (candidates.size !== files.length) {
+        throw new Error('TEST_EXECUTION_WORKSPACE_FILE_DUPLICATE')
+      }
+      if (baselineFiles) {
+        await this.assertWorkspaceBaseline(root, candidates.keys(), baselineFiles)
+      }
+
+      const otherBindings: CaseExecutionBinding[] = []
+      for (const bindingPath of await this.bindingFiles(root)) {
+        try {
+          const existing = normalizeBinding(
+            JSON.parse(await readFile(bindingPath, 'utf8')) as CaseExecutionBinding,
+          )
+          if (
+            existing.projectVersionId === safeBinding.projectVersionId
+            && existing.caseId !== safeBinding.caseId
+          ) otherBindings.push(existing)
+        } catch {
+          // Invalid historical Binding files remain isolated from publication.
+        }
+      }
+
+      const affected = otherBindings.filter(existing =>
+        existing.dependencyFiles.some(file => {
+          const candidate = candidates.get(file.path)
+          return candidate && candidate.contentSha256 !== file.contentSha256
+        }))
+      for (const existing of affected) {
+        const replacement = candidates.get(existing.entryFile)
+        if (!replacement) continue
+        const current = await this.readWorkspaceFile(root, existing.entryFile)
+        try {
+          assertExecutionBindingEntry(replacement.content, existing.caseId, existing.entrySymbol)
+          if (
+            executionEntrySourceSha256(current, existing.caseId)
+            !== executionEntrySourceSha256(replacement.content, existing.caseId)
+          ) throw new Error('TEST_EXECUTION_WORKSPACE_SHARED_ENTRY_MUTATION')
+        } catch (cause) {
+          throw new Error(
+            `TEST_EXECUTION_WORKSPACE_SHARED_ENTRY_CONFLICT: ${existing.entryFile}`,
+            { cause },
+          )
+        }
+      }
+
+      await this.writeFiles(binding.projectVersionId, files)
+      const updatedAt = new Date().toISOString()
+      for (const existing of affected) {
+        const dependencyFiles = existing.entryFile === safeBinding.entryFile
+          ? safeBinding.dependencyFiles
+          : existing.dependencyFiles.map(file => {
+              const replacement = candidates.get(file.path)
+              return replacement
+                ? { path: file.path, contentSha256: replacement.contentSha256 }
+                : file
+            })
+        await this.saveBinding({
+          ...existing,
+          entrySha256: candidates.get(existing.entryFile)?.contentSha256 ?? existing.entrySha256,
+          dependencyFiles,
+          dependencySha256: executionBindingDependencySha256(dependencyFiles),
+          bindingStatus: existing.bindingStatus === 'invalid' ? 'invalid' : 'needs_validation',
+          updatedAt,
+        })
+      }
+      return this.saveBinding(safeBinding)
     })
   }
 
@@ -419,6 +491,26 @@ export class LocalExecutionWorkspaceStore {
     const metadata = await stat(target)
     if (!metadata.isFile()) throw new Error('TEST_EXECUTION_BINDING_ENTRY_MISSING')
     return await readFile(target, 'utf8')
+  }
+
+  private async assertWorkspaceBaseline(
+    root: string,
+    candidatePaths: Iterable<string>,
+    baselineFiles: readonly Pick<ExecutionPackageFile, 'path' | 'contentSha256'>[],
+  ) {
+    const baseline = new Map(baselineFiles.map(file => [safePath(file.path), file.contentSha256]))
+    for (const path of candidatePaths) {
+      const expected = baseline.get(path)
+      let actual: string | undefined
+      try {
+        actual = sha256(await this.readWorkspaceFile(root, path))
+      } catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+      }
+      if (actual !== expected) {
+        throw new Error(`TEST_EXECUTION_WORKSPACE_REVISION_CONFLICT: ${path}`)
+      }
+    }
   }
 
   private async bindingFiles(root: string) {

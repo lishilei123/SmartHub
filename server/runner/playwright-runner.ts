@@ -37,7 +37,9 @@ export interface PlaywrightRunner {
     runner: ExecutionRunnerSnapshot
     /** Present for persistent ProjectVersion workspaces. OCI runners may ignore it. */
     workspace?: {
+      /** Persistent root supplies module resolution and Run-scoped auth only. */
       root: string
+      /** Immutable ScriptRevision entry materialized from `package` for launch. */
       entryFile: string
       entrySymbol: string
       /** Run-scoped ephemeral directory; excluded from snapshots and inheritance. */

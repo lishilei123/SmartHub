@@ -9,6 +9,7 @@ import {
   ConfiguredExecutionEnvironmentCatalog,
   executionEnvironmentProfilesFromJson,
 } from '../server/application/test-execution-environment.js'
+import { governedExecutionEntryFile } from '../server/application/test-execution-entry.js'
 import {
   aggregateExecutionRunStatus,
   assertRunTransition,
@@ -124,6 +125,24 @@ function apiTaskInput(): FrozenExecutionTaskInput & { taskId: string } {
     taskId: 'task-api-login',
   }
 }
+
+test('Service 按正式 Requirement 集合治理共享 spec，无直接追溯的 Case 保持隔离', () => {
+  const task = taskInput()
+  const sameRequirement = {
+    ...task,
+    caseId: 'case-status-invalid-transition',
+  }
+  assert.equal(governedExecutionEntryFile(task), governedExecutionEntryFile(sameRequirement))
+  assert.match(governedExecutionEntryFile(task), /^tests\/ui\/requirement-point-status-[a-f0-9]{12}\.spec\.ts$/u)
+  const untraced = {
+    ...task,
+    caseContent: { ...task.caseContent, requirementRefs: [] },
+  }
+  assert.notEqual(
+    governedExecutionEntryFile(untraced),
+    governedExecutionEntryFile({ ...untraced, caseId: 'another-untraced-case' }),
+  )
+})
 
 function candidate(source = validSource): ExecutionPackageCandidate {
   return {

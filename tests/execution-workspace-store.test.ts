@@ -93,6 +93,62 @@ test('一个 Case 不能覆盖另一个 Binding 已冻结的 Workspace 文件', 
   }
 })
 
+test('共享 spec 只允许追加当前 Case，并使其他 Case Binding 等待重新验证', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-workspace-'))
+  try {
+    const store = new LocalExecutionWorkspaceStore(root)
+    const path = 'tests/api/requirement-task-status.spec.ts'
+    const original = `import { test } from '@playwright/test'\ntest('状态流转 [CASE_A]', async () => {})\n`
+    const helperPath = 'helpers/task-record.ts'
+    const helper = 'export const taskRecord = true\n'
+    const shared = `import { test } from '@playwright/test'\nimport { taskRecord } from '../../helpers/task-record.js'\n${original.slice(original.indexOf("test('"))}test('拒绝非法回退 [CASE_B]', async () => { void taskRecord })\n`
+    await store.writeFiles('pv-v1', [{ path, content: original }])
+    const originalDependencies = [{ path, contentSha256: hash(original) }]
+    await store.saveBinding({
+      projectVersionId: 'pv-v1', caseId: 'CASE_A', executionType: 'api',
+      entryFile: path, entrySymbol: '[CASE_A]', bindingStatus: 'validated',
+      entrySha256: hash(original), caseContentSha256: 'd'.repeat(64),
+      dependencyFiles: originalDependencies,
+      dependencySha256: executionBindingDependencySha256(originalDependencies),
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z',
+    })
+    const sharedDependencies = [
+      { path: helperPath, contentSha256: hash(helper) },
+      { path, contentSha256: hash(shared) },
+    ]
+    await store.saveBindingImplementation({
+      projectVersionId: 'pv-v1', caseId: 'CASE_B', executionType: 'api',
+      entryFile: path, entrySymbol: '[CASE_B]', bindingStatus: 'validated',
+      entrySha256: hash(shared), caseContentSha256: 'e'.repeat(64),
+      dependencyFiles: sharedDependencies,
+      dependencySha256: executionBindingDependencySha256(sharedDependencies),
+      createdAt: '2026-08-24T00:01:00.000Z', updatedAt: '2026-08-24T00:01:00.000Z',
+    }, [{ path: helperPath, content: helper }, { path, content: shared }], originalDependencies)
+
+    const rebound = await store.resolveBinding('pv-v1', 'CASE_A')
+    assert.equal(rebound?.bindingStatus, 'needs_validation')
+    assert.equal(rebound?.entrySha256, hash(shared))
+    assert.deepEqual(rebound?.dependencyFiles, sharedDependencies)
+    assert.equal((await store.resolveBinding('pv-v1', 'CASE_B'))?.bindingStatus, 'validated')
+
+    const mutated = `import { test } from '@playwright/test'\nimport { taskRecord } from '../../helpers/task-record.js'\ntest('状态流转 [CASE_A]', async () => { throw new Error('changed') })\ntest('拒绝非法回退 [CASE_B]', async () => { void taskRecord })\ntest('重复提交 [CASE_C]', async () => {})\n`
+    const mutatedDependencies = [
+      { path: helperPath, contentSha256: hash(helper) },
+      { path, contentSha256: hash(mutated) },
+    ]
+    await assert.rejects(store.saveBindingImplementation({
+      projectVersionId: 'pv-v1', caseId: 'CASE_C', executionType: 'api',
+      entryFile: path, entrySymbol: '[CASE_C]', bindingStatus: 'validated',
+      entrySha256: hash(mutated), caseContentSha256: 'f'.repeat(64),
+      dependencyFiles: mutatedDependencies,
+      dependencySha256: executionBindingDependencySha256(mutatedDependencies),
+      createdAt: '2026-08-24T00:02:00.000Z', updatedAt: '2026-08-24T00:02:00.000Z',
+    }, [{ path: helperPath, content: helper }, { path, content: mutated }], sharedDependencies), /TEST_EXECUTION_WORKSPACE_SHARED_ENTRY_CONFLICT/u)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('storageState 只存在于 Run 临时目录，不进入 Snapshot 或 ProjectVersion 继承', async () => {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-auth-'))
   try {
