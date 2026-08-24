@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import type {
+  AgentUnderTest,
   ExecutionEnvironment,
   ExecutionReadiness,
   ExecutionRun,
@@ -22,47 +23,55 @@ import type {
 export function ExecutionRunPanel({
   readiness,
   environments,
+  agentsUnderTest,
   runs,
   run,
   busy,
   loading,
   onRefresh,
   onCreate,
+  onCreateAgentUnderTest,
   onOpen,
   onCancel,
 }: {
   readiness: ExecutionReadiness | null
   environments: ExecutionEnvironment[]
+  agentsUnderTest: AgentUnderTest[]
   runs: ExecutionRun[]
   run: Versioned<ExecutionRun> | null
   busy: string
   loading: boolean
   onRefresh: () => Promise<void>
-  onCreate: (baseUrl: string) => Promise<ExecutionRun | undefined>
+  onCreate: (agentUnderTestId: string) => Promise<ExecutionRun | undefined>
+  onCreateAgentUnderTest: (input: Parameters<typeof import('./api').createAgentUnderTest>[1]) => Promise<AgentUnderTest | undefined>
   onOpen: (runId: string) => Promise<ExecutionRun | undefined>
   onCancel: () => Promise<void>
 }) {
-  const [baseUrl, setBaseUrl] = useState('')
+  const [agentUnderTestId, setAgentUnderTestId] = useState('')
+  const [showAgentForm, setShowAgentForm] = useState(false)
+  const [agentDraft, setAgentDraft] = useState({ name: '', endpoint: '', protocol: 'http' as 'http' | 'sse', inputField: 'input', contextField: 'context', sessionIdField: 'sessionId', outputPath: 'output', tracePath: 'trace', traceCompleteness: 'partial' as 'complete' | 'partial' })
+  const selectedAgent = agentsUnderTest.find(item => item.id === agentUnderTestId)
 
   return <div className="te-run-column">
     <section className="te-card te-readiness">
-      <header><div><h2>执行就绪状态</h2><p>生产执行要求正式存储、不可变 Artifact、受控 Agent 与 ProjectVersion Execution Workspace Runner 全部就绪。</p></div><button className="te-icon-button" disabled={loading} onClick={() => void onRefresh()} aria-label="刷新执行就绪状态"><RefreshCw /></button></header>
+      <header><div><h2>Agent Test 就绪状态</h2><p>真实执行要求 PostgreSQL、AgentRunner 与 SmartHub Evaluation / FailureAnalysis 配置就绪。</p></div><button className="te-icon-button" disabled={loading} onClick={() => void onRefresh()} aria-label="刷新执行就绪状态"><RefreshCw /></button></header>
       <div className="te-readiness-grid">
         <ReadinessItem icon={<Database />} label="PostgreSQL" ready={readiness?.store.ready} reason={readiness?.store.reason} />
         <ReadinessItem icon={<Box />} label="Artifact Store" ready={readiness?.artifactStore.ready} reason={readiness?.artifactStore.reason} />
-        <ReadinessItem icon={<Globe2 />} label="执行环境" ready={readiness?.environment.ready} reason={readiness?.environment.reason} />
-        <ReadinessItem icon={<Bot />} label="执行 Agents" ready={readiness?.agents.ready} reason={readiness?.agents.agents.filter(item => !item.ready).map(item => item.reason ?? item.agentKey).join('；')} />
-        <ReadinessItem icon={<Server />} label="Local Workspace Runner" ready={readiness?.runner.ready} reason={readiness?.runner.reason} />
+        <ReadinessItem icon={<Globe2 />} label="Agent Under Test" ready={agentsUnderTest.some(item => item.enabled)} reason={agentsUnderTest.length ? '请启用至少一个被测 Agent' : '尚未配置被测 Agent'} />
+        <ReadinessItem icon={<Bot />} label="Evaluation / RCA Agent" ready={readiness?.agent?.ready} reason={readiness?.agent?.reason} />
+        <ReadinessItem icon={<Server />} label="Deterministic AgentRunner" ready={readiness?.agent?.ready} reason={readiness?.agent?.reason} />
       </div>
-      {readiness && <span className={`te-status-pill ${readiness.ready ? 'passed' : 'blocked'}`}>{readiness.ready ? '可以创建真实执行' : 'Runner unavailable / Agent not ready'}</span>}
+      {readiness && <span className={`te-status-pill ${readiness.agent?.ready ? 'passed' : 'blocked'}`}>{readiness.agent?.ready ? 'Agent Runtime 可以真实执行' : 'Agent Runtime 尚未就绪'}</span>}
     </section>
 
     <section className="te-card te-create-card">
       <header><div><h2>创建测试执行</h2><p>服务端会在创建 Run 时冻结当前项目版本最新正式用例库中的全部可执行用例。</p></div></header>
       <div className="te-handoff-preview"><div><span>执行范围</span><b>全部正式用例</b></div><div><span>冻结时机</span><b>创建 Run</b></div></div>
-      <label>被测系统地址<input type="url" list="test-execution-addresses" value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="https://staging.example.com" autoComplete="url" /><small>服务端校验 http/https 地址，并在创建执行时冻结目标环境。</small></label>
-      <datalist id="test-execution-addresses">{environments.map(item => <option key={item.environmentId} value={item.baseUrl} label={item.name} />)}</datalist>
-      <button className="te-primary" disabled={!readiness?.ready || !baseUrl.trim() || Boolean(busy)} onClick={() => void onCreate(baseUrl)}><Play />{busy === 'create' ? '正在冻结执行输入…' : '创建执行 Run'}</button>
+      <label>Agent Under Test<select value={agentUnderTestId} onChange={event => setAgentUnderTestId(event.target.value)}><option value="">选择当前 ProjectVersion 的被测 Agent</option>{agentsUnderTest.filter(item => item.enabled).map(item => <option key={item.id} value={item.id}>{item.name} · {item.protocol.toUpperCase()}</option>)}</select><small>{selectedAgent ? `${selectedAgent.endpoint} · 配置 V${selectedAgent.currentVersion}` : 'Run 会冻结 endpoint、协议、映射与文档引用；凭据只保存环境变量名。'}</small></label>
+      <button className="te-secondary" type="button" onClick={() => setShowAgentForm(value => !value)}>{showAgentForm ? '收起被测 Agent 配置' : '新增被测 Agent'}</button>
+      {showAgentForm && <div className="te-agent-under-test-form"><label>名称<input value={agentDraft.name} onChange={event => setAgentDraft(value => ({ ...value, name: event.target.value }))} /></label><label>Endpoint<input type="url" value={agentDraft.endpoint} onChange={event => setAgentDraft(value => ({ ...value, endpoint: event.target.value }))} placeholder="https://agent.example.com/run" /></label><label>协议<select value={agentDraft.protocol} onChange={event => setAgentDraft(value => ({ ...value, protocol: event.target.value as 'http' | 'sse' }))}><option value="http">HTTP</option><option value="sse">SSE</option></select></label><label>Input 字段<input value={agentDraft.inputField} onChange={event => setAgentDraft(value => ({ ...value, inputField: event.target.value }))} /></label><label>Output Path<input value={agentDraft.outputPath} onChange={event => setAgentDraft(value => ({ ...value, outputPath: event.target.value }))} /></label><label>Trace Path<input value={agentDraft.tracePath} onChange={event => setAgentDraft(value => ({ ...value, tracePath: event.target.value }))} /></label><label>Trace 完整度<select value={agentDraft.traceCompleteness} onChange={event => setAgentDraft(value => ({ ...value, traceCompleteness: event.target.value as 'complete' | 'partial' }))}><option value="partial">Partial / 未承诺完整</option><option value="complete">Complete / 契约保证完整</option></select></label><button type="button" className="te-secondary" disabled={!agentDraft.name.trim() || !agentDraft.endpoint.trim() || Boolean(busy)} onClick={() => void onCreateAgentUnderTest({ name: agentDraft.name, endpoint: agentDraft.endpoint, protocol: agentDraft.protocol, authenticationConfig: { type: 'none' }, requestMapping: { method: 'POST', inputField: agentDraft.inputField, contextField: agentDraft.contextField, sessionIdField: agentDraft.sessionIdField }, responseMapping: { outputPath: agentDraft.outputPath, ...(agentDraft.tracePath ? { tracePath: agentDraft.tracePath } : {}), traceCompleteness: agentDraft.traceCompleteness }, documentationRefs: [] }).then(created => { if (created) { setAgentUnderTestId(created.id); setShowAgentForm(false) } })}>{busy === 'create-agent-under-test' ? '保存中…' : '保存被测 Agent'}</button></div>}
+      <button className="te-primary" disabled={!readiness?.agent?.ready || !agentUnderTestId || Boolean(busy)} onClick={() => void onCreate(agentUnderTestId)}><Play />{busy === 'create' ? '正在冻结执行输入…' : '创建 Agent Test Run'}</button>
     </section>
 
     <section className="te-card te-run-history">
@@ -79,12 +88,12 @@ export function ExecutionRunPanel({
       <header><div><h2>本次执行</h2><p>查看目标环境、执行时间与必要运行信息。</p></div>{['queued', 'running'].includes(run.value.status) && <button className="te-danger" disabled={Boolean(busy) || Boolean(run.value.cancelRequestedAt)} onClick={() => void onCancel()}><Square />{run.value.cancelRequestedAt ? '已请求取消' : busy === 'cancel' ? '正在取消…' : '取消执行'}</button>}</header>
       <dl>
         <div><dt>执行范围</dt><dd>全部正式用例</dd></div>
-        <div><dt>目标环境</dt><dd>{run.value.environment.name} · {run.value.environment.baseUrl}</dd></div>
+        <div><dt>被测 Agent</dt><dd>{run.value.environment.name} · {run.value.environment.baseUrl}</dd></div>
         <div><dt>创建时间</dt><dd>{new Date(run.value.createdAt).toLocaleString('zh-CN')}</dd></div>
         <div><dt>执行耗时</dt><dd>{runDuration(run.value)}</dd></div>
         <div><dt>测试数据</dt><dd>{run.value.testData ? `需求 V${run.value.testData.sourceSetVersion} · ${run.value.testData.bindings.length} 项供给` : '无额外数据需求'}</dd></div>
       </dl>
-      <details className="te-developer-details"><summary>开发者信息</summary><dl><div><dt>冻结用例库</dt><dd>{shortId(run.value.handoff.testCaseLibraryVersionId)}</dd></div><div><dt>Runner</dt><dd>{run.value.runner.runnerVersion} · Playwright {run.value.runner.playwrightVersion}</dd></div><div><dt>Workspace</dt><dd>{run.value.runner.imageReference === 'local-workspace' ? 'ProjectVersion 隔离 Workspace' : run.value.runner.imageReference}</dd></div><div><dt>Agent 配置</dt><dd>{Object.values(run.value.agents).map(agent => `${agent.agentKey} v${agent.configurationVersion}`).join(' · ')}</dd></div></dl></details>
+      <details className="te-developer-details"><summary>开发者信息</summary><dl><div><dt>冻结用例库</dt><dd>{shortId(run.value.handoff.testCaseLibraryVersionId)}</dd></div><div><dt>Runner</dt><dd>{run.value.runner.runnerVersion}{run.value.runner.playwrightVersion ? ` · Playwright ${run.value.runner.playwrightVersion}` : ''}</dd></div><div><dt>协议</dt><dd>{run.value.environment.agentUnderTest?.protocol?.toUpperCase?.() ?? run.value.environment.targets[0]?.protocol.toUpperCase()}</dd></div><div><dt>平台 Agent 配置</dt><dd>{Object.values(run.value.agents).filter(Boolean).map(agent => `${agent!.agentKey} v${agent!.configurationVersion}`).join(' · ')}</dd></div></dl></details>
     </section>}
   </div>
 }

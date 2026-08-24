@@ -1,5 +1,5 @@
 import { SearchCheck } from 'lucide-react'
-import type { FailureDiagnosisCategory, TestReport } from './types'
+import type { FailureDiagnosisCategory, LegacyTestReport } from './types'
 
 const labels: Record<FailureDiagnosisCategory, string> = {
   product_defect: '产品缺陷',
@@ -13,7 +13,7 @@ const labels: Record<FailureDiagnosisCategory, string> = {
   unknown: '未知',
 }
 
-export function TestReportDiagnosisPanel({ report }: { report: TestReport }) {
+export function TestReportDiagnosisPanel({ report }: { report: LegacyTestReport }) {
   return <section className="tr-section tr-diagnosis" aria-labelledby="tr-diagnosis-title">
     <header><div><h2 id="tr-diagnosis-title"><SearchCheck aria-hidden="true" />诊断分布</h2><p>统计全部正式 FailureDiagnosis 事件，共 {report.diagnosisDistribution.totalDiagnoses} 条。</p></div></header>
     <div className="tr-table-scroll"><table><thead><tr><th>正式类别</th><th>事件数</th><th>占比</th><th>幅度</th></tr></thead><tbody>{report.diagnosisDistribution.categories.map(item => <tr key={item.category}><td><b>{labels[item.category]}</b><code>{item.category}</code></td><td>{item.count}</td><td>{item.percentage.toFixed(2)}%</td><td><span className="tr-magnitude" aria-label={`${labels[item.category]} ${item.percentage.toFixed(2)}%`}><i style={{ width: `${item.percentage}%` }} /></span></td></tr>)}</tbody></table></div>

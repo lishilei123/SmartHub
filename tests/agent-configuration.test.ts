@@ -210,8 +210,8 @@ test('两个测试执行 Agent 独立发布、精确能力就绪并冻结不同�
     },
     failureAnalysis: {
       definitionKey: 'failure-analysis',
-      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'failure_analysis.submit_result'],
-      skills: ['failure-analysis'],
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'agent_evaluation.submit_result', 'failure_analysis.submit_result'],
+      skills: ['agent-evaluation', 'failure-analysis'],
     },
   } as const
 
@@ -304,6 +304,10 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
       tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'failure_analysis.submit_result'],
       skills: ['failure-analysis'],
     },
+    agent_evaluation: {
+      tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'agent_evaluation.submit_result'],
+      skills: ['agent-evaluation'],
+    },
     script_repair: {
       tools: ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', ...BROWSER_TOOL_IDS, 'execution_implementation.submit_result'],
       skills: ['script-repair'],
@@ -323,7 +327,7 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
 
   for (const stage of Object.keys(TEST_EXECUTION_STAGE_BINDINGS) as Array<keyof typeof TEST_EXECUTION_STAGE_BINDINGS>) {
     const binding = TEST_EXECUTION_STAGE_BINDINGS[stage]
-    const browserSession: BrowserToolSession | undefined = stage === 'failure_diagnosis' ? undefined : {
+    const browserSession: BrowserToolSession | undefined = stage === 'script_generation' || stage === 'script_repair' ? {
       scope: {
         runId: run.id,
         taskId: task.id,
@@ -338,14 +342,16 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
       })),
       observations: () => [],
       close: async () => undefined,
-    }
+    } : undefined
     await runtime.execute({
       stage,
       run,
       task,
       workspace,
       ...(browserSession ? { browserSession } : {}),
-      stageContext: stage === 'failure_diagnosis'
+      stageContext: stage === 'agent_evaluation'
+        ? { agentExecution: { taskId: task.id, runId: run.id, status: 'NOT_EVALUABLE', caseRuns: [], successRate: 0, failureRate: 0, notEvaluableRate: 1, errorRate: 0, averageLatencyMs: 0, createdAt: new Date().toISOString() } }
+        : stage === 'failure_diagnosis'
         ? { scriptRevisionId: 'revision-1', attemptIds: ['attempt-1', 'attempt-2'], artifactIds: ['artifact-1'] }
         : stage === 'script_repair'
           ? { parentScriptRevisionId: 'revision-1', diagnosisId: 'diagnosis-1', repairCount: 0 }
@@ -365,8 +371,8 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
     assert.deepEqual(input.snapshot.agentDefinition.enabledSkills, stageCapabilities[stage].skills)
     assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.search'), stage === 'script_generation')
     assert.equal(input.executionProfile?.allowedToolIds.includes('knowledge.read_chunk'), stage === 'script_generation')
-    assert.equal(input.executionProfile?.allowedToolIds.includes('browser.snapshot'), stage !== 'failure_diagnosis')
-    assert.equal(input.executionProfile?.runtimeToolBindings?.length ?? 0, stage === 'failure_diagnosis' ? 0 : BROWSER_TOOL_IDS.length)
+    assert.equal(input.executionProfile?.allowedToolIds.includes('browser.snapshot'), stage === 'script_generation' || stage === 'script_repair')
+    assert.equal(input.executionProfile?.runtimeToolBindings?.length ?? 0, stage === 'script_generation' || stage === 'script_repair' ? BROWSER_TOOL_IDS.length : 0)
     assert.equal(input.executionProfile?.allowedToolIds.some(toolId => /runner|shell|ssh|database|http/u.test(toolId)), false)
     if (stage === 'script_repair') {
       assert.match(input.executionProfile!.initialTask, /不得重新进行需求分析、测试设计或通过 Knowledge 搜索扩大修复范围/u)
@@ -374,11 +380,13 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
   }
   const superseded = await service.getVersion(supersededId)
   assert.equal(captured[0].snapshot.agentDefinition.systemPrompt, superseded.agentDefinition.systemPrompt)
-  assert.deepEqual(captured[0].snapshot.agentDefinition.enabledSkills, ['test-script-generation'])
-  assert.deepEqual(captured[2].snapshot.agentDefinition.enabledSkills, ['script-repair'])
+  assert.deepEqual(captured.find(item => item.snapshot.agentDefinition.enabledSkills.includes('test-script-generation'))?.snapshot.agentDefinition.enabledSkills, ['test-script-generation'])
+  assert.deepEqual(captured.find(item => item.snapshot.agentDefinition.enabledSkills.includes('script-repair'))?.snapshot.agentDefinition.enabledSkills, ['script-repair'])
   assert.equal('executionSessionKey' in captured[0].snapshot && captured[0].snapshot.executionSessionKey, `execution-implementation:${run.id}:${task.id}`)
-  assert.equal('executionSessionKey' in captured[1].snapshot && captured[1].snapshot.executionSessionKey, `execution-diagnosis:${run.id}:${task.id}:revision-1`)
-  assert.equal('executionSessionKey' in captured[2].snapshot && captured[2].snapshot.executionSessionKey, `execution-implementation:${run.id}:${task.id}`)
+  const diagnosisInvocation = captured.find(item => item.snapshot.agentDefinition.enabledSkills.includes('failure-analysis'))!
+  const evaluationInvocation = captured.find(item => item.snapshot.agentDefinition.enabledSkills.includes('agent-evaluation'))!
+  assert.equal('executionSessionKey' in diagnosisInvocation.snapshot && diagnosisInvocation.snapshot.executionSessionKey, `execution-diagnosis:${run.id}:${task.id}:revision-1`)
+  assert.equal('executionSessionKey' in evaluationInvocation.snapshot && evaluationInvocation.snapshot.executionSessionKey, `agent-execution-evaluation:${run.id}:${task.id}`)
 })
 
 test('ExecutionImplementationAgent 在单次 invocation 中完成 Browser 多轮观察、Workspace 读取与 Submit', async () => {

@@ -2866,6 +2866,298 @@ const migrations: Migration[] = [{
       BEFORE INSERT ON smarthub.test_execution_runs
       FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_run_agents_insert();
   `,
+}, {
+  version: 38,
+  name: 'evidence-driven-agent-test-runtime',
+  sql: `
+    CREATE TABLE IF NOT EXISTS smarthub.agent_under_tests (
+      id text PRIMARY KEY,
+      project_id text NOT NULL REFERENCES smarthub.projects(id) ON DELETE RESTRICT,
+      project_version_id text NOT NULL REFERENCES smarthub.project_versions(id) ON DELETE RESTRICT,
+      name text NOT NULL,
+      enabled boolean NOT NULL,
+      current_version integer NOT NULL CHECK (current_version > 0),
+      created_at timestamptz NOT NULL,
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (project_version_id, name),
+      UNIQUE (id, project_version_id)
+    );
+    CREATE INDEX IF NOT EXISTS agent_under_tests_project_version_idx
+      ON smarthub.agent_under_tests (project_version_id, created_at, id);
+
+    ALTER TABLE smarthub.test_execution_tasks
+      DROP CONSTRAINT IF EXISTS test_execution_tasks_method_check;
+    ALTER TABLE smarthub.test_execution_tasks
+      ADD CONSTRAINT test_execution_tasks_method_check
+      CHECK (method IN ('ui','api','agent','performance_tool','long_running','environment_matrix'));
+
+    CREATE TABLE IF NOT EXISTS smarthub.agent_execution_case_runs (
+      id text PRIMARY KEY,
+      run_id text NOT NULL,
+      task_id text NOT NULL,
+      repeat_ordinal integer NOT NULL CHECK (repeat_ordinal > 0),
+      status text NOT NULL CHECK (status IN ('PASS','FAIL','NOT_EVALUABLE','ERROR')),
+      latency_ms bigint NOT NULL CHECK (latency_ms >= 0),
+      step_count integer NOT NULL CHECK (step_count >= 0),
+      token_usage jsonb,
+      cost numeric CHECK (cost IS NULL OR cost >= 0),
+      trace_ref text NOT NULL,
+      evidence_coverage jsonb NOT NULL,
+      actual_output jsonb,
+      error text,
+      started_at timestamptz NOT NULL,
+      finished_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (task_id, repeat_ordinal),
+      UNIQUE (id, run_id, task_id),
+      FOREIGN KEY (task_id, run_id)
+        REFERENCES smarthub.test_execution_tasks(id, run_id) ON DELETE RESTRICT,
+      CHECK ((status='ERROR') = (error IS NOT NULL)),
+      CHECK (finished_at >= started_at)
+    );
+    CREATE INDEX IF NOT EXISTS agent_execution_case_runs_task_idx
+      ON smarthub.agent_execution_case_runs (task_id, repeat_ordinal);
+
+    CREATE TABLE IF NOT EXISTS smarthub.agent_execution_trace_events (
+      id text PRIMARY KEY,
+      run_id text NOT NULL,
+      task_id text NOT NULL,
+      case_run_id text NOT NULL,
+      sequence integer NOT NULL CHECK (sequence > 0),
+      event_type text NOT NULL CHECK (event_type IN ('USER_INPUT','AGENT_OUTPUT','LLM_CALL','TOOL_CALL','TOOL_RESULT','MCP_CALL','RETRIEVAL','SUB_AGENT_CALL','ARTIFACT','BUSINESS_STATE','ERROR')),
+      event_at timestamptz NOT NULL,
+      source text NOT NULL CHECK (source IN ('agent_under_test','http_response_collector','sse_event_collector','agent_runner')),
+      name text,
+      input jsonb,
+      output jsonb,
+      metadata jsonb,
+      duration_ms bigint CHECK (duration_ms IS NULL OR duration_ms >= 0),
+      data jsonb NOT NULL,
+      UNIQUE (case_run_id, sequence),
+      FOREIGN KEY (case_run_id, run_id, task_id)
+        REFERENCES smarthub.agent_execution_case_runs(id, run_id, task_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS agent_execution_trace_events_case_run_idx
+      ON smarthub.agent_execution_trace_events (case_run_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS smarthub.agent_execution_assertion_results (
+      id text PRIMARY KEY,
+      case_run_id text NOT NULL REFERENCES smarthub.agent_execution_case_runs(id) ON DELETE RESTRICT,
+      ordinal integer NOT NULL CHECK (ordinal > 0),
+      assertion_type text NOT NULL,
+      status text NOT NULL CHECK (status IN ('PASS','FAIL','NOT_EVALUABLE')),
+      code text NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (case_run_id, ordinal)
+    );
+
+    CREATE TABLE IF NOT EXISTS smarthub.agent_execution_evaluation_results (
+      id text PRIMARY KEY,
+      case_run_id text NOT NULL REFERENCES smarthub.agent_execution_case_runs(id) ON DELETE RESTRICT,
+      ordinal integer NOT NULL CHECK (ordinal > 0),
+      evaluation_kind text NOT NULL CHECK (evaluation_kind IN ('task_completion','semantic','safety')),
+      status text NOT NULL CHECK (status IN ('PASS','FAIL','NOT_EVALUABLE')),
+      data jsonb NOT NULL,
+      UNIQUE (case_run_id, ordinal)
+    );
+
+    CREATE TABLE IF NOT EXISTS smarthub.agent_execution_failure_facts (
+      id text PRIMARY KEY,
+      case_run_id text NOT NULL REFERENCES smarthub.agent_execution_case_runs(id) ON DELETE RESTRICT,
+      ordinal integer NOT NULL CHECK (ordinal > 0),
+      code text NOT NULL,
+      data jsonb NOT NULL,
+      UNIQUE (case_run_id, ordinal)
+    );
+
+    CREATE TABLE IF NOT EXISTS smarthub.agent_execution_results (
+      task_id text PRIMARY KEY,
+      run_id text NOT NULL,
+      status text NOT NULL CHECK (status IN ('PASS','FAIL','NOT_EVALUABLE','ERROR')),
+      repeat_count integer NOT NULL CHECK (repeat_count > 0),
+      success_rate numeric NOT NULL CHECK (success_rate BETWEEN 0 AND 1),
+      failure_rate numeric NOT NULL CHECK (failure_rate BETWEEN 0 AND 1),
+      not_evaluable_rate numeric NOT NULL CHECK (not_evaluable_rate BETWEEN 0 AND 1),
+      error_rate numeric NOT NULL CHECK (error_rate BETWEEN 0 AND 1),
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      FOREIGN KEY (task_id, run_id)
+        REFERENCES smarthub.test_execution_tasks(id, run_id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS smarthub.agent_execution_failure_analyses (
+      task_id text PRIMARY KEY,
+      run_id text NOT NULL,
+      category text,
+      source text NOT NULL CHECK (source IN ('agent','unavailable')),
+      agent_snapshot_ref text,
+      reason text,
+      evidence text,
+      error text,
+      created_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      FOREIGN KEY (task_id, run_id)
+        REFERENCES smarthub.test_execution_tasks(id, run_id) ON DELETE RESTRICT,
+      CHECK ((source='agent') = (category IS NOT NULL AND reason IS NOT NULL AND evidence IS NOT NULL AND agent_snapshot_ref IS NOT NULL)),
+      CHECK ((source='unavailable') = (error IS NOT NULL))
+    );
+
+    CREATE OR REPLACE FUNCTION smarthub.reject_agent_execution_history_update()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      RAISE EXCEPTION 'AGENT_EXECUTION_HISTORY_IMMUTABLE';
+    END $$;
+    CREATE TRIGGER agent_execution_case_runs_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_case_runs FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_trace_events_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_trace_events FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_assertion_results_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_assertion_results FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_evaluation_results_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_evaluation_results FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_failure_facts_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_failure_facts FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_failure_analyses_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_failure_analyses FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+    CREATE TRIGGER agent_execution_results_immutable_ck BEFORE UPDATE OR DELETE ON smarthub.agent_execution_results FOR EACH ROW EXECUTE FUNCTION smarthub.reject_agent_execution_history_update();
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_task_write()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE allowed boolean := false;
+    DECLARE agent_result_status text;
+    BEGIN
+      IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_IMMUTABLE'; END IF;
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.state_version <> 0 OR NEW.runner_attempt_count <> 0
+          OR NEW.same_script_retry_count <> 0 OR NEW.repair_count <> 0
+          OR NEW.current_script_revision_id IS NOT NULL
+          OR (NEW.method IN ('ui','api','agent') AND NEW.status <> 'pending')
+          OR (NEW.method NOT IN ('ui','api','agent') AND NEW.status <> 'unsupported') THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_TASK_INITIAL_STATE_INVALID';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1
+          FROM smarthub.test_execution_runs run
+          JOIN smarthub.test_execution_handoff_members handoff_member
+            ON handoff_member.handoff_id=run.handoff_id
+           AND handoff_member.stage=NEW.frozen_input->>'stage'
+           AND handoff_member.ordinal=NEW.ordinal
+          JOIN smarthub.test_case_library_version_members library_member
+            ON library_member.version_id=run.test_case_library_version_id
+           AND library_member.case_id=NEW.case_id
+          WHERE run.id=NEW.run_id
+            AND handoff_member.source_version_id=NEW.source_version_id
+            AND handoff_member.case_id=NEW.case_id
+            AND handoff_member.case_revision=NEW.case_revision
+            AND handoff_member.method=NEW.method
+            AND handoff_member.dedup_key=NEW.dedup_key
+            AND handoff_member.dimension=NEW.dimension
+            AND handoff_member.execution_spec=NEW.frozen_input->'executionSpec'
+            AND handoff_member.traceability IS NOT DISTINCT FROM NEW.frozen_input->'traceability'
+            AND handoff_member.readiness_override IS NOT DISTINCT FROM NEW.frozen_input->'readinessOverride'
+            AND handoff_member.content_sha256=NEW.case_content_sha256
+            AND library_member.case_revision=NEW.case_revision
+            AND library_member.content_sha256=NEW.case_content_sha256
+            AND library_member.frozen_content=NEW.frozen_input->'caseContent'
+            AND library_member.traceability IS NOT DISTINCT FROM NEW.frozen_input->'traceability'
+            AND NEW.frozen_input->>'taskId'=NEW.id
+            AND NEW.frozen_input->>'runId'=NEW.run_id
+            AND NEW.frozen_input->>'inputSha256'=NEW.input_sha256
+            AND NEW.frozen_input->>'sourceVersionId'=NEW.source_version_id
+            AND (NEW.frozen_input->>'ordinal')::integer=NEW.ordinal
+            AND NEW.frozen_input->>'dedupKey'=NEW.dedup_key
+            AND NEW.frozen_input->>'caseId'=NEW.case_id
+            AND (NEW.frozen_input->>'caseRevision')::integer=NEW.case_revision
+            AND NEW.frozen_input->>'method'=NEW.method
+            AND NEW.frozen_input->>'dimension'=NEW.dimension
+            AND NEW.frozen_input->>'caseContentSha256'=NEW.case_content_sha256
+            AND NEW.frozen_input->>'executionSpecSha256'=NEW.execution_spec_sha256
+        ) THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_SOURCE_MISMATCH'; END IF;
+        RETURN NEW;
+      END IF;
+      IF ROW(NEW.run_id,NEW.ordinal,NEW.dedup_key,NEW.source_version_id,NEW.case_id,NEW.case_revision,NEW.method,NEW.dimension,NEW.case_content_sha256,NEW.execution_spec_sha256,NEW.input_sha256,NEW.created_at,NEW.frozen_input)
+        IS DISTINCT FROM ROW(OLD.run_id,OLD.ordinal,OLD.dedup_key,OLD.source_version_id,OLD.case_id,OLD.case_revision,OLD.method,OLD.dimension,OLD.case_content_sha256,OLD.execution_spec_sha256,OLD.input_sha256,OLD.created_at,OLD.frozen_input)
+      THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_SNAPSHOT_IMMUTABLE'; END IF;
+      IF NEW.state_version <> OLD.state_version + 1 THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_STATE_VERSION_INVALID'; END IF;
+      IF OLD.status IN ('passed','unsupported','cancelled') OR NEW.status=OLD.status THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_INVALID'; END IF;
+      allowed := CASE OLD.status
+        WHEN 'pending' THEN NEW.status IN ('script_generating','ready','running','unsupported','blocked','cancelled')
+        WHEN 'script_generating' THEN NEW.status IN ('ready','blocked','waiting_manual','cancelled')
+        WHEN 'ready' THEN NEW.status IN ('running','blocked','waiting_manual','cancelled')
+        WHEN 'running' THEN NEW.status IN ('ready','passed','retrying','diagnosing','failed','blocked','waiting_manual','cancelled')
+        WHEN 'retrying' THEN NEW.status IN ('running','blocked','cancelled')
+        WHEN 'diagnosing' THEN NEW.status IN ('repairing','failed','blocked','waiting_manual','cancelled')
+        WHEN 'repairing' THEN NEW.status IN ('ready','blocked','waiting_manual','cancelled')
+        WHEN 'failed' THEN NEW.status='ready'
+        WHEN 'blocked' THEN NEW.status='ready'
+        WHEN 'waiting_manual' THEN NEW.status='ready'
+        ELSE false
+      END;
+      IF NOT allowed THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_INVALID'; END IF;
+      IF NEW.runner_attempt_count < OLD.runner_attempt_count OR NEW.runner_attempt_count > OLD.runner_attempt_count + 1
+        OR NEW.same_script_retry_count < OLD.same_script_retry_count OR NEW.same_script_retry_count > OLD.same_script_retry_count + 1
+        OR NEW.repair_count < OLD.repair_count OR NEW.repair_count > OLD.repair_count + 1
+        OR (NEW.runner_attempt_count > OLD.runner_attempt_count AND NEW.status <> 'running')
+        OR (NEW.same_script_retry_count > OLD.same_script_retry_count AND NEW.status <> 'running')
+        OR (NEW.repair_count > OLD.repair_count AND NEW.status <> 'ready') THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_COUNTER_INVALID';
+      END IF;
+      IF NEW.current_script_revision_id IS DISTINCT FROM OLD.current_script_revision_id AND NEW.status <> 'ready' THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_SCRIPT_REVISION_INVALID'; END IF;
+      IF NEW.status IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled') AND EXISTS (SELECT 1 FROM smarthub.test_execution_attempts WHERE task_id=NEW.id AND status='running') THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_HAS_RUNNING_ATTEMPT'; END IF;
+      IF NEW.method='agent' AND NEW.status IN ('passed','failed','blocked') THEN
+        SELECT status INTO agent_result_status FROM smarthub.agent_execution_results WHERE task_id=NEW.id;
+        IF agent_result_status IS NULL
+          OR (NEW.status='passed' AND agent_result_status<>'PASS')
+          OR (NEW.status='failed' AND agent_result_status NOT IN ('FAIL','ERROR'))
+          OR (NEW.status='blocked' AND agent_result_status<>'NOT_EVALUABLE') THEN
+          RAISE EXCEPTION 'AGENT_EXECUTION_TASK_RESULT_MISMATCH';
+        END IF;
+      ELSIF NEW.method<>'agent' AND NEW.status='passed' AND NOT EXISTS (
+        SELECT 1 FROM smarthub.test_execution_attempts WHERE task_id=NEW.id AND script_revision_id=NEW.current_script_revision_id AND status='passed'
+      ) THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_PASSED_ATTEMPT_REQUIRED'; END IF;
+      RETURN NEW;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_task_attempts()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_task_id text; DECLARE task_status text; DECLARE task_method text;
+    DECLARE declared_attempts integer; DECLARE declared_retries integer;
+    DECLARE actual_attempts integer; DECLARE actual_retries integer; DECLARE running_attempts integer;
+    BEGIN
+      target_task_id := CASE WHEN TG_TABLE_NAME='test_execution_tasks' THEN NEW.id WHEN TG_TABLE_NAME='test_execution_attempts' THEN NEW.task_id ELSE NULL END;
+      IF target_task_id IS NULL THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_ATTEMPTS_TRIGGER_TABLE_UNSUPPORTED: %', TG_TABLE_NAME; END IF;
+      SELECT status,method,runner_attempt_count,same_script_retry_count INTO task_status,task_method,declared_attempts,declared_retries FROM smarthub.test_execution_tasks WHERE id=target_task_id;
+      IF NOT FOUND OR task_method='agent' THEN RETURN NEW; END IF;
+      SELECT count(*),count(*) FILTER (WHERE attempt_kind='same_script_retry'),count(*) FILTER (WHERE status='running') INTO actual_attempts,actual_retries,running_attempts FROM smarthub.test_execution_attempts WHERE task_id=target_task_id;
+      IF actual_attempts<>declared_attempts OR actual_retries<>declared_retries OR (task_status='running' AND running_attempts<>1) OR (task_status<>'running' AND running_attempts<>0) THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_ATTEMPT_STATE_MISMATCH'; END IF;
+      RETURN NEW;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_task_revisions()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE target_task_id text; DECLARE task_method text; DECLARE current_revision_id text;
+    DECLARE declared_repairs integer; DECLARE actual_revisions integer; DECLARE actual_repairs integer; DECLARE latest_revision_id text;
+    BEGIN
+      target_task_id := CASE WHEN TG_TABLE_NAME='test_execution_tasks' THEN NEW.id WHEN TG_TABLE_NAME='test_execution_script_revisions' THEN NEW.task_id ELSE NULL END;
+      IF target_task_id IS NULL THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_REVISIONS_TRIGGER_TABLE_UNSUPPORTED: %', TG_TABLE_NAME; END IF;
+      SELECT method,current_script_revision_id,repair_count INTO task_method,current_revision_id,declared_repairs FROM smarthub.test_execution_tasks WHERE id=target_task_id;
+      IF NOT FOUND OR task_method='agent' THEN RETURN NEW; END IF;
+      SELECT count(*),count(*) FILTER (WHERE generation_source='repair') INTO actual_revisions,actual_repairs FROM smarthub.test_execution_script_revisions WHERE task_id=target_task_id;
+      SELECT id INTO latest_revision_id FROM smarthub.test_execution_script_revisions WHERE task_id=target_task_id ORDER BY revision DESC LIMIT 1;
+      IF actual_repairs<>declared_repairs OR (actual_revisions=0 AND current_revision_id IS NOT NULL) OR (actual_revisions>0 AND current_revision_id IS DISTINCT FROM latest_revision_id) THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_REVISION_STATE_MISMATCH'; END IF;
+      RETURN NEW;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_run_agents_insert()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE agent_keys text[];
+    BEGIN
+      IF jsonb_typeof(NEW.snapshot->'agents') IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'TEST_EXECUTION_RUN_AGENT_SNAPSHOT_INVALID'; END IF;
+      SELECT array_agg(agent_key ORDER BY agent_key) INTO agent_keys FROM jsonb_object_keys(NEW.snapshot->'agents') AS agent_keys(agent_key);
+      IF NEW.snapshot #> '{environment,agentUnderTest}' IS NOT NULL THEN
+        IF agent_keys IS DISTINCT FROM ARRAY['failureAnalysis']::text[] OR NEW.snapshot #>> '{agents,failureAnalysis,agentKey}' IS DISTINCT FROM 'failure-analysis' THEN RAISE EXCEPTION 'TEST_EXECUTION_RUN_AGENT_SNAPSHOT_INVALID'; END IF;
+      ELSIF agent_keys IS DISTINCT FROM ARRAY['executionImplementation','failureAnalysis']::text[]
+        OR NEW.snapshot #>> '{agents,executionImplementation,agentKey}' IS DISTINCT FROM 'execution-implementation'
+        OR NEW.snapshot #>> '{agents,failureAnalysis,agentKey}' IS DISTINCT FROM 'failure-analysis' THEN RAISE EXCEPTION 'TEST_EXECUTION_RUN_AGENT_SNAPSHOT_INVALID';
+      END IF;
+      RETURN NEW;
+    END $$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

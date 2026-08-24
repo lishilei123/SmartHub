@@ -1,4 +1,5 @@
 import type { CreateTestDesignInput, TestCaseContent, TestDimension } from '../domain/test-design-types.js'
+import type { AgentTestSpec, AgentValueAssertionOperator } from '../domain/agent-test-types.js'
 
 export class TestDesignError extends Error {
   constructor(public readonly code: string, message: string, public readonly status = 400, public readonly details?: unknown) {
@@ -24,18 +25,24 @@ export function validateCreateTestDesignInput(value: unknown): CreateTestDesignI
 
 export function validateTestCaseContent(value: unknown): TestCaseContent {
   const input = object(value, 'TEST_CASE_SCHEMA_INVALID', 'TestCase 必须是对象')
-  rejectUnknown(input, ['schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults'], 'TEST_CASE_SCHEMA_INVALID')
+  rejectUnknown(input, ['schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults', 'agentTestSpec'], 'TEST_CASE_SCHEMA_INVALID')
   if (input.schemaVersion !== 'test-case/v3') fail('TEST_CASE_SCHEMA_INVALID', 'schemaVersion 必须为 test-case/v3', 422)
+  const methods = executionMethods(input.executionMethods)
+  const agentTestSpec = input.agentTestSpec === undefined ? undefined : validateAgentTestSpec(input.agentTestSpec)
+  if (methods.includes('agent') !== Boolean(agentTestSpec) || (agentTestSpec && (methods.length !== 1 || methods[0] !== 'agent'))) {
+    fail('TEST_CASE_SCHEMA_INVALID', 'Agent TestCase 必须同时提供 agentTestSpec 且 executionMethods 只能为 agent', 422)
+  }
   return {
     schemaVersion: 'test-case/v3',
     title: requiredText(input.title, 'title', 500, 'TEST_CASE_SCHEMA_INVALID'),
     dimension: dimension(input.dimension),
     priority: priority(input.priority),
     requirementRefs: uniqueTexts(input.requirementRefs, 'requirementRefs', 1_000, 500, 'TEST_CASE_SCHEMA_INVALID'),
-    executionMethods: executionMethods(input.executionMethods),
+    executionMethods: methods,
     preconditions: texts(input.preconditions, 'preconditions', 100, 2_000, 'TEST_CASE_SCHEMA_INVALID'),
     steps: nonEmptyTexts(input.steps, 'steps', 200, 4_000),
     expectedResults: nonEmptyTexts(input.expectedResults, 'expectedResults', 200, 4_000),
+    ...(agentTestSpec ? { agentTestSpec } : {}),
   }
 }
 
@@ -71,7 +78,7 @@ function validateCandidateCases(value: unknown, path: string, allowEmpty: boolea
   const cases = value.map((candidate, index) => {
     const casePath = `${path}/${index}`
     const input = synthesisObject(candidate, casePath, '必须是扁平 TestCase 对象')
-    synthesisRejectUnknown(input, ['ref', 'schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults'], casePath)
+    synthesisRejectUnknown(input, ['ref', 'schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults', 'agentTestSpec'], casePath)
     const ref = synthesisText(input.ref, `${casePath}/ref`, 200)
     const { ref: _ref, ...content } = input
     try { return { ref, content: validateTestCaseContent(content) } }
@@ -90,8 +97,78 @@ export function validateCaseDependencyGraph(_cases: Array<{ id: string; content:
 export function etag(kind: 'tree' | 'case', id: string, revision: number, hash: string) { return `\"${kind}:${id}:r${revision}:${hash}\"` }
 export function assertEtag(actual: string | undefined, expected: string, code: string) { if (!actual || actual !== expected) fail(code, 'If-Match 与当前 Revision 不一致', 409) }
 
-function optionalExecutionMethods(value: unknown, fallback: Array<'ui' | 'api'> = []): Array<'ui' | 'api'> { if (value === undefined) return [...fallback]; if (!Array.isArray(value) || value.some(item => item !== 'ui' && item !== 'api')) fail('TEST_DESIGN_INPUT_INVALID', 'executionMethods 只能包含 ui、api', 422); return [...new Set(value)] as Array<'ui' | 'api'> }
-function executionMethods(value: unknown): Array<'ui' | 'api'> { if (!Array.isArray(value) || value.length < 1 || value.length > 2 || value.some(item => item !== 'ui' && item !== 'api')) fail('TEST_CASE_SCHEMA_INVALID', 'executionMethods 必须包含 1 到 2 个 ui/api 值', 422); if (new Set(value).size !== value.length) fail('TEST_CASE_SCHEMA_INVALID', 'executionMethods 不能重复', 422); return value as Array<'ui' | 'api'> }
+function optionalExecutionMethods(value: unknown, fallback: Array<'ui' | 'api' | 'agent'> = []): Array<'ui' | 'api' | 'agent'> { if (value === undefined) return [...fallback]; if (!Array.isArray(value) || value.some(item => item !== 'ui' && item !== 'api' && item !== 'agent')) fail('TEST_DESIGN_INPUT_INVALID', 'executionMethods 只能包含 ui、api、agent', 422); return [...new Set(value)] as Array<'ui' | 'api' | 'agent'> }
+function executionMethods(value: unknown): Array<'ui' | 'api' | 'agent'> { if (!Array.isArray(value) || value.length < 1 || value.length > 2 || value.some(item => item !== 'ui' && item !== 'api' && item !== 'agent')) fail('TEST_CASE_SCHEMA_INVALID', 'executionMethods 必须包含有效执行方式', 422); if (new Set(value).size !== value.length) fail('TEST_CASE_SCHEMA_INVALID', 'executionMethods 不能重复', 422); return value as Array<'ui' | 'api' | 'agent'> }
+
+function validateAgentTestSpec(value: unknown): AgentTestSpec {
+  const input = object(value, 'TEST_CASE_SCHEMA_INVALID', 'agentTestSpec 必须是对象')
+  rejectUnknown(input, ['input', 'context', 'expectedOutcome', 'requiredTools', 'forbiddenTools', 'requiredActions', 'forbiddenActions', 'argumentAssertions', 'sequenceConstraints', 'businessAssertions', 'artifactAssertions', 'semanticAssertions', 'safetyAssertions', 'executionConstraints'], 'TEST_CASE_SCHEMA_INVALID')
+  if (!Object.hasOwn(input, 'input')) fail('TEST_CASE_SCHEMA_INVALID', 'agentTestSpec.input 必须存在', 422)
+  const context = input.context === undefined ? undefined : jsonObject(input.context, 'agentTestSpec.context')
+  const requiredTools = uniqueTexts(input.requiredTools, 'agentTestSpec.requiredTools', 100, 200, 'TEST_CASE_SCHEMA_INVALID')
+  const forbiddenTools = uniqueTexts(input.forbiddenTools, 'agentTestSpec.forbiddenTools', 100, 200, 'TEST_CASE_SCHEMA_INVALID')
+  const requiredActions = uniqueTexts(input.requiredActions, 'agentTestSpec.requiredActions', 100, 200, 'TEST_CASE_SCHEMA_INVALID')
+  const forbiddenActions = uniqueTexts(input.forbiddenActions, 'agentTestSpec.forbiddenActions', 100, 200, 'TEST_CASE_SCHEMA_INVALID')
+  rejectOverlap(requiredTools, forbiddenTools, 'Tool')
+  rejectOverlap(requiredActions, forbiddenActions, 'Action')
+  const execution = object(input.executionConstraints, 'TEST_CASE_SCHEMA_INVALID', 'agentTestSpec.executionConstraints 必须是对象')
+  rejectUnknown(execution, ['timeoutMs', 'maxSteps', 'repeatCount', 'maxCost'], 'TEST_CASE_SCHEMA_INVALID')
+  const maxCost = execution.maxCost === undefined ? undefined : finiteNumber(execution.maxCost, 'agentTestSpec.executionConstraints.maxCost', 0, 1_000_000)
+  return {
+    input: jsonValue(input.input, 'agentTestSpec.input'),
+    ...(context ? { context } : {}),
+    expectedOutcome: requiredText(input.expectedOutcome, 'agentTestSpec.expectedOutcome', 4_000, 'TEST_CASE_SCHEMA_INVALID'),
+    requiredTools,
+    forbiddenTools,
+    requiredActions,
+    forbiddenActions,
+    argumentAssertions: objectArray(input.argumentAssertions, 'agentTestSpec.argumentAssertions', 200, (item, path) => {
+      rejectUnknown(item, ['tool', 'path', 'operator', 'expected'], 'TEST_CASE_SCHEMA_INVALID')
+      const operator = assertionOperator(item.operator, `${path}.operator`)
+      return { tool: requiredText(item.tool, `${path}.tool`, 200, 'TEST_CASE_SCHEMA_INVALID'), path: jsonPath(item.path, `${path}.path`), operator, ...assertionExpected(item, operator, path) }
+    }),
+    sequenceConstraints: objectArray(input.sequenceConstraints, 'agentTestSpec.sequenceConstraints', 200, (item, path) => {
+      rejectUnknown(item, ['before', 'after'], 'TEST_CASE_SCHEMA_INVALID')
+      const before = requiredText(item.before, `${path}.before`, 200, 'TEST_CASE_SCHEMA_INVALID')
+      const after = requiredText(item.after, `${path}.after`, 200, 'TEST_CASE_SCHEMA_INVALID')
+      if (before === after) fail('TEST_CASE_SCHEMA_INVALID', `${path} 的 before 与 after 不能相同`, 422)
+      return { before, after }
+    }),
+    businessAssertions: objectArray(input.businessAssertions, 'agentTestSpec.businessAssertions', 200, (item, path) => {
+      rejectUnknown(item, ['path', 'operator', 'expected'], 'TEST_CASE_SCHEMA_INVALID')
+      const operator = assertionOperator(item.operator, `${path}.operator`)
+      return { path: jsonPath(item.path, `${path}.path`), operator, ...assertionExpected(item, operator, path) }
+    }),
+    artifactAssertions: objectArray(input.artifactAssertions, 'agentTestSpec.artifactAssertions', 100, (item, path) => {
+      rejectUnknown(item, ['name'], 'TEST_CASE_SCHEMA_INVALID')
+      return { name: requiredText(item.name, `${path}.name`, 500, 'TEST_CASE_SCHEMA_INVALID') }
+    }),
+    semanticAssertions: objectArray(input.semanticAssertions, 'agentTestSpec.semanticAssertions', 100, (item, path) => {
+      rejectUnknown(item, ['criterion', 'expected'], 'TEST_CASE_SCHEMA_INVALID')
+      return { criterion: requiredText(item.criterion, `${path}.criterion`, 1_000, 'TEST_CASE_SCHEMA_INVALID'), expected: requiredText(item.expected, `${path}.expected`, 4_000, 'TEST_CASE_SCHEMA_INVALID') }
+    }),
+    safetyAssertions: objectArray(input.safetyAssertions, 'agentTestSpec.safetyAssertions', 100, (item, path) => {
+      rejectUnknown(item, ['criterion', 'expected'], 'TEST_CASE_SCHEMA_INVALID')
+      return { criterion: requiredText(item.criterion, `${path}.criterion`, 1_000, 'TEST_CASE_SCHEMA_INVALID'), expected: requiredText(item.expected, `${path}.expected`, 4_000, 'TEST_CASE_SCHEMA_INVALID') }
+    }),
+    executionConstraints: {
+      timeoutMs: integer(execution.timeoutMs, 'agentTestSpec.executionConstraints.timeoutMs', 100, 600_000),
+      maxSteps: integer(execution.maxSteps, 'agentTestSpec.executionConstraints.maxSteps', 1, 10_000),
+      repeatCount: integer(execution.repeatCount, 'agentTestSpec.executionConstraints.repeatCount', 1, 50),
+      ...(maxCost === undefined ? {} : { maxCost }),
+    },
+  }
+}
+
+function rejectOverlap(left: string[], right: string[], label: string) { const overlap = left.filter(item => right.includes(item)); if (overlap.length) fail('TEST_CASE_SCHEMA_INVALID', `${label} 不能同时 required 和 forbidden：${overlap.join('、')}`, 422) }
+function assertionOperator(value: unknown, field: string): AgentValueAssertionOperator { if (!['equals', 'not_equals', 'contains', 'matches', 'exists'].includes(String(value))) fail('TEST_CASE_SCHEMA_INVALID', `${field} 无效`, 422); return value as AgentValueAssertionOperator }
+function assertionExpected(item: Record<string, unknown>, operator: AgentValueAssertionOperator, path: string) { if (operator === 'exists') { if (Object.hasOwn(item, 'expected')) fail('TEST_CASE_SCHEMA_INVALID', `${path}.expected 不适用于 exists`, 422); return {} } if (!Object.hasOwn(item, 'expected')) fail('TEST_CASE_SCHEMA_INVALID', `${path}.expected 必须存在`, 422); const expected = jsonValue(item.expected, `${path}.expected`); if (operator === 'matches') { if (typeof expected !== 'string') fail('TEST_CASE_SCHEMA_INVALID', `${path}.expected 必须是正则字符串`, 422); try { new RegExp(expected, 'u') } catch { fail('TEST_CASE_SCHEMA_INVALID', `${path}.expected 不是有效正则表达式`, 422) } } return { expected } }
+function objectArray<T>(value: unknown, field: string, maxItems: number, mapper: (item: Record<string, unknown>, path: string) => T): T[] { if (!Array.isArray(value) || value.length > maxItems) fail('TEST_CASE_SCHEMA_INVALID', `${field} 必须是最多 ${maxItems} 项的数组`, 422); return value.map((item, index) => mapper(object(item, 'TEST_CASE_SCHEMA_INVALID', `${field}[${index}] 必须是对象`), `${field}[${index}]`)) }
+function jsonPath(value: unknown, field: string) { const content = requiredText(value, field, 500, 'TEST_CASE_SCHEMA_INVALID'); if (content !== '$' && !/^[A-Za-z_][A-Za-z0-9_-]*(?:\.(?:[A-Za-z_][A-Za-z0-9_-]*|\d+))*$/u.test(content)) fail('TEST_CASE_SCHEMA_INVALID', `${field} 不是有效 JSON 路径`, 422); return content }
+function integer(value: unknown, field: string, min: number, max: number) { if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) fail('TEST_CASE_SCHEMA_INVALID', `${field} 必须是 ${min} 到 ${max} 的整数`, 422); return value }
+function finiteNumber(value: unknown, field: string, min: number, max: number) { if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) fail('TEST_CASE_SCHEMA_INVALID', `${field} 必须是 ${min} 到 ${max} 的有限数字`, 422); return value }
+function jsonObject(value: unknown, field: string): Record<string, unknown> { const result = jsonValue(value, field); if (!result || typeof result !== 'object' || Array.isArray(result)) fail('TEST_CASE_SCHEMA_INVALID', `${field} 必须是 JSON 对象`, 422); return result as Record<string, unknown> }
+function jsonValue(value: unknown, field: string, depth = 0): unknown { if (depth > 20) fail('TEST_CASE_SCHEMA_INVALID', `${field} 嵌套过深`, 422); if (value === null || typeof value === 'string' || typeof value === 'boolean') return value; if (typeof value === 'number' && Number.isFinite(value)) return value; if (Array.isArray(value)) { if (value.length > 1_000) fail('TEST_CASE_SCHEMA_INVALID', `${field} 数组过长`, 422); return value.map((item, index) => jsonValue(item, `${field}[${index}]`, depth + 1)) } if (value && typeof value === 'object') { const entries = Object.entries(value as Record<string, unknown>); if (entries.length > 1_000) fail('TEST_CASE_SCHEMA_INVALID', `${field} 对象字段过多`, 422); return Object.fromEntries(entries.map(([key, item]) => [requiredText(key, `${field}.key`, 500, 'TEST_CASE_SCHEMA_INVALID'), jsonValue(item, `${field}.${key}`, depth + 1)])) } fail('TEST_CASE_SCHEMA_INVALID', `${field} 必须是 JSON 值`, 422) }
 function dimension(value: unknown): TestDimension { if (!['functional', 'performance', 'stability', 'compatibility', 'security'].includes(String(value))) fail('TEST_CASE_SCHEMA_INVALID', 'dimension 无效', 422); return value as TestDimension }
 function priority(value: unknown): TestCaseContent['priority'] { if (!['P0', 'P1', 'P2', 'P3'].includes(String(value))) fail('TEST_CASE_SCHEMA_INVALID', 'priority 无效', 422); return value as TestCaseContent['priority'] }
 function validateAugmentation(value: unknown): CreateTestDesignInput['knowledgeAugmentation'] {

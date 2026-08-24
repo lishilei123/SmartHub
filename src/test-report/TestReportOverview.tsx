@@ -1,7 +1,7 @@
 import { AlertTriangle, Ban, CheckCircle2, Clock3, CircleSlash2, XCircle } from 'lucide-react'
-import type { TestReport } from './types'
+import type { LegacyTestReport } from './types'
 
-export function TestReportOverview({ report }: { report: TestReport }) {
+export function TestReportOverview({ report }: { report: LegacyTestReport }) {
   const values = [
     { key: 'total', label: '用例总数', value: report.overview.totalCases, icon: Clock3 },
     { key: 'passed', label: '通过', value: report.overview.passed, icon: CheckCircle2 },

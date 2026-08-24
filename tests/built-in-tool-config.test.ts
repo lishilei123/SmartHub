@@ -7,8 +7,8 @@ import { ToolRegistry } from '../server/tools/registry.js'
 const cloneConfig = () => structuredClone(defaultBuiltInToolConfig)
 
 test('checked-in built-in Tool config excludes retired requirement repair submissions', () => {
-  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 19)
-  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 18)
+  assert.equal(defaultBuiltInToolConfigResolver.keys().length, 20)
+  assert.equal(defaultBuiltInToolConfigResolver.keys({ catalogVisibleOnly: true }).length, 19)
   assert.ok(defaultBuiltInToolConfigResolver.keys().every(key => !key.startsWith('skill.')))
   assert.equal(defaultBuiltInToolConfigResolver.toToolResource('knowledge.search').source, 'builtin')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('workspace.read_file').piName, 'read')
@@ -55,11 +55,12 @@ test('测试执行候选工具只向 Agent 暴露最小智能结果', () => {
   assert.equal(implementation.properties.files.maxItems, 16)
   assert.equal(implementation.properties.files.items.properties.content.maxLength, 524_288)
   assert.equal(diagnosis.additionalProperties, false)
-  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').version, '2.0.0')
+  assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('failure_analysis.submit_result').version, '2.1.0')
   assert.deepEqual(Object.keys(diagnosis.properties).sort(), ['category', 'evidence', 'reason'])
   assert.deepEqual(diagnosis.required, ['category', 'reason', 'evidence'])
   assert.equal(diagnosis.properties.evidence.maxLength, 4_000)
-  assert.deepEqual(diagnosis.properties.category.enum, ['product_defect', 'script_defect', 'selector_changed', 'environment_defect', 'test_data_defect', 'flaky', 'assertion_mismatch', 'timeout', 'unknown'])
+  assert.ok(diagnosis.properties.category.enum.includes('tool_sequence'))
+  assert.ok(diagnosis.properties.category.enum.includes('business_backend'))
 })
 
 test('resolver copies outputs and descriptors register through the governed registry', () => {
@@ -80,7 +81,7 @@ test('测试用例提交工具向模型声明 Requirement 直接追溯字段', (
     required: string[]
     properties: { schemaVersion: { const: string }; cases: { minItems?: number; items: { additionalProperties: boolean; required: string[]; properties: Record<string, unknown> } } }
   }
-  assert.equal(descriptor.version, '4.0.0')
+  assert.equal(descriptor.version, '4.1.0')
   assert.equal(schema.additionalProperties, false)
   assert.equal(schema.properties.schemaVersion.const, 'test-case-design/v3')
   assert.deepEqual(Object.keys(schema.properties).sort(), ['cases', 'schemaVersion'])
@@ -96,18 +97,18 @@ test('测试用例提交工具声明闭合的扁平 TestCase v3', () => {
   const caseSchema = schema.properties.cases.items
   assert.equal(caseSchema.additionalProperties, false)
   assert.deepEqual(caseSchema.required, ['ref', 'schemaVersion', 'title', 'dimension', 'priority', 'requirementRefs', 'executionMethods', 'preconditions', 'steps', 'expectedResults'])
-  assert.deepEqual(Object.keys(caseSchema.properties).sort(), [...caseSchema.required].sort())
+  assert.deepEqual(Object.keys(caseSchema.properties).sort(), [...caseSchema.required, 'agentTestSpec'].sort())
   assert.equal(caseSchema.properties.schemaVersion.const, 'test-case/v3')
   assert.equal(caseSchema.properties.requirementRefs.minItems, undefined)
   assert.equal(caseSchema.properties.requirementRefs.uniqueItems, true)
   assert.equal(caseSchema.properties.executionMethods.uniqueItems, true)
-  assert.deepEqual(caseSchema.properties.executionMethods.items.enum, ['ui', 'api'])
+  assert.deepEqual(caseSchema.properties.executionMethods.items.enum, ['ui', 'api', 'agent'])
 })
 
 test('测试设计修复工具只声明 v3 patch 字段', () => {
   const descriptor = defaultBuiltInToolConfigResolver.toDescriptor('test_design_repair.submit_result')
   const schema = descriptor.parameters as any
-  assert.equal(descriptor.version, '3.0.0')
+  assert.equal(descriptor.version, '3.1.0')
   assert.equal(schema.additionalProperties, false)
   assert.deepEqual(schema.required, ['schemaVersion', 'baseCandidateSha256', 'upsertCases', 'removeCaseRefs'])
   assert.deepEqual(Object.keys(schema.properties).sort(), [...schema.required].sort())

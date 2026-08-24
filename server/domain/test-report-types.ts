@@ -11,6 +11,7 @@ import type {
   TestExecutionMethod,
   TestExecutionMode,
 } from './test-design-types.js'
+import type { AgentExecutionAggregateResult, FrozenAgentUnderTestSnapshot } from './agent-test-types.js'
 
 export interface TestReportRate {
   numerator: number
@@ -220,3 +221,49 @@ export interface TestExecutionReportContent {
 export interface TestExecutionReport extends TestExecutionReportContent {
   reportSha256: string
 }
+
+export interface AgentTestExecutionReportContent {
+  schemaVersion: 'agent-test-execution-report/v1'
+  statisticsAt: string
+  run: TestExecutionReportContent['run']
+  overview: {
+    totalCases: number
+    passed: number
+    failed: number
+    notEvaluable: number
+    error: number
+    active: number
+    successRate: TestReportRate
+    caseRunCount: number
+    averageLatencyMs: number | null
+    tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }
+    cost?: number
+  }
+  results: AgentExecutionAggregateResult[]
+  traceability: {
+    projectId: string
+    projectVersionId: string
+    runId: string
+    runStateVersion: number
+    handoff: TestReportTraceability['handoff']
+    testCaseLibraryVersion: TestReportTraceability['testCaseLibraryVersion']
+    testSuiteVersion?: TestReportTraceability['testSuiteVersion']
+    agentUnderTest: FrozenAgentUnderTestSnapshot
+    runner: {
+      kind: 'agent'
+      runnerVersion: string
+      configurationId?: string
+      configurationVersion?: number
+      configurationSha256?: string
+    }
+    agents: {
+      failureAnalysis: TestReportAgentTraceability
+    }
+  }
+}
+
+export interface AgentTestExecutionReport extends AgentTestExecutionReportContent {
+  reportSha256: string
+}
+
+export type AnyTestExecutionReport = TestExecutionReport | AgentTestExecutionReport

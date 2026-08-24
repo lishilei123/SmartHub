@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type {
+  AgentUnderTest,
   ExecutionEnvironment,
   ExecutionReadiness,
   ExecutionRun,
@@ -18,6 +19,7 @@ export function useTestExecution(
 ) {
   const [readiness, setReadiness] = useState<ExecutionReadiness | null>(null)
   const [environments, setEnvironments] = useState<ExecutionEnvironment[]>([])
+  const [agentsUnderTest, setAgentsUnderTest] = useState<AgentUnderTest[]>([])
   const [runs, setRuns] = useState<ExecutionRun[]>([])
   const [run, setRun] = useState<Versioned<ExecutionRun> | null>(null)
   const [tasks, setTasks] = useState<ExecutionTask[]>([])
@@ -42,15 +44,17 @@ export function useTestExecution(
     const requestGeneration = generation.current
     setLoading(true)
     try {
-      const [nextReadiness, nextEnvironments, nextRuns] =
+      const [nextReadiness, nextEnvironments, nextAgentsUnderTest, nextRuns] =
         await Promise.all([
           api.loadReadiness(projectVersionId),
           api.loadEnvironments(projectVersionId),
+          api.loadAgentsUnderTest(projectVersionId),
           api.loadRuns(projectVersionId),
         ])
       if (requestGeneration !== generation.current) return
       setReadiness(nextReadiness)
       setEnvironments(nextEnvironments)
+      setAgentsUnderTest(nextAgentsUnderTest)
       setRuns(nextRuns)
       setError('')
     } catch (cause) {
@@ -119,6 +123,7 @@ export function useTestExecution(
     taskRequest.current += 1
     setReadiness(null)
     setEnvironments([])
+    setAgentsUnderTest([])
     setRuns([])
     setRun(null)
     setTasks([])
@@ -153,15 +158,15 @@ export function useTestExecution(
   }, [fail, refreshSelection, run])
 
   const create = useCallback(async (
-    baseUrl: string,
+    agentUnderTestId: string,
   ) => {
     if (!projectVersionId || busy) return
     setBusy('create')
     try {
       const created = await api.createRun(
         projectVersionId,
-        baseUrl,
-        api.executionIdempotencyKey('create', baseUrl),
+        agentUnderTestId,
+        api.executionIdempotencyKey('create', agentUnderTestId),
       )
       setRun(created)
       setTask(null)
@@ -174,6 +179,21 @@ export function useTestExecution(
       ])
       notify('测试执行已创建，测试数据供给、业务输入与运行配置已冻结。', 'success')
       return created.value
+    } catch (cause) {
+      fail(cause, true)
+    } finally {
+      setBusy('')
+    }
+  }, [busy, fail, notify, projectVersionId])
+
+  const createAgentUnderTest = useCallback(async (input: Parameters<typeof api.createAgentUnderTest>[1]) => {
+    if (!projectVersionId || busy) return
+    setBusy('create-agent-under-test')
+    try {
+      const created = await api.createAgentUnderTest(projectVersionId, input)
+      setAgentsUnderTest(current => [...current, created])
+      notify('被测 Agent 已保存到当前 ProjectVersion。', 'success')
+      return created
     } catch (cause) {
       fail(cause, true)
     } finally {
@@ -245,6 +265,7 @@ export function useTestExecution(
   return {
     readiness,
     environments,
+    agentsUnderTest,
     runs,
     run,
     tasks,
@@ -257,6 +278,7 @@ export function useTestExecution(
     openRun,
     openTask,
     create,
+    createAgentUnderTest,
     cancel,
     retry,
     compareRevisions,

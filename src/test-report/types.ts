@@ -1,4 +1,5 @@
 import type {
+  AgentExecutionAggregateResult,
   CaseMaintenanceProposal,
   ExecutionRunStatus,
   ExecutionTaskStatus,
@@ -36,7 +37,7 @@ export type TestReportListItem = {
   finishedAt?: string
 }
 
-export type TestReport = {
+export type LegacyTestReport = {
   schemaVersion: 'test-execution-report/v3'
   statisticsAt: string
   reportSha256: string
@@ -174,3 +175,45 @@ export type TestReport = {
     }>
   }
 }
+
+export type AgentTestReport = {
+  schemaVersion: 'agent-test-execution-report/v1'
+  statisticsAt: string
+  reportSha256: string
+  run: LegacyTestReport['run']
+  overview: {
+    totalCases: number
+    passed: number
+    failed: number
+    notEvaluable: number
+    error: number
+    active: number
+    successRate: ReportRate
+    caseRunCount: number
+    averageLatencyMs: number | null
+    tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }
+    cost?: number
+  }
+  results: AgentExecutionAggregateResult[]
+  traceability: {
+    projectId: string
+    projectVersionId: string
+    runId: string
+    runStateVersion: number
+    handoff: { id: string; sha256: string; memberSnapshotSha256: string }
+    testCaseLibraryVersion: { id: string; sha256: string; sourceRunId?: string }
+    testSuiteVersion?: { id: string; sha256: string }
+    agentUnderTest: {
+      id: string
+      name: string
+      version: number
+      endpoint: string
+      protocol: 'http' | 'sse'
+      configurationSha256: string
+    }
+    runner: { kind: 'agent'; runnerVersion: string; configurationSha256?: string }
+    agents: { failureAnalysis: { agentKey: string; configurationId: string; configurationVersion: number; configurationSha256: string; definitionSha256: string; snapshotSha256: string } }
+  }
+}
+
+export type TestReport = LegacyTestReport | AgentTestReport

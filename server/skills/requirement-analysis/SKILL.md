@@ -55,6 +55,8 @@ description: Analyze a fixed current requirement workspace as one continuous tas
 19. 可测试性和验收判定；
 20. 其他非功能要求。
 
+当 Current Requirement 描述的是 AI Agent 时，在同一套 Requirement Analysis 中继续检查：Agent Goal、Capabilities、Input、Expected Output、Business Rules、Required/Forbidden Behavior、Tool/Function、MCP、Permissions、Safety Constraints、Context、Boundary Conditions、Failure Handling 与 External Dependencies。Prompt、Workflow、Model、Knowledge、Agent YAML、Tool/MCP 文档和 Runtime Log 只有在 Workspace 中实际存在并被读取时才是可用资料；缺失项记录为 `unknown / unavailable`，不得猜测，也不得仅因这些资料缺失阻断 Release。资料深度只决定后续可验证 Evidence 深度，不创建 Black/Gray/White Box 模式。
+
 ## 5. 非阻断测试风险
 
 高风险规则、关键状态、边界、异常、权限、并发、兼容性和 Knowledge 推荐维度不等于待人工处理的 Clarification。需求分析只负责判断它们是否暴露了必须确认的核心业务事实；测试风险本身由后续 PlanningAgent 在 TestCase Design 阶段结合连续 Context、Workspace 和 Knowledge 自主展开。

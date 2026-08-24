@@ -51,6 +51,7 @@ export const BUILT_IN_HANDLER_KEYS = [
   'test_design_cases.submit_result',
   'test_design_repair.submit_result',
   'execution_implementation.submit_result',
+  'agent_evaluation.submit_result',
   'failure_analysis.submit_result',
   'reviewer.submit_result',
 ] as const
@@ -133,9 +134,10 @@ export function normalizeToolSourcePath(value: unknown) {
 
 function jsonSchemaToTypebox(schema: Record<string, unknown>): TSchema {
   const options = descriptionOptions(schema)
+  if (Object.keys(schema).length === 0) return Type.Unsafe<TSchema>({})
   if (Object.hasOwn(schema, 'const') || Array.isArray(schema.enum)) return Type.Unsafe<TSchema>(structuredClone(schema))
   if (schema.type === 'object') {
-    const properties = schema.properties as Record<string, Record<string, unknown>>
+    const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>
     const required = new Set(schema.required as string[] | undefined)
     const shape: Record<string, TSchema> = {}
     for (const [key, value] of Object.entries(properties)) {
@@ -247,6 +249,9 @@ function validatePiNameUniqueness(tools: Record<string, BuiltInToolConfig>) {
 
 function validateJsonSchema(value: unknown, path: string): asserts value is Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path} 必须是 JSON Schema 对象`)
+  // Empty JSON Schema means any JSON value. Application validators still own
+  // the deterministic Agent Test domain constraints after tool submission.
+  if (Object.keys(value).length === 0) return
   if (Object.hasOwn(value, 'const')) {
     assertFields(value, ['const', 'description'], path)
     if (!isJsonLiteral(value.const)) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.const 无效`)
@@ -262,12 +267,13 @@ function validateJsonSchema(value: unknown, path: string): asserts value is Reco
   switch (value.type) {
     case 'object': {
       assertFields(value, ['type', 'properties', 'required', 'additionalProperties', 'description'], path)
-      if (!isRecord(value.properties)) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.properties 必须是对象`)
+      if (value.properties !== undefined && !isRecord(value.properties)) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.properties 必须是对象`)
+      if (value.properties === undefined && value.additionalProperties !== true) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.properties 必须是对象`)
       if (value.additionalProperties !== undefined && typeof value.additionalProperties !== 'boolean') throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.additionalProperties 无效`)
-      const properties = Object.keys(value.properties)
-      if (value.required !== undefined && (!Array.isArray(value.required) || value.required.some(item => typeof item !== 'string' || !Object.hasOwn(value.properties!, item)) || new Set(value.required).size !== value.required.length)) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.required 无效`)
+      const properties = Object.keys(value.properties ?? {})
+      if (value.required !== undefined && (!Array.isArray(value.required) || value.required.some(item => typeof item !== 'string' || !Object.hasOwn(value.properties ?? {}, item)) || new Set(value.required).size !== value.required.length)) throw new Error(`BUILT_IN_TOOL_CONFIG_INVALID: ${path}.required 无效`)
       validateDescription(value, path)
-      for (const [name, schema] of Object.entries(value.properties)) validateJsonSchema(schema, `${path}.properties.${name}`)
+      for (const [name, schema] of Object.entries(value.properties ?? {})) validateJsonSchema(schema, `${path}.properties.${name}`)
       return
     }
     case 'array':

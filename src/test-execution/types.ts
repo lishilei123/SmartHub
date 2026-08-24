@@ -22,7 +22,25 @@ export type ExecutionTaskStatus =
   | 'cancelled'
 
 export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
-export type TestExecutionMethod = 'ui' | 'api' | 'performance_tool' | 'long_running' | 'environment_matrix'
+export type TestExecutionMethod = 'ui' | 'api' | 'agent' | 'performance_tool' | 'long_running' | 'environment_matrix'
+
+export type AgentUnderTest = {
+  id: string
+  projectId: string
+  projectVersionId: string
+  name: string
+  description?: string
+  enabled: boolean
+  currentVersion: number
+  endpoint: string
+  protocol: 'http' | 'sse'
+  authenticationConfig: { type: 'none' } | { type: 'bearer_env'; environmentVariable: string } | { type: 'api_key_env'; headerName: string; environmentVariable: string }
+  requestMapping: { method: 'POST'; inputField: string; contextField?: string; sessionIdField?: string; headers?: Record<string, string> }
+  responseMapping: { outputPath: string; tracePath?: string; tokenUsagePath?: string; costPath?: string; traceCompleteness?: 'complete' | 'partial' }
+  documentationRefs: string[]
+  createdAt: string
+  updatedAt: string
+}
 
 export type TestDataRequirement = {
   id: string
@@ -82,6 +100,7 @@ export type ExecutionReadiness = {
     reason?: string
     snapshot: ExecutionRunnerSnapshot
   }
+  agent?: { ready: boolean; reason?: string }
 }
 
 export type ExecutionEnvironment = {
@@ -94,6 +113,7 @@ export type ExecutionEnvironment = {
     port: number
   }>
   signature: string
+  agentUnderTest?: { id: string; name: string; version: number; protocol: 'http' | 'sse' }
 }
 
 export type ExecutionHandoff = {
@@ -135,10 +155,11 @@ export type FrozenExecutionAgentSnapshot = {
 }
 
 export type ExecutionRunnerSnapshot = {
+  kind?: 'playwright' | 'agent'
   runnerVersion: string
-  playwrightVersion: string
-  imageReference: string
-  imageDigest: string
+  playwrightVersion?: string
+  imageReference?: string
+  imageDigest?: string
 }
 
 export type ExecutionRun = {
@@ -161,7 +182,7 @@ export type ExecutionRun = {
   testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
   agents: {
-    executionImplementation: FrozenExecutionAgentSnapshot
+    executionImplementation?: FrozenExecutionAgentSnapshot
     failureAnalysis: FrozenExecutionAgentSnapshot
   }
   status: ExecutionRunStatus
@@ -190,6 +211,7 @@ export type ExecutionTask = {
       preconditions: string[]
       steps: string[]
       expectedResults: string[]
+      agentTestSpec?: import('../test-design/types').AgentTestSpec
     }
     caseContentSha256: string
     method: TestExecutionMethod
@@ -329,7 +351,12 @@ export type ExecutionTaskDetail = {
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
   maintenanceProposals: CaseMaintenanceProposal[]
+  agentExecutionResult?: AgentExecutionAggregateResult
 }
+
+export type AgentTraceEvent = { id: string; caseRunId: string; sequence: number; type: string; timestamp: string; source: string; name?: string; input?: unknown; output?: unknown; metadata?: Record<string, unknown>; durationMs?: number }
+export type AgentExecutionCaseRun = { id: string; repeatOrdinal: number; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE' | 'ERROR'; actualOutput?: unknown; assertionResults: Array<{ id: string; type: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE'; code: string; message: string; evidenceRefs: string[] }>; evaluationResults: Array<{ id: string; kind: string; criterion: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE'; explanation: string; evidenceRefs: string[] }>; traceEvents: AgentTraceEvent[]; latencyMs: number; tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }; cost?: number; stepCount: number; failureFacts: Array<{ code: string; message: string; evidenceRefs: string[] }>; error?: string }
+export type AgentExecutionAggregateResult = { taskId: string; runId: string; status: 'PASS' | 'FAIL' | 'NOT_EVALUABLE' | 'ERROR'; caseRuns: AgentExecutionCaseRun[]; successRate: number; failureRate: number; notEvaluableRate: number; errorRate: number; averageLatencyMs: number; tokenUsage?: { totalTokens?: number }; cost?: number; failureAnalysis?: { category: string; reason: string; evidence: string; source: 'agent'; agentSnapshotRef: string }; failureAnalysisError?: string; evaluationError?: string; createdAt: string }
 
 export type ScriptRevisionDiff = {
   fromRevision: ScriptRevision

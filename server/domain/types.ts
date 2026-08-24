@@ -340,7 +340,7 @@ export interface AgentExecutionRecord {
   toolCalls: number
   toolErrors?: number
   framework?: { name: 'pi-agent-core' | 'pi-coding-agent'; version: string }
-  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
+  workflowStage?: import('./requirement-workflow-types.js').RequirementWorkflowStage | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'agent_evaluation' | 'failure_diagnosis' | 'script_repair'
   context?: import('./agent-types.js').AgentExecutionContext
   events: AgentExecutionEvent[]
 }
@@ -411,7 +411,7 @@ export interface ReviewRun {
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; testExecutionInfrastructureConfigurationVersions: TestExecutionInfrastructureConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; agentUnderTests: import('./agent-test-types.js').AgentUnderTest[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; testExecutionInfrastructureConfigurationVersions: TestExecutionInfrastructureConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

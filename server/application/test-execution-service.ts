@@ -43,6 +43,9 @@ import type {
   TestExecutionTransaction,
 } from '../infrastructure/test-execution-store.js'
 import type { PlaywrightRunner } from '../runner/playwright-runner.js'
+import type { AgentRunner } from '../runner/agent-runner.js'
+import type { AgentEvaluationResult, AgentExecutionAggregateResult } from '../domain/agent-test-types.js'
+import type { AgentUnderTestService } from './agent-under-test-service.js'
 import {
   executionBindingDependencySha256,
   LocalExecutionWorkspaceStore,
@@ -94,6 +97,7 @@ export interface TestExecutionAgentRuntime {
     agents: Array<{ agentKey: string; ready: boolean; reason?: string }>
   }>
   freezeConfiguration(): Promise<ExecutionRun['agents']>
+  freezeFailureAnalysisConfiguration?(): Promise<ExecutionRun['agents']>
   execute(
     input: TestExecutionAgentRuntimeInput,
     signal: AbortSignal,
@@ -102,7 +106,8 @@ export interface TestExecutionAgentRuntime {
 
 export type CreateTestExecutionRunInput = {
   projectVersionId: string
-  baseUrl: string
+  baseUrl?: string
+  agentUnderTestId?: string
   testDataBindings?: unknown
   idempotencyKey: string
   createdBy: string
@@ -139,6 +144,8 @@ export class TestExecutionService {
     private readonly uiExecutionAgent?: UIExecutionAgent,
     private readonly knowledgeResolver?: TestExecutionKnowledgeResolver,
     private readonly browserTools?: BrowserToolGateway,
+    private readonly agentUnderTestService?: AgentUnderTestService,
+    private readonly agentRunner?: AgentRunner,
   ) {}
 
   async readiness() {
@@ -160,6 +167,17 @@ export class TestExecutionService {
       environment,
       agents,
       runner,
+      agent: {
+        ready: store.ready
+          && Boolean(this.agentUnderTestService)
+          && Boolean(this.agentRunner)
+          && Boolean(agents.agents.find(item => item.agentKey === 'failure-analysis')?.ready),
+        reason: !store.ready
+          ? store.reason
+          : !this.agentUnderTestService || !this.agentRunner
+            ? 'AgentRunner 未配置'
+            : agents.agents.find(item => item.agentKey === 'failure-analysis')?.reason,
+      },
     }
   }
 
@@ -224,6 +242,7 @@ export class TestExecutionService {
       scriptRevisions: snapshot.scriptRevisions,
       artifacts: snapshot.artifacts.map(publicArtifact),
       maintenanceProposals: snapshot.maintenanceProposals,
+      ...(snapshot.agentExecutionResult ? { agentExecutionResult: snapshot.agentExecutionResult } : {}),
     }
   }
 
@@ -399,14 +418,13 @@ export class TestExecutionService {
 
   async createRun(input: CreateTestExecutionRunInput) {
     const projectVersionId = requiredIdentity(input.projectVersionId, 'projectVersionId')
-    const baseUrl = requiredUrl(input.baseUrl)
     const idempotencyKey = requiredIdentity(input.idempotencyKey, 'idempotencyKey')
     const createdBy = requiredIdentity(input.createdBy, 'createdBy')
     const requestedTestDataBindings = normalizeExecutionTestDataBindings(input.testDataBindings)
     const replay = await this.store.getRunByIdempotencyKey(projectVersionId, idempotencyKey)
     if (replay) {
       if (
-        replay.environment.baseUrl !== baseUrl
+        (input.agentUnderTestId ? replay.environment.agentUnderTest?.id !== input.agentUnderTestId : replay.environment.baseUrl !== requiredUrl(input.baseUrl))
         || replay.createdBy !== createdBy
         || canonicalSha256(replay.testData?.bindings ?? []) !== canonicalSha256(requestedTestDataBindings)
       ) {
@@ -453,6 +471,9 @@ export class TestExecutionService {
         '执行交接必须包含至少一个冻结任务',
       )
     }
+    const agentRun = frozenInputs.every(item => item.method === 'agent')
+    if (!agentRun && frozenInputs.some(item => item.method === 'agent')) throw new TestExecutionServiceError('TEST_EXECUTION_MIXED_RUNTIME_UNSUPPORTED', '同一个 Run 暂不允许混合 Agent 与 Script 执行任务')
+    if (agentRun && (!this.agentUnderTestService || !this.agentRunner)) throw new TestExecutionServiceError('AGENT_TEST_RUNTIME_UNAVAILABLE', 'Agent Test Runtime 未配置', 503)
     if (
       new Set(frozenInputs.map(item => item.ordinal)).size !== frozenInputs.length
       || new Set(frozenInputs.map(item => item.dedupKey)).size !== frozenInputs.length
@@ -463,16 +484,21 @@ export class TestExecutionService {
       )
     }
 
+    const agentUnderTest = agentRun
+      ? await this.agentUnderTestService!.freeze(projectVersionId, requiredIdentity(input.agentUnderTestId, 'agentUnderTestId'))
+      : undefined
     const [environment, agents, runnerReadiness, knowledge] = await Promise.all([
-      this.sourcesEnvironment(baseUrl),
-      this.agentRuntime.freezeConfiguration(),
-      this.runner.readiness(),
+      agentUnderTest ? Promise.resolve(agentExecutionEnvironment(agentUnderTest)) : this.sourcesEnvironment(requiredUrl(input.baseUrl)),
+      agentRun && this.agentRuntime.freezeFailureAnalysisConfiguration
+        ? this.agentRuntime.freezeFailureAnalysisConfiguration()
+        : this.agentRuntime.freezeConfiguration(),
+      agentRun ? Promise.resolve({ ready: true as const, snapshot: { kind: 'agent' as const, runnerVersion: 'agent-runner/v1' } }) : this.runner.readiness(),
       this.knowledgeResolver?.resolveSnapshot(modern.projectId),
     ])
     if (!runnerReadiness.ready) {
       throw new TestExecutionServiceError(
         'TEST_EXECUTION_RUNNER_UNAVAILABLE',
-        runnerReadiness.reason ?? 'Playwright Runner 不可用',
+        runnerReadiness.reason ?? (agentRun ? 'Agent Runner 不可用' : 'Playwright Runner 不可用'),
         503,
       )
     }
@@ -561,6 +587,9 @@ export class TestExecutionService {
       if (!run || !task || task.runId !== run.id) {
         throw new Error('TEST_EXECUTION_JOB_SCOPE_INVALID')
       }
+      if (task.input.method === 'agent') {
+        return await this.processAgentTask(job, lease, run, task, signal)
+      }
       if (terminalTaskStatus(task.status)) {
         if (task.status === 'passed') {
           await this.validatePassedWorkspaceBinding(run, task)
@@ -590,6 +619,105 @@ export class TestExecutionService {
           break
         default:
           return task
+      }
+    }
+  }
+
+  private async processAgentTask(
+    job: ExecutionJob,
+    lease: ExecutionJobLease,
+    run: ExecutionRun,
+    task: ExecutionTask,
+    signal: AbortSignal,
+  ): Promise<ExecutionTask> {
+    if (terminalTaskStatus(task.status)) return task
+    if (!this.agentRunner || !this.agentUnderTestService) throw new TestExecutionInfrastructureError('AGENT_TEST_RUNTIME_UNAVAILABLE')
+    const snapshot = run.environment.agentUnderTest
+    const spec = task.input.caseContent.agentTestSpec
+    if (!snapshot || !spec || task.input.executionSpec.schemaVersion !== 'agent-test-input/v1') throw new TestExecutionInfrastructureError('AGENT_TEST_FROZEN_INPUT_INVALID')
+    if (task.status === 'pending' || task.status === 'ready') {
+      await requiredLeaseTransaction(this.store, job.id, lease, transaction => transaction.transitionTask({
+        taskId: task.id,
+        expectedStatus: task.status,
+        expectedStateVersion: task.stateVersion,
+        status: 'running',
+      }))
+      const running = await this.getTask(task.id)
+      return await this.processAgentTask(job, lease, run, running, signal)
+    }
+    if (task.status !== 'running') throw new TestExecutionInfrastructureError(`AGENT_TEST_TASK_STATE_INVALID: ${task.status}`)
+    const resolvedVersion = await this.agentUnderTestService.resolveVersion(snapshot)
+    const runnerResult = await this.agentRunner.execute({ runId: run.id, taskId: task.id, agentUnderTest: snapshot, resolvedVersion, spec }, signal)
+    const executionResult = runnerResult.caseRuns.some(item => item.evaluationResults.length)
+      ? await this.evaluateAgentSemantics(run, task, runnerResult, signal)
+      : runnerResult
+    const result = executionResult.status === 'FAIL' || executionResult.status === 'ERROR'
+      ? await this.analyzeAgentFailure(run, task, executionResult, signal)
+      : executionResult
+    const status: ExecutionTask['status'] = result.status === 'PASS' ? 'passed' : result.status === 'NOT_EVALUABLE' ? 'blocked' : 'failed'
+    const error = result.status === 'PASS' ? undefined : result.caseRuns.flatMap(item => item.failureFacts.map(fact => fact.code)).filter((value, index, values) => values.indexOf(value) === index).join(', ') || result.status
+    return await requiredLeaseTransaction(this.store, job.id, lease, async transaction => {
+      await transaction.appendAgentExecutionResult(result)
+      return await transaction.transitionTask({ taskId: task.id, expectedStatus: 'running', expectedStateVersion: task.stateVersion, status, ...(error ? { error } : {}), finishedAt: this.clock() })
+    })
+  }
+
+  private async evaluateAgentSemantics(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    result: AgentExecutionAggregateResult,
+    signal: AbortSignal,
+  ): Promise<AgentExecutionAggregateResult> {
+    try {
+      const workspace = await this.workspace(run, task)
+      const output = await this.agentRuntime.execute({
+        stage: 'agent_evaluation',
+        run,
+        task,
+        workspace,
+        stageContext: { agentExecution: result },
+        validateCandidate: candidateValidator(candidate => applyAgentEvaluationCandidate(result, candidate, run.agents.failureAnalysis.snapshotSha256)),
+      }, signal)
+      assertAgentOutputSchema(output, 'agent-evaluation/v1')
+      return applyAgentEvaluationCandidate(result, output.candidate, run.agents.failureAnalysis.snapshotSha256)
+    } catch (error) {
+      return { ...result, evaluationError: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  private async analyzeAgentFailure(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    result: AgentExecutionAggregateResult,
+    signal: AbortSignal,
+  ): Promise<AgentExecutionAggregateResult> {
+    try {
+      const workspace = await this.workspace(run, task)
+      const validate = (candidate: Record<string, unknown>) => validateFailureDiagnosisCandidate(candidate)
+      const output = await this.agentRuntime.execute({
+        stage: 'failure_diagnosis',
+        run,
+        task,
+        workspace,
+        stageContext: { agentExecution: result },
+        validateCandidate: candidateValidator(validate),
+      }, signal)
+      assertAgentOutputSchema(output, 'failure-analysis/v1')
+      const candidate = validate(output.candidate)
+      return {
+        ...result,
+        failureAnalysis: {
+          category: candidate.category,
+          reason: candidate.reason,
+          evidence: candidate.evidence,
+          source: 'agent',
+          agentSnapshotRef: run.agents.failureAnalysis.snapshotSha256,
+        },
+      }
+    } catch (error) {
+      return {
+        ...result,
+        failureAnalysisError: error instanceof Error ? error.message : String(error),
       }
     }
   }
@@ -645,6 +773,7 @@ export class TestExecutionService {
     task: ExecutionTask,
     signal: AbortSignal,
   ) {
+    const executionImplementation = requiredExecutionImplementation(run)
     if (this.executionWorkspace) {
       const binding = await this.executionWorkspace.resolveBinding(
         run.projectVersionId,
@@ -677,14 +806,14 @@ export class TestExecutionService {
             method: executableMethod(task), caseContentSha256: task.input.caseContentSha256,
             executionSpecSha256: task.input.executionSpecSha256, taskInputSha256: task.input.inputSha256,
             environmentSignature: run.environment.signature,
-            executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
-            executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
+            executionImplementationAgentVersion: executionImplementation.configurationVersion,
+            executionImplementationAgentConfigurationSha256: executionImplementation.configurationSha256,
             createdAt: this.clock(),
           },
           // The immutable revision records the entry actually executed. It is
           // not a ScriptArtifact cache replay: the source of truth is the
           // ProjectVersion workspace binding.
-          source: 'agent', generatedBy: run.agents.executionImplementation, incrementRepair: false,
+          source: 'agent', generatedBy: executionImplementation, incrementRepair: false,
         })
         return
       }
@@ -717,6 +846,7 @@ export class TestExecutionService {
     task: ExecutionTask,
     signal: AbortSignal,
   ) {
+    const executionImplementation = requiredExecutionImplementation(run)
     const workspace = await this.workspace(run, task)
     const workspaceFiles = this.executionWorkspace
       ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
@@ -770,13 +900,13 @@ export class TestExecutionService {
         executionSpecSha256: task.input.executionSpecSha256,
         taskInputSha256: task.input.inputSha256,
         environmentSignature: run.environment.signature,
-        executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
-        executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
+        executionImplementationAgentVersion: executionImplementation.configurationVersion,
+        executionImplementationAgentConfigurationSha256: executionImplementation.configurationSha256,
         createdAt,
       },
       executionPackage,
       source: 'agent',
-      generatedBy: run.agents.executionImplementation,
+      generatedBy: executionImplementation,
       incrementRepair: false,
     })
   }
@@ -788,6 +918,7 @@ export class TestExecutionService {
     task: ExecutionTask,
     signal: AbortSignal,
   ) {
+    const executionImplementation = requiredExecutionImplementation(run)
     const parent = await this.currentRevision(task)
     const diagnoses = await this.store.listDiagnoses(task.id)
     const diagnosis = [...diagnoses]
@@ -896,7 +1027,7 @@ export class TestExecutionService {
       scriptArtifact,
       executionPackage,
       source: 'repair',
-      generatedBy: run.agents.executionImplementation,
+      generatedBy: executionImplementation,
       parent,
       repairReason: diagnosis.summary,
       incrementRepair: true,
@@ -1783,6 +1914,7 @@ function validateSuiteVersion(
 }
 
 function taskScriptCacheKey(run: ExecutionRun, task: ExecutionTask) {
+  const executionImplementation = requiredExecutionImplementation(run)
   return scriptCacheKey({
     caseId: task.input.caseId,
     caseRevision: task.input.caseRevision,
@@ -1791,8 +1923,8 @@ function taskScriptCacheKey(run: ExecutionRun, task: ExecutionTask) {
     executionSpecSha256: task.input.executionSpecSha256,
     taskInputSha256: task.input.inputSha256,
     environmentSignature: run.environment.signature,
-    executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
-    executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
+    executionImplementationAgentVersion: executionImplementation.configurationVersion,
+    executionImplementationAgentConfigurationSha256: executionImplementation.configurationSha256,
   })
 }
 
@@ -1846,6 +1978,20 @@ function failureDiagnosisPolicy(
     flaky: '保留失败证据并人工判断是否重试',
     assertion_mismatch: '核对正式预期；禁止自动修改受保护断言',
     timeout: '检查环境、等待条件或性能约束后人工重试',
+    planning: '根据确定性失败事实检查规划策略与前置条件',
+    tool_selection: '根据 Tool Trace 与资料检查工具选择',
+    tool_argument: '根据参数断言检查工具参数构造',
+    tool_sequence: '根据顺序断言检查工具调用次序',
+    prompt: '结合可用 Prompt 资料提出候选原因，等待人工确认',
+    context: '结合输入与上下文证据检查上下文处理',
+    model: '结合冻结模型信息提出模型行为候选原因',
+    tool_schema: '结合可用 Tool 文档检查工具 Schema',
+    mcp: '结合 MCP Trace 与文档检查 MCP 交互',
+    workflow: '结合可用 Workflow 资料检查编排路径',
+    knowledge: '结合检索证据与 Knowledge 资料检查知识使用',
+    memory: '结合可见 Memory 证据检查记忆处理',
+    runtime: '检查 Agent Runtime 错误与超时证据',
+    business_backend: '检查业务结果与后端状态证据',
     unknown: '保留失败证据并等待人工处理',
   }
   return { repairable: false, recommendedAction: actions[category] }
@@ -2063,6 +2209,68 @@ function assertAgentOutputSchema(
   }
 }
 
+function applyAgentEvaluationCandidate(
+  result: AgentExecutionAggregateResult,
+  candidate: Record<string, unknown>,
+  modelSnapshotRef: string,
+): AgentExecutionAggregateResult {
+  if (Object.keys(candidate).some(key => key !== 'results') || !Array.isArray(candidate.results)) throw new Error('AGENT_EVALUATION_CANDIDATE_INVALID')
+  const expected = result.caseRuns.flatMap(caseRun => caseRun.evaluationResults.map(evaluation => ({ caseRun, evaluation })))
+  if (candidate.results.length !== expected.length) throw new Error('AGENT_EVALUATION_RESULT_COUNT_MISMATCH')
+  const remaining = [...expected]
+  const replacements = new Map<string, AgentEvaluationResult>()
+  for (const raw of candidate.results) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('AGENT_EVALUATION_RESULT_INVALID')
+    const item = raw as Record<string, unknown>
+    const allowed = new Set(['caseRunId', 'kind', 'criterion', 'status', 'explanation', 'evidenceRefs'])
+    if (Object.keys(item).some(key => !allowed.has(key))) throw new Error('AGENT_EVALUATION_RESULT_FIELD_INVALID')
+    const caseRunId = boundedEvaluationText(item.caseRunId, 'caseRunId', 500)
+    const kind = boundedEvaluationText(item.kind, 'kind', 50)
+    const criterion = boundedEvaluationText(item.criterion, 'criterion', 4000)
+    const index = remaining.findIndex(entry => entry.caseRun.id === caseRunId && entry.evaluation.kind === kind && entry.evaluation.criterion === criterion)
+    if (index < 0) throw new Error('AGENT_EVALUATION_CRITERION_MISMATCH')
+    const [{ caseRun, evaluation }] = remaining.splice(index, 1)
+    const status = boundedEvaluationText(item.status, 'status', 50)
+    if (status !== 'PASS' && status !== 'FAIL' && status !== 'NOT_EVALUABLE') throw new Error('AGENT_EVALUATION_STATUS_INVALID')
+    if (!Array.isArray(item.evidenceRefs) || item.evidenceRefs.length > 200 || item.evidenceRefs.some(value => typeof value !== 'string')) throw new Error('AGENT_EVALUATION_EVIDENCE_INVALID')
+    const evidenceRefs = [...new Set(item.evidenceRefs as string[])]
+    const visibleEvidence = new Set(caseRun.traceEvents.map(event => event.id))
+    if (evidenceRefs.some(id => !visibleEvidence.has(id))) throw new Error('AGENT_EVALUATION_EVIDENCE_NOT_FOUND')
+    replacements.set(evaluation.id, {
+      ...evaluation,
+      status,
+      explanation: boundedEvaluationText(item.explanation, 'explanation', 8000),
+      evidenceRefs,
+      modelSnapshotRef,
+    })
+  }
+  if (remaining.length) throw new Error('AGENT_EVALUATION_CRITERION_MISSING')
+  const caseRuns = result.caseRuns.map(caseRun => {
+    const evaluationResults = caseRun.evaluationResults.map(item => replacements.get(item.id) ?? item)
+    const status = caseRun.status === 'ERROR'
+      ? 'ERROR' as const
+      : [...caseRun.assertionResults, ...evaluationResults].some(item => item.status === 'FAIL')
+        ? 'FAIL' as const
+        : [...caseRun.assertionResults, ...evaluationResults].some(item => item.status === 'NOT_EVALUABLE')
+          ? 'NOT_EVALUABLE' as const
+          : 'PASS' as const
+    return { ...caseRun, evaluationResults, status }
+  })
+  const count = caseRuns.length
+  const rate = (status: typeof caseRuns[number]['status']) => caseRuns.filter(item => item.status === status).length / count
+  const status = caseRuns.some(item => item.status === 'ERROR') ? 'ERROR'
+    : caseRuns.some(item => item.status === 'FAIL') ? 'FAIL'
+      : caseRuns.some(item => item.status === 'NOT_EVALUABLE') ? 'NOT_EVALUABLE'
+        : 'PASS'
+  return { ...result, caseRuns, status, successRate: rate('PASS'), failureRate: rate('FAIL'), notEvaluableRate: rate('NOT_EVALUABLE'), errorRate: rate('ERROR') }
+}
+
+function boundedEvaluationText(value: unknown, field: string, maxLength: number) {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (!normalized || normalized.length > maxLength) throw new Error(`AGENT_EVALUATION_${field.toUpperCase()}_INVALID`)
+  return normalized
+}
+
 function candidateValidator<T>(validate: (candidate: Record<string, unknown>) => T) {
   return async (candidate: Record<string, unknown>, _manifest: InputDeliveryManifest) => {
     try {
@@ -2125,19 +2333,29 @@ async function requiredLeaseTransaction<T>(
   return result
 }
 
+function agentExecutionEnvironment(agentUnderTest: NonNullable<ExecutionEnvironmentSnapshot['agentUnderTest']>): ExecutionEnvironmentSnapshot {
+  const url = new URL(agentUnderTest.endpoint)
+  const base = {
+    schemaVersion: 'agent-test-execution-environment/v1',
+    environmentId: `agent-under-test:${agentUnderTest.id}:v${agentUnderTest.version}`,
+    name: agentUnderTest.name,
+    baseUrl: agentUnderTest.endpoint,
+    targets: [{ protocol: url.protocol.slice(0, -1) as 'http' | 'https', host: url.hostname, port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)) }],
+    agentUnderTest: structuredClone(agentUnderTest),
+  }
+  return { ...base, signature: canonicalSha256(base) }
+}
+
 function assertAgentSnapshots(agents: ExecutionRun['agents']) {
-  const values = [agents.executionImplementation, agents.failureAnalysis]
-  const expected: FrozenExecutionAgentSnapshot['agentKey'][] = [
-    'execution-implementation',
-    'failure-analysis',
-  ]
-  values.forEach((snapshot, index) => {
+  const values = [agents.executionImplementation, agents.failureAnalysis].filter((value): value is FrozenExecutionAgentSnapshot => Boolean(value))
+  values.forEach(snapshot => {
     const { snapshotSha256, ...base } = snapshot
     if (
-      snapshot.agentKey !== expected[index]
+      !['execution-implementation', 'failure-analysis'].includes(snapshot.agentKey)
       || canonicalSha256(base) !== snapshotSha256
     ) throw new Error('TEST_EXECUTION_AGENT_SNAPSHOT_INVALID')
   })
+  if (agents.failureAnalysis.agentKey !== 'failure-analysis') throw new Error('TEST_EXECUTION_AGENT_SNAPSHOT_INVALID')
 }
 
 function assertFrozenRunner(run: ExecutionRun, actual: ExecutionRun['runner']) {
@@ -2146,7 +2364,7 @@ function assertFrozenRunner(run: ExecutionRun, actual: ExecutionRun['runner']) {
   }
 }
 
-function requiredIdentity(value: string, field: string) {
+function requiredIdentity(value: string | undefined, field: string) {
   const normalized = String(value ?? '').trim()
   if (!normalized || normalized.length > 500 || /[\u0000-\u001F\u007F]/u.test(normalized)) {
     throw new TestExecutionServiceError(
@@ -2158,7 +2376,7 @@ function requiredIdentity(value: string, field: string) {
   return normalized
 }
 
-function requiredUrl(value: string) {
+function requiredUrl(value: string | undefined) {
   const normalized = String(value ?? '').trim()
   let url: URL
   try {
@@ -2195,6 +2413,14 @@ function required<T>(
     throw new TestExecutionServiceError(code, message, status)
   }
   return value
+}
+
+function requiredExecutionImplementation(run: ExecutionRun): FrozenExecutionAgentSnapshot {
+  return required(
+    run.agents.executionImplementation,
+    'TEST_EXECUTION_IMPLEMENTATION_AGENT_SNAPSHOT_REQUIRED',
+    '脚本执行链缺少冻结的 ExecutionImplementationAgent 配置',
+  )
 }
 
 function publicArtifact(artifact: ExecutionArtifact) {

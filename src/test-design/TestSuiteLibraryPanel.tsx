@@ -8,8 +8,8 @@ type SuiteValue = SuiteDraftInput
 type SuiteMemberValue = SuiteValue['members'][number]
 
 function methodsForContent(content: TestCaseContent): TestExecutionMethod[] { return content.executionMethods }
-function methodsForSuiteMember(member: { executionMethods: Array<'ui' | 'api'> }): TestExecutionMethod[] { return member.executionMethods }
-function suiteMemberValue(caseId: string, _content: TestCaseContent | undefined, methods: TestExecutionMethod[], reason: string): SuiteMemberValue { return { caseId, executionMethods: (['ui', 'api'] as const).filter((method): method is 'ui' | 'api' => methods.includes(method)), reason } }
+function methodsForSuiteMember(member: { executionMethods: Array<'ui' | 'api' | 'agent'> }): TestExecutionMethod[] { return member.executionMethods }
+function suiteMemberValue(caseId: string, _content: TestCaseContent | undefined, methods: TestExecutionMethod[], reason: string): SuiteMemberValue { return { caseId, executionMethods: (['ui', 'api', 'agent'] as const).filter(method => methods.includes(method)), reason } }
 
 export function TestSuiteLibraryPanel({ projectId, cases, libraryVersions, drafts, versions, busy, onSave, onPublish, onDeprecate }: { projectId: string; cases: LibraryTestCase[]; libraryVersions: TestCaseLibraryVersion[]; drafts: TestSuiteDraft[]; versions: LibraryTestSuiteVersion[]; busy: boolean; onSave: (draft: TestSuiteDraft | undefined, value: SuiteValue) => void; onPublish: (draft: TestSuiteDraft) => void; onDeprecate: (version: LibraryTestSuiteVersion) => void }) {
   const [type, setType] = useState(''); const [selected, setSelected] = useState<string | null>(null); const [editor, setEditor] = useState<TestSuiteDraft | 'create' | null>(null); const [diff, setDiff] = useState<Array<{ caseId: string; change: string }> | null>(null)

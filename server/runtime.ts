@@ -38,6 +38,8 @@ import { LocalExecutionWorkspaceStore } from './infrastructure/execution-workspa
 import { PlaywrightCliAdapter, UIExecutionAgent } from './agent/ui-execution-agent.js'
 import { StateStoreTestExecutionKnowledgeResolver } from './application/test-execution-knowledge.js'
 import { PlaywrightBrowserToolGateway } from './tools/playwright-browser-tools.js'
+import { AgentUnderTestService } from './application/agent-under-test-service.js'
+import { AgentRunner, UnavailableAgentSemanticEvaluator } from './runner/agent-runner.js'
 
 const envFile = resolve(applicationRoot, '.env.local')
 if (existsSync(envFile)) process.loadEnvFile(envFile)
@@ -88,6 +90,7 @@ export const planningWorkflowService = new PlanningWorkflowService(
 requirementAnalysisService.onRequirementReleaseReady(async runId => { await planningWorkflowService.requirementReleaseReady(runId) })
 export const executionWorkspaceStore = new LocalExecutionWorkspaceStore(executionWorkspaceRoot)
 export const projectVersionService = new ProjectVersionService(stateStore, service, executionWorkspaceStore)
+export const agentUnderTestService = new AgentUnderTestService(stateStore)
 export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore
 
@@ -115,6 +118,7 @@ export const playwrightRunner: PlaywrightRunner = new LocalWorkspaceRunner(execu
 export const playwrightCliAdapter = new PlaywrightCliAdapter()
 export const uiExecutionAgent = new UIExecutionAgent(playwrightCliAdapter)
 export const playwrightBrowserTools = new PlaywrightBrowserToolGateway(playwrightCliAdapter)
+export const agentRunner = new AgentRunner(new UnavailableAgentSemanticEvaluator())
 export const testExecutionKnowledgeResolver = new StateStoreTestExecutionKnowledgeResolver(stateStore)
 export const testExecutionService =
   testExecutionStore && testExecutionWorkspaceProvider
@@ -131,6 +135,8 @@ export const testExecutionService =
         uiExecutionAgent,
         testExecutionKnowledgeResolver,
         playwrightBrowserTools,
+        agentUnderTestService,
+        agentRunner,
       )
     : undefined
 export const testReportService = testExecutionStore

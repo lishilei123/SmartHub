@@ -1,7 +1,7 @@
 import { Gauge, HeartPulse, RotateCcw, TimerReset } from 'lucide-react'
-import type { TestReport } from './types'
+import type { LegacyTestReport } from './types'
 
-export function TestReportMetrics({ report }: { report: TestReport }) {
+export function TestReportMetrics({ report }: { report: LegacyTestReport }) {
   const efficiency = [
     ['总耗时', duration(report.efficiency.totalDurationMs)],
     ['平均用例耗时', duration(report.efficiency.averageCaseDurationMs)],

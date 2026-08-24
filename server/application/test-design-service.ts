@@ -113,7 +113,7 @@ export class TestDesignService {
         includedScopes: [],
         excludedScopes: [],
         focusDimensions: ['functional', 'performance', 'stability', 'compatibility', 'security'],
-        executionMethods: ['ui', 'api'],
+        executionMethods: ['agent'],
         knowledgeAugmentation: activeIndex ? { mode: 'fixed_index', indexVersionId: activeIndex.id } : { mode: 'disabled' },
       }
       const input = validateCreateTestDesignInput(rawInput)
@@ -340,7 +340,7 @@ export class TestDesignService {
 
   async listCases(projectVersionId: string, designId: string, runId: string, filters: { dimension?: string; executionMethod?: string; status?: string } = {}) {
     const run = await this.loadScopedRun(projectVersionId, designId, runId)
-    return run.testCases.filter(item => !item.tombstonedAt).filter(item => { const content = currentCaseRevision(item).content; return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || content.executionMethods.includes(filters.executionMethod as 'ui' | 'api')) && (!filters.status || item.reviewState === filters.status) }).map(testCase => presentCase(testCase))
+    return run.testCases.filter(item => !item.tombstonedAt).filter(item => { const content = currentCaseRevision(item).content; return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || content.executionMethods.includes(filters.executionMethod as TestExecutionMethod)) && (!filters.status || item.reviewState === filters.status) }).map(testCase => presentCase(testCase))
   }
 
   async createCase(projectVersionId: string, designId: string, runId: string, rawContent: unknown, principal: Principal) {
@@ -1379,7 +1379,7 @@ function isWithinWorkspace(value: string) { const normalized = normalizeWorkspac
 function safeWorkspaceSegment(value: string) { const encode = (character: string) => `%${character.codePointAt(0)!.toString(16).toUpperCase().padStart(2, '0')}`; const source = value.normalize('NFC').trim() || '未命名版本'; let safe = source.replace(/[%<>:"/\\|?*\u0000-\u001F]/gu, encode).replace(/[. ]+$/gu, characters => [...characters].map(encode).join('')); if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(source)) safe = `${encode(source[0])}${safe.slice(1)}`; return safe }
 
 export function testCaseSemanticSha256(content: TestCaseContent) {
-  return canonicalSha256({ title: content.title, dimension: content.dimension, priority: content.priority, executionMethods: content.executionMethods, preconditions: content.preconditions, steps: content.steps, expectedResults: content.expectedResults })
+  return canonicalSha256({ title: content.title, dimension: content.dimension, priority: content.priority, executionMethods: content.executionMethods, preconditions: content.preconditions, steps: content.steps, expectedResults: content.expectedResults, ...(content.agentTestSpec ? { agentTestSpec: content.agentTestSpec } : {}) })
 }
 function semanticContentSha256(content: TestCaseContent) { return testCaseSemanticSha256(content) }
 function newCase(runId: string, content: TestCaseContent, origin: TestCase['origin'], actorId: string, reason: string, id = `test_case_${randomUUID()}`): TestCase { const revision = createCaseRevision(0, content, actorId, reason); return { id, runId, origin, currentRevision: 0, reviewState: 'in_review', revisions: [revision], reviewActions: [] } }
@@ -1393,8 +1393,8 @@ function assertProjectExists(state: DatabaseState, projectId: string) { required
 function executionMethodForContent(content: TestCaseContent): TestExecutionMethod { return content.executionMethods[0] }
 function executionMethodsForContent(content: TestCaseContent): TestExecutionMethod[] { return [...content.executionMethods] }
 function executionSpecForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod) {
-  if (!content.executionMethods.includes(executionMethod)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '冻结 TestCase Revision 未选择该 UI/API 执行方式', 422)
-  return { schemaVersion: 'test-script-input/v1' as const, method: executionMethod, testCase: structuredClone(content) }
+  if (!content.executionMethods.includes(executionMethod)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', '冻结 TestCase Revision 未选择该执行方式', 422)
+  return { schemaVersion: executionMethod === 'agent' ? 'agent-test-input/v1' as const : 'test-script-input/v1' as const, method: executionMethod, testCase: structuredClone(content) }
 }
 function executionConfigurationForMethod(content: TestCaseContent, executionMethod: TestExecutionMethod): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } { return content.executionMethods.includes(executionMethod) ? { status: 'ready', issues: [] } : { status: 'blocked', issues: ['TestCase 未选择该执行方式'] } }
 function executionConfiguration(content: TestCaseContent): { status: 'ready' | 'needs_confirmation' | 'blocked'; issues: string[] } {
@@ -1408,7 +1408,7 @@ function freezeLibraryVersionMember(aggregate: TestDesignState, projectId: strin
   if (revision.contentSha256 !== member.contentSha256 || canonicalSha256(revision.content) !== member.contentSha256) throw new TestDesignError('TEST_CASE_LIBRARY_MEMBER_HASH_MISMATCH', '用例库成员冻结内容 Hash 与成员记录不一致', 409, { caseId: member.caseId, revision: member.revision, expectedSha256: member.contentSha256, actualSha256: revision.contentSha256 })
   const traceability = member.traceability ?? revision.traceability
   if (traceability) assertFixedTraceability(traceability)
-  return { ...member, frozenContent: structuredClone(revision.content), frozenExecutionMethods: executionMethodsForContent(revision.content).filter((method): method is 'ui' | 'api' => method === 'ui' || method === 'api'), ...(traceability ? { traceability: structuredClone(traceability) } : {}), executionReadiness: executionConfiguration(revision.content).status }
+  return { ...member, frozenContent: structuredClone(revision.content), frozenExecutionMethods: executionMethodsForContent(revision.content), ...(traceability ? { traceability: structuredClone(traceability) } : {}), executionReadiness: executionConfiguration(revision.content).status }
 }
 function presentLibraryVersion(aggregate: TestDesignState, version: TestCaseLibraryVersion): TestCaseLibraryVersionDetail {
   const members = version.members.map(member => {
@@ -1584,7 +1584,7 @@ function applyProposalToLibrary(aggregate: TestDesignState, projectId: string, r
   if (proposal.operation === 'deprecate' && proposal.decision === 'deprecated') { const testCase = required(source, 'LIBRARY_TEST_CASE_NOT_FOUND', '废弃来源用例不存在'); testCase.status = 'deprecated'; testCase.updatedAt = now(); members.delete(testCase.id); proposal.appliedCaseId = testCase.id; proposal.appliedRevision = testCase.currentRevision }
 }
 
-function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange: boolean; members: Array<{ testCaseLibraryVersionId?: string; caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string }> } {
+function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange: boolean; members: Array<{ testCaseLibraryVersionId?: string; caseId: string; executionMethods: TestExecutionMethod[]; reason: string }> } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', '套件草稿必须是对象', 422)
   const input = raw as Record<string, unknown>
   if (Object.keys(input).some(key => !['suiteKey', 'suiteType', 'name', 'testCaseLibraryVersionId', 'confirmLibraryVersionChange', 'members'].includes(key))) throw new TestDesignError('TEST_SUITE_DRAFT_INVALID', '套件草稿包含未知字段', 422)
@@ -1607,8 +1607,8 @@ function suiteDraftInput(raw: unknown): { suiteKey: string; suiteType: 'smoke' |
       if (rawExecutionMethods !== undefined && !Array.isArray(rawExecutionMethods)) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 必须是数组`, 422)
       const executionMethods = Array.isArray(rawExecutionMethods)
         ? rawExecutionMethods.map((method, methodIndex) => {
-          if (method !== 'ui' && method !== 'api') throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods[${methodIndex}] 只能是 ui 或 api`, 422)
-          return method
+          if (method !== 'ui' && method !== 'api' && method !== 'agent') throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods[${methodIndex}] 只能是 ui、api 或 agent`, 422)
+          return method as TestExecutionMethod
         })
         : undefined
       if (executionMethods && !executionMethods.length) throw new TestDesignError('TEST_SUITE_EXECUTION_METHOD_INVALID', `members[${index}].executionMethods 不能为空`, 422)
@@ -1633,7 +1633,7 @@ function validateSuiteMembers(aggregate: TestDesignState, projectId: string, tes
     return { testCaseLibraryVersionId: version.id, caseId: member.caseId, revision: member.revision, executionMethods: canonicalSuiteExecutionMethods(selectedMethods), ordinal, reason: cleanRequired(value.reason, '套件成员原因', 2_000) }
   })
 }
-function canonicalSuiteExecutionMethods(methods: Array<'ui' | 'api'>) { return (['ui', 'api'] as const).filter((method): method is 'ui' | 'api' => methods.includes(method)) }
+function canonicalSuiteExecutionMethods(methods: TestExecutionMethod[]) { return (['ui', 'api', 'agent'] as const).filter((method): method is TestExecutionMethod => methods.includes(method)) }
 function suiteMemberExecutionMethods(member: TestSuiteVersionMember, _frozenContent: TestCaseContent): TestExecutionMethod[] { return canonicalSuiteExecutionMethods(member.executionMethods) }
 function suiteDraftEtag(draft: TestSuiteDraft) { return `"suite-draft:${draft.id}:${canonicalSha256({ contentSha256: draft.contentSha256, status: draft.status, updatedAt: draft.updatedAt })}"` }
 function versionMemberDiff<T extends { caseId: string; revision: number }>(left: T[], right: T[]) { const before = new Map(left.map(item => [item.caseId, item])); const after = new Map(right.map(item => [item.caseId, item])); return [...new Set([...before.keys(), ...after.keys()])].sort().map(caseId => { const from = before.get(caseId); const to = after.get(caseId); return { caseId, change: !from ? 'added' as const : !to ? 'removed' as const : canonicalSha256(from) === canonicalSha256(to) ? 'unchanged' as const : 'modified' as const, ...(from ? { from: structuredClone(from) } : {}), ...(to ? { to: structuredClone(to) } : {}) } }).filter(item => item.change !== 'unchanged') }

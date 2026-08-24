@@ -1,5 +1,6 @@
 import type {
   CaseMaintenanceProposal,
+  AgentUnderTest,
   ExecutionEnvironment,
   ExecutionReadiness,
   ExecutionRun,
@@ -73,6 +74,22 @@ export async function loadEnvironments(projectVersionId: string) {
   )).value.items
 }
 
+export async function loadAgentsUnderTest(projectVersionId: string) {
+  return (await request<{ items: AgentUnderTest[] }>(`${projectScope(projectVersionId)}/agents-under-test`)).value.items
+}
+
+export async function createAgentUnderTest(projectVersionId: string, input: {
+  name: string
+  endpoint: string
+  protocol: 'http' | 'sse'
+  authenticationConfig: AgentUnderTest['authenticationConfig']
+  requestMapping: AgentUnderTest['requestMapping']
+  responseMapping: AgentUnderTest['responseMapping']
+  documentationRefs: string[]
+}) {
+  return (await request<AgentUnderTest>(`${projectScope(projectVersionId)}/agents-under-test`, { method: 'POST', body: JSON.stringify(input) })).value
+}
+
 export async function loadRuns(projectVersionId: string, limit = 50) {
   return (await request<{ items: ExecutionRun[] }>(
     `${projectScope(projectVersionId)}/test-execution-runs?limit=${limit}`,
@@ -137,13 +154,13 @@ export function decideMaintenanceProposal(
 
 export function createRun(
   projectVersionId: string,
-  baseUrl: string,
+  agentUnderTestId: string,
   idempotencyKey: string,
 ) {
   return request<ExecutionRun>(`${projectScope(projectVersionId)}/test-execution-runs`, {
     method: 'POST',
     headers: { 'idempotency-key': idempotencyKey },
-    body: JSON.stringify({ baseUrl }),
+    body: JSON.stringify({ agentUnderTestId }),
   })
 }
 

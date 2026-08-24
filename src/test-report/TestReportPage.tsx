@@ -10,6 +10,7 @@ import { TestReportMaintenanceTable } from './TestReportMaintenanceTable'
 import { TestReportMetrics } from './TestReportMetrics'
 import { TestReportOverview } from './TestReportOverview'
 import { TestReportTraceability } from './TestReportTraceability'
+import type { AgentTestReport } from './types'
 import './test-report.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
@@ -65,16 +66,29 @@ export function TestReportPage({
         {!model.report && <section className="tr-section tr-report-empty"><Activity /><h2>选择一个 ExecutionRun</h2><p>报告只读取正式执行事实，不调用 Agent、Runner，也不修改状态。</p></section>}
         {model.report && <>
           <section className="tr-report-toolbar"><div><span className={`tr-status ${model.report.run.status}`}>{runStatusLabel(model.report.run.status)}</span><b>{model.report.run.id}</b><small>统计截至 {formatDate(model.report.statisticsAt)} · SHA-256 {model.report.reportSha256}</small></div><div>{model.refreshing && <span className="tr-refreshing"><RefreshCw />正在刷新</span>}<button className="tr-icon-button" aria-label="刷新当前报告" title="刷新当前报告" disabled={model.refreshing} onClick={() => void model.openReport(model.report!.run.id, true).catch(cause => notify(messageOf(cause), 'error'))}><RefreshCw className={model.refreshing ? 'spinning' : ''} /></button><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')}><FileJson2 />导出 JSON</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'markdown')}><FileText />导出 Markdown</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')} aria-label="下载报告"><Download /></a></div></section>
-          <TestReportOverview report={model.report} />
-          <TestReportMetrics report={model.report} />
-          <TestReportDiagnosisPanel report={model.report} />
-          <TestReportMaintenanceTable report={model.report} />
-          <TestReportFailureTable report={model.report} />
-          <TestReportTraceability report={model.report} />
+          {model.report.schemaVersion === 'agent-test-execution-report/v1'
+            ? <AgentTestReportView report={model.report} />
+            : <><TestReportOverview report={model.report} /><TestReportMetrics report={model.report} /><TestReportDiagnosisPanel report={model.report} /><TestReportMaintenanceTable report={model.report} /><TestReportFailureTable report={model.report} /><TestReportTraceability report={model.report} /></>}
         </>}
       </div>
     </div>
   </main>
+}
+
+function AgentTestReportView({ report }: { report: AgentTestReport }) {
+  const summary = [
+    ['Agent TestCase', report.overview.totalCases],
+    ['PASS', report.overview.passed],
+    ['FAIL', report.overview.failed],
+    ['NOT_EVALUABLE', report.overview.notEvaluable],
+    ['ERROR', report.overview.error],
+    ['Repeat Run', report.overview.caseRunCount],
+  ] as const
+  return <>
+    <section className="tr-section"><header><div><h2>Agent 执行概览</h2><p>Assertion 与 AI Evaluation 分开保存；看不到 Trace 不等于没有发生。</p></div><strong>{report.overview.successRate.percentage.toFixed(2)}%</strong></header><div className="tr-kpi-grid">{summary.map(([label, value]) => <article key={label} className="tr-kpi"><span>{label}</span><b>{value}</b></article>)}</div></section>
+    <section className="tr-section"><header><div><h2>单次执行与 Evidence</h2><p>每个 Repeat Run 独立保留状态、延迟、Trace、确定性断言和语义评估。</p></div></header><div className="tr-table-scroll"><table><thead><tr><th>Task / Repeat</th><th>状态</th><th>断言</th><th>AI Evaluation</th><th>Trace</th><th>延迟</th></tr></thead><tbody>{report.results.flatMap(result => result.caseRuns.map(caseRun => <tr key={caseRun.id}><td><code>{result.taskId}</code><small> #{caseRun.repeatOrdinal}</small></td><td><b>{caseRun.status}</b></td><td>{caseRun.assertionResults.map(item => `${item.status}:${item.type}`).join(' · ') || '无'}</td><td>{caseRun.evaluationResults.map(item => `${item.status}:${item.criterion}`).join(' · ') || '无语义断言'}</td><td>{caseRun.traceEvents.length}</td><td>{caseRun.latencyMs} ms</td></tr>))}</tbody></table></div></section>
+    <section className="tr-section tr-trace"><header><div><h2>完整追溯</h2><p>来自 ExecutionRun 冻结的被测对象、Runner、Handoff 与平台 FailureAnalysisAgent 配置。</p></div></header><dl className="tr-trace-grid"><div><dt>Agent Under Test</dt><dd>{report.traceability.agentUnderTest.name} v{report.traceability.agentUnderTest.version}</dd></div><div><dt>Protocol</dt><dd>{report.traceability.agentUnderTest.protocol}</dd></div><div><dt>AUT Config Hash</dt><dd>{report.traceability.agentUnderTest.configurationSha256}</dd></div><div><dt>AgentRunner</dt><dd>{report.traceability.runner.runnerVersion}</dd></div><div><dt>Handoff Hash</dt><dd>{report.traceability.handoff.sha256}</dd></div><div><dt>FailureAnalysis Snapshot</dt><dd>{report.traceability.agents.failureAnalysis.snapshotSha256}</dd></div></dl></section>
+  </>
 }
 
 function updateReportRoute(runId: string) {

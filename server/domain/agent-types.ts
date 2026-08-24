@@ -307,7 +307,7 @@ export interface AgentExecutionInput {
   requirementInputPlan?: RequirementInputPlan
   executionProfile?: {
     mode: 'workspace_tools'
-    workflowStage: 'analysis' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'failure_diagnosis' | 'script_repair'
+    workflowStage: 'analysis' | 'test_case_design' | 'test_design_repair' | 'script_generation' | 'agent_evaluation' | 'failure_diagnosis' | 'script_repair'
     allowedToolIds: string[]
     submitToolId: string
     schemaVersion: string

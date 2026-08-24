@@ -2,9 +2,10 @@ import type { AgentDefinitionVersion, AgentExecutionEvent, CurrentInputRef, Inpu
 import type { AgentExecutionRecord } from './types.js'
 import type { AgentRoutingConfiguration } from './types.js'
 import type { RequirementReleaseContent } from './requirement-workflow-types.js'
+import type { AgentTestSpec } from './agent-test-types.js'
 
 export type TestDimension = 'functional' | 'performance' | 'stability' | 'compatibility' | 'security'
-export type TestExecutionMethod = 'ui' | 'api'
+export type TestExecutionMethod = 'ui' | 'api' | 'agent'
 export type TestExecutionMode = 'smoke' | 'regression' | 'full' | 'custom'
 export type WorkflowStatus = 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled'
 export type WorkflowNodeStatus = 'pending' | 'queued' | 'running' | 'waiting_gate' | 'succeeded' | 'failed' | 'cancelled' | 'stale'
@@ -25,7 +26,7 @@ export interface CreateTestDesignCommon {
   includedScopes?: ScopeRule[]
   excludedScopes?: ScopeRule[]
   focusDimensions?: TestDimension[]
-  executionMethods?: Array<'ui' | 'api'>
+  executionMethods?: TestExecutionMethod[]
   knowledgeAugmentation: KnowledgeAugmentation
 }
 
@@ -212,16 +213,18 @@ export interface TestCaseContent {
   dimension: TestDimension
   requirementRefs: string[]
   priority: 'P0' | 'P1' | 'P2' | 'P3'
-  executionMethods: Array<'ui' | 'api'>
+  executionMethods: TestExecutionMethod[]
   preconditions: string[]
   steps: string[]
   expectedResults: string[]
+  /** Present only for evidence-driven Agent testing. Historical UI/API v3 cases remain valid. */
+  agentTestSpec?: AgentTestSpec
 }
 
-/** Execution-stage projection: the script agent receives the v3 case unchanged plus the selected channel. */
+/** Execution-stage projection freezes the v3 case and its selected execution channel. */
 export interface TestCaseExecutionSpec {
-  schemaVersion: 'test-script-input/v1'
-  method: 'ui' | 'api'
+  schemaVersion: 'test-script-input/v1' | 'agent-test-input/v1'
+  method: TestExecutionMethod
   testCase: TestCaseContent
 }
 
@@ -380,7 +383,7 @@ export interface TestCaseLibraryVersionMember {
   contentSha256: string
   frozenContent?: TestCaseContent
   /** Query-friendly projection of the methods already present in frozenContent. */
-  frozenExecutionMethods?: Array<'ui' | 'api'>
+  frozenExecutionMethods?: TestExecutionMethod[]
   traceability?: TestCaseTraceability
   executionReadiness?: ExecutionReadiness
 }
@@ -415,7 +418,7 @@ export interface WorkspaceArtifactProjection {
   error?: string
 }
 
-export interface TestSuiteVersionMember { testCaseLibraryVersionId: string; caseId: string; revision: number; executionMethods: Array<'ui' | 'api'>; ordinal: number; reason: string }
+export interface TestSuiteVersionMember { testCaseLibraryVersionId: string; caseId: string; revision: number; executionMethods: TestExecutionMethod[]; ordinal: number; reason: string }
 export interface TestSuiteVersion { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom' | 'functional_domain'; version: number; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteVersionMember[]; contentSha256: string; publishedBy: string; publishedAt: string; status?: 'active' | 'deprecated'; deprecatedBy?: string; deprecatedAt?: string }
 export interface TestSuiteDraft { id: string; projectId: string; suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId?: string; compatibilityStatus?: 'compatible' | 'migration_required'; incompatibilityReason?: string; members: TestSuiteVersionMember[]; contentSha256: string; status: 'draft' | 'published'; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; publishedVersionId?: string }
 export interface TestExecutionHandoffMember { stage: 'smoke' | 'new_feature' | 'impacted_regression' | 'full_regression' | TestExecutionMode; ordinal: number; sourceVersionId: string; caseId: string; revision: number; method: TestExecutionMethod; reason: string; dedupKey: string; dimension?: TestDimension; executionSpec?: TestCaseExecutionSpec; traceability?: TestCaseTraceability; selectionReason?: string; contentSha256?: string; readinessOverride?: { reason: string; actorId: string; createdAt: string } }
@@ -430,8 +433,8 @@ export interface TestDesignWorkflowRun {
   stage: TestDesignNodeKey | 'completed' | 'cancelled' | 'failed'
   progress: number
   idempotencyKey: string
-  /** Frozen UI/API channels requested by the TestDesign input for this Run. */
-  requestedExecutionMethods?: Array<'ui' | 'api'>
+  /** Frozen execution channels requested by the TestDesign input for this Run. */
+  requestedExecutionMethods?: TestExecutionMethod[]
   basisSnapshot: TestDesignBasisSnapshot
   agentConfigurationSnapshot: TestDesignRunAgentConfigurationSnapshot
   currentInputRefs: CurrentInputRef[]

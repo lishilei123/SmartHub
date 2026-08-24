@@ -60,7 +60,7 @@ export const diffLibraryVersions = (projectId: string, from: string, to: string)
 
 export const loadSuiteDrafts = (projectId: string) => request<{ items: TestSuiteDraft[] }>(`${projectScope(projectId)}/test-suite-drafts`)
 export const loadSuiteVersions = (projectId: string) => request<{ items: LibraryTestSuiteVersion[] }>(`${projectScope(projectId)}/test-suite-versions`)
-export type SuiteDraftMemberInput = { caseId: string; executionMethods: Array<'ui' | 'api'>; reason: string }
+export type SuiteDraftMemberInput = { caseId: string; executionMethods: Array<'ui' | 'api' | 'agent'>; reason: string }
 export type SuiteDraftInput = { suiteKey: string; suiteType: 'smoke' | 'regression' | 'custom'; name: string; testCaseLibraryVersionId: string; confirmLibraryVersionChange?: boolean; members: SuiteDraftMemberInput[] }
 export const createSuiteDraft = (projectId: string, input: SuiteDraftInput) => request<TestSuiteDraft>(`${projectScope(projectId)}/test-suite-drafts`, { method: 'POST', body: JSON.stringify(input) })
 export const loadSuiteDraft = (projectId: string, draftId: string) => requestWithResponse<TestSuiteDraft>(`${projectScope(projectId)}/test-suite-drafts/${encodeURIComponent(draftId)}`)

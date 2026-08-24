@@ -1,7 +1,7 @@
 import { Fingerprint } from 'lucide-react'
-import type { TestReport } from './types'
+import type { LegacyTestReport } from './types'
 
-export function TestReportTraceability({ report }: { report: TestReport }) {
+export function TestReportTraceability({ report }: { report: LegacyTestReport }) {
   const trace = report.traceability
   const references = [
     ['Project ID', trace.projectId],

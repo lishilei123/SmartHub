@@ -91,10 +91,11 @@ export async function routeTestExecution(
       'test-execution:create',
     )
     const body = await json(request)
-    rejectUnknownFields(body, ['baseUrl', 'testDataBindings'])
+    rejectUnknownFields(body, ['baseUrl', 'agentUnderTestId', 'testDataBindings'])
     const run = await requireService(service).createRun({
       projectVersionId: projectVersion.id,
-      baseUrl: String(body.baseUrl ?? ''),
+      ...(body.baseUrl === undefined ? {} : { baseUrl: String(body.baseUrl) }),
+      ...(body.agentUnderTestId === undefined ? {} : { agentUnderTestId: String(body.agentUnderTestId) }),
       ...(body.testDataBindings !== undefined ? { testDataBindings: body.testDataBindings } : {}),
       idempotencyKey: header(request, 'idempotency-key'),
       createdBy: principal.subjectId,

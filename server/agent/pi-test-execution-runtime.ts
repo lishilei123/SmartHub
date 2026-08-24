@@ -22,6 +22,7 @@ import type {
   ExecutionTask,
   FrozenExecutionAgentSnapshot,
 } from '../domain/test-execution-types.js'
+import type { AgentExecutionAggregateResult } from '../domain/agent-test-types.js'
 import type {
   AgentConfigurationVersion,
   AgentModelReference,
@@ -70,6 +71,17 @@ export const TEST_EXECUTION_STAGE_BINDINGS = {
       ...BROWSER_TOOL_IDS,
     ],
   },
+  agent_evaluation: {
+    agentKey: 'failure-analysis',
+    snapshotKey: 'failureAnalysis',
+    agentType: 'failure_analysis',
+    configurationSchemaVersion: 'failure-analysis/v1',
+    skillKey: 'agent-evaluation',
+    submitToolId: 'agent_evaluation.submit_result',
+    schemaVersion: 'agent-evaluation/v1',
+    agentLabel: 'AgentEvaluationAgent',
+    runtimeToolIds: [...TEST_EXECUTION_WORKSPACE_TOOL_IDS],
+  },
   failure_diagnosis: {
     agentKey: 'failure-analysis',
     snapshotKey: 'failureAnalysis',
@@ -114,6 +126,7 @@ export interface TestExecutionAgentStageContext {
   attemptIds?: string[]
   artifactIds?: string[]
   repairCount?: number
+  agentExecution?: AgentExecutionAggregateResult
 }
 
 export interface TestExecutionAgentRuntimeInput {
@@ -185,8 +198,16 @@ export class PiTestExecutionRuntimeAdapter {
     return this.freezeConfigurations()
   }
 
+  async freezeFailureAnalysisConfiguration(): Promise<ExecutionRun['agents']> {
+    return this.freezeSelectedConfigurations(['failure-analysis'])
+  }
+
   async freezeConfigurations(): Promise<ExecutionRun['agents']> {
-    const configurations = await Promise.all(EXECUTION_AGENT_KEYS.map(async agentKey => {
+    return this.freezeSelectedConfigurations(EXECUTION_AGENT_KEYS)
+  }
+
+  private async freezeSelectedConfigurations(agentKeys: readonly typeof EXECUTION_AGENT_KEYS[number][]): Promise<ExecutionRun['agents']> {
+    const configurations = await Promise.all(agentKeys.map(async agentKey => {
       const configuration = await this.configurations.resolveActive(agentKey)
       if (!configuration) {
         throw new Error(
@@ -202,7 +223,7 @@ export class PiTestExecutionRuntimeAdapter {
       return [agentKey, freezeAgent(configuration, resolveModel(state, configuration), agentKey)]
     }))
     return {
-      executionImplementation: required(frozen.get('execution-implementation'), 'EXECUTION_IMPLEMENTATION_AGENT_SNAPSHOT_REQUIRED'),
+      ...(frozen.has('execution-implementation') ? { executionImplementation: frozen.get('execution-implementation')! } : {}),
       failureAnalysis: required(frozen.get('failure-analysis'), 'FAILURE_ANALYSIS_AGENT_SNAPSHOT_REQUIRED'),
     }
   }
@@ -212,7 +233,10 @@ export class PiTestExecutionRuntimeAdapter {
     signal: AbortSignal,
   ): Promise<TestExecutionAgentRuntimeOutput> {
     const binding = TEST_EXECUTION_STAGE_BINDINGS[input.stage]
-    const frozen = input.run.agents[binding.snapshotKey]
+    const frozen = required(
+      input.run.agents[binding.snapshotKey],
+      `TEST_EXECUTION_AGENT_SNAPSHOT_REQUIRED: ${binding.snapshotKey}`,
+    )
     validateStageInput(input, binding, frozen)
     const configuration = await this.configurations.resolveVersion(frozen.configurationId)
     const state = await this.store.snapshot()
@@ -286,7 +310,7 @@ export function buildTestExecutionAgentTask(
   return canonicalJson({
     schemaVersion: 'test-execution-agent-task/v2',
     agent: binding.agentLabel,
-    assignment: stageAssignment(input.stage),
+    assignment: stageAssignment(input),
     testCase: input.task.input.caseContent,
     execution: {
       method: input.task.input.method,
@@ -296,6 +320,7 @@ export function buildTestExecutionAgentTask(
         ? { testDataBindings: input.task.input.testDataBindings }
         : {}),
     },
+    ...(input.stageContext?.agentExecution ? { agentExecutionEvidence: input.stageContext.agentExecution } : {}),
     workspace: {
       root: `/${workspace.rootLogicalPath ?? workspace.logicalPath}`,
       activeBranch: workspace.activeBranchLogicalPath
@@ -314,25 +339,39 @@ export function buildTestExecutionAgentTask(
       } : {}),
     },
     ...(input.uiExecution ? { uiExecution: input.uiExecution } : {}),
-    instructions: stageInstructions(input.stage, input.task.input.caseId, binding.submitToolId),
+    instructions: stageInstructions(input, input.task.input.caseId, binding.submitToolId),
   })
 }
 
-function stageAssignment(stage: TestExecutionAgentStage) {
+function stageAssignment(input: Pick<TestExecutionAgentRuntimeInput, 'stage' | 'task'>) {
+  const stage = input.stage
   if (stage === 'script_generation') return '根据冻结 TestCase 和 Execution Workspace 实现 Playwright 自动化代码'
-  if (stage === 'failure_diagnosis') return '根据当前失败 Attempt 和 Runner Evidence 客观判断失败类型'
+  if (stage === 'agent_evaluation') return '逐项评估确定性 Assertion 无法判断的 Task Completion、Semantic 与 Safety 标准'
+  if (stage === 'failure_diagnosis') return input.task.input.method === 'agent'
+    ? '根据确定性 Assertion、Trace 与可用 Workspace 资料解释失败事实并提出 Root Cause Candidate'
+    : '根据当前失败 Attempt 和 Runner Evidence 客观判断失败类型'
   return '根据已确认的 FailureDiagnosis 修复 Playwright 实现'
 }
 
-function stageInstructions(stage: TestExecutionAgentStage, caseId: string, submitToolId: string) {
+function stageInstructions(input: Pick<TestExecutionAgentRuntimeInput, 'stage' | 'task'>, caseId: string, submitToolId: string) {
+  const stage = input.stage
   const common = [
     '只使用冻结 TestCase、只读 Workspace 与当前 Runtime 明确授权的上下文；不得编造 API、Selector、凭据、业务规则或预期结果。',
     '不得修改 TestCase、Expected Result、Verification Check、受保护断言语义或测试目标。',
     '不得调用 Shell、数据库、任意网络、其他 Agent 或 Runner；Service 和 Runner 负责流程与真实执行。',
   ]
+  if (stage === 'agent_evaluation') return [
+    ...common,
+    '只评估 Service 提供的 Task Completion、Semantic 与 Safety 标准；不得重新判断 HTTP、Tool、参数、顺序、Timeout、Step Count 或 Cost。',
+    '每个 Repeat、每个标准必须单独返回 PASS、FAIL 或 NOT_EVALUABLE。证据不足或不可见时必须 NOT_EVALUABLE；不得用总分替代。',
+    `完成后只调用 ${submitToolId} 提交 results。`,
+  ]
   if (stage === 'failure_diagnosis') return [
     ...common,
-    '只根据当前失败 Attempt、Execution Event 与 Artifact 证据分类；不得修改脚本或决定是否修复。',
+    input.task.input.method === 'agent'
+      ? '先读取确定性 failed assertions、failure facts、actual output、Trace 与 Runtime error；只解释这些事实并结合实际存在的 Workspace 资料提出候选原因。看不到的资料必须标记 unavailable。'
+      : '只根据当前失败 Attempt、Execution Event 与 Artifact 证据分类；不得修改脚本或决定是否修复。',
+    'Deterministic Code identifies facts；LLM 输出只能是 Root Cause Candidate，不得认定正式 Root Cause。',
     `完成后只调用 ${submitToolId} 提交 category、reason、evidence。`,
   ]
   const implementation = [
@@ -404,11 +443,10 @@ function stageAgentDefinition(
 }
 
 function executionSessionKey(input: TestExecutionAgentRuntimeInput) {
+  if (input.stage === 'agent_evaluation') return `agent-execution-evaluation:${input.run.id}:${input.task.id}`
   if (input.stage === 'failure_diagnosis') {
-    const revisionId = required(
-      input.stageContext?.scriptRevisionId,
-      'TEST_EXECUTION_DIAGNOSIS_REVISION_SESSION_REQUIRED',
-    )
+    if (input.task.input.method === 'agent') return `agent-execution-diagnosis:${input.run.id}:${input.task.id}`
+    const revisionId = required(input.stageContext?.scriptRevisionId, 'TEST_EXECUTION_DIAGNOSIS_REVISION_SESSION_REQUIRED')
     return `execution-diagnosis:${input.run.id}:${input.task.id}:${revisionId}`
   }
   return `execution-implementation:${input.run.id}:${input.task.id}`
@@ -447,12 +485,15 @@ function validateStageInput(
       || scope.stage !== input.stage
     ) throw new Error('TEST_EXECUTION_BROWSER_SESSION_SCOPE_MISMATCH')
   }
+  if (input.stage === 'agent_evaluation') {
+    if (!input.stageContext?.agentExecution || input.stageContext.agentExecution.taskId !== input.task.id) throw new Error('AGENT_TEST_EVALUATION_CONTEXT_REQUIRED')
+  }
   if (input.stage === 'failure_diagnosis') {
-    if (
-      !input.stageContext?.scriptRevisionId
-      || !input.stageContext.attemptIds
-      || input.stageContext.attemptIds.length < 1
-    ) throw new Error('TEST_EXECUTION_DIAGNOSIS_CONTEXT_REQUIRED')
+    if (input.task.input.method === 'agent') {
+      if (!input.stageContext?.agentExecution || input.stageContext.agentExecution.taskId !== input.task.id) throw new Error('AGENT_TEST_FAILURE_ANALYSIS_CONTEXT_REQUIRED')
+    } else if (!input.stageContext?.scriptRevisionId || !input.stageContext.attemptIds || input.stageContext.attemptIds.length < 1) {
+      throw new Error('TEST_EXECUTION_DIAGNOSIS_CONTEXT_REQUIRED')
+    }
   }
   if (input.stage === 'script_repair') {
     if (!input.stageContext?.parentScriptRevisionId || !input.stageContext.diagnosisId) {
@@ -549,7 +590,7 @@ function validateConfiguration(
     || definition.resultSchemaVersion !== binding.configurationSchemaVersion
   ) throw new Error(`${binding.agentLabel} 配置类型不兼容`)
 
-  const expectedTools = [...catalog.runtimeToolIds, binding.submitToolId]
+  const expectedTools = [...catalog.runtimeToolIds, ...stageSubmitToolIds(binding.agentKey)]
   if (!sameSet(definition.toolIds, expectedTools)) {
     throw new Error(`${binding.agentLabel} 工具白名单必须精确匹配当前 Agent`)
   }
@@ -592,6 +633,12 @@ function validateConfiguration(
     throw new Error(`${binding.agentLabel} Tool 配置与发布快照不一致`)
   }
   resolveModel(state, configuration)
+}
+
+function stageSubmitToolIds(agentKey: FrozenExecutionAgentSnapshot['agentKey']) {
+  return [...new Set(Object.values(TEST_EXECUTION_STAGE_BINDINGS)
+    .filter(candidate => candidate.agentKey === agentKey)
+    .map(candidate => candidate.submitToolId))]
 }
 
 function resolveModel(

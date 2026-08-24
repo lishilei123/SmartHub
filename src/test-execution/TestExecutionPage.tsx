@@ -75,6 +75,7 @@ export function TestExecutionPage({
       <ExecutionRunPanel
         readiness={model.readiness}
         environments={model.environments}
+        agentsUnderTest={model.agentsUnderTest}
         runs={model.runs}
         run={model.run}
         busy={model.busy}
@@ -85,6 +86,7 @@ export function TestExecutionPage({
           if (created) updateExecutionRoute(created.id)
           return created
         }}
+        onCreateAgentUnderTest={model.createAgentUnderTest}
         onOpen={openRun}
         onCancel={model.cancel}
       />

@@ -76,6 +76,20 @@ export type FailureDiagnosisCategory =
   | 'flaky'
   | 'assertion_mismatch'
   | 'timeout'
+  | 'planning'
+  | 'tool_selection'
+  | 'tool_argument'
+  | 'tool_sequence'
+  | 'prompt'
+  | 'context'
+  | 'model'
+  | 'tool_schema'
+  | 'mcp'
+  | 'workflow'
+  | 'knowledge'
+  | 'memory'
+  | 'runtime'
+  | 'business_backend'
   | 'unknown'
 
 export type ExecutionAttemptKind =
@@ -131,13 +145,16 @@ export interface ExecutionEnvironmentSnapshot {
     port: number
   }>
   signature: string
+  /** Present only for evidence-driven Agent runs; auth secrets are never frozen here. */
+  agentUnderTest?: import('./agent-test-types.js').FrozenAgentUnderTestSnapshot
 }
 
 export interface ExecutionRunnerSnapshot {
+  kind?: 'playwright' | 'agent'
   runnerVersion: string
-  playwrightVersion: string
-  imageReference: string
-  imageDigest: string
+  playwrightVersion?: string
+  imageReference?: string
+  imageDigest?: string
   configurationId?: string
   configurationVersion?: number
   configurationSha256?: string
@@ -175,7 +192,8 @@ export interface ExecutionRun {
   testData?: FrozenExecutionTestDataSnapshot
   runner: ExecutionRunnerSnapshot
   agents: {
-    executionImplementation: FrozenExecutionAgentSnapshot
+    /** Legacy UI/API runs only. Agent runs never freeze or call Script Generation/Repair. */
+    executionImplementation?: FrozenExecutionAgentSnapshot
     failureAnalysis: FrozenExecutionAgentSnapshot
   }
   status: ExecutionRunStatus

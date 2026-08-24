@@ -150,6 +150,7 @@ function CaseDetail({ testCase, busy, onEdit, onDelete, onReview }: { testCase: 
       <TextSection title="前置条件" values={content.preconditions} empty="无额外前置条件" />
       <TextSection title="执行步骤" values={content.steps} ordered />
       <TextSection title="预期结果" values={content.expectedResults} ordered />
+      {content.agentTestSpec && <section className="tdw-agent-spec-summary"><h4>Agent Test Spec</h4><dl><div><dt>Expected Outcome</dt><dd>{content.agentTestSpec.expectedOutcome}</dd></div><div><dt>Required Tools</dt><dd>{content.agentTestSpec.requiredTools.join('、') || '无显式约束'}</dd></div><div><dt>Forbidden Tools</dt><dd>{content.agentTestSpec.forbiddenTools.join('、') || '无显式约束'}</dd></div><div><dt>Sequence</dt><dd>{content.agentTestSpec.sequenceConstraints.map(item => `${item.before} BEFORE ${item.after}`).join('；') || '无显式约束'}</dd></div><div><dt>Repeat</dt><dd>{content.agentTestSpec.executionConstraints.repeatCount}</dd></div></dl></section>}
     </div>
     <section className="td2-case-review">
       <header><div><p>Human Review</p><h4>人工审核</h4></div><span>{reviewHint(testCase.reviewState)}</span></header>

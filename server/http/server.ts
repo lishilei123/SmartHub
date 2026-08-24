@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfigurationScene, AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
+import { accessControl, agentConfigurationService, agentUnderTestService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
 import type { TestExecutionInfrastructureConfigurationInput } from '../application/test-execution-infrastructure-configuration-service.js'
 import type { AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
@@ -17,10 +17,11 @@ import { TestExecutionValidationError } from '../application/test-execution-vali
 import { routeTestExecution } from './test-execution-routes.js'
 import { TestReportServiceError } from '../application/test-report-service.js'
 import { routeTestReport } from './test-report-routes.js'
+import { AgentUnderTestServiceError, type AgentUnderTestInput } from '../application/agent-under-test-service.js'
 
 const webRoot = resolve(applicationRoot, 'dist')
 
-export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService }
+export { agentConfigurationService, agentUnderTestService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService }
 
 export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
   await service.initialize()
@@ -38,12 +39,15 @@ export async function start(port = Number(process.env.PORT ?? 8787), controls: A
               ? error.status
               : error instanceof TestReportServiceError
                 ? error.status
+                : error instanceof AgentUnderTestServiceError
+                  ? error.status
                 : error instanceof TestExecutionValidationError
                   ? 422
                   : 400
       const structured = error instanceof TestDesignError
         || error instanceof TestExecutionServiceError
         || error instanceof TestReportServiceError
+        || error instanceof AgentUnderTestServiceError
         || error instanceof TestExecutionValidationError
       send(response, status, structured
         ? { code: error.code, message: error.message.replace(/^[A-Z][A-Z0-9_]+:\s*/u, ''), details: error.details }
@@ -255,6 +259,35 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     return send(response, 200, (await Promise.all(versions.map(async version => await controls.canAccess(principal, version.id, 'project-version:read') ? version : null))).filter(Boolean))
   }
   if (method === 'POST' && url.pathname === '/api/project-versions') { const body = await json(request); const sourceProjectVersionId = body.sourceProjectVersionId ? String(body.sourceProjectVersionId) : undefined; await requireProjectVersion(sourceProjectVersionId ?? '*', 'project-version:create'); return send(response, 201, await projectVersionService.create({ name: String(body.name ?? ''), description: body.description ? String(body.description) : undefined, sourceProjectVersionId, inheritRequirementBindings: body.inheritRequirementBindings === true })) }
+  const agentsUnderTest = /^\/api\/project-versions\/([^/]+)\/agents-under-test$/.exec(url.pathname)
+  if (method === 'GET' && agentsUnderTest) {
+    await requireProjectVersion(agentsUnderTest[1], 'project-version:read')
+    return send(response, 200, { items: await agentUnderTestService.list(agentsUnderTest[1]) })
+  }
+  if (method === 'POST' && agentsUnderTest) {
+    await requireProjectVersion(agentsUnderTest[1], 'project-version:manage')
+    return send(response, 201, await agentUnderTestService.create(
+      agentsUnderTest[1],
+      await json(request) as unknown as AgentUnderTestInput,
+      principal.displayName,
+    ))
+  }
+  const agentUnderTest = /^\/api\/project-versions\/([^/]+)\/agents-under-test\/([^/]+)$/.exec(url.pathname)
+  if (method === 'GET' && agentUnderTest) {
+    await requireProjectVersion(agentUnderTest[1], 'project-version:read')
+    const value = await agentUnderTestService.get(agentUnderTest[2])
+    if (value.projectVersionId !== agentUnderTest[1]) throw new AgentUnderTestServiceError('AGENT_UNDER_TEST_SCOPE_MISMATCH', '被测 Agent 不属于当前 ProjectVersion', 404)
+    return send(response, 200, value)
+  }
+  if ((method === 'PUT' || method === 'PATCH') && agentUnderTest) {
+    await requireProjectVersion(agentUnderTest[1], 'project-version:manage')
+    const body = await json(request)
+    const expectedVersion = Number(body.expectedVersion)
+    const value = await agentUnderTestService.get(agentUnderTest[2])
+    if (value.projectVersionId !== agentUnderTest[1]) throw new AgentUnderTestServiceError('AGENT_UNDER_TEST_SCOPE_MISMATCH', '被测 Agent 不属于当前 ProjectVersion', 404)
+    const { expectedVersion: _expectedVersion, ...input } = body
+    return send(response, 200, await agentUnderTestService.update(agentUnderTest[2], expectedVersion, input as unknown as AgentUnderTestInput, principal.displayName))
+  }
   const projectVersionStatus = /^\/api\/project-versions\/([^/]+)\/status$/.exec(url.pathname)
   if (method === 'PATCH' && projectVersionStatus) { await requireProjectVersion(projectVersionStatus[1], 'project-version:manage'); const body = await json(request); return send(response, 200, await projectVersionService.updateStatus(projectVersionStatus[1], String(body.status ?? '') as 'open' | 'locked' | 'archived')) }
   const projectVersion = /^\/api\/project-versions\/([^/]+)$/.exec(url.pathname)

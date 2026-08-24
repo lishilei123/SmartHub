@@ -1,8 +1,8 @@
 import { Library } from 'lucide-react'
 import { diagnosisLabel } from './TestReportDiagnosisPanel'
-import type { TestReport } from './types'
+import type { LegacyTestReport } from './types'
 
-export function TestReportMaintenanceTable({ report }: { report: TestReport }) {
+export function TestReportMaintenanceTable({ report }: { report: LegacyTestReport }) {
   return <section className="tr-section tr-maintenance" aria-labelledby="tr-maintenance-title">
     <header><div><h2 id="tr-maintenance-title"><Library aria-hidden="true" />用例维护建议</h2><p>接受仅表示确认正式用例需要人工维护，不会自动修改正式 TestCase。</p></div><span>{report.overview.maintenanceProposalCount}</span></header>
     <div className="tr-maintenance-counts"><span><small>待确认</small><b>{report.overview.pendingMaintenanceCount}</b></span><span><small>已确认</small><b>{report.overview.acceptedMaintenanceCount}</b></span><span><small>已拒绝</small><b>{report.overview.rejectedMaintenanceCount}</b></span></div>

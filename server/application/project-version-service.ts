@@ -89,8 +89,10 @@ export class ProjectVersionService {
       const deletedSuiteDrafts = (testDesignState?.suiteDrafts ?? []).filter(item => item.testCaseLibraryVersionId && libraryVersionIds.has(item.testCaseLibraryVersionId))
       const deletedSuiteVersions = (testDesignState?.suiteVersions ?? []).filter(item => item.testCaseLibraryVersionId && libraryVersionIds.has(item.testCaseLibraryVersionId))
       const deletedBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId === version.id).length
+      const deletedAgentsUnderTest = state.agentUnderTests.filter(item => item.projectVersionId === version.id).length
       const deletedRunIds = new Set(reviewRuns.map(item => item.id))
       state.projectVersionRequirementBindings = state.projectVersionRequirementBindings.filter(item => item.projectVersionId !== version.id)
+      state.agentUnderTests = state.agentUnderTests.filter(item => item.projectVersionId !== version.id)
       state.findingActions = state.findingActions.filter(item => !deletedRunIds.has(item.runId))
       state.toolApprovals = state.toolApprovals.filter(item => !deletedRunIds.has(item.runId))
       state.reviewRuns = state.reviewRuns.filter(item => item.projectVersionId !== version.id)
@@ -103,7 +105,7 @@ export class ProjectVersionService {
         testDesignState.libraryVersions = testDesignState.libraryVersions.filter(item => !libraryVersionIds.has(item.id))
       }
       state.projectVersions = state.projectVersions.filter(item => item.id !== version.id)
-      return { id: version.id, name: version.name, projectId: version.projectId, deletedBindings, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseLibraryVersions: libraryVersionIds.size, deletedTestSuiteDrafts: deletedSuiteDrafts.length, deletedTestSuiteVersions: deletedSuiteVersions.length }
+      return { id: version.id, name: version.name, projectId: version.projectId, deletedBindings, deletedAgentsUnderTest, deletedAnalysisRuns: reviewRuns.length, deletedTestDesigns: testDesignIds.size, deletedTestDesignRuns: testDesignRuns.length, deletedTestCaseLibraryVersions: libraryVersionIds.size, deletedTestSuiteDrafts: deletedSuiteDrafts.length, deletedTestSuiteVersions: deletedSuiteVersions.length }
     })
     const workspaceCleanup = this.workspaceCleaner
       ? await this.workspaceCleaner.queueProjectVersionWorkspaceCleanup(deleted.projectId, deleted.name)

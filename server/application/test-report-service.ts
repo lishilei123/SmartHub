@@ -14,6 +14,8 @@ import type {
 import type {
   TestExecutionReport,
   TestExecutionReportContent,
+  AnyTestExecutionReport,
+  AgentTestExecutionReportContent,
   TestReportAgentTraceability,
   TestReportDiagnosisCategoryStatistics,
   TestReportListItem,
@@ -103,7 +105,7 @@ export class TestReportService {
     return run
   }
 
-  async getReport(runId: string): Promise<TestExecutionReport> {
+  async getReport(runId: string): Promise<AnyTestExecutionReport> {
     const source = await this.sourceReader.getRunReportSource(
       requiredIdentity(runId, 'runId'),
     )
@@ -138,8 +140,11 @@ export class TestReportService {
 
 export function buildTestExecutionReport(
   rawSource: TestExecutionReportSource,
-): TestExecutionReport {
+): AnyTestExecutionReport {
   const source = normalizedSource(rawSource)
+  if (source.tasks.length && source.tasks.every(task => task.input.method === 'agent')) {
+    return buildAgentTestExecutionReport(source)
+  }
   assertSourceConsistency(source)
   const { run, tasks, attempts, diagnoses, scriptRevisions, artifacts, maintenanceProposals } = source
   const statusCounts = Object.fromEntries(
@@ -366,9 +371,9 @@ export function buildTestExecutionReport(
         baseUrl: run.environment.baseUrl,
         targets: structuredClone(run.environment.targets),
       },
-      runner: structuredClone(run.runner),
+      runner: legacyRunnerTraceability(run),
       agents: {
-        executionImplementation: agentTraceability(run.agents.executionImplementation),
+        executionImplementation: agentTraceability(requiredReportAgent(run.agents.executionImplementation, 'executionImplementation')),
         failureAnalysis: agentTraceability(run.agents.failureAnalysis),
       },
     },
@@ -379,7 +384,142 @@ export function buildTestExecutionReport(
   }
 }
 
-export function testExecutionReportMarkdown(report: TestExecutionReport) {
+function buildAgentTestExecutionReport(source: TestExecutionReportSource) {
+  const { run, tasks } = source
+  const results = source.agentExecutionResults ?? []
+  const resultByTaskId = new Map(results.map(result => [result.taskId, result]))
+  if (results.some(result => result.runId !== run.id || !tasks.some(task => task.id === result.taskId))) {
+    throw new TestReportServiceError('TEST_REPORT_AGENT_RESULT_SCOPE_MISMATCH', 'Agent 执行结果不属于当前 Run', 409)
+  }
+  for (const task of tasks) {
+    if (terminalTaskStatuses.has(task.status) && !resultByTaskId.has(task.id)) {
+      throw new TestReportServiceError('TEST_REPORT_AGENT_RESULT_MISSING', `Agent 终态任务 ${task.id} 缺少正式执行结果`, 409)
+    }
+  }
+  const agentUnderTest = run.environment.agentUnderTest
+  if (!agentUnderTest || run.runner.kind !== 'agent') {
+    throw new TestReportServiceError('TEST_REPORT_AGENT_TRACEABILITY_MISSING', 'Agent Run 缺少被测 Agent 或 Runner 冻结快照', 409)
+  }
+  const caseRuns = results.flatMap(result => result.caseRuns)
+  const status = (value: string) => results.filter(result => result.status === value).length
+  const passed = status('PASS')
+  const finished = results.length
+  const averageLatencyMs = caseRuns.length
+    ? Math.round(caseRuns.reduce((sum, item) => sum + item.latencyMs, 0) / caseRuns.length)
+    : null
+  const tokenUsage = sumTokenUsage(caseRuns.map(item => item.tokenUsage).filter(
+    (value): value is NonNullable<typeof value> => Boolean(value),
+  ))
+  const costValues = caseRuns.flatMap(item => item.cost === undefined ? [] : [item.cost])
+  const content: AgentTestExecutionReportContent = {
+    schemaVersion: 'agent-test-execution-report/v1',
+    statisticsAt: reportStatisticsAt(source),
+    run: {
+      id: run.id,
+      status: run.status,
+      stateVersion: run.stateVersion,
+      mode: run.handoff.mode,
+      createdAt: run.createdAt,
+      ...(run.startedAt ? { startedAt: run.startedAt } : {}),
+      ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
+    },
+    overview: {
+      totalCases: tasks.length,
+      passed,
+      failed: status('FAIL'),
+      notEvaluable: status('NOT_EVALUABLE'),
+      error: status('ERROR'),
+      active: Math.max(0, tasks.length - finished),
+      successRate: rate(passed, finished),
+      caseRunCount: caseRuns.length,
+      averageLatencyMs,
+      ...(tokenUsage ? { tokenUsage } : {}),
+      ...(costValues.length ? { cost: round(costValues.reduce((sum, value) => sum + value, 0), 8) } : {}),
+    },
+    results: structuredClone(results),
+    traceability: {
+      projectId: run.projectId,
+      projectVersionId: run.projectVersionId,
+      runId: run.id,
+      runStateVersion: run.stateVersion,
+      handoff: {
+        id: run.handoff.handoffId,
+        sha256: run.handoff.handoffSha256,
+        memberSnapshotSha256: run.handoff.memberSnapshotSha256,
+      },
+      testCaseLibraryVersion: {
+        id: run.handoff.testCaseLibraryVersionId,
+        sha256: run.handoff.testCaseLibraryVersionSha256,
+        ...(source.testCaseLibraryVersionSourceRunId ? { sourceRunId: source.testCaseLibraryVersionSourceRunId } : {}),
+      },
+      ...(run.handoff.suiteVersionId && run.handoff.suiteVersionSha256 ? {
+        testSuiteVersion: { id: run.handoff.suiteVersionId, sha256: run.handoff.suiteVersionSha256 },
+      } : {}),
+      agentUnderTest: structuredClone(agentUnderTest),
+      runner: {
+        kind: 'agent',
+        runnerVersion: run.runner.runnerVersion,
+        ...(run.runner.configurationId ? { configurationId: run.runner.configurationId } : {}),
+        ...(run.runner.configurationVersion !== undefined ? { configurationVersion: run.runner.configurationVersion } : {}),
+        ...(run.runner.configurationSha256 ? { configurationSha256: run.runner.configurationSha256 } : {}),
+      },
+      agents: {
+        failureAnalysis: agentTraceability(run.agents.failureAnalysis),
+      },
+    },
+  }
+  return { ...content, reportSha256: canonicalSha256(content) }
+}
+
+function sumTokenUsage(values: Array<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }>) {
+  if (!values.length) return undefined
+  const sum = (key: 'inputTokens' | 'outputTokens' | 'totalTokens') => {
+    const samples = values.flatMap(value => value[key] === undefined ? [] : [value[key]!])
+    return samples.length ? samples.reduce((total, value) => total + value, 0) : undefined
+  }
+  return {
+    ...(sum('inputTokens') !== undefined ? { inputTokens: sum('inputTokens') } : {}),
+    ...(sum('outputTokens') !== undefined ? { outputTokens: sum('outputTokens') } : {}),
+    ...(sum('totalTokens') !== undefined ? { totalTokens: sum('totalTokens') } : {}),
+  }
+}
+
+function agentTestExecutionReportMarkdown(report: Extract<AnyTestExecutionReport, { schemaVersion: 'agent-test-execution-report/v1' }>) {
+  const rows = report.results.flatMap(result => result.caseRuns.map(caseRun =>
+    `| ${md(result.taskId)} | ${caseRun.repeatOrdinal} | ${caseRun.status} | ${caseRun.assertionResults.filter(item => item.status === 'FAIL').length} | ${caseRun.assertionResults.filter(item => item.status === 'NOT_EVALUABLE').length} | ${caseRun.latencyMs} ms | ${caseRun.traceEvents.length} |`))
+  return [
+    '# Agent 测试执行报告', '',
+    `- Report SHA-256: ${md(report.reportSha256)}`,
+    `- Statistics At: ${md(report.statisticsAt)}`,
+    `- Execution Run: ${md(report.run.id)}`,
+    `- Run Status: ${md(report.run.status)}`, '',
+    '## 执行概览', '',
+    '| 指标 | 数值 |', '|---|---:|',
+    `| Agent TestCase | ${report.overview.totalCases} |`,
+    `| PASS / FAIL / NOT_EVALUABLE / ERROR | ${report.overview.passed} / ${report.overview.failed} / ${report.overview.notEvaluable} / ${report.overview.error} |`,
+    `| Repeat Run | ${report.overview.caseRunCount} |`,
+    `| 成功率 | ${formatPercentage(report.overview.successRate.percentage)} (${report.overview.successRate.numerator}/${report.overview.successRate.denominator}) |`,
+    `| 平均延迟 | ${formatDuration(report.overview.averageLatencyMs)} |`,
+    `| Token | ${report.overview.tokenUsage?.totalTokens ?? '无可用证据'} |`,
+    `| Cost | ${report.overview.cost ?? '无可用证据'} |`, '',
+    '## 单次执行与 Evidence', '',
+    '| Task | Repeat | 状态 | 失败断言 | 不可评估断言 | 延迟 | Trace 事件 |',
+    '|---|---:|---|---:|---:|---:|---:|',
+    ...(rows.length ? rows : ['| - | - | 无正式结果 | 0 | 0 | - | 0 |']), '',
+    '## 完整追溯', '',
+    `- Project Version: ${md(report.traceability.projectVersionId)}`,
+    `- Handoff: ${md(report.traceability.handoff.id)} / ${md(report.traceability.handoff.sha256)}`,
+    `- Agent Under Test: ${md(report.traceability.agentUnderTest.name)} v${report.traceability.agentUnderTest.version} / ${md(report.traceability.agentUnderTest.configurationSha256)}`,
+    `- Protocol: ${md(report.traceability.agentUnderTest.protocol)}`,
+    `- AgentRunner: ${md(report.traceability.runner.runnerVersion)}`,
+    `- FailureAnalysisAgent snapshot: ${md(report.traceability.agents.failureAnalysis.snapshotSha256)}`, '',
+  ].join('\n')
+}
+
+export function testExecutionReportMarkdown(report: AnyTestExecutionReport) {
+  if (report.schemaVersion === 'agent-test-execution-report/v1') {
+    return agentTestExecutionReportMarkdown(report)
+  }
   const diagnosisRows = report.diagnosisDistribution.categories
     .map(item => `| ${md(item.category)} | ${item.count} | ${formatPercentage(item.percentage)} |`)
   const failureRows = report.nonPassedTasks.length
@@ -550,6 +690,9 @@ function normalizedSource(source: TestExecutionReportSource): TestExecutionRepor
       (taskOrdinal.get(left.taskId) ?? 0) - (taskOrdinal.get(right.taskId) ?? 0)
       || compare(left.createdAt, right.createdAt)
       || compare(left.id, right.id)),
+    agentExecutionResults: structuredClone(source.agentExecutionResults ?? []).sort((left, right) =>
+      (taskOrdinal.get(left.taskId) ?? 0) - (taskOrdinal.get(right.taskId) ?? 0)
+      || compare(left.taskId, right.taskId)),
     ...(source.testCaseLibraryVersionSourceRunId
       ? { testCaseLibraryVersionSourceRunId: source.testCaseLibraryVersionSourceRunId }
       : {}),
@@ -687,6 +830,10 @@ function reportStatisticsAt(source: TestExecutionReportSource) {
       proposal.createdAt,
       proposal.decidedAt,
     ]),
+    ...(source.agentExecutionResults ?? []).flatMap(result => [
+      result.createdAt,
+      ...result.caseRuns.flatMap(caseRun => [caseRun.startedAt, caseRun.finishedAt]),
+    ]),
   ].filter((value): value is string => Boolean(value))
   const timestamp = Math.max(...values.map(value => Date.parse(value)))
   if (!Number.isFinite(timestamp)) {
@@ -792,4 +939,21 @@ function requiredIdentity(value: string, field: string) {
     )
   }
   return normalized
+}
+
+function requiredReportAgent(value: FrozenExecutionAgentSnapshot | undefined, name: string) {
+  if (!value) throw new TestReportServiceError('TEST_REPORT_AGENT_TRACEABILITY_MISSING', `测试报告缺少 ${name} 冻结配置`)
+  return value
+}
+
+function legacyRunnerTraceability(run: ExecutionRun) {
+  if (!run.runner.playwrightVersion || !run.runner.imageReference || !run.runner.imageDigest) {
+    throw new TestReportServiceError('TEST_REPORT_RUNNER_TRACEABILITY_MISSING', '脚本测试报告缺少 Playwright Runner 冻结信息')
+  }
+  return {
+    runnerVersion: run.runner.runnerVersion,
+    playwrightVersion: run.runner.playwrightVersion,
+    imageReference: run.runner.imageReference,
+    imageDigest: run.runner.imageDigest,
+  }
 }

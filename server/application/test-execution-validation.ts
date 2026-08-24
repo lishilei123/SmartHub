@@ -48,7 +48,7 @@ export const EXECUTION_RUN_TRANSITIONS: Readonly<Record<ExecutionRunStatus, read
 }
 
 export const EXECUTION_TASK_TRANSITIONS: Readonly<Record<ExecutionTaskStatus, readonly ExecutionTaskStatus[]>> = {
-  pending: ['script_generating', 'ready', 'unsupported', 'blocked', 'cancelled'],
+  pending: ['script_generating', 'ready', 'running', 'unsupported', 'blocked', 'cancelled'],
   script_generating: ['ready', 'blocked', 'waiting_manual', 'cancelled'],
   ready: ['running', 'blocked', 'waiting_manual', 'cancelled'],
   running: ['ready', 'passed', 'retrying', 'diagnosing', 'blocked', 'waiting_manual', 'cancelled'],
@@ -81,6 +81,20 @@ const diagnosisCategories = new Set<FailureDiagnosisCategory>([
   'flaky',
   'assertion_mismatch',
   'timeout',
+  'planning',
+  'tool_selection',
+  'tool_argument',
+  'tool_sequence',
+  'prompt',
+  'context',
+  'model',
+  'tool_schema',
+  'mcp',
+  'workflow',
+  'knowledge',
+  'memory',
+  'runtime',
+  'business_backend',
   'unknown',
 ])
 
@@ -953,8 +967,9 @@ function verificationChecks(spec: TestCaseExecutionSpec) {
 }
 
 function resolveExecutionSpec(content: TestCaseContent, method: string): TestCaseExecutionSpec {
-  if (method !== 'ui' && method !== 'api' || !content.executionMethods.includes(method)) throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_NOT_IN_CASE', '固定用例不包含 Handoff 执行方法')
-  return { schemaVersion: 'test-script-input/v1', method, testCase: structuredClone(content) }
+  if ((method !== 'ui' && method !== 'api' && method !== 'agent') || !content.executionMethods.includes(method)) throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_NOT_IN_CASE', '固定用例不包含 Handoff 执行方法')
+  if (method === 'agent' && !content.agentTestSpec) throw new TestExecutionValidationError('TEST_EXECUTION_AGENT_SPEC_REQUIRED', 'Agent 执行方法缺少 agentTestSpec')
+  return { schemaVersion: method === 'agent' ? 'agent-test-input/v1' : 'test-script-input/v1', method, testCase: structuredClone(content) }
 }
 
 function safePackagePath(value: string) {

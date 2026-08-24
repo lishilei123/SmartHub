@@ -66,16 +66,17 @@ export function ExecutionTaskPanel({
     <section className="te-card te-task-detail">
       {!task && <div className="te-task-placeholder"><TerminalSquare /><h2>选择一个测试用例</h2><p>查看执行过程、失败原因、修复说明和运行产物。</p></div>}
       {task && <>
-        <header className="te-task-header"><div><span className={`te-status-pill ${task.value.task.status}`}>{taskStatusLabel(task.value.task.status)}</span><h2>{task.value.task.input.caseContent.title}</h2><p>{task.value.task.input.caseContent.expectedResults.join(' · ')}</p></div>{retryable(task.value.task.status) && <button className="te-primary" disabled={Boolean(busy)} onClick={() => void onRetry()}><RotateCcw />{busy === 'retry' ? '正在排队…' : '人工重试'}</button>}</header>
+        <header className="te-task-header"><div><span className={`te-status-pill ${task.value.task.status}`}>{taskStatusLabel(task.value.task.status)}</span><h2>{task.value.task.input.caseContent.title}</h2><p>{task.value.task.input.caseContent.expectedResults.join(' · ')}</p></div>{task.value.task.input.method !== 'agent' && retryable(task.value.task.status) && <button className="te-primary" disabled={Boolean(busy)} onClick={() => void onRetry()}><RotateCcw />{busy === 'retry' ? '正在排队…' : '人工重试'}</button>}</header>
         <div className="te-task-metrics">
           <Metric label="执行方式" value={methodLabel(task.value.task.input.method)} />
-          <Metric label="执行次数" value={task.value.task.runnerAttemptCount} />
-          <Metric label="总耗时" value={formatDuration(task.value.attempts.reduce((total, item) => total + (item.durationMs ?? 0), 0))} />
-          <Metric label="自动修复" value={`${task.value.task.repairCount}/2`} />
+          <Metric label="执行次数" value={task.value.agentExecutionResult?.caseRuns.length ?? task.value.task.runnerAttemptCount} />
+          <Metric label="平均耗时" value={task.value.agentExecutionResult ? formatDuration(task.value.agentExecutionResult.averageLatencyMs) : formatDuration(task.value.attempts.reduce((total, item) => total + (item.durationMs ?? 0), 0))} />
+          <Metric label={task.value.task.input.method === 'agent' ? '成功率' : '自动修复'} value={task.value.agentExecutionResult ? `${(task.value.agentExecutionResult.successRate * 100).toFixed(1)}%` : `${task.value.task.repairCount}/2`} />
         </div>
         {task.value.task.status === 'unsupported' && <div className="te-state-message unsupported"><ShieldAlert /><span><b>V1 不支持此执行方法</b><small>{task.value.task.unsupportedReason}</small></span></div>}
         {task.value.task.status === 'blocked' && <div className="te-state-message blocked"><FileWarning /><span><b>外部条件阻塞</b><small>{task.value.task.error}</small></span></div>}
         {task.value.task.status === 'waiting_manual' && <div className="te-state-message waiting_manual"><AlertTriangle /><span><b>等待人工处理</b><small>{task.value.task.error ?? '自动修复已收口，历史不会被重置。'}</small></span></div>}
+        {task.value.agentExecutionResult && <AgentExecutionEvidence result={task.value.agentExecutionResult} />}
         <nav className="te-tabs">
           <button className={tab === 'attempts' ? 'active' : ''} onClick={() => setTab('attempts')}>执行过程 <span>{task.value.events.length}</span></button>
           <button className={tab === 'diagnoses' ? 'active' : ''} onClick={() => setTab('diagnoses')}>诊断 <span>{task.value.diagnoses.length}</span></button>
@@ -157,6 +158,15 @@ function Metric({ label, value }: { label: string; value: string | number }) {
   return <div><span>{label}</span><b>{value}</b></div>
 }
 
+function AgentExecutionEvidence({ result }: { result: NonNullable<ExecutionTaskDetail['agentExecutionResult']> }) {
+  return <section className="te-agent-evidence"><header><div><b>Agent Execution Result</b><small>Single Runs 与 Aggregate 分开保存；Assertion 和 AI Evaluation 不混合计分。</small></div><span className={`te-status-pill ${result.status === 'PASS' ? 'passed' : result.status === 'NOT_EVALUABLE' ? 'blocked' : 'failed'}`}>{result.status}</span></header>
+    <div className="te-task-metrics"><Metric label="PASS" value={`${(result.successRate * 100).toFixed(1)}%`} /><Metric label="FAIL" value={`${(result.failureRate * 100).toFixed(1)}%`} /><Metric label="NOT_EVALUABLE" value={`${(result.notEvaluableRate * 100).toFixed(1)}%`} /><Metric label="Token" value={result.tokenUsage?.totalTokens ?? 'unavailable'} /></div>
+    {result.caseRuns.map(caseRun => <details key={caseRun.id} open={result.caseRuns.length === 1}><summary>Repeat {caseRun.repeatOrdinal} · {caseRun.status} · {caseRun.latencyMs} ms · {caseRun.stepCount} steps</summary><div className="te-agent-result-grid"><section><h4>Deterministic Assertions</h4>{caseRun.assertionResults.map(item => <article key={item.id}><span className={`te-status-pill ${item.status === 'PASS' ? 'passed' : item.status === 'NOT_EVALUABLE' ? 'blocked' : 'failed'}`}>{item.status}</span><b>{item.type}</b><p>{item.message}</p><code>{item.code}</code></article>)}</section><section><h4>AI Evaluation</h4>{caseRun.evaluationResults.map(item => <article key={item.id}><span className={`te-status-pill ${item.status === 'PASS' ? 'passed' : item.status === 'NOT_EVALUABLE' ? 'blocked' : 'failed'}`}>{item.status}</span><b>{item.kind}</b><p>{item.criterion}</p><small>{item.explanation}</small></article>)}</section></div><section><h4>Trace / Evidence</h4><ol className="te-agent-trace">{caseRun.traceEvents.map(event => <li key={event.id}><code>{event.sequence}</code><b>{event.type}</b><span>{event.name ?? event.source}</span><small>{new Date(event.timestamp).toLocaleTimeString('zh-CN')}</small></li>)}</ol></section>{caseRun.actualOutput !== undefined && <details><summary>Actual Output</summary><pre>{JSON.stringify(caseRun.actualOutput, null, 2)}</pre></details>}</details>)}
+    {result.failureAnalysis && <section className="te-agent-rca"><h4>Failure Analysis · Root Cause Candidate</h4><b>{diagnosisLabel(result.failureAnalysis.category)}</b><p>{result.failureAnalysis.reason}</p><small>{result.failureAnalysis.evidence}</small></section>}
+    {result.evaluationError && <p className="te-empty">AI Evaluation unavailable：{result.evaluationError}</p>}{result.failureAnalysisError && <p className="te-empty">Failure Analysis unavailable：{result.failureAnalysisError}</p>}
+  </section>
+}
+
 function TaskIcon({ status }: { status: ExecutionTask['status'] }) {
   if (status === 'passed') return <CheckCircle2 />
   if (['pending', 'script_generating', 'ready', 'running', 'diagnosing', 'retrying', 'repairing'].includes(status)) return <Clock3 />
@@ -191,7 +201,7 @@ function formatBytes(size: number) {
 }
 
 function methodLabel(method: ExecutionTask['input']['method']) {
-  return ({ ui: 'UI', api: 'API', performance_tool: '性能工具', long_running: '长时任务', environment_matrix: '环境矩阵' })[method]
+  return ({ ui: 'UI', api: 'API', agent: 'Agent', performance_tool: '性能工具', long_running: '长时任务', environment_matrix: '环境矩阵' })[method]
 }
 
 function attemptStatusLabel(status: ExecutionTaskDetail['attempts'][number]['status']) {

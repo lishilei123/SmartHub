@@ -13,6 +13,7 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
 
   const initial = await service.list()
   assert.deepEqual(initial.tools.map(tool => tool.key).sort(), [
+    'agent_evaluation.submit_result',
     'browser.click',
     'browser.fill',
     'browser.get_locator',
@@ -41,6 +42,7 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
   assert.ok(initial.skills.filter(skill => skill.builtIn).every(skill => skill.status === 'ready' && skill.enabled))
   assert.equal(initial.tools.find(tool => tool.key === 'example.echo')?.managedBy, 'filesystem')
   assert.deepEqual(Object.fromEntries(initial.tools.map(tool => [tool.key, tool.sourcePath])), {
+    'agent_evaluation.submit_result': 'server/tools/requirement-tools.ts',
     'browser.snapshot': 'server/tools/playwright-browser-tools.ts',
     'browser.click': 'server/tools/playwright-browser-tools.ts',
     'browser.fill': 'server/tools/playwright-browser-tools.ts',
@@ -62,7 +64,7 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
     'example.echo': 'ai/tools/example-echo.ts',
   })
   store.transaction = async () => { throw new Error('内置资源已同步时不应再次启动写事务') }
-  assert.equal((await service.list()).tools.length, 19)
+  assert.equal((await service.list()).tools.length, 20)
   store.transaction = JsonStore.prototype.transaction.bind(store)
   const searchTool = initial.tools.find(tool => tool.key === 'knowledge.search')!
   const builtInSource = await service.source(searchTool.id)
@@ -96,14 +98,14 @@ test('AI 资源目录只登记可独立配置工具并持久化 MCP、Skill 和�
 
   const catalog = await service.list()
   assert.equal(catalog.mcpServers.length, 1)
-  assert.equal(catalog.tools.length, 20)
+  assert.equal(catalog.tools.length, 21)
 
   await assert.rejects(() => service.delete('tool', tool.id), /Skill 引用/)
   await assert.rejects(() => service.delete('mcp', mcp.id), /工具引用/)
   await service.delete('skill', skill.id)
   await service.delete('tool', tool.id)
   await service.delete('mcp', mcp.id)
-  assert.equal((await service.list()).tools.length, 19)
+  assert.equal((await service.list()).tools.length, 20)
 })
 
 test('ai/skills 与 ai/tools 支持单文件、单描述、目录、批量和 package 自动识别并按内容 Hash 重载', async () => {

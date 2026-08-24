@@ -404,11 +404,11 @@
       }
     },
     "test_design_cases.submit_result": {
-      "version": "4.0.0",
+      "version": "4.1.0",
       "piName": "test_design_cases_submit_result",
       "label": "提交测试用例候选",
       "catalogName": "提交测试用例候选",
-      "description": "提交极简 test-case-design/v3；PlanningAgent 只描述测试语义，Service 负责正式治理。",
+      "description": "提交 test-case-design/v3；Agent Case 使用 agentTestSpec 描述 Evidence-driven 约束，Service 负责正式治理。",
       "catalogDescription": "提交 test-case-design/v3 极简测试用例候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -432,10 +432,11 @@
                 "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
                 "priority": { "enum": ["P0", "P1", "P2", "P3"] },
                 "requirementRefs": { "type": "array", "maxItems": 1000, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "executionMethods": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["ui", "api"] } },
+                "executionMethods": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["ui", "api", "agent"] } },
                 "preconditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
                 "steps": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-                "expectedResults": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+                "expectedResults": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
+                "agentTestSpec": { "type": "object", "properties": { "input": {}, "context": { "type": "object", "additionalProperties": true }, "expectedOutcome": { "type": "string", "minLength": 1, "maxLength": 4000 }, "requiredTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "requiredActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "argumentAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "tool": { "type": "string" }, "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["tool", "path", "operator"], "additionalProperties": false } }, "sequenceConstraints": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "before": { "type": "string" }, "after": { "type": "string" } }, "required": ["before", "after"], "additionalProperties": false } }, "businessAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["path", "operator"], "additionalProperties": false } }, "artifactAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }, "semanticAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "safetyAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "executionConstraints": { "type": "object", "properties": { "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 600000 }, "maxSteps": { "type": "integer", "minimum": 1, "maximum": 10000 }, "repeatCount": { "type": "integer", "minimum": 1, "maximum": 50 }, "maxCost": { "type": "number", "minimum": 0 } }, "required": ["timeoutMs", "maxSteps", "repeatCount"], "additionalProperties": false } }, "required": ["input", "expectedOutcome", "requiredTools", "forbiddenTools", "requiredActions", "forbiddenActions", "argumentAssertions", "sequenceConstraints", "businessAssertions", "artifactAssertions", "semanticAssertions", "safetyAssertions", "executionConstraints"], "additionalProperties": false }
               },
               "required": ["ref", "schemaVersion", "title", "dimension", "priority", "requirementRefs", "executionMethods", "preconditions", "steps", "expectedResults"],
               "additionalProperties": false
@@ -447,11 +448,11 @@
       }
     },
     "test_design_repair.submit_result": {
-      "version": "3.0.0",
+      "version": "3.1.0",
       "piName": "test_design_repair_submit_result",
       "label": "提交测试设计修复候选",
       "catalogName": "提交测试设计修复候选",
-      "description": "提交轻量 test-design-repair/v3 Patch；只增删或完整替换 TestCase v3。",
+      "description": "提交 test-design-repair/v3 Patch；可增删或完整替换包含 Agent Test Spec 的 TestCase v3。",
       "catalogDescription": "提交 test-design-repair/v3 极简修复 Patch。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -476,10 +477,11 @@
                 "dimension": { "enum": ["functional", "performance", "stability", "compatibility", "security"] },
                 "priority": { "enum": ["P0", "P1", "P2", "P3"] },
                 "requirementRefs": { "type": "array", "maxItems": 1000, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-                "executionMethods": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["ui", "api"] } },
+                "executionMethods": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["ui", "api", "agent"] } },
                 "preconditions": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
                 "steps": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
-                "expectedResults": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+                "expectedResults": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } },
+                "agentTestSpec": { "type": "object", "properties": { "input": {}, "context": { "type": "object", "additionalProperties": true }, "expectedOutcome": { "type": "string", "minLength": 1, "maxLength": 4000 }, "requiredTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenTools": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "requiredActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "forbiddenActions": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "argumentAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "tool": { "type": "string" }, "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["tool", "path", "operator"], "additionalProperties": false } }, "sequenceConstraints": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "before": { "type": "string" }, "after": { "type": "string" } }, "required": ["before", "after"], "additionalProperties": false } }, "businessAssertions": { "type": "array", "maxItems": 200, "items": { "type": "object", "properties": { "path": { "type": "string" }, "operator": { "enum": ["equals", "not_equals", "contains", "matches", "exists"] }, "expected": {} }, "required": ["path", "operator"], "additionalProperties": false } }, "artifactAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }, "semanticAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "safetyAssertions": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "criterion": { "type": "string" }, "expected": { "type": "string" } }, "required": ["criterion", "expected"], "additionalProperties": false } }, "executionConstraints": { "type": "object", "properties": { "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 600000 }, "maxSteps": { "type": "integer", "minimum": 1, "maximum": 10000 }, "repeatCount": { "type": "integer", "minimum": 1, "maximum": 50 }, "maxCost": { "type": "number", "minimum": 0 } }, "required": ["timeoutMs", "maxSteps", "repeatCount"], "additionalProperties": false } }, "required": ["input", "expectedOutcome", "requiredTools", "forbiddenTools", "requiredActions", "forbiddenActions", "argumentAssertions", "sequenceConstraints", "businessAssertions", "artifactAssertions", "semanticAssertions", "safetyAssertions", "executionConstraints"], "additionalProperties": false }
               },
               "required": ["ref", "schemaVersion", "title", "dimension", "priority", "requirementRefs", "executionMethods", "preconditions", "steps", "expectedResults"],
               "additionalProperties": false
@@ -698,12 +700,50 @@
         "additionalProperties": false
       }
     },
+    "agent_evaluation.submit_result": {
+      "version": "1.0.0",
+      "piName": "agent_evaluation_submit_result",
+      "label": "提交 Agent 语义评估",
+      "catalogName": "提交 Agent 语义评估",
+      "description": "逐项提交 Task Completion、Semantic 与 Safety 结果；不得覆盖确定性 Assertion。",
+      "catalogDescription": "提交 Agent Test 的辅助语义评估结果。",
+      "risk": "internal_write",
+      "timeoutMs": 30000,
+      "idempotent": false,
+      "sourcePath": "server/tools/requirement-tools.ts",
+      "handlerKey": "agent_evaluation.submit_result",
+      "catalogVisible": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "maxItems": 10000,
+            "items": {
+              "type": "object",
+              "properties": {
+                "caseRunId": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "kind": { "enum": ["task_completion", "semantic", "safety"] },
+                "criterion": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "status": { "enum": ["PASS", "FAIL", "NOT_EVALUABLE"] },
+                "explanation": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                "evidenceRefs": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }
+              },
+              "required": ["caseRunId", "kind", "criterion", "status", "explanation", "evidenceRefs"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["results"],
+        "additionalProperties": false
+      }
+    },
     "failure_analysis.submit_result": {
-      "version": "2.0.0",
+      "version": "2.1.0",
       "piName": "failure_analysis_submit_result",
       "label": "提交执行失败诊断候选",
       "catalogName": "提交执行失败诊断候选",
-      "description": "提交失败分类、简短原因和关键证据；Service 自动绑定当前 ScriptRevision、Attempt、Artifact 并计算修复策略。",
+      "description": "提交基于确定性 Assertion、Trace 或旧 Script Attempt 的失败分类与证据解释；结论仅为候选，Service 负责正式事实。",
       "catalogDescription": "提交只读失败分析 Stage 的证据化诊断候选。",
       "risk": "internal_write",
       "timeoutMs": 30000,
@@ -724,6 +764,20 @@
               "flaky",
               "assertion_mismatch",
               "timeout",
+              "planning",
+              "tool_selection",
+              "tool_argument",
+              "tool_sequence",
+              "prompt",
+              "context",
+              "model",
+              "tool_schema",
+              "mcp",
+              "workflow",
+              "knowledge",
+              "memory",
+              "runtime",
+              "business_backend",
               "unknown"
             ]
           },

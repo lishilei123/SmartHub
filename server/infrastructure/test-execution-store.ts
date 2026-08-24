@@ -39,6 +39,7 @@ import type {
   TestExecutionMode,
   TestSuiteVersionMember,
 } from '../domain/test-design-types.js'
+import type { AgentExecutionAggregateResult } from '../domain/agent-test-types.js'
 
 export interface ExecutionJobLease {
   workerId: string
@@ -76,6 +77,7 @@ export interface TestExecutionTransaction {
   appendScriptRevision(revision: ScriptRevision): Promise<void>
   appendAttempt(attempt: ExecutionAttempt): Promise<void>
   appendExecutionEvents(events: readonly ExecutionEvent[]): Promise<void>
+  appendAgentExecutionResult(result: AgentExecutionAggregateResult): Promise<void>
   finalizeAttempt(input: {
     attemptId: string
     status: Exclude<ExecutionAttempt['status'], 'running'>
@@ -100,6 +102,7 @@ export interface ExecutionTaskDetailSnapshot {
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
   maintenanceProposals: CaseMaintenanceProposal[]
+  agentExecutionResult?: AgentExecutionAggregateResult
 }
 
 export interface MaintenanceProposalDetailSnapshot {
@@ -131,6 +134,7 @@ export interface TestExecutionReportSource {
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
   maintenanceProposals: CaseMaintenanceProposal[]
+  agentExecutionResults?: AgentExecutionAggregateResult[]
   testCaseLibraryVersionSourceRunId?: string
 }
 
@@ -149,6 +153,7 @@ export interface TestExecutionStore {
   listTasks(runId: string): Promise<ExecutionTask[]>
   getTask(taskId: string): Promise<ExecutionTask | null>
   getTaskDetail(taskId: string): Promise<ExecutionTaskDetailSnapshot | null>
+  getAgentExecutionResult(taskId: string): Promise<AgentExecutionAggregateResult | null>
   listAttempts(taskId: string): Promise<ExecutionAttempt[]>
   listEvents(taskId: string, attemptId?: string): Promise<ExecutionEvent[]>
   listDiagnoses(taskId: string): Promise<FailureDiagnosis[]>
@@ -314,7 +319,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       }
       const run = await getRun(client, task.runId)
       if (!run) throw new Error('TEST_EXECUTION_RUN_NOT_FOUND')
-      const [attempts, events, diagnoses, revisions, artifacts, proposals] = await Promise.all([
+      const [attempts, events, diagnoses, revisions, artifacts, proposals, agentResult] = await Promise.all([
         client.query<AttemptRow>('SELECT * FROM smarthub.test_execution_attempts WHERE task_id=$1 ORDER BY ordinal', [task.id]),
         client.query<ExecutionEventRow>('SELECT * FROM smarthub.test_execution_events WHERE task_id=$1 ORDER BY attempt_id,sequence', [task.id]),
         client.query<DiagnosisRow>(`${diagnosisSelectSql}
@@ -329,6 +334,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
           SELECT * FROM smarthub.test_execution_case_maintenance_proposals
           WHERE task_id=$1 ORDER BY created_at,id
         `, [task.id]),
+        client.query<{ data: AgentExecutionAggregateResult }>('SELECT data FROM smarthub.agent_execution_results WHERE task_id=$1', [task.id]),
       ])
       await client.query('COMMIT')
       return {
@@ -340,6 +346,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
         artifacts: artifacts.rows.map(artifactFromRow),
         maintenanceProposals: proposals.rows.map(maintenanceProposalFromRow),
+        ...(agentResult.rows[0] ? { agentExecutionResult: structuredClone(agentResult.rows[0].data) } : {}),
       }
     } catch (error) {
       await client.query('ROLLBACK')
@@ -347,6 +354,11 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     } finally {
       client.release()
     }
+  }
+
+  async getAgentExecutionResult(taskId: string) {
+    const result = await this.pool.query<{ data: AgentExecutionAggregateResult }>('SELECT data FROM smarthub.agent_execution_results WHERE task_id=$1', [taskId])
+    return result.rows[0] ? structuredClone(result.rows[0].data) : null
   }
 
   async getRunReportSource(runId: string): Promise<TestExecutionReportSource | null> {
@@ -358,7 +370,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         await client.query('COMMIT')
         return null
       }
-      const [tasks, attempts, diagnoses, revisions, artifacts, proposals, handoff, library, suite] = await Promise.all([
+      const [tasks, attempts, diagnoses, revisions, artifacts, proposals, agentResults, handoff, library, suite] = await Promise.all([
         client.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
           SELECT frozen_input,status,state_version,runner_attempt_count,
                  same_script_retry_count,repair_count,current_script_revision_id,
@@ -399,6 +411,13 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
           JOIN smarthub.test_execution_tasks task ON task.id=proposal.task_id
           WHERE proposal.run_id=$1 AND task.run_id=$1
           ORDER BY task.ordinal,proposal.created_at,proposal.id
+        `, [run.id]),
+        client.query<{ data: AgentExecutionAggregateResult }>(`
+          SELECT result.data
+          FROM smarthub.agent_execution_results result
+          JOIN smarthub.test_execution_tasks task ON task.id=result.task_id
+          WHERE result.run_id=$1 AND task.run_id=$1
+          ORDER BY task.ordinal,task.id
         `, [run.id]),
         client.query<{ project_version_id: string; test_case_library_version_id: string | null; suite_version_id: string | null; content_sha256: string }>(`
           SELECT project_version_id,test_case_library_version_id,suite_version_id,content_sha256
@@ -442,6 +461,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
         artifacts: artifacts.rows.map(artifactFromRow),
         maintenanceProposals: proposals.rows.map(maintenanceProposalFromRow),
+        agentExecutionResults: agentResults.rows.map(row => structuredClone(row.data)),
         ...(persistedLibrary.source_run_id
           ? { testCaseLibraryVersionSourceRunId: persistedLibrary.source_run_id }
           : {}),
@@ -1188,6 +1208,11 @@ function transactionFor(client: PoolClient, scope: ExecutionLeaseScope, cancella
       for (const event of events) assertLeaseAggregate(scope, event.runId, event.taskId)
       return insertExecutionEvents(client, events, scope)
     },
+    appendAgentExecutionResult: result => {
+      requireNormal()
+      assertLeaseAggregate(scope, result.runId, result.taskId)
+      return insertAgentExecutionResult(client, result)
+    },
     finalizeAttempt: input => {
       if (cancellation !== (input.status === 'cancelled')) throw new Error('TEST_EXECUTION_CANCELLATION_ATTEMPT_INVALID')
       return finalizeAttempt(client, input, scope)
@@ -1347,13 +1372,15 @@ async function transitionTask(client: PoolClient, input: {
   if (input.incrementRunnerAttempt && input.status !== 'running') throw new Error('TEST_EXECUTION_ATTEMPT_COUNTER_TRANSITION_INVALID')
   const terminalStatuses = new Set<ExecutionTaskStatus>(['passed', 'failed', 'blocked', 'unsupported', 'waiting_manual', 'cancelled'])
   if (terminalStatuses.has(input.status)) {
+    const target = await client.query<{ method: string }>('SELECT method FROM smarthub.test_execution_tasks WHERE id=$1 FOR UPDATE', [input.taskId])
+    const agentTask = target.rows[0]?.method === 'agent'
     const runningAttempt = await client.query(`
       SELECT id FROM smarthub.test_execution_attempts
       WHERE task_id=$1 AND status='running'
       FOR UPDATE
     `, [input.taskId])
     if (runningAttempt.rows[0]) throw new Error('TEST_EXECUTION_TASK_HAS_RUNNING_ATTEMPT')
-    if (input.status === 'passed') {
+    if (input.status === 'passed' && !agentTask) {
       const passed = await client.query(`
         SELECT 1
         FROM smarthub.test_execution_tasks task
@@ -2135,6 +2162,54 @@ async function insertExecutionEvents(
       || !sameCanonicalRecord(executionEventFromRow(conflicts.rows[0]), event)
     ) throw new Error('TEST_EXECUTION_EVENT_CONFLICT')
   }
+}
+
+async function insertAgentExecutionResult(client: PoolClient, result: AgentExecutionAggregateResult) {
+  if (!result.caseRuns.length || result.caseRuns.some(item => item.runId !== result.runId || item.taskId !== result.taskId)) throw new Error('AGENT_EXECUTION_RESULT_SCOPE_INVALID')
+  const ordinals = result.caseRuns.map(item => item.repeatOrdinal)
+  if (new Set(ordinals).size !== ordinals.length || ordinals.some((value, index) => value !== index + 1)) throw new Error('AGENT_EXECUTION_REPEAT_ORDINAL_INVALID')
+  for (const caseRun of result.caseRuns) {
+    await client.query(`
+      INSERT INTO smarthub.agent_execution_case_runs
+        (id,run_id,task_id,repeat_ordinal,status,latency_ms,step_count,token_usage,cost,trace_ref,evidence_coverage,actual_output,error,started_at,finished_at,data)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb,$12::jsonb,$13,$14,$15,$16::jsonb)
+    `, [caseRun.id,caseRun.runId,caseRun.taskId,caseRun.repeatOrdinal,caseRun.status,caseRun.latencyMs,caseRun.stepCount,JSON.stringify(caseRun.tokenUsage ?? null),caseRun.cost ?? null,caseRun.traceRef,JSON.stringify(caseRun.evidenceCoverage),JSON.stringify(caseRun.actualOutput ?? null),caseRun.error ?? null,caseRun.startedAt,caseRun.finishedAt,JSON.stringify(caseRun)])
+    for (const event of caseRun.traceEvents) {
+      if (event.caseRunId !== caseRun.id || event.runId !== result.runId || event.taskId !== result.taskId) throw new Error('AGENT_TRACE_EVENT_SCOPE_INVALID')
+      await client.query(`
+        INSERT INTO smarthub.agent_execution_trace_events
+          (id,run_id,task_id,case_run_id,sequence,event_type,event_at,source,name,input,output,metadata,duration_ms,data)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,$13,$14::jsonb)
+      `, [event.id,event.runId,event.taskId,event.caseRunId,event.sequence,event.type,event.timestamp,event.source,event.name??null,JSON.stringify(event.input??null),JSON.stringify(event.output??null),JSON.stringify(event.metadata??null),event.durationMs??null,JSON.stringify(event)])
+    }
+    for (const assertion of caseRun.assertionResults) {
+      await client.query(`INSERT INTO smarthub.agent_execution_assertion_results (id,case_run_id,ordinal,assertion_type,status,code,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`, [assertion.id,caseRun.id,assertion.ordinal,assertion.type,assertion.status,assertion.code,JSON.stringify(assertion)])
+    }
+    for (const evaluation of caseRun.evaluationResults) {
+      await client.query(`INSERT INTO smarthub.agent_execution_evaluation_results (id,case_run_id,ordinal,evaluation_kind,status,data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)`, [evaluation.id,caseRun.id,evaluation.ordinal,evaluation.kind,evaluation.status,JSON.stringify(evaluation)])
+    }
+    for (const [index, fact] of caseRun.failureFacts.entries()) {
+      await client.query(`INSERT INTO smarthub.agent_execution_failure_facts (id,case_run_id,ordinal,code,data) VALUES ($1,$2,$3,$4,$5::jsonb)`, [`${caseRun.id}:fact:${index + 1}`,caseRun.id,index + 1,fact.code,JSON.stringify(fact)])
+    }
+  }
+  if (result.failureAnalysis) {
+    await client.query(`
+      INSERT INTO smarthub.agent_execution_failure_analyses
+        (task_id,run_id,category,source,agent_snapshot_ref,reason,evidence,error,created_at,data)
+      VALUES ($1,$2,$3,'agent',$4,$5,$6,NULL,$7,$8::jsonb)
+    `, [result.taskId,result.runId,result.failureAnalysis.category,result.failureAnalysis.agentSnapshotRef,result.failureAnalysis.reason,result.failureAnalysis.evidence,result.createdAt,JSON.stringify(result.failureAnalysis)])
+  } else if (result.failureAnalysisError) {
+    await client.query(`
+      INSERT INTO smarthub.agent_execution_failure_analyses
+        (task_id,run_id,category,source,agent_snapshot_ref,reason,evidence,error,created_at,data)
+      VALUES ($1,$2,NULL,'unavailable',NULL,NULL,NULL,$3,$4,$5::jsonb)
+    `, [result.taskId,result.runId,result.failureAnalysisError,result.createdAt,JSON.stringify({ error: result.failureAnalysisError })])
+  }
+  await client.query(`
+    INSERT INTO smarthub.agent_execution_results
+      (task_id,run_id,status,repeat_count,success_rate,failure_rate,not_evaluable_rate,error_rate,created_at,data)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+  `, [result.taskId,result.runId,result.status,result.caseRuns.length,result.successRate,result.failureRate,result.notEvaluableRate,result.errorRate,result.createdAt,JSON.stringify(result)])
 }
 
 async function finalizeAttempt(client: PoolClient, input: { attemptId: string; status: Exclude<ExecutionAttempt['status'], 'running'>; finishedAt: string; durationMs: number; exitCode?: number; summary?: string; error?: string }, scope: ExecutionLeaseScope) {

@@ -67,7 +67,7 @@ export type DefaultKnowledgeBase = {
   knowledgeBase: DatabaseState['knowledgeBases'][number]
 }
 
-const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], testExecutionInfrastructureConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [] })
+const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], agentUnderTests: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], testExecutionInfrastructureConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [] })
 
 export interface StateStore {
   load(): Promise<void>
@@ -147,7 +147,7 @@ export class JsonStore implements StateStore {
     try {
       const loaded = JSON.parse(await readFile(this.file, 'utf8')) as DatabaseState & { reviewQaSessions?: unknown[]; reviewQaTurns?: unknown[]; technicalSolutionReviews?: unknown[]; technicalSolutionRuns?: unknown[]; technicalSolutionFindingActions?: unknown[] }
       this.state = loaded
-      this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.testExecutionInfrastructureConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []
+      this.state.projectVersions ??= []; this.state.projectVersionRequirementBindings ??= []; this.state.agentUnderTests ??= []; this.state.directories ??= []; this.state.modelSources ??= []; this.state.aiResources ??= []; this.state.agentConfigurationDrafts ??= []; this.state.agentConfigurationVersions ??= []; this.state.testExecutionInfrastructureConfigurationVersions ??= []; this.state.reviewRuns ??= []; this.state.findingActions ??= []; this.state.toolApprovals ??= []
       this.state.projectVersions.forEach(normalizeRequirementReleaseBindings)
       const retiredDataRemoved = removeRetiredAgentData(loaded)
       normalizeTestDesignState(this.state)

@@ -2,9 +2,9 @@ import { Download, ExternalLink, FileWarning } from 'lucide-react'
 import { artifactUrl } from './api'
 import { diagnosisLabel } from './TestReportDiagnosisPanel'
 import { taskStatusLabel } from '../test-execution/ExecutionTaskPanel'
-import type { TestReport } from './types'
+import type { LegacyTestReport } from './types'
 
-export function TestReportFailureTable({ report }: { report: TestReport }) {
+export function TestReportFailureTable({ report }: { report: LegacyTestReport }) {
   return <section className="tr-section tr-failures" aria-labelledby="tr-failures-title">
     <header><div><h2 id="tr-failures-title"><FileWarning aria-hidden="true" />非通过任务明细</h2><p>包含当前状态不是 passed 的任务；活动 Run 中以“进行中”区分尚未终结的任务。</p></div><span>{report.nonPassedTasks.length}</span></header>
     {!report.nonPassedTasks.length

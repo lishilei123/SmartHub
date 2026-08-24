@@ -1,8 +1,23 @@
 # SmartHub 需求分析、测试设计与测试执行闭环
 
-当前仓库已实现资料接入与检索、统一需求分析、需求发布、测试设计和测试执行闭环。需求分析与测试设计由同一个 `PlanningAgent` 在同一个 ProjectVersion Planning Session 和完整 Project Workspace 中连续完成；测试执行由确定性的 `TestExecutionService` 按 Execute First 编排 ProjectVersion Execution Binding、受控执行 Agent 与非 Agentic Local Workspace Runner。`ExecutionImplementationAgent` 保持 Playwright CLI-first，并可在 generation/repair invocation 内按需、多轮调用 SmartHub Browser Tools；真实 UI 操作期间观察到的业务 API 经脱敏后沉淀为 ProjectVersion Exploration Context。PostgreSQL 保存 Run/Task/Revision/Attempt/ExecutionEvent 等正式状态；ProjectVersion Workspace 独立保存自动化工程、Binding 与脱敏后的可复用 Exploration Context，Artifact Store 保存不可变执行产物。
+当前主链面向 Evidence-driven Agent Testing：复用既有 Project、ProjectVersion、Workspace、Requirement Release、Test Design、TestCase v3、TestSuite、Runtime、Service、Validator、Knowledge、平台 Model/Agent Configuration 和 PostgreSQL，由确定性的 `AgentRunner` 真实调用版本化 `AgentUnderTest`，采集 HTTP/SSE Trace，再执行确定性 Assertion 与必要的 AI Evaluation。平台自己的 `PlanningAgent`、`FailureAnalysisAgent` 配置与被测 Agent 描述保持严格分离。
 
-## 测试执行基础设施配置
+## Evidence-driven Agent Test v1
+
+```text
+Requirement Release → Test Design → TestCase v3 + AgentTestSpec → TestSuite/Handoff
+→ AgentUnderTest frozen snapshot → AgentRunner (HTTP/SSE, timeout, repeat)
+→ Trace Collector → Deterministic Assertion Engine → optional AI Evaluator
+→ PASS / FAIL / NOT_EVALUABLE / ERROR → Failure Facts → FailureAnalysisAgent → Report
+```
+
+- `AgentTestSpec` 使用 required/forbidden Tool/Action、Argument、部分顺序、业务结果、产物、语义/安全断言和执行约束，不写死完整推理步骤。不可观察的 Tool/MCP Evidence 返回 `NOT_EVALUABLE`，不会把“看不到”误判成“未发生”。
+- HTTP 与 SSE Collector 已实现；WebSocket、OpenAI Agents、LangGraph、Claude Agent、Google ADK、MCP/OTel/日志/数据库 Collector 与 RAGRunner 只保留扩展边界，没有用占位实现冒充可用能力。
+- 确定性事实与 AI 解释分层保存。HTTP、Timeout、Tool 存在性、参数、顺序、业务输出、步数、Cost 由代码判断；语义正确性和安全等无法确定性判断的项目才进入平台现有 Model Runtime。单次 Repeat Run 与聚合成功率、失败率、延迟、Token、Cost 分开持久化。
+- Agent Test Run 不进入 `TestScriptAgent`、ScriptRepair、SelectorRepair、Playwright Script Generation 或 LocalWorkspaceRunner。旧 UI/API Playwright 源码仅作为历史兼容链保留，不属于 Agent Test 主链。
+- `agent-test-execution-report/v1` 从 PostgreSQL 正式结果生成 canonical JSON/Markdown，展示 Repeat、Assertion、Evaluation、Trace 与冻结 AUT/Runner/FailureAnalysis 配置；旧 Playwright Run 继续使用 `test-execution-report/v3`。
+
+## 历史 UI/API Playwright 执行（兼容保留，非 Agent Test 主链）
 
 执行基础设施的已发布配置继续保留不可变版本与历史快照；当前主执行链使用 ProjectVersion Local Workspace Runner，由用户在创建 Run 时提交被测系统 BaseURL。真实密钥仍只允许由部署环境注入，绝不保存或回显；Network Exploration 仅保留字段结构、必要非敏感 Header 和 `<REDACTED>` 标记。
 
@@ -35,16 +50,16 @@ Test Design 对创建、更新、删除、状态流转、持久化配置、跨�
 | 模块 | 当前状态 | 边界 |
 | --- | --- | --- |
 | 知识库、需求分析、测试设计 | 已实现 | 已接入真实 API、持久化数据、Agent Workflow 和服务端治理。 |
-| 测试执行 | 已实现 | 以当前 ProjectVersion 最新正式用例库的全部用例为唯一执行范围；Service 冻结输入与 Knowledge Index，优先执行 Binding；无 Binding 时实现 Agent 复用脱敏 Exploration Context 与共享 Workspace，并可按需多轮调用受控 Browser Tools，提交后经 Validator 再交给 Local Workspace Runner。 |
-| 报告与诊断 | 已实现 | 绑定单个 `ExecutionRun`，从 PostgreSQL 正式事实确定性投影指标、九类诊断、非通过明细与完整追溯，并提供 canonical JSON 和 Markdown 导出。 |
+| 测试执行 | 已实现 | Agent Test 以正式 AgentTestSpec 和版本化 AgentUnderTest 为输入，由 AgentRunner 真实调用 HTTP/SSE、采集 Trace、执行 Assertion/Evaluation 并持久化单次与聚合结果；旧 UI/API Playwright 链不参与 Agent Run。 |
+| 报告与诊断 | 已实现 | Agent Report 确定性投影 Assertion、Evaluation、Trace、Repeat 与冻结配置；失败分析只基于正式 Failure Facts 和可用 Evidence 解释 Root Cause Candidates。旧 Run 保持 v3 报告兼容。 |
 
 左侧“测试执行”展示 PostgreSQL 中的真实 Run/Task、就绪状态、冻结快照和不可变历史，不生成示例进度；“报告与诊断”只读汇总同一 Run 的正式事实，不调用 Agent 或 Runner，也不修改执行状态。
 
 ## 已实现
 
-- 测试执行：固定 `TestExecutionService → Execution Binding / Agent → Validator → ExecutionPackage → Local Workspace Runner` 边界，Service 独占状态、重试、诊断和修复决策；Service 为每个 `runId/taskId/stage` invocation 创建并最终关闭受控 Browser Session，`ExecutionImplementationAgent` 通过官方 Playwright CLI Adapter 主动调用结构化 Browser Tools；请求观察在持久化前过滤静态资源、Analytics/Telemetry、跨源请求和全部真实敏感值；API Case 无 Binding 时优先消费同版本 Context，UI Case 不得用 API 调用替代真实 UI；
-- PlanningAgent/TestCaseDesign Skill 为 `2.9.0`/`3.3.0`；ExecutionImplementationAgent 为 `1.1.0` 并绑定 TestScriptGeneration/ScriptRepair Skill `1.5.0`/`1.4.0`，FailureAnalysisAgent/Skill 为 `1.1.0`。升级现有部署后需要重新发布 `ExecutionImplementationAgent` 配置，使 Toolset/Skill Hash 包含 Browser Tools；`FailureAnalysisAgent` 的权限未因本次改造扩大。迁移 37 只切换正式快照约束与 Revision 校验，不对旧 Agent 做双写或运行时回退；
-- 报告与诊断：以 `REPEATABLE READ READ ONLY` 一次读取单个 Run 的 Task、Attempt、Diagnosis、ScriptRevision、Artifact 及冻结来源，Service 确定性计算执行概览、耗时分布、首轮质量、稳定性、自愈和九类诊断分布；非通过任务展示正式诊断、建议与脱敏 Artifact 元数据，追溯 Handoff、Library、Suite、环境、Runner 和两个 Agent 快照；
+- Agent 测试执行：固定 `TestExecutionService → AgentRunner → HTTP/SSE Collector → AssertionEngine → optional Model Runtime Evaluation → PostgreSQL` 边界；Service 独占正式状态，Runner 不使用 LLM 决定网络、Tool、参数、顺序或资源限制事实；
+- PlanningAgent/TestCaseDesign Skill 为 `3.0.0`/`3.4.0`，RequirementAnalysis Skill 为 `1.3.0`；FailureAnalysisAgent 为 `1.3.0`，按 Stage 分别投影 `agent-evaluation@1.0.0` 与 `failure-analysis@1.2.0` Skill。内置资源版本变化后，已有不可变 Agent Configuration 需要按正常治理流程重新发布才能用于新 Run；
+- Agent 报告与诊断：以 `REPEATABLE READ READ ONLY` 读取 Run、Task、AgentExecutionResult 和冻结来源，报告不调用 Runner/Agent、不修改状态；FailureAnalysisAgent 输入包含 failed assertions、actual/expected、Trace、Runtime Error 和当前 Workspace 可用资料，输出仅作为 Root Cause Candidate；
 - 测试设计：统一 `PlanningAgent`、`test-case-design/v3` Candidate、扁平 `test-case/v3`、显式 Requirement 引用、服务端 Coverage Audit、受控 v3 Repair、直接语义审核、正式用例库发布与 UI/API 方法级执行交接；Service 独占 Case ID、Revision、Hash、历史匹配和正式版本治理；
 
 - 平台固定服务一个 SmartHub 项目，启动时自动解析并复用该项目的默认知识库；前端不提供项目创建、项目选择或项目切换；
