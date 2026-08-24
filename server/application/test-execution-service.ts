@@ -1718,10 +1718,20 @@ function validateLibraryVersion(library: TestCaseLibraryVersionDetail, projectId
   const canonical = {
     schemaVersion: 'test-case-library/v3',
     projectId,
+    projectVersionId: library.projectVersionId,
     sourceRunId: library.sourceRunId,
     members: library.members,
   }
-  if (canonicalSha256(canonical) !== library.contentSha256) {
+  const legacyCanonical = {
+    schemaVersion: 'test-case-library/v3',
+    projectId,
+    sourceRunId: library.sourceRunId,
+    members: library.members,
+  }
+  if (
+    canonicalSha256(canonical) !== library.contentSha256
+    && canonicalSha256(legacyCanonical) !== library.contentSha256
+  ) {
     throw new TestExecutionServiceError(
       'TEST_EXECUTION_LIBRARY_CONTENT_HASH_MISMATCH',
       '固定用例库版本内容 Hash 无效',

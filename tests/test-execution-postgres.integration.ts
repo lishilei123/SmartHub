@@ -81,6 +81,7 @@ const librarySourceRunId = `${prefix}-library-source-run`
 const libraryVersionSha256 = canonicalSha256({
   schemaVersion: 'test-case-library/v3',
   projectId: ids.project,
+  projectVersionId: ids.projectVersion,
   sourceRunId: librarySourceRunId,
   members: [libraryMember],
 })
