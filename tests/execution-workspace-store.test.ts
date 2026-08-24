@@ -65,6 +65,34 @@ test('缺失或漂移 Entry 会使 Binding 失效而不会静默重新生成', a
   }
 })
 
+test('一个 Case 不能覆盖另一个 Binding 已冻结的 Workspace 文件', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-workspace-'))
+  try {
+    const store = new LocalExecutionWorkspaceStore(root)
+    const path = 'tests/ui/invalid-task-status.spec.ts'
+    const original = `import { test } from '@playwright/test'\ntest('拒绝跳级 [CASE_A]', async () => {})\n`
+    const replacement = `import { test } from '@playwright/test'\ntest('拒绝回退 [CASE_B]', async () => {})\n`
+    await store.writeFiles('pv-v1', [{ path, content: original }])
+    const dependencyFiles = [{ path, contentSha256: hash(original) }]
+    await store.saveBinding({
+      projectVersionId: 'pv-v1', caseId: 'CASE_A', executionType: 'ui',
+      entryFile: path, entrySymbol: '[CASE_A]', bindingStatus: 'validated',
+      entrySha256: hash(original), caseContentSha256: 'c'.repeat(64),
+      dependencyFiles, dependencySha256: executionBindingDependencySha256(dependencyFiles),
+      createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z',
+    })
+
+    await assert.rejects(
+      store.writeBindingFiles('pv-v1', 'CASE_B', [{ path, content: replacement }]),
+      /TEST_EXECUTION_WORKSPACE_FILE_OWNERSHIP_CONFLICT/u,
+    )
+    assert.equal((await store.snapshot('pv-v1')).files.find(file => file.path === path)?.content, original)
+    await store.writeBindingFiles('pv-v1', 'CASE_B', [{ path, content: original }])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('storageState 只存在于 Run 临时目录，不进入 Snapshot 或 ProjectVersion 继承', async () => {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-auth-'))
   try {

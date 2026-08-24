@@ -188,6 +188,60 @@ function frozenApiInput(caseId = 'TC_API_LOGIN_001') {
   })
 }
 
+function frozenProtectedApiInput(caseId = 'TC_API_TASKS_001') {
+  const apiCaseContent: TestCaseContent = {
+    ...caseContent,
+    title: '拒绝任务非法状态枚举值且不改变已保存状态',
+    preconditions: ['已具备任务 API 调用条件'],
+    executionMethods: ['api'],
+    steps: ['读取任务列表', '提交非法状态'],
+    expectedResults: ['拒绝非法状态'],
+  }
+  const apiContentSha256 = canonicalSha256(apiCaseContent)
+  return freezeExecutionTaskInput({
+    libraryMember: {
+      ...libraryMember,
+      caseId,
+      contentSha256: apiContentSha256,
+      frozenContent: apiCaseContent,
+    },
+    handoffMember: {
+      ...handoffMember,
+      caseId,
+      dedupKey: `${caseId}:1:api`,
+      method: 'api',
+      contentSha256: apiContentSha256,
+      executionSpec: { schemaVersion: 'test-script-input/v1', method: 'api', testCase: apiCaseContent },
+    },
+  })
+}
+
+function frozenProtectedUiInput(caseId = 'TC_UI_TASKS_001') {
+  const uiCaseContent: TestCaseContent = {
+    ...caseContent,
+    title: '已登录任务页状态检查',
+    preconditions: ['已登录'],
+    steps: ['打开任务页', '检查任务状态'],
+    expectedResults: ['任务状态可见'],
+  }
+  const uiContentSha256 = canonicalSha256(uiCaseContent)
+  return freezeExecutionTaskInput({
+    libraryMember: {
+      ...libraryMember,
+      caseId,
+      contentSha256: uiContentSha256,
+      frozenContent: uiCaseContent,
+    },
+    handoffMember: {
+      ...handoffMember,
+      caseId,
+      dedupKey: `${caseId}:1:ui`,
+      contentSha256: uiContentSha256,
+      executionSpec: { schemaVersion: 'test-script-input/v1', method: 'ui', testCase: uiCaseContent },
+    },
+  })
+}
+
 const runnerSnapshot = {
   runnerVersion: '1.0.0',
   playwrightVersion: '1.58.2',
@@ -738,10 +792,12 @@ class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
   calls: Array<UiExecutionBrowserContext['phase']> = []
   browserCalls: string[] = []
   private readonly sessions = new Set<string>()
+  private authenticated = false
 
   constructor(
     private readonly available = true,
     private readonly networkCandidates: RawUiNetworkObservation[] = [],
+    private readonly authBootstrap = false,
   ) {}
 
   async explore(input: {
@@ -780,7 +836,13 @@ class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
   async stateSave(session: string, path: string) {
     this.requireSession(session)
     this.browserCalls.push('state-save')
-    await writeFile(path, JSON.stringify({ cookies: [], origins: [] }), { encoding: 'utf8' })
+    await writeFile(path, JSON.stringify({
+      cookies: [],
+      origins: [{
+        origin: 'https://example.test',
+        localStorage: [{ name: 'example_token', value: 'runtime-token' }],
+      }],
+    }), { encoding: 'utf8' })
   }
 
   async close(session: string) {
@@ -791,12 +853,17 @@ class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
   async snapshot(session: string) {
     this.requireSession(session)
     this.browserCalls.push('snapshot')
+    if (this.authBootstrap && !this.authenticated) {
+      return 'url: https://example.test/login\n- textbox "用户名" [ref=e11]: environment-user\n- textbox "密码" [ref=e13]: environment-secret\n- button "登录" [ref=e14]'
+    }
+    if (this.authBootstrap) return 'url: https://example.test/tasks\n- heading "任务"\n- button "新建任务" [ref=e20]'
     return 'url: https://example.test/status\n- button "状态" [ref=e1]\n- textbox "账号" [ref=e2]'
   }
 
   async click(session: string, target: string) {
     this.requireSession(session)
     this.browserCalls.push(`click:${target}`)
+    if (this.authBootstrap && target === 'e14') this.authenticated = true
     return 'clicked'
   }
 
@@ -846,7 +913,12 @@ class FixturePlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
 }
 
 class SequenceRunner implements PlaywrightRunner {
-  calls: Array<{ attemptId: string; package: ExecutionPackage }> = []
+  calls: Array<{
+    attemptId: string
+    package: ExecutionPackage
+    authStatePath?: string
+    apiAuthorization?: NonNullable<Parameters<PlaywrightRunner['execute']>[0]['workspace']>['apiAuthorization']
+  }> = []
 
   constructor(private readonly results: SandboxExecutionResult[]) {}
 
@@ -861,10 +933,15 @@ class SequenceRunner implements PlaywrightRunner {
   async execute(input: {
     package: ExecutionPackage
     attemptId: string
+    workspace?: NonNullable<Parameters<PlaywrightRunner['execute']>[0]['workspace']>
   }) {
     this.calls.push({
       attemptId: input.attemptId,
       package: structuredClone(input.package),
+      ...(input.workspace?.authStatePath ? { authStatePath: input.workspace.authStatePath } : {}),
+      ...(input.workspace?.apiAuthorization
+        ? { apiAuthorization: structuredClone(input.workspace.apiAuthorization) }
+        : {}),
     })
     const result = this.results.shift()
     if (!result) throw new Error('RUNNER_RESULT_NOT_CONFIGURED')
@@ -898,6 +975,7 @@ async function withService(
     networkCandidates?: RawUiNetworkObservation[]
     rejectMaintenanceProposalWrites?: boolean
     runtimeFailure?: string
+    browserAuthBootstrap?: boolean
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
@@ -911,6 +989,7 @@ async function withService(
     const playwrightCli = new FixturePlaywrightCliAdapter(
       options.playwrightCliAvailable,
       options.networkCandidates,
+      options.browserAuthBootstrap,
     )
     const workspace = options.workspace
       ? new LocalExecutionWorkspaceStore(join(root, 'workspace'))
@@ -1007,6 +1086,87 @@ test('已有有效 API Execution Binding 时 Execute First 直接运行 request 
       'api/auth-client.ts',
       entryFile,
     ])
+  }, { workspace: true })
+})
+
+test('受保护 API Binding 在 Attempt 前建立登录态并把 storageState 交给 Runner', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '认证 API 入口通过', artifacts: [] },
+  ], async ({ service, store, runner, runtime, playwrightCli, job, workspace }) => {
+    assert.ok(workspace)
+    store.task = { ...store.task, input: frozenProtectedApiInput() }
+    const entryFile = 'tests/api/tasks.spec.ts'
+    const entrySource = `import { test, expect } from '@playwright/test'
+test('拒绝任务非法状态枚举值且不改变已保存状态 [${store.task.input.caseId}]', async ({ request }) => {
+  const response = await request.get('/api/tasks')
+  // smarthub:assert expected-1
+  expect(response.ok()).toBeTruthy()
+})
+`
+    const entrySha256 = createHash('sha256').update(entrySource, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: entryFile, content: entrySource }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'api',
+      entryFile,
+      entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'validated',
+      entrySha256,
+      ...singleFileBindingDependency(entryFile, entrySource),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.deepEqual(runtime.calls, [])
+    assert.equal(runner.calls.length, 1)
+    assert.match(runner.calls[0].authStatePath ?? '', /\.runtime-auth[\\/]run-status[\\/]default\.json$/u)
+    assert.deepEqual(runner.calls[0].apiAuthorization, {
+      kind: 'bearer_local_storage',
+      origin: 'https://example.test',
+      localStorageKey: 'example_token',
+    })
+    assert.equal(playwrightCli.browserCalls.includes('click:e14'), true)
+    assert.equal(playwrightCli.browserCalls.includes('state-save'), true)
+  }, { workspace: true, browserAuthBootstrap: true })
+})
+
+test('受保护 API 无受管登录凭据时在 Runner 前进入人工处理', async () => {
+  await withService([], async ({ service, store, runner, job, workspace }) => {
+    assert.ok(workspace)
+    store.task = { ...store.task, input: frozenProtectedApiInput() }
+    const entryFile = 'tests/api/tasks.spec.ts'
+    const entrySource = `import { test, expect } from '@playwright/test'
+test('拒绝任务非法状态枚举值且不改变已保存状态 [${store.task.input.caseId}]', async ({ request }) => {
+  const response = await request.get('/api/tasks')
+  // smarthub:assert expected-1
+  expect(response.ok()).toBeTruthy()
+})
+`
+    const entrySha256 = createHash('sha256').update(entrySource, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: entryFile, content: entrySource }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'api',
+      entryFile,
+      entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'validated',
+      entrySha256,
+      ...singleFileBindingDependency(entryFile, entrySource),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'waiting_manual')
+    assert.equal(task.error, 'BROWSER_AUTHENTICATION_ENTRY_NOT_FOUND')
+    assert.equal(runner.calls.length, 0)
+    assert.equal(store.attempts.length, 0)
   }, { workspace: true })
 })
 
@@ -1118,6 +1278,44 @@ test('Binding 方法不匹配先标记 invalid，再由 Agent 生成独立有效
   }, { workspace: true })
 })
 
+test('旧 UI Binding 缺少初始导航时先失效再由 Agent 重新生成', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '重新生成入口通过', artifacts: [] },
+  ], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const legacySource = source.replace("  await page.goto('/status')\n", '')
+    const entryFile = 'tests/ui/status.spec.ts'
+    const entrySha256 = createHash('sha256').update(legacySource, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: entryFile, content: legacySource }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'ui',
+      entryFile,
+      entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'validated',
+      entrySha256,
+      ...singleFileBindingDependency(entryFile, legacySource),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+    const recordedStatuses: string[] = []
+    const original = workspace.setBindingStatus.bind(workspace)
+    workspace.setBindingStatus = async (projectVersionId, caseId, status) => {
+      recordedStatuses.push(status)
+      return original(projectVersionId, caseId, status)
+    }
+
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+
+    assert.equal(task.status, 'passed')
+    assert.equal(recordedStatuses[0], 'invalid')
+    assert.equal(runtime.calls.some(call => call.stage === 'script_generation'), true)
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+  }, { workspace: true })
+})
+
 test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷不修改 Workspace', async () => {
   await withService([
     { status: 'failed', exitCode: 1, durationMs: 8, summary: '业务断言失败', error: 'expected Ready', artifacts: [] },
@@ -1145,6 +1343,37 @@ test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷�
     assert.equal(store.diagnoses[0].evidence[0].attemptId, store.attempts[0].id)
     assert.equal((await workspace.readEntry(store.run.projectVersionId, { entryFile: 'tests/ui/status.spec.ts' })), source)
   }, { workspace: true, diagnosisCategory: 'product_defect' })
+})
+
+test('已登录 UI Case 的失败诊断省略不可靠的 CLI 登录页快照', async () => {
+  await withService([
+    { status: 'failed', exitCode: 1, durationMs: 8, summary: 'selector 不存在', error: 'locator not found', artifacts: [] },
+  ], async ({ service, store, runtime, playwrightCli, job, workspace }) => {
+    assert.ok(workspace)
+    store.task = { ...store.task, input: frozenProtectedUiInput() }
+    const entrySource = scriptSource('missing-status', store.task.input.caseId)
+    const entryFile = 'tests/ui/protected-status.spec.ts'
+    const entrySha256 = createHash('sha256').update(entrySource, 'utf8').digest('hex')
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: entryFile, content: entrySource }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'ui',
+      entryFile,
+      entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'validated',
+      entrySha256,
+      ...singleFileBindingDependency(entryFile, entrySource),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'failed')
+    assert.deepEqual(playwrightCli.calls, [])
+    assert.equal(runtime.calls[0].uiExecution, undefined)
+  }, { workspace: true, diagnosisCategory: 'product_defect', browserAuthBootstrap: true })
 })
 
 test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async () => {
@@ -1177,8 +1406,21 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
     assert.equal(repairCall.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/script-revision.json')), true)
     assert.equal(repairCall.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/current.spec.ts')), true)
     assert.equal(repairCall.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/attempts.json')), true)
+    assert.equal(repairCall.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/events.json')), true)
     assert.equal(repairCall.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/diagnoses.json')), true)
     assert.equal(repairCall.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/artifacts.json')), true)
+    const workspaceRoot = repairCall.workspace.documentWorkspace.rootLogicalPath
+      ?? repairCall.workspace.documentWorkspace.logicalPath
+    assert.equal(
+      repairCall.workspace.workspaceFiles.every(file => file.logicalPath.startsWith(`${workspaceRoot}/`)),
+      true,
+    )
+    assert.equal(
+      repairCall.workspace.workspaceFiles.some(file => file.logicalPath.startsWith(`${workspaceRoot}/execution/`)),
+      true,
+    )
+    assert.equal(repairCall.workspace.documentWorkspace.layoutVersion, undefined)
+    assert.equal(repairCall.workspace.documentWorkspace.activeBranchLogicalPath, undefined)
     assert.equal(store.diagnoses[0].repairable, true)
     assert.equal(store.diagnoses[0].confidence, 0.5)
     assert.match(store.diagnoses[0].recommendedAction, /服务端.*受控脚本修复/u)
@@ -1216,7 +1458,10 @@ test('新 UI Case 由 ExecutionImplementationAgent 多轮调用 Browser Tools �
       'close',
     ])
     const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
-    assert.equal(binding?.entryFile, `tests/ui/${store.task.id}.spec.ts`)
+    assert.equal(
+      binding?.entryFile,
+      `tests/ui/case-${createHash('sha256').update(store.task.input.caseId, 'utf8').digest('hex').slice(0, 32)}.spec.ts`,
+    )
     assert.equal(binding?.bindingStatus, 'validated')
     assert.equal(runner.calls.length, 1)
   }, { workspace: true })
@@ -1240,7 +1485,7 @@ test('UI Exploration 将 Action 关联业务 API 脱敏沉淀到当前 ProjectVe
     assert.equal(result.validationStatus, 'validated')
     assert.doesNotMatch(JSON.stringify(result), /real-password|real-token|real-authorization|real-session/u)
     assert.equal(runtime.calls[0].workspace.workspaceFiles.some(
-      file => file.logicalPath === 'exploration/context.json',
+      file => file.logicalPath.endsWith('/exploration/context.json'),
     ), false)
   }, {
     workspace: true,
@@ -1327,9 +1572,10 @@ test('API Case 无 Binding 时优先获得当前 ProjectVersion Exploration Cont
     assert.deepEqual(playwrightCli.calls, [])
     assert.deepEqual(runtime.calls.map(call => call.stage), ['script_generation'])
     const contextFile = runtime.calls[0].workspace.workspaceFiles.find(
-      file => file.logicalPath === 'exploration/context.json',
+      file => file.logicalPath.endsWith('/exploration/context.json'),
     )
     assert.ok(contextFile)
+    assert.ok(contextFile.logicalPath.startsWith(`${runtime.calls[0].workspace.documentWorkspace.rootLogicalPath}/`))
     const context = JSON.parse(contextFile.content) as {
       projectVersionId: string
       authority: string
@@ -1349,14 +1595,15 @@ test('API Case 无 Binding 时优先获得当前 ProjectVersion Exploration Cont
       validationStatus: 'validated',
     }])
     const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
-    assert.equal(binding?.entryFile, `tests/api/${store.task.id}.spec.ts`)
+    const governedEntry = `tests/api/case-${createHash('sha256').update(store.task.input.caseId, 'utf8').digest('hex').slice(0, 32)}.spec.ts`
+    assert.equal(binding?.entryFile, governedEntry)
     assert.deepEqual(binding?.dependencyFiles.map(file => file.path), [
       'api/auth-client.ts',
-      `tests/api/${store.task.id}.spec.ts`,
+      governedEntry,
     ])
     assert.deepEqual(store.revisions[0].sourceArtifacts.map(file => file.path), [
       'api/auth-client.ts',
-      `tests/api/${store.task.id}.spec.ts`,
+      governedEntry,
     ])
   }, { workspace: true })
 })

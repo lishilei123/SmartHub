@@ -6,6 +6,7 @@ import type {
 import type {
   ExecutionArtifact,
   ExecutionAttempt,
+  ExecutionEvent,
   ExecutionRun,
   ExecutionTask,
   FailureDiagnosis,
@@ -28,6 +29,7 @@ implements TestExecutionWorkspaceProvider {
     task: ExecutionTask
     scriptRevision?: ScriptRevision
     attempts: readonly ExecutionAttempt[]
+    events: readonly ExecutionEvent[]
     diagnoses: readonly FailureDiagnosis[]
     artifacts: readonly ExecutionArtifact[]
   }): Promise<TestExecutionAgentWorkspaceProjection> {
@@ -48,6 +50,11 @@ implements TestExecutionWorkspaceProvider {
         `${rootLogicalPath}/attempts.json`,
         '不可变 Runner Attempts',
         orderedAttempts(input.attempts),
+      ),
+      workspaceJson(
+        `${rootLogicalPath}/events.json`,
+        '结构化 Playwright Reporter 事件',
+        orderedEvents(input.events),
       ),
       workspaceJson(
         `${rootLogicalPath}/diagnoses.json`,
@@ -96,10 +103,7 @@ implements TestExecutionWorkspaceProvider {
         mode: 'agent_directory',
         logicalPath: rootLogicalPath,
         rootLogicalPath,
-        activeBranchLogicalPath: rootLogicalPath,
-        branchLogicalPaths: [rootLogicalPath],
         agentLogicalPath: rootLogicalPath,
-        layoutVersion: 'workspace/v1',
         candidateAssetVersionIds: [],
       },
       workspaceFiles: files.sort((left, right) =>
@@ -162,6 +166,7 @@ function assertScope(input: {
   task: ExecutionTask
   scriptRevision?: ScriptRevision
   attempts: readonly ExecutionAttempt[]
+  events: readonly ExecutionEvent[]
   diagnoses: readonly FailureDiagnosis[]
   artifacts: readonly ExecutionArtifact[]
 }) {
@@ -193,6 +198,12 @@ function assertScope(input: {
     throw new Error('TEST_EXECUTION_WORKSPACE_DIAGNOSIS_SCOPE_INVALID')
   }
   const attemptIds = new Set(input.attempts.map(attempt => attempt.id))
+  if (input.events.some(event =>
+    event.runId !== input.run.id
+    || event.taskId !== input.task.id
+    || !attemptIds.has(event.attemptId))) {
+    throw new Error('TEST_EXECUTION_WORKSPACE_EVENT_SCOPE_INVALID')
+  }
   if (input.artifacts.some(artifact =>
     artifact.runId !== input.run.id
     || artifact.taskId !== input.task.id
@@ -226,6 +237,15 @@ function orderedAttempts(attempts: readonly ExecutionAttempt[]) {
   return attempts
     .slice()
     .sort((left, right) => left.ordinal - right.ordinal)
+}
+
+function orderedEvents(events: readonly ExecutionEvent[]) {
+  return events
+    .slice()
+    .sort((left, right) =>
+      left.attemptId.localeCompare(right.attemptId, 'en')
+      || left.sequence - right.sequence
+      || left.id.localeCompare(right.id, 'en'))
 }
 
 function orderedDiagnoses(diagnoses: readonly FailureDiagnosis[]) {

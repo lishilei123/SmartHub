@@ -549,7 +549,7 @@ function executionWorkspaceFixture(run: ExecutionRun): TestExecutionAgentRuntime
     knowledgeBaseId: 'knowledge-base-1',
     indexVersionId: 'index-1',
     assets: [],
-    documentWorkspace: { mode: 'agent_directory', logicalPath: 'workspace', rootLogicalPath: 'workspace', activeBranchLogicalPath: 'workspace/branches/V1.0', branchLogicalPaths: ['workspace/branches/V1.0'], agentLogicalPath: 'workspace/agent_workspace/execution_agent', layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] },
+    documentWorkspace: { mode: 'agent_directory', logicalPath: 'workspace', rootLogicalPath: 'workspace', agentLogicalPath: 'workspace/agent_workspace/execution_agent', layoutVersion: 'workspace/v1', candidateAssetVersionIds: [] },
     workspaceFiles: [{ logicalPath: 'workspace/branches/V1.0/execution/run-1/task.json', contentSha256: '1'.repeat(64), content: '{"taskId":"task-1"}\n', displayName: 'task.json' }],
   }
 }

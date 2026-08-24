@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { chmod, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type {
+  RuntimeApiAuthorization,
   RuntimeAuthStateAccess,
   RuntimeAuthStateScope,
 } from '../application/test-execution-auth-session.js'
@@ -54,6 +55,8 @@ export interface ExecutionWorkspaceSnapshot {
  * reusable tests, page objects, fixtures and clients over time.
  */
 export class LocalExecutionWorkspaceStore {
+  private readonly mutationTails = new Map<string, Promise<void>>()
+
   constructor(private readonly root: string) {}
 
   async ensure(projectVersionId: string) {
@@ -119,6 +122,38 @@ export class LocalExecutionWorkspaceStore {
     }
   }
 
+  /**
+   * Writes one Case implementation without allowing it to mutate files frozen
+   * by another Case Binding. Identical shared dependencies remain reusable.
+   */
+  async writeBindingFiles(
+    projectVersionId: string,
+    caseId: string,
+    files: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[],
+  ) {
+    const root = await this.ensure(projectVersionId)
+    const candidates = new Map(files.map(file => {
+      const path = safePath(file.path)
+      return [path, sha256(file.content)] as const
+    }))
+    for (const bindingPath of await this.bindingFiles(root)) {
+      let binding: CaseExecutionBinding
+      try {
+        binding = normalizeBinding(JSON.parse(await readFile(bindingPath, 'utf8')) as CaseExecutionBinding)
+      } catch {
+        continue
+      }
+      if (binding.projectVersionId !== projectVersionId || binding.caseId === caseId) continue
+      for (const dependency of binding.dependencyFiles) {
+        const candidateSha256 = candidates.get(dependency.path)
+        if (candidateSha256 && candidateSha256 !== dependency.contentSha256) {
+          throw new Error(`TEST_EXECUTION_WORKSPACE_FILE_OWNERSHIP_CONFLICT: ${dependency.path}`)
+        }
+      }
+    }
+    await this.writeFiles(projectVersionId, files)
+  }
+
   async saveBinding(binding: CaseExecutionBinding) {
     const root = await this.ensure(binding.projectVersionId)
     const safe = normalizeBinding(binding)
@@ -127,6 +162,21 @@ export class LocalExecutionWorkspaceStore {
     await writeFile(temporary, JSON.stringify(safe, null, 2), { encoding: 'utf8' })
     await rename(temporary, target)
     return safe
+  }
+
+  /**
+   * Serializes the ownership check, workspace write and Binding publication for
+   * one ProjectVersion. Concurrent Agent tasks may generate independently, but
+   * they cannot race while publishing files into the shared durable workspace.
+   */
+  async saveBindingImplementation(
+    binding: CaseExecutionBinding,
+    files: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[],
+  ) {
+    return this.withMutation(binding.projectVersionId, async () => {
+      await this.writeBindingFiles(binding.projectVersionId, binding.caseId, files)
+      return this.saveBinding(binding)
+    })
   }
 
   async setBindingStatus(
@@ -197,6 +247,40 @@ export class LocalExecutionWorkspaceStore {
       discard: async () => {
         if (!committed) await rm(savePath, { force: true })
       },
+    }
+  }
+
+  async runtimeApiAuthorization(
+    statePath: string,
+    baseUrl: string,
+  ): Promise<RuntimeApiAuthorization | undefined> {
+    const source = await readFile(statePath, 'utf8')
+    const state = JSON.parse(source) as {
+      cookies?: unknown[]
+      origins?: Array<{
+        origin?: unknown
+        localStorage?: Array<{ name?: unknown; value?: unknown }>
+      }>
+    }
+    if (!Array.isArray(state.cookies) || !Array.isArray(state.origins)) {
+      throw new Error('TEST_EXECUTION_RUNTIME_AUTH_STATE_INVALID')
+    }
+    const origin = new URL(baseUrl).origin
+    const originState = state.origins.find(value => String(value.origin ?? '') === origin)
+    const candidates = (originState?.localStorage ?? []).filter(value =>
+      typeof value.name === 'string'
+      && typeof value.value === 'string'
+      && value.value.length > 0
+      && value.value.length <= 64 * 1024
+      && /(?:^|[_-])(?:access[_-]?)?(?:auth[_-]?)?token$/iu.test(value.name))
+    if (candidates.length === 0 && state.cookies.length) return undefined
+    if (candidates.length !== 1) {
+      throw new Error('TEST_EXECUTION_API_AUTHORIZATION_BRIDGE_UNAVAILABLE')
+    }
+    return {
+      kind: 'bearer_local_storage',
+      origin,
+      localStorageKey: String(candidates[0].name),
     }
   }
 
@@ -362,6 +446,26 @@ export class LocalExecutionWorkspaceStore {
       bindingStatus: status,
       updatedAt: new Date().toISOString(),
     })
+  }
+
+  private async withMutation<T>(
+    projectVersionId: string,
+    operation: () => Promise<T>,
+  ) {
+    const previous = this.mutationTails.get(projectVersionId) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolveCurrent => { release = resolveCurrent })
+    const tail = previous.then(() => current)
+    this.mutationTails.set(projectVersionId, tail)
+    await previous
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (this.mutationTails.get(projectVersionId) === tail) {
+        this.mutationTails.delete(projectVersionId)
+      }
+    }
   }
 }
 

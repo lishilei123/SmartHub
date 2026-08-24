@@ -78,12 +78,13 @@ if (-not (Test-Path -LiteralPath $concurrentlyEntrypoint) -or -not (Test-Path -L
 
 Set-Location -LiteralPath $repositoryRoot
 Write-Host "正在启动 SmartHub：http://${hostAddress}:${webPort}（API ${hostAddress}:${apiPort}）"
+Write-Host 'Worker 使用稳定进程，不随源码变更自动重启；请在没有运行中任务时重启开发服务以加载 Worker 代码变更。'
 
 & node $concurrentlyEntrypoint `
   '--kill-others' `
   '--names' 'API,WORKER,WEB' `
   'node --watch --import tsx server/http/server.ts' `
-  'node --watch --import tsx server/worker.ts' `
+  'node --import tsx server/worker.ts' `
   "node `"$viteEntrypoint`" --host $hostAddress --port $webPort --strictPort"
 
 if ($LASTEXITCODE -ne 0) {

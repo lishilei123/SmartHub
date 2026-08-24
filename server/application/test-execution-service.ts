@@ -14,6 +14,7 @@ import type {
   ExecutionTask,
   ExecutionTestDataBinding,
   FailureDiagnosis,
+  FrozenExecutionTaskInput,
   FrozenExecutionTestDataSnapshot,
   FrozenExecutionAgentSnapshot,
   HttpExplorationObservation,
@@ -58,6 +59,7 @@ import {
   executionEntrySymbol,
   freezeExecutionTaskInput,
   scriptCacheKey,
+  TestExecutionValidationError,
   unsupportedExecutionMethodReason,
   validateFailureDiagnosisCandidate,
 } from './test-execution-validation.js'
@@ -83,6 +85,7 @@ export interface TestExecutionWorkspaceProvider {
     task: ExecutionTask
     scriptRevision?: ScriptRevision
     attempts: readonly ExecutionAttempt[]
+    events: readonly ExecutionEvent[]
     diagnoses: readonly FailureDiagnosis[]
     artifacts: readonly ExecutionArtifact[]
   }): Promise<TestExecutionAgentWorkspaceProjection>
@@ -650,6 +653,7 @@ export class TestExecutionService {
         run.projectVersionId,
         task.input.caseId,
       )
+      let bindingRejected = false
       if (
         binding
         && binding.bindingStatus !== 'invalid'
@@ -658,37 +662,46 @@ export class TestExecutionService {
       ) {
         const workspaceSnapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
         const source = await this.executionWorkspace.readEntry(run.projectVersionId, binding)
-        const executionPackage = buildExecutionPackage({
-          candidate: {
-            entryFile: binding.entryFile,
-            files: [{ path: binding.entryFile, content: source }],
-            summary: '复用 ProjectVersion Execution Workspace 入口',
-          },
-          task: { ...task.input, taskId: task.id },
-          environmentSignature: run.environment.signature,
-          workspaceFiles: workspaceSnapshot.files,
-        })
-        const cacheKey = taskScriptCacheKey(run, task)
-        await this.persistScriptRevision({
-          job, lease, run, task, expectedStatus: 'pending', executionPackage,
-          scriptArtifact: {
-            id: stableIdentity('test_execution_script_artifact', { cacheKey }), cacheKey,
-            caseId: task.input.caseId, caseRevision: task.input.caseRevision,
-            method: executableMethod(task), caseContentSha256: task.input.caseContentSha256,
-            executionSpecSha256: task.input.executionSpecSha256, taskInputSha256: task.input.inputSha256,
+        let executionPackage: ExecutionPackage | undefined
+        try {
+          executionPackage = buildExecutionPackage({
+            candidate: {
+              entryFile: binding.entryFile,
+              files: [{ path: binding.entryFile, content: source }],
+              summary: '复用 ProjectVersion Execution Workspace 入口',
+            },
+            task: { ...task.input, taskId: task.id },
             environmentSignature: run.environment.signature,
-            executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
-            executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
-            createdAt: this.clock(),
-          },
-          // The immutable revision records the entry actually executed. It is
-          // not a ScriptArtifact cache replay: the source of truth is the
-          // ProjectVersion workspace binding.
-          source: 'agent', generatedBy: run.agents.executionImplementation, incrementRepair: false,
-        })
-        return
+            workspaceFiles: workspaceSnapshot.files,
+          })
+        } catch (error) {
+          if (!(error instanceof TestExecutionValidationError)) throw error
+          await this.executionWorkspace.setBindingStatus(run.projectVersionId, task.input.caseId, 'invalid')
+          bindingRejected = true
+        }
+        if (executionPackage) {
+          const cacheKey = taskScriptCacheKey(run, task)
+          await this.persistScriptRevision({
+            job, lease, run, task, expectedStatus: 'pending', executionPackage,
+            scriptArtifact: {
+              id: stableIdentity('test_execution_script_artifact', { cacheKey }), cacheKey,
+              caseId: task.input.caseId, caseRevision: task.input.caseRevision,
+              method: executableMethod(task), caseContentSha256: task.input.caseContentSha256,
+              executionSpecSha256: task.input.executionSpecSha256, taskInputSha256: task.input.inputSha256,
+              environmentSignature: run.environment.signature,
+              executionImplementationAgentVersion: run.agents.executionImplementation.configurationVersion,
+              executionImplementationAgentConfigurationSha256: run.agents.executionImplementation.configurationSha256,
+              createdAt: this.clock(),
+            },
+            // The immutable revision records the entry actually executed. It is
+            // not a ScriptArtifact cache replay: the source of truth is the
+            // ProjectVersion workspace binding.
+            source: 'agent', generatedBy: run.agents.executionImplementation, incrementRepair: false,
+          })
+          return
+        }
       }
-      if (binding && binding.bindingStatus !== 'invalid') {
+      if (binding && binding.bindingStatus !== 'invalid' && !bindingRejected) {
         await this.executionWorkspace.setBindingStatus(
           run.projectVersionId,
           task.input.caseId,
@@ -733,7 +746,10 @@ export class TestExecutionService {
         workspace,
         ...(browserSession ? { browserSession } : {}),
         validateCandidate: candidateValidator(candidate => {
-          const normalized = packageCandidate(candidate, 'test-script-generation/v1')
+          const normalized = governedPackageCandidate(
+            packageCandidate(candidate, 'test-script-generation/v1'),
+            task.input,
+          )
           buildExecutionPackage({
             candidate: normalized,
             task: { ...task.input, taskId: task.id },
@@ -746,7 +762,10 @@ export class TestExecutionService {
     )
     assertAgentOutputSchema(output, 'test-script-generation/v1')
     const executionPackage = buildExecutionPackage({
-      candidate: packageCandidate(output.candidate, 'test-script-generation/v1'),
+      candidate: governedPackageCandidate(
+        packageCandidate(output.candidate, 'test-script-generation/v1'),
+        task.input,
+      ),
       task: { ...task.input, taskId: task.id },
       environmentSignature: run.environment.signature,
       workspaceFiles,
@@ -814,6 +833,9 @@ export class TestExecutionService {
     const artifacts = (await Promise.all(
       attempts.map(attempt => this.store.listArtifacts(task.id, attempt.id)),
     )).flat()
+    const events = (await Promise.all(
+      attempts.map(attempt => this.store.listEvents(task.id, attempt.id)),
+    )).flat()
     const workspace = await this.workspace(
       run,
       task,
@@ -821,12 +843,16 @@ export class TestExecutionService {
       attempts,
       [diagnosis],
       artifacts,
+      events,
     )
     const workspaceFiles = this.executionWorkspace
       ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
       : []
     const build = (candidate: Record<string, unknown>) => {
-      const normalized = packageCandidate(candidate, 'script-repair/v1')
+      const normalized = governedPackageCandidate(
+        packageCandidate(candidate, 'script-repair/v1'),
+        task.input,
+      )
       buildExecutionPackage({
         candidate: normalized,
         task: { ...task.input, taskId: task.id },
@@ -1005,6 +1031,27 @@ export class TestExecutionService {
     const revision = await this.currentRevision(task)
     const executionPackage = await this.reconstructPackage(run, task, revision)
     assertFrozenRunner(run, this.runner.snapshot())
+    let workspaceRunTarget: Awaited<ReturnType<TestExecutionService['workspaceRunTarget']>>
+    try {
+      workspaceRunTarget = await this.workspaceRunTarget(run, task, revision, signal)
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error)
+      if (!authenticationPreparationFailure(code)) throw error
+      await requiredLeaseTransaction(
+        this.store,
+        job.id,
+        lease,
+        transaction => transaction.transitionTask({
+          taskId: task.id,
+          expectedStatus: task.status as 'ready' | 'retrying',
+          expectedStateVersion: task.stateVersion,
+          status: 'waiting_manual',
+          error: code,
+          finishedAt: this.clock(),
+        }),
+      )
+      return
+    }
     const priorAttempts = await this.store.listAttempts(task.id)
     const revisionAttempts = priorAttempts.filter(item => item.scriptRevisionId === revision.id)
     const kind = attemptKind(task, revision, priorAttempts, revisionAttempts)
@@ -1060,7 +1107,7 @@ export class TestExecutionService {
         expectedPackageSha256: revision.package.packageSha256,
         environment: run.environment,
         runner: run.runner,
-        ...(await this.workspaceRunTarget(run, task, revision)),
+        ...workspaceRunTarget,
       }, signal)
     } catch (error) {
       result = {
@@ -1208,9 +1255,12 @@ export class TestExecutionService {
     const artifacts = (await Promise.all(
       attempts.map(attempt => this.store.listArtifacts(task.id, attempt.id)),
     )).flat()
+    const events = (await Promise.all(
+      attempts.map(attempt => this.store.listEvents(task.id, attempt.id)),
+    )).flat()
     const diagnoses = await this.store.listDiagnoses(task.id)
     const uiExecution = await this.uiExecutionContext(run, task, 'failure_analysis', signal)
-    const workspace = await this.workspace(run, task, revision, attempts, diagnoses, artifacts)
+    const workspace = await this.workspace(run, task, revision, attempts, diagnoses, artifacts, events)
     const attemptIds = attempts.map(attempt => attempt.id)
     const artifactIds = artifacts.map(artifact => artifact.id)
     const validate = (candidate: Record<string, unknown>) =>
@@ -1369,19 +1419,23 @@ export class TestExecutionService {
     attempts: readonly ExecutionAttempt[] = [],
     diagnoses: readonly FailureDiagnosis[] = [],
     artifacts: readonly ExecutionArtifact[] = [],
+    events: readonly ExecutionEvent[] = [],
   ) {
     const projection = await this.workspaceProvider.project({
       run: structuredClone(run),
       task: structuredClone(task),
       ...(scriptRevision ? { scriptRevision: structuredClone(scriptRevision) } : {}),
       attempts: structuredClone(attempts),
+      events: structuredClone(events),
       diagnoses: structuredClone(diagnoses),
       artifacts: structuredClone(artifacts),
     })
     if (this.executionWorkspace) {
       const snapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
+      const projectionRoot = projection.documentWorkspace.rootLogicalPath
+        ?? projection.documentWorkspace.logicalPath
       projection.workspaceFiles.push(...snapshot.files.map(file => ({
-        logicalPath: `execution/${file.path}`,
+        logicalPath: `${projectionRoot}/execution/${file.path}`,
         displayName: `Execution Workspace · ${file.path}`,
         content: file.content,
         contentSha256: file.contentSha256,
@@ -1397,7 +1451,7 @@ export class TestExecutionService {
           results: orderedExplorationResults(explorationResults, run, task, this.clock()),
         })
         projection.workspaceFiles.push({
-          logicalPath: 'exploration/context.json',
+          logicalPath: `${projectionRoot}/exploration/context.json`,
           displayName: 'ProjectVersion Exploration Context · Runtime Observed Knowledge',
           content,
           contentSha256: sha256(content),
@@ -1422,14 +1476,13 @@ export class TestExecutionService {
     bindingStatus: CaseExecutionBinding['bindingStatus'],
   ) {
     if (!this.executionWorkspace) return
-    await this.executionWorkspace.writeFiles(run.projectVersionId, executionPackage.files)
     const entry = required(executionPackage.files.find(file => file.path === executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
     const dependencyFiles = executionPackage.manifest.files.map(file => ({
       path: file.path,
       contentSha256: file.contentSha256,
     }))
     const now = this.clock()
-    await this.executionWorkspace.saveBinding({
+    await this.executionWorkspace.saveBindingImplementation({
       projectVersionId: run.projectVersionId,
       caseId: task.input.caseId,
       executionType: executableMethod(task),
@@ -1442,10 +1495,15 @@ export class TestExecutionService {
       caseContentSha256: task.input.caseContentSha256,
       createdAt: now,
       updatedAt: now,
-    })
+    }, executionPackage.files)
   }
 
-  private async workspaceRunTarget(run: ExecutionRun, task: ExecutionTask, revision: ScriptRevision) {
+  private async workspaceRunTarget(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    revision: ScriptRevision,
+    signal: AbortSignal,
+  ) {
     if (!this.executionWorkspace) return {}
     const binding = await this.executionWorkspace.resolveBinding(run.projectVersionId, task.input.caseId)
     if (
@@ -1457,16 +1515,51 @@ export class TestExecutionService {
     ) {
       throw new Error('TEST_EXECUTION_WORKSPACE_BINDING_DRIFT')
     }
+    const authPolicy = resolveAuthSessionPolicy(task.input)
     const [snapshot, authStateRoot] = await Promise.all([
       this.executionWorkspace.snapshot(run.projectVersionId),
       this.executionWorkspace.runtimeAuthRoot(run.projectVersionId, run.id),
     ])
+    let authStatePath: string | undefined
+    let apiAuthorization: Awaited<ReturnType<LocalExecutionWorkspaceStore['runtimeApiAuthorization']>>
+    if (authPolicy.mode === 'reuse_authenticated' && authPolicy.role && authPolicy.stateKey) {
+      const scope = {
+        projectVersionId: run.projectVersionId,
+        runId: run.id,
+        environmentSignature: run.environment.signature,
+        baseUrl: run.environment.baseUrl,
+        role: authPolicy.role,
+        stateKey: authPolicy.stateKey,
+      }
+      let access = await this.executionWorkspace.runtimeAuthStateAccess(scope, { writable: true })
+      if (!access.loadPath) {
+        if (!this.browserTools) throw new Error('TEST_EXECUTION_AUTH_STATE_PREPARATION_REQUIRED')
+        await this.browserTools.prepareAuthenticatedState({
+          run,
+          task,
+          stage: 'script_generation',
+          authPolicy,
+          authState: access,
+        }, signal)
+        access = await this.executionWorkspace.runtimeAuthStateAccess(scope, { writable: false })
+      }
+      if (!access.loadPath) throw new Error('TEST_EXECUTION_AUTH_STATE_REQUIRED')
+      authStatePath = access.loadPath
+      if (task.input.method === 'api') {
+        apiAuthorization = await this.executionWorkspace.runtimeApiAuthorization(
+          authStatePath,
+          run.environment.baseUrl,
+        )
+      }
+    }
     return {
       workspace: {
         root: snapshot.root,
         entryFile: binding.entryFile,
         entrySymbol: binding.entrySymbol,
         authStateRoot,
+        ...(authStatePath ? { authStatePath } : {}),
+        ...(apiAuthorization ? { apiAuthorization } : {}),
       },
     }
   }
@@ -1595,6 +1688,10 @@ export class TestExecutionService {
       if (required) throw new Error('TEST_EXECUTION_UI_AGENT_REQUIRED')
       return undefined
     }
+    const authPolicy = resolveAuthSessionPolicy(task.input)
+    // Playwright CLI state-load does not reliably restore origin localStorage.
+    // Never let a fresh login page contradict the authenticated Runner evidence.
+    if (authPolicy.mode === 'reuse_authenticated') return undefined
     const context = await this.uiExecutionAgent.explore({
       baseUrl: run.environment.baseUrl,
       run,
@@ -2124,6 +2221,25 @@ function packageCandidate(
   }
 }
 
+function governedPackageCandidate(
+  candidate: ExecutionPackageCandidate,
+  task: Pick<FrozenExecutionTaskInput, 'caseId' | 'method'>,
+): ExecutionPackageCandidate {
+  if (!['ui', 'api'].includes(task.method)) return candidate
+  const governedEntryFile = `tests/${task.method}/case-${sha256(task.caseId).slice(0, 32)}.spec.ts`
+  if (candidate.entryFile === governedEntryFile) return candidate
+  if (candidate.files.some(file => file.path === governedEntryFile)) {
+    throw new Error('TEST_EXECUTION_PACKAGE_GOVERNED_ENTRY_CONFLICT')
+  }
+  return {
+    ...candidate,
+    entryFile: governedEntryFile,
+    files: candidate.files.map(file => file.path === candidate.entryFile
+      ? { ...file, path: governedEntryFile }
+      : file),
+  }
+}
+
 async function requiredLeaseTransaction<T>(
   store: TestExecutionStore,
   jobId: string,
@@ -2255,6 +2371,10 @@ function taskEntrypoint(taskId: string) {
 
 function retryableFailure(error?: string, summary?: string) {
   return /(?:timeout|timed? out|ECONNRESET|ECONNREFUSED|temporary network|network error)/iu.test(`${error ?? ''}\n${summary ?? ''}`)
+}
+
+function authenticationPreparationFailure(code: string) {
+  return /^(?:BROWSER_AUTHENTICATION_|BROWSER_AUTH_STATE_PREPARATION_|TEST_EXECUTION_AUTH_STATE_|TEST_EXECUTION_API_AUTHORIZATION_)/u.test(code)
 }
 
 function terminalTaskStatus(status: ExecutionTask['status']) {

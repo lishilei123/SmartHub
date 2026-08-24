@@ -411,6 +411,24 @@ test('状态检查 [case-status]', async ({ request }) => {
     () => buildExecutionPackage({ candidate: candidate(requestOnly), task, environmentSignature: 'env' }),
     error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
   )
+  const missingNavigation = validSource.replace("  await page.goto('/status')\n", '')
+  assert.throws(
+    () => buildExecutionPackage({ candidate: candidate(missingNavigation), task, environmentSignature: 'env' }),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
+  const lateNavigation = `import { test, expect } from '@playwright/test'
+
+test('状态检查 [case-status]', async ({ page }) => {
+  const status = page.locator('[data-testid="status"]')
+  await page.goto('/status')
+  // smarthub:assert expected-1
+  await expect(status).toHaveText('Ready')
+})
+`
+  assert.throws(
+    () => buildExecutionPackage({ candidate: candidate(lateNavigation), task, environmentSignature: 'env' }),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
   const mixed = `import { test, expect } from '@playwright/test'
 test('状态检查 [case-status]', async ({ page, request }) => {
   await request.post('/api/setup')

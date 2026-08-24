@@ -1056,9 +1056,6 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       if (!['failed', 'blocked', 'waiting_manual'].includes(currentTask.status)) {
         throw new Error('TEST_EXECUTION_TASK_NOT_RETRYABLE')
       }
-      if (!currentTask.currentScriptRevisionId) {
-        throw new Error('TEST_EXECUTION_CURRENT_SCRIPT_REVISION_REQUIRED')
-      }
       if (input.job.runId !== input.runId || input.job.taskId !== input.taskId) {
         throw new Error('TEST_EXECUTION_JOB_TASK_MISMATCH')
       }
@@ -1073,13 +1070,16 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         throw new Error('TEST_EXECUTION_MANUAL_RETRY_JOB_INVALID')
       }
 
-      assertTaskTransition(currentTask.status, 'ready')
+      const retryStatus: ExecutionTaskStatus = currentTask.currentScriptRevisionId
+        ? 'ready'
+        : 'pending'
+      assertTaskTransition(currentTask.status, retryStatus)
       assertRunTransition(currentRun.status, 'running')
       const updated = await transitionTask(client, {
         taskId: currentTask.id,
         expectedStatus: currentTask.status,
         expectedStateVersion: currentTask.stateVersion,
-        status: 'ready',
+        status: retryStatus,
       })
       await client.query(`
         UPDATE smarthub.test_execution_runs
@@ -1509,16 +1509,21 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
 
   const libraryResult = await client.query<{
     project_id: string
+    project_version_id: string
     source_run_id: string | null
     content_sha256: string
     data: TestCaseLibraryVersionDetail
   }>(`
-    SELECT project_id,source_run_id,content_sha256,data
+    SELECT project_id,project_version_id,source_run_id,content_sha256,data
     FROM smarthub.test_case_library_versions WHERE id=$1 FOR SHARE
   `, [run.handoff.testCaseLibraryVersionId])
   const library = libraryResult.rows[0]
   if (!library) throw new Error('TEST_EXECUTION_LIBRARY_VERSION_NOT_FOUND')
-  if (library.project_id !== run.projectId || library.content_sha256 !== run.handoff.testCaseLibraryVersionSha256) {
+  if (
+    library.project_id !== run.projectId
+    || library.project_version_id !== run.projectVersionId
+    || library.content_sha256 !== run.handoff.testCaseLibraryVersionSha256
+  ) {
     throw new Error('TEST_EXECUTION_LIBRARY_VERSION_MISMATCH')
   }
 
@@ -1540,10 +1545,20 @@ async function validatePersistedExecutionSources(client: PoolClient, input: Crea
   const libraryCanonical = {
     schemaVersion: 'test-case-library/v3',
     projectId: run.projectId,
+    projectVersionId: library.project_version_id,
     sourceRunId: library.source_run_id,
     members: libraryMembers,
   }
-  if (canonicalSha256(libraryCanonical) !== library.content_sha256) {
+  const legacyLibraryCanonical = {
+    schemaVersion: 'test-case-library/v3',
+    projectId: run.projectId,
+    sourceRunId: library.source_run_id,
+    members: libraryMembers,
+  }
+  if (
+    canonicalSha256(libraryCanonical) !== library.content_sha256
+    && canonicalSha256(legacyLibraryCanonical) !== library.content_sha256
+  ) {
     throw new Error('TEST_EXECUTION_LIBRARY_CONTENT_HASH_MISMATCH')
   }
 

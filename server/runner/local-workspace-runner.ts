@@ -5,12 +5,15 @@ import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from
 import { createRequire } from 'node:module'
 import { dirname, join, relative, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import JSZip, { type JSZipObject } from 'jszip'
 import type {
   ExecutionEventStatus,
   ExecutionEventType,
   ExecutionRunnerSnapshot,
   RunnerExecutionEvent,
 } from '../domain/test-execution-types.js'
+import { canonicalSha256 } from '../application/canonical-json.js'
+import type { RuntimeApiAuthorization } from '../application/test-execution-auth-session.js'
 import { assertExecutionPackageIntegrity } from '../application/test-execution-validation.js'
 import type { ExecutionEnvironmentSecretResolver, PlaywrightRunner } from './playwright-runner.js'
 import type { RunnerArtifactObject, SandboxExecutionResult } from './execution-sandbox.js'
@@ -57,7 +60,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
   async execute(input: Parameters<PlaywrightRunner['execute']>[0], signal: AbortSignal): Promise<SandboxExecutionResult> {
     if (!input.workspace) throw new Error('TEST_EXECUTION_LOCAL_WORKSPACE_REQUIRED')
     if (this.playwright.error) throw new Error(this.playwright.error)
-    if (JSON.stringify(input.runner) !== JSON.stringify(this.value)) throw new Error('TEST_EXECUTION_RUNNER_SNAPSHOT_DRIFT')
+    if (canonicalSha256(input.runner) !== canonicalSha256(this.value)) throw new Error('TEST_EXECUTION_RUNNER_SNAPSHOT_DRIFT')
     const executionPackage = assertExecutionPackageIntegrity({
       package: input.package,
       task: input.task,
@@ -68,10 +71,36 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
     const entry = resolve(workspaceRoot, ...input.workspace.entryFile.split('/'))
     const authStateRoot = resolve(input.workspace.authStateRoot)
     const authStatePath = relative(workspaceRoot, authStateRoot).replaceAll('\\', '/')
+    const authStateFile = input.workspace.authStatePath
+      ? resolve(input.workspace.authStatePath)
+      : undefined
+    const apiAuthorization = input.workspace.apiAuthorization
     if (!inside(workspaceRoot, entry)) throw new Error('TEST_EXECUTION_WORKSPACE_ENTRY_INVALID')
     if (!inside(workspaceRoot, authStateRoot) || !/^\.runtime-auth\/[A-Za-z0-9._-]{1,200}$/u.test(authStatePath)) {
       throw new Error('TEST_EXECUTION_AUTH_STATE_SCOPE_INVALID')
     }
+    if (authStateFile) {
+      const relativeState = relative(authStateRoot, authStateFile).replaceAll('\\', '/')
+      if (!inside(authStateRoot, authStateFile) || !/^[A-Za-z0-9._-]{1,200}\.json$/u.test(relativeState)) {
+        throw new Error('TEST_EXECUTION_AUTH_STATE_FILE_INVALID')
+      }
+      const [actualAuthRoot, actualAuthState, authStateMetadata] = await Promise.all([
+        realpath(authStateRoot),
+        realpath(authStateFile),
+        lstat(authStateFile),
+      ])
+      if (
+        !inside(actualAuthRoot, actualAuthState)
+        || !authStateMetadata.isFile()
+        || authStateMetadata.isSymbolicLink()
+      ) throw new Error('TEST_EXECUTION_AUTH_STATE_FILE_INVALID')
+    }
+    if (apiAuthorization && !authStateFile) {
+      throw new Error('TEST_EXECUTION_API_AUTHORIZATION_STATE_REQUIRED')
+    }
+    const runtimeApiAuthorization = apiAuthorization && authStateFile
+      ? await readRuntimeApiAuthorization(authStateFile, apiAuthorization, input.environment.baseUrl)
+      : undefined
     await access(entry)
     for (const file of executionPackage.files) {
       const target = resolve(workspaceRoot, ...file.path.split('/'))
@@ -99,6 +128,8 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
           join(runtimeRoot, 'test-results'),
           reporterPath,
           authStateRoot,
+          authStateFile,
+          Boolean(runtimeApiAuthorization),
         ),
         { encoding: 'utf8' },
       )
@@ -119,6 +150,9 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
           ...infrastructureEnvironment(),
           SMARTHUB_BASE_URL: input.environment.baseUrl,
           ...secretEnvironment,
+          ...(runtimeApiAuthorization
+            ? { SMARTHUB_RUNTIME_API_AUTHORIZATION: runtimeApiAuthorization }
+            : {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
@@ -134,7 +168,12 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
       signal.removeEventListener('abort', terminate)
       const output = redactRunnerOutput(
         Buffer.concat([Buffer.concat(stdout), Buffer.concat(stderr)]),
-        Object.values(secretEnvironment),
+        [
+          ...Object.values(secretEnvironment),
+          ...(runtimeApiAuthorization
+            ? [runtimeApiAuthorization, runtimeApiAuthorization.replace(/^Bearer\s+/iu, '')]
+            : []),
+        ],
       )
       const artifact = output.length ? await this.artifacts.put({ body: bytes(output), mimeType: 'text/plain; charset=utf-8', maximumBytes: 2 * 1024 * 1024 }) : undefined
       if (signal.aborted) return { ...cancelled(Date.now() - started), artifacts: artifact ? [{ ...artifact, type: 'log' }] : [] }
@@ -142,26 +181,29 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         JSON.parse(await readFile(reporterPath, 'utf8')) as unknown,
         input.workspace.entrySymbol,
       )
+      report.events = applyPlaywrightTraceHttpObservations(
+        report.events,
+        await readPlaywrightTraceHttpObservations(runtimeRoot, report.attachments),
+      )
       const attachmentArtifacts = await ingestReporterAttachments(
         runtimeRoot,
         report.attachments,
         this.artifacts,
+        runtimeApiAuthorization
+          ? [runtimeApiAuthorization, runtimeApiAuthorization.replace(/^Bearer\s+/iu, '')]
+          : [],
       )
       const artifacts = [
         ...(artifact ? [{ ...artifact, type: 'log' as const }] : []),
         ...attachmentArtifacts,
       ]
       const passed = exitCode === 0
-      const attachmentSha256s = attachmentArtifacts.map(item => item.sha256)
-      const events = report.events.map(event =>
-        event.type === 'failure' || event.type === 'runner' && event.status === 'failed'
-          ? { ...event, artifactSha256s: attachmentSha256s }
-          : event)
+      const events = report.events.slice()
       events.push(...attachmentArtifacts.map((item, index): RunnerExecutionEvent => ({
         sequence: events.length + index + 1,
         type: item.type === 'screenshot' ? 'screenshot' : item.type === 'trace' ? 'trace' : 'video',
         title: item.type === 'screenshot' ? '失败页面截图' : item.type === 'trace' ? 'Playwright Trace' : 'Playwright Video',
-        status: passed ? 'passed' : 'failed',
+        status: 'passed',
         startedAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
         durationMs: 0,
@@ -218,11 +260,24 @@ export function localPlaywrightConfig(
   outputRoot: string,
   reporterPath = join(outputRoot, 'playwright-report.json'),
   authStateRoot = join(outputRoot, '.runtime-auth'),
+  authStatePath?: string,
+  apiAuthorization = false,
 ) {
+  const storageState = authStatePath ? `, storageState: ${JSON.stringify(authStatePath)}` : ''
+  const runtimeAuthorization = apiAuthorization
+    ? [
+        "const runtimeAuthorization = process.env.SMARTHUB_RUNTIME_API_AUTHORIZATION",
+        "if (!runtimeAuthorization) throw new Error('TEST_EXECUTION_API_AUTHORIZATION_REQUIRED')",
+      ]
+    : []
+  const extraHttpHeaders = apiAuthorization
+    ? ', extraHTTPHeaders: { Authorization: runtimeAuthorization }'
+    : ''
   return [
     "const baseURL = process.env.SMARTHUB_BASE_URL",
     "if (!baseURL) throw new Error('TEST_EXECUTION_BASE_URL_REQUIRED')",
-    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, trace: 'retain-on-failure', screenshot: 'only-on-failure' } }`,
+    ...runtimeAuthorization,
+    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, trace: 'retain-on-failure', screenshot: 'only-on-failure'${storageState}${extraHttpHeaders} } }`,
     '',
   ].join('\n')
 }
@@ -239,6 +294,12 @@ type PlaywrightJsonStep = {
   duration?: unknown
   error?: unknown
   steps?: unknown
+}
+
+export type PlaywrightTraceHttpObservation = {
+  method: string
+  path: string
+  status: number
 }
 
 /** Parse only Playwright's structured JSON reporter contract, never stdout. */
@@ -309,19 +370,31 @@ export function parsePlaywrightJsonReport(value: unknown, entrySymbol: string): 
         path: attachment.path,
       })
     }
+    const outcomeAt = new Date(Date.parse(startedAt) + durationMs).toISOString()
     if (status === 'failed') {
-      events.push(eventRecord('failure', 'Playwright 执行失败', 'failed', startedAt, durationMs))
+      const failure = reporterFailure(result)
+      events.push({
+        ...eventRecord('failure', failure.title, 'failed', outcomeAt, 0),
+        metadata: {
+          source: 'playwright_json_reporter',
+          retry: Number.isSafeInteger(retry) ? retry : 0,
+          failureKind: failure.kind,
+          ...(failure.location ? { location: failure.location } : {}),
+          ...(failure.locator ? { locator: failure.locator } : {}),
+        },
+      })
+    } else {
+      events.push({
+        ...eventRecord(
+          'runner',
+          status === 'passed' ? 'Playwright 测试通过' : 'Playwright 测试跳过',
+          status,
+          outcomeAt,
+          0,
+        ),
+        metadata: { source: 'playwright_json_reporter', retry: Number.isSafeInteger(retry) ? retry : 0 },
+      })
     }
-    events.push({
-      ...eventRecord(
-        'runner',
-        safeExecutionTitle(String(specs[0].title ?? entrySymbol), 'runner'),
-        status,
-        startedAt,
-        durationMs,
-      ),
-      metadata: { source: 'playwright_json_reporter', retry: Number.isSafeInteger(retry) ? retry : 0 },
-    })
   }
   return {
     events: events.map((event, index) => ({ ...event, sequence: index + 1 })),
@@ -361,6 +434,72 @@ function reporterStatus(value: unknown): ExecutionEventStatus {
   if (value === 'passed') return 'passed'
   if (value === 'skipped') return 'skipped'
   return 'failed'
+}
+
+function reporterFailure(result: Record<string, unknown>): {
+  title: string
+  kind: 'assertion' | 'timeout' | 'execution'
+  location?: { file: string; line: number; column: number }
+  locator?: { strategy: 'test_id'; value: string; operation?: string }
+} {
+  const messages = [result.error, ...(Array.isArray(result.errors) ? result.errors : [])]
+    .flatMap(value => {
+      if (!value || typeof value !== 'object') return []
+      const message = (value as Record<string, unknown>).message
+      return typeof message === 'string' ? [message] : []
+    })
+  const kind = messages.some(message => /(?:\bexpect\b|\bassert(?:ion)?\b|\bto(?:be|equal|match|contain|have|throw)\w*\s*\()/iu.test(message))
+    ? 'assertion' as const
+    : messages.some(message => /\btimeout|timed\s*out\b/iu.test(message))
+      ? 'timeout' as const
+      : 'execution' as const
+  const location = safeReporterLocation(result.errorLocation)
+  const locator = safeReporterLocator(messages)
+  return {
+    title: kind === 'assertion'
+      ? 'Playwright 断言失败'
+      : kind === 'timeout'
+        ? 'Playwright 执行超时'
+        : 'Playwright 执行失败',
+    kind,
+    ...(location ? { location } : {}),
+    ...(locator ? { locator } : {}),
+  }
+}
+
+function safeReporterLocator(messages: readonly string[]) {
+  for (const message of messages) {
+    const target = /waiting for getByTestId\((['"])([A-Za-z0-9._:-]{1,120})\1\)/u.exec(message)
+    if (!target) continue
+    const operation = /locator\.([A-Za-z][A-Za-z0-9]{0,50})\s*:/u.exec(message)?.[1]
+    return {
+      strategy: 'test_id' as const,
+      value: target[2],
+      ...(operation ? { operation } : {}),
+    }
+  }
+  return undefined
+}
+
+function safeReporterLocation(value: unknown) {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  const file = typeof record.file === 'string'
+    ? record.file.replaceAll('\\', '/').replace(/^\.\//u, '')
+    : ''
+  const line = Number(record.line)
+  const column = Number(record.column)
+  if (
+    !file
+    || file.startsWith('/')
+    || /^[A-Za-z]:\//u.test(file)
+    || file.split('/').includes('..')
+    || !Number.isSafeInteger(line)
+    || line < 1
+    || !Number.isSafeInteger(column)
+    || column < 1
+  ) return undefined
+  return { file: safeMetadataText(file, 500), line, column }
 }
 
 function eventRecord(
@@ -428,6 +567,118 @@ function safeMetadataText(value: string, maximum: number) {
   return value.replace(/[\u0000-\u001F\u007F]/gu, ' ').trim().slice(0, maximum)
 }
 
+export function applyPlaywrightTraceHttpObservations(
+  events: readonly RunnerExecutionEvent[],
+  observations: readonly PlaywrightTraceHttpObservation[],
+) {
+  const pending = new Map<string, PlaywrightTraceHttpObservation[]>()
+  for (const observation of observations) {
+    const key = httpObservationKey(observation.method, observation.path)
+    const values = pending.get(key) ?? []
+    values.push(observation)
+    pending.set(key, values)
+  }
+  return events.map(event => {
+    if (event.type !== 'http' || event.metadata?.httpStatus !== undefined) return event
+    const method = typeof event.metadata?.method === 'string' ? event.metadata.method : ''
+    const path = typeof event.metadata?.path === 'string' ? event.metadata.path : ''
+    const observation = pending.get(httpObservationKey(method, path))?.shift()
+    if (!observation) return event
+    return {
+      ...event,
+      title: `${observation.method} ${observation.path} · ${observation.status}`,
+      metadata: { ...event.metadata, httpStatus: observation.status },
+    }
+  })
+}
+
+async function readPlaywrightTraceHttpObservations(
+  runtimeRoot: string,
+  attachments: readonly PlaywrightJsonAttachment[],
+): Promise<PlaywrightTraceHttpObservation[]> {
+  const observations: PlaywrightTraceHttpObservation[] = []
+  for (const attachment of attachments) {
+    if (reporterAttachmentType(attachment) !== 'trace') continue
+    try {
+      const { actual, metadata } = await validatedReporterAttachment(runtimeRoot, attachment)
+      if (metadata.size > 64 * 1024 * 1024) continue
+      const archive = await JSZip.loadAsync(await readFile(actual))
+      const networkEntries = Object.values(archive.files)
+        .filter(entry => !entry.dir && /(?:^|\/)\d*-?trace\.network$/u.test(entry.name))
+        .sort((left, right) => left.name.localeCompare(right.name, 'en'))
+      for (const entry of networkEntries) {
+        const source = await readBoundedZipEntry(entry, 16 * 1024 * 1024)
+        for (const line of source.split(/\r?\n/u)) {
+          if (!line || line.length > 1024 * 1024) continue
+          const observation = traceHttpObservation(line)
+          if (observation) observations.push(observation)
+        }
+      }
+    } catch {
+      // Trace enrichment is best-effort. Attachment ingestion below remains
+      // authoritative and still rejects invalid paths or files.
+    }
+  }
+  return observations
+}
+
+async function readBoundedZipEntry(entry: JSZipObject, maximumBytes: number) {
+  const stream = entry.nodeStream('nodebuffer') as NodeJS.ReadableStream & { destroy?: () => void }
+  return await new Promise<string>((resolvePromise, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    let settled = false
+    stream.on('data', value => {
+      if (settled) return
+      const chunk = Buffer.from(value)
+      size += chunk.length
+      if (size > maximumBytes) {
+        settled = true
+        stream.destroy?.()
+        reject(new Error('TEST_EXECUTION_PLAYWRIGHT_TRACE_NETWORK_TOO_LARGE'))
+        return
+      }
+      chunks.push(chunk)
+    })
+    stream.once('error', error => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
+    stream.once('end', () => {
+      if (settled) return
+      settled = true
+      resolvePromise(Buffer.concat(chunks).toString('utf8'))
+    })
+  })
+}
+
+function traceHttpObservation(line: string): PlaywrightTraceHttpObservation | undefined {
+  let value: unknown
+  try { value = JSON.parse(line) } catch { return undefined }
+  if (!value || typeof value !== 'object') return undefined
+  const snapshot = (value as Record<string, unknown>).snapshot
+  if (!snapshot || typeof snapshot !== 'object') return undefined
+  const request = (snapshot as Record<string, unknown>).request
+  const response = (snapshot as Record<string, unknown>).response
+  if (!request || typeof request !== 'object' || !response || typeof response !== 'object') return undefined
+  const method = String((request as Record<string, unknown>).method ?? '').toUpperCase()
+  const rawUrl = (request as Record<string, unknown>).url
+  const status = Number((response as Record<string, unknown>).status)
+  if (!/^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/u.test(method) || typeof rawUrl !== 'string') return undefined
+  if (!Number.isSafeInteger(status) || status < 100 || status > 599) return undefined
+  try {
+    const path = safeMetadataText(new URL(rawUrl).pathname, 500)
+    return path ? { method, path, status } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function httpObservationKey(method: string, path: string) {
+  return `${method.toUpperCase()}\u0000${path}`
+}
+
 function safeTimestamp(value: unknown) {
   const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString()
@@ -442,16 +693,17 @@ async function ingestReporterAttachments(
   runtimeRoot: string,
   attachments: readonly PlaywrightJsonAttachment[],
   store: ExecutionArtifactStore,
+  secrets: readonly string[] = [],
 ): Promise<RunnerArtifactObject[]> {
   const actualRoot = await realpath(runtimeRoot)
   const results: RunnerArtifactObject[] = []
   for (const attachment of attachments) {
     const type = reporterAttachmentType(attachment)
     if (!type) continue
-    const target = resolve(runtimeRoot, attachment.path)
-    const [actual, metadata] = await Promise.all([realpath(target), lstat(target)])
-    if (!inside(actualRoot, actual) || !metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new Error('TEST_EXECUTION_PLAYWRIGHT_ATTACHMENT_INVALID')
+    const { actual, metadata } = await validatedReporterAttachment(runtimeRoot, attachment, actualRoot)
+    if (type === 'trace' && secrets.length) {
+      if (metadata.size > 64 * 1024 * 1024) continue
+      await redactTraceArchive(actual, secrets)
     }
     const stored = await store.put({
       body: createReadStream(actual),
@@ -461,6 +713,63 @@ async function ingestReporterAttachments(
     results.push({ ...stored, type })
   }
   return results
+}
+
+async function redactTraceArchive(path: string, secrets: readonly string[]) {
+  const values = [...new Set(secrets.filter(Boolean))]
+    .map(secret => Buffer.from(secret, 'utf8').toString('latin1'))
+    .sort((left, right) => right.length - left.length)
+  if (!values.length) return
+  const archive = await JSZip.loadAsync(await readFile(path))
+  for (const entry of Object.values(archive.files)) {
+    if (entry.dir) continue
+    const source = await entry.async('nodebuffer')
+    let redacted = source.toString('latin1')
+    for (const value of values) redacted = redacted.replaceAll(value, '<REDACTED>')
+    if (redacted !== source.toString('latin1')) {
+      archive.file(entry.name, Buffer.from(redacted, 'latin1'))
+    }
+  }
+  await writeFile(path, await archive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))
+}
+
+async function readRuntimeApiAuthorization(
+  statePath: string,
+  descriptor: RuntimeApiAuthorization,
+  baseUrl: string,
+) {
+  if (
+    descriptor.kind !== 'bearer_local_storage'
+    || descriptor.origin !== new URL(baseUrl).origin
+    || !/^[A-Za-z0-9._-]{1,200}$/u.test(descriptor.localStorageKey)
+  ) throw new Error('TEST_EXECUTION_API_AUTHORIZATION_INVALID')
+  const state = JSON.parse(await readFile(statePath, 'utf8')) as {
+    origins?: Array<{
+      origin?: unknown
+      localStorage?: Array<{ name?: unknown; value?: unknown }>
+    }>
+  }
+  const origin = state.origins?.find(value => String(value.origin ?? '') === descriptor.origin)
+  const entry = origin?.localStorage?.find(value => value.name === descriptor.localStorageKey)
+  const token = typeof entry?.value === 'string' ? entry.value.trim() : ''
+  if (!token || token.length > 64 * 1024 || /[\r\n]/u.test(token)) {
+    throw new Error('TEST_EXECUTION_API_AUTHORIZATION_INVALID')
+  }
+  return /^Bearer\s+/iu.test(token) ? token : `Bearer ${token}`
+}
+
+async function validatedReporterAttachment(
+  runtimeRoot: string,
+  attachment: PlaywrightJsonAttachment,
+  resolvedRoot?: string,
+) {
+  const actualRoot = resolvedRoot ?? await realpath(runtimeRoot)
+  const target = resolve(runtimeRoot, attachment.path)
+  const [actual, metadata] = await Promise.all([realpath(target), lstat(target)])
+  if (!inside(actualRoot, actual) || !metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error('TEST_EXECUTION_PLAYWRIGHT_ATTACHMENT_INVALID')
+  }
+  return { actual, metadata }
 }
 
 function reporterAttachmentType(attachment: PlaywrightJsonAttachment): RunnerArtifactObject['type'] | undefined {

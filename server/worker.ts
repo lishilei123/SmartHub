@@ -19,14 +19,22 @@ import type { TestExecutionService } from './application/test-execution-service.
 const workerId = process.env.SMARTHUB_WORKER_ID ?? `${hostname()}-${process.pid}`
 const leaseMs = positiveIntegerEnv('SMARTHUB_TASK_LEASE_MS', 60_000)
 const pollMs = positiveIntegerEnv('SMARTHUB_TASK_POLL_MS', 1_000)
-const concurrency = positiveIntegerEnv('SMARTHUB_WORKER_CONCURRENCY', 1)
+const workflowConcurrency = positiveIntegerEnv(
+  'SMARTHUB_WORKFLOW_CONCURRENCY',
+  positiveIntegerEnv('SMARTHUB_WORKER_CONCURRENCY', 1, 8),
+  8,
+)
+const testExecutionConcurrency = positiveIntegerEnv(
+  'SMARTHUB_TEST_EXECUTION_CONCURRENCY',
+  3,
+  8,
+)
 let stopping = false
 const activeControllers = new Set<AbortController>()
 let nextQueueIndex = 0
 
-async function processOne() {
+async function processWorkflowOne() {
   const queues = [
-    processTestExecutionOne,
     processTestDesignOne,
     processReviewOne,
     processKnowledgeOne,
@@ -296,26 +304,55 @@ async function run() {
     || !testExecutionService
   ) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
   await service.initialize()
-  console.log(`SmartHub Worker ${workerId} 已启动，并发度 ${concurrency}`)
+  console.log(
+    `SmartHub Worker ${workerId} 已启动，测试执行并发度 ${testExecutionConcurrency}，其余工作流并发度 ${workflowConcurrency}`,
+  )
   try {
-    while (!stopping) {
-      const results = await Promise.allSettled(Array.from({ length: concurrency }, () => processOne()))
-      const claimed = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
-      results.filter(result => result.status === 'rejected').forEach(result => console.error('知识库任务处理失败：', result.reason instanceof Error ? result.reason.message : result.reason))
-      if (!claimed.some(Boolean)) {
-        try {
-          if (stateStore.waitForTaskNotification) await stateStore.waitForTaskNotification(pollMs)
-          else await new Promise(resolve => setTimeout(resolve, pollMs))
-        } catch (error) {
-          console.error('知识库任务等待失败：', error instanceof Error ? error.message : error)
-        }
-      }
-    }
+    await Promise.all([
+      runLane('测试执行', testExecutionConcurrency, processTestExecutionOne),
+      runLane('工作流', workflowConcurrency, processWorkflowOne),
+    ])
   } finally {
     await Promise.all([
       stateStore.close?.(),
       testExecutionStore.close(),
     ])
+  }
+}
+
+async function runLane(
+  label: string,
+  slots: number,
+  processWork: () => Promise<boolean>,
+) {
+  await Promise.all(Array.from({ length: slots }, async () => {
+    while (!stopping) {
+      let claimed = false
+      try {
+        claimed = await processWork()
+      } catch (error) {
+        console.error(
+          `${label}任务处理失败：`,
+          error instanceof Error ? error.message : error,
+        )
+      }
+      if (!claimed && !stopping) await waitForWork(label)
+    }
+  }))
+}
+
+async function waitForWork(label: string) {
+  try {
+    if (stateStore.waitForTaskNotification) {
+      await stateStore.waitForTaskNotification(pollMs)
+    } else {
+      await new Promise(resolve => setTimeout(resolve, pollMs))
+    }
+  } catch (error) {
+    console.error(
+      `${label}任务等待失败：`,
+      error instanceof Error ? error.message : error,
+    )
   }
 }
 
@@ -328,11 +365,14 @@ if (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.
   run().catch(error => { console.error('SmartHub Worker 启动失败：', error instanceof Error ? error.message : error); process.exitCode = 1 })
 }
 
-function positiveIntegerEnv(name: string, fallback: number) {
+function positiveIntegerEnv(name: string, fallback: number, maximum?: number) {
   const raw = process.env[name]
   if (raw == null || raw === '') return fallback
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} 必须是正整数`)
+  if (maximum !== undefined && value > maximum) {
+    throw new Error(`${name} 不能大于 ${maximum}`)
+  }
   return value
 }
 

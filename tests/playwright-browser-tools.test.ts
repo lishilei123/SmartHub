@@ -10,6 +10,10 @@ import type {
   PlaywrightBrowserCliAdapter,
   PlaywrightCliRequestSummary,
 } from '../server/agent/ui-execution-agent.js'
+import {
+  normalizePlaywrightCliSnapshot,
+  resolvePlaywrightCliLaunch,
+} from '../server/agent/ui-execution-agent.js'
 import type { RawUiNetworkObservation } from '../server/application/test-execution-exploration.js'
 import {
   BROWSER_TOOL_IDS,
@@ -29,6 +33,7 @@ class FixtureBrowserCli implements PlaywrightBrowserCliAdapter {
   closed: string[] = []
   screenshotFilenames: string[] = []
   snapshotValue = 'url: https://example.test/app\n- button "提交" [ref=e1]\n- textbox "账号" [ref=e2]'
+  snapshotAfterClick?: string
   readonly summaries: PlaywrightCliRequestSummary[] = [
     { index: 1, method: 'POST', url: 'https://example.test/api/login?token=real-query', status: 200, resourceType: 'fetch' },
     { index: 2, method: 'GET', url: 'https://analytics.invalid/collect', status: 204, resourceType: 'xhr' },
@@ -45,7 +50,10 @@ class FixtureBrowserCli implements PlaywrightBrowserCliAdapter {
   }
   async close(session: string) { this.closed.push(session) }
   async snapshot() { return this.snapshotValue }
-  async click(_session: string, target: string) { return `clicked ${target}` }
+  async click(_session: string, target: string) {
+    if (this.snapshotAfterClick) this.snapshotValue = this.snapshotAfterClick
+    return `clicked ${target}`
+  }
   async fill(_session: string, target: string) { return `filled ${target}` }
   async generateLocator() { return `page.getByRole('button', { name: '提交' })` }
   async screenshot(
@@ -84,6 +92,68 @@ class FixtureBrowserCli implements PlaywrightBrowserCliAdapter {
 }
 
 const environmentSignature = 'a'.repeat(64)
+
+test('Playwright CLI 在 Windows 直接通过 node 启动已安装 CLI，避免 npx 派生窗口', () => {
+  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const cli = 'C:\\workspace\\node_modules\\@playwright\\cli\\playwright-cli.js'
+  const launch = resolvePlaywrightCliLaunch({
+    platform: 'win32',
+    execPath: node,
+    installedCliPath: cli,
+  })
+  assert.equal(launch.executable, node)
+  assert.deepEqual(launch.prefixArgs, [cli])
+})
+
+test('Playwright CLI 在 Windows 缺少本地依赖时通过 node 启动 npx-cli.js', () => {
+  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const npxCli = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js'
+  const launch = resolvePlaywrightCliLaunch({
+    platform: 'win32',
+    execPath: node,
+    installedCliPath: null,
+    pathExists: path => path === npxCli,
+  })
+  assert.equal(launch.executable, node)
+  assert.deepEqual(launch.prefixArgs, [npxCli, '--yes', '@playwright/cli@latest'])
+  assert.equal(launch.executable.endsWith('.cmd'), false)
+})
+
+test('Playwright CLI 在 Linux 使用无 shell 的原生 npx 启动方式', () => {
+  const launch = resolvePlaywrightCliLaunch({ platform: 'linux', installedCliPath: null })
+  assert.equal(launch.executable, 'npx')
+  assert.deepEqual(launch.prefixArgs, ['--yes', '@playwright/cli@latest'])
+})
+
+test('Playwright CLI 在 Windows 拒绝会创建命令解释器窗口的批处理启动器', () => {
+  assert.throws(
+    () => resolvePlaywrightCliLaunch({ platform: 'win32', command: 'playwright-cli.cmd' }),
+    /PLAYWRIGHT_CLI_WINDOWS_BATCH_LAUNCHER_FORBIDDEN/u,
+  )
+})
+
+test('Playwright CLI JSON Snapshot 保留控件语义并在进入 Runtime 前移除凭据', () => {
+  const snapshot = normalizePlaywrightCliSnapshot(JSON.stringify({
+    snapshot: [{
+      role: 'main', ref: 'e5', children: [{
+        role: 'generic', ref: 'e9', children: [
+          { role: 'textbox', name: '用户名', ref: 'e11', text: 'environment-user' },
+          { role: 'textbox', name: '密码', ref: 'e13', text: 'environment-secret' },
+          { role: 'button', name: '登录', ref: 'e14' },
+        ],
+      }],
+    }],
+  }, null, 2))
+  assert.match(snapshot, /textbox "用户名" \[ref=e11\]: <REDACTED>/u)
+  assert.match(snapshot, /textbox "密码" \[ref=e13\]: <REDACTED>/u)
+  assert.match(snapshot, /button "登录" \[ref=e14\]/u)
+  assert.doesNotMatch(snapshot, /environment-user|environment-secret/u)
+  const legacy = normalizePlaywrightCliSnapshot([
+    '- paragraph: 演示账号：admin / admin123',
+    '- textbox "密码" [ref=e13]: admin123',
+  ].join('\n'))
+  assert.doesNotMatch(legacy, /admin123|admin\s*\//u)
+})
 
 function execution(stage: BrowserToolStage = 'script_generation', taskId = 'task-browser-1') {
   const run = {
@@ -385,6 +455,47 @@ test('Auth Session Policy 只根据冻结 Case 语义区分业务复用、认证
   })
   assert.deepEqual(policy('角色切换', ['管理员已登录']), { mode: 'custom' })
   assert.deepEqual(policy('公开首页', []), { mode: 'fresh_anonymous' })
+})
+
+test('受保护 API Case 在 Runner 前从环境预填登录页建立受控 Run 登录态', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-api-auth-bootstrap-'))
+  try {
+    const cli = new FixtureBrowserCli()
+    cli.snapshotValue = normalizePlaywrightCliSnapshot(JSON.stringify({
+      url: 'https://example.test/login',
+      snapshot: [{ role: 'generic', ref: 'e9', children: [
+        { role: 'textbox', name: '用户名', ref: 'e11', text: 'environment-user' },
+        { role: 'textbox', name: '密码', ref: 'e13', text: 'environment-secret' },
+        { role: 'button', name: '登录', ref: 'e14' },
+      ] }],
+    }, null, 2))
+    cli.snapshotAfterClick = 'url: https://example.test/tasks\n- heading "任务"\n- button "新建任务" [ref=e20]'
+    const input = execution('script_generation', 'task-api-auth')
+    input.task.input.method = 'api'
+    input.task.input.caseContent = {
+      ...input.task.input.caseContent,
+      title: '拒绝任务非法状态枚举值且不改变已保存状态',
+      executionMethods: ['api'],
+      preconditions: ['已具备任务 API 调用条件'],
+      steps: ['调用任务 API'],
+      expectedResults: ['拒绝非法状态'],
+    }
+    const authPolicy = resolveAuthSessionPolicy(input.task.input)
+    assert.deepEqual(authPolicy, { mode: 'reuse_authenticated', role: 'default', stateKey: 'default' })
+    let committed = false
+    await new PlaywrightBrowserToolGateway(cli).prepareAuthenticatedState({
+      ...input,
+      authPolicy,
+      authState: {
+        savePath: join(root, 'default.json'),
+        commit: async () => { committed = true },
+      },
+    }, new AbortController().signal)
+    assert.equal(cli.saved.length, 1)
+    assert.equal(committed, true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('Browser Exploration 在 Run 内按 Role 复用状态，Repair 同策略，认证 Case 与其他 Run 不加载', async () => {

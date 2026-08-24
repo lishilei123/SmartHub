@@ -7,6 +7,7 @@ import type {
 import {
   assertExecutionPackageIntegrity,
 } from '../application/test-execution-validation.js'
+import type { RuntimeApiAuthorization } from '../application/test-execution-auth-session.js'
 import type {
   ExecutionSandbox,
   SandboxExecutionResult,
@@ -41,6 +42,10 @@ export interface PlaywrightRunner {
       entrySymbol: string
       /** Run-scoped ephemeral directory; excluded from snapshots and inheritance. */
       authStateRoot: string
+      /** Service-validated storageState for this frozen Case policy. */
+      authStatePath?: string
+      /** Runtime-only API authorization bridge; never contains the credential value. */
+      apiAuthorization?: RuntimeApiAuthorization
     }
   }, signal: AbortSignal): Promise<SandboxExecutionResult>
 }

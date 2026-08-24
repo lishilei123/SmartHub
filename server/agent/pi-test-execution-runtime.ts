@@ -22,6 +22,7 @@ import type {
   ExecutionTask,
   FrozenExecutionAgentSnapshot,
 } from '../domain/test-execution-types.js'
+import { agentDefinitionContentSha256 } from './planning-agent.js'
 import type {
   AgentConfigurationVersion,
   AgentModelReference,
@@ -281,7 +282,7 @@ export function buildTestExecutionAgentTask(
 ) {
   const workspace = input.workspace.documentWorkspace
   const explorationContext = input.workspace.workspaceFiles.find(
-    file => file.logicalPath === 'exploration/context.json',
+    file => file.logicalPath.endsWith('/exploration/context.json'),
   )
   return canonicalJson({
     schemaVersion: 'test-execution-agent-task/v2',
@@ -298,12 +299,12 @@ export function buildTestExecutionAgentTask(
     },
     workspace: {
       root: `/${workspace.rootLogicalPath ?? workspace.logicalPath}`,
-      activeBranch: workspace.activeBranchLogicalPath
-        ? `/${workspace.activeBranchLogicalPath}`
-        : undefined,
-      agentDirectory: workspace.agentLogicalPath
-        ? `/${workspace.agentLogicalPath}`
-        : undefined,
+      ...(workspace.activeBranchLogicalPath
+        ? { activeBranch: `/${workspace.activeBranchLogicalPath}` }
+        : {}),
+      ...(workspace.agentLogicalPath
+        ? { agentDirectory: `/${workspace.agentLogicalPath}` }
+        : {}),
       fileCount: input.workspace.workspaceFiles.length,
       ...(explorationContext ? {
         explorationContext: {
@@ -511,11 +512,8 @@ function validateFrozenConfiguration(
     || configuration.contentSha256 !== frozen.configurationSha256
     || configuration.agentDefinition.contentSha256 !== frozen.definitionSha256
   ) throw new Error('TEST_EXECUTION_AGENT_CONFIGURATION_DRIFT')
-  const {
-    contentSha256: definitionSha256,
-    ...definitionBase
-  } = configuration.agentDefinition
-  if (sha256(JSON.stringify(definitionBase)) !== definitionSha256) {
+  const definitionSha256 = configuration.agentDefinition.contentSha256
+  if (agentDefinitionContentSha256(configuration.agentDefinition) !== definitionSha256) {
     throw new Error('TEST_EXECUTION_AGENT_DEFINITION_HASH_INVALID')
   }
   const { snapshotSha256, ...snapshotBase } = frozen

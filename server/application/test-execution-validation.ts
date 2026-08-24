@@ -56,10 +56,10 @@ export const EXECUTION_TASK_TRANSITIONS: Readonly<Record<ExecutionTaskStatus, re
   diagnosing: ['repairing', 'failed', 'blocked', 'waiting_manual', 'cancelled'],
   repairing: ['ready', 'blocked', 'waiting_manual', 'cancelled'],
   passed: [],
-  failed: ['ready'],
-  blocked: ['ready'],
+  failed: ['pending', 'ready'],
+  blocked: ['pending', 'ready'],
   unsupported: [],
-  waiting_manual: ['ready'],
+  waiting_manual: ['pending', 'ready'],
   cancelled: [],
 }
 
@@ -307,13 +307,22 @@ export function scriptCacheKey(input: Omit<ScriptArtifact, 'id' | 'cacheKey' | '
   })
 }
 
-export function buildExecutionPackage(input: {
+type ExecutionPackageBuildInput = {
   candidate: ExecutionPackageCandidate
   task: FrozenExecutionTaskInput & { taskId: string }
   environmentSignature: string
   workspaceFiles?: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[]
   baselineAssertions?: readonly ExecutionAssertionContract[]
-}): ExecutionPackage {
+}
+
+export function buildExecutionPackage(input: ExecutionPackageBuildInput): ExecutionPackage {
+  return buildExecutionPackageWithPolicy(input, true)
+}
+
+function buildExecutionPackageWithPolicy(
+  input: ExecutionPackageBuildInput,
+  enforceInitialUiNavigation: boolean,
+): ExecutionPackage {
   if (!['ui', 'api'].includes(input.task.method)) {
     throw new TestExecutionValidationError('TEST_EXECUTION_METHOD_UNSUPPORTED', '不支持的方法不能创建执行包')
   }
@@ -340,6 +349,7 @@ export function buildExecutionPackage(input: {
     entry.content,
     input.task.executionSpec,
     input.task.caseId,
+    enforceInitialUiNavigation,
   )
   if (input.baselineAssertions) assertProtectedAssertions(input.baselineAssertions, assertions)
   const protectedAssertionSha256 = canonicalSha256(assertions)
@@ -395,7 +405,9 @@ export function assertExecutionPackageIntegrity(input: {
   environmentSignature: string
   expectedPackageSha256: string
 }) {
-  const rebuilt = buildExecutionPackage({
+  // Integrity replays immutable historical packages. New candidates and
+  // Workspace Bindings still pass through the current navigation gate.
+  const rebuilt = buildExecutionPackageWithPolicy({
     candidate: {
       entryFile: input.package.manifest.entrypoint,
       files: input.package.files
@@ -405,7 +417,7 @@ export function assertExecutionPackageIntegrity(input: {
     task: input.task,
     environmentSignature: input.environmentSignature,
     workspaceFiles: input.package.files,
-  })
+  }, false)
   if (
     canonicalSha256(rebuilt) !== canonicalSha256(input.package)
     || rebuilt.manifest.packageSha256 !== input.expectedPackageSha256
@@ -624,6 +636,7 @@ function validateEntrypointSource(
   source: string,
   executionSpec: TestCaseExecutionSpec,
   caseId: string,
+  enforceInitialUiNavigation: boolean,
 ): ExecutionAssertionContract[] {
   const ast = parseWorkspaceSource(source)
   const callback = entryTestCallback(ast, caseId)
@@ -636,6 +649,7 @@ function validateEntrypointSource(
   if (executionSpec.method === 'ui' && !fixtures.has('page')) {
     rejectSource('UI Case 必须使用 Playwright page 完成真实 UI 测试目标')
   }
+  if (executionSpec.method === 'ui' && enforceInitialUiNavigation) assertInitialUiNavigation(callback)
   const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null }>()
   walkAst(callback, (node) => {
     if (node.type === 'ExpressionStatement') {
@@ -670,6 +684,39 @@ function validateEntrypointSource(
       }),
     }
   })
+}
+
+function assertInitialUiNavigation(callback: Node) {
+  const pageBinding = callbackFixtureBinding(callback, 'page')
+  if (!pageBinding) rejectSource('UI Case 必须使用 Playwright page 完成真实 UI 测试目标')
+  let navigationPosition: number | undefined
+  let firstPageInteractionPosition: number | undefined
+  walkAst(callback, node => {
+    if (
+      node.type !== 'CallExpression'
+      || node.callee.type !== 'MemberExpression'
+      || node.callee.computed
+      || node.callee.object.type !== 'Identifier'
+      || node.callee.object.name !== pageBinding
+      || node.callee.property.type !== 'Identifier'
+    ) return
+    const method = node.callee.property.name
+    const position = node.start ?? Number.MAX_SAFE_INTEGER
+    if (method === 'goto') navigationPosition = Math.min(navigationPosition ?? position, position)
+    if (uiPageInteractionMethod(method)) {
+      firstPageInteractionPosition = Math.min(firstPageInteractionPosition ?? position, position)
+    }
+  })
+  if (navigationPosition === undefined || (
+    firstPageInteractionPosition !== undefined
+    && navigationPosition > firstPageInteractionPosition
+  )) {
+    rejectSource('UI Case 必须在读取 Locator 或执行页面交互前通过 page.goto(relativeUrl) 导航到当前 ExecutionRun BaseURL 下的页面')
+  }
+}
+
+function uiPageInteractionMethod(method: string) {
+  return /^(?:locator|frameLocator|getByAltText|getByLabel|getByPlaceholder|getByRole|getByTestId|getByText|getByTitle|click|dblclick|fill|press|pressSequentially|check|uncheck|selectOption|setChecked|setInputFiles|dragAndDrop|hover|focus|type|waitForSelector|waitForURL|reload|goBack|goForward)$/u.test(method)
 }
 
 function assertAuthIsolation(
@@ -873,6 +920,23 @@ function callbackFixtureNames(callback: Node) {
     if (name) result.add(name)
   }
   return result
+}
+
+function callbackFixtureBinding(callback: Node, fixtureName: string) {
+  if (
+    callback.type !== 'ArrowFunctionExpression'
+    && callback.type !== 'FunctionExpression'
+  ) return undefined
+  const parameter = callback.params[0]
+  if (parameter?.type !== 'ObjectPattern') return undefined
+  for (const property of parameter.properties) {
+    if (property.type !== 'ObjectProperty' || propertyName(property.key) !== fixtureName) continue
+    if (property.value.type === 'Identifier') return property.value.name
+    if (property.value.type === 'AssignmentPattern' && property.value.left.type === 'Identifier') {
+      return property.value.left.name
+    }
+  }
+  return undefined
 }
 
 function propertyName(node: Node) {

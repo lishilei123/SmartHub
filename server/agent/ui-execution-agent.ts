@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { win32 } from 'node:path'
 import {
   normalizeUiNetworkObservation,
   type RawUiNetworkObservation,
@@ -9,6 +12,8 @@ import type {
   ExecutionTask,
   HttpExplorationObservation,
 } from '../domain/test-execution-types.js'
+
+const requireFromModule = createRequire(import.meta.url)
 
 export type UiExecutionAgentPhase = 'implementation' | 'failure_analysis' | 'script_repair'
 
@@ -117,7 +122,9 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
     const session = `smarthub-${hash(`${input.run.id}:${input.task.id}`).slice(0, 24)}`
     try {
       await this.command(session, 'open', [input.baseUrl], signal)
-      const snapshot = await this.command(session, 'snapshot', [], signal)
+      const snapshot = normalizePlaywrightCliSnapshot(
+        await this.command(session, 'snapshot', [], signal),
+      )
       const title = input.task.input.caseContent.title.trim()
       const hint = title
         ? await this.command(session, 'find', [title], signal).catch(() => '')
@@ -174,7 +181,9 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
   }
 
   async snapshot(session: string, signal: AbortSignal) {
-    return this.command(session, 'snapshot', [], signal)
+    return normalizePlaywrightCliSnapshot(
+      await this.command(session, 'snapshot', [], signal),
+    )
   }
 
   /** Available to the capability agent when a discovered ref must be exercised. */
@@ -287,17 +296,18 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
     signal: AbortSignal,
     output: { json?: boolean } = {},
   ) {
-    const executable = this.options.command
+    const configuredCommand = this.options.command
       ?? process.env.SMARTHUB_PLAYWRIGHT_CLI_COMMAND
-      ?? (process.platform === 'win32' ? 'npx.cmd' : 'npx')
+    const launch = resolvePlaywrightCliLaunch({
+      ...(configuredCommand ? { command: configuredCommand } : {}),
+      ...(this.options.packageSpec ? { packageSpec: this.options.packageSpec } : {}),
+    })
     const actionArgs = [`-s=${session}`, action, ...args, ...(output.json === false ? [] : ['--json'])]
-    const command = this.options.command || process.env.SMARTHUB_PLAYWRIGHT_CLI_COMMAND
-      ? actionArgs
-      : ['--yes', this.options.packageSpec ?? '@playwright/cli@latest', ...actionArgs]
+    const command = [...launch.prefixArgs, ...actionArgs]
     const timeout = AbortSignal.timeout(this.options.timeoutMs ?? 60_000)
     const combined = AbortSignal.any([signal, timeout])
     return await new Promise<string>((resolve, reject) => {
-      const child = spawn(executable, command, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(launch.executable, command, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
       const stdout: Buffer[] = []
       const stderr: Buffer[] = []
       child.stdout?.on('data', value => stdout.push(Buffer.from(value)))
@@ -318,6 +328,161 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
         else resolve(output)
       })
     })
+  }
+}
+
+export function resolvePlaywrightCliLaunch(input: {
+  command?: string
+  packageSpec?: string
+  platform?: NodeJS.Platform
+  execPath?: string
+  npmExecPath?: string
+  installedCliPath?: string | null
+  pathExists?: (path: string) => boolean
+} = {}) {
+  const platform = input.platform ?? process.platform
+  const execPath = input.execPath ?? process.execPath
+  if (input.command) {
+    if (platform === 'win32' && /\.(?:cmd|bat)$/iu.test(input.command)) {
+      throw new Error('PLAYWRIGHT_CLI_WINDOWS_BATCH_LAUNCHER_FORBIDDEN')
+    }
+    if (platform === 'win32' && /\.(?:c?js|mjs)$/iu.test(input.command)) {
+      return { executable: execPath, prefixArgs: [input.command] }
+    }
+    return { executable: input.command, prefixArgs: [] as string[] }
+  }
+
+  const installedCliPath = input.installedCliPath === undefined
+    ? resolveInstalledPlaywrightCliPath()
+    : input.installedCliPath
+  if (!input.packageSpec && installedCliPath) {
+    return { executable: execPath, prefixArgs: [installedCliPath] }
+  }
+
+  const packageArgs = ['--yes', input.packageSpec ?? '@playwright/cli@latest']
+  if (platform !== 'win32') return { executable: 'npx', prefixArgs: packageArgs }
+
+  const npmExecPath = input.npmExecPath ?? process.env.npm_execpath
+  const pathExists = input.pathExists ?? existsSync
+  const candidates = [
+    ...(npmExecPath ? [win32.join(win32.dirname(npmExecPath), 'npx-cli.js')] : []),
+    win32.join(win32.dirname(execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js'),
+  ]
+  const npxCli = [...new Set(candidates)].find(pathExists)
+  if (!npxCli) throw new Error('PLAYWRIGHT_CLI_NPX_LAUNCHER_UNAVAILABLE')
+  return { executable: execPath, prefixArgs: [npxCli, ...packageArgs] }
+}
+
+function resolveInstalledPlaywrightCliPath() {
+  try {
+    return requireFromModule.resolve('@playwright/cli/playwright-cli.js')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The official CLI emits a structured JSON accessibility tree when `--json`
+ * is enabled. Runtime Browser governance consumes one control per line so the
+ * control role, label and ref must stay associated. Credential values are
+ * removed before the snapshot can enter Agent context.
+ */
+export function normalizePlaywrightCliSnapshot(output: string) {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output)
+  } catch {
+    return redactPlaywrightSnapshotText(output)
+  }
+  if (!parsed || typeof parsed !== 'object') return redactPlaywrightSnapshotText(output)
+  const record = parsed as Record<string, unknown>
+  if (typeof record.snapshot === 'string') return redactPlaywrightSnapshotText(record.snapshot)
+  const root = record.snapshot ?? parsed
+  const lines: string[] = []
+  const pageUrl = snapshotPageUrl(record)
+  if (pageUrl) lines.push(`url: ${pageUrl}`)
+  appendSnapshotNodes(root, lines, 0)
+  return lines.length ? lines.join('\n') : redactPlaywrightSnapshotText(output)
+}
+
+function redactPlaywrightSnapshotText(value: string) {
+  return value
+    .replace(
+      /((?:textbox|input)[^\r\n]*(?:账号|账户|用户名|邮箱|手机|密码|口令|username|user\s*name|email|phone|password|passcode)[^\r\n]*\]\s*:\s*)[^\r\n]+/giu,
+      '$1<REDACTED>',
+    )
+    .replace(
+      /((?:演示账号|示例账号|demo\s+account)\s*[:：]\s*)[^\r\n]+/giu,
+      '$1<REDACTED>',
+    )
+}
+
+function appendSnapshotNodes(value: unknown, lines: string[], depth: number) {
+  if (Array.isArray(value)) {
+    value.forEach(item => appendSnapshotNodes(item, lines, depth))
+    return
+  }
+  if (!value || typeof value !== 'object' || depth > 100) return
+  const node = value as Record<string, unknown>
+  const role = snapshotScalar(node.role ?? node.type)
+  const ref = typeof node.ref === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,100}$/u.test(node.ref)
+    ? node.ref
+    : undefined
+  const label = snapshotScalar(node.name ?? node.label ?? node.ariaLabel)
+  const text = snapshotScalar(node.value ?? node.text)
+  const isElement = Boolean(role && (ref || label || text))
+  if (isElement) {
+    const level = Number(node.level)
+    const valueText = snapshotDisplayValue(role!, label, text)
+    lines.push([
+      `${'  '.repeat(Math.min(depth, 40))}- ${role}`,
+      label ? ` ${JSON.stringify(label)}` : '',
+      Number.isSafeInteger(level) && level > 0 ? ` [level=${level}]` : '',
+      ref ? ` [ref=${ref}]` : '',
+      valueText ? `: ${valueText}` : '',
+    ].join(''))
+  }
+  if (node.children !== undefined) {
+    appendSnapshotNodes(node.children, lines, isElement ? depth + 1 : depth)
+    return
+  }
+  if (!isElement) {
+    Object.entries(node)
+      .filter(([key]) => !['url', 'pageUrl'].includes(key))
+      .forEach(([, child]) => appendSnapshotNodes(child, lines, depth))
+  }
+}
+
+function snapshotDisplayValue(role: string, label: string | undefined, text: string | undefined) {
+  if (!text || text === label) return undefined
+  if (
+    /^(?:textbox|input)$/iu.test(role)
+    && /(?:账号|账户|用户名|邮箱|手机|密码|口令|username|user\s*name|email|phone|password|passcode)/iu.test(label ?? '')
+  ) return '<REDACTED>'
+  if (/(?:演示账号|示例账号|demo\s+account|username.{0,20}password|账号.{0,20}密码)/iu.test(text)) {
+    return '<REDACTED>'
+  }
+  return text
+}
+
+function snapshotScalar(value: unknown) {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.replace(/[\u0000-\u001F\u007F]/gu, ' ').trim()
+  return normalized ? normalized.slice(0, 4_000) : undefined
+}
+
+function snapshotPageUrl(value: Record<string, unknown>) {
+  const direct = snapshotScalar(value.url ?? value.pageUrl)
+  const page = value.page && typeof value.page === 'object'
+    ? snapshotScalar((value.page as Record<string, unknown>).url)
+    : undefined
+  const candidate = direct ?? page
+  if (!candidate) return undefined
+  try {
+    const url = new URL(candidate)
+    return ['http:', 'https:'].includes(url.protocol) ? url.toString() : undefined
+  } catch {
+    return undefined
   }
 }
 

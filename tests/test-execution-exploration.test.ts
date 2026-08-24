@@ -7,6 +7,7 @@ import {
   createProjectVersionExplorationResult,
   normalizeUiNetworkObservation,
 } from '../server/application/test-execution-exploration.js'
+import { canonicalJson } from '../server/application/canonical-json.js'
 import { StateStoreTestExecutionKnowledgeResolver } from '../server/application/test-execution-knowledge.js'
 import {
   parsePlaywrightCliRequestDetail,
@@ -85,6 +86,30 @@ test('静态资源、Analytics 与 Telemetry 不进入正式 API Exploration Con
     { method: 'POST', url: 'https://example.test/analytics/collect', resourceType: 'fetch' },
     { method: 'POST', url: 'https://telemetry.example.test/v1/events', resourceType: 'xhr' },
   ]) assert.equal(normalizeUiNetworkObservation(candidate), null)
+})
+
+test('无请求体与响应体的 Exploration Result 可进入严格 Canonical JSON', () => {
+  const observation = normalizeUiNetworkObservation({
+    method: 'GET',
+    url: 'https://example.test/api/tasks?priority=high',
+    resourceType: 'xhr',
+    responseStatus: 204,
+    page: '/tasks',
+    action: 'select high priority',
+    actionType: 'select',
+    sequence: 1,
+  })!
+  const result = createProjectVersionExplorationResult({
+    projectVersionId: 'pv-v1',
+    sourceCaseId: 'TC_UI_PRIORITY_001',
+    environmentSignature,
+    observedAt: '2026-08-24T10:00:00.000Z',
+    observation,
+  })
+
+  assert.equal(Object.hasOwn(result, 'requestSchema'), false)
+  assert.equal(Object.hasOwn(result, 'responseSchema'), false)
+  assert.doesNotThrow(() => canonicalJson(result))
 })
 
 test('Playwright CLI requests/request 输出解析保留稳定请求序号与详情', () => {

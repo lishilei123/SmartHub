@@ -65,11 +65,6 @@ export function TestExecutionPage({
   if (!projectVersion) return <main className="te-shell"><section className="te-card te-page-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>正式用例库、Run、Task 与全部执行历史都按项目版本授权和隔离。</p><button className="te-primary" onClick={onManageVersions}>管理项目版本</button></section></main>
 
   return <main className="te-shell">
-    <header className="te-page-header">
-      <div className="te-page-title"><span><Play /></span><div><h1>测试执行</h1><p>{projectVersion.name} · Deterministic Service + governed Agents + Local Execution Workspace Runner</p></div></div>
-      <div className="te-boundary"><ShieldCheck /><span><small>执行边界</small><b>Agent candidate → Server validation → Runner</b></span></div>
-      <button className="te-secondary" onClick={onManageVersions}><Settings2 />项目版本</button>
-    </header>
     {model.error && <div className="te-global-error"><b>执行数据未完整加载</b><span>{model.error}</span><button onClick={() => void model.loadCollection()}><RefreshCw />重试</button></div>}
     <div className="te-layout">
       <ExecutionRunPanel

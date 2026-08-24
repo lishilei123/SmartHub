@@ -91,6 +91,7 @@ SmartHub 遵循以下职责边界：
 - Execution Binding 固定 `Case → entryFile → entrySymbol`，并校验 Case 内容、执行方式、入口和依赖闭包 Hash。
 - 有效 Binding 先执行；Binding 缺失或失效时，按 Existing Workspace、Exploration Context、Knowledge、受控 Browser Exploration 的顺序补齐实现信息。
 - Runner 只消费 Playwright JSON Reporter 的结构化结果，不把 Agent 自然语言过程或原始 CLI 输出当作执行证据。
+- HTTP Timeline 仅把 `test.step` 完成表达为“已返回”，并从 Playwright Trace 的结构化 Network 记录补充状态码；失败结果与 Screenshot/Trace/Video 产物各保留一个 Timeline 节点。
 
 ## 技术栈
 
@@ -122,6 +123,7 @@ SmartHub 遵循以下职责边界：
 ```powershell
 $ErrorActionPreference = 'Stop'
 npm ci
+npx playwright install chromium
 ```
 
 ### 2. 创建本地配置
@@ -202,6 +204,7 @@ npm run dev
 - 模型来源的 Base URL 与 API Key 作为配置值保存在数据库中；读取接口不会回显 API Key。生产环境必须限制数据库访问并使用受控备份。
 - Execution Workspace、Revision、Artifact 和 Exploration Context 不保存真实 Authorization、Cookie、Token、账号或原始请求/响应 Body。
 - Playwright 登录态仅存在于 Run-scoped 临时目录，运行终态后清理，也不会进入版本继承。
+- 普通受保护业务 Case 在 Runner 前由 Browser Gateway 复用或准备同源登录态；只有登录成功证据通过且 `storageState` 完成作用域校验后，Runner 才会加载。登录入口、受管凭据或成功证据缺失时，Task 在真实 Attempt 前进入人工处理，不会以匿名请求制造 401 和自动修复重试。
 - 开发启动身份不能替代生产认证；生产环境需要接入可信身份认证适配器。
 
 ## 生产构建与运行
@@ -236,14 +239,16 @@ npm run start:worker:dist
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run dev` | 同时启动 API、Worker 和 Vite Web。 |
+| `npm run dev` | 同时启动 watch 模式 API、稳定 Worker 和 Vite Web；Worker 不随源码变更重启。 |
 | `npm run dev:web` | 只启动 Web。 |
 | `npm run dev:api` | 以 watch 模式启动 API。 |
-| `npm run dev:worker` | 以 watch 模式启动 Worker。 |
+| `npm run dev:worker` | 启动稳定 Worker；应在没有运行中任务时手动重启以加载代码变更。 |
 | `npm test` | 运行 TypeScript 单元与服务测试。 |
 | `npm run test:postgres` | 运行 PostgreSQL 集成测试。 |
 | `npm run build` | 构建前端和服务端。 |
 | `npm run migrate` | 执行 PostgreSQL 迁移。 |
+
+Worker 将测试执行与需求分析、测试设计、知识库队列分成独立 lane。测试执行默认并发度为 3，其余工作流默认并发度为 1；可分别通过 `SMARTHUB_TEST_EXECUTION_CONCURRENCY` 和 `SMARTHUB_WORKFLOW_CONCURRENCY` 调整，允许范围均为 1–8。旧的 `SMARTHUB_WORKER_CONCURRENCY` 仅作为其余工作流并发度的兼容回退。并发度提升前应同时验证模型服务、Browser Host 和 PostgreSQL 容量。
 
 PostgreSQL 集成测试必须使用独立测试库，且数据库名称需要包含 `test`：
 

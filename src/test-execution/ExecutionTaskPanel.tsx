@@ -74,8 +74,8 @@ export function ExecutionTaskPanel({
           <Metric label="自动修复" value={`${task.value.task.repairCount}/2`} />
         </div>
         {task.value.task.status === 'unsupported' && <div className="te-state-message unsupported"><ShieldAlert /><span><b>V1 不支持此执行方法</b><small>{task.value.task.unsupportedReason}</small></span></div>}
-        {task.value.task.status === 'blocked' && <div className="te-state-message blocked"><FileWarning /><span><b>外部条件阻塞</b><small>{task.value.task.error}</small></span></div>}
-        {task.value.task.status === 'waiting_manual' && <div className="te-state-message waiting_manual"><AlertTriangle /><span><b>等待人工处理</b><small>{task.value.task.error ?? '自动修复已收口，历史不会被重置。'}</small></span></div>}
+        {task.value.task.status === 'blocked' && <div className="te-state-message blocked"><FileWarning /><span><b>外部条件阻塞</b><small>{executionErrorLabel(task.value.task.error)}</small></span></div>}
+        {task.value.task.status === 'waiting_manual' && <div className="te-state-message waiting_manual"><AlertTriangle /><span><b>等待人工处理</b><small>{executionErrorLabel(task.value.task.error) ?? '自动修复已收口，历史不会被重置。'}</small></span></div>}
         <nav className="te-tabs">
           <button className={tab === 'attempts' ? 'active' : ''} onClick={() => setTab('attempts')}>执行过程 <span>{task.value.events.length}</span></button>
           <button className={tab === 'diagnoses' ? 'active' : ''} onClick={() => setTab('diagnoses')}>诊断 <span>{task.value.diagnoses.length}</span></button>
@@ -123,12 +123,14 @@ function ExecutionEventTimeline({
   return <ol className={`te-execution-events ${method === 'api' ? 'api' : 'ui'}`}>
     {events.slice().sort((left, right) => left.sequence - right.sequence).map(event => {
       const linked = (event.artifactIds ?? []).flatMap(id => byId.get(id) ? [byId.get(id)!] : [])
-      return <li key={event.id} className={event.status}>
+      const visualStatus = event.type === 'http' && event.status === 'passed' ? 'observed' : event.status
+      return <li key={event.id} className={visualStatus}>
         <span className="te-event-rail"><EventIcon type={event.type} /></span>
         <div>
-          <header><b>{event.title}</b><em className={`te-status-pill ${event.status}`}>{eventStatusLabel(event.status)}</em></header>
+          <header><b>{event.title}</b><em className={`te-status-pill ${visualStatus}`}>{eventStatusLabel(event)}</em></header>
           {event.type === 'http' && <p className="te-http-summary"><strong>{event.metadata?.method}</strong><code>{event.metadata?.path}</code>{event.metadata?.httpStatus !== undefined && <span className={event.metadata.httpStatus >= 400 ? 'error' : ''}>{event.metadata.httpStatus}</span>}</p>}
           {event.metadata?.queryFields?.length ? <small>Query 字段：{event.metadata.queryFields.join('、')}</small> : null}
+          {event.metadata?.location ? <small>失败位置：{event.metadata.location.file}:{event.metadata.location.line}:{event.metadata.location.column}</small> : null}
           <small>{new Date(event.startedAt).toLocaleTimeString('zh-CN')}{event.durationMs !== undefined ? ` · ${event.durationMs} ms` : ''} · Playwright Reporter</small>
           {linked.length > 0 && <div className="te-event-artifacts">{linked.map(artifact => <a key={artifact.id} href={artifactUrl(artifact.id, artifact.type === 'screenshot' ? 'inline' : 'attachment')} target="_blank" rel="noreferrer"><ArtifactIcon type={artifact.type} />{artifact.type}</a>)}</div>}
         </div>
@@ -149,8 +151,9 @@ function EventIcon({ type }: { type: ExecutionTaskDetail['events'][number]['type
   return <Activity />
 }
 
-function eventStatusLabel(status: ExecutionTaskDetail['events'][number]['status']) {
-  return ({ running: '进行中', passed: '完成', failed: '失败', skipped: '跳过' })[status]
+function eventStatusLabel(event: ExecutionTaskDetail['events'][number]) {
+  if (event.type === 'http' && event.status === 'passed') return '已返回'
+  return ({ running: '进行中', passed: '完成', failed: '失败', skipped: '跳过' })[event.status]
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {
@@ -182,6 +185,19 @@ function diagnosisLabel(category: string) {
 
 function retryable(status: ExecutionTask['status']) {
   return ['failed', 'blocked', 'waiting_manual'].includes(status)
+}
+
+function executionErrorLabel(error?: string) {
+  if (!error) return undefined
+  const labels: Record<string, string> = {
+    BROWSER_AUTHENTICATION_ENTRY_NOT_FOUND: '当前执行环境没有可识别的同源登录入口，尚未启动 Runner。',
+    BROWSER_AUTHENTICATION_CREDENTIALS_REQUIRED: '登录页未提供受管的预填凭据；请先配置测试数据或 Runtime Secret，再人工重试。',
+    BROWSER_AUTHENTICATION_SUBMIT_AMBIGUOUS: '登录页存在多个候选提交入口，平台未擅自选择；请完善受管认证配置。',
+    BROWSER_AUTHENTICATION_NOT_ESTABLISHED: '已提交登录，但未观察到成功认证证据，登录态没有保存，Runner 未启动。',
+    TEST_EXECUTION_AUTH_STATE_PREPARATION_REQUIRED: '当前 Runtime 未配置受控 Browser Gateway，无法准备登录态。',
+    TEST_EXECUTION_AUTH_STATE_REQUIRED: '受保护用例缺少已校验的 Run 登录态，Runner 未启动。',
+  }
+  return labels[error] ?? error
 }
 
 function formatBytes(size: number) {

@@ -3,5 +3,6 @@ dist/
 dist-server/
 *.tsbuildinfo
 .vite/
+.playwright-cli/
 data/
 .env.local

@@ -326,6 +326,38 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.equal((await firstStore.getRun(exhaustedRunId))?.status, 'partial')
   const exhaustedStatus = await database.query<{ status: string }>('SELECT status FROM smarthub.test_execution_jobs WHERE id=$1', [exhaustedJobId])
   assert.equal(exhaustedStatus.rows[0]?.status, 'failed')
+
+  const blockedTask = required(await firstStore.getTask(exhaustedTaskId), '耗尽 Task 应存在')
+  const partialRun = required(await firstStore.getRun(exhaustedRunId), '耗尽 Run 应存在')
+  const manualRetryJob: ExecutionJob = {
+    ...job,
+    id: `${prefix}-exhausted-manual-retry-job`,
+    runId: exhaustedRunId,
+    taskId: exhaustedTaskId,
+    maxAttempts: 1,
+    request: {
+      kind: 'manual_retry',
+      idempotencyKey: `${prefix}-exhausted-manual-retry`,
+      requestedBy: 'integration-test',
+    },
+    createdAt: new Date(Date.now() + 450).toISOString(),
+    updatedAt: new Date(Date.now() + 450).toISOString(),
+  }
+  const retried = await firstStore.retryTask({
+    runId: exhaustedRunId,
+    taskId: exhaustedTaskId,
+    expectedRunStateVersion: partialRun.stateVersion,
+    expectedTaskStateVersion: blockedTask.stateVersion,
+    job: manualRetryJob,
+  })
+  assert.equal(retried.status, 'pending')
+  assert.equal(retried.currentScriptRevisionId, undefined)
+  assert.equal((await firstStore.getRun(exhaustedRunId))?.status, 'running')
+
+  const manualRetryClaim = required(await firstStore.claimJob('execution-worker-manual-retry', 60_000), '脚本生成前阻塞的人工重试应重新排队')
+  assert.equal(manualRetryClaim.id, manualRetryJob.id)
+  assert.equal(await firstStore.releaseJob(manualRetryJob.id, lease(manualRetryClaim), 0, 'provider still unavailable'), true)
+  assert.equal((await firstStore.getTask(exhaustedTaskId))?.status, 'blocked')
 })
 
 test('PostgreSQL 并发同请求只创建一个聚合并返回唯一键赢家', async () => {

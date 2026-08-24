@@ -53,6 +53,13 @@ export interface BrowserToolSession {
 }
 
 export interface BrowserToolGateway {
+  prepareAuthenticatedState(input: {
+    run: ExecutionRun
+    task: ExecutionTask
+    stage: BrowserToolStage
+    authPolicy: AuthSessionPolicy
+    authState: RuntimeAuthStateAccess
+  }, signal: AbortSignal): Promise<void>
   openSession(input: {
     run: ExecutionRun
     task: ExecutionTask
@@ -65,6 +72,32 @@ export interface BrowserToolGateway {
 export class PlaywrightBrowserToolGateway implements BrowserToolGateway {
   constructor(private readonly cli: PlaywrightBrowserCliAdapter) {}
 
+  async prepareAuthenticatedState(input: {
+    run: ExecutionRun
+    task: ExecutionTask
+    stage: BrowserToolStage
+    authPolicy: AuthSessionPolicy
+    authState: RuntimeAuthStateAccess
+  }, signal: AbortSignal) {
+    if (input.authPolicy.mode !== 'reuse_authenticated' || !input.authState.savePath) {
+      throw new Error('BROWSER_AUTH_STATE_PREPARATION_NOT_ALLOWED')
+    }
+    const session = await this.createSession(input, signal)
+    let primaryError: unknown
+    try {
+      await session.prepareAuthenticatedState(signal)
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      try {
+        await session.close()
+      } catch (error) {
+        if (!primaryError) throw error
+      }
+    }
+  }
+
   async openSession(input: {
     run: ExecutionRun
     task: ExecutionTask
@@ -73,6 +106,25 @@ export class PlaywrightBrowserToolGateway implements BrowserToolGateway {
     authState?: RuntimeAuthStateAccess
   }, signal: AbortSignal): Promise<BrowserToolSession> {
     if (input.task.input.method !== 'ui') throw new Error('BROWSER_TOOL_UI_CASE_REQUIRED')
+    const session = await this.createSession(input, signal)
+    try {
+      if (input.authPolicy.mode === 'reuse_authenticated' && input.authState?.loadPath) {
+        await session.prepareAuthenticatedState(signal)
+      }
+      return session
+    } catch (error) {
+      await session.close().catch(() => undefined)
+      throw error
+    }
+  }
+
+  private async createSession(input: {
+    run: ExecutionRun
+    task: ExecutionTask
+    stage: BrowserToolStage
+    authPolicy: AuthSessionPolicy
+    authState?: RuntimeAuthStateAccess
+  }, signal: AbortSignal) {
     if (input.task.runId !== input.run.id) throw new Error('BROWSER_TOOL_TASK_SCOPE_INVALID')
     const expectedAuthPolicy = resolveAuthSessionPolicy(input.task.input)
     if (
@@ -154,6 +206,33 @@ class ControlledBrowserToolSession implements BrowserToolSession {
 
   observations() {
     return structuredClone(this.observedNetwork)
+  }
+
+  async prepareAuthenticatedState(signal: AbortSignal) {
+    if (this.scope.authPolicy.mode !== 'reuse_authenticated') return
+    const snapshot = await this.refreshSnapshot(signal)
+    if (this.scope.authStateLoaded && authenticatedDestination(this.page, snapshot)) return
+    if (!authenticationEntry(this.page, snapshot)) {
+      throw new Error('BROWSER_AUTHENTICATION_ENTRY_NOT_FOUND')
+    }
+    if (!prefilledAuthenticationCredentials(snapshot)) {
+      throw new Error('BROWSER_AUTHENTICATION_CREDENTIALS_REQUIRED')
+    }
+    const targets = [...this.elementRefs.entries()]
+      .filter(([, line]) => authenticationSubmitControl(line))
+      .map(([target]) => target)
+    if (targets.length !== 1) throw new Error('BROWSER_AUTHENTICATION_SUBMIT_AMBIGUOUS')
+    const [target] = targets
+    this.authenticationCredentialFillObserved = true
+    await this.cli.click(this.sessionId, target, signal)
+    this.rememberAction(`click ${target}`, 'click')
+    this.authenticationSubmitObserved = true
+    await this.refreshSnapshot(signal)
+    await this.collectNetwork(signal)
+    if (
+      !authenticatedDestination(this.page, this.lastSnapshot)
+      || !(this.successfulAuthenticationObserved || this.stableAuthenticatedPageObserved)
+    ) throw new Error('BROWSER_AUTHENTICATION_NOT_ESTABLISHED')
   }
 
   async close() {
@@ -472,6 +551,7 @@ function sameOrigin(value: string, baseUrl: string) {
 function safeBrowserText(value: string, maximum: number) {
   return String(value ?? '')
     .slice(0, maximum)
+    .replace(/((?:textbox|input)[^\r\n]*(?:账号|账户|用户名|邮箱|手机|密码|口令|username|user\s*name|email|phone|password|passcode)[^\r\n]*\]\s*:\s*)[^\r\n]+/giu, '$1<REDACTED>')
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/giu, 'Bearer <REDACTED>')
     .replace(/\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '<REDACTED>')
     .replace(/\b(authorization|cookie|password|passwd|passcode|token|api[-_ ]?key|secret|session(?:[-_ ]?id)?|csrf(?:[-_ ]?token)?)\s*[:=]\s*[^\s,;]+/giu, '$1=<REDACTED>')
@@ -507,6 +587,26 @@ function authenticationEntry(page: string, snapshot: string) {
 
 function authenticationCredentialField(value: string) {
   return /(?:账号|账户|用户名|邮箱|手机|密码|口令|username|user\s*name|email|phone|password|passcode)/iu.test(value)
+}
+
+function authenticationSubmitControl(value: string) {
+  return /(?:button|link)[^\n]*(?:登录|sign[ -]?in|log[ -]?in)/iu.test(value)
+}
+
+function prefilledAuthenticationCredentials(snapshot: string) {
+  let identity = false
+  let secret = false
+  for (const line of snapshot.split(/\r?\n/u)) {
+    if (!/(?:textbox|input)/iu.test(line) || !prefilledControlValue(line)) continue
+    if (/(?:账号|账户|用户名|邮箱|手机|username|user\s*name|email|phone)/iu.test(line)) identity = true
+    if (/(?:密码|口令|password|passcode)/iu.test(line)) secret = true
+  }
+  return identity && secret
+}
+
+function prefilledControlValue(line: string) {
+  const value = /\]\s*:\s*(.+?)\s*$/u.exec(line)?.[1]?.trim()
+  return Boolean(value && !/^(?:empty|none|null|undefined|<empty>)$/iu.test(value))
 }
 
 function authenticationFailure(page: string, snapshot: string) {

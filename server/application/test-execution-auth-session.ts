@@ -33,6 +33,17 @@ export interface RuntimeAuthStateAccess {
 }
 
 /**
+ * Non-secret instructions for bridging an SPA localStorage token into
+ * Playwright's APIRequestContext. The token value remains in the Run-scoped
+ * storageState file and is read only inside the Runner process.
+ */
+export interface RuntimeApiAuthorization {
+  kind: 'bearer_local_storage'
+  origin: string
+  localStorageKey: string
+}
+
+/**
  * Determines browser authentication authority from the frozen TestCase only.
  * Agent output, Task order and an existing state file never influence policy.
  */
@@ -55,7 +66,7 @@ export function resolveAuthSessionPolicy(
     return { mode: 'isolated_role', role: role.role, stateKey: role.stateKey }
   }
   if (freshAuthenticationIntent(intent)) return { mode: 'fresh_anonymous' }
-  if (authenticatedPrecondition(preconditions)) {
+  if (authenticatedPrecondition(preconditions) || governedApiAccessPrecondition(preconditions)) {
     return { mode: 'reuse_authenticated', role: role.role, stateKey: role.stateKey }
   }
   return { mode: 'fresh_anonymous' }
@@ -71,6 +82,10 @@ function normalizedIntent(values: readonly string[]) {
 
 function authenticatedPrecondition(value: string) {
   return /(?:已登录|登录状态|已认证|authenticated|signed[ -]?in|logged[ -]?in)/iu.test(value)
+}
+
+function governedApiAccessPrecondition(value: string) {
+  return /(?:已|已经)?具备.{0,40}(?:api|接口).{0,20}(?:调用|访问)(?:条件|权限|能力)/iu.test(value)
 }
 
 function freshAuthenticationIntent(value: string) {

@@ -2866,6 +2866,141 @@ const migrations: Migration[] = [{
       BEFORE INSERT ON smarthub.test_execution_runs
       FOR EACH ROW EXECUTE FUNCTION smarthub.validate_test_execution_run_agents_insert();
   `,
+}, {
+  version: 38,
+  name: 'allow-pre-script-test-execution-manual-retry',
+  sql: `
+    CREATE OR REPLACE FUNCTION smarthub.validate_test_execution_task_write()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE allowed boolean := false;
+    BEGIN
+      IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_IMMUTABLE';
+      END IF;
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.state_version <> 0 OR NEW.runner_attempt_count <> 0
+          OR NEW.same_script_retry_count <> 0 OR NEW.repair_count <> 0
+          OR NEW.current_script_revision_id IS NOT NULL
+          OR (NEW.method IN ('ui','api') AND NEW.status <> 'pending')
+          OR (NEW.method NOT IN ('ui','api') AND NEW.status <> 'unsupported') THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_TASK_INITIAL_STATE_INVALID';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1
+          FROM smarthub.test_execution_runs run
+          JOIN smarthub.test_execution_handoff_members handoff_member
+            ON handoff_member.handoff_id=run.handoff_id
+           AND handoff_member.stage=NEW.frozen_input->>'stage'
+           AND handoff_member.ordinal=NEW.ordinal
+          JOIN smarthub.test_case_library_version_members library_member
+            ON library_member.version_id=run.test_case_library_version_id
+           AND library_member.case_id=NEW.case_id
+          WHERE run.id=NEW.run_id
+            AND handoff_member.source_version_id=NEW.source_version_id
+            AND handoff_member.case_id=NEW.case_id
+            AND handoff_member.case_revision=NEW.case_revision
+            AND handoff_member.method=NEW.method
+            AND handoff_member.dedup_key=NEW.dedup_key
+            AND handoff_member.dimension=NEW.dimension
+            AND handoff_member.execution_spec=NEW.frozen_input->'executionSpec'
+            AND handoff_member.traceability IS NOT DISTINCT FROM NEW.frozen_input->'traceability'
+            AND handoff_member.readiness_override IS NOT DISTINCT FROM NEW.frozen_input->'readinessOverride'
+            AND handoff_member.content_sha256=NEW.case_content_sha256
+            AND library_member.case_revision=NEW.case_revision
+            AND library_member.content_sha256=NEW.case_content_sha256
+            AND library_member.frozen_content=NEW.frozen_input->'caseContent'
+            AND library_member.traceability IS NOT DISTINCT FROM NEW.frozen_input->'traceability'
+            AND NEW.frozen_input->>'taskId'=NEW.id
+            AND NEW.frozen_input->>'runId'=NEW.run_id
+            AND NEW.frozen_input->>'inputSha256'=NEW.input_sha256
+            AND NEW.frozen_input->>'sourceVersionId'=NEW.source_version_id
+            AND (NEW.frozen_input->>'ordinal')::integer=NEW.ordinal
+            AND NEW.frozen_input->>'dedupKey'=NEW.dedup_key
+            AND NEW.frozen_input->>'caseId'=NEW.case_id
+            AND (NEW.frozen_input->>'caseRevision')::integer=NEW.case_revision
+            AND NEW.frozen_input->>'method'=NEW.method
+            AND NEW.frozen_input->>'dimension'=NEW.dimension
+            AND NEW.frozen_input->>'caseContentSha256'=NEW.case_content_sha256
+            AND NEW.frozen_input->>'executionSpecSha256'=NEW.execution_spec_sha256
+        ) THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_TASK_SOURCE_MISMATCH';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF ROW(
+        NEW.run_id,NEW.ordinal,NEW.dedup_key,NEW.source_version_id,NEW.case_id,
+        NEW.case_revision,NEW.method,NEW.dimension,NEW.case_content_sha256,
+        NEW.execution_spec_sha256,NEW.input_sha256,NEW.created_at,NEW.frozen_input
+      ) IS DISTINCT FROM ROW(
+        OLD.run_id,OLD.ordinal,OLD.dedup_key,OLD.source_version_id,OLD.case_id,
+        OLD.case_revision,OLD.method,OLD.dimension,OLD.case_content_sha256,
+        OLD.execution_spec_sha256,OLD.input_sha256,OLD.created_at,OLD.frozen_input
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_SNAPSHOT_IMMUTABLE';
+      END IF;
+      IF NEW.state_version <> OLD.state_version + 1 THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_STATE_VERSION_INVALID';
+      END IF;
+      IF OLD.status IN ('passed','unsupported','cancelled') OR NEW.status=OLD.status THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_INVALID';
+      END IF;
+      allowed := CASE OLD.status
+        WHEN 'pending' THEN NEW.status IN ('script_generating','ready','unsupported','blocked','cancelled')
+        WHEN 'script_generating' THEN NEW.status IN ('ready','blocked','waiting_manual','cancelled')
+        WHEN 'ready' THEN NEW.status IN ('running','blocked','waiting_manual','cancelled')
+        WHEN 'running' THEN NEW.status IN ('ready','passed','retrying','diagnosing','blocked','waiting_manual','cancelled')
+        WHEN 'retrying' THEN NEW.status IN ('running','blocked','cancelled')
+        WHEN 'diagnosing' THEN NEW.status IN ('repairing','failed','blocked','waiting_manual','cancelled')
+        WHEN 'repairing' THEN NEW.status IN ('ready','blocked','waiting_manual','cancelled')
+        WHEN 'failed' THEN NEW.status='ready' OR (NEW.status='pending' AND OLD.current_script_revision_id IS NULL)
+        WHEN 'blocked' THEN NEW.status='ready' OR (NEW.status='pending' AND OLD.current_script_revision_id IS NULL)
+        WHEN 'waiting_manual' THEN NEW.status='ready' OR (NEW.status='pending' AND OLD.current_script_revision_id IS NULL)
+        ELSE false
+      END;
+      IF NOT allowed THEN RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_INVALID'; END IF;
+      IF OLD.status='running' AND NEW.status='ready' AND NOT EXISTS (
+        SELECT 1 FROM smarthub.test_execution_attempts
+        WHERE task_id=NEW.id
+          AND ordinal=NEW.runner_attempt_count
+          AND status='infrastructure_error'
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_INFRASTRUCTURE_RETRY_REQUIRED';
+      END IF;
+      IF NEW.runner_attempt_count < OLD.runner_attempt_count
+        OR NEW.runner_attempt_count > OLD.runner_attempt_count + 1
+        OR NEW.same_script_retry_count < OLD.same_script_retry_count
+        OR NEW.same_script_retry_count > OLD.same_script_retry_count + 1
+        OR NEW.repair_count < OLD.repair_count
+        OR NEW.repair_count > OLD.repair_count + 1
+        OR (NEW.runner_attempt_count > OLD.runner_attempt_count AND NEW.status <> 'running')
+        OR (NEW.same_script_retry_count > OLD.same_script_retry_count AND NEW.status <> 'running')
+        OR (NEW.repair_count > OLD.repair_count AND NEW.status <> 'ready') THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_COUNTER_INVALID';
+      END IF;
+      IF NEW.current_script_revision_id IS DISTINCT FROM OLD.current_script_revision_id
+        AND NEW.status <> 'ready' THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_SCRIPT_REVISION_INVALID';
+      END IF;
+      IF NEW.status IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled') THEN
+        IF EXISTS (
+          SELECT 1 FROM smarthub.test_execution_attempts
+          WHERE task_id=NEW.id AND status='running'
+        ) THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_TASK_HAS_RUNNING_ATTEMPT';
+        END IF;
+        IF NEW.status='passed' AND NOT EXISTS (
+          SELECT 1 FROM smarthub.test_execution_attempts
+          WHERE task_id=NEW.id
+            AND script_revision_id=NEW.current_script_revision_id
+            AND status='passed'
+        ) THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_TASK_PASSED_ATTEMPT_REQUIRED';
+        END IF;
+      END IF;
+      RETURN NEW;
+    END $$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

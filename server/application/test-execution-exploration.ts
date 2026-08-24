@@ -155,8 +155,8 @@ function assertSafeObservation(input: HttpExplorationObservation): HttpExplorati
   if (!normalized) throw new Error('TEST_EXECUTION_EXPLORATION_RESULT_INVALID')
   // Existing shapes are descriptors, not captured bodies; preserve them after
   // validating that they contain only the allowlisted schema vocabulary.
-  normalized.requestSchema = input.requestSchema ? validateSchema(input.requestSchema) : undefined
-  normalized.responseSchema = input.responseSchema ? validateSchema(input.responseSchema) : undefined
+  if (input.requestSchema) normalized.requestSchema = validateSchema(input.requestSchema)
+  if (input.responseSchema) normalized.responseSchema = validateSchema(input.responseSchema)
   normalized.queryParams = [...new Set(input.queryParams.map(safeFieldName))]
     .sort((left, right) => left.localeCompare(right, 'en'))
   normalized.confidence = Number(input.confidence)

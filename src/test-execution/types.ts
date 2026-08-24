@@ -252,6 +252,12 @@ export type ExecutionEvent = {
     httpStatus?: number
     queryFields?: string[]
     retry?: number
+    failureKind?: 'assertion' | 'timeout' | 'execution'
+    location?: {
+      file: string
+      line: number
+      column: number
+    }
   }
 }
 

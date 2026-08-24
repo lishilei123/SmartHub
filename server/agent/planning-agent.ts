@@ -105,5 +105,47 @@ export function createAgentDefinitionVersion(input: {
     toolsetContentSha256: toolsetContentHash(input.tools),
     skillBindings: structuredClone(input.skills ?? []), enabledSkills: (input.skills ?? []).filter(item => item.enabled).map(item => item.skillKey), mcpBindings: structuredClone(input.mcps ?? []), toolIds: input.tools.map(item => item.split('@')[0]), limits: input.limits,
   }
-  return { ...value, contentSha256: createHash('sha256').update(JSON.stringify(value)).digest('hex') }
+  return { ...value, contentSha256: agentDefinitionContentSha256(value) }
+}
+
+export function agentDefinitionContentSha256(
+  definition: AgentDefinitionVersion | Omit<AgentDefinitionVersion, 'contentSha256'>,
+) {
+  // PostgreSQL jsonb does not preserve object-key insertion order. Rebuild the
+  // published definition shape before hashing so a read-back cannot turn an
+  // unchanged immutable definition into false configuration drift.
+  const value = {
+    agentKey: definition.agentKey,
+    agentType: definition.agentType,
+    version: definition.version,
+    status: definition.status,
+    modelScene: definition.modelScene,
+    resultSchemaVersion: definition.resultSchemaVersion,
+    systemPrompt: definition.systemPrompt,
+    taskTemplate: definition.taskTemplate,
+    promptRef: {
+      promptKey: definition.promptRef.promptKey,
+      version: definition.promptRef.version,
+      contentSha256: definition.promptRef.contentSha256,
+    },
+    toolsetVersion: definition.toolsetVersion,
+    toolsetContentSha256: definition.toolsetContentSha256,
+    skillBindings: definition.skillBindings.map(binding => ({
+      skillKey: binding.skillKey,
+      version: binding.version,
+      enabled: binding.enabled,
+      configurationHash: binding.configurationHash,
+    })),
+    enabledSkills: definition.enabledSkills,
+    mcpBindings: definition.mcpBindings.map(binding => ({
+      serverKey: binding.serverKey,
+      version: binding.version,
+      enabled: binding.enabled,
+      toolIds: binding.toolIds,
+      policyHash: binding.policyHash,
+    })),
+    toolIds: definition.toolIds,
+    limits: definition.limits,
+  }
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
