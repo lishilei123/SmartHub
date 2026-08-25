@@ -38,6 +38,8 @@ export interface CaseExecutionBinding {
   dependencyFiles: Array<Pick<ExecutionPackageFile, 'path' | 'contentSha256'>>
   dependencySha256: string
   caseContentSha256: string
+  /** Validator policy that admitted this implementation. Missing means legacy. */
+  validationPolicyVersion?: 'execution-binding-validation/v2'
   createdAt: string
   updatedAt: string
   inheritedFromProjectVersionId?: string
@@ -75,18 +77,20 @@ export class LocalExecutionWorkspaceStore {
     return { projectVersionId, root, files, contentSha256: sha256(JSON.stringify(files.map(file => [file.path, file.contentSha256]))) }
   }
 
-  async resolveBinding(projectVersionId: string, caseId: string) {
+  async resolveBinding(
+    projectVersionId: string,
+    caseId: string,
+    executionType: CaseExecutionBinding['executionType'],
+  ) {
     const root = await this.ensure(projectVersionId)
-    const bindingPath = join(root, 'bindings', `${bindingName(caseId)}.json`)
-    let binding: CaseExecutionBinding
-    try {
-      binding = JSON.parse(await readFile(bindingPath, 'utf8')) as CaseExecutionBinding
-    } catch {
-      return null
-    }
-    if (binding.projectVersionId !== projectVersionId || binding.caseId !== caseId) return null
+    const resolved = await this.readBinding(root, projectVersionId, caseId, executionType)
+    if (!resolved) return null
+    let { binding } = resolved
     try {
       binding = normalizeBinding(binding)
+      if (resolved.legacyPath) {
+        await this.migrateLegacyBinding(root, binding, resolved.legacyPath)
+      }
       const dependencies = await Promise.all(binding.dependencyFiles.map(async file => ({
         path: file.path,
         contentSha256: sha256(await this.readWorkspaceFile(root, file.path)),
@@ -130,6 +134,7 @@ export class LocalExecutionWorkspaceStore {
   async writeBindingFiles(
     projectVersionId: string,
     caseId: string,
+    executionType: CaseExecutionBinding['executionType'],
     files: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[],
   ) {
     const root = await this.ensure(projectVersionId)
@@ -144,7 +149,10 @@ export class LocalExecutionWorkspaceStore {
       } catch {
         continue
       }
-      if (binding.projectVersionId !== projectVersionId || binding.caseId === caseId) continue
+      if (
+        binding.projectVersionId !== projectVersionId
+        || binding.caseId === caseId && binding.executionType === executionType
+      ) continue
       for (const dependency of binding.dependencyFiles) {
         const candidateSha256 = candidates.get(dependency.path)
         if (candidateSha256 && candidateSha256 !== dependency.contentSha256) {
@@ -158,10 +166,8 @@ export class LocalExecutionWorkspaceStore {
   async saveBinding(binding: CaseExecutionBinding) {
     const root = await this.ensure(binding.projectVersionId)
     const safe = normalizeBinding(binding)
-    const target = join(root, 'bindings', `${bindingName(safe.caseId)}.json`)
-    const temporary = `${target}.${process.pid}.tmp`
-    await writeFile(temporary, JSON.stringify(safe, null, 2), { encoding: 'utf8' })
-    await rename(temporary, target)
+    await this.writeBinding(root, safe)
+    await this.removeMatchingLegacyBinding(root, safe)
     return safe
   }
 
@@ -197,7 +203,10 @@ export class LocalExecutionWorkspaceStore {
           )
           if (
             existing.projectVersionId === safeBinding.projectVersionId
-            && existing.caseId !== safeBinding.caseId
+            && (
+              existing.caseId !== safeBinding.caseId
+              || existing.executionType !== safeBinding.executionType
+            )
           ) otherBindings.push(existing)
         } catch {
           // Invalid historical Binding files remain isolated from publication.
@@ -254,15 +263,17 @@ export class LocalExecutionWorkspaceStore {
   async setBindingStatus(
     projectVersionId: string,
     caseId: string,
+    executionType: CaseExecutionBinding['executionType'],
     status: ExecutionBindingStatus,
   ) {
     const root = await this.ensure(projectVersionId)
-    const bindingPath = join(root, 'bindings', `${bindingName(caseId)}.json`)
-    const binding = JSON.parse(await readFile(bindingPath, 'utf8')) as CaseExecutionBinding
-    if (binding.projectVersionId !== projectVersionId || binding.caseId !== caseId) {
-      throw new Error('TEST_EXECUTION_BINDING_SCOPE_INVALID')
+    const resolved = await this.readBinding(root, projectVersionId, caseId, executionType)
+    if (!resolved) throw new Error('TEST_EXECUTION_BINDING_SCOPE_INVALID')
+    const binding = normalizeBinding(resolved.binding)
+    if (resolved.legacyPath) {
+      await this.migrateLegacyBinding(root, binding, resolved.legacyPath)
     }
-    return this.persistBindingStatus(normalizeBinding(binding), status)
+    return this.persistBindingStatus(binding, status)
   }
 
   /** Run-scoped, non-versioned state used only by Playwright fixtures. */
@@ -520,6 +531,75 @@ export class LocalExecutionWorkspaceStore {
       .map(entry => join(directory, entry.name))
   }
 
+  private async readBinding(
+    root: string,
+    projectVersionId: string,
+    caseId: string,
+    executionType: CaseExecutionBinding['executionType'],
+  ): Promise<{ binding: CaseExecutionBinding; legacyPath?: string } | null> {
+    const currentPath = join(root, 'bindings', `${bindingName(caseId, executionType)}.json`)
+    const legacyPath = join(root, 'bindings', `${legacyBindingName(caseId)}.json`)
+    for (const path of [currentPath, legacyPath]) {
+      let binding: CaseExecutionBinding
+      try {
+        binding = JSON.parse(await readFile(path, 'utf8')) as CaseExecutionBinding
+      } catch {
+        continue
+      }
+      if (
+        binding.projectVersionId !== projectVersionId
+        || binding.caseId !== caseId
+        || binding.executionType !== executionType
+      ) continue
+      return {
+        binding,
+        ...(path === legacyPath ? { legacyPath } : {}),
+      }
+    }
+    return null
+  }
+
+  private async writeBinding(root: string, binding: CaseExecutionBinding) {
+    const target = join(
+      root,
+      'bindings',
+      `${bindingName(binding.caseId, binding.executionType)}.json`,
+    )
+    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
+    await writeFile(temporary, JSON.stringify(binding, null, 2), { encoding: 'utf8' })
+    await rename(temporary, target)
+  }
+
+  private async migrateLegacyBinding(
+    root: string,
+    binding: CaseExecutionBinding,
+    legacyPath: string,
+  ) {
+    await this.withMutation(binding.projectVersionId, async () => {
+      await this.writeBinding(root, binding)
+      await rm(legacyPath, { force: true })
+    })
+  }
+
+  private async removeMatchingLegacyBinding(
+    root: string,
+    binding: CaseExecutionBinding,
+  ) {
+    const legacyPath = join(root, 'bindings', `${legacyBindingName(binding.caseId)}.json`)
+    try {
+      const legacy = normalizeBinding(
+        JSON.parse(await readFile(legacyPath, 'utf8')) as CaseExecutionBinding,
+      )
+      if (
+        legacy.projectVersionId === binding.projectVersionId
+        && legacy.caseId === binding.caseId
+        && legacy.executionType === binding.executionType
+      ) await rm(legacyPath, { force: true })
+    } catch {
+      // A missing, malformed or other-method legacy Binding remains isolated.
+    }
+  }
+
   private async explorationFiles(root: string) {
     const directory = join(root, 'exploration')
     return (await readdir(directory, { withFileTypes: true }))
@@ -575,6 +655,8 @@ function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
     || binding.entrySymbol !== executionEntrySymbol(binding.caseId)
     || !/^[a-f0-9]{64}$/u.test(binding.entrySha256)
     || !/^[a-f0-9]{64}$/u.test(binding.caseContentSha256)
+    || binding.validationPolicyVersion !== undefined
+      && binding.validationPolicyVersion !== 'execution-binding-validation/v2'
     || !dependencyFiles.length
     || new Set(dependencyFiles.map(file => file.path.toLocaleLowerCase())).size !== dependencyFiles.length
     || dependencyFiles.some(file => !/^[a-f0-9]{64}$/u.test(file.contentSha256))
@@ -597,7 +679,10 @@ export function executionBindingDependencySha256(
   return sha256(JSON.stringify(files.map(file => [file.path, file.contentSha256])))
 }
 
-function bindingName(caseId: string) { return sha256(caseId).slice(0, 32) }
+function bindingName(caseId: string, executionType: CaseExecutionBinding['executionType']) {
+  return sha256(`${caseId}\u0000${executionType}`).slice(0, 32)
+}
+function legacyBindingName(caseId: string) { return sha256(caseId).slice(0, 32) }
 function explorationName(result: ProjectVersionExplorationResult) {
   return explorationContextKey(result, result.environmentSignature).slice(0, 48)
 }

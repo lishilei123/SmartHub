@@ -22,8 +22,19 @@ import { LocalExecutionWorkspaceStore } from '../server/infrastructure/execution
 import {
   applyPlaywrightTraceHttpObservations,
   LocalWorkspaceRunner,
+  localPlaywrightConfig,
   parsePlaywrightJsonReport,
 } from '../server/runner/local-workspace-runner.js'
+
+test('LocalWorkspaceRunner 固定无头执行浏览器', () => {
+  const config = localPlaywrightConfig(
+    'C:\\workspace',
+    'C:\\output',
+    'C:\\output\\report.json',
+  )
+  assert.match(config, /headless: true/u)
+  assert.doesNotMatch(config, /headed: true/u)
+})
 
 test('LocalWorkspaceRunner 使用当前 Run baseUrl 真实执行 Playwright request fixture API Case', async () => {
   const observed: Array<{ method?: string; url?: string; host?: string }> = []
@@ -387,7 +398,7 @@ test('Playwright JSON Reporter 生成结构化 UI/API/失败事件并脱敏敏�
             status: 'failed',
             startTime: '2026-08-23T08:00:00.000Z',
             duration: 42,
-            errors: [{ message: 'Error: expect(received).toBeTruthy()' }],
+            errors: [{ message: 'Error: expect(received).toBeTruthy()\nAuthorization: Bearer real-token\npassword=secret-value\nC:\\Users\\Alice\\repo\\tests\\api\\orders.spec.ts:27:5' }],
             errorLocation: { file: 'tests/api/orders.spec.ts', line: 27, column: 5 },
             steps: [
               { category: 'test.step', title: 'GET /api/tasks', duration: 3 },
@@ -443,10 +454,22 @@ test('Playwright JSON Reporter 生成结构化 UI/API/失败事件并脱敏敏�
       source: 'playwright_json_reporter',
       retry: 1,
       failureKind: 'assertion',
+      message: 'Error: expect(received).toBeTruthy() Authorization=<REDACTED> password=<REDACTED> <workspace>/tests/api/orders.spec.ts:27:5',
       location: { file: 'tests/api/orders.spec.ts', line: 27, column: 5 },
     },
   })
   assert.doesNotMatch(JSON.stringify(report.events), /secret-value|super-secret/u)
+
+  const templatedHttp = applyPlaywrightTraceHttpObservations([{
+    sequence: 1,
+    type: 'http',
+    title: 'PATCH /api/tasks/:id',
+    status: 'failed',
+    startedAt: '2026-08-23T08:00:00.000Z',
+    metadata: { method: 'PATCH', path: '/api/tasks/:id' },
+  }], [{ method: 'PATCH', path: '/api/tasks/task-1', status: 422 }])
+  assert.equal(templatedHttp[0].title, 'PATCH /api/tasks/:id · 422')
+  assert.equal(templatedHttp[0].metadata?.httpStatus, 422)
 
   const timeout = parsePlaywrightJsonReport({
     suites: [{

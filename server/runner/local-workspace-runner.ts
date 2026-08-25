@@ -17,6 +17,7 @@ import { assertExecutionPackageIntegrity } from '../application/test-execution-v
 import type { ExecutionEnvironmentSecretResolver, PlaywrightRunner } from './playwright-runner.js'
 import type { RunnerArtifactObject, SandboxExecutionResult } from './execution-sandbox.js'
 import type { ExecutionArtifactStore } from '../infrastructure/execution-artifact-store.js'
+import { withWindowsHiddenNodeChildren } from './windows-child-process.js'
 
 /** Local runner for the ProjectVersion-owned automation workspace. */
 export class LocalWorkspaceRunner implements PlaywrightRunner {
@@ -151,7 +152,8 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         shell: false,
         windowsHide: true,
         env: {
-          ...infrastructureEnvironment(),
+          ...withWindowsHiddenNodeChildren(infrastructureEnvironment()),
+          PLAYWRIGHT_HTML_OPEN: 'never',
           SMARTHUB_BASE_URL: input.environment.baseUrl,
           ...secretEnvironment,
           ...(runtimeApiAuthorization
@@ -281,7 +283,7 @@ export function localPlaywrightConfig(
     "const baseURL = process.env.SMARTHUB_BASE_URL",
     "if (!baseURL) throw new Error('TEST_EXECUTION_BASE_URL_REQUIRED')",
     ...runtimeAuthorization,
-    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, trace: 'retain-on-failure', screenshot: 'only-on-failure'${storageState}${extraHttpHeaders} } }`,
+    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, headless: true, trace: 'retain-on-failure', screenshot: 'only-on-failure'${storageState}${extraHttpHeaders} } }`,
     '',
   ].join('\n')
 }
@@ -383,6 +385,7 @@ export function parsePlaywrightJsonReport(value: unknown, entrySymbol: string): 
           source: 'playwright_json_reporter',
           retry: Number.isSafeInteger(retry) ? retry : 0,
           failureKind: failure.kind,
+          ...(failure.message ? { message: failure.message } : {}),
           ...(failure.location ? { location: failure.location } : {}),
           ...(failure.locator ? { locator: failure.locator } : {}),
         },
@@ -443,6 +446,7 @@ function reporterStatus(value: unknown): ExecutionEventStatus {
 function reporterFailure(result: Record<string, unknown>): {
   title: string
   kind: 'assertion' | 'timeout' | 'execution'
+  message?: string
   location?: { file: string; line: number; column: number }
   locator?: { strategy: 'test_id'; value: string; operation?: string }
 } {
@@ -459,6 +463,7 @@ function reporterFailure(result: Record<string, unknown>): {
       : 'execution' as const
   const location = safeReporterLocation(result.errorLocation)
   const locator = safeReporterLocator(messages)
+  const message = safeReporterFailureMessage(messages)
   return {
     title: kind === 'assertion'
       ? 'Playwright 断言失败'
@@ -466,9 +471,30 @@ function reporterFailure(result: Record<string, unknown>): {
         ? 'Playwright 执行超时'
         : 'Playwright 执行失败',
     kind,
+    ...(message ? { message } : {}),
     ...(location ? { location } : {}),
     ...(locator ? { locator } : {}),
   }
+}
+
+function safeReporterFailureMessage(messages: readonly string[]) {
+  const message = messages.find(value => value.trim())
+  if (!message) return undefined
+  const redacted = message
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
+    .replace(/[A-Za-z]:\\[^\r\n]*/gu, redactReporterLocalPath)
+    .replace(/\bBearer\s+[^\s,;]+/giu, 'Bearer <REDACTED>')
+    .replace(
+      /\b(authorization|cookie|set-cookie|password|token|api[_ -]?key|secret)\b\s*[:=]\s*[^\r\n,;]+/giu,
+      '$1=<REDACTED>',
+    )
+  return safeMetadataText(redacted, 1_200) || undefined
+}
+
+function redactReporterLocalPath(value: string) {
+  const normalized = value.replaceAll('\\', '/')
+  const workspacePath = normalized.lastIndexOf('/tests/')
+  return workspacePath >= 0 ? `<workspace>${normalized.slice(workspacePath)}` : '<local-path>'
 }
 
 function safeReporterLocator(messages: readonly string[]) {
@@ -575,25 +601,33 @@ export function applyPlaywrightTraceHttpObservations(
   events: readonly RunnerExecutionEvent[],
   observations: readonly PlaywrightTraceHttpObservation[],
 ) {
-  const pending = new Map<string, PlaywrightTraceHttpObservation[]>()
-  for (const observation of observations) {
-    const key = httpObservationKey(observation.method, observation.path)
-    const values = pending.get(key) ?? []
-    values.push(observation)
-    pending.set(key, values)
-  }
+  const pending = observations.slice()
   return events.map(event => {
     if (event.type !== 'http' || event.metadata?.httpStatus !== undefined) return event
     const method = typeof event.metadata?.method === 'string' ? event.metadata.method : ''
     const path = typeof event.metadata?.path === 'string' ? event.metadata.path : ''
-    const observation = pending.get(httpObservationKey(method, path))?.shift()
+    const index = pending.findIndex(observation => traceHttpObservationMatches(method, path, observation))
+    const observation = index >= 0 ? pending.splice(index, 1)[0] : undefined
     if (!observation) return event
     return {
       ...event,
-      title: `${observation.method} ${observation.path} · ${observation.status}`,
+      title: `${method.toUpperCase()} ${path} · ${observation.status}`,
       metadata: { ...event.metadata, httpStatus: observation.status },
     }
   })
+}
+
+function traceHttpObservationMatches(
+  method: string,
+  path: string,
+  observation: PlaywrightTraceHttpObservation,
+) {
+  if (method.toUpperCase() !== observation.method.toUpperCase()) return false
+  if (path === observation.path) return true
+  const expected = path.split('/').filter(Boolean)
+  const actual = observation.path.split('/').filter(Boolean)
+  return expected.length === actual.length && expected.every((segment, index) =>
+    segment.startsWith(':') || /^\{[^{}]+\}$/u.test(segment) || segment === actual[index])
 }
 
 async function readPlaywrightTraceHttpObservations(
@@ -677,10 +711,6 @@ function traceHttpObservation(line: string): PlaywrightTraceHttpObservation | un
   } catch {
     return undefined
   }
-}
-
-function httpObservationKey(method: string, path: string) {
-  return `${method.toUpperCase()}\u0000${path}`
 }
 
 function safeTimestamp(value: unknown) {

@@ -21,6 +21,7 @@ import {
 } from '../server/application/test-execution-workspace-provider.js'
 import {
   assertTaskTransition,
+  CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
   freezeExecutionTaskInput,
 } from '../server/application/test-execution-validation.js'
 import type {
@@ -59,6 +60,7 @@ import type {
   TestExecutionHandoffMember,
 } from '../server/domain/test-design-types.js'
 import {
+  executionArtifactBody,
   LocalExecutionArtifactStore,
 } from '../server/infrastructure/execution-artifact-store.js'
 import {
@@ -123,6 +125,16 @@ test('状态检查 [${caseId}]', async ({ page }) => {
   await expect(page.locator('[data-testid="${locator}"]')).toHaveText('Ready')
 })
 `
+}
+
+function workspaceRelativePath(
+  workspace: TestExecutionAgentRuntimeInput['workspace'],
+  logicalPath: string,
+) {
+  const root = (workspace.documentWorkspace.rootLogicalPath
+    ?? workspace.documentWorkspace.logicalPath).replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  const normalized = logicalPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  return normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized
 }
 
 function apiScriptSource(caseId: string) {
@@ -770,9 +782,56 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
       policyVersion: 'test-execution-workspace/v1',
       packageSha256: canonicalSha256(candidate),
       batches: [],
-      toolReads: [],
+      toolReads: input.stage === 'failure_diagnosis'
+        ? input.workspace.workspaceFiles
+            .map(file => ({
+              file,
+              relativePath: workspaceRelativePath(input.workspace, file.logicalPath),
+            }))
+            .filter(({ relativePath }) =>
+              relativePath === 'attempts.json'
+              || relativePath === 'events.json'
+              || relativePath.startsWith('evidence/') && !this.options.omitDiagnosticLogRead)
+            .map(({ file, relativePath }, index) => ({
+              toolCallId: `fixture-workspace-read-${index}`,
+              toolId: 'workspace.read_file' as const,
+              relativePath,
+              contentHash: file.contentSha256,
+              startLine: 1,
+              endLine: Math.max(1, file.content.split('\n').length),
+              assetVersionIds: [],
+              chunkIds: [],
+            }))
+        : input.stage === 'script_generation'
+          && input.task.input.method === 'api'
+          && input.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/exploration/context.json'))
+          ? [{
+              toolCallId: 'fixture-api-contract-read',
+              toolId: 'workspace.read_file' as const,
+              relativePath: 'exploration/context.json',
+              contentHash: 'fixture-contract',
+              startLine: 1,
+              endLine: 1,
+              assetVersionIds: [],
+              chunkIds: [],
+            }]
+          : [],
+      knowledgeReads: input.stage === 'script_generation'
+        && input.task.input.method === 'api'
+        && !input.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/exploration/context.json'))
+        ? [{
+            toolCallId: 'fixture-knowledge-contract-read',
+            toolId: 'knowledge.read_chunk' as const,
+            chunkId: 'fixture-api-contract',
+            assetVersionId: 'fixture-api-contract-version',
+            logicalPath: 'api/openapi.json',
+            sourceScope: 'knowledge_reference' as const,
+            contentHash: 'fixture-contract',
+            indexVersionId: 'fixture-index',
+          }]
+        : [],
     })
-    assert.equal(validated.valid, true)
+    assert.equal(validated.valid, true, JSON.stringify(validated.issues))
     return {
       schemaVersion,
       candidate,
@@ -977,6 +1036,8 @@ async function withService(
     rejectMaintenanceProposalWrites?: boolean
     runtimeFailure?: string
     browserAuthBootstrap?: boolean
+    diagnosticLog?: string
+    omitDiagnosticLogRead?: boolean
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-service-'))
@@ -985,7 +1046,17 @@ async function withService(
     const store = new InMemoryExecutionStore(value)
     store.rejectMaintenanceProposalWrites = options.rejectMaintenanceProposalWrites ?? false
     const artifactStore = new LocalExecutionArtifactStore(root)
-    const runner = new SequenceRunner(results)
+    const preparedResults = structuredClone(results)
+    if (options.diagnosticLog) {
+      const failed = preparedResults.find(result => result.status === 'failed')
+      assert.ok(failed)
+      const stored = await artifactStore.put({
+        body: executionArtifactBody(options.diagnosticLog),
+        mimeType: 'text/plain; charset=utf-8',
+      })
+      failed.artifacts = [...failed.artifacts, { ...stored, type: 'log' }]
+    }
+    const runner = new SequenceRunner(preparedResults)
     const runtime = new ScriptAgentRuntime(value.run.agents, options)
     const playwrightCli = new FixturePlaywrightCliAdapter(
       options.playwrightCliAvailable,
@@ -1073,6 +1144,7 @@ test('已有有效 API Execution Binding 时 Execute First 直接运行 request 
       dependencyFiles,
       dependencySha256: executionBindingDependencySha256(dependencyFiles),
       caseContentSha256: store.task.input.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z',
       updatedAt: '2026-08-13T12:00:00.000Z',
     })
@@ -1087,6 +1159,46 @@ test('已有有效 API Execution Binding 时 Execute First 直接运行 request 
       'api/auth-client.ts',
       entryFile,
     ])
+  }, { workspace: true })
+})
+
+test('旧 API Binding 缺少当前契约验证策略时失效并重新进入 Agent Implement', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '重新生成 API 入口通过', artifacts: [] },
+  ], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    store.task = { ...store.task, input: frozenApiInput() }
+    const entryFile = 'tests/api/legacy-login.spec.ts'
+    const entrySource = apiScriptSource(store.task.input.caseId)
+    const dependencyFiles = [
+      { path: 'api/auth-client.ts', contentSha256: createHash('sha256').update(apiClientSource, 'utf8').digest('hex') },
+      { path: entryFile, contentSha256: createHash('sha256').update(entrySource, 'utf8').digest('hex') },
+    ]
+    await workspace.writeFiles(store.run.projectVersionId, [
+      { path: 'api/auth-client.ts', content: apiClientSource },
+      { path: entryFile, content: entrySource },
+    ])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId,
+      caseId: store.task.input.caseId,
+      executionType: 'api',
+      entryFile,
+      entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'validated',
+      entrySha256: dependencyFiles[1].contentSha256,
+      dependencyFiles,
+      dependencySha256: executionBindingDependencySha256(dependencyFiles),
+      caseContentSha256: store.task.input.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z',
+      updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.deepEqual(runtime.calls.map(call => call.stage), ['script_generation'])
+    const rebound = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'api')
+    assert.equal(rebound?.validationPolicyVersion, CURRENT_EXECUTION_BINDING_VALIDATION_POLICY)
+    assert.equal(rebound?.entryFile, governedExecutionEntryFile(store.task.input))
   }, { workspace: true })
 })
 
@@ -1116,6 +1228,7 @@ test('拒绝任务非法状态枚举值且不改变已保存状态 [${store.task
       entrySha256,
       ...singleFileBindingDependency(entryFile, entrySource),
       caseContentSha256: store.task.input.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z',
       updatedAt: '2026-08-13T12:00:00.000Z',
     })
@@ -1201,6 +1314,109 @@ test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAge
   }, { workspace: true })
 })
 
+test('同一 Case 的 UI/API Binding 跨 Run 同时 Execute First，不互相覆盖', async () => {
+  await withService([
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: 'UI Binding 通过', artifacts: [] },
+    { status: 'passed', exitCode: 0, durationMs: 3, summary: 'API Binding 通过', artifacts: [] },
+  ], async ({ service, store, runner, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const caseId = store.task.input.caseId
+    const projectVersionId = store.run.projectVersionId
+    const dualCaseContent: TestCaseContent = {
+      ...caseContent,
+      executionMethods: ['ui', 'api'],
+    }
+    const dualContentSha256 = canonicalSha256(dualCaseContent)
+    const inputFor = (method: 'ui' | 'api') => freezeExecutionTaskInput({
+      libraryMember: {
+        ...libraryMember,
+        caseId,
+        contentSha256: dualContentSha256,
+        frozenContent: dualCaseContent,
+      },
+      handoffMember: {
+        ...handoffMember,
+        caseId,
+        method,
+        dedupKey: `${caseId}:1:${method}`,
+        contentSha256: dualContentSha256,
+        executionSpec: {
+          schemaVersion: 'test-script-input/v1',
+          method,
+          testCase: dualCaseContent,
+        },
+      },
+    })
+    const uiInput = inputFor('ui')
+    const apiInput = inputFor('api')
+    store.task = { ...store.task, input: uiInput }
+    const uiEntry = 'tests/ui/status.spec.ts'
+    const apiEntry = 'tests/api/status.spec.ts'
+    const apiSource = apiScriptSource(caseId)
+    const apiDependencies = [
+      { path: 'api/auth-client.ts', contentSha256: createHash('sha256').update(apiClientSource, 'utf8').digest('hex') },
+      { path: apiEntry, contentSha256: createHash('sha256').update(apiSource, 'utf8').digest('hex') },
+    ]
+    await workspace.writeFiles(store.run.projectVersionId, [
+      { path: uiEntry, content: source },
+      { path: 'api/auth-client.ts', content: apiClientSource },
+      { path: apiEntry, content: apiSource },
+    ])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId, caseId, executionType: 'ui',
+      entryFile: uiEntry, entrySymbol: `[${caseId}]`, bindingStatus: 'validated',
+      entrySha256: createHash('sha256').update(source, 'utf8').digest('hex'),
+      ...singleFileBindingDependency(uiEntry, source),
+      caseContentSha256: uiInput.caseContentSha256,
+      createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId, caseId, executionType: 'api',
+      entryFile: apiEntry, entrySymbol: `[${caseId}]`, bindingStatus: 'validated',
+      entrySha256: apiDependencies[1].contentSha256,
+      dependencyFiles: apiDependencies,
+      dependencySha256: executionBindingDependencySha256(apiDependencies),
+      caseContentSha256: apiInput.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
+      createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
+    })
+
+    const uiTask = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(uiTask.status, 'passed')
+
+    const next = fixture()
+    store.run = {
+      ...next.run,
+      id: 'run-dual-method-api',
+      projectVersionId,
+      idempotencyKey: 'idempotency-dual-method-api',
+    }
+    store.task = {
+      ...next.task,
+      id: 'task-dual-method-api',
+      runId: store.run.id,
+      input: apiInput,
+    }
+    store.job = {
+      ...next.job,
+      id: 'job-dual-method-api',
+      runId: store.run.id,
+      taskId: store.task.id,
+    }
+    const apiTask = await service.processPreparedTask(
+      store.job,
+      lease,
+      new AbortController().signal,
+    )
+
+    assert.equal(apiTask.status, 'passed')
+    assert.deepEqual(runtime.calls, [])
+    assert.deepEqual(runner.calls.map(call => call.package.manifest.method), ['ui', 'api'])
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, caseId, 'ui'))?.entryFile, uiEntry)
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, caseId, 'api'))?.entryFile, apiEntry)
+  }, { workspace: true })
+})
+
 test('继承 Binding 真实通过后升级 validated，真实失败不自动判 invalid', async () => {
   const bindInheritedEntry = async (
     workspace: LocalExecutionWorkspaceStore,
@@ -1231,7 +1447,7 @@ test('继承 Binding 真实通过后升级 validated，真实失败不自动判 
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
     assert.equal(task.status, 'passed')
     assert.deepEqual(runtime.calls, [])
-    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'))?.bindingStatus, 'validated')
   }, { workspace: true })
 
   await withService([
@@ -1241,11 +1457,11 @@ test('继承 Binding 真实通过后升级 validated，真实失败不自动判 
     await bindInheritedEntry(workspace, store)
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
     assert.equal(task.status, 'failed')
-    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'needs_validation')
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'))?.bindingStatus, 'needs_validation')
   }, { workspace: true, diagnosisCategory: 'product_defect' })
 })
 
-test('Binding 方法不匹配先标记 invalid，再由 Agent 生成独立有效入口', async () => {
+test('Binding 按执行方法独立复用，缺少当前方法时由 Agent 生成且保留另一方法', async () => {
   await withService([
     { status: 'passed', exitCode: 0, durationMs: 8, summary: '新入口通过', artifacts: [] },
   ], async ({ service, store, runtime, job, workspace }) => {
@@ -1267,15 +1483,16 @@ test('Binding 方法不匹配先标记 invalid，再由 Agent 生成独立有效
     })
     const recordedStatuses: string[] = []
     const original = workspace.setBindingStatus.bind(workspace)
-    workspace.setBindingStatus = async (projectVersionId, caseId, status) => {
+    workspace.setBindingStatus = async (projectVersionId, caseId, executionType, status) => {
       recordedStatuses.push(status)
-      return original(projectVersionId, caseId, status)
+      return original(projectVersionId, caseId, executionType, status)
     }
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
     assert.equal(task.status, 'passed')
-    assert.equal(recordedStatuses[0], 'invalid')
+    assert.deepEqual(recordedStatuses, [])
     assert.equal(runtime.calls.some(call => call.stage === 'script_generation'), true)
-    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'))?.bindingStatus, 'validated')
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'api'))?.bindingStatus, 'needs_validation')
   }, { workspace: true })
 })
 
@@ -1303,9 +1520,9 @@ test('旧 UI Binding 缺少初始导航时先失效再由 Agent 重新生成', a
     })
     const recordedStatuses: string[] = []
     const original = workspace.setBindingStatus.bind(workspace)
-    workspace.setBindingStatus = async (projectVersionId, caseId, status) => {
+    workspace.setBindingStatus = async (projectVersionId, caseId, executionType, status) => {
       recordedStatuses.push(status)
-      return original(projectVersionId, caseId, status)
+      return original(projectVersionId, caseId, executionType, status)
     }
 
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
@@ -1313,7 +1530,7 @@ test('旧 UI Binding 缺少初始导航时先失效再由 Agent 重新生成', a
     assert.equal(task.status, 'passed')
     assert.equal(recordedStatuses[0], 'invalid')
     assert.equal(runtime.calls.some(call => call.stage === 'script_generation'), true)
-    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'))?.bindingStatus, 'validated')
   }, { workspace: true })
 })
 
@@ -1342,8 +1559,39 @@ test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷�
     assert.equal(store.diagnoses[0].recommendedAction, '记录产品缺陷，不进入脚本修复 Stage')
     assert.equal(store.diagnoses[0].attemptIds[0], store.attempts[0].id)
     assert.equal(store.diagnoses[0].evidence[0].attemptId, store.attempts[0].id)
+    const evidence = runtime.calls[0].workspace.workspaceFiles.find(file =>
+      workspaceRelativePath(runtime.calls[0].workspace, file.logicalPath).startsWith('evidence/'))
+    assert.ok(evidence)
+    assert.match(evidence.content, /Received: false/u)
+    assert.doesNotMatch(evidence.content, /runtime-only-token/u)
+    assert.doesNotMatch(evidence.content, /Users\\Alice/u)
     assert.equal((await workspace.readEntry(store.run.projectVersionId, { entryFile: 'tests/ui/status.spec.ts' })), source)
-  }, { workspace: true, diagnosisCategory: 'product_defect' })
+  }, {
+    workspace: true,
+    diagnosisCategory: 'product_defect',
+    diagnosticLog: 'Error: expect(received).toBeTruthy()\nReceived: false\nAuthorization: Bearer runtime-only-token\nC:\\Users\\Alice\\repo\\tests\\ui\\status.spec.ts:8:3\n',
+  })
+})
+
+test('失败诊断缺少日志读取时返回终态 Attempt 的实际 evidence 路径', async () => {
+  await withService([
+    { status: 'failed', exitCode: 1, durationMs: 8, summary: '业务断言失败', error: 'expected Ready', artifacts: [] },
+  ], async ({ service, job }) => {
+    await assert.rejects(
+      service.processPreparedTask(job, lease, new AbortController().signal),
+      error => {
+        const message = error instanceof Error ? error.message : String(error)
+        assert.match(message, /evidence\/attempt-1\/runner-test_execution_artifact_[a-f0-9]+\.log/u)
+        assert.doesNotMatch(message, /<terminal-attempt-runner-log>/u)
+        return true
+      },
+    )
+  }, {
+    workspace: true,
+    diagnosisCategory: 'product_defect',
+    diagnosticLog: 'Error: expect(received).toBeTruthy()\nReceived: false\n',
+    omitDiagnosticLogRead: true,
+  })
 })
 
 test('已登录 UI Case 的失败诊断省略不可靠的 CLI 登录页快照', async () => {
@@ -1426,7 +1674,7 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
     assert.equal(store.diagnoses[0].confidence, 0.5)
     assert.match(store.diagnoses[0].recommendedAction, /服务端.*受控脚本修复/u)
     assert.equal(store.revisions.find(revision => revision.source === 'repair')?.parentRevisionId, store.revisions[0].id)
-    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId))?.bindingStatus, 'validated')
+    assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'))?.bindingStatus, 'validated')
   }, { workspace: true, diagnosisCategory: 'script_defect' })
 })
 
@@ -1458,7 +1706,7 @@ test('新 UI Case 由 ExecutionImplementationAgent 多轮调用 Browser Tools �
       'requests',
       'close',
     ])
-    const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
+    const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui')
     assert.equal(binding?.entryFile, governedExecutionEntryFile(store.task.input))
     assert.equal(binding?.bindingStatus, 'validated')
     assert.equal(runner.calls.length, 1)
@@ -1592,7 +1840,7 @@ test('API Case 无 Binding 时优先获得当前 ProjectVersion Exploration Cont
       path: '/api/login',
       validationStatus: 'validated',
     }])
-    const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId)
+    const binding = await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'api')
     const governedEntry = governedExecutionEntryFile(store.task.input)
     assert.equal(binding?.entryFile, governedEntry)
     assert.deepEqual(binding?.dependencyFiles.map(file => file.path), [

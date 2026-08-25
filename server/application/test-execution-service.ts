@@ -57,6 +57,7 @@ import {
   assertExecutionPackageIntegrity,
   automaticRepairAllowed,
   buildExecutionPackage,
+  CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
   executionEntrySymbol,
   freezeExecutionTaskInput,
   scriptCacheKey,
@@ -653,6 +654,7 @@ export class TestExecutionService {
       const binding = await this.executionWorkspace.resolveBinding(
         run.projectVersionId,
         task.input.caseId,
+        executableMethod(task),
       )
       let bindingRejected = false
       if (
@@ -660,6 +662,10 @@ export class TestExecutionService {
         && binding.bindingStatus !== 'invalid'
         && binding.executionType === executableMethod(task)
         && binding.caseContentSha256 === task.input.caseContentSha256
+        && (
+          binding.executionType !== 'api'
+          || binding.validationPolicyVersion === CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
+        )
       ) {
         const workspaceSnapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
         const source = await this.executionWorkspace.readEntry(run.projectVersionId, binding)
@@ -677,7 +683,12 @@ export class TestExecutionService {
           })
         } catch (error) {
           if (!(error instanceof TestExecutionValidationError)) throw error
-          await this.executionWorkspace.setBindingStatus(run.projectVersionId, task.input.caseId, 'invalid')
+          await this.executionWorkspace.setBindingStatus(
+            run.projectVersionId,
+            task.input.caseId,
+            executableMethod(task),
+            'invalid',
+          )
           bindingRejected = true
         }
         if (executionPackage) {
@@ -706,6 +717,7 @@ export class TestExecutionService {
         await this.executionWorkspace.setBindingStatus(
           run.projectVersionId,
           task.input.caseId,
+          executableMethod(task),
           'invalid',
         )
       }
@@ -747,7 +759,7 @@ export class TestExecutionService {
         task,
         workspace,
         ...(browserSession ? { browserSession } : {}),
-        validateCandidate: candidateValidator(candidate => {
+        validateCandidate: scriptGenerationCandidateValidator(candidate => {
           const normalized = governedPackageCandidate(
             packageCandidate(candidate, 'test-script-generation/v1'),
             entryFile,
@@ -759,7 +771,7 @@ export class TestExecutionService {
             workspaceFiles,
           })
           return normalized
-        }),
+        }, task.input.method),
       }, signal),
     )
     assertAgentOutputSchema(output, 'test-script-generation/v1')
@@ -1268,6 +1280,10 @@ export class TestExecutionService {
     const artifactIds = artifacts.map(artifact => artifact.id)
     const validate = (candidate: Record<string, unknown>) =>
       validateFailureDiagnosisCandidate(candidate)
+    const terminalAttemptEvidenceRoot = `evidence/attempt-${attempts.at(-1)!.ordinal}/`
+    const diagnosticLogPaths = workspace.workspaceFiles
+      .map(file => workspaceRelativePath(workspace, file.logicalPath))
+      .filter(path => path.startsWith(terminalAttemptEvidenceRoot) && path.endsWith('.log'))
     const output = await this.agentRuntime.execute({
       stage: 'failure_diagnosis',
       run,
@@ -1279,7 +1295,7 @@ export class TestExecutionService {
         attemptIds,
         artifactIds,
       },
-      validateCandidate: candidateValidator(validate),
+      validateCandidate: failureDiagnosisCandidateValidator(validate, diagnosticLogPaths),
     }, signal)
     assertAgentOutputSchema(output, 'failure-analysis/v1')
     const candidate = validate(output.candidate)
@@ -1497,6 +1513,7 @@ export class TestExecutionService {
       dependencyFiles,
       dependencySha256: executionBindingDependencySha256(dependencyFiles),
       caseContentSha256: task.input.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: now,
       updatedAt: now,
     }, executionPackage.files, baselineFiles)
@@ -1564,6 +1581,7 @@ export class TestExecutionService {
     const binding = await this.executionWorkspace.resolveBinding(
       run.projectVersionId,
       task.input.caseId,
+      executableMethod(task),
     )
     if (
       !binding
@@ -1571,12 +1589,17 @@ export class TestExecutionService {
       || binding.executionType !== executableMethod(task)
       || binding.entrySha256 !== revision.contentSha256
       || binding.caseContentSha256 !== task.input.caseContentSha256
+      || (
+        binding.executionType === 'api'
+        && binding.validationPolicyVersion !== CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
+      )
       || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
     ) {
       if (binding && binding.bindingStatus !== 'invalid') {
         await this.executionWorkspace.setBindingStatus(
           run.projectVersionId,
           task.input.caseId,
+          executableMethod(task),
           'invalid',
         )
       }
@@ -1586,6 +1609,7 @@ export class TestExecutionService {
       await this.executionWorkspace.setBindingStatus(
         run.projectVersionId,
         task.input.caseId,
+        executableMethod(task),
         'validated',
       )
     }
@@ -2180,6 +2204,68 @@ function candidateValidator<T>(validate: (candidate: Record<string, unknown>) =>
       }
     }
   }
+}
+
+function scriptGenerationCandidateValidator<T>(
+  validate: (candidate: Record<string, unknown>) => T,
+  method: FrozenExecutionTaskInput['method'],
+) {
+  return async (candidate: Record<string, unknown>, manifest: InputDeliveryManifest) => {
+    if (method === 'api' && !hasTrustedApiContractRead(manifest)) {
+      return {
+        valid: false,
+        issues: [{
+          path: '/contractEvidence',
+          message: 'API 脚本提交前必须读取可信契约证据：/exploration/context.json、execution/api|helpers|fixtures、已有 execution/tests/api，或 Run 固定 Knowledge Chunk；禁止凭经验猜测 Endpoint、HTTP Method、Payload 或认证流程',
+        }],
+      }
+    }
+    return candidateValidator(validate)(candidate, manifest)
+  }
+}
+
+function hasTrustedApiContractRead(manifest: InputDeliveryManifest) {
+  if (manifest.knowledgeReads?.some(read => read.toolId === 'knowledge.read_chunk')) return true
+  return (manifest.toolReads ?? []).some(read => {
+    const path = read.relativePath.replaceAll('\\', '/').replace(/^\.\//u, '')
+    return path === 'exploration/context.json'
+      || /^execution\/(?:api|helpers|fixtures)\//u.test(path)
+      || /^execution\/tests\/api\//u.test(path)
+  })
+}
+
+function failureDiagnosisCandidateValidator<T>(
+  validate: (candidate: Record<string, unknown>) => T,
+  diagnosticLogPaths: readonly string[],
+) {
+  return async (candidate: Record<string, unknown>, manifest: InputDeliveryManifest) => {
+    const reads = new Set((manifest.toolReads ?? []).map(read =>
+      read.relativePath.replaceAll('\\', '/').replace(/^\.\//u, '')))
+    const missing = ['attempts.json', 'events.json'].filter(path => !reads.has(path))
+    if (diagnosticLogPaths.length && !diagnosticLogPaths.some(path => reads.has(path))) {
+      missing.push(diagnosticLogPaths.join(' 或 '))
+    }
+    if (missing.length) {
+      return {
+        valid: false,
+        issues: [{
+          path: '/workspaceReads',
+          message: `提交诊断前必须读取当前终态证据：${missing.join(', ')}`,
+        }],
+      }
+    }
+    return candidateValidator(validate)(candidate, manifest)
+  }
+}
+
+function workspaceRelativePath(
+  workspace: TestExecutionAgentWorkspaceProjection,
+  logicalPath: string,
+) {
+  const root = (workspace.documentWorkspace.rootLogicalPath
+    ?? workspace.documentWorkspace.logicalPath).replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  const normalized = logicalPath.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '')
+  return normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized
 }
 
 function packageCandidate(

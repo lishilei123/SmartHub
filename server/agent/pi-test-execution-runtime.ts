@@ -310,7 +310,8 @@ export function buildTestExecutionAgentTask(
         : {}),
     },
     workspace: {
-      root: `/${workspace.rootLogicalPath ?? workspace.logicalPath}`,
+      root: '/',
+      logicalRoot: `/${workspace.rootLogicalPath ?? workspace.logicalPath}`,
       ...(workspace.activeBranchLogicalPath
         ? { activeBranch: `/${workspace.activeBranchLogicalPath}` }
         : {}),
@@ -351,16 +352,18 @@ function stageInstructions(
   if (stage === 'failure_diagnosis') return [
     ...common,
     '只根据当前失败 Attempt、Execution Event 与 Artifact 证据分类；不得修改脚本或决定是否修复。',
+    'Workspace 工具的当前目录就是本任务的冻结根目录；先读取 attempts.json、events.json，若存在 evidence/ 则必须读取其中与终态 Attempt 对应的 Runner 日志摘录。',
     `完成后只调用 ${submitToolId} 提交 category、reason、evidence。`,
   ]
   const implementation = [
     ...common,
     '实现阶段可使用只读 Workspace、Knowledge、已有 Runtime Observation 与当前 invocation 明确授权的 Browser Tools。',
     `Playwright Test 标题必须以稳定 Case Symbol ${JSON.stringify(`[${caseId}]`)} 结尾。`,
-    `entryFile 必须为 Service 指定的 ${JSON.stringify(entryFile)}；如果文件已存在，保留其中其他 Case 的 test 声明，只新增或修复当前 Case。`,
+    `entryFile 必须为 Service 指定的 ${JSON.stringify(entryFile)}；该文件只归当前 Case 所有，不得写入或改写其他 Case。`,
     '优先复用 execution/ 下已有 tests、pages、api、helpers 和 fixtures；API 使用 request/APIRequestContext，UI 必须完成真实 UI 操作与页面断言。',
     '先复用 Workspace 和已有 Observation；只有实现所需信息不足时才按需、多轮调用 Browser Tools。Browser Observation 是运行时观察事实，不是 Requirement Truth。',
     'Browser Tools 只用于受控探索，不是 Runner；不得把工具观察解释为 PASS/FAIL，也不得据此改变 Expected Result 或弱化断言。',
+    '每条前置条件都必须由冻结 Test Data、受管 Fixture、可追溯的 setup/cleanup 或运行时可观察验证来落实；T1、T2、K 等用例符号不是环境中已存在数据的证明，无法落实时不得提交可执行候选。',
     '只提交需要新增或修改的 Workspace 文件；summary 仅用于简短说明。',
   ]
   if (stage === 'script_repair') implementation.push(

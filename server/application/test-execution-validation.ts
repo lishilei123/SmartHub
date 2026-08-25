@@ -86,6 +86,7 @@ const diagnosisCategories = new Set<FailureDiagnosisCategory>([
 
 const allowedExternalStaticImports = new Set(['@playwright/test'])
 const allowedWorkspaceSourceRoots = new Set(['tests', 'api', 'pages', 'helpers', 'fixtures'])
+export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v2' as const
 const forbiddenHttpClientModules = new Set([
   'axios',
   'superagent',
@@ -668,7 +669,7 @@ function validateEntrypointSource(
     rejectSource('UI Case 必须使用 Playwright page 完成真实 UI 测试目标')
   }
   if (executionSpec.method === 'ui' && enforceInitialUiNavigation) assertInitialUiNavigation(callback)
-  const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null }>()
+  const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null; received: Node }>()
   walkAst(callback, (node) => {
     if (node.type === 'ExpressionStatement') {
       const comments = [...(node.leadingComments ?? []), ...(node.innerComments ?? [])]
@@ -677,6 +678,9 @@ function validateEntrypointSource(
       if (anchors.has(anchorComment)) rejectSource(`断言锚点重复：${anchorComment}`)
       const parsed = assertionExpression(node.expression)
       if (!parsed) rejectSource(`断言锚点 ${anchorComment} 必须绑定 Playwright expect 断言`)
+      if (executionSpec.method === 'api' && weakNegativeResponseAssertion(parsed)) {
+        rejectSource(`API 异常场景断言 ${anchorComment} 不能只验证 response.ok() 为 false；必须断言明确 HTTP 状态码，并按固定 Expected Result 校验业务错误语义`)
+      }
       anchors.set(anchorComment, parsed)
     }
   })
@@ -987,7 +991,7 @@ function assertProtectedAssertions(baseline: readonly ExecutionAssertionContract
   }
 }
 
-function assertionExpression(expression: Node): { matcher: string; modifiers: string[]; expected: Node | null } | null {
+function assertionExpression(expression: Node): { matcher: string; modifiers: string[]; expected: Node | null; received: Node } | null {
   if (expression.type === 'AwaitExpression') return assertionExpression(expression.argument)
   if (expression.type !== 'CallExpression' || expression.callee.type !== 'MemberExpression' || expression.callee.computed) return null
   if (expression.callee.property.type !== 'Identifier' || !expression.callee.property.name.startsWith('to')) return null
@@ -999,7 +1003,27 @@ function assertionExpression(expression: Node): { matcher: string; modifiers: st
     current = current.object
   }
   if (current.type !== 'CallExpression' || current.callee.type !== 'Identifier' || current.callee.name !== 'expect') return null
-  return { matcher, modifiers, expected: expression.arguments[0] && expression.arguments[0].type !== 'SpreadElement' ? expression.arguments[0] : null }
+  return {
+    matcher,
+    modifiers,
+    expected: expression.arguments[0] && expression.arguments[0].type !== 'SpreadElement' ? expression.arguments[0] : null,
+    received: current.arguments[0] && current.arguments[0].type !== 'SpreadElement' ? current.arguments[0] : current,
+  }
+}
+
+function weakNegativeResponseAssertion(assertion: ReturnType<typeof assertionExpression> & {}) {
+  const received = assertion.received
+  const responseOkCall = received.type === 'CallExpression'
+    && received.callee.type === 'MemberExpression'
+    && !received.callee.computed
+    && received.callee.property.type === 'Identifier'
+    && received.callee.property.name === 'ok'
+  if (!responseOkCall) return false
+  if (assertion.matcher === 'toBeFalsy') return !assertion.modifiers.includes('not')
+  if (assertion.matcher === 'toBeTruthy') return assertion.modifiers.includes('not')
+  return ['toBe', 'toEqual', 'toStrictEqual'].includes(assertion.matcher)
+    && assertion.expected?.type === 'BooleanLiteral'
+    && assertion.expected.value === assertion.modifiers.includes('not')
 }
 
 function walkAst(root: Node, visit: (node: Node, parent: Node | null) => void) {

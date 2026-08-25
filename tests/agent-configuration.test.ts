@@ -55,6 +55,7 @@ test('统一 PlanningAgent 发布 Workspace、Knowledge、Skill 与全部提交�
   const initial = (await service.get('planning')).agents.planning!
   assert.deepEqual(initial.requiredToolIds, ['workspace.read_file', 'workspace.grep_files', 'workspace.find_files', 'workspace.list_directory', 'knowledge.search', 'knowledge.read_chunk', 'requirement-analysis.submit_result', 'test_design_cases.submit_result', 'test_design_repair.submit_result'])
   assert.equal(initial.requiredToolIds.some(toolId => toolId.startsWith('browser.')), false)
+  assert.deepEqual(initial.requiredSkillKeys, ['requirement.baseline', 'requirement.analysis', 'test-design-baseline', 'test-case-design', 'test-design-repair'])
   assert.ok(initial.draft.definition.toolIds.includes('workspace.read_file'))
   assert.ok(initial.draft.definition.toolIds.includes('knowledge.search'))
   assert.ok(initial.draft.definition.skillKeys.includes('requirement.analysis'))
@@ -72,33 +73,43 @@ test('统一 PlanningAgent 发布 Workspace、Knowledge、Skill 与全部提交�
   assert.equal((await service.resolveActive('planning'))?.id, published.id)
 })
 
-test('PlanningAgent 草稿加载与前端发布 payload 会补齐新增的必需工具', async () => {
+test('PlanningAgent 草稿加载与前端发布 payload 会补齐默认绑定的 Tool 和 Skill', async () => {
   const { store, service } = await fixture()
   const initialState = (await service.get('planning')).agents.planning!
+  const newlyRequiredTools = new Set(['test_design_repair.submit_result'])
+  const newlyRequiredSkills = new Set(['test-design-repair'])
   const firstSaved = await service.save('planning', {
     agentKey: 'planning',
     revision: initialState.draft.revision,
     routing: { ...initialState.draft.routing, primaryModel: { sourceId: 'source-agent-config', modelId: 'model-agent-config' } },
-    definition: initialState.draft.definition,
+    definition: {
+      ...initialState.draft.definition,
+      skillKeys: initialState.draft.definition.skillKeys.filter(skillKey => !newlyRequiredSkills.has(skillKey)),
+    },
   })
-  const newlyRequiredTools = new Set(['test_design_repair.submit_result'])
+  assert.ok(firstSaved.definition.skillKeys.includes('test-design-repair'))
   await store.transaction(state => {
     const stored = state.agentConfigurationDrafts.find(item => item.scene === 'planning')!.agents.planning!
     stored.definition.toolIds = stored.definition.toolIds.filter(toolId => !newlyRequiredTools.has(toolId))
+    stored.definition.skillKeys = stored.definition.skillKeys.filter(skillKey => !newlyRequiredSkills.has(skillKey))
   })
 
   const reloaded = (await service.get('planning')).agents.planning!
   assert.equal(reloaded.draft.revision, firstSaved.revision)
   assert.ok(reloaded.requiredToolIds.every(toolId => reloaded.draft.definition.toolIds.includes(toolId)))
+  assert.ok(reloaded.requiredSkillKeys.every(skillKey => reloaded.draft.definition.skillKeys.includes(skillKey)))
 
   const staleBrowserDraft = structuredClone(reloaded.draft)
   staleBrowserDraft.definition.toolIds = staleBrowserDraft.definition.toolIds.filter(toolId => !newlyRequiredTools.has(toolId))
+  staleBrowserDraft.definition.skillKeys = staleBrowserDraft.definition.skillKeys.filter(skillKey => !newlyRequiredSkills.has(skillKey))
   const publishPayload = materializeRequiredAgentCapabilities(staleBrowserDraft, reloaded)
   assert.ok(reloaded.requiredToolIds.every(toolId => publishPayload.definition.toolIds.includes(toolId)))
+  assert.ok(reloaded.requiredSkillKeys.every(skillKey => publishPayload.definition.skillKeys.includes(skillKey)))
 
   const migrated = await service.save('planning', { agentKey: 'planning', revision: publishPayload.revision, routing: publishPayload.routing, definition: publishPayload.definition })
   const published = await service.publish('planning', { agentKey: 'planning', revision: migrated.revision })
   assert.ok(reloaded.requiredToolIds.every(toolId => published.agentDefinition.toolIds.includes(toolId)))
+  assert.ok(reloaded.requiredSkillKeys.every(skillKey => published.agentDefinition.enabledSkills.includes(skillKey)))
 })
 
 test('统一 PlanningAgent 为需求分析和测试设计发布同一条不可变版本链', async () => {
@@ -357,6 +368,8 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
     const agentTask = JSON.parse(input.executionProfile!.initialTask) as Record<string, unknown>
     assert.equal(agentTask.schemaVersion, 'test-execution-agent-task/v2')
     assert.equal(typeof agentTask.assignment, 'string')
+    assert.equal((agentTask.workspace as Record<string, unknown>).root, '/')
+    assert.equal(typeof (agentTask.workspace as Record<string, unknown>).logicalRoot, 'string')
     assert.deepEqual(
       ['runId', 'projectVersionId', 'stageContext', 'stageContract', 'environment', 'runner'].filter(key => key in agentTask),
       [],
@@ -370,6 +383,9 @@ test('测试执行 runtime 按固定 stage 暴露自己的 Tool/Skill 并保留 
     assert.equal(input.executionProfile?.allowedToolIds.some(toolId => /runner|shell|ssh|database|http/u.test(toolId)), false)
     if (stage === 'script_repair') {
       assert.match(input.executionProfile!.initialTask, /不得重新进行需求分析、测试设计或通过 Knowledge 搜索扩大修复范围/u)
+    }
+    if (stage === 'failure_diagnosis') {
+      assert.match(input.executionProfile!.initialTask, /读取 attempts\.json、events\.json/u)
     }
   }
   const superseded = await service.getVersion(supersededId)
@@ -584,7 +600,7 @@ test('Agent 配置可选择完整 Tool、MCP、Skill 并在发布版本中固定
   })
   const initial = (await service.get('planning')).agents.planning!
   assert.ok(initial.requiredToolIds.includes('test_design_cases.submit_result'))
-  assert.deepEqual(initial.requiredSkillKeys, [])
+  assert.deepEqual(initial.requiredSkillKeys, ['requirement.baseline', 'requirement.analysis', 'test-design-baseline', 'test-case-design', 'test-design-repair'])
   assert.deepEqual(initial.requiredMcpServerKeys, [])
   assert.ok(initial.draft.definition.skillKeys.includes('requirement.analysis'))
   assert.ok(initial.draft.definition.skillKeys.includes('test-case-design'))

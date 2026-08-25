@@ -12,6 +12,7 @@ import type {
   ExecutionTask,
   HttpExplorationObservation,
 } from '../domain/test-execution-types.js'
+import { withWindowsHiddenNodeChildren } from '../runner/windows-child-process.js'
 
 const requireFromModule = createRequire(import.meta.url)
 
@@ -307,7 +308,15 @@ export class PlaywrightCliAdapter implements PlaywrightCliToolAdapter, Playwrigh
     const timeout = AbortSignal.timeout(this.options.timeoutMs ?? 60_000)
     const combined = AbortSignal.any([signal, timeout])
     return await new Promise<string>((resolve, reject) => {
-      const child = spawn(launch.executable, command, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(launch.executable, command, {
+        shell: false,
+        windowsHide: true,
+        env: {
+          ...withWindowsHiddenNodeChildren(process.env),
+          PLAYWRIGHT_MCP_HEADLESS: 'true',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
       const stdout: Buffer[] = []
       const stderr: Buffer[] = []
       child.stdout?.on('data', value => stdout.push(Buffer.from(value)))

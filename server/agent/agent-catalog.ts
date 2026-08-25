@@ -23,6 +23,14 @@ const BROWSER_TOOLS = [
   'browser.screenshot',
 ] as const
 
+const PLANNING_SKILLS = [
+  'requirement.baseline',
+  'requirement.analysis',
+  'test-design-baseline',
+  'test-case-design',
+  'test-design-repair',
+] as const
+
 export interface AgentCatalogEntry {
   configurationKey: AgentConfigurationAgentKey
   definitionKey: AgentDefinitionVersion['agentKey']
@@ -50,7 +58,7 @@ export const AGENT_CATALOG = {
       'test_design_cases.submit_result',
       'test_design_repair.submit_result',
     ],
-    requiredSkillKeys: [],
+    requiredSkillKeys: [...PLANNING_SKILLS],
     requiredMcpServerKeys: [],
     runtimeToolIds: [...WORKSPACE_TOOLS, ...KNOWLEDGE_TOOLS],
     exactCapabilities: false,

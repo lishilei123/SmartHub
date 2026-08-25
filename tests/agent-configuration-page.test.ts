@@ -30,6 +30,15 @@ test('Agent 配置页面展示一个 PlanningAgent 与两个测试执行 Agent',
   assert.match(source, /exactCapabilities: true/u)
 })
 
+test('Agent 配置页面将默认绑定的 Skill 和 Tool 标记为不可关闭', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /Agent 默认绑定的 Skill \/ Tool 由服务端强制保留，不可关闭/u)
+  assert.match(source, /disabled=\{agentMetadata\.exactCapabilities \|\| required/u)
+  assert.match(source, /Agent 默认绑定，不可关闭/u)
+  assert.match(source, /\? '默认绑定'/u)
+})
+
 test('Agent 配置 API 从 planning 与 test_execution 聚合并按 Agent 选择保存发布 URL', () => {
   const source = readFileSync(new URL('../src/agent-configuration-api.ts', import.meta.url), 'utf8')
 

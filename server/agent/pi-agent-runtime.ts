@@ -483,7 +483,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       mode: inputPlan.mode,
       packageSha256: inputPlan.packageSha256,
       entries: [],
-      ...(inputPlan.mode === 'agent_directory' ? { toolReads: [] } : {}),
+      ...(inputPlan.mode === 'agent_directory' ? { toolReads: [], knowledgeReads: [] } : {}),
       finalMergeCompleted: false,
     }
     const registry = createWorkspaceAgentToolRegistry(this.store, stage.submitToolId, async value => {
@@ -497,7 +497,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       if (deliveryManifest.toolReads?.some(item => item.toolCallId === observation.toolCallId)) return
       deliveryManifest.toolReads ??= []
       deliveryManifest.toolReads.push(structuredClone(observation))
-    }, piDocumentWorkspace, this.knowledge)
+    }, piDocumentWorkspace, this.knowledge, observation => {
+      if (deliveryManifest.knowledgeReads?.some(item => item.toolCallId === observation.toolCallId)) return
+      deliveryManifest.knowledgeReads ??= []
+      deliveryManifest.knowledgeReads.push(structuredClone(observation))
+    })
     for (const binding of workspaceProfile.runtimeToolBindings ?? []) {
       if (!stage.allowedToolIds.includes(binding.descriptor.id)) {
         throw new Error(`RUNTIME_TOOL_BINDING_NOT_ALLOWED: ${binding.descriptor.id}`)

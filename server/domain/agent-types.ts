@@ -170,6 +170,16 @@ export interface InputDeliveryManifest {
     replayed?: boolean
     replayedFromToolCallId?: string
   }>
+  knowledgeReads?: Array<{
+    toolCallId: string
+    toolId: 'knowledge.read_chunk'
+    chunkId: string
+    assetVersionId: string
+    logicalPath?: string
+    sourceScope: 'current_requirement' | 'knowledge_reference'
+    contentHash: string
+    indexVersionId: string
+  }>
   finalMergeCompleted: boolean
 }
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +25,7 @@ import {
 import { ToolRegistry } from '../server/tools/registry.js'
 import { GovernedToolRuntime } from '../server/tools/runtime.js'
 import { LocalExecutionWorkspaceStore } from '../server/infrastructure/execution-workspace-store.js'
+import { withWindowsHiddenNodeChildren } from '../server/runner/windows-child-process.js'
 
 class FixtureBrowserCli implements PlaywrightBrowserCliAdapter {
   opened: string[] = []
@@ -130,6 +132,22 @@ test('Playwright CLI 在 Windows 拒绝会创建命令解释器窗口的批处�
     () => resolvePlaywrightCliLaunch({ platform: 'win32', command: 'playwright-cli.cmd' }),
     /PLAYWRIGHT_CLI_WINDOWS_BATCH_LAUNCHER_FORBIDDEN/u,
   )
+})
+
+test('Windows Playwright CLI 子孙 Node 进程统一隐藏控制台窗口', () => {
+  const environment = withWindowsHiddenNodeChildren({ PATH: process.env.PATH }, 'win32')
+  assert.match(environment.NODE_OPTIONS ?? '', /--import=data:text\/javascript,/u)
+  const child = spawnSync(process.execPath, [
+    '-e',
+    "process.stdout.write(String(require('node:child_process').spawn).includes('windowsHide:true')?'hidden':'missing')",
+  ], {
+    env: environment,
+    encoding: 'utf8',
+    shell: false,
+    windowsHide: true,
+  })
+  assert.equal(child.status, 0, child.stderr)
+  assert.equal(child.stdout, 'hidden')
 })
 
 test('Playwright CLI JSON Snapshot 保留控件语义并在进入 Runtime 前移除凭据', () => {

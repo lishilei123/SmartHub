@@ -126,14 +126,14 @@ function apiTaskInput(): FrozenExecutionTaskInput & { taskId: string } {
   }
 }
 
-test('Service 按正式 Requirement 集合治理共享 spec，无直接追溯的 Case 保持隔离', () => {
+test('Service 按正式 Requirement 生成可读路径，并以 Case 身份隔离 entry spec', () => {
   const task = taskInput()
   const sameRequirement = {
     ...task,
     caseId: 'case-status-invalid-transition',
   }
-  assert.equal(governedExecutionEntryFile(task), governedExecutionEntryFile(sameRequirement))
-  assert.match(governedExecutionEntryFile(task), /^tests\/ui\/requirement-point-status-[a-f0-9]{12}\.spec\.ts$/u)
+  assert.notEqual(governedExecutionEntryFile(task), governedExecutionEntryFile(sameRequirement))
+  assert.match(governedExecutionEntryFile(task), /^tests\/ui\/requirement-point-status-[a-f0-9]{12}-case-[a-f0-9]{12}\.spec\.ts$/u)
   const untraced = {
     ...task,
     caseContent: { ...task.caseContent, requirementRefs: [] },
@@ -352,6 +352,7 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
   // smarthub:assert expected-1
   expect(response.status()).toBe(403)
 })
+
 `
   const executionPackage = buildExecutionPackage({
     candidate: {
@@ -366,6 +367,28 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
   assert.equal(executionPackage.manifest.entrypoint, entryFile)
   assert.deepEqual(executionPackage.files.map(file => file.path), [clientFile, entryFile])
   assert.equal(executionPackage.manifest.assertions[0].matcher, 'toBe')
+})
+
+test('API 异常场景拒绝仅以 response.ok false 代替明确业务状态断言', () => {
+  const task = apiTaskInput()
+  const weakSource = `import { test, expect } from '@playwright/test'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await request.post('/api/login')
+  // smarthub:assert expected-1
+  expect(response.ok()).toBeFalsy()
+})
+`
+  assert.throws(
+    () => buildExecutionPackage({
+      candidate: {
+        entryFile: 'tests/api/login.spec.ts',
+        files: [{ path: 'tests/api/login.spec.ts', content: weakSource }],
+      },
+      task,
+      environmentSignature: 'env',
+    }),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
 })
 
 test('API Validator 拒绝其他 HTTP Client、硬编码 Host、fetch 与不安全相对导入', () => {

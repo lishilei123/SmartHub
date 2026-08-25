@@ -70,6 +70,18 @@ test('诊断与失败明细使用语义表格、正式空状态和安全 Artifac
   assert.doesNotMatch(`${failures}\n${api}`, /storagePath/u)
 })
 
+test('产品缺陷诊断独立投影为待人工确认候选，不冒充已确认 BUG', () => {
+  const page = read('../src/test-report/TestReportPage.tsx')
+  const defects = read('../src/test-report/TestReportDefectPanel.tsx')
+  assert.match(page, /<TestReportDefectPanel report=\{model\.report\}/u)
+  assert.match(defects, /report\.productDefectCandidates/u)
+  assert.match(defects, /候选不等于已确认 BUG/u)
+  assert.match(defects, /candidate\.diagnosisId/u)
+  assert.match(defects, /candidate\.attemptIds\.length/u)
+  assert.match(defects, /candidate\.artifactIds\.length/u)
+  assert.match(defects, /artifactUrl\(artifactId, 'inline'\)/u)
+})
+
 test('报告独立展示维护建议统计、正式追溯和人工维护边界', () => {
   const page = read('../src/test-report/TestReportPage.tsx')
   const maintenance = read('../src/test-report/TestReportMaintenanceTable.tsx')

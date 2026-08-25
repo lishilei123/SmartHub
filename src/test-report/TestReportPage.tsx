@@ -5,6 +5,7 @@ import { runStatusLabel } from '../test-execution/ExecutionRunPanel'
 import { reportExportUrl } from './api'
 import { useTestReport } from './hooks/useTestReport'
 import { TestReportDiagnosisPanel } from './TestReportDiagnosisPanel'
+import { TestReportDefectPanel } from './TestReportDefectPanel'
 import { TestReportFailureTable } from './TestReportFailureTable'
 import { TestReportMaintenanceTable } from './TestReportMaintenanceTable'
 import { TestReportMetrics } from './TestReportMetrics'
@@ -49,11 +50,6 @@ export function TestReportPage({
   if (!projectVersion) return <main className="tr-shell"><section className="tr-section tr-page-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>报告严格绑定 ProjectVersion 与真实 ExecutionRun。</p><button className="tr-primary" onClick={onManageVersions}>管理项目版本</button></section></main>
 
   return <main className="tr-shell">
-    <header className="tr-page-header">
-      <div className="tr-page-title"><span><Activity /></span><div><p>{projectVersion.name} · PostgreSQL formal facts → deterministic report</p></div></div>
-      <div className="tr-boundary"><ShieldCheck /><span><small>报告边界</small><b>Service 统计 · Agent 不计算正式指标</b></span></div>
-      <button className="tr-secondary" onClick={onManageVersions}><Settings2 />项目版本</button>
-    </header>
     {model.error && <div className="tr-global-error" role="alert"><b>报告数据未完整加载</b><span>{model.error}</span><button onClick={() => void model.loadReports()}><RefreshCw />重试</button></div>}
     <div className="tr-layout">
       <aside className="tr-section tr-run-list">
@@ -68,6 +64,7 @@ export function TestReportPage({
           <TestReportOverview report={model.report} />
           <TestReportMetrics report={model.report} />
           <TestReportDiagnosisPanel report={model.report} />
+          <TestReportDefectPanel report={model.report} />
           <TestReportMaintenanceTable report={model.report} />
           <TestReportFailureTable report={model.report} />
           <TestReportTraceability report={model.report} />

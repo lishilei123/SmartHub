@@ -99,6 +99,22 @@ export interface TestReportDiagnosisDistribution {
   categories: TestReportDiagnosisCategoryStatistics[]
 }
 
+export interface TestReportProductDefectCandidate {
+  id: string
+  diagnosisId: string
+  taskId: string
+  ordinal: number
+  caseId: string
+  caseRevision: number
+  title: string
+  method: TestExecutionMethod
+  status: 'pending_confirmation'
+  summary: string
+  attemptIds: string[]
+  artifactIds: string[]
+  createdAt: string
+}
+
 export interface TestReportPublicArtifact {
   id: string
   attemptId?: string
@@ -195,7 +211,7 @@ export interface TestReportTraceability {
 }
 
 export interface TestExecutionReportContent {
-  schemaVersion: 'test-execution-report/v3'
+  schemaVersion: 'test-execution-report/v4'
   statisticsAt: string
   run: {
     id: string
@@ -212,6 +228,7 @@ export interface TestExecutionReportContent {
   stability: TestReportStability
   selfHealing: TestReportSelfHealing
   diagnosisDistribution: TestReportDiagnosisDistribution
+  productDefectCandidates: TestReportProductDefectCandidate[]
   nonPassedTasks: TestReportNonPassedTask[]
   maintenanceProposals: TestReportMaintenanceProposal[]
   traceability: TestReportTraceability

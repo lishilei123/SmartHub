@@ -11,7 +11,7 @@ import { reportSourceFixture, reportSourceReader } from './test-report-fixture.j
 
 test('报告 Service 按正式口径计算概览、效率、首次质量、稳定性和自愈', () => {
   const report = buildTestExecutionReport(reportSourceFixture())
-  assert.equal(report.schemaVersion, 'test-execution-report/v3')
+  assert.equal(report.schemaVersion, 'test-execution-report/v4')
   assert.equal(report.statisticsAt, '2026-08-14T00:00:26.000Z')
   assert.deepEqual(report.overview, {
     totalCases: 9,
@@ -118,6 +118,9 @@ test('报告固定返回九类诊断并按 Attempt ordinal 选择最新正式诊
   )
   assert.equal(report.diagnosisDistribution.totalDiagnoses, 5)
   assert.equal(report.diagnosisDistribution.categories.find(item => item.category === 'script_defect')?.count, 1)
+  assert.equal(report.productDefectCandidates.length, 1)
+  assert.equal(report.productDefectCandidates[0].diagnosisId, 'diagnosis-product')
+  assert.equal(report.productDefectCandidates[0].status, 'pending_confirmation')
   assert.equal(report.nonPassedTasks.find(task => task.taskId === 'task-4')?.diagnosis?.id, 'diagnosis-higher-attempt')
   assert.equal(report.nonPassedTasks.find(task => task.taskId === 'task-5')?.terminal, false)
   assert.equal(report.nonPassedTasks.find(task => task.taskId === 'task-7')?.diagnosis, null)
@@ -206,6 +209,8 @@ test('报告输入乱序不改变 Hash 或导出字节，正式事实变化会�
   const markdown = await service.exportMarkdown(source.run.id)
   assert.equal(markdown.sha256, createHash('sha256').update(markdown.body, 'utf8').digest('hex'))
   assert.match(markdown.body, /失败 \\| &lt;script&gt;<br>路径\\\\名称/u)
+  assert.match(markdown.body, /## 产品缺陷候选/u)
+  assert.match(markdown.body, /候选不等于已确认 BUG/u)
   assert.doesNotMatch(markdown.body, /storagePath|private\/objects/u)
   assert.equal(markdown.body.endsWith('\n'), true)
   assert.equal(markdown.body.includes('\r'), false)

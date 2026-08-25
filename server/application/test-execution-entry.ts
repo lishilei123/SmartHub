@@ -7,11 +7,11 @@ type ExecutionEntryTask = Pick<
 >
 
 /**
- * Service-owned physical grouping for generated Playwright entries.
+ * Service-owned physical identity for generated Playwright entries.
  *
- * Cases with the same formal Requirement set and execution method share one
- * spec. Cases without direct Requirement traceability keep an isolated entry
- * because the Service has no deterministic business grouping fact for them.
+ * Every Case owns one deterministic entry file. Requirement traceability keeps
+ * the path readable, while the Case hash prevents concurrent Agents from
+ * publishing stale replacements of a shared spec.
  */
 export function governedExecutionEntryFile(task: ExecutionEntryTask) {
   if (task.method !== 'ui' && task.method !== 'api') {
@@ -31,7 +31,9 @@ export function governedExecutionEntryFile(task: ExecutionEntryTask) {
     .replace(/^-+|-+$/gu, '')
     .slice(0, 48)
   const group = readable || 'group'
-  return `tests/${task.method}/requirement-${group}-${sha256(requirementRefs.join('\u0000')).slice(0, 12)}.spec.ts`
+  const requirementHash = sha256(requirementRefs.join('\u0000')).slice(0, 12)
+  const caseHash = sha256(task.caseId).slice(0, 12)
+  return `tests/${task.method}/requirement-${group}-${requirementHash}-case-${caseHash}.spec.ts`
 }
 
 function sha256(value: string) {

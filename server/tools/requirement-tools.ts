@@ -4,7 +4,7 @@ import { ToolRegistry } from './registry.js'
 import { registerRequirementAnalysisSubmitResultTool } from './requirement-analysis-submit-result.js'
 import { registerRequirementDocumentWorkspaceTools, type RequirementDocumentReadObservation, type RequirementDocumentWorkspace } from './requirement-document-workspace.js'
 import { registerKnowledgeSearchTool } from './knowledge-search.js'
-import { registerKnowledgeReadChunkTool } from './knowledge-read-chunk.js'
+import { registerKnowledgeReadChunkTool, type KnowledgeReadObservation } from './knowledge-read-chunk.js'
 import type { ReviewSubmissionFeedback } from './submission-feedback.js'
 import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
 import { KnowledgeService } from '../application/knowledge-service.js'
@@ -18,12 +18,13 @@ export function createWorkspaceAgentToolRegistry(
   onRead?: (observation: RequirementDocumentReadObservation) => void,
   documentWorkspace?: RequirementDocumentWorkspace,
   knowledge = new KnowledgeService(store),
+  onKnowledgeRead?: (observation: KnowledgeReadObservation) => void,
 ) {
   const registry = new ToolRegistry()
   if (!documentWorkspace) throw new Error('PI_DOCUMENT_WORKSPACE_REQUIRED')
   registerRequirementDocumentWorkspaceTools(registry, documentWorkspace, onRead)
   registerKnowledgeSearchTool(registry, knowledge)
-  registerKnowledgeReadChunkTool(registry, store)
+  registerKnowledgeReadChunkTool(registry, store, onKnowledgeRead)
   registry.register(defaultBuiltInToolConfigResolver.toDescriptor(submitToolId), async request => {
     const feedback = await submit(structuredClone(request.arguments) as Record<string, unknown>)
     return feedback.accepted

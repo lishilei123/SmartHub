@@ -1,8 +1,15 @@
+import type { InputDeliveryManifest } from '../domain/agent-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import type { ToolRegistry } from './registry.js'
 import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
 
-export function registerKnowledgeReadChunkTool(registry: ToolRegistry, store: StateStore) {
+export type KnowledgeReadObservation = NonNullable<InputDeliveryManifest['knowledgeReads']>[number]
+
+export function registerKnowledgeReadChunkTool(
+  registry: ToolRegistry,
+  store: StateStore,
+  onRead?: (observation: KnowledgeReadObservation) => void,
+) {
   registry.register(defaultBuiltInToolConfigResolver.toDescriptor('knowledge.read_chunk'), async request => {
     const args = request.arguments as { chunkId: string }
     const state = await store.snapshot()
@@ -11,6 +18,16 @@ export function registerKnowledgeReadChunkTool(registry: ToolRegistry, store: St
     const logicalPath = chunk.assetMetadata?.logicalPath
     const currentRequirementPath = 'documentWorkspace' in request.context.snapshot ? request.context.snapshot.documentWorkspace?.logicalPath : undefined
     const sourceScope = logicalPath && currentRequirementPath && logicalPath.startsWith(`${currentRequirementPath}/`) ? 'current_requirement' : 'knowledge_reference'
+    onRead?.({
+      toolCallId: request.toolCallId,
+      toolId: 'knowledge.read_chunk',
+      chunkId: chunk.id,
+      assetVersionId: chunk.assetVersionId,
+      ...(logicalPath ? { logicalPath } : {}),
+      sourceScope,
+      contentHash: chunk.contentHash,
+      indexVersionId: index.id,
+    })
     return { data: { chunkId: chunk.id, assetVersionId: chunk.assetVersionId, logicalPath, sourceScope, contentHash: chunk.contentHash, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar, content: chunk.content } }
   })
 }

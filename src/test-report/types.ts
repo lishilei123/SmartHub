@@ -37,7 +37,7 @@ export type TestReportListItem = {
 }
 
 export type TestReport = {
-  schemaVersion: 'test-execution-report/v3'
+  schemaVersion: 'test-execution-report/v4'
   statisticsAt: string
   reportSha256: string
   run: {
@@ -105,6 +105,21 @@ export type TestReport = {
       percentage: number
     }>
   }
+  productDefectCandidates: Array<{
+    id: string
+    diagnosisId: string
+    taskId: string
+    ordinal: number
+    caseId: string
+    caseRevision: number
+    title: string
+    method: TestExecutionMethod
+    status: 'pending_confirmation'
+    summary: string
+    attemptIds: string[]
+    artifactIds: string[]
+    createdAt: string
+  }>
   maintenanceProposals: Array<CaseMaintenanceProposal & {
     ordinal: number
     title: string

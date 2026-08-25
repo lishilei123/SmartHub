@@ -314,22 +314,20 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       }
       const run = await getRun(client, task.runId)
       if (!run) throw new Error('TEST_EXECUTION_RUN_NOT_FOUND')
-      const [attempts, events, diagnoses, revisions, artifacts, proposals] = await Promise.all([
-        client.query<AttemptRow>('SELECT * FROM smarthub.test_execution_attempts WHERE task_id=$1 ORDER BY ordinal', [task.id]),
-        client.query<ExecutionEventRow>('SELECT * FROM smarthub.test_execution_events WHERE task_id=$1 ORDER BY attempt_id,sequence', [task.id]),
-        client.query<DiagnosisRow>(`${diagnosisSelectSql}
+      const attempts = await client.query<AttemptRow>('SELECT * FROM smarthub.test_execution_attempts WHERE task_id=$1 ORDER BY ordinal', [task.id])
+      const events = await client.query<ExecutionEventRow>('SELECT * FROM smarthub.test_execution_events WHERE task_id=$1 ORDER BY attempt_id,sequence', [task.id])
+      const diagnoses = await client.query<DiagnosisRow>(`${diagnosisSelectSql}
           WHERE diagnosis.task_id=$1 ORDER BY diagnosis.created_at,diagnosis.id
-        `, [task.id]),
-        client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE task_id=$1 ORDER BY revision,id', [task.id]),
-        client.query<ArtifactRow>(`
+        `, [task.id])
+      const revisions = await client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE task_id=$1 ORDER BY revision,id', [task.id])
+      const artifacts = await client.query<ArtifactRow>(`
           SELECT * FROM smarthub.test_execution_artifacts
           WHERE task_id=$1 ORDER BY created_at,id
-        `, [task.id]),
-        client.query<MaintenanceProposalRow>(`
+        `, [task.id])
+      const proposals = await client.query<MaintenanceProposalRow>(`
           SELECT * FROM smarthub.test_execution_case_maintenance_proposals
           WHERE task_id=$1 ORDER BY created_at,id
-        `, [task.id]),
-      ])
+        `, [task.id])
       await client.query('COMMIT')
       return {
         run,
@@ -358,32 +356,31 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         await client.query('COMMIT')
         return null
       }
-      const [tasks, attempts, diagnoses, revisions, artifacts, proposals, handoff, library, suite] = await Promise.all([
-        client.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
+      const tasks = await client.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
           SELECT frozen_input,status,state_version,runner_attempt_count,
                  same_script_retry_count,repair_count,current_script_revision_id,
                  unsupported_reason,error,created_at,updated_at,finished_at
           FROM smarthub.test_execution_tasks
           WHERE run_id=$1 ORDER BY ordinal,id
-        `, [run.id]),
-        client.query<AttemptRow>(`
+        `, [run.id])
+      const attempts = await client.query<AttemptRow>(`
           SELECT attempt.* FROM smarthub.test_execution_attempts attempt
           JOIN smarthub.test_execution_tasks task ON task.id=attempt.task_id
           WHERE attempt.run_id=$1 AND task.run_id=$1
           ORDER BY task.ordinal,attempt.ordinal,attempt.id
-        `, [run.id]),
-        client.query<DiagnosisRow>(`${diagnosisSelectSql}
+        `, [run.id])
+      const diagnoses = await client.query<DiagnosisRow>(`${diagnosisSelectSql}
           JOIN smarthub.test_execution_tasks task ON task.id=diagnosis.task_id
           WHERE diagnosis.run_id=$1 AND task.run_id=$1
           ORDER BY task.ordinal,diagnosis.created_at,diagnosis.id
-        `, [run.id]),
-        client.query<ScriptRevisionRow>(`
+        `, [run.id])
+      const revisions = await client.query<ScriptRevisionRow>(`
           SELECT revision.* FROM smarthub.test_execution_script_revisions revision
           JOIN smarthub.test_execution_tasks task ON task.id=revision.task_id
           WHERE revision.run_id=$1 AND task.run_id=$1
           ORDER BY task.ordinal,revision.revision,revision.id
-        `, [run.id]),
-        client.query<ArtifactRow>(`
+        `, [run.id])
+      const artifacts = await client.query<ArtifactRow>(`
           SELECT artifact.* FROM smarthub.test_execution_artifacts artifact
           LEFT JOIN smarthub.test_execution_tasks task ON task.id=artifact.task_id
           LEFT JOIN smarthub.test_execution_attempts attempt ON attempt.id=artifact.attempt_id
@@ -392,29 +389,28 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
             AND (artifact.attempt_id IS NULL OR attempt.run_id=$1)
           ORDER BY COALESCE(task.ordinal,-1),COALESCE(attempt.ordinal,-1),
                    artifact.created_at,artifact.id
-        `, [run.id]),
-        client.query<MaintenanceProposalRow>(`
+        `, [run.id])
+      const proposals = await client.query<MaintenanceProposalRow>(`
           SELECT proposal.*
           FROM smarthub.test_execution_case_maintenance_proposals proposal
           JOIN smarthub.test_execution_tasks task ON task.id=proposal.task_id
           WHERE proposal.run_id=$1 AND task.run_id=$1
           ORDER BY task.ordinal,proposal.created_at,proposal.id
-        `, [run.id]),
-        client.query<{ project_version_id: string; test_case_library_version_id: string | null; suite_version_id: string | null; content_sha256: string }>(`
+        `, [run.id])
+      const handoff = await client.query<{ project_version_id: string; test_case_library_version_id: string | null; suite_version_id: string | null; content_sha256: string }>(`
           SELECT project_version_id,test_case_library_version_id,suite_version_id,content_sha256
           FROM smarthub.test_execution_handoffs WHERE id=$1
-        `, [run.handoff.handoffId]),
-        client.query<{ project_id: string; source_run_id: string | null; content_sha256: string }>(`
+        `, [run.handoff.handoffId])
+      const library = await client.query<{ project_id: string; source_run_id: string | null; content_sha256: string }>(`
           SELECT project_id,source_run_id,content_sha256
           FROM smarthub.test_case_library_versions WHERE id=$1
-        `, [run.handoff.testCaseLibraryVersionId]),
-        run.handoff.suiteVersionId
-          ? client.query<{ project_id: string; test_case_library_version_id: string | null; content_sha256: string }>(`
+        `, [run.handoff.testCaseLibraryVersionId])
+      const suite = run.handoff.suiteVersionId
+        ? await client.query<{ project_id: string; test_case_library_version_id: string | null; content_sha256: string }>(`
               SELECT project_id,test_case_library_version_id,content_sha256
               FROM smarthub.test_suite_versions WHERE id=$1
             `, [run.handoff.suiteVersionId])
-          : Promise.resolve({ rows: [] }),
-      ])
+        : { rows: [] }
       const persistedHandoff = handoff.rows[0]
       const persistedLibrary = library.rows[0]
       const persistedSuite = suite.rows[0]
@@ -515,26 +511,25 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         return null
       }
       const proposal = maintenanceProposalFromRow(proposalRow)
-      const [run, task, diagnosisResult, originalResult, repairResult, failureAttemptsResult, postRepairResult, baselineResult] = await Promise.all([
-        getRun(client, proposal.runId),
-        getTaskWithQueryable(client, proposal.taskId),
-        client.query<DiagnosisRow>(`${diagnosisSelectSql} WHERE diagnosis.id=$1`, [proposal.diagnosisId]),
-        client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE id=(SELECT script_revision_id FROM smarthub.test_execution_diagnoses WHERE id=$1)', [proposal.diagnosisId]),
-        client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE id=$1', [proposal.scriptRevisionId]),
-        client.query<AttemptRow>(`
+      const run = await getRun(client, proposal.runId)
+      const task = await getTaskWithQueryable(client, proposal.taskId)
+      const diagnosisResult = await client.query<DiagnosisRow>(`${diagnosisSelectSql} WHERE diagnosis.id=$1`, [proposal.diagnosisId])
+      const originalResult = await client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE id=(SELECT script_revision_id FROM smarthub.test_execution_diagnoses WHERE id=$1)', [proposal.diagnosisId])
+      const repairResult = await client.query<ScriptRevisionRow>('SELECT * FROM smarthub.test_execution_script_revisions WHERE id=$1', [proposal.scriptRevisionId])
+      const failureAttemptsResult = await client.query<AttemptRow>(`
           SELECT attempt.*
           FROM smarthub.test_execution_attempts attempt
           JOIN smarthub.test_execution_diagnosis_attempts binding
             ON binding.diagnosis_id=$1 AND binding.attempt_id=attempt.id
           ORDER BY binding.ordinal
-        `, [proposal.diagnosisId]),
-        client.query<AttemptRow>(`
+        `, [proposal.diagnosisId])
+      const postRepairResult = await client.query<AttemptRow>(`
           SELECT * FROM smarthub.test_execution_attempts
           WHERE run_id=$1 AND task_id=$2 AND script_revision_id=$3
             AND attempt_kind='post_repair' AND status='passed'
           ORDER BY ordinal DESC,id DESC LIMIT 1
-        `, [proposal.runId, proposal.taskId, proposal.scriptRevisionId]),
-        client.query<PersistedLibraryMemberRow>(`
+        `, [proposal.runId, proposal.taskId, proposal.scriptRevisionId])
+      const baselineResult = await client.query<PersistedLibraryMemberRow>(`
           SELECT member.case_id,member.case_revision,member.ordinal,member.content_sha256,
                  member.frozen_content,member.traceability,member.execution_readiness,
                  revision.content_sha256 AS revision_content_sha256,
@@ -543,8 +538,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
           JOIN smarthub.library_test_case_revisions revision
             ON revision.case_id=member.case_id AND revision.revision=member.case_revision
           WHERE member.version_id=$1 AND member.case_id=$2 AND member.case_revision=$3
-        `, [proposal.baselineLibraryVersionId, proposal.caseId, proposal.caseRevision]),
-      ])
+        `, [proposal.baselineLibraryVersionId, proposal.caseId, proposal.caseRevision])
       const diagnosisRow = diagnosisResult.rows[0]
       const originalRow = originalResult.rows[0]
       const repairRow = repairResult.rows[0]

@@ -239,7 +239,7 @@ export function buildTestExecutionReport(
   })
 
   const content: TestExecutionReportContent = {
-    schemaVersion: 'test-execution-report/v3',
+    schemaVersion: 'test-execution-report/v4',
     statisticsAt,
     run: {
       id: run.id,
@@ -313,6 +313,28 @@ export function buildTestExecutionReport(
       totalDiagnoses: diagnoses.length,
       categories: diagnosisDistribution,
     },
+    productDefectCandidates: diagnoses
+      .filter(diagnosis => diagnosis.category === 'product_defect')
+      .map(diagnosis => {
+        const task = tasks.find(item => item.id === diagnosis.taskId)!
+        return {
+          id: `product-defect-candidate:${diagnosis.id}`,
+          diagnosisId: diagnosis.id,
+          taskId: task.id,
+          ordinal: task.input.ordinal,
+          caseId: task.input.caseId,
+          caseRevision: task.input.caseRevision,
+          title: task.input.caseContent.title,
+          method: task.input.method,
+          status: 'pending_confirmation' as const,
+          summary: diagnosis.summary,
+          attemptIds: [...diagnosis.attemptIds],
+          artifactIds: diagnosis.evidence
+            .flatMap(evidence => evidence.artifactId ? [evidence.artifactId] : [])
+            .filter((id, index, values) => values.indexOf(id) === index),
+          createdAt: diagnosis.createdAt,
+        }
+      }),
     nonPassedTasks: tasks
       .filter(task => task.status !== 'passed')
       .map(task => nonPassedTask(
@@ -382,6 +404,10 @@ export function buildTestExecutionReport(
 export function testExecutionReportMarkdown(report: TestExecutionReport) {
   const diagnosisRows = report.diagnosisDistribution.categories
     .map(item => `| ${md(item.category)} | ${item.count} | ${formatPercentage(item.percentage)} |`)
+  const defectCandidateRows = report.productDefectCandidates.length
+    ? report.productDefectCandidates.map(candidate =>
+        `| ${candidate.ordinal} | ${md(candidate.caseId)}@${candidate.caseRevision} | ${md(candidate.title)} | ${md(candidate.method)} | ${md(candidate.summary)} | ${candidate.attemptIds.length} | ${candidate.artifactIds.length} | ${md(candidate.diagnosisId)} |`)
+    : ['| - | - | 无 | - | - | 0 | 0 | - |']
   const failureRows = report.nonPassedTasks.length
     ? report.nonPassedTasks.map(task =>
         `| ${task.ordinal} | ${md(task.caseId)}@${task.caseRevision} | ${md(task.title)} | ${md(task.status)} | ${md(task.diagnosis?.category ?? '无正式诊断')} | ${task.attemptCount} | ${task.scriptRevisionCount} |`)
@@ -456,6 +482,14 @@ export function testExecutionReportMarkdown(report: TestExecutionReport) {
     '| 类别 | 数量 | 占比 |',
     '|---|---:|---:|',
     ...diagnosisRows,
+    '',
+    '## 产品缺陷候选',
+    '',
+    '以下条目来自正式 product_defect 诊断，但仍需人工复核；候选不等于已确认 BUG。',
+    '',
+    '| 序号 | 用例 | 标题 | 方法 | 诊断摘要 | Attempts | Artifacts | Diagnosis |',
+    '|---:|---|---|---|---|---:|---:|---|',
+    ...defectCandidateRows,
     '',
     '## 非通过任务',
     '',
