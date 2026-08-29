@@ -353,6 +353,10 @@ function stageInstructions(
     ...common,
     '只根据当前失败 Attempt、Execution Event 与 Artifact 证据分类；不得修改脚本或决定是否修复。',
     'Workspace 工具的当前目录就是本任务的冻结根目录；先读取 attempts.json、events.json，若存在 evidence/ 则必须读取其中与终态 Attempt 对应的 Runner 日志摘录。',
+    '若 HTTP 证据为 404/405，且冻结 TestCase 未明确要求该状态码，必须判定为 API 契约/脚本实现问题 script_defect；Validator 要求通用 4xx 断言排除 404/405 是为了暴露错误路径/方法，绝不能将该保护性断言诊断为 assertion_mismatch。只有 400/401/403/409/422 等非路由失败状态被脚本自行收窄、且冻结 Expected Result 未固定时，才属于 assertion_mismatch。',
+    '若 events.json 的 failure phase=load，且证据指向脚本导入、测试发现或入口实现（包括 No tests found），应归类 script_defect；只有独立 Runner readiness 或依赖安装证据才能支持 environment_defect。',
+    '若 T1、T2、K 等符号数据未由冻结 Test Data Binding、成功 setup 响应或显式前置数据守卫证明存在，相关失败应归类 test_data_defect，不能据此报告 product_defect。',
+    'UI 失败必须优先核对 events.json 中 category=terminal_page 的同源终态路径和页面地标；它们是 Runner 从本次 Playwright Trace 提取的正向观察事实。不得只根据失败 Locator 猜测 assertion_mismatch；若终态路径或页面地标直接违反冻结 Expected Result，应按产品行为证据判断。',
     `完成后只调用 ${submitToolId} 提交 category、reason、evidence。`,
   ]
   const implementation = [
@@ -364,6 +368,10 @@ function stageInstructions(
     '先复用 Workspace 和已有 Observation；只有实现所需信息不足时才按需、多轮调用 Browser Tools。Browser Observation 是运行时观察事实，不是 Requirement Truth。',
     'Browser Tools 只用于受控探索，不是 Runner；不得把工具观察解释为 PASS/FAIL，也不得据此改变 Expected Result 或弱化断言。',
     '每条前置条件都必须由冻结 Test Data、受管 Fixture、可追溯的 setup/cleanup 或运行时可观察验证来落实；T1、T2、K 等用例符号不是环境中已存在数据的证明，无法落实时不得提交可执行候选。',
+    'API 的 method、path、query 参数和 request body 字段必须来自复用代码、Exploration Context 或本次 Browser Observation；禁止根据命名习惯猜测 /search、/auth/login、PATCH 等契约。契约仍不可观察时不得提交候选。',
+    '每个需要读取响应体的 API 请求必须包装在标题精确形如 test.step("METHOD /relative/path", ...) 的步骤中；Runner 会用该方法和相对路径关联同源 Trace，固化脱敏状态码、请求与响应证据。不得使用“发起登录请求”等无法关联 HTTP Trace 的自由文本步骤标题。',
+    'API Case 的 test/expect 必须直接从 @playwright/test 导入；@smarthub/playwright-test 只允许用于冻结前置条件明确已登录、且确实需要 request 辅助准备的 UI Case。',
+    'API 异常场景不得把业务失败自行等同于 HTTP 4xx：只有冻结 Expected Result 明确要求 HTTP/状态码时，受保护断言才能锚定状态码或 4xx 范围。否则应把冻结的业务错误字段、成功标志或持久化不变量作为受保护断言；404/405 仅作为非锚定防误报保护并必须触发契约修复，不能把不存在的路径、错误方法或“200 + 业务失败响应”误判。',
     '只提交需要新增或修改的 Workspace 文件；summary 仅用于简短说明。',
   ]
   if (stage === 'script_repair') implementation.push(

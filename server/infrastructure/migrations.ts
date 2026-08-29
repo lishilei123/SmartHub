@@ -3001,6 +3001,143 @@ const migrations: Migration[] = [{
       RETURN NEW;
     END $$;
   `,
+}, {
+  version: 39,
+  name: 'allow-policy-invalidated-manual-retry-regeneration',
+  sql: `
+    DO $migration$
+    DECLARE
+      definition text;
+      updated text;
+    BEGIN
+      SELECT pg_get_functiondef(
+        'smarthub.validate_test_execution_task_write()'::regprocedure
+      ) INTO definition;
+
+      updated := replace(
+        definition,
+        'WHEN ''failed'' THEN NEW.status=''ready'' OR (NEW.status=''pending'' AND OLD.current_script_revision_id IS NULL)',
+        'WHEN ''failed'' THEN NEW.status IN (''ready'',''pending'')'
+      );
+      IF updated = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_MIGRATION_FAILED_STATUS_NOT_FOUND';
+      END IF;
+      definition := updated;
+
+      updated := replace(
+        definition,
+        'WHEN ''blocked'' THEN NEW.status=''ready'' OR (NEW.status=''pending'' AND OLD.current_script_revision_id IS NULL)',
+        'WHEN ''blocked'' THEN NEW.status IN (''ready'',''pending'')'
+      );
+      IF updated = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_MIGRATION_BLOCKED_STATUS_NOT_FOUND';
+      END IF;
+      definition := updated;
+
+      updated := replace(
+        definition,
+        'WHEN ''waiting_manual'' THEN NEW.status=''ready'' OR (NEW.status=''pending'' AND OLD.current_script_revision_id IS NULL)',
+        'WHEN ''waiting_manual'' THEN NEW.status IN (''ready'',''pending'')'
+      );
+      IF updated = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_TASK_TRANSITION_MIGRATION_WAITING_STATUS_NOT_FOUND';
+      END IF;
+
+      EXECUTE updated;
+    END $migration$;
+  `,
+}, {
+  version: 40,
+  name: 'append-policy-regenerated-script-revisions',
+  sql: `
+    ALTER TABLE smarthub.test_execution_script_revisions
+      DROP CONSTRAINT IF EXISTS test_execution_script_revisions_generation_source_check;
+    ALTER TABLE smarthub.test_execution_script_revisions
+      ADD CONSTRAINT test_execution_script_revisions_generation_source_check
+      CHECK (generation_source IN ('agent','cache','repair','regeneration'));
+
+    DO $migration$
+    DECLARE
+      definition text;
+      updated text;
+    BEGIN
+      SELECT pg_get_functiondef(
+        'smarthub.validate_test_execution_script_revision_insert()'::regprocedure
+      ) INTO definition;
+
+      updated := replace(
+        definition,
+        $from$IF NEW.generation_source='repair' THEN$from$,
+        $to$IF NEW.generation_source IN ('repair','regeneration') THEN$to$
+      );
+      IF updated = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REGENERATION_PARENT_MIGRATION_FAILED';
+      END IF;
+      definition := updated;
+
+      updated := replace(
+        definition,
+        $from$IF NEW.protected_assertion_sha256 IS DISTINCT FROM parent_protected_assertion_sha256
+          OR NEW.package_manifest->'assertions' IS DISTINCT FROM parent_assertions THEN$from$,
+        $to$IF NEW.generation_source='repair' AND (
+          NEW.protected_assertion_sha256 IS DISTINCT FROM parent_protected_assertion_sha256
+          OR NEW.package_manifest->'assertions' IS DISTINCT FROM parent_assertions
+        ) THEN$to$
+      );
+      IF updated = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_SCRIPT_REGENERATION_ASSERTION_MIGRATION_FAILED';
+      END IF;
+
+      EXECUTE updated;
+    END $migration$;
+  `,
+}, {
+  version: 41,
+  name: 'record-post-regeneration-attempts',
+  sql: `
+    ALTER TABLE smarthub.test_execution_attempts
+      DROP CONSTRAINT IF EXISTS test_execution_attempts_attempt_kind_check;
+    ALTER TABLE smarthub.test_execution_attempts
+      ADD CONSTRAINT test_execution_attempts_attempt_kind_check
+      CHECK (attempt_kind IN (
+        'initial','same_script_retry','infrastructure_retry',
+        'post_repair','post_regeneration','manual_retry'
+      ));
+
+    DO $migration$
+    DECLARE
+      definition text;
+      updated text;
+    BEGIN
+      SELECT pg_get_functiondef(
+        'smarthub.validate_test_execution_attempt_write()'::regprocedure
+      ) INTO definition;
+
+      updated := replace(
+        definition,
+        $from$OR (NEW.attempt_kind='post_repair' AND (revision_source<>'repair' OR revision_attempt_count<>0))
+          OR (NEW.attempt_kind='manual_retry'$from$,
+        $to$OR (NEW.attempt_kind='post_repair' AND (revision_source<>'repair' OR revision_attempt_count<>0))
+          OR (NEW.attempt_kind='post_regeneration' AND (revision_source<>'regeneration' OR revision_attempt_count<>0))
+          OR (NEW.attempt_kind='manual_retry'$to$
+      );
+      IF updated = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_POST_REGENERATION_ATTEMPT_MIGRATION_FAILED';
+      END IF;
+      definition := updated;
+
+      updated := replace(
+        definition,
+        $from$NEW.attempt_kind NOT IN ('initial','post_repair','manual_retry','same_script_retry','infrastructure_retry')$from$,
+        $to$NEW.attempt_kind NOT IN ('initial','post_repair','post_regeneration','manual_retry','same_script_retry','infrastructure_retry')$to$
+      );
+      IF updated = definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_POST_REGENERATION_KIND_MIGRATION_FAILED';
+      END IF;
+
+      EXECUTE updated;
+    END $migration$;
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

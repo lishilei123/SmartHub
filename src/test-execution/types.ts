@@ -250,6 +250,8 @@ export type ExecutionEvent = {
     method?: string
     path?: string
     httpStatus?: number
+    request?: ExecutionHttpPayload
+    response?: ExecutionHttpPayload
     queryFields?: string[]
     retry?: number
     failureKind?: 'assertion' | 'timeout' | 'execution'
@@ -259,6 +261,13 @@ export type ExecutionEvent = {
       column: number
     }
   }
+}
+
+export type ExecutionHttpPayload = {
+  contentType?: string
+  bodyBytes: number
+  truncated?: boolean
+  body?: unknown
 }
 
 export type FailureDiagnosis = {

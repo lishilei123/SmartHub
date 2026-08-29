@@ -5,6 +5,7 @@ import type { CallExpression, Node } from '@babel/types'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import type {
   ExecutionAssertionContract,
+  ExecutionEvent,
   ExecutionPackage,
   ExecutionPackageCandidate,
   ExecutionPackageFile,
@@ -91,7 +92,7 @@ const allowedExternalStaticImports = new Set([
   GOVERNED_UI_API_TEST_MODULE,
 ])
 const allowedWorkspaceSourceRoots = new Set(['tests', 'api', 'pages', 'helpers', 'fixtures'])
-export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v3' as const
+export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v9' as const
 const forbiddenHttpClientModules = new Set([
   'axios',
   'superagent',
@@ -357,6 +358,7 @@ function buildExecutionPackageWithPolicy(
     input.task.caseId,
     enforceInitialUiNavigation,
     resolveAuthSessionPolicy(input.task).mode,
+    Boolean(input.task.testDataBindings?.length),
   )
   if (input.baselineAssertions) assertProtectedAssertions(input.baselineAssertions, assertions)
   const protectedAssertionSha256 = canonicalSha256(assertions)
@@ -478,6 +480,35 @@ export function validateFailureDiagnosisCandidate(
     category,
     reason: text(candidate.reason, 'reason', 4_000),
     evidence: text(candidate.evidence, 'evidence', 4_000),
+  }
+}
+
+export function adjudicateFailureDiagnosisCandidate(
+  candidate: FailureDiagnosisCandidate,
+  task: Pick<FrozenExecutionTaskInput, 'method' | 'caseContent'>,
+  events: readonly ExecutionEvent[],
+): FailureDiagnosisCandidate {
+  if (task.method !== 'api') return candidate
+  const routeFailure = events.find(event => (
+    event.type === 'http'
+    && event.status === 'failed'
+    && (event.metadata?.httpStatus === 404 || event.metadata?.httpStatus === 405)
+  ))
+  if (!routeFailure) return candidate
+  const status = Number(routeFailure.metadata?.httpStatus)
+  const frozenSemantics = [
+    task.caseContent.title,
+    ...task.caseContent.preconditions,
+    ...task.caseContent.steps,
+    ...task.caseContent.expectedResults,
+  ].join('\n')
+  if (new RegExp(`(?:^|\\D)${status}(?:$|\\D)`, 'u').test(frozenSemantics)) return candidate
+  const method = typeof routeFailure.metadata?.method === 'string' ? routeFailure.metadata.method : 'HTTP'
+  const path = typeof routeFailure.metadata?.path === 'string' ? routeFailure.metadata.path : '未知路径'
+  return {
+    category: 'script_defect',
+    reason: `Runner 观察到 ${method} ${path} 返回 HTTP ${status}，冻结 TestCase 未要求该路由失败；这说明脚本使用的 API 路径或方法契约不成立`,
+    evidence: `结构化 HTTP Event ${routeFailure.id} 在 Attempt ${routeFailure.attemptId} 中记录 ${method} ${path} · ${status}`,
   }
 }
 
@@ -663,12 +694,28 @@ function validateEntrypointSource(
   caseId: string,
   enforceInitialUiNavigation: boolean,
   authSessionMode: ReturnType<typeof resolveAuthSessionPolicy>['mode'],
+  hasFrozenTestDataBindings: boolean,
 ): ExecutionAssertionContract[] {
   const ast = parseWorkspaceSource(source)
   const callback = entryTestCallback(ast, caseId)
   assertAuthIsolation(ast, executionSpec)
   assertBusinessClosure(ast, executionSpec)
+  assertSymbolicTestDataRealization(source, callback, executionSpec, hasFrozenTestDataBindings)
   const fixtures = callbackFixtureNames(callback)
+  const governedUiApiImport = importsModule(ast, GOVERNED_UI_API_TEST_MODULE)
+  if (executionSpec.method === 'api' && governedUiApiImport) {
+    rejectSource(`API Case 必须直接从 @playwright/test 导入 test/expect；${GOVERNED_UI_API_TEST_MODULE} 仅供受管认证的 UI request fixture 使用`)
+  }
+  if (
+    governedUiApiImport
+    && (
+      executionSpec.method !== 'ui'
+      || !fixtures.has('request')
+      || authSessionMode !== 'reuse_authenticated'
+    )
+  ) {
+    rejectSource(`${GOVERNED_UI_API_TEST_MODULE} 只能用于已登录且需要 request 辅助准备的 UI Case`)
+  }
   if (executionSpec.method === 'api' && !fixtures.has('request')) {
     rejectSource('API Case 必须使用 Playwright Test request fixture / APIRequestContext')
   }
@@ -684,6 +731,7 @@ function validateEntrypointSource(
     rejectSource(`已登录 UI Case 使用 request 辅助准备时，入口 test 必须从 ${GOVERNED_UI_API_TEST_MODULE} 导入`)
   }
   if (executionSpec.method === 'ui' && enforceInitialUiNavigation) assertInitialUiNavigation(callback)
+  if (executionSpec.method === 'api') assertStructuredApiResponseEvidence(callback)
   const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null; received: Node }>()
   walkAst(callback, (node) => {
     if (node.type === 'ExpressionStatement') {
@@ -704,9 +752,11 @@ function validateEntrypointSource(
   const expectedKeys = new Set(checks.map(check => check.key))
   const unexpectedAnchor = [...anchors.keys()].find(key => !expectedKeys.has(key))
   if (unexpectedAnchor) rejectSource(`存在未声明的断言锚点：${unexpectedAnchor}`)
+  if (executionSpec.method === 'api') assertGenericClientErrorExcludesRouteFailures(callback, checks)
   return checks.map(check => {
     const assertion = anchors.get(check.key)
     if (!assertion) rejectSource(`缺少 Verification Check 断言锚点：${check.key}`)
+    if (executionSpec.method === 'api') assertFrozenApiStatusSemantics(assertion, check.description, callback)
     return {
       verificationCheckKey: check.key,
       verificationCheckSha256: canonicalSha256(check),
@@ -721,6 +771,175 @@ function validateEntrypointSource(
       }),
     }
   })
+}
+
+function assertStructuredApiResponseEvidence(callback: Node) {
+  const structuredResponseIdentifiers = new Set<string>()
+  walkAst(callback, node => {
+    if (node.type !== 'VariableDeclarator' || node.id.type !== 'Identifier' || !node.init) return
+    let initializer = node.init
+    while (initializer.type === 'AwaitExpression') initializer = initializer.argument
+    if (isStructuredHttpStepCall(initializer)) structuredResponseIdentifiers.add(node.id.name)
+  })
+  walkAst(callback, node => {
+    if (
+      node.type !== 'CallExpression'
+      || node.callee.type !== 'MemberExpression'
+      || node.callee.computed
+      || node.callee.property.type !== 'Identifier'
+      || !['json', 'text', 'body'].includes(node.callee.property.name)
+    ) return
+    if (node.callee.object.type === 'Identifier' && structuredResponseIdentifiers.has(node.callee.object.name)) return
+    rejectSource(
+      '读取 API 响应体的 Case 必须把对应响应变量赋值为 test.step("METHOD /relative/path", ...) 的结果，使 Runner 能从同源 Trace 固化状态码与脱敏请求/响应证据',
+    )
+  })
+}
+
+function isStructuredHttpStepCall(node: Node) {
+  return node.type === 'CallExpression'
+    && node.callee.type === 'MemberExpression'
+    && !node.callee.computed
+    && node.callee.object.type === 'Identifier'
+    && node.callee.object.name === 'test'
+    && node.callee.property.type === 'Identifier'
+    && node.callee.property.name === 'step'
+    && node.arguments[0]?.type === 'StringLiteral'
+    && /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\//u.test(node.arguments[0].value.trim())
+}
+
+function assertGenericClientErrorExcludesRouteFailures(
+  callback: Node,
+  checks: Array<{ description: string }>,
+) {
+  let lowerBound = false
+  let upperBound = false
+  const excludedStatuses = new Set<number>()
+  walkAst(callback, node => {
+    if (node.type !== 'ExpressionStatement') return
+    const assertion = assertionExpression(node.expression)
+    if (!assertion || !httpStatusExpression(assertion.received, callback)) return
+    const expected = assertion.expected
+    if (expected?.type !== 'NumericLiteral' || !Number.isInteger(expected.value)) return
+    if (assertion.matcher === 'toBeGreaterThanOrEqual' && expected.value === 400) lowerBound = true
+    if (assertion.matcher === 'toBeLessThan' && expected.value === 500) upperBound = true
+    if (
+      assertion.modifiers.includes('not')
+      && ['toBe', 'toEqual', 'toStrictEqual'].includes(assertion.matcher)
+    ) excludedStatuses.add(expected.value)
+  })
+  if (!lowerBound || !upperBound) return
+  const frozenSemantics = checks.map(check => check.description).join('\n')
+  const missing = [404, 405].filter(status => (
+    !new RegExp(`(?:^|\\D)${status}(?:$|\\D)`, 'u').test(frozenSemantics)
+    && !excludedStatuses.has(status)
+  ))
+  if (!missing.length) return
+  rejectSource(
+    `API 通用 4xx 拒绝断言必须显式排除 ${missing.join('/')}，避免不存在的路径或错误方法被误判为业务拒绝成功；只有冻结 Verification Check 明确要求该状态时才能接受`,
+  )
+}
+
+function assertFrozenApiStatusSemantics(
+  assertion: { matcher: string; modifiers: string[]; expected: Node | null; received: Node },
+  verificationCheck: string,
+  callback: Node,
+) {
+  const statusExpression = httpStatusExpression(assertion.received, callback)
+  if (
+    statusExpression
+    && ['toBeGreaterThanOrEqual', 'toBeGreaterThan', 'toBeLessThanOrEqual', 'toBeLessThan'].includes(assertion.matcher)
+    && assertion.expected?.type === 'NumericLiteral'
+    && assertion.expected.value >= 400
+    && assertion.expected.value <= 500
+    && !/(?:HTTP|状态码|4xx|4\d\d)/iu.test(verificationCheck)
+  ) {
+    rejectSource(
+      'Verification Check 只冻结了业务失败语义，不能把受保护断言收窄为 HTTP 4xx；应直接断言冻结的业务错误语义，并将 404/405 路由保护作为非锚定防误报检查',
+    )
+  }
+  if (
+    assertion.modifiers.includes('not')
+    || !['toBe', 'toEqual', 'toStrictEqual'].includes(assertion.matcher)
+    || assertion.expected?.type !== 'NumericLiteral'
+    || !Number.isInteger(assertion.expected.value)
+    || assertion.expected.value < 400
+    || assertion.expected.value > 499
+    || !statusExpression
+  ) return
+  const status = assertion.expected.value
+  if (new RegExp(`(?:^|\\D)${status}(?:$|\\D)`, 'u').test(verificationCheck)) return
+  rejectSource(
+    `Verification Check 未固定 HTTP ${status}，API 异常场景不能把通用拒绝结果收窄成单一状态码；应校验冻结的业务错误语义，并只对 4xx 范围或明确允许的状态集合做保护性检查`,
+  )
+}
+
+function httpStatusExpression(node: Node, callback: Node) {
+  if (httpResponseStatusCall(node)) return true
+  if (node.type !== 'Identifier') return false
+  let found = false
+  walkAst(callback, candidate => {
+    if (
+      candidate.type === 'VariableDeclarator'
+      && candidate.id.type === 'Identifier'
+      && candidate.id.name === node.name
+      && candidate.init
+      && httpResponseStatusCall(candidate.init)
+    ) found = true
+  })
+  return found
+}
+
+function httpResponseStatusCall(node: Node) {
+  return node.type === 'CallExpression'
+    && node.callee.type === 'MemberExpression'
+    && !node.callee.computed
+    && node.callee.property.type === 'Identifier'
+    && node.callee.property.name === 'status'
+}
+
+function assertSymbolicTestDataRealization(
+  source: string,
+  callback: Node,
+  executionSpec: TestCaseExecutionSpec,
+  hasFrozenTestDataBindings: boolean,
+) {
+  if (hasFrozenTestDataBindings) return
+  const roles = symbolicTestDataRoles(executionSpec.testCase)
+  if (!roles.length) return
+  let traceableSetup = false
+  let explicitPreconditionGuard = false
+  walkAst(callback, node => {
+    if (
+      node.type === 'CallExpression'
+      && node.callee.type === 'MemberExpression'
+      && !node.callee.computed
+      && node.callee.property.type === 'Identifier'
+      && /^(?:post|put|patch|delete)$/u.test(node.callee.property.name.toLocaleLowerCase())
+    ) traceableSetup = true
+    if (node.type !== 'ThrowStatement' || !Number.isInteger(node.start) || !Number.isInteger(node.end)) return
+    explicitPreconditionGuard ||= /(?:precondition|test\s*data|fixture|前置|测试数据)/iu.test(
+      source.slice(node.start!, node.end!),
+    )
+  })
+  if (traceableSetup || explicitPreconditionGuard) return
+  rejectSource(
+    `用例符号 ${roles.join('、')} 没有冻结 Test Data Binding、可追溯 setup/cleanup 或显式前置数据守卫；不能把符号当作环境中已存在的数据`,
+  )
+}
+
+function symbolicTestDataRoles(testCase: TestCaseContent) {
+  const text = [
+    testCase.title,
+    ...testCase.preconditions,
+    ...testCase.steps,
+    ...testCase.expectedResults,
+  ].join('\n')
+  const result = new Set<string>()
+  for (const match of text.matchAll(/(?:^|[^\p{L}\p{N}_])(T\d+|K)(?=$|[^\p{L}\p{N}_])/giu)) {
+    result.add(match[1].toLocaleUpperCase())
+  }
+  return [...result].sort((left, right) => left.localeCompare(right, 'en'))
 }
 
 function assertInitialUiNavigation(callback: Node) {
@@ -764,6 +983,14 @@ function importsNamedTestFrom(ast: ReturnType<typeof parse>, moduleName: string)
       && (specifier.imported.type === 'Identifier'
         ? specifier.imported.name === 'test'
         : specifier.imported.value === 'test'))
+  })
+  return imported
+}
+
+function importsModule(ast: ReturnType<typeof parse>, moduleName: string) {
+  let imported = false
+  walkAst(ast, node => {
+    imported ||= node.type === 'ImportDeclaration' && String(node.source.value) === moduleName
   })
   return imported
 }

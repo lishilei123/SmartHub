@@ -549,6 +549,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
     taskId: string
     expectedRunStateVersion: number
     expectedTaskStateVersion: number
+    retryStatus?: 'pending' | 'ready'
     job: ExecutionJob
   }) {
     assert.equal(input.runId, this.run.id)
@@ -566,7 +567,7 @@ class InMemoryExecutionStore implements TestExecutionStore {
     }
     this.task = {
       ...this.task,
-      status: 'ready',
+      status: input.retryStatus ?? (this.task.currentScriptRevisionId ? 'ready' : 'pending'),
       stateVersion: this.task.stateVersion + 1,
       updatedAt: input.job.createdAt,
       finishedAt: undefined,

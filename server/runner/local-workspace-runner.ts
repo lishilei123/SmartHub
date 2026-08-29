@@ -35,7 +35,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
   ) {
     this.playwright = playwright ?? localPlaywrightInstallation()
     this.value = {
-      runnerVersion: 'local-workspace/v5',
+      runnerVersion: 'local-workspace/v10',
       playwrightVersion: this.playwright.version,
       imageReference: 'local-workspace',
       imageDigest: `sha256:${'0'.repeat(64)}`,
@@ -180,14 +180,15 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
       const exitCode = await new Promise<number | null>(resolveExit => child.once('close', resolveExit))
       clearTimeout(timeout)
       signal.removeEventListener('abort', terminate)
+      const sensitiveValues = [
+        ...Object.values(secretEnvironment),
+        ...(runtimeApiAuthorization
+          ? [runtimeApiAuthorization, runtimeApiAuthorization.replace(/^Bearer\s+/iu, '')]
+          : []),
+      ]
       const output = redactRunnerOutput(
         Buffer.concat([Buffer.concat(stdout), Buffer.concat(stderr)]),
-        [
-          ...Object.values(secretEnvironment),
-          ...(runtimeApiAuthorization
-            ? [runtimeApiAuthorization, runtimeApiAuthorization.replace(/^Bearer\s+/iu, '')]
-            : []),
-        ],
+        sensitiveValues,
       )
       const artifact = output.length ? await this.artifacts.put({ body: bytes(output), mimeType: 'text/plain; charset=utf-8', maximumBytes: 2 * 1024 * 1024 }) : undefined
       if (signal.aborted) return { ...cancelled(Date.now() - started), artifacts: artifact ? [{ ...artifact, type: 'log' }] : [] }
@@ -195,17 +196,21 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         JSON.parse(await readFile(reporterPath, 'utf8')) as unknown,
         input.workspace.entrySymbol,
       )
-      report.events = applyPlaywrightTraceHttpObservations(
-        report.events,
-        await readPlaywrightTraceHttpObservations(runtimeRoot, report.attachments),
-      )
       const attachmentArtifacts = await ingestReporterAttachments(
         runtimeRoot,
         report.attachments,
         this.artifacts,
-        runtimeApiAuthorization
-          ? [runtimeApiAuthorization, runtimeApiAuthorization.replace(/^Bearer\s+/iu, '')]
-          : [],
+        sensitiveValues,
+      )
+      const traceEvidence = await readPlaywrightTraceEvidence(
+        runtimeRoot,
+        report.attachments,
+        input.environment.baseUrl,
+        sensitiveValues,
+      )
+      report.events = applyPlaywrightTraceHttpObservations(
+        report.events,
+        traceEvidence.http,
       )
       const artifacts = [
         ...(artifact ? [{ ...artifact, type: 'log' as const }] : []),
@@ -213,10 +218,19 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
       ]
       const passed = exitCode === 0
       const events = report.events.slice()
+      if (traceEvidence.terminalPage) {
+        const traceArtifacts = attachmentArtifacts.filter(item => item.type === 'trace')
+        events.push(terminalPageEvent(
+          traceEvidence.terminalPage,
+          traceArtifacts.length === 1 ? traceArtifacts[0].sha256 : undefined,
+        ))
+      }
       events.push(...attachmentArtifacts.map((item, index): RunnerExecutionEvent => ({
         sequence: events.length + index + 1,
         type: item.type === 'screenshot' ? 'screenshot' : item.type === 'trace' ? 'trace' : 'video',
-        title: item.type === 'screenshot' ? '失败页面截图' : item.type === 'trace' ? 'Playwright Trace' : 'Playwright Video',
+        title: item.type === 'screenshot'
+          ? passed ? '成功页面截图' : '失败页面截图'
+          : item.type === 'trace' ? 'Playwright Trace' : 'Playwright Video',
         status: 'passed',
         startedAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
@@ -291,7 +305,7 @@ export function localPlaywrightConfig(
     "const baseURL = process.env.SMARTHUB_BASE_URL",
     "if (!baseURL) throw new Error('TEST_EXECUTION_BASE_URL_REQUIRED')",
     ...runtimeAuthorization,
-    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, headless: true, trace: 'retain-on-failure', screenshot: 'only-on-failure'${storageState}${extraHttpHeaders} } }`,
+    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, headless: true, trace: 'on', screenshot: 'on'${storageState}${extraHttpHeaders} } }`,
     '',
   ].join('\n')
 }
@@ -314,6 +328,23 @@ export type PlaywrightTraceHttpObservation = {
   method: string
   path: string
   status: number
+  request?: PlaywrightTraceHttpPayload
+  response?: PlaywrightTraceHttpPayload
+}
+
+export type PlaywrightTraceHttpPayload = {
+  contentType?: string
+  bodyBytes: number
+  truncated?: boolean
+  body?: unknown
+}
+
+export type PlaywrightTraceTerminalPageObservation = {
+  path: string
+  queryFields?: string[]
+  headings?: string[]
+  controls?: string[]
+  observedAt: string
 }
 
 /** Parse only Playwright's structured JSON reporter contract, never stdout. */
@@ -325,8 +356,16 @@ export function parsePlaywrightJsonReport(value: unknown, entrySymbol: string): 
   const record = value as Record<string, unknown>
   const specs = collectReporterSpecs(record.suites)
     .filter(spec => reporterTitleMatches(String(spec.title ?? ''), entrySymbol))
-  if (specs.length !== 1) throw new Error('TEST_EXECUTION_PLAYWRIGHT_REPORT_ENTRY_COUNT_INVALID')
-  const tests = Array.isArray(specs[0].tests) ? specs[0].tests : []
+  // The launch boundary already scopes Playwright to the integrity-checked
+  // entry file and exact Case Symbol. JSON Reporter may project that one
+  // declaration more than once (for example across nested suites/projects),
+  // so reporter cardinality is not an independent executable-entry count.
+  if (!specs.length) {
+    const globalErrors = reporterGlobalErrors(record)
+    if (globalErrors.length) return { events: globalErrors, attachments: [] }
+    throw new Error('TEST_EXECUTION_PLAYWRIGHT_REPORT_ENTRY_COUNT_INVALID')
+  }
+  const tests = specs.flatMap(spec => Array.isArray(spec.tests) ? spec.tests : [])
   const results = tests.flatMap(test => {
     if (!test || typeof test !== 'object') return []
     const value = (test as Record<string, unknown>).results
@@ -415,6 +454,35 @@ export function parsePlaywrightJsonReport(value: unknown, entrySymbol: string): 
     events: events.map((event, index) => ({ ...event, sequence: index + 1 })),
     attachments: [...new Map(attachments.map(item => [item.path, item])).values()],
   }
+}
+
+function reporterGlobalErrors(report: Record<string, unknown>): RunnerExecutionEvent[] {
+  if (!Array.isArray(report.errors)) return []
+  const stats = report.stats && typeof report.stats === 'object'
+    ? report.stats as Record<string, unknown>
+    : undefined
+  const startedAt = safeTimestamp(stats?.startTime)
+  return report.errors.flatMap((candidate, index) => {
+    if (!candidate || typeof candidate !== 'object') return []
+    const error = candidate as Record<string, unknown>
+    const failure = reporterFailure({
+      error,
+      errors: [error],
+      errorLocation: error.location,
+    })
+    return [{
+      ...eventRecord('failure', 'Playwright 测试加载失败', 'failed', startedAt, 0),
+      sequence: index + 1,
+      metadata: {
+        source: 'playwright_json_reporter',
+        retry: 0,
+        failureKind: failure.kind,
+        phase: 'load',
+        ...(failure.message ? { message: failure.message } : {}),
+        ...(failure.location ? { location: failure.location } : {}),
+      },
+    } satisfies RunnerExecutionEvent]
+  })
 }
 
 function collectReporterSpecs(value: unknown): Array<Record<string, unknown>> {
@@ -611,7 +679,7 @@ export function applyPlaywrightTraceHttpObservations(
 ) {
   const pending = observations.slice()
   return events.map(event => {
-    if (event.type !== 'http' || event.metadata?.httpStatus !== undefined) return event
+    if (event.type !== 'http') return event
     const method = typeof event.metadata?.method === 'string' ? event.metadata.method : ''
     const path = typeof event.metadata?.path === 'string' ? event.metadata.path : ''
     const index = pending.findIndex(observation => traceHttpObservationMatches(method, path, observation))
@@ -620,7 +688,12 @@ export function applyPlaywrightTraceHttpObservations(
     return {
       ...event,
       title: `${method.toUpperCase()} ${path} · ${observation.status}`,
-      metadata: { ...event.metadata, httpStatus: observation.status },
+      metadata: {
+        ...event.metadata,
+        httpStatus: observation.status,
+        ...(observation.request ? { request: observation.request } : {}),
+        ...(observation.response ? { response: observation.response } : {}),
+      },
     }
   })
 }
@@ -638,11 +711,17 @@ function traceHttpObservationMatches(
     segment.startsWith(':') || /^\{[^{}]+\}$/u.test(segment) || segment === actual[index])
 }
 
-async function readPlaywrightTraceHttpObservations(
+async function readPlaywrightTraceEvidence(
   runtimeRoot: string,
   attachments: readonly PlaywrightJsonAttachment[],
-): Promise<PlaywrightTraceHttpObservation[]> {
-  const observations: PlaywrightTraceHttpObservation[] = []
+  baseUrl: string,
+  secrets: readonly string[],
+): Promise<{
+  http: PlaywrightTraceHttpObservation[]
+  terminalPage?: PlaywrightTraceTerminalPageObservation
+}> {
+  const http: PlaywrightTraceHttpObservation[] = []
+  let terminalPage: PlaywrightTraceTerminalPageObservation | undefined
   for (const attachment of attachments) {
     if (reporterAttachmentType(attachment) !== 'trace') continue
     try {
@@ -656,16 +735,172 @@ async function readPlaywrightTraceHttpObservations(
         const source = await readBoundedZipEntry(entry, 16 * 1024 * 1024)
         for (const line of source.split(/\r?\n/u)) {
           if (!line || line.length > 1024 * 1024) continue
-          const observation = traceHttpObservation(line)
-          if (observation) observations.push(observation)
+          const observation = await traceHttpObservation(line, archive, secrets)
+          if (observation) http.push(observation)
         }
       }
+      const traceEntries = Object.values(archive.files)
+        .filter(entry => !entry.dir && /(?:^|\/)\d+-trace\.trace$/u.test(entry.name))
+        .sort((left, right) => left.name.localeCompare(right.name, 'en'))
+      for (const entry of traceEntries) {
+        const source = await readBoundedZipEntry(entry, 16 * 1024 * 1024)
+        const observation = traceTerminalPageObservation(source, baseUrl, secrets)
+        if (observation) terminalPage = observation
+      }
     } catch {
-      // Trace enrichment is best-effort. Attachment ingestion below remains
+      // Trace enrichment is best-effort. Attachment ingestion above remains
       // authoritative and still rejects invalid paths or files.
     }
   }
-  return observations
+  return { http, ...(terminalPage ? { terminalPage } : {}) }
+}
+
+function traceTerminalPageObservation(
+  source: string,
+  baseUrl: string,
+  secrets: readonly string[],
+): PlaywrightTraceTerminalPageObservation | undefined {
+  const snapshots: Array<{
+    pageId: string
+    frameUrl: string
+    html: unknown
+    observedAt: string
+  }> = []
+  for (const line of source.split(/\r?\n/u)) {
+    if (!line || line.length > 1024 * 1024) continue
+    let value: unknown
+    try { value = JSON.parse(line) } catch { continue }
+    if (!value || typeof value !== 'object') continue
+    const record = value as Record<string, unknown>
+    if (record.type !== 'frame-snapshot' || !record.snapshot || typeof record.snapshot !== 'object') continue
+    const snapshot = record.snapshot as Record<string, unknown>
+    if (snapshot.isMainFrame !== true || typeof snapshot.frameUrl !== 'string' || typeof snapshot.pageId !== 'string') continue
+    const observedAt = traceObservedAt(snapshot.wallTime)
+    snapshots.push({
+      pageId: snapshot.pageId,
+      frameUrl: snapshot.frameUrl,
+      html: snapshot.html,
+      observedAt,
+    })
+  }
+  const terminal = snapshots.at(-1)
+  if (!terminal) return undefined
+  const location = safeTerminalPageLocation(terminal.frameUrl, baseUrl)
+  if (!location) return undefined
+  let phaseStart = snapshots.length - 1
+  while (
+    phaseStart > 0
+    && snapshots[phaseStart - 1].pageId === terminal.pageId
+    && snapshots[phaseStart - 1].frameUrl === terminal.frameUrl
+  ) phaseStart -= 1
+  const headings: string[] = []
+  const controls: string[] = []
+  for (const snapshot of snapshots.slice(phaseStart)) {
+    collectTraceLandmarks(snapshot.html, headings, controls, secrets)
+  }
+  return {
+    path: location.path,
+    ...(location.queryFields.length ? { queryFields: location.queryFields } : {}),
+    ...(headings.length ? { headings } : {}),
+    ...(controls.length ? { controls } : {}),
+    observedAt: terminal.observedAt,
+  }
+}
+
+function safeTerminalPageLocation(rawUrl: string, baseUrl: string) {
+  try {
+    const actual = new URL(rawUrl)
+    const approved = new URL(baseUrl)
+    if (actual.origin !== approved.origin) return undefined
+    const path = safeMetadataText(actual.pathname || '/', 500)
+    if (!path) return undefined
+    return {
+      path,
+      queryFields: [...new Set([...actual.searchParams.keys()])].sort().slice(0, 40),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function collectTraceLandmarks(
+  html: unknown,
+  headings: string[],
+  controls: string[],
+  secrets: readonly string[],
+) {
+  let visited = 0
+  const visit = (node: unknown, depth: number) => {
+    if (!Array.isArray(node) || depth > 80 || visited >= 50_000) return
+    visited += 1
+    if (typeof node[0] !== 'string') {
+      for (const child of node) visit(child, depth + 1)
+      return
+    }
+    const tag = node[0].toUpperCase()
+    const attributes = node[1] && typeof node[1] === 'object' && !Array.isArray(node[1])
+      ? node[1] as Record<string, unknown>
+      : {}
+    const role = String(attributes.role ?? '').toLowerCase()
+    const rawLabel = traceNodeText(node, 0, { visited: 0 })
+      || (typeof attributes['aria-label'] === 'string' ? attributes['aria-label'] : '')
+    const label = safeTraceLandmark(rawLabel, secrets)
+    if (label && (/^H[1-6]$/u.test(tag) || role === 'heading')) appendUnique(headings, label, 20)
+    if (label && (tag === 'BUTTON' || tag === 'A' || role === 'button' || role === 'link')) appendUnique(controls, label, 30)
+    for (const child of node.slice(2)) visit(child, depth + 1)
+  }
+  visit(html, 0)
+}
+
+function traceNodeText(node: unknown, depth: number, state: { visited: number }): string {
+  if (typeof node === 'string') return node
+  if (!Array.isArray(node) || depth > 40 || state.visited >= 10_000) return ''
+  state.visited += 1
+  const children = typeof node[0] === 'string' ? node.slice(2) : node
+  return children.map(child => traceNodeText(child, depth + 1, state)).join(' ')
+}
+
+function safeTraceLandmark(value: string, secrets: readonly string[]) {
+  const exactRedacted = redactRunnerOutput(Buffer.from(value, 'utf8'), secrets).toString('utf8')
+  const genericRedacted = safeReporterFailureMessage([exactRedacted])
+  return genericRedacted ? safeMetadataText(genericRedacted.replace(/\s+/gu, ' '), 200) : ''
+}
+
+function appendUnique(target: string[], value: string, maximum: number) {
+  if (target.length >= maximum || target.includes(value)) return
+  target.push(value)
+}
+
+function traceObservedAt(value: unknown) {
+  const milliseconds = Number(value)
+  if (!Number.isFinite(milliseconds) || milliseconds < 946684800000 || milliseconds > Date.now() + 24 * 60 * 60 * 1_000) {
+    return new Date().toISOString()
+  }
+  return new Date(milliseconds).toISOString()
+}
+
+function terminalPageEvent(
+  observation: PlaywrightTraceTerminalPageObservation,
+  traceArtifactSha256?: string,
+): RunnerExecutionEvent {
+  return {
+    sequence: 0,
+    type: 'navigate',
+    title: `终态页面 ${observation.path}`,
+    status: 'passed',
+    startedAt: observation.observedAt,
+    finishedAt: observation.observedAt,
+    durationMs: 0,
+    ...(traceArtifactSha256 ? { artifactSha256s: [traceArtifactSha256] } : {}),
+    metadata: {
+      source: 'playwright_trace',
+      category: 'terminal_page',
+      path: observation.path,
+      ...(observation.queryFields?.length ? { queryFields: observation.queryFields } : {}),
+      ...(observation.headings?.length ? { headings: observation.headings } : {}),
+      ...(observation.controls?.length ? { controls: observation.controls } : {}),
+    },
+  }
 }
 
 async function readBoundedZipEntry(entry: JSZipObject, maximumBytes: number) {
@@ -699,7 +934,11 @@ async function readBoundedZipEntry(entry: JSZipObject, maximumBytes: number) {
   })
 }
 
-function traceHttpObservation(line: string): PlaywrightTraceHttpObservation | undefined {
+async function traceHttpObservation(
+  line: string,
+  archive: JSZip,
+  secrets: readonly string[],
+): Promise<PlaywrightTraceHttpObservation | undefined> {
   let value: unknown
   try { value = JSON.parse(line) } catch { return undefined }
   if (!value || typeof value !== 'object') return undefined
@@ -715,10 +954,181 @@ function traceHttpObservation(line: string): PlaywrightTraceHttpObservation | un
   if (!Number.isSafeInteger(status) || status < 100 || status > 599) return undefined
   try {
     const path = safeMetadataText(new URL(rawUrl).pathname, 500)
-    return path ? { method, path, status } : undefined
+    if (!path) return undefined
+    const [safeRequest, safeResponse] = await Promise.all([
+      traceHttpPayload(request as Record<string, unknown>, archive, secrets, 'request'),
+      traceHttpPayload(response as Record<string, unknown>, archive, secrets, 'response'),
+    ])
+    return {
+      method,
+      path,
+      status,
+      ...(safeRequest ? { request: safeRequest } : {}),
+      ...(safeResponse ? { response: safeResponse } : {}),
+    }
   } catch {
     return undefined
   }
+}
+
+const TRACE_HTTP_BODY_LIMIT = 16 * 1024
+const TRACE_HTTP_SENSITIVE_KEY = /authorization|cookie|password|passwd|passcode|token|api.?key|secret|session|csrf|xsrf|private.?key/iu
+
+async function traceHttpPayload(
+  message: Record<string, unknown>,
+  archive: JSZip,
+  secrets: readonly string[],
+  kind: 'request' | 'response',
+): Promise<PlaywrightTraceHttpPayload | undefined> {
+  const bodyRecord = kind === 'request'
+    ? objectRecord(message.postData)
+    : objectRecord(message.content)
+  const contentType = safeHttpContentType(
+    bodyRecord?.mimeType ?? traceHeaderValue(message.headers, 'content-type'),
+  )
+  const declaredBytes = safeHttpBodySize(
+    kind === 'request' ? message.bodySize : bodyRecord?.size,
+  )
+  const inlineText = typeof bodyRecord?.text === 'string' && bodyRecord.text
+    ? Buffer.from(bodyRecord.text, 'utf8')
+    : undefined
+  const resource = inlineText
+    ? undefined
+    : traceBodyResource(archive, bodyRecord?._sha1)
+  const loaded = inlineText
+    ? {
+        buffer: inlineText.subarray(0, TRACE_HTTP_BODY_LIMIT),
+        truncated: inlineText.length > TRACE_HTTP_BODY_LIMIT,
+      }
+    : resource
+      ? await readBoundedZipBuffer(resource, TRACE_HTTP_BODY_LIMIT)
+      : undefined
+  const bodyBytes = declaredBytes ?? loaded?.buffer.length ?? 0
+  if (!contentType && !loaded && declaredBytes === undefined) return undefined
+  const body = loaded && !loaded.truncated
+    ? safeTraceHttpBody(loaded.buffer, contentType, secrets)
+    : undefined
+  return {
+    ...(contentType ? { contentType } : {}),
+    bodyBytes,
+    ...(loaded?.truncated ? { truncated: true } : {}),
+    ...(body !== undefined ? { body } : {}),
+  }
+}
+
+function objectRecord(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function traceHeaderValue(value: unknown, expectedName: string) {
+  if (!Array.isArray(value)) return undefined
+  for (const candidate of value) {
+    const header = objectRecord(candidate)
+    if (String(header?.name ?? '').toLowerCase() !== expectedName) continue
+    return header?.value
+  }
+  return undefined
+}
+
+function safeHttpContentType(value: unknown) {
+  if (typeof value !== 'string') return undefined
+  const type = value.split(';')[0].trim().toLowerCase()
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u.test(type) ? type.slice(0, 100) : undefined
+}
+
+function safeHttpBodySize(value: unknown) {
+  const size = Number(value)
+  return Number.isSafeInteger(size) && size >= 0 && size <= 1024 * 1024 * 1024 ? size : undefined
+}
+
+function traceBodyResource(archive: JSZip, value: unknown) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9@._-]{1,200}$/u.test(value)) return undefined
+  return archive.file(`resources/${value}`) ?? undefined
+}
+
+async function readBoundedZipBuffer(entry: JSZipObject, maximumBytes: number) {
+  const stream = entry.nodeStream('nodebuffer') as NodeJS.ReadableStream & { destroy?: () => void }
+  return await new Promise<{ buffer: Buffer; truncated: boolean }>((resolvePromise, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    let settled = false
+    stream.on('data', value => {
+      if (settled) return
+      const chunk = Buffer.from(value)
+      const remaining = maximumBytes - size
+      if (chunk.length > remaining) {
+        if (remaining > 0) chunks.push(chunk.subarray(0, remaining))
+        settled = true
+        stream.destroy?.()
+        resolvePromise({ buffer: Buffer.concat(chunks), truncated: true })
+        return
+      }
+      chunks.push(chunk)
+      size += chunk.length
+    })
+    stream.once('error', error => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
+    stream.once('end', () => {
+      if (settled) return
+      settled = true
+      resolvePromise({ buffer: Buffer.concat(chunks), truncated: false })
+    })
+  })
+}
+
+function safeTraceHttpBody(buffer: Buffer, contentType: string | undefined, secrets: readonly string[]) {
+  const source = buffer.toString('utf8')
+  if (contentType?.includes('json') || /^[\s\r\n]*[\[{]/u.test(source)) {
+    try {
+      return safeTraceHttpBodyValue(JSON.parse(source), '', 0, secrets)
+    } catch {
+      // Fall through to a redacted text representation.
+    }
+  }
+  if (contentType === 'application/x-www-form-urlencoded') {
+    const result: Record<string, unknown> = {}
+    for (const [key, value] of new URLSearchParams(source)) {
+      if (Object.keys(result).length >= 100) break
+      result[safeMetadataText(key, 100)] = TRACE_HTTP_SENSITIVE_KEY.test(key)
+        ? '<REDACTED>'
+        : safeTraceHttpText(value, secrets)
+    }
+    return result
+  }
+  if (contentType && !contentType.startsWith('text/') && !/xml|graphql|javascript/u.test(contentType)) {
+    return undefined
+  }
+  return safeTraceHttpText(source, secrets)
+}
+
+function safeTraceHttpBodyValue(value: unknown, key: string, depth: number, secrets: readonly string[]): unknown {
+  if (TRACE_HTTP_SENSITIVE_KEY.test(key)) return '<REDACTED>'
+  if (depth > 8) return '<TRUNCATED>'
+  if (typeof value === 'string') return safeTraceHttpText(value, secrets)
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
+  if (Array.isArray(value)) return value.slice(0, 100).map(item => safeTraceHttpBodyValue(item, key, depth + 1, secrets))
+  if (!value || typeof value !== 'object') return String(value ?? '')
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .slice(0, 100)
+    .map(([childKey, child]) => [
+      safeMetadataText(childKey, 100),
+      safeTraceHttpBodyValue(child, childKey, depth + 1, secrets),
+    ]))
+}
+
+function safeTraceHttpText(value: string, secrets: readonly string[]) {
+  const exactRedacted = redactRunnerOutput(Buffer.from(value, 'utf8'), secrets).toString('utf8')
+  return safeMetadataText(exactRedacted
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/giu, 'Bearer <REDACTED>')
+    .replace(
+      /\b(authorization|cookie|set-cookie|password|passwd|passcode|token|api[_ -]?key|secret|session|csrf|xsrf|private[_ -]?key)\b\s*[:=]\s*[^\s,;&]+/giu,
+      '$1=<REDACTED>',
+    ), 4_000)
 }
 
 function safeTimestamp(value: unknown) {
@@ -743,7 +1153,7 @@ async function ingestReporterAttachments(
     const type = reporterAttachmentType(attachment)
     if (!type) continue
     const { actual, metadata } = await validatedReporterAttachment(runtimeRoot, attachment, actualRoot)
-    if (type === 'trace' && secrets.length) {
+    if (type === 'trace') {
       if (metadata.size > 64 * 1024 * 1024) continue
       await redactTraceArchive(actual, secrets)
     }
@@ -758,11 +1168,37 @@ async function ingestReporterAttachments(
 }
 
 async function redactTraceArchive(path: string, secrets: readonly string[]) {
-  const values = [...new Set(secrets.filter(Boolean))]
+  const sensitiveValues = new Set(secrets.filter(Boolean))
+  const archive = await JSZip.loadAsync(await readFile(path))
+  const httpResources = new Map<string, string | undefined>()
+  for (const entry of Object.values(archive.files)) {
+    if (entry.dir || !/(?:^|\/)\d*-?trace\.network$/u.test(entry.name)) continue
+    const lines = (await entry.async('string')).split(/\r?\n/u)
+    const redactedLines = lines.map(line => {
+      if (!line) return line
+      let value: unknown
+      try { value = JSON.parse(line) } catch { return redactTraceText(line, secrets) }
+      const snapshot = objectRecord(objectRecord(value)?.snapshot)
+      const request = objectRecord(snapshot?.request)
+      const response = objectRecord(snapshot?.response)
+      const postData = objectRecord(request?.postData)
+      const content = objectRecord(response?.content)
+      registerTraceHttpResource(httpResources, postData?._sha1, postData?.mimeType)
+      registerTraceHttpResource(httpResources, content?._sha1, content?.mimeType)
+      return JSON.stringify(redactTraceNetworkValue(value, '', secrets))
+    })
+    archive.file(entry.name, redactedLines.join('\n'))
+  }
+  for (const [sha, contentType] of httpResources) {
+    const entry = archive.file(`resources/${sha}`)
+    if (!entry) continue
+    const source = await entry.async('nodebuffer')
+    collectTraceHttpSensitiveValues(source, contentType, sensitiveValues)
+    archive.file(entry.name, redactTraceHttpResource(source, contentType, secrets))
+  }
+  const values = [...sensitiveValues]
     .map(secret => Buffer.from(secret, 'utf8').toString('latin1'))
     .sort((left, right) => right.length - left.length)
-  if (!values.length) return
-  const archive = await JSZip.loadAsync(await readFile(path))
   for (const entry of Object.values(archive.files)) {
     if (entry.dir) continue
     const source = await entry.async('nodebuffer')
@@ -773,6 +1209,117 @@ async function redactTraceArchive(path: string, secrets: readonly string[]) {
     }
   }
   await writeFile(path, await archive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))
+}
+
+function collectTraceHttpSensitiveValues(source: Buffer, contentType: string | undefined, target: Set<string>) {
+  const text = source.toString('utf8')
+  if (contentType?.includes('json') || /^[\s\r\n]*[\[{]/u.test(text)) {
+    try {
+      collectSensitiveBodyValues(JSON.parse(text), '', target)
+      return
+    } catch {
+      // Fall through for malformed text.
+    }
+  }
+  if (contentType === 'application/x-www-form-urlencoded') {
+    for (const [key, value] of new URLSearchParams(text)) {
+      if (TRACE_HTTP_SENSITIVE_KEY.test(key) && value) target.add(value)
+    }
+  }
+}
+
+function collectSensitiveBodyValues(value: unknown, key: string, target: Set<string>) {
+  if (TRACE_HTTP_SENSITIVE_KEY.test(key)) {
+    if (typeof value === 'string' && value) target.add(value)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectSensitiveBodyValues(item, key, target)
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
+    collectSensitiveBodyValues(child, childKey, target)
+  }
+}
+
+function registerTraceHttpResource(target: Map<string, string | undefined>, sha: unknown, mimeType: unknown) {
+  if (typeof sha !== 'string' || !/^[A-Za-z0-9@._-]{1,200}$/u.test(sha)) return
+  target.set(sha, safeHttpContentType(mimeType))
+}
+
+function redactTraceNetworkValue(value: unknown, key: string, secrets: readonly string[]): unknown {
+  if (typeof value === 'string') {
+    if (TRACE_HTTP_SENSITIVE_KEY.test(key)) return '<REDACTED>'
+    if (key === 'url') return redactTraceUrl(value)
+    return redactTraceText(value, secrets)
+  }
+  if (Array.isArray(value)) {
+    if (key === 'queryString') return value.map(item => redactNamedTraceValue(item, true, secrets))
+    if (key === 'cookies' || key === 'params') return value.map(item => redactNamedTraceValue(item, false, secrets))
+    if (key === 'headers') return value.map(item => redactNamedTraceValue(item, false, secrets))
+    return value.map(item => redactTraceNetworkValue(item, key, secrets))
+  }
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .map(([childKey, child]) => [childKey, redactTraceNetworkValue(child, childKey, secrets)]))
+}
+
+function redactNamedTraceValue(value: unknown, redactEveryValue: boolean, secrets: readonly string[]) {
+  const record = objectRecord(value)
+  if (!record) return redactTraceNetworkValue(value, '', secrets)
+  const sensitive = redactEveryValue || TRACE_HTTP_SENSITIVE_KEY.test(String(record.name ?? ''))
+  return Object.fromEntries(Object.entries(record).map(([key, child]) => [
+    key,
+    key === 'value' && sensitive ? '<REDACTED>' : redactTraceNetworkValue(child, key, secrets),
+  ]))
+}
+
+function redactTraceUrl(value: string) {
+  try {
+    const url = new URL(value)
+    for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, '<REDACTED>')
+    return url.toString()
+  } catch {
+    return value.split('?')[0]
+  }
+}
+
+function redactTraceHttpResource(source: Buffer, contentType: string | undefined, secrets: readonly string[]) {
+  const text = source.toString('utf8')
+  if (contentType?.includes('json') || /^[\s\r\n]*[\[{]/u.test(text)) {
+    try {
+      return Buffer.from(JSON.stringify(redactTraceNetworkValue(JSON.parse(text), '', secrets)), 'utf8')
+    } catch {
+      // Preserve non-JSON bodies and apply text redaction below.
+    }
+  }
+  if (contentType === 'application/x-www-form-urlencoded') {
+    const params = new URLSearchParams(text)
+    for (const key of [...params.keys()]) {
+      const values = params.getAll(key)
+      params.delete(key)
+      for (const value of values) params.append(
+        key,
+        TRACE_HTTP_SENSITIVE_KEY.test(key) ? '<REDACTED>' : redactTraceText(value, secrets),
+      )
+    }
+    return Buffer.from(params.toString(), 'utf8')
+  }
+  if (!contentType || contentType.startsWith('text/') || /xml|graphql|javascript/u.test(contentType)) {
+    return Buffer.from(redactTraceText(text, secrets), 'utf8')
+  }
+  return source
+}
+
+function redactTraceText(value: string, secrets: readonly string[]) {
+  const exactRedacted = redactRunnerOutput(Buffer.from(value, 'utf8'), secrets).toString('utf8')
+  return exactRedacted
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/giu, 'Bearer <REDACTED>')
+    .replace(
+      /\b(authorization|cookie|set-cookie|password|passwd|passcode|token|api[_ -]?key|secret|session|csrf|xsrf|private[_ -]?key)\b\s*[:=]\s*[^\s,;&]+/giu,
+      '$1=<REDACTED>',
+    )
 }
 
 async function readRuntimeApiAuthorization(

@@ -33,6 +33,8 @@ test('LocalWorkspaceRunner 固定无头执行浏览器', () => {
     'C:\\output\\report.json',
   )
   assert.match(config, /headless: true/u)
+  assert.match(config, /trace: 'on'/u)
+  assert.match(config, /screenshot: 'on'/u)
   assert.doesNotMatch(config, /headed: true/u)
 })
 
@@ -43,7 +45,7 @@ test('LocalWorkspaceRunner 使用当前 Run baseUrl 真实执行 Playwright requ
     observed.push({ method: request.method, url: request.url, host: request.headers.host })
     response.statusCode = responseStatus
     response.setHeader('content-type', 'application/json')
-    response.end(JSON.stringify({ code: 'UNAUTHORIZED' }))
+    response.end(JSON.stringify({ code: responseStatus === 403 ? 'UNAUTHORIZED' : 'INVALID_SESSION', token: 'must-not-leak' }))
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -62,7 +64,7 @@ test('LocalWorkspaceRunner 使用当前 Run baseUrl 真实执行 Playwright requ
 
 export class AuthClient {
   constructor(private readonly request: APIRequestContext) {}
-  login() { return this.request.post('/api/login') }
+  login() { return this.request.post('/api/login', { data: { action: 'login', password: 'must-not-leak' } }) }
 }
 `
     const entrySource = `import { test, expect } from '@playwright/test'
@@ -135,7 +137,28 @@ test('未授权登录 [TC_API_LOGIN_001]', async ({ request }) => {
       }
     }
     assert.equal(result.status, 'passed', runnerLog)
-    assert.equal(result.events?.some(event => event.type === 'http' && event.metadata?.method === 'POST' && event.metadata.path === '/api/login'), true, JSON.stringify(result.events))
+    assert.equal(result.artifacts.some(artifact => artifact.type === 'screenshot'), false)
+    const passedHttp = result.events?.find(event => event.type === 'http' && event.metadata?.method === 'POST' && event.metadata.path === '/api/login')
+    assert.deepEqual(passedHttp?.metadata?.request, {
+      contentType: 'application/json',
+      bodyBytes: 45,
+      body: { action: 'login', password: '<REDACTED>' },
+    })
+    assert.deepEqual(passedHttp?.metadata?.response, {
+      contentType: 'application/json',
+      bodyBytes: 47,
+      body: { code: 'UNAUTHORIZED', token: '<REDACTED>' },
+    })
+    assert.doesNotMatch(JSON.stringify(result.events), /must-not-leak/u)
+    const passedTrace = result.artifacts.find(artifact => artifact.type === 'trace')
+    assert.ok(passedTrace)
+    const passedTraceArchive = await JSZip.loadAsync(Buffer.concat(await Array.fromAsync(await artifactStore.open(passedTrace.storagePath), chunk => Buffer.from(chunk))))
+    const passedTraceText = (await Promise.all(Object.values(passedTraceArchive.files)
+      .filter(entry => !entry.dir)
+      .map(entry => entry.async('nodebuffer'))))
+      .map(value => value.toString('utf8'))
+      .join('\n')
+    assert.doesNotMatch(passedTraceText, /must-not-leak/u)
     assert.equal(result.events?.some(event => event.type === 'runner' && event.status === 'passed'), true)
     responseStatus = 401
     const failed = await runner.execute(
@@ -143,10 +166,21 @@ test('未授权登录 [TC_API_LOGIN_001]', async ({ request }) => {
       new AbortController().signal,
     )
     assert.equal(failed.status, 'failed')
-    assert.equal(failed.events?.some(event =>
+    const failedHttp = failed.events?.find(event =>
       event.type === 'http'
       && event.title === 'POST /api/login · 401'
-      && event.metadata?.httpStatus === 401), true, JSON.stringify(failed.events))
+      && event.metadata?.httpStatus === 401)
+    assert.deepEqual(failedHttp?.metadata?.request, {
+      contentType: 'application/json',
+      bodyBytes: 45,
+      body: { action: 'login', password: '<REDACTED>' },
+    })
+    assert.deepEqual(failedHttp?.metadata?.response, {
+      contentType: 'application/json',
+      bodyBytes: 50,
+      body: { code: 'INVALID_SESSION', token: '<REDACTED>' },
+    })
+    assert.doesNotMatch(JSON.stringify(failed.events), /must-not-leak/u)
     assert.equal(failed.events?.filter(event => event.type === 'failure').length, 1)
     assert.equal(failed.events?.some(event => event.type === 'runner' && event.status === 'failed'), false)
     assert.equal(failed.events?.filter(event => event.type === 'trace').length, 1)
@@ -273,11 +307,15 @@ test('LocalWorkspaceRunner 将同源 localStorage Bearer 分别桥接到 API 与
       authorization: String(request.headers.authorization ?? ''),
     })
     const authenticated = request.headers.authorization === 'Bearer runtime-only-token'
-    response.statusCode = request.url === '/api/tasks'
-      ? authenticated ? 200 : 401
-      : 200
-    response.setHeader('content-type', 'application/json')
-    response.end(JSON.stringify({ authenticated }))
+    if (request.url === '/api/tasks') {
+      response.statusCode = authenticated ? 200 : 401
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ authenticated }))
+      return
+    }
+    response.statusCode = 200
+    response.setHeader('content-type', 'text/html; charset=utf-8')
+    response.end('<!doctype html><html lang="zh-CN"><body><main><h1>项目</h1><button>创建</button><p>authenticated</p></main></body></html>')
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -415,11 +453,53 @@ test('任务页面使用隔离 API 准备 [TC_UI_TASKS_001]', async ({ page, req
       },
     }, new AbortController().signal)
     assert.equal(uiResult.status, 'passed')
+    assert.equal(uiResult.artifacts.filter(artifact => artifact.type === 'screenshot').length, 1)
+    assert.equal(uiResult.events?.some(event =>
+      event.type === 'screenshot'
+      && event.title === '成功页面截图'
+      && event.artifactSha256s?.length === 1), true, JSON.stringify(uiResult.events))
+
+    const failingUiSource = `import { test, expect } from '@playwright/test'
+test('任务页面终态证据 [TC_UI_TASKS_001]', async ({ page }) => {
+  await page.goto('/projects')
+  // smarthub:assert expected-1
+  await expect(page.getByRole('button', { name: '登录' })).toBeVisible({ timeout: 100 })
+})
+`
+    const failingUiPackage = buildExecutionPackage({
+      candidate: { entryFile: uiEntryFile, files: [{ path: uiEntryFile, content: failingUiSource }] },
+      task: uiTask,
+      environmentSignature: 'local-bearer-environment',
+    })
+    const failedUiResult = await runner.execute({
+      package: failingUiPackage,
+      task: uiTask,
+      attemptId: 'attempt-local-bearer-ui-failed',
+      expectedPackageSha256: failingUiPackage.manifest.packageSha256,
+      environment,
+      runner: runner.snapshot(),
+      workspace: {
+        root: workspace.root,
+        entryFile: uiEntryFile,
+        entrySymbol: `[${uiTask.caseId}]`,
+        authStateRoot,
+      },
+    }, new AbortController().signal)
+    assert.equal(failedUiResult.status, 'failed')
+    const terminalPage = failedUiResult.events?.find(event => event.metadata?.category === 'terminal_page')
+    assert.equal(terminalPage?.type, 'navigate')
+    assert.equal(terminalPage?.title, '终态页面 /projects')
+    assert.equal(terminalPage?.metadata?.source, 'playwright_trace')
+    assert.equal(terminalPage?.metadata?.path, '/projects')
+    assert.deepEqual(terminalPage?.metadata?.headings, ['项目'])
+    assert.deepEqual(terminalPage?.metadata?.controls, ['创建'])
+    assert.equal(terminalPage?.artifactSha256s?.length, 1)
     assert.deepEqual(observedRequests, [
       { path: '/api/tasks', authorization: 'Bearer runtime-only-token' },
       { path: '/api/tasks', authorization: 'Bearer runtime-only-token' },
       { path: '/api/tasks', authorization: 'Bearer runtime-only-token' },
       { path: '/', authorization: '' },
+      { path: '/projects', authorization: '' },
     ])
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
@@ -530,6 +610,71 @@ test('Playwright JSON Reporter 生成结构化 UI/API/失败事件并脱敏敏�
     value: 'priority-filter',
     operation: 'selectOption',
   })
+})
+
+test('Playwright JSON Reporter 合并启动边界已锁定的重复 Entry 投影', () => {
+  const result = (startTime: string) => ({
+    status: 'passed',
+    startTime,
+    duration: 5,
+  })
+  const spec = (startTime: string) => ({
+    title: '同一 Entry [case-duplicate-report]',
+    file: 'tests/api/duplicate.spec.ts',
+    line: 3,
+    column: 1,
+    tests: [{ results: [result(startTime)] }],
+  })
+  const parsed = parsePlaywrightJsonReport({
+    suites: [{
+      specs: [spec('2026-08-23T08:00:00.000Z')],
+      suites: [{ specs: [spec('2026-08-23T08:00:01.000Z')] }],
+    }],
+  }, '[case-duplicate-report]')
+  assert.equal(parsed.events.length, 2)
+  assert.deepEqual(parsed.events.map(event => event.sequence), [1, 2])
+  assert.deepEqual(parsed.events.map(event => event.status), ['passed', 'passed'])
+
+  const projected = parsePlaywrightJsonReport({
+    suites: [{ specs: [
+      spec('2026-08-23T08:00:00.000Z'),
+      { ...spec('2026-08-23T08:00:01.000Z'), line: 9 },
+    ] }],
+  }, '[case-duplicate-report]')
+  assert.equal(projected.events.length, 2)
+
+  assert.throws(() => parsePlaywrightJsonReport({
+    suites: [{ specs: [{ ...spec('2026-08-23T08:00:00.000Z'), title: '其他 Entry [case-other]' }] }],
+  }, '[case-duplicate-report]'), /TEST_EXECUTION_PLAYWRIGHT_REPORT_ENTRY_COUNT_INVALID/u)
+})
+
+test('Playwright JSON Reporter 将根级加载错误转换为可诊断执行失败', () => {
+  const parsed = parsePlaywrightJsonReport({
+    suites: [],
+    stats: { startTime: '2026-08-23T08:00:00.000Z' },
+    errors: [{
+      message: "Error: Cannot find module './missing.js'\nC:\\Users\\Alice\\repo\\tests\\api\\broken.spec.ts:4:1",
+      location: { file: 'tests/api/broken.spec.ts', line: 4, column: 1 },
+    }],
+  }, '[case-load-error]')
+  assert.deepEqual(parsed.attachments, [])
+  assert.deepEqual(parsed.events, [{
+    sequence: 1,
+    type: 'failure',
+    title: 'Playwright 测试加载失败',
+    status: 'failed',
+    startedAt: '2026-08-23T08:00:00.000Z',
+    finishedAt: '2026-08-23T08:00:00.000Z',
+    durationMs: 0,
+    metadata: {
+      source: 'playwright_json_reporter',
+      retry: 0,
+      failureKind: 'execution',
+      phase: 'load',
+      message: "Error: Cannot find module './missing.js' <workspace>/tests/api/broken.spec.ts:4:1",
+      location: { file: 'tests/api/broken.spec.ts', line: 4, column: 1 },
+    },
+  }])
 })
 
 function apiTask() {

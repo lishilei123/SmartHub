@@ -55,6 +55,7 @@ import { governedExecutionEntryFile } from './test-execution-entry.js'
 import { createProjectVersionExplorationResult } from './test-execution-exploration.js'
 import {
   assertExecutionPackageIntegrity,
+  adjudicateFailureDiagnosisCandidate,
   automaticRepairAllowed,
   buildExecutionPackage,
   CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
@@ -370,6 +371,7 @@ export class TestExecutionService {
     requireStateVersion(input.expectedTaskStateVersion, 'Task')
     requireStateVersion(input.expectedRunStateVersion, 'Run')
     const requestedAt = this.clock()
+    const retryStatus = await this.manualRetryStatus(run, task)
     const job: ExecutionJob = {
       id: stableIdentity('test_execution_manual_retry_job', {
         taskId: task.id,
@@ -396,11 +398,35 @@ export class TestExecutionService {
         taskId: task.id,
         expectedRunStateVersion: input.expectedRunStateVersion,
         expectedTaskStateVersion: input.expectedTaskStateVersion,
+        retryStatus,
         job,
       })
     } catch (error) {
       throw storeCommandError(error)
     }
+  }
+
+  private async manualRetryStatus(run: ExecutionRun, task: ExecutionTask): Promise<'pending' | 'ready'> {
+    if (!task.currentScriptRevisionId) return 'pending'
+    if (!this.executionWorkspace) return 'ready'
+    const method = executableMethod(task)
+    const [binding, revision] = await Promise.all([
+      this.executionWorkspace.resolveBinding(run.projectVersionId, task.input.caseId, method),
+      this.store.getScriptRevision(task.currentScriptRevisionId),
+    ])
+    if (
+      !binding
+      || !revision
+      || revision.runId !== run.id
+      || revision.taskId !== task.id
+      || binding.bindingStatus === 'invalid'
+      || binding.executionType !== method
+      || binding.entrySha256 !== revision.contentSha256
+      || binding.caseContentSha256 !== task.input.caseContentSha256
+      || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
+      || (method === 'api' && binding.validationPolicyVersion !== CURRENT_EXECUTION_BINDING_VALIDATION_POLICY)
+    ) return 'pending'
+    return 'ready'
   }
 
   async createRun(input: CreateTestExecutionRunInput) {
@@ -693,6 +719,9 @@ export class TestExecutionService {
           bindingRejected = true
         }
         if (executionPackage) {
+          const parent = task.currentScriptRevisionId
+            ? await this.currentRevision(task)
+            : undefined
           const cacheKey = taskScriptCacheKey(run, task)
           await this.persistScriptRevision({
             job, lease, run, task, expectedStatus: 'pending', executionPackage,
@@ -709,7 +738,10 @@ export class TestExecutionService {
             // The immutable revision records the entry actually executed. It is
             // not a ScriptArtifact cache replay: the source of truth is the
             // ProjectVersion workspace binding.
-            source: 'agent', generatedBy: run.agents.executionImplementation, incrementRepair: false,
+            source: parent ? 'regeneration' : 'agent',
+            generatedBy: run.agents.executionImplementation,
+            ...(parent ? { parent } : {}),
+            incrementRepair: false,
           })
           return
         }
@@ -744,6 +776,9 @@ export class TestExecutionService {
     task: ExecutionTask,
     signal: AbortSignal,
   ) {
+    const parent = task.currentScriptRevisionId
+      ? await this.currentRevision(task)
+      : undefined
     const workspace = await this.workspace(run, task)
     const workspaceFiles = this.executionWorkspace
       ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
@@ -809,8 +844,9 @@ export class TestExecutionService {
         createdAt,
       },
       executionPackage,
-      source: 'agent',
+      source: parent ? 'regeneration' : 'agent',
       generatedBy: run.agents.executionImplementation,
+      ...(parent ? { parent } : {}),
       incrementRepair: false,
     })
   }
@@ -953,7 +989,7 @@ export class TestExecutionService {
     expectedStatus: 'pending' | 'script_generating' | 'repairing'
     scriptArtifact: ScriptArtifact
     executionPackage: ExecutionPackage
-    source: 'agent' | 'repair'
+    source: 'agent' | 'repair' | 'regeneration'
     generatedBy: FrozenExecutionAgentSnapshot
     parent?: ScriptRevision
     repairReason?: string
@@ -1305,7 +1341,9 @@ export class TestExecutionService {
       validateCandidate: failureDiagnosisCandidateValidator(validate, diagnosticLogPaths),
     }, signal)
     assertAgentOutputSchema(output, 'failure-analysis/v1')
-    const candidate = validate(output.candidate)
+    const agentCandidate = validate(output.candidate)
+    const candidate = adjudicateFailureDiagnosisCandidate(agentCandidate, task.input, events)
+    const deterministicallyAdjudicated = candidate !== agentCandidate
     const policy = failureDiagnosisPolicy(candidate.category)
     const evidenceAttempt = attempts.at(-1)!
     const evidenceArtifact = artifacts.find(artifact =>
@@ -1332,8 +1370,8 @@ export class TestExecutionService {
         observation: candidate.evidence,
       }],
       ...policy,
-      source: 'agent',
-      agent: structuredClone(run.agents.failureAnalysis),
+      source: deterministicallyAdjudicated ? 'deterministic' : 'agent',
+      ...(!deterministicallyAdjudicated ? { agent: structuredClone(run.agents.failureAnalysis) } : {}),
       createdAt: this.clock(),
     }
     const next = diagnosisTaskStatus(diagnosis, task.repairCount)
@@ -1958,6 +1996,7 @@ function attemptKind(
 ): ExecutionAttemptKind {
   if (task.status === 'retrying') return 'same_script_retry'
   if (!revisionAttempts.length && revision.source === 'repair') return 'post_repair'
+  if (!revisionAttempts.length && revision.source === 'regeneration') return 'post_regeneration'
   if (!attempts.length) return 'initial'
   if (attempts.at(-1)?.status === 'infrastructure_error') return 'infrastructure_retry'
   return 'manual_retry'

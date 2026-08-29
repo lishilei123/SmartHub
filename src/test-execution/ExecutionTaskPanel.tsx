@@ -129,6 +129,13 @@ function ExecutionEventTimeline({
         <div>
           <header><b>{event.title}</b><em className={`te-status-pill ${visualStatus}`}>{eventStatusLabel(event)}</em></header>
           {event.type === 'http' && <p className="te-http-summary"><strong>{event.metadata?.method}</strong><code>{event.metadata?.path}</code>{event.metadata?.httpStatus !== undefined && <span className={event.metadata.httpStatus >= 400 ? 'error' : ''}>{event.metadata.httpStatus}</span>}</p>}
+          {event.type === 'http' && (event.metadata?.request || event.metadata?.response) && <details className="te-http-evidence">
+            <summary>查看请求 / 响应数据</summary>
+            <div>
+              {event.metadata.request && <HttpPayload title="请求" payload={event.metadata.request} />}
+              {event.metadata.response && <HttpPayload title="响应" payload={event.metadata.response} />}
+            </div>
+          </details>}
           {event.metadata?.queryFields?.length ? <small>Query 字段：{event.metadata.queryFields.join('、')}</small> : null}
           {event.metadata?.location ? <small>失败位置：{event.metadata.location.file}:{event.metadata.location.line}:{event.metadata.location.column}</small> : null}
           <small>{new Date(event.startedAt).toLocaleTimeString('zh-CN')}{event.durationMs !== undefined ? ` · ${event.durationMs} ms` : ''} · Playwright Reporter</small>
@@ -138,6 +145,16 @@ function ExecutionEventTimeline({
     })}
     {!events.length && <li className="empty"><Activity /><span>该 Attempt 尚未收到结构化 Playwright Reporter 事件</span></li>}
   </ol>
+}
+
+function HttpPayload({ title, payload }: {
+  title: '请求' | '响应'
+  payload: NonNullable<NonNullable<ExecutionTaskDetail['events'][number]['metadata']>['request']>
+}) {
+  return <section>
+    <header><b>{title}</b><small>{payload.contentType ?? '未知类型'} · {formatBytes(payload.bodyBytes)}{payload.truncated ? ' · 内容过大，仅记录元数据' : ''}</small></header>
+    {payload.body !== undefined ? <pre>{typeof payload.body === 'string' ? payload.body : JSON.stringify(payload.body, null, 2)}</pre> : <p>无可展示正文</p>}
+  </section>
 }
 
 function EventIcon({ type }: { type: ExecutionTaskDetail['events'][number]['type'] }) {

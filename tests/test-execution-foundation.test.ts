@@ -12,6 +12,7 @@ import {
 import { governedExecutionEntryFile } from '../server/application/test-execution-entry.js'
 import {
   aggregateExecutionRunStatus,
+  adjudicateFailureDiagnosisCandidate,
   assertRunTransition,
   assertTaskTransition,
   automaticRepairAllowed,
@@ -373,7 +374,7 @@ test('API 异常场景拒绝仅以 response.ok false 代替明确业务状态断
   const task = apiTaskInput()
   const weakSource = `import { test, expect } from '@playwright/test'
 test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
-  const response = await request.post('/api/login')
+  const response = await test.step('POST /api/login', () => request.post('/api/login'))
   // smarthub:assert expected-1
   expect(response.ok()).toBeFalsy()
 })
@@ -389,6 +390,238 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
     }),
     error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
   )
+})
+
+test('API 响应体读取必须关联对应的结构化 HTTP Step', () => {
+  const task = apiTaskInput()
+  const source = `import { test, expect } from '@playwright/test'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  await test.step('GET /api/health', () => request.get('/api/health'))
+  const response = await request.post('/api/login')
+  const body = await response.json()
+  // smarthub:assert expected-1
+  expect(response.status()).toBe(403)
+  expect(body).toBeDefined()
+})
+`
+  assert.throws(
+    () => buildExecutionPackage({
+      candidate: {
+        entryFile: 'tests/api/login.spec.ts',
+        files: [{ path: 'tests/api/login.spec.ts', content: source }],
+      },
+      task,
+      environmentSignature: 'env',
+    }),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
+})
+
+test('API 异常场景不能把冻结的通用拒绝结果收窄成单一 4xx 状态码', () => {
+  const base = apiTaskInput()
+  const testCase: TestCaseContent = {
+    ...base.caseContent,
+    expectedResults: ['空名称请求被拒绝并返回名称校验错误'],
+  }
+  const task = {
+    ...base,
+    caseContent: testCase,
+    executionSpec: { ...base.executionSpec, testCase },
+  }
+  const exactStatus = `import { test, expect } from '@playwright/test'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await test.step('POST /api/projects', () => request.post('/api/projects', { data: { name: '' } }))
+  // smarthub:assert expected-1
+  expect(response.status()).toBe(400)
+})
+`
+  assert.throws(
+    () => buildExecutionPackage({
+      candidate: {
+        entryFile: 'tests/api/login.spec.ts',
+        files: [{ path: 'tests/api/login.spec.ts', content: exactStatus }],
+      },
+      task,
+      environmentSignature: 'env',
+    }),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
+
+  const frozenSemantics = `import { test, expect } from '@playwright/test'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await test.step('POST /api/projects', () => request.post('/api/projects', { data: { name: '' } }))
+  expect(response.status()).toBeGreaterThanOrEqual(400)
+  expect(response.status()).toBeLessThan(500)
+  expect(response.status()).not.toBe(404)
+  expect(response.status()).not.toBe(405)
+  const body = await response.json()
+  // smarthub:assert expected-1
+  expect(JSON.stringify(body)).toMatch(/name|名称/iu)
+})
+`
+  assert.doesNotThrow(() => buildExecutionPackage({
+    candidate: {
+      entryFile: 'tests/api/login.spec.ts',
+      files: [{ path: 'tests/api/login.spec.ts', content: frozenSemantics }],
+    },
+    task,
+    environmentSignature: 'env',
+  }))
+})
+
+test('API 通用 4xx 拒绝断言必须排除 404/405 路由失败假阳性', () => {
+  const base = apiTaskInput()
+  const testCase: TestCaseContent = {
+    ...base.caseContent,
+    expectedResults: ['错误密码登录返回失败且不会被当作成功登录'],
+  }
+  const task = {
+    ...base,
+    caseContent: testCase,
+    executionSpec: { ...base.executionSpec, testCase },
+  }
+  const source = (routeGuards: string) => `import { test, expect } from '@playwright/test'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await test.step('POST /api/auth/login', () => request.post('/api/auth/login', { data: { username: 'admin', password: 'wrong' } }))
+  expect(response.status()).toBeGreaterThanOrEqual(400)
+  expect(response.status()).toBeLessThan(500)
+  ${routeGuards}
+  const body = await response.json()
+  // smarthub:assert expected-1
+  expect(body?.success).not.toBe(true)
+})
+`
+  const build = (content: string) => buildExecutionPackage({
+    candidate: {
+      entryFile: 'tests/api/login.spec.ts',
+      files: [{ path: 'tests/api/login.spec.ts', content }],
+    },
+    task,
+    environmentSignature: 'env',
+  })
+  assert.throws(() => build(source('')), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+  assert.doesNotThrow(() => build(source(`
+    expect(response.status()).not.toBe(404)
+    expect(response.status()).not.toBe(405)
+  `)))
+})
+
+test('API 业务失败语义不能由受保护 4xx 范围断言替代', () => {
+  const base = apiTaskInput()
+  const testCase: TestCaseContent = {
+    ...base.caseContent,
+    expectedResults: ['登录返回失败', '错误密码登录不会被当作成功登录'],
+  }
+  const task = {
+    ...base,
+    caseContent: testCase,
+    executionSpec: { ...base.executionSpec, testCase },
+  }
+  const narrowed = `import { test, expect } from '@playwright/test'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await test.step('POST /api/login', () => request.post('/api/login'))
+  const status = response.status()
+  // smarthub:assert expected-1
+  expect(status).toBeGreaterThanOrEqual(400)
+  expect(status).toBeLessThan(500)
+  expect(status).not.toBe(404)
+  expect(status).not.toBe(405)
+  const body = await response.json()
+  // smarthub:assert expected-2
+  expect(body?.success).not.toBe(true)
+})
+`
+  assert.throws(() => buildExecutionPackage({
+    candidate: {
+      entryFile: 'tests/api/login.spec.ts',
+      files: [{ path: 'tests/api/login.spec.ts', content: narrowed }],
+    },
+    task,
+    environmentSignature: 'env',
+  }), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+
+  const businessSemantics = narrowed
+    .replace('  // smarthub:assert expected-1\n  expect(status).toBeGreaterThanOrEqual(400)', '  expect(status).not.toBe(404)')
+    .replace('  expect(status).toBeLessThan(500)\n  expect(status).not.toBe(404)\n', '')
+    .replace('  // smarthub:assert expected-2\n  expect(body?.success).not.toBe(true)', '  // smarthub:assert expected-1\n  expect(body?.success).not.toBe(true)\n  // smarthub:assert expected-2\n  expect(body?.success).not.toBe(true)')
+  assert.doesNotThrow(() => buildExecutionPackage({
+    candidate: {
+      entryFile: 'tests/api/login.spec.ts',
+      files: [{ path: 'tests/api/login.spec.ts', content: businessSemantics }],
+    },
+    task,
+    environmentSignature: 'env',
+  }))
+})
+
+test('API 404/405 路由失败由 Service 确定性裁决为可修复脚本缺陷', () => {
+  const task = apiTaskInput()
+  const candidate = {
+    category: 'assertion_mismatch' as const,
+    reason: '脚本排除了 405',
+    evidence: '断言 status not 405 失败',
+  }
+  const event = {
+    id: 'event-route-failure',
+    runId: 'run-1',
+    taskId: 'task-1',
+    attemptId: 'attempt-1',
+    sequence: 1,
+    type: 'http' as const,
+    title: 'PATCH /api/tasks/:id · 405',
+    status: 'failed' as const,
+    startedAt: '2026-08-29T00:00:00.000Z',
+    metadata: { httpStatus: 405, method: 'PATCH', path: '/api/tasks/:id' },
+  }
+  const adjudicated = adjudicateFailureDiagnosisCandidate(candidate, task, [event])
+  assert.equal(adjudicated.category, 'script_defect')
+  assert.match(adjudicated.reason, /PATCH \/api\/tasks\/:id.*405/u)
+
+  const explicitCase = {
+    ...task,
+    caseContent: { ...task.caseContent, expectedResults: ['接口返回 HTTP 405'] },
+  }
+  assert.equal(adjudicateFailureDiagnosisCandidate(candidate, explicitCase, [event]), candidate)
+})
+
+test('符号测试数据必须由冻结 Binding、setup 或显式前置守卫落实', () => {
+  const base = apiTaskInput()
+  const testCase: TestCaseContent = {
+    ...base.caseContent,
+    preconditions: ['存在标题为 T1 的任务'],
+    expectedResults: ['查询结果包含任务 T1'],
+  }
+  const task = {
+    ...base,
+    caseContent: testCase,
+    executionSpec: { ...base.executionSpec, testCase },
+  }
+  const source = (setup: string) => `import { test, expect } from '@playwright/test'
+test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
+  ${setup}
+  const response = await test.step('GET /api/tasks', () => request.get('/api/tasks', { params: { keyword: 'T1' } }))
+  const tasks = await response.json()
+  // smarthub:assert expected-1
+  expect(tasks.some((item: { title?: string }) => item.title === 'T1')).toBeTruthy()
+})
+`
+  const build = (content: string, frozenTask = task) => buildExecutionPackage({
+    candidate: {
+      entryFile: 'tests/api/login.spec.ts',
+      files: [{ path: 'tests/api/login.spec.ts', content }],
+    },
+    task: frozenTask,
+    environmentSignature: 'env',
+  })
+  assert.throws(() => build(source('')), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+  assert.doesNotThrow(() => build(source("await request.post('/api/tasks', { data: { title: 'T1' } })")))
+  assert.doesNotThrow(() => build(source(''), {
+    ...task,
+    testDataBindings: [{
+      requirement: { id: 'required-T1', name: '任务 T1', description: '标题为 T1', required: true },
+      binding: { requirementId: 'required-T1', sourceType: 'fixture', sourceRef: 'fixture/tasks/T1' },
+    }],
+  }))
 })
 
 test('API Validator 拒绝其他 HTTP Client、硬编码 Host、fetch 与不安全相对导入', () => {
@@ -420,6 +653,11 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
   ]) {
     assert.throws(() => build(source), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
   }
+  assert.throws(
+    () => build(entry("import { test as governedTest } from '@smarthub/playwright-test'", "await request.get('/api/login')")
+      .replace("import { test, expect } from '@playwright/test'", "import { expect } from '@playwright/test'\nimport { test } from '@smarthub/playwright-test'")),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
   assert.throws(
     () => build(entry("import { AuthClient } from '../../api/missing'", 'await new AuthClient(request).login()')),
     error => validationCode(error, 'TEST_EXECUTION_WORKSPACE_IMPORT_UNRESOLVED'),
@@ -489,6 +727,22 @@ test('状态检查 [case-status]', async ({ page, request }) => {
   )
   assert.doesNotThrow(
     () => buildExecutionPackage({ candidate: candidate(governedMixed), task, environmentSignature: 'env' }),
+  )
+  const anonymousCase = {
+    ...task,
+    caseContent: { ...task.caseContent, preconditions: ['使用隔离测试数据'] },
+    executionSpec: {
+      ...task.executionSpec,
+      testCase: { ...task.executionSpec.testCase, preconditions: ['使用隔离测试数据'] },
+    },
+  }
+  assert.throws(
+    () => buildExecutionPackage({
+      candidate: candidate(governedMixed),
+      task: anonymousCase,
+      environmentSignature: 'env',
+    }),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
   )
 })
 
@@ -600,8 +854,8 @@ test('持久化 Expected Result 强制 API 回读，Repair 不能删除业务闭
   const entryFile = 'tests/api/persisted-status.spec.ts'
   const source = (readBack: boolean) => `import { test, expect } from '@playwright/test'
 test('更新状态并回读 [case-persisted-status]', async ({ request }) => {
-  const mutation = await request.post('/api/status', { data: { status: 'done' } })
-  ${readBack ? "const persisted = await request.get('/api/status')" : 'const persisted = mutation'}
+  const mutation = await test.step('POST /api/status', () => request.post('/api/status', { data: { status: 'done' } }))
+  ${readBack ? "const persisted = await test.step('GET /api/status', () => request.get('/api/status'))" : 'const persisted = mutation'}
   // smarthub:assert expected-1
   expect(await persisted.json()).toMatchObject({ status: 'done' })
 })
@@ -620,7 +874,7 @@ test('更新状态并回读 [case-persisted-status]', async ({ request }) => {
   const baseline = build(source(true))
   assert.throws(() => build(source(false), baseline.manifest.assertions), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
   assert.throws(
-    () => build(source(false).replace("const mutation = await request.post('/api/status', { data: { status: 'done' } })", "await request.get('/api/status')\n  const mutation = await request.post('/api/status', { data: { status: 'done' } })")),
+    () => build(source(false).replace("const mutation = await test.step('POST /api/status', () => request.post('/api/status', { data: { status: 'done' } }))", "await request.get('/api/status')\n  const mutation = await test.step('POST /api/status', () => request.post('/api/status', { data: { status: 'done' } }))")),
     error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
   )
 })

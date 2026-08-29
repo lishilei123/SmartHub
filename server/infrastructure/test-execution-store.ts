@@ -178,6 +178,7 @@ export interface TestExecutionStore {
     taskId: string
     expectedRunStateVersion: number
     expectedTaskStateVersion: number
+    retryStatus?: 'pending' | 'ready'
     job: ExecutionJob
   }): Promise<ExecutionTask>
   transactionWithLease<T>(jobId: string, lease: ExecutionJobLease, operation: (transaction: TestExecutionTransaction) => Promise<T>, options?: { allowCancellation?: boolean }): Promise<T | null>
@@ -987,6 +988,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     taskId: string
     expectedRunStateVersion: number
     expectedTaskStateVersion: number
+    retryStatus?: 'pending' | 'ready'
     job: ExecutionJob
   }) {
     const client = await this.pool.connect()
@@ -1064,9 +1066,8 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         throw new Error('TEST_EXECUTION_MANUAL_RETRY_JOB_INVALID')
       }
 
-      const retryStatus: ExecutionTaskStatus = currentTask.currentScriptRevisionId
-        ? 'ready'
-        : 'pending'
+      const retryStatus: ExecutionTaskStatus = input.retryStatus
+        ?? (currentTask.currentScriptRevisionId ? 'ready' : 'pending')
       assertTaskTransition(currentTask.status, retryStatus)
       assertRunTransition(currentRun.status, 'running')
       const updated = await transitionTask(client, {
@@ -2018,7 +2019,7 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
     throw new Error('TEST_EXECUTION_SCRIPT_CACHE_PROVENANCE_FORBIDDEN')
   }
 
-  if (revision.source === 'repair') {
+  if (revision.source === 'repair' || revision.source === 'regeneration') {
     if (!revision.parentRevisionId || revision.revision <= 1) {
       throw new Error('TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID')
     }
@@ -2036,10 +2037,10 @@ async function validateScriptRevisionSources(client: PoolClient, revision: Scrip
     if (Number(parent.rows[0]?.revision) !== revision.revision - 1) {
       throw new Error('TEST_EXECUTION_SCRIPT_REVISION_PARENT_INVALID')
     }
-    if (
+    if (revision.source === 'repair' && (
       parent.rows[0].protected_assertion_sha256 !== revision.protectedAssertionSha256
       || canonicalSha256(parent.rows[0].assertions) !== canonicalSha256(revision.package.assertions)
-    ) {
+    )) {
       throw new Error('TEST_EXECUTION_SCRIPT_REVISION_ASSERTIONS_CHANGED')
     }
   } else if (revision.parentRevisionId || revision.revision !== 1) {

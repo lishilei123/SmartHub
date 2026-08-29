@@ -83,11 +83,12 @@ export type ExecutionAttemptKind =
   | 'same_script_retry'
   | 'infrastructure_retry'
   | 'post_repair'
+  | 'post_regeneration'
   | 'manual_retry'
 
 export type ExecutionAttemptStatus = 'running' | 'passed' | 'failed' | 'cancelled' | 'infrastructure_error'
 
-export type ScriptGenerationSource = 'agent' | 'cache' | 'repair'
+export type ScriptGenerationSource = 'agent' | 'cache' | 'repair' | 'regeneration'
 
 export type ExecutionArtifactType =
   | 'log'
