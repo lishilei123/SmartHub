@@ -13,7 +13,10 @@ import type {
 } from '../domain/test-execution-types.js'
 import { canonicalSha256 } from '../application/canonical-json.js'
 import type { RuntimeApiAuthorization } from '../application/test-execution-auth-session.js'
-import { assertExecutionPackageIntegrity } from '../application/test-execution-validation.js'
+import {
+  assertExecutionPackageIntegrity,
+  GOVERNED_UI_API_TEST_MODULE,
+} from '../application/test-execution-validation.js'
 import type { ExecutionEnvironmentSecretResolver, PlaywrightRunner } from './playwright-runner.js'
 import type { RunnerArtifactObject, SandboxExecutionResult } from './execution-sandbox.js'
 import type { ExecutionArtifactStore } from '../infrastructure/execution-artifact-store.js'
@@ -32,7 +35,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
   ) {
     this.playwright = playwright ?? localPlaywrightInstallation()
     this.value = {
-      runnerVersion: 'local-workspace/v4',
+      runnerVersion: 'local-workspace/v5',
       playwrightVersion: this.playwright.version,
       imageReference: 'local-workspace',
       imageDigest: `sha256:${'0'.repeat(64)}`,
@@ -99,6 +102,8 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
     const runtimeApiAuthorization = apiAuthorization && authStateFile
       ? await readRuntimeApiAuthorization(authStateFile, apiAuthorization, input.environment.baseUrl)
       : undefined
+    const apiAuthorizationMode = input.workspace.apiAuthorizationMode
+      ?? (runtimeApiAuthorization ? 'default_request_context' : undefined)
     if (signal.aborted) return cancelled()
     const secretEnvironment = normalizeSecretEnvironment(await this.secretResolver.resolveForLaunch({
       environmentId: input.environment.environmentId,
@@ -116,6 +121,9 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
       const configPath = join(runtimeRoot, 'playwright.config.mjs')
       const reporterPath = join(runtimeRoot, 'playwright-report.json')
       await mkdir(executionRoot, { recursive: true })
+      if (runtimeApiAuthorization && apiAuthorizationMode === 'isolated_ui_request_fixture') {
+        await writeGovernedUiApiFixture(runtimeRoot)
+      }
       for (const file of executionPackage.files) {
         const target = resolve(executionRoot, ...file.path.split('/'))
         if (!inside(executionRoot, target)) throw new Error('TEST_EXECUTION_WORKSPACE_DEPENDENCY_INVALID')
@@ -134,7 +142,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
           reporterPath,
           authStateRoot,
           authStateFile,
-          Boolean(runtimeApiAuthorization),
+          Boolean(runtimeApiAuthorization && apiAuthorizationMode === 'default_request_context'),
         ),
         { encoding: 'utf8' },
       )
@@ -790,6 +798,58 @@ async function readRuntimeApiAuthorization(
     throw new Error('TEST_EXECUTION_API_AUTHORIZATION_INVALID')
   }
   return /^Bearer\s+/iu.test(token) ? token : `Bearer ${token}`
+}
+
+async function writeGovernedUiApiFixture(runtimeRoot: string) {
+  const packageRoot = join(runtimeRoot, 'node_modules', ...GOVERNED_UI_API_TEST_MODULE.split('/'))
+  await mkdir(packageRoot, { recursive: true })
+  await Promise.all([
+    writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+      name: GOVERNED_UI_API_TEST_MODULE,
+      private: true,
+      type: 'module',
+      exports: './index.mjs',
+    }), { encoding: 'utf8' }),
+    writeFile(join(packageRoot, 'index.mjs'), governedUiApiFixtureSource(), { encoding: 'utf8' }),
+  ])
+}
+
+function governedUiApiFixtureSource() {
+  return `import { test as base, expect, request as playwrightRequest } from '@playwright/test'
+
+const baseURL = process.env.SMARTHUB_BASE_URL
+const authorization = process.env.SMARTHUB_RUNTIME_API_AUTHORIZATION
+if (!baseURL) throw new Error('TEST_EXECUTION_BASE_URL_REQUIRED')
+if (!authorization) throw new Error('TEST_EXECUTION_API_AUTHORIZATION_REQUIRED')
+const approvedOrigin = new URL(baseURL).origin
+const requestMethods = new Set(['delete', 'fetch', 'get', 'head', 'patch', 'post', 'put'])
+
+export const test = base.extend({
+  request: async ({}, use) => {
+    const context = await playwrightRequest.newContext({
+      baseURL,
+      extraHTTPHeaders: { Authorization: authorization },
+    })
+    const governed = new Proxy(context, {
+      get(target, property, receiver) {
+        if (requestMethods.has(property)) {
+          return async (url, options = {}) => {
+            if (typeof url !== 'string' || new URL(url, baseURL).origin !== approvedOrigin) {
+              throw new Error('TEST_EXECUTION_API_REQUEST_CROSS_ORIGIN_REJECTED')
+            }
+            return target[property](url, { ...options, maxRedirects: 0 })
+          }
+        }
+        const value = Reflect.get(target, property, receiver)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    try { await use(governed) } finally { await context.dispose() }
+  },
+})
+
+export { expect }
+`
 }
 
 async function validatedReporterAttachment(

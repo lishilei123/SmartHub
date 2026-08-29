@@ -39,7 +39,7 @@ export interface CaseExecutionBinding {
   dependencySha256: string
   caseContentSha256: string
   /** Validator policy that admitted this implementation. Missing means legacy. */
-  validationPolicyVersion?: 'execution-binding-validation/v2'
+  validationPolicyVersion?: 'execution-binding-validation/v2' | 'execution-binding-validation/v3'
   createdAt: string
   updatedAt: string
   inheritedFromProjectVersionId?: string
@@ -656,7 +656,10 @@ function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
     || !/^[a-f0-9]{64}$/u.test(binding.entrySha256)
     || !/^[a-f0-9]{64}$/u.test(binding.caseContentSha256)
     || binding.validationPolicyVersion !== undefined
-      && binding.validationPolicyVersion !== 'execution-binding-validation/v2'
+      && ![
+        'execution-binding-validation/v2',
+        'execution-binding-validation/v3',
+      ].includes(binding.validationPolicyVersion)
     || !dependencyFiles.length
     || new Set(dependencyFiles.map(file => file.path.toLocaleLowerCase())).size !== dependencyFiles.length
     || dependencyFiles.some(file => !/^[a-f0-9]{64}$/u.test(file.contentSha256))

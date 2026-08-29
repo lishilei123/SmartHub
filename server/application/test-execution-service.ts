@@ -60,6 +60,7 @@ import {
   CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
   executionEntrySymbol,
   freezeExecutionTaskInput,
+  GOVERNED_UI_API_TEST_MODULE,
   scriptCacheKey,
   TestExecutionValidationError,
   unsupportedExecutionMethodReason,
@@ -1048,7 +1049,13 @@ export class TestExecutionService {
     assertFrozenRunner(run, this.runner.snapshot())
     let workspaceRunTarget: Awaited<ReturnType<TestExecutionService['workspaceRunTarget']>>
     try {
-      workspaceRunTarget = await this.workspaceRunTarget(run, task, revision, signal)
+      workspaceRunTarget = await this.workspaceRunTarget(
+        run,
+        task,
+        revision,
+        executionPackage,
+        signal,
+      )
     } catch (error) {
       const code = error instanceof Error ? error.message : String(error)
       if (!authenticationPreparationFailure(code)) throw error
@@ -1523,6 +1530,7 @@ export class TestExecutionService {
     run: ExecutionRun,
     task: ExecutionTask,
     revision: ScriptRevision,
+    executionPackage: ExecutionPackage,
     signal: AbortSignal,
   ) {
     if (!this.executionWorkspace) return {}
@@ -1533,6 +1541,7 @@ export class TestExecutionService {
     ])
     let authStatePath: string | undefined
     let apiAuthorization: Awaited<ReturnType<LocalExecutionWorkspaceStore['runtimeApiAuthorization']>>
+    let apiAuthorizationMode: 'default_request_context' | 'isolated_ui_request_fixture' | undefined
     if (authPolicy.mode === 'reuse_authenticated' && authPolicy.role && authPolicy.stateKey) {
       const scope = {
         projectVersionId: run.projectVersionId,
@@ -1556,12 +1565,24 @@ export class TestExecutionService {
       }
       if (!access.loadPath) throw new Error('TEST_EXECUTION_AUTH_STATE_REQUIRED')
       authStatePath = access.loadPath
-      if (task.input.method === 'api') {
+      const usesIsolatedUiRequestFixture = task.input.method === 'ui'
+        && executionPackage.files.some(file =>
+          file.content.includes(`'${GOVERNED_UI_API_TEST_MODULE}'`)
+          || file.content.includes(`"${GOVERNED_UI_API_TEST_MODULE}"`))
+      if (task.input.method === 'api' || usesIsolatedUiRequestFixture) {
         apiAuthorization = await this.executionWorkspace.runtimeApiAuthorization(
           authStatePath,
           run.environment.baseUrl,
         )
       }
+      if (usesIsolatedUiRequestFixture && !apiAuthorization) {
+        throw new Error('TEST_EXECUTION_API_AUTHORIZATION_UI_BRIDGE_UNAVAILABLE')
+      }
+      apiAuthorizationMode = usesIsolatedUiRequestFixture
+        ? 'isolated_ui_request_fixture' as const
+        : task.input.method === 'api' && apiAuthorization
+          ? 'default_request_context' as const
+          : undefined
     }
     return {
       workspace: {
@@ -1571,6 +1592,7 @@ export class TestExecutionService {
         authStateRoot,
         ...(authStatePath ? { authStatePath } : {}),
         ...(apiAuthorization ? { apiAuthorization } : {}),
+        ...(apiAuthorizationMode ? { apiAuthorizationMode } : {}),
       },
     }
   }

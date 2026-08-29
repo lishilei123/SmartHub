@@ -48,6 +48,8 @@ export interface PlaywrightRunner {
       authStatePath?: string
       /** Runtime-only API authorization bridge; never contains the credential value. */
       apiAuthorization?: RuntimeApiAuthorization
+      /** Limits whether the bridge applies to the API-only default context or a governed UI setup fixture. */
+      apiAuthorizationMode?: 'default_request_context' | 'isolated_ui_request_fixture'
     }
   }, signal: AbortSignal): Promise<SandboxExecutionResult>
 }

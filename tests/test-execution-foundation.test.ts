@@ -479,8 +479,16 @@ test('状态检查 [case-status]', async ({ page, request }) => {
   await expect(page.locator('[data-testid="status"]')).toHaveText('Ready')
 })
 `
-  assert.doesNotThrow(
+  assert.throws(
     () => buildExecutionPackage({ candidate: candidate(mixed), task, environmentSignature: 'env' }),
+    error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'),
+  )
+  const governedMixed = mixed.replace(
+    "from '@playwright/test'",
+    "from '@smarthub/playwright-test'",
+  )
+  assert.doesNotThrow(
+    () => buildExecutionPackage({ candidate: candidate(governedMixed), task, environmentSignature: 'env' }),
   )
 })
 

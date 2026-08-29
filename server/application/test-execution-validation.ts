@@ -24,6 +24,7 @@ import type {
   TestCaseLibraryVersionMemberDetail,
   TestExecutionHandoffMember,
 } from '../domain/test-design-types.js'
+import { resolveAuthSessionPolicy } from './test-execution-auth-session.js'
 
 export const EXECUTION_PACKAGE_LIMITS = {
   maximumCandidateFiles: 16,
@@ -84,9 +85,13 @@ const diagnosisCategories = new Set<FailureDiagnosisCategory>([
   'unknown',
 ])
 
-const allowedExternalStaticImports = new Set(['@playwright/test'])
+export const GOVERNED_UI_API_TEST_MODULE = '@smarthub/playwright-test'
+const allowedExternalStaticImports = new Set([
+  '@playwright/test',
+  GOVERNED_UI_API_TEST_MODULE,
+])
 const allowedWorkspaceSourceRoots = new Set(['tests', 'api', 'pages', 'helpers', 'fixtures'])
-export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v2' as const
+export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v3' as const
 const forbiddenHttpClientModules = new Set([
   'axios',
   'superagent',
@@ -351,6 +356,7 @@ function buildExecutionPackageWithPolicy(
     input.task.executionSpec,
     input.task.caseId,
     enforceInitialUiNavigation,
+    resolveAuthSessionPolicy(input.task).mode,
   )
   if (input.baselineAssertions) assertProtectedAssertions(input.baselineAssertions, assertions)
   const protectedAssertionSha256 = canonicalSha256(assertions)
@@ -656,6 +662,7 @@ function validateEntrypointSource(
   executionSpec: TestCaseExecutionSpec,
   caseId: string,
   enforceInitialUiNavigation: boolean,
+  authSessionMode: ReturnType<typeof resolveAuthSessionPolicy>['mode'],
 ): ExecutionAssertionContract[] {
   const ast = parseWorkspaceSource(source)
   const callback = entryTestCallback(ast, caseId)
@@ -667,6 +674,14 @@ function validateEntrypointSource(
   }
   if (executionSpec.method === 'ui' && !fixtures.has('page')) {
     rejectSource('UI Case 必须使用 Playwright page 完成真实 UI 测试目标')
+  }
+  if (
+    executionSpec.method === 'ui'
+    && fixtures.has('request')
+    && authSessionMode === 'reuse_authenticated'
+    && !importsNamedTestFrom(ast, GOVERNED_UI_API_TEST_MODULE)
+  ) {
+    rejectSource(`已登录 UI Case 使用 request 辅助准备时，入口 test 必须从 ${GOVERNED_UI_API_TEST_MODULE} 导入`)
   }
   if (executionSpec.method === 'ui' && enforceInitialUiNavigation) assertInitialUiNavigation(callback)
   const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null; received: Node }>()
@@ -735,6 +750,22 @@ function assertInitialUiNavigation(callback: Node) {
   )) {
     rejectSource('UI Case 必须在读取 Locator 或执行页面交互前通过 page.goto(relativeUrl) 导航到当前 ExecutionRun BaseURL 下的页面')
   }
+}
+
+function importsNamedTestFrom(ast: ReturnType<typeof parse>, moduleName: string) {
+  let imported = false
+  walkAst(ast, node => {
+    if (
+      node.type !== 'ImportDeclaration'
+      || String(node.source.value) !== moduleName
+    ) return
+    imported ||= node.specifiers.some(specifier =>
+      specifier.type === 'ImportSpecifier'
+      && (specifier.imported.type === 'Identifier'
+        ? specifier.imported.name === 'test'
+        : specifier.imported.value === 'test'))
+  })
+  return imported
 }
 
 function uiPageInteractionMethod(method: string) {

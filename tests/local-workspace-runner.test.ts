@@ -265,12 +265,17 @@ test('读取受保护任务 [TC_API_TASKS_001]', async ({ request }) => {
   }
 })
 
-test('LocalWorkspaceRunner 将同源 localStorage Bearer 临时桥接到 API request fixture', async () => {
-  const observedAuthorization: string[] = []
+test('LocalWorkspaceRunner 将同源 localStorage Bearer 分别桥接到 API 与隔离 UI request fixture', async () => {
+  const observedRequests: Array<{ path: string; authorization: string }> = []
   const server = createServer((request, response) => {
-    observedAuthorization.push(String(request.headers.authorization ?? ''))
+    observedRequests.push({
+      path: request.url ?? '',
+      authorization: String(request.headers.authorization ?? ''),
+    })
     const authenticated = request.headers.authorization === 'Bearer runtime-only-token'
-    response.statusCode = authenticated ? 200 : 401
+    response.statusCode = request.url === '/api/tasks'
+      ? authenticated ? 200 : 401
+      : 200
     response.setHeader('content-type', 'application/json')
     response.end(JSON.stringify({ authenticated }))
   })
@@ -376,9 +381,45 @@ test('读取 Bearer 保护资源 [TC_API_TASKS_001]', async ({ request }) => {
       .map(value => value.toString('utf8'))
       .join('\n')
     assert.doesNotMatch(traceText, /runtime-only-token/u)
-    assert.deepEqual(observedAuthorization, [
-      'Bearer runtime-only-token',
-      'Bearer runtime-only-token',
+    const uiTask = authenticatedUiTask()
+    const uiEntryFile = 'tests/ui/authenticated-setup.spec.ts'
+    const uiEntrySource = `import { test, expect } from '@smarthub/playwright-test'
+test('任务页面使用隔离 API 准备 [TC_UI_TASKS_001]', async ({ page, request }) => {
+  const response = await request.get('/api/tasks')
+  expect(response.status()).toBe(200)
+  await page.goto('/')
+  // smarthub:assert expected-1
+  await expect(page.locator('body')).toContainText('authenticated')
+})
+`
+    const uiPackage = buildExecutionPackage({
+      candidate: { entryFile: uiEntryFile, files: [{ path: uiEntryFile, content: uiEntrySource }] },
+      task: uiTask,
+      environmentSignature: 'local-bearer-environment',
+    })
+    const uiResult = await runner.execute({
+      package: uiPackage,
+      task: uiTask,
+      attemptId: 'attempt-local-bearer-ui',
+      expectedPackageSha256: uiPackage.manifest.packageSha256,
+      environment,
+      runner: runner.snapshot(),
+      workspace: {
+        root: workspace.root,
+        entryFile: uiEntryFile,
+        entrySymbol: `[${uiTask.caseId}]`,
+        authStateRoot,
+        authStatePath,
+        apiAuthorization,
+        apiAuthorizationMode: 'isolated_ui_request_fixture',
+      },
+    }, new AbortController().signal)
+    assert.equal(uiResult.status, 'passed')
+    assert.deepEqual(observedRequests, [
+      { path: '/api/tasks', authorization: 'Bearer runtime-only-token' },
+      { path: '/api/tasks', authorization: 'Bearer runtime-only-token' },
+      { path: '/api/tasks', authorization: 'Bearer runtime-only-token' },
+      { path: '/', authorization: '' },
     ])
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
@@ -561,4 +602,32 @@ function authenticatedApiTask() {
     contentSha256,
   }
   return { ...freezeExecutionTaskInput({ handoffMember, libraryMember }), taskId: 'task-api-authenticated' }
+}
+
+function authenticatedUiTask() {
+  const content: TestCaseContent = {
+    schemaVersion: 'test-case/v3',
+    title: '任务页面使用隔离 API 准备',
+    dimension: 'functional',
+    requirementRefs: ['requirement-task'],
+    priority: 'P0',
+    preconditions: ['已登录'],
+    executionMethods: ['ui'],
+    steps: ['通过 API 准备数据', '打开页面'],
+    expectedResults: ['页面显示 authenticated'],
+  }
+  const contentSha256 = canonicalSha256(content)
+  const libraryMember: TestCaseLibraryVersionMemberDetail = {
+    caseId: 'TC_UI_TASKS_001', revision: 1, ordinal: 0, contentSha256,
+    frozenContent: content, executionReadiness: 'ready',
+  }
+  const handoffMember: TestExecutionHandoffMember = {
+    stage: 'full', ordinal: 0, sourceVersionId: 'library-version-auth',
+    caseId: libraryMember.caseId, revision: libraryMember.revision, method: 'ui',
+    reason: '验证隔离 UI request fixture', dedupKey: 'TC_UI_TASKS_001:1:ui',
+    dimension: content.dimension,
+    executionSpec: { schemaVersion: 'test-script-input/v1', method: 'ui', testCase: content },
+    contentSha256,
+  }
+  return { ...freezeExecutionTaskInput({ handoffMember, libraryMember }), taskId: 'task-ui-authenticated' }
 }
