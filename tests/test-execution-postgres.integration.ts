@@ -1011,7 +1011,7 @@ async function appendScriptAndAttempt(claimed: ExecutionJob) {
       await transaction.appendArtifact(sourceArtifact)
       await transaction.appendArtifact({
         ...sourceArtifact,
-        createdAt: sourceArtifact.createdAt.replace(/Z$/u, '+00:00'),
+        createdAt: new Date(Date.parse(sourceArtifact.createdAt) + 50).toISOString(),
       })
       await assert.rejects(
         transaction.appendArtifact({ ...sourceArtifact, mimeType: 'application/javascript' }),

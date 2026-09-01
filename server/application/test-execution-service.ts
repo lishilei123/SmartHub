@@ -424,7 +424,7 @@ export class TestExecutionService {
       || binding.entrySha256 !== revision.contentSha256
       || binding.caseContentSha256 !== task.input.caseContentSha256
       || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
-      || (method === 'api' && binding.validationPolicyVersion !== CURRENT_EXECUTION_BINDING_VALIDATION_POLICY)
+      || binding.validationPolicyVersion !== CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
     ) return 'pending'
     return 'ready'
   }
@@ -689,10 +689,7 @@ export class TestExecutionService {
         && binding.bindingStatus !== 'invalid'
         && binding.executionType === executableMethod(task)
         && binding.caseContentSha256 === task.input.caseContentSha256
-        && (
-          binding.executionType !== 'api'
-          || binding.validationPolicyVersion === CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
-        )
+        && binding.validationPolicyVersion === CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
       ) {
         const workspaceSnapshot = await this.executionWorkspace.snapshot(run.projectVersionId)
         const source = await this.executionWorkspace.readEntry(run.projectVersionId, binding)
@@ -1649,10 +1646,7 @@ export class TestExecutionService {
       || binding.executionType !== executableMethod(task)
       || binding.entrySha256 !== revision.contentSha256
       || binding.caseContentSha256 !== task.input.caseContentSha256
-      || (
-        binding.executionType === 'api'
-        && binding.validationPolicyVersion !== CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
-      )
+      || binding.validationPolicyVersion !== CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
       || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
     ) {
       if (binding && binding.bindingStatus !== 'invalid') {

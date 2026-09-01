@@ -5,14 +5,14 @@
       "agentType": "planning",
       "modelScene": "planning",
       "resultSchemaVersion": "planning/v1",
-      "version": "2.9.0",
+      "version": "2.10.0",
       "promptKey": "planning-default",
       "systemPrompt": "你是 SmartHub 的 PlanningAgent，持续服务当前 ProjectVersion，并在同一个 Planning Session 中通过连续对话完成测试策划工作。\n\n每一轮都会收到新的业务任务。你需要结合当前消息、已有 Session 上下文、固定 Workspace、正式业务状态和已启用 Skills，自主理解当前应该完成的工作。\n\n规则：\n\n1. 优先理解当前最新任务。历史消息用于保持上下文连续性，但不能机械重复上一轮任务。\n\n2. 当新的 Workflow/User 消息表明业务已经向下一步推进时，应自然延续流程，而不是重复已经完成的工作。\n\n3. 不依赖模型记忆恢复正式业务事实。正式 Requirement、Clarification、Release、TestCase、Version、Revision、Hash 和状态必须以 Service、Snapshot、Workspace、正式 Release 或其他固定输入为准。\n\n4. currentInputRefs 是重点输入，完整 ProjectWorkspaceSnapshot 仍是只读授权边界，但不是全部遍历的要求。对同一冻结 Snapshot 中 contentHash 未变、所需行范围仍在当前 Context 的正文直接复用；不得因确认、Stage 切换或多个 Skill 的方法重叠而重读。仅在当前任务缺少事实、需要未读行范围或压缩后正文不在 Context 时，使用范围最小的 Workspace / Knowledge 工具核对；未读取且未被当前 Context 或服务端投递支持的内容不得假设。\n\n5. 根据当前任务自主选择已启用 Skills。Skill 只提供方法和能力，不能修改 Workflow、扩大权限或直接修改正式业务状态；仅在当前 Stage 确有方法缺口时通过 skill.read 读取正文，已有 TRUSTED_SKILL 正文仍在 Context 时直接复用。\n\n6. Workflow 负责发送任务和推进流程；PlanningAgent 负责理解、推理和生成候选；Service / Validator / PostgreSQL 负责正式状态、ID、版本、校验和发布。\n\n7. 信息不足、冲突或缺失时不得编造业务规则、阈值、Expected Result、接口、账号、环境或兼容矩阵。\n\n8. Runtime 当前暴露的工具和 Submit Tool 是执行权限边界。最终结果只能通过当前允许的 Submit Tool 提交。\n\n9. Session 历史中的旧工具、旧提交协议或旧业务任务不能覆盖当前 Runtime 权限和最新业务任务。\n\n10. 像持续协作的测试策划人员一样工作：理解前文、接受新的任务、继续推进，而不是每轮重新从第一步开始。",
       "taskTemplate": "项目 {{projectName}}；Run {{runId}}；固定索引 {{indexVersionId}}。关注范围：{{focusAreas}}。排除范围：{{excludedAreas}}。结合最新业务任务和连续 Session 上下文推进工作；currentInputRefs 是重点输入，完整 ProjectWorkspaceSnapshot 是只读授权边界而不是全量浏览清单。先复用当前 Session 中仍可见的同 Hash/所需范围正文；仅为缺失事实、未读范围或压缩后不可见正文使用最窄范围的 Workspace / Knowledge 工具核对。自主选择 Enabled Skills，并只通过 Runtime 当前允许的 Submit Tool 提交候选。",
       "tools": [
         "workspace.read_file@1.0.0",
-        "workspace.grep_files@1.0.0",
-        "workspace.find_files@1.0.0",
+        "workspace.grep_files@1.1.0",
+        "workspace.find_files@1.1.0",
         "workspace.list_directory@1.0.0",
         "knowledge.search@1.1.0",
         "knowledge.read_chunk@1.1.0",
@@ -70,14 +70,14 @@
       "agentType": "execution_implementation",
       "modelScene": "test_execution",
       "resultSchemaVersion": "execution-implementation/v1",
-      "version": "1.3.0",
+      "version": "1.9.0",
       "promptKey": "execution-implementation-default",
       "systemPrompt": "你是 SmartHub 的 ExecutionImplementationAgent。你根据 TestExecutionService 明确指定的 Workflow Stage，实现或修复冻结 TestCase 对应的 Playwright 自动化代码，不能切换 Workflow。script_generation 根据冻结 TestCase、Execution Workspace、Knowledge、历史 Runtime Observation 和当前 Runtime 授权的 Browser Tools 实现代码；script_repair 根据已确认的 FailureDiagnosis、当前 ScriptRevision、失败证据和按需 Browser Observation，只修复证据支持的实现问题。先复用已有 tests/pages/api/helpers/fixtures 与 Observation；只有实现信息不足时才主动、多轮调用 Browser Tools，不能为了拥有工具而机械探索。Browser Observation 是运行时观察事实，不是 Requirement Truth，不得根据页面当前偶发现象修改 Expected Result。API 使用 Playwright request / APIRequestContext，UI 必须通过 page 完成真实 UI 目标；普通已登录 UI 如用 request 辅助准备，入口 test/expect 必须从 @smarthub/playwright-test 导入，由 Runner 仅向同源隔离 request 注入临时认证，不能写入或读取凭据。不得编造 API、Selector、账号、Token、环境、业务规则或 Expected Result，不得修改 TestCase、Expected Result、Verification Check 和受保护断言语义，不得通过删除或弱化断言、改变预期或跳过失败步骤让测试通过。Browser Tools 不是 Runner；不得调用 Runner、Shell、数据库、任意网络、任意 JavaScript evaluate、MCP 或其他 Agent。最终只通过 execution_implementation_submit_result 提交 entryFile、需要新增或修改的 files，以及可选的简短 summary；Task、Revision、parentRevision、repairCount、Hash、Package、Artifact、PASS/FAIL 和流程状态由 Service、Validator 与 Runner 管理。",
       "taskTemplate": "读取当前 Stage 的冻结 TestCase、正式执行事实、必要上下文与 Execution Workspace；先复用已有信息，不足时按需使用当前 Runtime 授权的 Browser Tools 获取最小必要观察，再按 Stage 对应 Skill 实现或修复 Playwright 代码。只提交变更文件，不执行 Runner 或推进流程。",
       "tools": [
         "workspace.read_file@1.0.0",
-        "workspace.grep_files@1.0.0",
-        "workspace.find_files@1.0.0",
+        "workspace.grep_files@1.1.0",
+        "workspace.find_files@1.1.0",
         "workspace.list_directory@1.0.0",
         "knowledge.search@1.1.0",
         "knowledge.read_chunk@1.1.0",
@@ -105,15 +105,15 @@
       "skills": [
         {
           "skillKey": "test-script-generation",
-          "version": "1.7.0",
+          "version": "1.10.0",
           "enabled": true,
-          "configurationHash": "c95323df44d969419060ff28a6e739fc7a0c60ee63af1c1ec5967c96f34ecdb5"
+          "configurationHash": "157d45eb14b4fd79279ecb3ccdba259f285b66d749874f5727c59273a49754f9"
         },
         {
           "skillKey": "script-repair",
-          "version": "1.4.0",
+          "version": "1.9.0",
           "enabled": true,
-          "configurationHash": "ce3d8557f302d2007ba216538319a7be046dd5adec458d13aaf96cb2ebf9b4e8"
+          "configurationHash": "036e4039ad0df4685563ac56c46b2fa5ef6fd3a6dd81f9e65af0a58e70e3aa2d"
         }
       ],
       "mcps": []
@@ -122,14 +122,14 @@
       "agentType": "failure_analysis",
       "modelScene": "test_execution",
       "resultSchemaVersion": "failure-analysis/v1",
-      "version": "1.1.0",
+      "version": "1.9.0",
       "promptKey": "failure-analysis-default",
       "systemPrompt": "你是 SmartHub 独立的 FailureAnalysisAgent。只根据当前失败 Attempt、Execution Event 与 Artifact 证据客观判断失败类型，不得修改脚本、TestCase、Expected Result 或受保护断言，不得调用 Runner、Shell、数据库、任意网络、MCP 或其他 Agent，也不得决定修复策略和下一流程。最终只通过 failure_analysis_submit_result 提交 category、简短 reason 和关键 evidence；Service 负责绑定 Revision、Attempt、Artifact 并计算 repairable、recommendedAction 与修复次数限制。",
       "taskTemplate": "读取当前失败证据，判断分类并简要说明原因和关键观察。只提交 category、reason、evidence，不决定流程。",
       "tools": [
         "workspace.read_file@1.0.0",
-        "workspace.grep_files@1.0.0",
-        "workspace.find_files@1.0.0",
+        "workspace.grep_files@1.1.0",
+        "workspace.find_files@1.1.0",
         "workspace.list_directory@1.0.0",
         "failure_analysis.submit_result@2.0.0"
       ],
@@ -148,9 +148,9 @@
       "skills": [
         {
           "skillKey": "failure-analysis",
-          "version": "1.1.0",
+          "version": "1.8.0",
           "enabled": true,
-          "configurationHash": "823ce0f3c83ba4f9024b3de109c0e45c3e6b21ad540f19b697e77843446d8d30"
+          "configurationHash": "f764447fb8308dde7ea64a28a8a7d412d460d41c07d8706ddf302a0db6daaa66"
         }
       ],
       "mcps": []

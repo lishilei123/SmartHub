@@ -18,6 +18,13 @@ test('checked-in built-in Tool config excludes retired requirement repair submis
   }
   assert.equal(listDirectory.properties.path.minLength, 0)
   assert.match(listDirectory.properties.path.description, /空字符串/u)
+  for (const toolId of ['workspace.grep_files', 'workspace.find_files']) {
+    const searchTool = defaultBuiltInToolConfigResolver.toDescriptor(toolId).parameters as unknown as {
+      properties: { path: { minLength: number; description: string } }
+    }
+    assert.equal(searchTool.properties.path.minLength, 0)
+    assert.match(searchTool.properties.path.description, /空字符串/u)
+  }
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('test_design_cases.submit_result').piName, 'test_design_cases_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('requirement-analysis.submit_result').piName, 'requirement_analysis_submit_result')
   assert.equal(defaultBuiltInToolConfigResolver.toDescriptor('execution_implementation.submit_result').piName, 'execution_implementation_submit_result')

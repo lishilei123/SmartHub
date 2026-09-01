@@ -1302,6 +1302,7 @@ test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAge
       entrySha256,
       ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
       caseContentSha256: store.task.input.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z',
       updatedAt: '2026-08-13T12:00:00.000Z',
     })
@@ -1369,6 +1370,7 @@ test('同一 Case 的 UI/API Binding 跨 Run 同时 Execute First，不互相覆
       entrySha256: createHash('sha256').update(source, 'utf8').digest('hex'),
       ...singleFileBindingDependency(uiEntry, source),
       caseContentSha256: uiInput.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
     })
     await workspace.saveBinding({
@@ -1435,6 +1437,7 @@ test('继承 Binding 真实通过后升级 validated，真实失败不自动判 
       entrySha256,
       ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
       caseContentSha256: store.task.input.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z',
       updatedAt: '2026-08-13T12:00:00.000Z',
     })
@@ -1547,6 +1550,7 @@ test('Workspace 历史入口首次失败后才调用 CLI 诊断，产品缺陷�
       executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: `[${store.task.input.caseId}]`,
       bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
       ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
     })
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)
@@ -1615,6 +1619,7 @@ test('已登录 UI Case 的失败诊断省略不可靠的 CLI 登录页快照', 
       entrySha256,
       ...singleFileBindingDependency(entryFile, entrySource),
       caseContentSha256: store.task.input.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z',
       updatedAt: '2026-08-13T12:00:00.000Z',
     })
@@ -1639,6 +1644,7 @@ test('Workspace script_defect 仅在 CLI 诊断后修改代码并 Retry', async 
       executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: `[${store.task.input.caseId}]`,
       bindingStatus: 'validated', entrySha256, caseContentSha256: store.task.input.caseContentSha256,
       ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: '2026-08-13T12:00:00.000Z', updatedAt: '2026-08-13T12:00:00.000Z',
     })
     const task = await service.processPreparedTask(job, lease, new AbortController().signal)

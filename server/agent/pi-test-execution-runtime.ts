@@ -355,8 +355,15 @@ function stageInstructions(
     'Workspace 工具的当前目录就是本任务的冻结根目录；先读取 attempts.json、events.json，若存在 evidence/ 则必须读取其中与终态 Attempt 对应的 Runner 日志摘录。',
     '若 HTTP 证据为 404/405，且冻结 TestCase 未明确要求该状态码，必须判定为 API 契约/脚本实现问题 script_defect；Validator 要求通用 4xx 断言排除 404/405 是为了暴露错误路径/方法，绝不能将该保护性断言诊断为 assertion_mismatch。只有 400/401/403/409/422 等非路由失败状态被脚本自行收窄、且冻结 Expected Result 未固定时，才属于 assertion_mismatch。',
     '若 events.json 的 failure phase=load，且证据指向脚本导入、测试发现或入口实现（包括 No tests found），应归类 script_defect；只有独立 Runner readiness 或依赖安装证据才能支持 environment_defect。',
-    '若 T1、T2、K 等符号数据未由冻结 Test Data Binding、成功 setup 响应或显式前置数据守卫证明存在，相关失败应归类 test_data_defect，不能据此报告 product_defect。',
+    '若 T1、T2、K 等符号数据未由冻结 Test Data Binding、成功 setup 响应或显式前置数据守卫证明存在，且现有契约证据未提供可信创建路径，相关失败应归类 test_data_defect，不能据此报告 product_defect。若 Workspace 或 Exploration Context 已提供可信创建路径，而脚本只用 guard 依赖可变存量数据、没有落实本应自给的前置条件，应归类 script_defect 以允许修复。',
+    '当失败来自可变存量数据 guard 时，在提交 test_data_defect 前必须先用 workspace.grep_files/find_files/read_file 检查当前 Workspace 是否已有同类实体的可信创建 helper、API Case、Fixture 或 UI setup；找到可信创建路径而当前脚本未使用时应归类 script_defect。',
+    '若脚本从全局列表选择 first/find 任意现有记录来满足可变状态前置，且同一 Run 的并发任务或其他业务操作能够修改该记录，即使终态表现为 API 与 UI 状态不一致，也应归类 script_defect；可信创建路径存在时，脚本必须自建带唯一标识的记录、按合法路径准备状态并清理，不能把共享记录竞争归为 test_data_defect。',
     'UI 失败必须优先核对 events.json 中 category=terminal_page 的同源终态路径和页面地标；它们是 Runner 从本次 Playwright Trace 提取的正向观察事实。不得只根据失败 Locator 猜测 assertion_mismatch；若终态路径或页面地标直接违反冻结 Expected Result，应按产品行为证据判断。',
+    '若失败来自脚本自行增加、但冻结 Expected Result/Verification Check 未要求的提示文案、Toast、状态码或其他额外门槛，应归类 script_defect；assertion_mismatch 只用于受保护断言本身与冻结预期存在语义冲突，不能让额外实现断言阻断自动修复。',
+    '若冻结预期要求在变更前出现确认交互，脚本已在点击正确目标前注册原生 dialog 观察，点击后观察值仍为 false，且终态仍位于正确业务页面、未观察到 modal、确认文案或确认/取消控件，这已经是“未提供确认交互”的直接产品证据，应归类 product_defect；不要求脚本继续执行到对象已被修改或删除后才成立。若对象已直接被修改或删除，同样归类 product_defect。只有 Trace/页面证据真实显示另一种确认控件而脚本没有绑定时，才归类 script_defect；不得无证据猜测“可能是非原生确认”并返回 unknown。',
+    '若确认类脚本把“目标对象仍可见”、固定布尔值、点击完成或其他非确认观察当成确认已出现，后续失败应归类 script_defect：受保护确认断言必须绑定真实 dialog、modal、确认文案或确认/取消控件证据，不能由对象可见性代替。',
+    '若冻结步骤要求修改实体，脚本已定位正确实体并尝试触发修改，但终态仍在正确业务页面且页面地标/控件证据中不存在改名、编辑、保存等任何修改入口，也没有出现 modal/dialog，则这是产品未提供冻结能力的直接证据，应归类 product_defect，不得仅因没有更新请求而返回 unknown。若证据显示存在真实修改入口但脚本触发了错误元素，才归类 script_defect。',
+    '若已登录 UI 脚本需要同源 API 数据却从 @playwright/test 导入并使用 page.request，而没有从 @smarthub/playwright-test 接收受管 request fixture，且失败发生在该辅助请求或其 response.ok() 门槛、尚未到达受保护业务断言，应归类 script_defect。即使 Trace 事件摘要与 response.ok() 表现矛盾，也不得返回 unknown：当前脚本未使用平台规定的 Run-scoped Bearer bridge 是可直接从 ScriptRevision 观察的实现缺陷。',
     `完成后只调用 ${submitToolId} 提交 category、reason、evidence。`,
   ]
   const implementation = [
@@ -368,15 +375,29 @@ function stageInstructions(
     '先复用 Workspace 和已有 Observation；只有实现所需信息不足时才按需、多轮调用 Browser Tools。Browser Observation 是运行时观察事实，不是 Requirement Truth。',
     'Browser Tools 只用于受控探索，不是 Runner；不得把工具观察解释为 PASS/FAIL，也不得据此改变 Expected Result 或弱化断言。',
     '每条前置条件都必须由冻结 Test Data、受管 Fixture、可追溯的 setup/cleanup 或运行时可观察验证来落实；T1、T2、K 等用例符号不是环境中已存在数据的证明，无法落实时不得提交可执行候选。',
+    '仅检查前置数据并在缺失时失败，不算落实前置条件；已有可信 setup API、Fixture 或合法 UI 流程时必须创建所需状态并在清理阶段隔离回收。状态机数据必须按已知合法边创建，禁止直接写入或猜测捷径。',
+    '不得从全局列表选择 first/find 任意现有记录来满足可能被并发任务修改的前置条件。每个 Case 必须创建带本次唯一标识的实体并只操作自己的记录；状态型前置必须通过已知合法流转准备，最后清理。',
+    'Dashboard、报表或聚合一致性 Case 不得依赖可变的全局种子数量；若可信 UI/受管 Fixture/同源 setup 契约可用，应为每个必要类别创建最小隔离数据，并从已创建记录或可观察源数据推导期望，完成后清理。',
     'API 的 method、path、query 参数和 request body 字段必须来自复用代码、Exploration Context 或本次 Browser Observation；禁止根据命名习惯猜测 /search、/auth/login、PATCH 等契约。契约仍不可观察时不得提交候选。',
+    '每次 Service 重试都是新的提交校验 invocation；即使同一 Session 记得先前内容，提交 API 脚本前也必须在本次 invocation 重新 read /exploration/context.json、相关 execution/api|helpers|fixtures|tests/api 文件，或执行 knowledge.search 后 read_chunk。只 search、只依赖历史读取或反复提交不能满足契约证据门。',
     '每个需要读取响应体的 API 请求必须包装在标题精确形如 test.step("METHOD /relative/path", ...) 的步骤中；Runner 会用该方法和相对路径关联同源 Trace，固化脱敏状态码、请求与响应证据。不得使用“发起登录请求”等无法关联 HTTP Trace 的自由文本步骤标题。',
     'API Case 的 test/expect 必须直接从 @playwright/test 导入；@smarthub/playwright-test 只允许用于冻结前置条件明确已登录、且确实需要 request 辅助准备的 UI Case。',
     'API 异常场景不得把业务失败自行等同于 HTTP 4xx：只有冻结 Expected Result 明确要求 HTTP/状态码时，受保护断言才能锚定状态码或 4xx 范围。否则应把冻结的业务错误字段、成功标志或持久化不变量作为受保护断言；404/405 仅作为非锚定防误报保护并必须触发契约修复，不能把不存在的路径、错误方法或“200 + 业务失败响应”误判。',
+    '重复删除、幂等或恢复性 Case 若未冻结具体响应状态，应通过目标仍不存在、对照数据仍可读、后续列表/查询仍成功等持久化不变量证明结果；不得把 response.ok()、4xx 范围或任意单一状态码作为受保护业务断言。',
+    'UI 拒绝类 Case 若冻结 Expected Result 未指定错误文案，不得额外要求某个 Toast、提示文本或正则必须可见；应在刷新、重新进入或稳定页面查询后通过持久化业务状态证明操作被拒绝。',
+    'UI 状态机负向 Case 不得用页面上可见的合法前进、回退或其他相邻动作替代冻结步骤中的目标非法动作。若目标对象范围内根本不提供该非法转换入口，应验证该对象内不存在对应按钮、菜单项或选项，并在刷新后验证状态未改变；不得点击其他合法动作制造失败，也不得使用页面级宽泛状态文本定位器代替对象内定位。',
     '只提交需要新增或修改的 Workspace 文件；summary 仅用于简短说明。',
   ]
   if (stage === 'script_repair') implementation.push(
     '当前 Stage 只根据已确认的 FailureDiagnosis、当前 ScriptRevision、Runner Evidence 和 Execution Workspace 修复实现问题；不得重新进行需求分析、测试设计或通过 Knowledge 搜索扩大修复范围。',
     '只修改诊断支持的实现问题；不得删除、绕过或弱化受保护断言和业务闭环。',
+    '若诊断指出脚本增加了冻结预期未要求的提示文案、Toast 或状态码门槛，应移除该额外门槛，并保留或补全刷新/重新进入后的受保护持久化状态验证；这属于修复脚本实现，不是弱化正式断言。',
+    '若诊断证据显示脚本为受保护业务不变量增加了未冻结且返回 404/405 的辅助 API 路径，应删除该无效调用，或改用 Exploration Context/Workspace 已证明的列表、查询契约验证同一不变量；不得因为它靠近断言锚点就保留错误路由。',
+    '若诊断指出确认断言由对象可见性、固定布尔值或点击完成冒充，应删除该替代逻辑，只让真实 dialog/modal/确认文案或确认/取消控件设置确认观察；若真实确认不存在，让受保护断言如实失败，禁止继续猜测或制造确认。',
+    '若诊断指出状态机动作被错误替换或定位器范围过宽，必须回到目标对象范围：只定位该对象内真实存在的目标动作；目标非法动作未暴露时验证其入口在该对象内不存在并刷新验证持久化状态，禁止改点合法相邻动作或使用页面级状态文本。',
+    '若诊断指出 Dashboard、报表或聚合脚本只依赖可变存量数据的 guard，而当前证据已有可信创建路径，应创建最小隔离前置数据、从受控源数据推导期望并清理；不得保留“环境必须预先有数据”的实现假设。',
+    '若诊断指出脚本从全局列表选择任意现有记录并与并发任务发生状态竞争，应改为在本 Case 内创建带唯一标识的记录，通过已知合法流转准备所需状态，只操作该记录并在 finally 清理；不得通过降低 Worker 并发度掩盖数据隔离缺陷。',
+    '已登录 UI Case 需要同源 APIRequestContext 读取或准备数据时，必须把入口改为从 @smarthub/playwright-test 导入 test/expect，并从测试参数接收受管 request fixture；禁止用 page.request 代替，因为浏览器 localStorage 登录不会自动成为其 Bearer 凭据。若诊断已指出 response.ok() 是未冻结的辅助门槛，应移除该门槛并保留真正的响应体解析与受保护 Dashboard/持久化对账断言；不得原样提交导致 TEST_EXECUTION_REPAIR_NO_CHANGE。',
   )
   return [...implementation, `完成后只调用 ${submitToolId} 提交 entryFile、files，可选 summary。`]
 }

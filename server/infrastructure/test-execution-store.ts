@@ -1847,9 +1847,15 @@ async function insertArtifact(client: PoolClient, artifact: ExecutionArtifact) {
   `, [artifact.id, artifact.runId, artifact.taskId ?? null, artifact.attemptId ?? null, artifact.type, artifact.storagePath, artifact.sha256, artifact.size, artifact.mimeType, artifact.createdAt])
   if (inserted.rows[0]) return
   const existing = await client.query<ArtifactRow>('SELECT * FROM smarthub.test_execution_artifacts WHERE id=$1', [artifact.id])
-  if (!existing.rows[0] || !sameCanonicalRecord(artifactFromRow(existing.rows[0]), artifact)) {
+  if (!existing.rows[0] || !sameArtifactRecord(artifactFromRow(existing.rows[0]), artifact)) {
     throw new Error('TEST_EXECUTION_ARTIFACT_CONFLICT')
   }
+}
+
+function sameArtifactRecord(left: ExecutionArtifact, right: ExecutionArtifact) {
+  const { createdAt: _leftCreatedAt, ...leftIdentity } = left
+  const { createdAt: _rightCreatedAt, ...rightIdentity } = right
+  return sameCanonicalRecord(leftIdentity, rightIdentity)
 }
 
 async function insertScriptArtifact(client: PoolClient, artifact: ScriptArtifact) {

@@ -92,7 +92,7 @@ const allowedExternalStaticImports = new Set([
   GOVERNED_UI_API_TEST_MODULE,
 ])
 const allowedWorkspaceSourceRoots = new Set(['tests', 'api', 'pages', 'helpers', 'fixtures'])
-export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v9' as const
+export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v10' as const
 const forbiddenHttpClientModules = new Set([
   'axios',
   'superagent',
@@ -742,7 +742,7 @@ function validateEntrypointSource(
       const parsed = assertionExpression(node.expression)
       if (!parsed) rejectSource(`断言锚点 ${anchorComment} 必须绑定 Playwright expect 断言`)
       if (executionSpec.method === 'api' && weakNegativeResponseAssertion(parsed)) {
-        rejectSource(`API 异常场景断言 ${anchorComment} 不能只验证 response.ok() 为 false；必须断言明确 HTTP 状态码，并按固定 Expected Result 校验业务错误语义`)
+        rejectSource(`API 异常场景断言 ${anchorComment} 不能只验证 response.ok() 为 false，也不能改为未由 Verification Check 冻结的 HTTP 状态码；必须直接断言冻结的业务失败字段、持久化不变量或后续可操作性`)
       }
       anchors.set(anchorComment, parsed)
     }

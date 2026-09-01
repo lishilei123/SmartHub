@@ -44,7 +44,7 @@
       }
     },
     "workspace.grep_files": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "grep",
       "label": "搜索工作区正文",
       "catalogName": "工作区正文搜索",
@@ -66,8 +66,9 @@
           },
           "path": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 2000
+            "minLength": 0,
+            "maxLength": 2000,
+            "description": "可选搜索起点；省略、'.' 或空字符串均表示当前只读工作区根目录。"
           },
           "glob": {
             "type": "string",
@@ -98,7 +99,7 @@
       }
     },
     "workspace.find_files": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "piName": "find",
       "label": "查找工作区文件",
       "catalogName": "工作区文件查找",
@@ -120,8 +121,9 @@
           },
           "path": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 2000
+            "minLength": 0,
+            "maxLength": 2000,
+            "description": "可选查找起点；省略、'.' 或空字符串均表示当前只读工作区根目录。"
           },
           "limit": {
             "type": "integer",

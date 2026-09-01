@@ -266,7 +266,7 @@ function normalizeToolArguments(toolId: RequirementWorkspaceToolId, value: unkno
   }
   if (toolId === 'workspace.grep_files') return {
     pattern: requiredText(input.pattern, 'pattern'),
-    path: relativeInput(input.path ?? '.', true),
+    path: workspaceSearchPathInput(input.path),
     ...(input.glob === undefined ? {} : { glob: safeGlob(input.glob) }),
     ...(input.ignoreCase === undefined ? {} : { ignoreCase: Boolean(input.ignoreCase) }),
     ...(input.literal === undefined ? {} : { literal: Boolean(input.literal) }),
@@ -275,7 +275,7 @@ function normalizeToolArguments(toolId: RequirementWorkspaceToolId, value: unkno
   }
   if (toolId === 'workspace.find_files') return {
     pattern: safeGlob(input.pattern),
-    path: relativeInput(input.path ?? '.', true),
+    path: workspaceSearchPathInput(input.path),
     ...(input.limit === undefined ? {} : { limit: positiveInteger(input.limit, 'limit') }),
   }
   return {
@@ -287,6 +287,13 @@ function normalizeToolArguments(toolId: RequirementWorkspaceToolId, value: unkno
 function workspaceDirectoryInput(value: unknown) {
   // Models commonly represent an omitted `ls` path as "". Keep that spelling
   // equivalent to an omitted path, while normalizing it to the sandboxed root.
+  if (typeof value === 'string' && !value.trim()) return '.'
+  return relativeInput(value ?? '.', true)
+}
+
+function workspaceSearchPathInput(value: unknown) {
+  // Keep grep/find consistent with ls: an empty path still means the already
+  // sandboxed workspace root and never broadens the authorization boundary.
   if (typeof value === 'string' && !value.trim()) return '.'
   return relativeInput(value ?? '.', true)
 }
