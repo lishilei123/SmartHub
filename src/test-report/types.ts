@@ -37,7 +37,7 @@ export type TestReportListItem = {
 }
 
 export type TestReport = {
-  schemaVersion: 'test-execution-report/v4'
+  schemaVersion: 'test-execution-report/v5'
   statisticsAt: string
   reportSha256: string
   run: {
@@ -62,6 +62,10 @@ export type TestReport = {
     pendingMaintenanceCount: number
     acceptedMaintenanceCount: number
     rejectedMaintenanceCount: number
+    productDefectCandidateCount: number
+    pendingProductDefectCount: number
+    confirmedProductDefectCount: number
+    rejectedProductDefectCount: number
     statusCounts: Record<ExecutionTaskStatus, number>
     finalPassRate: ReportRate
   }
@@ -114,7 +118,15 @@ export type TestReport = {
     caseRevision: number
     title: string
     method: TestExecutionMethod
-    status: 'pending_confirmation'
+    status: 'pending_confirmation' | 'confirmed' | 'rejected'
+    decisionEtag?: string
+    disposition?: {
+      actionId: string
+      actorId: string
+      actorDisplayName: string
+      comment?: string
+      decidedAt: string
+    }
     summary: string
     attemptIds: string[]
     artifactIds: string[]

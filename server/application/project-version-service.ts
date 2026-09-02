@@ -62,6 +62,7 @@ export class ProjectVersionService {
     return this.store.transaction(state => {
       const project = platformProject(state)
       const version = required(state.projectVersions.find(item => item.id === projectVersionId && item.projectId === project.id), '项目版本不存在')
+      if (status !== 'open' && state.reviewRuns.some(item => item.projectVersionId === version.id && requirementWorkflowUnsettled(item))) throw new Error('项目版本仍有未收口的需求分析工作流，请完成发布或取消运行后再锁定或归档')
       if (status !== 'open' && (state.testDesignState?.runs ?? []).some(item => item.projectVersionId === version.id && ['queued', 'running', 'waiting_gate'].includes(item.status))) throw new Error('项目版本仍有活动测试设计工作流，请先取消运行后再锁定或归档')
       version.status = status
       version.updatedAt = now()
@@ -77,7 +78,7 @@ export class ProjectVersionService {
       const dependent = state.projectVersions.find(item => item.sourceProjectVersionId === version.id)
       if (dependent) throw new Error(`版本正在被 ${dependent.name} 作为继承来源，不能删除`)
       const reviewRuns = state.reviewRuns.filter(item => item.projectVersionId === version.id)
-      if (reviewRuns.some(item => item.status === 'running')) throw new Error('项目版本仍有正在执行的需求分析，请先取消运行后再删除')
+      if (reviewRuns.some(requirementWorkflowUnsettled)) throw new Error('项目版本仍有未收口的需求分析工作流，请完成发布或取消运行后再删除')
       const testDesignState = state.testDesignState
       const testDesignRuns = testDesignState?.runs.filter(item => item.projectVersionId === version.id) ?? []
       if (testDesignRuns.some(item => ['queued', 'running', 'waiting_gate'].includes(item.status))) throw new Error('项目版本仍有活动测试设计工作流，请先取消运行后再删除')
@@ -156,6 +157,12 @@ export class ProjectVersionService {
       return binding
     })
   }
+}
+
+function requirementWorkflowUnsettled(run: import('../domain/types.js').ReviewRun) {
+  return run.status === 'running'
+    || run.status === 'waiting_clarification'
+    || run.status === 'succeeded' && run.workflow?.release?.status !== 'published'
 }
 
 function bindingMetadata(state: Awaited<ReturnType<StateStore['snapshot']>>) {

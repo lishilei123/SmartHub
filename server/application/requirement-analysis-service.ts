@@ -371,7 +371,8 @@ export class RequirementAnalysisService {
       workflow: { currentStage: 'analysis' },
     }
     await this.store.transaction(draft => {
-      required(draft.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
+      const currentProjectVersion = required(draft.projectVersions.find(item => item.id === request.projectVersionId), '项目版本不存在')
+      if (currentProjectVersion.status !== 'open') throw new Error('当前项目版本为只读状态，不能发起需求分析')
       draft.reviewRuns.push(run)
     })
     onCreated?.(presentRun(run))

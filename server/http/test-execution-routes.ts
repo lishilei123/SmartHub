@@ -183,6 +183,48 @@ export async function routeTestExecution(
     })
   }
 
+  const productDefectDecision = /^\/api\/project-versions\/([^/]+)\/test-execution-runs\/([^/]+)\/product-defect-candidates\/([^/]+)\/decision$/.exec(url.pathname)
+  if (productDefectDecision && method === 'POST') {
+    const executionService = requireService(service)
+    const scoped = await scopedProductDefectCandidate(
+      executionService,
+      controls,
+      principal,
+      productDefectDecision[1],
+      productDefectDecision[2],
+      productDefectDecision[3],
+      'test-execution:maintain',
+    )
+    const expected = productDefectCandidateEtag(scoped.candidate.diagnosis.id)
+    if (ifMatch(request) !== expected) {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_PRODUCT_DEFECT_CANDIDATE_STATE_CONFLICT',
+        '产品缺陷候选状态已变化，请刷新报告后重试',
+        412,
+      )
+    }
+    const body = await json(request)
+    rejectUnknownFields(body, ['decision', 'comment'])
+    const decision = String(body.decision ?? '')
+    if (decision !== 'confirmed' && decision !== 'rejected') {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_PRODUCT_DEFECT_DECISION_INVALID',
+        'decision 只能是 confirmed 或 rejected',
+        400,
+      )
+    }
+    const action = await executionService.decideProductDefectCandidate({
+      diagnosisId: scoped.candidate.diagnosis.id,
+      decision,
+      ...(typeof body.comment === 'string' ? { comment: body.comment } : {}),
+      actorId: principal.subjectId,
+      actorDisplayName: principal.displayName,
+    })
+    privateNoStore(response)
+    response.setHeader('ETag', representationEtag(action))
+    return send(response, 200, action)
+  }
+
   const taskMaintenanceProposals = /^\/api\/project-versions\/([^/]+)\/test-execution-runs\/([^/]+)\/tasks\/([^/]+)\/maintenance-proposals$/.exec(url.pathname)
   if (taskMaintenanceProposals && method === 'GET') {
     const executionService = requireService(service)
@@ -503,6 +545,35 @@ async function scopedMaintenanceProposal(
   return { proposal, task, run }
 }
 
+async function scopedProductDefectCandidate(
+  service: TestExecutionService,
+  controls: AccessControl,
+  principal: Principal,
+  projectVersionId: string,
+  runId: string,
+  diagnosisId: string,
+  permission: ProjectVersionPermission,
+) {
+  const candidate = await service.getProductDefectCandidate(diagnosisId)
+  const task = await service.getTask(candidate.diagnosis.taskId)
+  const run = await service.getRun(candidate.diagnosis.runId)
+  await controls.authorize(principal, run.projectVersionId, permission)
+  if (
+    run.projectVersionId !== projectVersionId
+    || run.id !== runId
+    || task.runId !== run.id
+    || candidate.diagnosis.runId !== run.id
+    || candidate.diagnosis.taskId !== task.id
+  ) {
+    throw new TestExecutionServiceError(
+      'TEST_EXECUTION_PRODUCT_DEFECT_CANDIDATE_NOT_FOUND',
+      '产品缺陷候选不存在',
+      404,
+    )
+  }
+  return { candidate, task, run }
+}
+
 function assertMaintenanceProposalDetailScope(
   detail: Awaited<ReturnType<TestExecutionService['maintenanceProposalDetail']>>,
   run: Awaited<ReturnType<TestExecutionService['getRun']>>,
@@ -645,6 +716,10 @@ function artifactEtag(sha256: string) {
 
 function representationEtag(value: unknown) {
   return `"sha256-${canonicalSha256(value)}"`
+}
+
+function productDefectCandidateEtag(diagnosisId: string) {
+  return `"product-defect-candidate-${canonicalSha256({ diagnosisId, status: 'pending_confirmation', version: 0 })}"`
 }
 
 function requiredQuery(url: URL, name: string) {

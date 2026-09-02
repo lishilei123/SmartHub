@@ -142,6 +142,10 @@ export function buildTestExecutionReport(
   const source = normalizedSource(rawSource)
   assertSourceConsistency(source)
   const { run, tasks, attempts, diagnoses, scriptRevisions, artifacts, maintenanceProposals } = source
+  const productDefectCandidateActions = source.productDefectCandidateActions ?? []
+  const productDefectActionByDiagnosis = new Map(
+    productDefectCandidateActions.map(action => [action.diagnosisId, action]),
+  )
   const statusCounts = Object.fromEntries(
     taskStatuses.map(status => [
       status,
@@ -239,7 +243,7 @@ export function buildTestExecutionReport(
   })
 
   const content: TestExecutionReportContent = {
-    schemaVersion: 'test-execution-report/v4',
+    schemaVersion: 'test-execution-report/v5',
     statisticsAt,
     run: {
       id: run.id,
@@ -263,6 +267,10 @@ export function buildTestExecutionReport(
       pendingMaintenanceCount,
       acceptedMaintenanceCount,
       rejectedMaintenanceCount,
+      productDefectCandidateCount: diagnoses.filter(diagnosis => diagnosis.category === 'product_defect').length,
+      pendingProductDefectCount: diagnoses.filter(diagnosis => diagnosis.category === 'product_defect' && !productDefectActionByDiagnosis.has(diagnosis.id)).length,
+      confirmedProductDefectCount: productDefectCandidateActions.filter(action => action.toStatus === 'confirmed').length,
+      rejectedProductDefectCount: productDefectCandidateActions.filter(action => action.toStatus === 'rejected').length,
       statusCounts,
       finalPassRate: rate(passed, tasks.length),
     },
@@ -317,6 +325,7 @@ export function buildTestExecutionReport(
       .filter(diagnosis => diagnosis.category === 'product_defect')
       .map(diagnosis => {
         const task = tasks.find(item => item.id === diagnosis.taskId)!
+        const action = productDefectActionByDiagnosis.get(diagnosis.id)
         return {
           id: `product-defect-candidate:${diagnosis.id}`,
           diagnosisId: diagnosis.id,
@@ -326,7 +335,18 @@ export function buildTestExecutionReport(
           caseRevision: task.input.caseRevision,
           title: task.input.caseContent.title,
           method: task.input.method,
-          status: 'pending_confirmation' as const,
+          status: action?.toStatus ?? 'pending_confirmation',
+          ...(!action ? {
+            decisionEtag: `"product-defect-candidate-${canonicalSha256({ diagnosisId: diagnosis.id, status: 'pending_confirmation', version: 0 })}"`,
+          } : {
+            disposition: {
+              actionId: action.id,
+              actorId: action.actorId,
+              actorDisplayName: action.actorDisplayName,
+              ...(action.comment ? { comment: action.comment } : {}),
+              decidedAt: action.createdAt,
+            },
+          }),
           summary: diagnosis.summary,
           attemptIds: [...diagnosis.attemptIds],
           artifactIds: diagnosis.evidence
@@ -406,8 +426,8 @@ export function testExecutionReportMarkdown(report: TestExecutionReport) {
     .map(item => `| ${md(item.category)} | ${item.count} | ${formatPercentage(item.percentage)} |`)
   const defectCandidateRows = report.productDefectCandidates.length
     ? report.productDefectCandidates.map(candidate =>
-        `| ${candidate.ordinal} | ${md(candidate.caseId)}@${candidate.caseRevision} | ${md(candidate.title)} | ${md(candidate.method)} | ${md(candidate.summary)} | ${candidate.attemptIds.length} | ${candidate.artifactIds.length} | ${md(candidate.diagnosisId)} |`)
-    : ['| - | - | 无 | - | - | 0 | 0 | - |']
+        `| ${candidate.ordinal} | ${md(candidate.caseId)}@${candidate.caseRevision} | ${md(candidate.title)} | ${md(candidate.method)} | ${md(candidate.status)} | ${md(candidate.summary)} | ${candidate.attemptIds.length} | ${candidate.artifactIds.length} | ${md(candidate.disposition?.actorDisplayName ?? '-')}<br>${md(candidate.disposition?.comment ?? '-')}<br>${md(candidate.disposition?.decidedAt ?? '-')} | ${md(candidate.diagnosisId)} |`)
+    : ['| - | - | 无 | - | - | - | 0 | 0 | - | - |']
   const failureRows = report.nonPassedTasks.length
     ? report.nonPassedTasks.map(task =>
         `| ${task.ordinal} | ${md(task.caseId)}@${task.caseRevision} | ${md(task.title)} | ${md(task.status)} | ${md(task.diagnosis?.category ?? '无正式诊断')} | ${task.attemptCount} | ${task.scriptRevisionCount} |`)
@@ -444,6 +464,10 @@ export function testExecutionReportMarkdown(report: TestExecutionReport) {
     `| 待确认维护建议 | ${report.overview.pendingMaintenanceCount} |`,
     `| 已确认维护建议 | ${report.overview.acceptedMaintenanceCount} |`,
     `| 已拒绝维护建议 | ${report.overview.rejectedMaintenanceCount} |`,
+    `| 产品缺陷候选 | ${report.overview.productDefectCandidateCount} |`,
+    `| 待确认产品缺陷候选 | ${report.overview.pendingProductDefectCount} |`,
+    `| 已确认产品缺陷 | ${report.overview.confirmedProductDefectCount} |`,
+    `| 已驳回产品缺陷候选 | ${report.overview.rejectedProductDefectCount} |`,
     `| 最终通过率 | ${formatPercentage(report.overview.finalPassRate.percentage)} (${report.overview.finalPassRate.numerator}/${report.overview.finalPassRate.denominator}) |`,
     '',
     '## 执行效率',
@@ -485,10 +509,10 @@ export function testExecutionReportMarkdown(report: TestExecutionReport) {
     '',
     '## 产品缺陷候选',
     '',
-    '以下条目来自正式 product_defect 诊断，但仍需人工复核；候选不等于已确认 BUG。',
+    '以下条目来自正式 product_defect 诊断；只有带人工处置事实的 confirmed 条目才表示已确认产品缺陷，仍不表示缺陷已修复或关闭。',
     '',
-    '| 序号 | 用例 | 标题 | 方法 | 诊断摘要 | Attempts | Artifacts | Diagnosis |',
-    '|---:|---|---|---|---|---:|---:|---|',
+    '| 序号 | 用例 | 标题 | 方法 | 状态 | 诊断摘要 | Attempts | Artifacts | 人工处置 | Diagnosis |',
+    '|---:|---|---|---|---|---|---:|---:|---|---|',
     ...defectCandidateRows,
     '',
     '## 非通过任务',
@@ -584,6 +608,10 @@ function normalizedSource(source: TestExecutionReportSource): TestExecutionRepor
       (taskOrdinal.get(left.taskId) ?? 0) - (taskOrdinal.get(right.taskId) ?? 0)
       || compare(left.createdAt, right.createdAt)
       || compare(left.id, right.id)),
+    productDefectCandidateActions: structuredClone(source.productDefectCandidateActions ?? []).sort((left, right) =>
+      (taskOrdinal.get(left.taskId) ?? 0) - (taskOrdinal.get(right.taskId) ?? 0)
+      || compare(left.createdAt, right.createdAt)
+      || compare(left.id, right.id)),
     ...(source.testCaseLibraryVersionSourceRunId
       ? { testCaseLibraryVersionSourceRunId: source.testCaseLibraryVersionSourceRunId }
       : {}),
@@ -598,6 +626,7 @@ function assertSourceConsistency(source: TestExecutionReportSource) {
   const revisionIds = new Set(scriptRevisions.map(revision => revision.id))
   const revisionById = new Map(scriptRevisions.map(revision => [revision.id, revision]))
   const diagnosisById = new Map(diagnoses.map(diagnosis => [diagnosis.id, diagnosis]))
+  const productDefectCandidateActions = source.productDefectCandidateActions ?? []
   if (
     tasks.length !== run.taskCount
     || tasks.some(task => task.runId !== run.id)
@@ -648,6 +677,15 @@ function assertSourceConsistency(source: TestExecutionReportSource) {
         || proposal.baselineLibraryVersionId !== run.handoff.testCaseLibraryVersionId
         || proposal.baselineLibraryVersionSha256 !== run.handoff.testCaseLibraryVersionSha256
     })
+    || productDefectCandidateActions.some(action => {
+      const diagnosis = diagnosisById.get(action.diagnosisId)
+      return action.runId !== run.id
+        || !diagnosis
+        || diagnosis.category !== 'product_defect'
+        || diagnosis.runId !== action.runId
+        || diagnosis.taskId !== action.taskId
+    })
+    || new Set(productDefectCandidateActions.map(action => action.diagnosisId)).size !== productDefectCandidateActions.length
   ) throw new TestReportServiceError('TEST_REPORT_SOURCE_INVALID', '测试报告正式事实范围不一致', 409)
   if (
     tasks.reduce((sum, task) => sum + task.runnerAttemptCount, 0) !== attempts.length
@@ -721,6 +759,7 @@ function reportStatisticsAt(source: TestExecutionReportSource) {
       proposal.createdAt,
       proposal.decidedAt,
     ]),
+    ...(source.productDefectCandidateActions ?? []).map(action => action.createdAt),
   ].filter((value): value is string => Boolean(value))
   const timestamp = Math.max(...values.map(value => Date.parse(value)))
   if (!Number.isFinite(timestamp)) {

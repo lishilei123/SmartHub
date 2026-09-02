@@ -195,6 +195,7 @@ npm run dev
 | `SMARTHUB_MODEL_HUB_FALLBACK` | 主仓库发生网络错误时使用的备用镜像；空字符串可关闭。 |
 | `SMARTHUB_BOOTSTRAP_SUBJECT_ID` | 仅用于开发环境的启动身份。 |
 | `SMARTHUB_BOOTSTRAP_DISPLAY_NAME` | 仅用于开发环境的启动身份名称。 |
+| `SMARTHUB_TRUSTED_PROXY_SECRET` | 生产 API 与可信反向代理之间的共享密钥，至少 32 字节；Worker 不需要。 |
 
 默认可写目录位于 `data/`。生产部署应使用 `SMARTHUB_DATA_ROOT` 将其放到应用包之外，并在升级时同时保留 PostgreSQL 和外部数据目录。
 
@@ -205,7 +206,7 @@ npm run dev
 - Execution Workspace、Revision、Artifact 和 Exploration Context 不保存真实 Authorization、Cookie、Token、账号或原始请求/响应 Body。
 - Playwright 登录态仅存在于 Run-scoped 临时目录，运行终态后清理，也不会进入版本继承。
 - 普通受保护业务 Case 在 Runner 前由 Browser Gateway 复用或准备同源登录态；只有登录成功证据通过且 `storageState` 完成作用域校验后，Runner 才会加载。登录入口、受管凭据或成功证据缺失时，Task 在真实 Attempt 前进入人工处理，不会以匿名请求制造 401 和自动修复重试。
-- 开发启动身份不能替代生产认证；生产环境需要接入可信身份认证适配器。
+- 开发启动身份不能替代生产认证。生产 API 默认要求可信反向代理：代理必须移除客户端传入的 `x-smarthub-*` Header，在完成身份认证后注入 `x-smarthub-proxy-secret`、`x-smarthub-subject-id` 和 `x-smarthub-display-name`。API 继续只监听 loopback；第一版仅完成认证，细粒度 RBAC 后续接入。
 
 ## 生产构建与运行
 
@@ -233,7 +234,7 @@ $ErrorActionPreference = 'Stop'
 npm run start:worker:dist
 ```
 
-生产模式必须提供 `DATABASE_URL`。API 与 Worker 应使用相同的应用产物、数据库配置和外部数据根目录。
+生产模式必须提供 `DATABASE_URL`；API 还必须提供 `SMARTHUB_TRUSTED_PROXY_SECRET`，Worker 不读取该变量。API 与 Worker 应使用相同的应用产物、数据库配置和外部数据根目录。
 
 ## 开发与验证
 

@@ -219,12 +219,21 @@ test('storageState 只存在于 Run 临时目录，不进入 Snapshot 或 Projec
     const store = new LocalExecutionWorkspaceStore(root)
     const authRoot = await store.runtimeAuthRoot('pv-auth-v1', 'run-auth-1')
     await writeFile(join(authRoot, 'admin.json'), JSON.stringify({ cookies: [{ value: 'secret-token' }] }), { encoding: 'utf8' })
+    await store.runtimeAuthRoot('pv-auth-v2', 'run-auth-2')
+    assert.deepEqual(await store.listRuntimeAuthScopes(), [
+      { projectVersionId: 'pv-auth-v1', runId: 'run-auth-1' },
+      { projectVersionId: 'pv-auth-v2', runId: 'run-auth-2' },
+    ])
     assert.equal((await store.snapshot('pv-auth-v1')).files.some(file => file.path.includes('runtime-auth')), false)
     await store.inherit('pv-auth-v1', 'pv-auth-v2')
     const inheritedRoot = await store.ensure('pv-auth-v2')
     await assert.rejects(access(join(inheritedRoot, '.runtime-auth', 'run-auth-1', 'admin.json')))
+    await store.runtimeAuthRoot('pv-auth-v2', 'run-auth-2')
     await store.cleanupRuntimeAuth('pv-auth-v1', 'run-auth-1')
     await assert.rejects(access(join(authRoot, 'admin.json')))
+    assert.deepEqual(await store.listRuntimeAuthScopes(), [
+      { projectVersionId: 'pv-auth-v2', runId: 'run-auth-2' },
+    ])
   } finally {
     await rm(root, { recursive: true, force: true })
   }

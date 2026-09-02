@@ -11,7 +11,7 @@ import { reportSourceFixture, reportSourceReader } from './test-report-fixture.j
 
 test('报告 Service 按正式口径计算概览、效率、首次质量、稳定性和自愈', () => {
   const report = buildTestExecutionReport(reportSourceFixture())
-  assert.equal(report.schemaVersion, 'test-execution-report/v4')
+  assert.equal(report.schemaVersion, 'test-execution-report/v5')
   assert.equal(report.statisticsAt, '2026-08-14T00:00:26.000Z')
   assert.deepEqual(report.overview, {
     totalCases: 9,
@@ -26,6 +26,10 @@ test('报告 Service 按正式口径计算概览、效率、首次质量、稳�
     pendingMaintenanceCount: 1,
     acceptedMaintenanceCount: 0,
     rejectedMaintenanceCount: 0,
+    productDefectCandidateCount: 1,
+    pendingProductDefectCount: 1,
+    confirmedProductDefectCount: 0,
+    rejectedProductDefectCount: 0,
     statusCounts: {
       pending: 0,
       script_generating: 0,
@@ -173,6 +177,23 @@ test('报告独立投影维护建议并将状态、内容和时间纳入正式�
   assert.match(markdown.body, /不会自动修改正式 TestCase/u)
 })
 
+test('产品缺陷候选只由 append-only 人工处置事实从待确认进入终态', () => {
+  const source = reportSourceFixture()
+  source.productDefectCandidateActions = [{
+    id: 'product-defect-action-1', runId: 'run-report-1', taskId: 'task-4', diagnosisId: 'diagnosis-product',
+    version: 1, action: 'confirm', fromStatus: 'pending_confirmation', toStatus: 'confirmed',
+    comment: '已结合 Trace 与终态页面人工复核', actorId: 'operator-1', actorDisplayName: '测试负责人',
+    createdAt: '2026-08-14T00:00:31.000Z',
+  }]
+  const report = buildTestExecutionReport(source)
+  assert.equal(report.productDefectCandidates[0].status, 'confirmed')
+  assert.equal(report.productDefectCandidates[0].decisionEtag, undefined)
+  assert.equal(report.productDefectCandidates[0].disposition?.actorDisplayName, '测试负责人')
+  assert.equal(report.overview.pendingProductDefectCount, 0)
+  assert.equal(report.overview.confirmedProductDefectCount, 1)
+  assert.equal(report.statisticsAt, '2026-08-14T00:00:31.000Z')
+})
+
 test('报告 Artifact 只投影公开元数据且不泄露 storagePath', () => {
   const report = buildTestExecutionReport(reportSourceFixture())
   const artifact = report.nonPassedTasks.find(task => task.taskId === 'task-4')?.artifacts[0]
@@ -210,7 +231,7 @@ test('报告输入乱序不改变 Hash 或导出字节，正式事实变化会�
   assert.equal(markdown.sha256, createHash('sha256').update(markdown.body, 'utf8').digest('hex'))
   assert.match(markdown.body, /失败 \\| &lt;script&gt;<br>路径\\\\名称/u)
   assert.match(markdown.body, /## 产品缺陷候选/u)
-  assert.match(markdown.body, /候选不等于已确认 BUG/u)
+  assert.match(markdown.body, /只有带人工处置事实的 confirmed 条目才表示已确认产品缺陷/u)
   assert.doesNotMatch(markdown.body, /storagePath|private\/objects/u)
   assert.equal(markdown.body.endsWith('\n'), true)
   assert.equal(markdown.body.includes('\r'), false)

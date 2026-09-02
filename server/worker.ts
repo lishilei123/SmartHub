@@ -60,6 +60,12 @@ async function processTestExecutionOne() {
     )
     return false
   }
+  await executionService.cleanupTerminalRunRuntimeStates().catch(error => {
+    console.error(
+      '测试执行终态认证状态清理失败，将在下一轮重试：',
+      error instanceof Error ? error.message : error,
+    )
+  })
   if (!job) return false
   if (!job.runToken || job.fencingToken < 1) {
     throw new Error('TEST_EXECUTION_JOB_LEASE_INVALID')
@@ -144,7 +150,7 @@ export async function processClaimedTestExecutionJob(input: {
     if (!finished) {
       throw new Error('TEST_EXECUTION_JOB_FINALIZATION_REJECTED')
     }
-    await input.service.cleanupRunRuntimeState?.(input.job.runId)
+    await bestEffortRunCleanup(input.service, input.job.runId)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (controller.signal.aborted) {
@@ -154,7 +160,7 @@ export async function processClaimedTestExecutionJob(input: {
         'cancelled',
         message,
       )
-      if (finished) await input.service.cleanupRunRuntimeState?.(input.job.runId)
+      if (finished) await bestEffortRunCleanup(input.service, input.job.runId)
     } else {
       const delay = Math.min(
         60_000,
@@ -173,6 +179,20 @@ export async function processClaimedTestExecutionJob(input: {
   } finally {
     scheduled.clear()
     input.activeControllers?.delete(controller)
+  }
+}
+
+async function bestEffortRunCleanup(
+  service: Partial<Pick<TestExecutionService, 'cleanupRunRuntimeState'>>,
+  runId: string,
+) {
+  try {
+    await service.cleanupRunRuntimeState?.(runId)
+  } catch (error) {
+    console.error(
+      `测试执行 Run ${runId} 认证状态清理失败，将由终态扫描重试：`,
+      error instanceof Error ? error.message : error,
+    )
   }
 }
 

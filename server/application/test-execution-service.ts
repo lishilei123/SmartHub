@@ -239,6 +239,84 @@ export class TestExecutionService {
     return this.store.listMaintenanceProposals(run.id)
   }
 
+  async getProductDefectCandidate(diagnosisId: string) {
+    const diagnosis = required(
+      await this.store.getDiagnosis(requiredIdentity(diagnosisId, 'diagnosisId')),
+      'TEST_EXECUTION_PRODUCT_DEFECT_CANDIDATE_NOT_FOUND',
+      '产品缺陷候选不存在',
+      404,
+    )
+    if (diagnosis.category !== 'product_defect') {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_PRODUCT_DEFECT_CANDIDATE_NOT_FOUND',
+        '产品缺陷候选不存在',
+        404,
+      )
+    }
+    return {
+      diagnosis,
+      action: await this.store.getProductDefectCandidateAction(diagnosis.id),
+    }
+  }
+
+  async decideProductDefectCandidate(input: {
+    diagnosisId: string
+    decision: 'confirmed' | 'rejected'
+    comment?: string
+    actorId: string
+    actorDisplayName: string
+  }) {
+    const candidate = await this.getProductDefectCandidate(input.diagnosisId)
+    if (candidate.action) {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_PRODUCT_DEFECT_CANDIDATE_STATE_CONFLICT',
+        '产品缺陷候选已经完成人工处置',
+        409,
+      )
+    }
+    const comment = input.comment?.trim()
+    if (comment && comment.length > 4_000) {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_PRODUCT_DEFECT_COMMENT_INVALID',
+        '处置说明不能超过 4000 个字符',
+        400,
+      )
+    }
+    if (input.decision === 'rejected' && !comment) {
+      throw new TestExecutionServiceError(
+        'TEST_EXECUTION_PRODUCT_DEFECT_REJECTION_COMMENT_REQUIRED',
+        '驳回产品缺陷候选时必须填写原因',
+        400,
+      )
+    }
+    const createdAt = this.clock()
+    try {
+      return await this.store.appendProductDefectCandidateAction({
+        id: `product_defect_action_${createHash('sha256').update(`${candidate.diagnosis.id}:${createdAt}:${input.actorId}`).digest('hex').slice(0, 32)}`,
+        runId: candidate.diagnosis.runId,
+        taskId: candidate.diagnosis.taskId,
+        diagnosisId: candidate.diagnosis.id,
+        version: 1,
+        action: input.decision === 'confirmed' ? 'confirm' : 'reject',
+        fromStatus: 'pending_confirmation',
+        toStatus: input.decision,
+        ...(comment ? { comment } : {}),
+        actorId: requiredIdentity(input.actorId, 'actorId'),
+        actorDisplayName: requiredIdentity(input.actorDisplayName, 'actorDisplayName'),
+        createdAt,
+      })
+    } catch (error) {
+      if (String(error).includes('unique') || String(error).includes('duplicate')) {
+        throw new TestExecutionServiceError(
+          'TEST_EXECUTION_PRODUCT_DEFECT_CANDIDATE_STATE_CONFLICT',
+          '产品缺陷候选已经完成人工处置',
+          409,
+        )
+      }
+      throw error
+    }
+  }
+
   async listTaskMaintenanceProposals(taskId: string) {
     const task = await this.getTask(taskId)
     return this.store.listTaskMaintenanceProposals(task.id)
@@ -344,11 +422,18 @@ export class TestExecutionService {
     const run = await this.getRun(runId)
     requireStateVersion(expectedStateVersion, 'Run')
     try {
-      return await this.store.cancelRun(
+      const cancelled = await this.store.cancelRun(
         run.id,
         expectedStateVersion,
         this.clock(),
       )
+      await this.cleanupRunRuntimeState(cancelled.id).catch(error => {
+        console.error(
+          `测试执行 Run ${cancelled.id} 认证状态清理失败，将由 Worker 重试：`,
+          error instanceof Error ? error.message : error,
+        )
+      })
+      return cancelled
     } catch (error) {
       throw storeCommandError(error)
     }
@@ -1070,6 +1155,41 @@ export class TestExecutionService {
     )
   }
 
+  private async appendMaintenanceProposalAfterVerifiedRepair(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    revision: ScriptRevision,
+    attemptId: string,
+    createdAt: string,
+  ) {
+    if (revision.source !== 'repair' || !revision.parentRevisionId) return
+    const diagnosis = (await this.store.listDiagnoses(task.id))
+      .filter(item => item.scriptRevisionId === revision.parentRevisionId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0]
+    if (!diagnosis || !['script_defect', 'selector_changed'].includes(diagnosis.category)) return
+    const attempt = (await this.store.listAttempts(task.id)).find(item => item.id === attemptId)
+    if (!attempt || attempt.kind !== 'post_repair' || attempt.status !== 'passed') return
+    await this.store.appendMaintenanceProposal({
+      id: stableIdentity('test_execution_case_maintenance_proposal', {
+        taskId: task.id,
+        diagnosisId: diagnosis.id,
+        scriptRevisionId: revision.id,
+      }),
+      runId: run.id,
+      taskId: task.id,
+      caseId: task.input.caseId,
+      caseRevision: task.input.caseRevision,
+      diagnosisId: diagnosis.id,
+      scriptRevisionId: revision.id,
+      status: 'pending',
+      summary: `${diagnosis.category === 'selector_changed' ? '选择器变化' : '脚本缺陷'}经受控修复后已由真实 Runner 验证通过`,
+      proposedChange: '请人工比较原 ScriptRevision 与 Repair Revision，并判断是否维护正式 TestCase；不得修改 Expected Result、Verification Check、Requirement 或业务语义。',
+      baselineLibraryVersionId: run.handoff.testCaseLibraryVersionId,
+      baselineLibraryVersionSha256: run.handoff.testCaseLibraryVersionSha256,
+      createdAt,
+    })
+  }
+
   private async executeRunner(
     job: ExecutionJob,
     lease: ExecutionJobLease,
@@ -1292,6 +1412,15 @@ export class TestExecutionService {
         })
       },
     )
+    if (result.status === 'passed' && kind === 'post_repair') {
+      await this.appendMaintenanceProposalAfterVerifiedRepair(run, task, revision, attemptId, finishedAt)
+        .catch(error => {
+          console.error(
+            `测试执行 Task ${task.id} 的维护建议写入失败，不影响已验证 PASS：`,
+            error instanceof Error ? error.message : error,
+          )
+        })
+    }
   }
 
   private async diagnoseFailure(
@@ -1674,6 +1803,23 @@ export class TestExecutionService {
     const run = await this.getRun(runId)
     if (!['succeeded', 'failed', 'partial', 'cancelled'].includes(run.status)) return
     await this.executionWorkspace.cleanupRuntimeAuth(run.projectVersionId, run.id)
+  }
+
+  async cleanupTerminalRunRuntimeStates() {
+    if (!this.executionWorkspace) return 0
+    const scopes = await this.executionWorkspace.listRuntimeAuthScopes()
+    let cleaned = 0
+    for (const scope of scopes) {
+      const run = await this.store.getRun(scope.runId)
+      if (
+        !run
+        || run.projectVersionId !== scope.projectVersionId
+        || !['succeeded', 'failed', 'partial', 'cancelled'].includes(run.status)
+      ) continue
+      await this.executionWorkspace.cleanupRuntimeAuth(scope.projectVersionId, scope.runId)
+      cleaned += 1
+    }
+    return cleaned
   }
 
   private async withBrowserSession<T>(

@@ -5,9 +5,9 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfigurationScene, AiResourceKind, AssetType, KnowledgeConfig } from '../domain/types.js'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 import type { AgentConfigurationInput } from '../application/agent-configuration-service.js'
-import { accessControl, agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
+import { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, piAgentRuntime, planningWorkflowService, playwrightRunner, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionAgentRuntime, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService, usingPostgres } from '../runtime.js'
 import type { TestExecutionInfrastructureConfigurationInput } from '../application/test-execution-infrastructure-configuration-service.js'
-import type { AccessControl } from './access-control.js'
+import { createEnvironmentAccessControl, type AccessControl } from './access-control.js'
 import { MAX_SKILL_ARCHIVE_BYTES } from '../infrastructure/skill-package-store.js'
 import { applicationRoot } from '../infrastructure/runtime-paths.js'
 import { routeTestDesign } from './test-design-routes.js'
@@ -22,7 +22,7 @@ const webRoot = resolve(applicationRoot, 'dist')
 
 export { agentConfigurationService, aiResourceService, executionArtifactStore, executionEnvironmentCatalog, localModelRuntime, modelService, planningWorkflowService, projectVersionService, rawDocumentStore, requirementAnalysisService, reviewGovernanceService, service, stateStore, testDesignService, testExecutionInfrastructureConfigurationService, testExecutionService, testExecutionStore, testReportService }
 
-export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = accessControl) {
+export async function start(port = Number(process.env.PORT ?? 8787), controls: AccessControl = createEnvironmentAccessControl()) {
   await service.initialize()
   await aiResourceService.initialize()
   const server = createServer(async (request, response) => {

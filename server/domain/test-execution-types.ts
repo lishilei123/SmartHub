@@ -443,6 +443,22 @@ export interface CaseMaintenanceProposal {
   createdAt: string
 }
 
+/** Append-only human disposition of a product_defect diagnosis. */
+export interface ProductDefectCandidateAction {
+  id: string
+  runId: string
+  taskId: string
+  diagnosisId: string
+  version: 1
+  action: 'confirm' | 'reject'
+  fromStatus: 'pending_confirmation'
+  toStatus: 'confirmed' | 'rejected'
+  comment?: string
+  actorId: string
+  actorDisplayName: string
+  createdAt: string
+}
+
 export interface ExecutionJob {
   id: string
   runId: string

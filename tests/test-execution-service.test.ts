@@ -450,6 +450,15 @@ class InMemoryExecutionStore implements TestExecutionStore {
       .map(item => structuredClone(item))
   }
 
+  async appendMaintenanceProposal(proposal: CaseMaintenanceProposal) {
+    this.maintenanceProposalWriteAttempts += 1
+    if (this.rejectMaintenanceProposalWrites) throw new Error('MAINTENANCE_PROPOSAL_WRITE_MUST_NOT_BLOCK_PASS')
+    const existing = this.maintenanceProposals.find(item => item.id === proposal.id)
+    if (existing) return structuredClone(existing)
+    this.maintenanceProposals.push(structuredClone(proposal))
+    return structuredClone(proposal)
+  }
+
   async listTaskMaintenanceProposals(taskId: string) {
     return this.maintenanceProposals
       .filter(item => item.taskId === taskId)
@@ -2075,7 +2084,7 @@ for (const diagnosisCategory of ['script_defect', 'selector_changed'] as const) 
       const task = await service.processPreparedTask(job, lease, new AbortController().signal)
       assert.equal(task.status, 'passed')
       assert.equal(store.maintenanceProposals.length, 0)
-      assert.equal(store.maintenanceProposalWriteAttempts, 0)
+      assert.equal(store.maintenanceProposalWriteAttempts, 1)
       const original = store.revisions[0]
       const repair = store.revisions[1]
       assert.equal(repair.parentRevisionId, original.id)
@@ -2085,6 +2094,23 @@ for (const diagnosisCategory of ['script_defect', 'selector_changed'] as const) 
     }, { diagnosisCategory, rejectMaintenanceProposalWrites: true })
   })
 }
+
+test('真实 post_repair PASS 生成待人工决策的维护建议且不修改正式用例', async () => {
+  await withService([
+    { status: 'failed', exitCode: 1, durationMs: 10, summary: '首次失败', error: 'locator 未匹配', artifacts: [] },
+    { status: 'failed', exitCode: 1, durationMs: 11, summary: '重试失败', error: 'locator 未匹配', artifacts: [] },
+    { status: 'passed', exitCode: 0, durationMs: 8, summary: '修复后通过', artifacts: [] },
+  ], async ({ service, store, job }) => {
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'passed')
+    assert.equal(store.maintenanceProposals.length, 1)
+    assert.equal(store.maintenanceProposals[0].status, 'pending')
+    assert.equal(store.maintenanceProposals[0].caseId, store.task.input.caseId)
+    assert.equal(store.maintenanceProposals[0].diagnosisId, store.diagnoses[0].id)
+    assert.equal(store.maintenanceProposals[0].scriptRevisionId, store.revisions[1].id)
+    assert.match(store.maintenanceProposals[0].proposedChange, /不得修改 Expected Result/u)
+  }, { diagnosisCategory: 'script_defect' })
+})
 
 for (const diagnosisCategory of [
   'product_defect',

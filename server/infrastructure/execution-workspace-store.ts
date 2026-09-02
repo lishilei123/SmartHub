@@ -52,6 +52,11 @@ export interface ExecutionWorkspaceSnapshot {
   files: ExecutionPackageFile[]
 }
 
+export interface RuntimeAuthScopeDirectory {
+  projectVersionId: string
+  runId: string
+}
+
 /**
  * A ProjectVersion owns one writable automation project.  It deliberately
  * lives outside a Run: runs freeze revisions, while the workspace accumulates
@@ -372,6 +377,41 @@ export class LocalExecutionWorkspaceStore {
     const root = join(workspace, '.runtime-auth', safeIdentity(runId))
     assertInside(workspace, root)
     await rm(root, { recursive: true, force: true })
+  }
+
+  async listRuntimeAuthScopes(): Promise<RuntimeAuthScopeDirectory[]> {
+    let projectVersions
+    try {
+      projectVersions = await readdir(this.root, { withFileTypes: true })
+    } catch (error) {
+      if (isMissingPath(error)) return []
+      throw error
+    }
+    const scopes: RuntimeAuthScopeDirectory[] = []
+    for (const projectVersion of projectVersions) {
+      if (!projectVersion.isDirectory()) continue
+      let runs
+      try {
+        runs = await readdir(join(this.root, projectVersion.name, '.runtime-auth'), {
+          withFileTypes: true,
+        })
+      } catch (error) {
+        if (isMissingPath(error)) continue
+        throw error
+      }
+      for (const run of runs) {
+        if (!run.isDirectory()) continue
+        try {
+          scopes.push({
+            projectVersionId: safeIdentity(projectVersion.name),
+            runId: safeIdentity(run.name),
+          })
+        } catch {
+          // Unknown directories are never interpreted as credential scopes.
+        }
+      }
+    }
+    return scopes
   }
 
   async listExplorationResults(projectVersionId: string) {
@@ -699,6 +739,10 @@ function explorationName(result: ProjectVersionExplorationResult) {
 function safeIdentity(value: string) {
   if (!/^[A-Za-z0-9._-]{1,200}$/u.test(value)) throw new Error('TEST_EXECUTION_WORKSPACE_IDENTITY_INVALID')
   return value
+}
+
+function isMissingPath(error: unknown) {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
 }
 function safePath(value: string) {
   const path = String(value ?? '').trim().replaceAll('\\', '/')

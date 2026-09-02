@@ -3138,6 +3138,58 @@ const migrations: Migration[] = [{
       EXECUTE updated;
     END $migration$;
   `,
+}, {
+  version: 42,
+  name: 'product-defect-candidate-human-dispositions',
+  sql: `
+    CREATE TABLE smarthub.test_execution_product_defect_candidate_actions (
+      id text PRIMARY KEY,
+      run_id text NOT NULL,
+      task_id text NOT NULL,
+      diagnosis_id text NOT NULL UNIQUE,
+      version integer NOT NULL CHECK (version = 1),
+      action text NOT NULL CHECK (action IN ('confirm','reject')),
+      from_status text NOT NULL CHECK (from_status = 'pending_confirmation'),
+      to_status text NOT NULL CHECK (
+        (action='confirm' AND to_status='confirmed')
+        OR (action='reject' AND to_status='rejected')
+      ),
+      comment text CHECK (comment IS NULL OR char_length(comment) BETWEEN 1 AND 4000),
+      actor_id text NOT NULL CHECK (char_length(actor_id) BETWEEN 1 AND 200),
+      actor_display_name text NOT NULL CHECK (char_length(actor_display_name) BETWEEN 1 AND 200),
+      created_at timestamptz NOT NULL,
+      FOREIGN KEY (diagnosis_id, run_id, task_id)
+        REFERENCES smarthub.test_execution_diagnoses(id, run_id, task_id)
+        ON DELETE RESTRICT
+    );
+    CREATE INDEX test_execution_product_defect_actions_run_idx
+      ON smarthub.test_execution_product_defect_candidate_actions
+      (run_id, created_at, id);
+
+    CREATE OR REPLACE FUNCTION smarthub.validate_product_defect_candidate_action_insert()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM smarthub.test_execution_diagnoses diagnosis
+        WHERE diagnosis.id=NEW.diagnosis_id
+          AND diagnosis.run_id=NEW.run_id
+          AND diagnosis.task_id=NEW.task_id
+          AND diagnosis.category='product_defect'
+      ) THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_PRODUCT_DEFECT_CANDIDATE_INVALID';
+      END IF;
+      IF NEW.action='reject' AND COALESCE(btrim(NEW.comment),'')='' THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_PRODUCT_DEFECT_REJECTION_COMMENT_REQUIRED';
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_execution_product_defect_actions_insert_ck
+      BEFORE INSERT ON smarthub.test_execution_product_defect_candidate_actions
+      FOR EACH ROW EXECUTE FUNCTION smarthub.validate_product_defect_candidate_action_insert();
+    CREATE TRIGGER test_execution_product_defect_actions_immutable_ck
+      BEFORE UPDATE OR DELETE ON smarthub.test_execution_product_defect_candidate_actions
+      FOR EACH ROW EXECUTE FUNCTION smarthub.reject_test_execution_history_update();
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

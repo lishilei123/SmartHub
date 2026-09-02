@@ -1,7 +1,8 @@
 import { Activity, Boxes, Download, FileJson2, FileText, RefreshCw, Settings2, ShieldCheck } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ProjectVersion } from '../project-version-api'
 import { runStatusLabel } from '../test-execution/ExecutionRunPanel'
+import { decideMaintenanceProposal, decideProductDefectCandidate, loadMaintenanceProposal } from '../test-execution/api'
 import { reportExportUrl } from './api'
 import { useTestReport } from './hooks/useTestReport'
 import { TestReportDiagnosisPanel } from './TestReportDiagnosisPanel'
@@ -26,6 +27,7 @@ export function TestReportPage({
 }) {
   const model = useTestReport(projectVersion?.id)
   const restored = useRef(false)
+  const [governanceBusyId, setGovernanceBusyId] = useState('')
 
   useEffect(() => {
     restored.current = false
@@ -47,6 +49,32 @@ export function TestReportPage({
     }
   }
 
+  const decideMaintenance = async (proposalId: string, decision: 'accepted' | 'rejected') => {
+    if (!projectVersion || !model.report) return
+    setGovernanceBusyId(proposalId)
+    try {
+      const detail = await loadMaintenanceProposal(projectVersion.id, model.report.run.id, proposalId)
+      if (!detail.decisionEtag) throw new Error('维护建议缺少并发控制版本，请刷新后重试')
+      const accepted = window.confirm(`${detail.value.proposal.summary}\n\n${detail.value.proposal.proposedChange}\n\n该操作不会自动修改正式 TestCase。是否继续？`)
+      if (!accepted) return
+      await decideMaintenanceProposal(projectVersion.id, model.report.run.id, proposalId, detail.decisionEtag, decision)
+      await model.openReport(model.report.run.id, true)
+      notify(decision === 'accepted' ? '已确认该用例需要人工维护' : '已拒绝维护建议', 'success')
+    } catch (cause) { notify(messageOf(cause), 'error') }
+    finally { setGovernanceBusyId('') }
+  }
+
+  const decideDefect = async (diagnosisId: string, etag: string, decision: 'confirmed' | 'rejected', comment?: string) => {
+    if (!projectVersion || !model.report) return
+    setGovernanceBusyId(`product-defect-candidate:${diagnosisId}`)
+    try {
+      await decideProductDefectCandidate(projectVersion.id, model.report.run.id, diagnosisId, etag, decision, comment)
+      await model.openReport(model.report.run.id, true)
+      notify(decision === 'confirmed' ? '已记录人工确认的产品缺陷事实' : '已驳回产品缺陷候选', 'success')
+    } catch (cause) { notify(messageOf(cause), 'error') }
+    finally { setGovernanceBusyId('') }
+  }
+
   if (!projectVersion) return <main className="tr-shell"><section className="tr-section tr-page-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>报告严格绑定 ProjectVersion 与真实 ExecutionRun。</p><button className="tr-primary" onClick={onManageVersions}>管理项目版本</button></section></main>
 
   return <main className="tr-shell">
@@ -64,8 +92,8 @@ export function TestReportPage({
           <TestReportOverview report={model.report} />
           <TestReportMetrics report={model.report} />
           <TestReportDiagnosisPanel report={model.report} />
-          <TestReportDefectPanel report={model.report} />
-          <TestReportMaintenanceTable report={model.report} />
+          <TestReportDefectPanel report={model.report} busyId={governanceBusyId} onDecide={decideDefect} />
+          <TestReportMaintenanceTable report={model.report} busyId={governanceBusyId} onDecide={decideMaintenance} />
           <TestReportFailureTable report={model.report} />
           <TestReportTraceability report={model.report} />
         </>}

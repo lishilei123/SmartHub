@@ -153,6 +153,22 @@ test('测试执行 Worker 将基础设施异常交给 Store release 并保留 pr
   assert.equal(heartbeat.cleared(), true)
 })
 
+test('终态认证清理失败不会反向释放已完成的 Job', async () => {
+  const state = workerStore({ task: executionTask('passed') })
+  await processClaimedTestExecutionJob({
+    job: executionJob(),
+    store: state.store,
+    service: {
+      async processPreparedTask() { return executionTask('passed') },
+      async cleanupRunRuntimeState() { throw new Error('FILESYSTEM_TEMPORARY') },
+    },
+    workerId: 'worker-1',
+    leaseMs: 60_000,
+  })
+  assert.deepEqual(state.finishes, [{ status: 'succeeded' }])
+  assert.deepEqual(state.releases, [])
+})
+
 test('测试执行 Worker 续租失败立即 Abort，且不以普通 release 延续失效租约', async () => {
   const state = workerStore({
     task: executionTask('running'),

@@ -16,7 +16,6 @@ import { AiResourceService } from './application/ai-resource-service.js'
 import { SkillPackageStore } from './infrastructure/skill-package-store.js'
 import { applicationRoot, dataRoot } from './infrastructure/runtime-paths.js'
 import { ReviewGovernanceService } from './application/review-governance-service.js'
-import { createBootstrapAccessControl } from './http/access-control.js'
 import { TestDesignService } from './application/test-design-service.js'
 import { PlanningWorkflowService } from './application/planning-workflow-service.js'
 import { PiTestDesignRuntimeAdapter } from './agent/pi-test-design-runtime.js'
@@ -88,7 +87,6 @@ export const planningWorkflowService = new PlanningWorkflowService(
 requirementAnalysisService.onRequirementReleaseReady(async runId => { await planningWorkflowService.requirementReleaseReady(runId) })
 export const executionWorkspaceStore = new LocalExecutionWorkspaceStore(executionWorkspaceRoot)
 export const projectVersionService = new ProjectVersionService(stateStore, service, executionWorkspaceStore)
-export const accessControl = createBootstrapAccessControl(production)
 export const usingPostgres = stateStore instanceof PostgresStore
 
 export const testExecutionInfrastructureConfigurationService =

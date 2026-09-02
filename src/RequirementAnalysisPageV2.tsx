@@ -10,10 +10,12 @@ import { PlanningContextMetrics, PlanningSubAgentRuns } from './PlanningObservab
 import { runRequirementReviewer } from './planning-api'
 import {
   cancelRequirementAnalysisRun,
+  decideToolApproval,
   actOnPlanningClarifications,
   downloadRequirementAnalysisReport,
   loadRequirementAnalysisRun,
   loadRequirementAnalysisRuns,
+  loadToolApprovals,
   retryRequirementAnalysisRun,
   retryAutomaticTestDesign,
   loadRequirementReleaseArtifact,
@@ -25,6 +27,7 @@ import {
   type AnalysisEvidence,
   type RequirementAnalysisRun,
   type PlanningClarification,
+  type ToolApproval,
 } from './requirement-analysis-api'
 import { requirementAnalysisInputTypeForDocument, requirementWorkspaceDirectory } from './version-document-path'
 import { loadAgentConfiguration, type AgentConfigurationState } from './agent-configuration-api'
@@ -180,6 +183,8 @@ export function RequirementAnalysisPageV2(props: Props) {
   const [linkedFormalOutputError, setLinkedFormalOutputError] = useState('')
   const [linkedTestDesignRun, setLinkedTestDesignRun] = useState<TestDesignWorkflowRun>()
   const [linkedTestDesignRunError, setLinkedTestDesignRunError] = useState('')
+  const [toolApprovals, setToolApprovals] = useState<ToolApproval[]>([])
+  const [toolApprovalBusy, setToolApprovalBusy] = useState('')
   const openDetails = (next: DetailViewKey) => { setDetailView(next); setView('details') }
 
   const projectVersionName = projectVersion?.name ?? ''
@@ -230,6 +235,23 @@ export function RequirementAnalysisPageV2(props: Props) {
     void poll(); return () => { cancelled = true; if (timer) clearTimeout(timer) }
   }, [selectedRun?.id, selectedRun?.status])
   useEffect(() => {
+    if (!selectedRun || selectedRun.id.startsWith('pending-')) { setToolApprovals([]); return }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const approvals = await loadToolApprovals(selectedRun.id)
+        if (cancelled) return
+        setToolApprovals(approvals)
+        if (selectedRun.status === 'running' || approvals.some(item => item.status === 'pending')) timer = setTimeout(() => void poll(), 1_200)
+      } catch {
+        if (!cancelled && selectedRun.status === 'running') timer = setTimeout(() => void poll(), 2_500)
+      }
+    }
+    void poll()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [selectedRun?.id, selectedRun?.status])
+  useEffect(() => {
     const versions = (selectedDocument?.versions ?? []).filter(item => item.status === 'ready')
     const right = selectedDocument?.assetVersionId ?? versions.at(-1)?.id ?? ''
     const rightIndex = versions.findIndex(item => item.id === right)
@@ -254,6 +276,18 @@ export function RequirementAnalysisPageV2(props: Props) {
       setRuns(current => [started, ...current.filter(item => item.id !== started.id)]); setSelectedRunId(started.id); setView('conversation')
       addAudit(`启动 PlanningAgent 需求分析：${started.id}`); notify('需求分析已在当前 Planning Session 启动。')
     } catch (error) { notify(error instanceof Error ? error.message : '需求分析启动失败', 'error') } finally { setStarting(false) }
+  }
+
+  const decideApproval = async (approval: ToolApproval, decision: 'approved' | 'rejected') => {
+    const comment = window.prompt(decision === 'approved' ? '审批说明（可选）' : '拒绝原因（建议填写）')
+    if (comment === null) return
+    setToolApprovalBusy(approval.id)
+    try {
+      const decided = await decideToolApproval(approval.id, decision, comment.trim() || undefined)
+      setToolApprovals(current => current.map(item => item.id === decided.id ? decided : item))
+      notify(decision === 'approved' ? '已批准本次高风险工具调用' : '已拒绝本次高风险工具调用', 'success')
+    } catch (error) { notify(error instanceof Error ? error.message : '工具审批失败', 'error') }
+    finally { setToolApprovalBusy('') }
   }
 
   const resolveClarifications = async () => {
@@ -437,6 +471,7 @@ export function RequirementAnalysisPageV2(props: Props) {
       <aside className="rav2-status-panel">
         <header><span><b>当前任务 / 产物状态</b><small>{selectedRun?.id ? `Run ${selectedRun.id.replace('analysis_run_', '').slice(0, 10)}` : '新建对话（未创建 Run）'}</small></span><Badge tone={selectedRun?.status === 'succeeded' ? 'green' : selectedRun?.status === 'running' ? 'purple' : selectedRun?.status === 'failed' ? 'red' : 'gray'}>{selectedRun ? runLabel(selectedRun) : '新建对话'}</Badge></header>
         <div className="rav2-status-scroll">
+          {toolApprovals.length > 0 && <section className="rav2-status-card rav2-tool-approvals"><header><i>!</i><b>高风险工具审批</b><Badge tone={toolApprovals.some(item => item.status === 'pending') ? 'orange' : 'green'}>{toolApprovals.filter(item => item.status === 'pending').length} 待处理</Badge></header><div>{toolApprovals.map(approval => <article key={approval.id}><header><span><b>{approval.toolId}</b><small>{approval.toolVersion} · {approval.risk === 'write_high_risk' ? '高风险写入' : '可逆写入'}</small></span><Badge tone={approval.status === 'pending' ? 'orange' : approval.status === 'approved' ? 'green' : 'gray'}>{approval.status === 'pending' ? '待审批' : approval.status === 'approved' ? approval.consumedAt ? '已批准并消费' : '已批准' : approval.status === 'rejected' ? '已拒绝' : '已结束'}</Badge></header><p>{approval.parameterSummary}</p><small>申请 {formatTime(approval.requestedAt)} · 过期 {formatTime(approval.expiresAt)}</small>{approval.status === 'pending' && <footer><button disabled={toolApprovalBusy === approval.id} onClick={() => void decideApproval(approval, 'approved')}><CheckCircle2 />批准</button><button disabled={toolApprovalBusy === approval.id} onClick={() => void decideApproval(approval, 'rejected')}><XCircle />拒绝</button></footer>}</article>)}</div></section>}
           <section className="rav2-status-card"><header><i>①</i><b>当前业务阶段</b></header><div className="rav2-stage-list">{stages.map(stage => <article className={stage.state} key={stage.label}><span /><b>{stage.label}</b><small>{stage.detail}</small></article>)}</div></section>
           <section className="rav2-status-card"><header><i>②</i><b>产物状态</b></header><div className="rav2-formal-list"><button onClick={() => openDetails('artifacts')} disabled={!result}><span><b>Requirement Release</b><small>{release?.status === 'published' ? `已由服务端发布 · ${formatTime(release.publishedAt ?? release.createdAt)}` : '等待需求分析和必要澄清完成'}</small></span><em className={release?.status === 'published' ? 'published' : 'empty'}>{release?.status === 'published' ? '已发布' : '—'}</em></button><button onClick={() => setView('cases')} disabled={!linkedTestDesign}><span><b>{formalLibraryVersion ? '正式测试用例库' : activeTestDesignCases.length ? '测试用例候选' : '测试设计运行'}</b><small>{formalLibraryVersion ? `V${formalLibraryVersion.version} · ${formalLibraryVersion.members.length} 条冻结用例` : linkedFormalOutputError ? '正式发布状态暂时无法读取' : linkedTestDesignRunError ? '测试设计运行状态暂时无法读取' : activeTestDesignCases.length ? `${activeTestDesignCases.length} 条候选用例，尚未发布正式用例库` : linkedTestDesignRun ? testDesignRunFailed ? linkedTestDesignRun.status === 'cancelled' ? '测试设计已取消' : '测试设计运行失败' : testDesignProgressDetail : linkedTestDesign ? '正在读取测试设计运行' : automaticTransition?.status === 'running' || automaticTransition?.status === 'pending' ? '正在创建测试设计运行' : '等待 Requirement Release'}</small></span><em className={formalLibraryVersion ? 'published' : 'empty'}>{formalLibraryVersion ? '已发布' : activeTestDesignCases.length ? '非正式' : linkedTestDesignRun?.status === 'running' ? '进行中' : testDesignRunFailed ? '失败' : '—'}</em></button></div></section>
           <details className="rav2-status-card rav2-technical-status"><summary><Activity /><span><b>运行记录</b><small>Turn、工具调用、事件与异常</small></span></summary><div className="rav2-activity-summary"><div className="rav2-activity-state"><span className={selectedRun?.status ?? 'idle'}><Activity /></span><div><b>{selectedRun ? runLabel(selectedRun) : '等待启动'}</b><small>{latestActivity ? `${agentEventLabels[latestActivity.type] ?? latestActivity.type} · #${latestActivity.sequence}` : '尚无 Agent Activity'}</small></div></div><div className="rav2-activity-metrics"><span><small>Turn</small><b>{activityExecution?.turns ?? 0}</b></span><span><small>工具</small><b>{activityExecution?.toolCalls ?? 0}</b></span><span><small>事件</small><b>{activityEvents.length}</b></span><span><small>异常</small><b>{activityExecution?.toolErrors ?? 0}</b></span></div></div></details>
@@ -493,6 +528,7 @@ function Artifacts({ result, release, runId }: { result?: RequirementAnalysisRes
     catch (error) { setPreviewError(error instanceof Error ? error.message : '正式产物读取失败') }
     finally { setPreviewLoading('') }
   }
+
   if (!result && !release) return <div className="rav2-empty"><FileText /><h2>暂无需求分析候选</h2></div>
   const report = release?.artifacts.find(item => item.fileName === 'requirement-analysis.md')
   const releaseContentComplete = Boolean(release && isCompleteRequirementReleaseContent(release.content))

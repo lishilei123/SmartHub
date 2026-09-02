@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import { ForbiddenError, UnauthenticatedError, type Principal, type ProjectVersionPermission } from '../domain/access-control.js'
 
@@ -55,6 +56,36 @@ export class StaticProjectVersionAuthorizer implements ProjectVersionAuthorizer 
   }
 }
 
+/**
+ * Production identity adapter for a loopback API placed behind a trusted
+ * reverse proxy. The proxy must remove incoming SMARTHUB headers and inject
+ * them only after it has authenticated the request.
+ */
+export class TrustedProxyAuthenticator implements RequestAuthenticator {
+  constructor(private readonly sharedSecret: string) {
+    if (Buffer.byteLength(sharedSecret, 'utf8') < 32) {
+      throw new Error('SMARTHUB_TRUSTED_PROXY_SECRET 至少需要 32 字节')
+    }
+  }
+
+  async authenticate(request: IncomingMessage) {
+    const suppliedSecret = singleHeader(request, 'x-smarthub-proxy-secret')
+    if (!suppliedSecret || !secretEquals(suppliedSecret, this.sharedSecret)) unauthenticated()
+    const subjectId = requiredHeader(request, 'x-smarthub-subject-id', 200)
+    const displayName = optionalHeader(request, 'x-smarthub-display-name', 200) ?? subjectId
+    return { subjectId, displayName }
+  }
+}
+
+/** V1 boundary: authenticate every request; project RBAC is added separately. */
+export class AuthenticatedProjectVersionAuthorizer implements ProjectVersionAuthorizer {
+  async require(principal: Principal) {
+    if (!principal.subjectId) throw new ForbiddenError()
+  }
+
+  async can(principal: Principal) { return Boolean(principal.subjectId) }
+}
+
 export function createBootstrapAccessControl(production: boolean): AccessControl {
   const subjectId = clean(process.env.SMARTHUB_BOOTSTRAP_SUBJECT_ID, 'local-developer')
   const displayName = clean(process.env.SMARTHUB_BOOTSTRAP_DISPLAY_NAME, '本地开发者')
@@ -62,6 +93,44 @@ export function createBootstrapAccessControl(production: boolean): AccessControl
   return new StaticAccessControl(authenticator, new StaticProjectVersionAuthorizer([{ subjectId, projectVersionId: '*', permissions: ['*'] }]))
 }
 
-export function unauthenticated() { throw new UnauthenticatedError() }
+export function createEnvironmentAccessControl(
+  environment: NodeJS.ProcessEnv = process.env,
+): AccessControl {
+  const production = environment.NODE_ENV === 'production'
+  if (!production) return createBootstrapAccessControl(false)
+  const sharedSecret = environment.SMARTHUB_TRUSTED_PROXY_SECRET?.trim()
+  if (!sharedSecret) {
+    throw new Error('生产 API 必须配置 SMARTHUB_TRUSTED_PROXY_SECRET')
+  }
+  return new StaticAccessControl(
+    new TrustedProxyAuthenticator(sharedSecret),
+    new AuthenticatedProjectVersionAuthorizer(),
+  )
+}
+
+export function unauthenticated(): never { throw new UnauthenticatedError() }
 
 function clean(value: string | undefined, fallback: string) { return value?.trim().slice(0, 200) || fallback }
+
+function singleHeader(request: IncomingMessage, name: string) {
+  const value = request.headers[name]
+  return Array.isArray(value) ? undefined : value?.trim()
+}
+
+function requiredHeader(request: IncomingMessage, name: string, maxLength: number) {
+  const value = optionalHeader(request, name, maxLength)
+  if (!value) unauthenticated()
+  return value
+}
+
+function optionalHeader(request: IncomingMessage, name: string, maxLength: number) {
+  const value = singleHeader(request, name)
+  if (!value || value.length > maxLength || /[\u0000-\u001f\u007f]/u.test(value)) return undefined
+  return value
+}
+
+function secretEquals(left: string, right: string) {
+  const leftBuffer = Buffer.from(left, 'utf8')
+  const rightBuffer = Buffer.from(right, 'utf8')
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer)
+}

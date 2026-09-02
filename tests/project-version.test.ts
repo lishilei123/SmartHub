@@ -81,3 +81,36 @@ test('删除未被继承的项目版本时同步删除其专属用例库版本',
   assert.deepEqual(await service.list(), [])
   assert.equal((await store.snapshot()).testDesignState?.libraryVersions.length, 0)
 })
+
+test('项目版本锁定与删除拒绝遗留未收口的需求分析工作流', async () => {
+  for (const [status, workflow] of [
+    ['running', undefined],
+    ['waiting_clarification', undefined],
+    ['succeeded', { currentStage: 'release' }],
+  ] as const) {
+    const { store, service } = await fixture()
+    const version = await service.create({ name: `V-${status}` })
+    await store.transaction(state => {
+      state.reviewRuns.push({
+        id: `run-${status}`,
+        projectVersionId: version.id,
+        status,
+        ...(workflow ? { workflow } : {}),
+      } as never)
+    })
+    await assert.rejects(() => service.updateStatus(version.id, 'locked'), /未收口/u)
+    await assert.rejects(() => service.delete(version.id), /未收口/u)
+  }
+})
+
+test('已发布 Requirement Release 的成功需求分析不阻止版本锁定', async () => {
+  const { store, service } = await fixture()
+  const version = await service.create({ name: 'V-published' })
+  await store.transaction(state => {
+    state.reviewRuns.push({
+      id: 'run-published', projectVersionId: version.id, status: 'succeeded',
+      workflow: { currentStage: 'release', release: { status: 'published' } },
+    } as never)
+  })
+  assert.equal((await service.updateStatus(version.id, 'locked')).status, 'locked')
+})

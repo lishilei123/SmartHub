@@ -22,6 +22,7 @@ import type {
   ExecutionTask,
   ExecutionTaskStatus,
   FailureDiagnosis,
+  ProductDefectCandidateAction,
   ScriptArtifact,
   ScriptRevision,
 } from '../domain/test-execution-types.js'
@@ -131,6 +132,7 @@ export interface TestExecutionReportSource {
   scriptRevisions: ScriptRevision[]
   artifacts: ExecutionArtifact[]
   maintenanceProposals: CaseMaintenanceProposal[]
+  productDefectCandidateActions?: ProductDefectCandidateAction[]
   testCaseLibraryVersionSourceRunId?: string
 }
 
@@ -152,7 +154,12 @@ export interface TestExecutionStore {
   listAttempts(taskId: string): Promise<ExecutionAttempt[]>
   listEvents(taskId: string, attemptId?: string): Promise<ExecutionEvent[]>
   listDiagnoses(taskId: string): Promise<FailureDiagnosis[]>
+  getDiagnosis(diagnosisId: string): Promise<FailureDiagnosis | null>
+  listProductDefectCandidateActions(runId: string): Promise<ProductDefectCandidateAction[]>
+  getProductDefectCandidateAction(diagnosisId: string): Promise<ProductDefectCandidateAction | null>
+  appendProductDefectCandidateAction(action: ProductDefectCandidateAction): Promise<ProductDefectCandidateAction>
   listMaintenanceProposals(runId: string): Promise<CaseMaintenanceProposal[]>
+  appendMaintenanceProposal(proposal: CaseMaintenanceProposal): Promise<CaseMaintenanceProposal>
   listTaskMaintenanceProposals(taskId: string): Promise<CaseMaintenanceProposal[]>
   getMaintenanceProposal(proposalId: string): Promise<CaseMaintenanceProposal | null>
   getMaintenanceProposalDetail(proposalId: string): Promise<MaintenanceProposalDetailSnapshot | null>
@@ -364,6 +371,13 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
           FROM smarthub.test_execution_tasks
           WHERE run_id=$1 ORDER BY ordinal,id
         `, [run.id])
+      const productDefectActions = await client.query<ProductDefectCandidateActionRow>(`
+          SELECT action.*
+          FROM smarthub.test_execution_product_defect_candidate_actions action
+          JOIN smarthub.test_execution_tasks task ON task.id=action.task_id
+          WHERE action.run_id=$1 AND task.run_id=$1
+          ORDER BY task.ordinal,action.created_at,action.id
+        `, [run.id])
       const attempts = await client.query<AttemptRow>(`
           SELECT attempt.* FROM smarthub.test_execution_attempts attempt
           JOIN smarthub.test_execution_tasks task ON task.id=attempt.task_id
@@ -439,6 +453,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         scriptRevisions: revisions.rows.map(scriptRevisionFromRow),
         artifacts: artifacts.rows.map(artifactFromRow),
         maintenanceProposals: proposals.rows.map(maintenanceProposalFromRow),
+        productDefectCandidateActions: productDefectActions.rows.map(productDefectCandidateActionFromRow),
         ...(persistedLibrary.source_run_id
           ? { testCaseLibraryVersionSourceRunId: persistedLibrary.source_run_id }
           : {}),
@@ -473,6 +488,44 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     return result.rows.map(diagnosisFromRow)
   }
 
+  async getDiagnosis(diagnosisId: string) {
+    const result = await this.pool.query<DiagnosisRow>(`${diagnosisSelectSql}
+      WHERE diagnosis.id=$1
+    `, [diagnosisId])
+    return result.rows[0] ? diagnosisFromRow(result.rows[0]) : null
+  }
+
+  async listProductDefectCandidateActions(runId: string) {
+    const result = await this.pool.query<ProductDefectCandidateActionRow>(`
+      SELECT * FROM smarthub.test_execution_product_defect_candidate_actions
+      WHERE run_id=$1 ORDER BY created_at,id
+    `, [runId])
+    return result.rows.map(productDefectCandidateActionFromRow)
+  }
+
+  async getProductDefectCandidateAction(diagnosisId: string) {
+    const result = await this.pool.query<ProductDefectCandidateActionRow>(`
+      SELECT * FROM smarthub.test_execution_product_defect_candidate_actions
+      WHERE diagnosis_id=$1
+    `, [diagnosisId])
+    return result.rows[0] ? productDefectCandidateActionFromRow(result.rows[0]) : null
+  }
+
+  async appendProductDefectCandidateAction(action: ProductDefectCandidateAction) {
+    const result = await this.pool.query<ProductDefectCandidateActionRow>(`
+      INSERT INTO smarthub.test_execution_product_defect_candidate_actions
+        (id,run_id,task_id,diagnosis_id,version,action,from_status,to_status,
+         comment,actor_id,actor_display_name,created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      RETURNING *
+    `, [
+      action.id, action.runId, action.taskId, action.diagnosisId, action.version,
+      action.action, action.fromStatus, action.toStatus, action.comment ?? null,
+      action.actorId, action.actorDisplayName, action.createdAt,
+    ])
+    return productDefectCandidateActionFromRow(result.rows[0])
+  }
+
   async listMaintenanceProposals(runId: string) {
     const result = await this.pool.query<MaintenanceProposalRow>(`
       SELECT proposal.*
@@ -482,6 +535,21 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       ORDER BY task.ordinal,proposal.created_at,proposal.id
     `, [runId])
     return result.rows.map(maintenanceProposalFromRow)
+  }
+
+  async appendMaintenanceProposal(proposal: CaseMaintenanceProposal) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const inserted = await insertMaintenanceProposal(client, proposal)
+      await client.query('COMMIT')
+      return inserted
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async listTaskMaintenanceProposals(taskId: string) {
@@ -2635,6 +2703,38 @@ function maintenanceProposalFromRow(row: MaintenanceProposalRow): CaseMaintenanc
       : {}),
     ...(row.decided_by ? { decidedBy: row.decided_by } : {}),
     ...(row.decided_at ? { decidedAt: iso(row.decided_at) } : {}),
+    createdAt: iso(row.created_at),
+  }
+}
+
+type ProductDefectCandidateActionRow = {
+  id: string
+  run_id: string
+  task_id: string
+  diagnosis_id: string
+  version: number
+  action: ProductDefectCandidateAction['action']
+  from_status: ProductDefectCandidateAction['fromStatus']
+  to_status: ProductDefectCandidateAction['toStatus']
+  comment: string | null
+  actor_id: string
+  actor_display_name: string
+  created_at: Date | string
+}
+
+function productDefectCandidateActionFromRow(row: ProductDefectCandidateActionRow): ProductDefectCandidateAction {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    diagnosisId: row.diagnosis_id,
+    version: 1,
+    action: row.action,
+    fromStatus: row.from_status,
+    toStatus: row.to_status,
+    ...(row.comment ? { comment: row.comment } : {}),
+    actorId: row.actor_id,
+    actorDisplayName: row.actor_display_name,
     createdAt: iso(row.created_at),
   }
 }

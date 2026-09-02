@@ -63,7 +63,7 @@ test('报告详情返回稳定 ETag、报告 Hash 和脱敏 JSON', async () => {
     maintenanceProposals: Array<{ taskId: string; status: string }>
   }
   assert.equal(result.status, 200)
-  assert.equal(report.schemaVersion, 'test-execution-report/v4')
+  assert.equal(report.schemaVersion, 'test-execution-report/v5')
   assert.equal(report.overview.maintenanceProposalCount, 1)
   assert.equal(report.overview.pendingMaintenanceCount, 1)
   assert.equal(report.maintenanceProposals.length, 1)

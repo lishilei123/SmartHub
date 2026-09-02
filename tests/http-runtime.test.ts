@@ -11,13 +11,38 @@ process.env.SMARTHUB_DOCUMENT_ROOT = join(httpTestRoot, 'knowledge-bases')
 process.env.SMARTHUB_MODEL_ROOT = join(httpTestRoot, 'models')
 process.env.SMARTHUB_SKILL_ROOT = join(httpTestRoot, 'skills')
 const { start, stateStore } = await import('../server/http/server.js')
-const { StaticAccessControl, StaticProjectVersionAuthorizer } = await import('../server/http/access-control.js')
+const { createEnvironmentAccessControl, StaticAccessControl, StaticProjectVersionAuthorizer } = await import('../server/http/access-control.js')
 delete process.env.SMARTHUB_FORCE_JSON_STORE
 delete process.env.SMARTHUB_DATA_FILE
 delete process.env.SMARTHUB_DOCUMENT_ROOT
 delete process.env.SMARTHUB_MODEL_ROOT
 delete process.env.SMARTHUB_SKILL_ROOT
 test.after(async () => { await rm(httpTestRoot, { recursive: true, force: true }) })
+
+test('生产 API 使用可信代理身份且缺少配置时 fail closed', async () => {
+  assert.throws(
+    () => createEnvironmentAccessControl({ NODE_ENV: 'production' }),
+    /SMARTHUB_TRUSTED_PROXY_SECRET/u,
+  )
+  const secret = 'production-proxy-secret-with-at-least-32-bytes'
+  const controls = createEnvironmentAccessControl({
+    NODE_ENV: 'production',
+    SMARTHUB_TRUSTED_PROXY_SECRET: secret,
+  })
+  const principal = await controls.authenticate({ headers: {
+    'x-smarthub-proxy-secret': secret,
+    'x-smarthub-subject-id': 'operator-1',
+    'x-smarthub-display-name': '生产操作员',
+  } } as never)
+  assert.deepEqual(principal, { subjectId: 'operator-1', displayName: '生产操作员' })
+  await assert.rejects(
+    controls.authenticate({ headers: {
+      'x-smarthub-proxy-secret': 'invalid-secret-with-at-least-32-bytes',
+      'x-smarthub-subject-id': 'forged',
+    } } as never),
+    /UNAUTHENTICATED/u,
+  )
+})
 
 async function withServer(run: (baseUrl: string) => Promise<void>, controls?: InstanceType<typeof StaticAccessControl>) {
   const server = await start(0, controls)

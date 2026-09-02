@@ -135,6 +135,29 @@ export function decideMaintenanceProposal(
   )
 }
 
+export function decideProductDefectCandidate(
+  projectVersionId: string,
+  runId: string,
+  diagnosisId: string,
+  etag: string,
+  decision: 'confirmed' | 'rejected',
+  comment?: string,
+) {
+  return request<{
+    id: string
+    diagnosisId: string
+    toStatus: 'confirmed' | 'rejected'
+    createdAt: string
+  }>(
+    `${runScope(projectVersionId, runId)}/product-defect-candidates/${encodeURIComponent(diagnosisId)}/decision`,
+    {
+      method: 'POST',
+      headers: { 'if-match': etag },
+      body: JSON.stringify({ decision, ...(comment?.trim() ? { comment: comment.trim() } : {}) }),
+    },
+  )
+}
+
 export function createRun(
   projectVersionId: string,
   baseUrl: string,
