@@ -186,7 +186,7 @@ test('测试执行与报告诊断均使用真实懒加载页面', () => {
   assert.doesNotMatch(`${page}\n${runPanel}\n${taskPanel}\n${hook}`, /Math\.random|setInterval|fakeArtifact|mockProgress/u)
   assert.match(hook, /window\.setTimeout\(poll, 1800\)/u)
   assert.match(readme, /当前测试执行只保留 Agent Test 主链/u)
-  assert.match(readme, /agent-test-execution-report\/v1/u)
+  assert.match(readme, /agent-test-execution-report\/v2/u)
   assert.doesNotMatch(readme, /第一期-项目知识库|第二期-需求评审/u)
   assert.equal(existsSync(new URL('../_temp.patch', import.meta.url)), false)
 })

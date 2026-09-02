@@ -220,6 +220,7 @@ export interface AgentExecutionCaseRun {
   id: string
   runId: string
   taskId: string
+  executionAttemptOrdinal: number
   repeatOrdinal: number
   status: AgentCaseRunStatus
   actualOutput?: unknown
@@ -242,6 +243,7 @@ export interface AgentExecutionCaseRun {
 export interface AgentExecutionAggregateResult {
   taskId: string
   runId: string
+  executionAttemptOrdinal: number
   status: AgentCaseRunStatus
   caseRuns: AgentExecutionCaseRun[]
   successRate: number

@@ -31,6 +31,7 @@ export interface AgentSemanticEvaluator {
 export interface AgentRunnerInput {
   runId: string
   taskId: string
+  executionAttemptOrdinal: number
   agentUnderTest: FrozenAgentUnderTestSnapshot
   resolvedVersion: AgentUnderTestVersion
   spec: AgentTestSpec
@@ -63,7 +64,7 @@ export class AgentRunner {
   }
 
   private async executeCaseRun(input: AgentRunnerInput, repeatOrdinal: number, outerSignal: AbortSignal): Promise<AgentExecutionCaseRun> {
-    const caseRunId = `${input.runId}:${input.taskId}:repeat:${repeatOrdinal}`
+    const caseRunId = `${input.runId}:${input.taskId}:attempt:${input.executionAttemptOrdinal}:repeat:${repeatOrdinal}`
     const startedAt = this.clock()
     const startedMs = Date.now()
     const controller = new AbortController()
@@ -130,6 +131,7 @@ export class AgentRunner {
       id: caseRunId,
       runId: input.runId,
       taskId: input.taskId,
+      executionAttemptOrdinal: input.executionAttemptOrdinal,
       repeatOrdinal,
       status,
       ...(actualOutput === undefined ? {} : { actualOutput }),
@@ -202,6 +204,7 @@ function aggregate(runId: string, taskId: string, caseRuns: AgentExecutionCaseRu
   return {
     taskId,
     runId,
+    executionAttemptOrdinal: caseRuns[0]!.executionAttemptOrdinal,
     status,
     caseRuns,
     successRate: rate(statuses.filter(item => item === 'PASS').length, count),

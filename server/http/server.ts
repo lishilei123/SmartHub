@@ -386,14 +386,17 @@ function installAwaitedShutdown(server: ReturnType<typeof createServer>) {
 
 async function unavailableTestExecutionReadiness() {
   const agents = await testExecutionAgentRuntime.readiness()
+  const failureAnalysis = agents.agents.find(item => item.agentKey === 'failure-analysis')
   return {
     ready: false,
     store: {
       ready: false,
       reason: 'TEST_EXECUTION_POSTGRES_UNAVAILABLE',
     },
+    worker: { ready: false, reason: 'AGENT_TEST_WORKER_UNAVAILABLE', activeWorkers: 0 },
     agents,
-    runner: { ready: true, snapshot: { kind: 'agent', runnerVersion: 'agent-runner/v1' } },
+    runner: { ready: true, snapshot: { kind: 'agent', runnerVersion: 'agent-runner/v2' } },
+    agent: { ready: false, reason: failureAnalysis?.reason ?? 'TEST_EXECUTION_POSTGRES_UNAVAILABLE' },
   }
 }
 

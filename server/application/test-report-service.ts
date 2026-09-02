@@ -29,17 +29,19 @@ function buildReport(source: TestExecutionReportSource): AgentTestExecutionRepor
   const statuses = results.map(item => item.status)
   const active = source.tasks.filter(item => item.status === 'pending' || item.status === 'running').length
   const caseRuns = results.flatMap(item => item.caseRuns)
+  const executionAttempts = structuredClone(source.agentExecutionAttempts).sort((a, b) => a.taskId.localeCompare(b.taskId) || a.executionAttemptOrdinal - b.executionAttemptOrdinal)
   const content: AgentTestExecutionReportContent = {
-    schemaVersion: 'agent-test-execution-report/v1', statisticsAt: statisticsAt(source),
+    schemaVersion: 'agent-test-execution-report/v2', statisticsAt: statisticsAt(source),
     run: { id: source.run.id, status: source.run.status, stateVersion: source.run.stateVersion, mode: source.run.handoff.mode, createdAt: source.run.createdAt, ...(source.run.startedAt ? { startedAt: source.run.startedAt } : {}), ...(source.run.finishedAt ? { finishedAt: source.run.finishedAt } : {}) },
     overview: {
       totalCases: source.tasks.length, passed: statuses.filter(value => value === 'PASS').length, failed: statuses.filter(value => value === 'FAIL').length,
       notEvaluable: statuses.filter(value => value === 'NOT_EVALUABLE').length, error: statuses.filter(value => value === 'ERROR').length, active,
-      successRate: rate(statuses.filter(value => value === 'PASS').length, results.length), caseRunCount: caseRuns.length,
+      successRate: rate(statuses.filter(value => value === 'PASS').length, results.length), executionAttemptCount: executionAttempts.length, caseRunCount: caseRuns.length,
       averageLatencyMs: caseRuns.length ? caseRuns.reduce((sum, item) => sum + item.latencyMs, 0) / caseRuns.length : null,
       ...aggregateUsage(results),
     },
     results,
+    executionAttempts,
     traceability: {
       projectId: source.run.projectId, projectVersionId: source.run.projectVersionId, runId: source.run.id, runStateVersion: source.run.stateVersion,
       handoff: { id: source.run.handoff.handoffId, sha256: source.run.handoff.handoffSha256, memberSnapshotSha256: source.run.handoff.memberSnapshotSha256 },
@@ -59,6 +61,26 @@ function aggregateUsage(results: AgentExecutionAggregateResult[]) {
 }
 function sumOptional(values: Array<number | undefined>) { const present = values.filter((item): item is number => typeof item === 'number'); return present.length ? present.reduce((sum, item) => sum + item, 0) : undefined }
 function rate(numerator: number, denominator: number): TestReportRate { return { numerator, denominator, percentage: denominator ? numerator / denominator * 100 : 0 } }
-function statisticsAt(source: TestExecutionReportSource) { return [...source.tasks.map(item => item.updatedAt), ...source.agentExecutionResults.map(item => item.createdAt), source.run.finishedAt ?? source.run.startedAt ?? source.run.createdAt].sort().at(-1)! }
-function markdown(report: AgentTestExecutionReport) { return [`# Agent Test Execution Report`, '', `- Run: ${report.run.id}`, `- Status: ${report.run.status}`, `- Agent Under Test: ${report.traceability.agentUnderTest.name} v${report.traceability.agentUnderTest.version}`, `- Report SHA-256: ${report.reportSha256}`, '', '## Overview', '', `- Cases: ${report.overview.totalCases}`, `- PASS: ${report.overview.passed}`, `- FAIL: ${report.overview.failed}`, `- NOT_EVALUABLE: ${report.overview.notEvaluable}`, `- ERROR: ${report.overview.error}`, `- Success rate: ${report.overview.successRate.percentage.toFixed(2)}%`, '', '## Results', '', ...report.results.map(item => `- ${item.taskId}: ${item.status} (${item.caseRuns.length} repeats)`), ''].join('\n') }
+function statisticsAt(source: TestExecutionReportSource) { return [...source.tasks.map(item => item.updatedAt), ...source.agentExecutionAttempts.map(item => item.createdAt), source.run.finishedAt ?? source.run.startedAt ?? source.run.createdAt].sort().at(-1)! }
+function markdown(report: AgentTestExecutionReport) {
+  return [
+    '# Agent Test Execution Report', '',
+    `- Run: ${report.run.id}`,
+    `- Status: ${report.run.status}`,
+    `- Agent Under Test: ${report.traceability.agentUnderTest.name} v${report.traceability.agentUnderTest.version}`,
+    `- Report SHA-256: ${report.reportSha256}`, '',
+    '## Overview', '',
+    `- Cases: ${report.overview.totalCases}`,
+    `- Execution attempts: ${report.overview.executionAttemptCount}`,
+    `- PASS: ${report.overview.passed}`,
+    `- FAIL: ${report.overview.failed}`,
+    `- NOT_EVALUABLE: ${report.overview.notEvaluable}`,
+    `- ERROR: ${report.overview.error}`,
+    `- Success rate: ${report.overview.successRate.percentage.toFixed(2)}%`, '',
+    '## Latest Results', '',
+    ...report.results.map(item => `- ${item.taskId}: ${item.status} (attempt ${item.executionAttemptOrdinal}, ${item.caseRuns.length} repeats)`), '',
+    '## Attempt History', '',
+    ...report.executionAttempts.map(item => `- ${item.taskId} / attempt ${item.executionAttemptOrdinal}: ${item.status} (${item.caseRuns.length} repeats)`), '',
+  ].join('\n')
+}
 function required(run: ExecutionRun | null) { if (!run) throw new TestReportServiceError('TEST_REPORT_RUN_NOT_FOUND', '测试报告对应的执行 Run 不存在', 404); return run }

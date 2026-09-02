@@ -63,13 +63,14 @@ export class TestExecutionService {
   ) {}
 
   async readiness() {
-    const [store, agents] = await Promise.all([this.store.readiness(), this.agentRuntime.readiness()])
+    const [store, worker, agents] = await Promise.all([this.store.readiness(), this.store.workerReadiness(), this.agentRuntime.readiness()])
     const failureAnalysis = agents.agents.find(item => item.agentKey === 'failure-analysis')
     return {
-      ready: store.ready && agents.ready && Boolean(failureAnalysis?.ready),
+      ready: store.ready && worker.ready && agents.ready && Boolean(failureAnalysis?.ready),
       store,
+      worker,
       agents,
-      runner: { ready: true, snapshot: { kind: 'agent' as const, runnerVersion: 'agent-runner/v1' as const } },
+      runner: { ready: true, snapshot: { kind: 'agent' as const, runnerVersion: 'agent-runner/v2' as const } },
       agent: { ready: store.ready && Boolean(failureAnalysis?.ready), reason: store.reason ?? failureAnalysis?.reason },
     }
   }
@@ -122,6 +123,7 @@ export class TestExecutionService {
       id: stableIdentity('agent_test_manual_retry_job', { taskId: task.id, idempotencyKey }),
       runId: run.id,
       taskId: task.id,
+      executionAttemptOrdinal: ((await this.store.getAgentExecutionResult(task.id))?.executionAttemptOrdinal ?? 0) + 1,
       status: 'queued',
       attempts: 0,
       maxAttempts: 3,
@@ -213,7 +215,7 @@ export class TestExecutionService {
       },
       agentUnderTest,
       ...(knowledge ? { knowledge: structuredClone(knowledge) } : {}),
-      runner: { kind: 'agent', runnerVersion: 'agent-runner/v1' },
+      runner: { kind: 'agent', runnerVersion: 'agent-runner/v2' },
       agents: structuredClone(agents),
       status: 'queued',
       stateVersion: 0,
@@ -226,6 +228,7 @@ export class TestExecutionService {
       id: stableIdentity('agent_test_execution_job', { runId, taskId: task.id }),
       runId,
       taskId: task.id,
+      executionAttemptOrdinal: 1,
       status: 'queued',
       attempts: 0,
       maxAttempts: 3,
@@ -256,7 +259,7 @@ export class TestExecutionService {
     const spec = task.input.caseContent.agentTestSpec
     if (!spec || task.input.executionSpec.schemaVersion !== 'agent-test-input/v1') throw new AgentTestExecutionRuntimeError('AGENT_TEST_FROZEN_INPUT_INVALID')
     const resolvedVersion = await this.agentUnderTestService.resolveVersion(run.agentUnderTest)
-    const runnerResult = await this.agentRunner.execute({ runId: run.id, taskId: task.id, agentUnderTest: run.agentUnderTest, resolvedVersion, spec }, signal)
+    const runnerResult = await this.agentRunner.execute({ runId: run.id, taskId: task.id, executionAttemptOrdinal: job.executionAttemptOrdinal, agentUnderTest: run.agentUnderTest, resolvedVersion, spec }, signal)
     const executionResult = runnerResult.caseRuns.some(item => item.evaluationResults.length)
       ? await this.evaluateAgentSemantics(run, task, runnerResult, signal)
       : runnerResult
@@ -359,7 +362,7 @@ function assertAgentOutputSchema(output: TestExecutionAgentRuntimeOutput, expect
   if (output.schemaVersion !== expected) throw new Error('TEST_EXECUTION_AGENT_OUTPUT_SCHEMA_MISMATCH')
 }
 
-function applyAgentEvaluationCandidate(result: AgentExecutionAggregateResult, candidate: Record<string, unknown>, modelSnapshotRef: string): AgentExecutionAggregateResult {
+export function applyAgentEvaluationCandidate(result: AgentExecutionAggregateResult, candidate: Record<string, unknown>, modelSnapshotRef: string): AgentExecutionAggregateResult {
   if (Object.keys(candidate).some(key => key !== 'results') || !Array.isArray(candidate.results)) throw new Error('AGENT_EVALUATION_CANDIDATE_INVALID')
   const expected = result.caseRuns.flatMap(caseRun => caseRun.evaluationResults.map(evaluation => ({ caseRun, evaluation })))
   if (candidate.results.length !== expected.length) throw new Error('AGENT_EVALUATION_RESULT_COUNT_MISMATCH')
@@ -397,7 +400,17 @@ function applyAgentEvaluationCandidate(result: AgentExecutionAggregateResult, ca
       : [...caseRun.assertionResults, ...evaluationResults].some(item => item.status === 'FAIL') ? 'FAIL' as const
         : [...caseRun.assertionResults, ...evaluationResults].some(item => item.status === 'NOT_EVALUABLE') ? 'NOT_EVALUABLE' as const
           : 'PASS' as const
-    return { ...caseRun, evaluationResults, status }
+    const deterministicFailureFacts = caseRun.failureFacts.filter(item => item.code !== 'AI_EVALUATION_FAILED')
+    const evaluationFailureFacts = evaluationResults
+      .filter(item => item.status === 'FAIL')
+      .map(item => ({
+        code: 'AI_EVALUATION_FAILED',
+        message: item.explanation,
+        evidenceRefs: [...item.evidenceRefs],
+        expected: item.criterion,
+        actual: caseRun.actualOutput,
+      }))
+    return { ...caseRun, evaluationResults, status, failureFacts: [...deterministicFailureFacts, ...evaluationFailureFacts] }
   })
   const count = caseRuns.length
   const rate = (status: typeof caseRuns[number]['status']) => caseRuns.filter(item => item.status === status).length / count

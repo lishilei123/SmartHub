@@ -21,7 +21,7 @@ export const EXECUTION_RUN_TRANSITIONS: Readonly<Record<ExecutionRunStatus, read
 }
 
 export const EXECUTION_TASK_TRANSITIONS: Readonly<Record<ExecutionTaskStatus, readonly ExecutionTaskStatus[]>> = {
-  pending: ['running', 'cancelled'],
+  pending: ['running', 'failed', 'cancelled'],
   running: ['passed', 'failed', 'blocked', 'cancelled'],
   passed: [],
   failed: ['pending'],

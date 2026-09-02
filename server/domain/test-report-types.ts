@@ -12,14 +12,15 @@ export interface TestReportAgentTraceability {
   configurationSha256: string; definitionSha256: string; snapshotSha256: string
 }
 export interface AgentTestExecutionReportContent {
-  schemaVersion: 'agent-test-execution-report/v1'; statisticsAt: string
+  schemaVersion: 'agent-test-execution-report/v2'; statisticsAt: string
   run: { id: string; status: ExecutionRunStatus; stateVersion: number; mode: string; createdAt: string; startedAt?: string; finishedAt?: string }
   overview: {
     totalCases: number; passed: number; failed: number; notEvaluable: number; error: number; active: number
-    successRate: TestReportRate; caseRunCount: number; averageLatencyMs: number | null
+    successRate: TestReportRate; executionAttemptCount: number; caseRunCount: number; averageLatencyMs: number | null
     tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }; cost?: number
   }
   results: AgentExecutionAggregateResult[]
+  executionAttempts: AgentExecutionAggregateResult[]
   traceability: {
     projectId: string; projectVersionId: string; runId: string; runStateVersion: number
     handoff: { id: string; sha256: string; memberSnapshotSha256: string }

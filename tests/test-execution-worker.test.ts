@@ -18,6 +18,7 @@ function executionJob(attempts = 1): ExecutionJob {
     id: 'job-1',
     runId: 'run-1',
     taskId: 'task-1',
+    executionAttemptOrdinal: 1,
     status: 'running',
     attempts,
     maxAttempts: 3,
@@ -38,9 +39,6 @@ function executionTask(status: ExecutionTask['status'], error?: string) {
     runId: 'run-1',
     status,
     stateVersion: 1,
-    runnerAttemptCount: 0,
-    sameScriptRetryCount: 0,
-    repairCount: 0,
     input: {},
     createdAt,
     updatedAt: createdAt,
@@ -100,11 +98,11 @@ function heartbeatHarness(input?: { fire?: boolean }) {
   }
 }
 
-test('测试执行 Worker 按 Task 业务终态完成 Job，不把 failed/waiting_manual 伪装成功', async () => {
+test('测试执行 Worker 按 Task 业务终态完成 Job，不把 failed/blocked 伪装成功', async () => {
   for (const [task, expected] of [
     [executionTask('passed'), 'succeeded'],
     [executionTask('failed', 'product defect'), 'failed'],
-    [executionTask('waiting_manual'), 'failed'],
+    [executionTask('blocked', 'not evaluable'), 'failed'],
   ] as const) {
     const state = workerStore({ task })
     const heartbeat = heartbeatHarness()

@@ -91,7 +91,7 @@ export interface FrozenExecutionAgentSnapshot {
 
 export interface ExecutionRunnerSnapshot {
   kind: 'agent'
-  runnerVersion: 'agent-runner/v1'
+  runnerVersion: 'agent-runner/v1' | 'agent-runner/v2'
 }
 
 export interface FrozenExecutionKnowledgeSnapshot {
@@ -178,6 +178,7 @@ export interface ExecutionJob {
   id: string
   runId: string
   taskId: string
+  executionAttemptOrdinal: number
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   attempts: number
   maxAttempts: number

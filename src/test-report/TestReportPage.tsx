@@ -8,18 +8,53 @@ import type { AgentTestReport } from './types'
 import './test-report.css'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
+
 export function TestReportPage({ projectVersion, onManageVersions, notify }: { projectVersion: ProjectVersion | null; onManageVersions: () => void; notify: Notify }) {
-  const model = useTestReport(projectVersion?.id); const restored = useRef(false)
+  const model = useTestReport(projectVersion?.id)
+  const restored = useRef(false)
   useEffect(() => { restored.current = false }, [projectVersion?.id])
-  useEffect(() => { if (restored.current || !projectVersion || model.loading) return; restored.current = true; const runId = new URL(window.location.href).searchParams.get('reportRunId'); if (runId) void model.openReport(runId).catch(cause => notify(messageOf(cause), 'error')) }, [model.loading, model.openReport, notify, projectVersion])
-  const open = async (runId: string) => { try { const next = await model.openReport(runId); if (next) { const url = new URL(window.location.href); url.searchParams.set('reportRunId', runId); window.history.replaceState({}, '', url) } } catch (cause) { notify(messageOf(cause), 'error') } }
+  useEffect(() => {
+    if (restored.current || !projectVersion || model.loading) return
+    restored.current = true
+    const runId = new URL(window.location.href).searchParams.get('reportRunId')
+    if (runId) void model.openReport(runId).catch(cause => notify(messageOf(cause), 'error'))
+  }, [model.loading, model.openReport, notify, projectVersion])
+  const open = async (runId: string) => {
+    try {
+      const next = await model.openReport(runId)
+      if (next) {
+        const url = new URL(window.location.href)
+        url.searchParams.set('reportRunId', runId)
+        window.history.replaceState({}, '', url)
+      }
+    } catch (cause) { notify(messageOf(cause), 'error') }
+  }
   if (!projectVersion) return <main className="tr-shell"><section className="tr-section tr-page-empty"><Boxes /><h2>请先选择 ProjectVersion</h2><p>Agent Test 报告严格绑定正式 Run。</p><button className="tr-primary" onClick={onManageVersions}>管理项目版本</button></section></main>
-  return <main className="tr-shell"><header className="tr-page-header"><div className="tr-page-title"><span><Activity /></span><div><p>{projectVersion.name} · Agent Test formal facts → deterministic report</p></div></div><div className="tr-boundary"><ShieldCheck /><span><small>报告边界</small><b>Service 统计 · Agent 不计算正式指标</b></span></div><button className="tr-secondary" onClick={onManageVersions}><Settings2 />项目版本</button></header>
+  return <main className="tr-shell">
+    <header className="tr-page-header"><div className="tr-page-title"><span><Activity /></span><div><p>{projectVersion.name} · Agent Test formal facts → deterministic report</p></div></div><div className="tr-boundary"><ShieldCheck /><span><small>报告边界</small><b>Service 统计 · Agent 不计算正式指标</b></span></div><button className="tr-secondary" onClick={onManageVersions}><Settings2 />项目版本</button></header>
     {model.error && <div className="tr-global-error"><b>报告数据未完整加载</b><span>{model.error}</span><button onClick={() => void model.loadReports()}><RefreshCw />重试</button></div>}
-    <div className="tr-layout"><aside className="tr-section tr-run-list"><header><div><h2>Agent Test 报告</h2><p>选择正式 Run。</p></div><button className="tr-icon-button" disabled={model.loading} onClick={() => void model.loadReports()}><RefreshCw /></button></header><div>{model.reports.map(item => <button key={item.runId} className={model.report?.run.id === item.runId ? 'active' : ''} onClick={() => void open(item.runId)}><Activity /><span><b>{item.agentUnderTest.name} · V{item.agentUnderTest.version}</b><small>{formatDate(item.createdAt)} · {item.totalCases} cases</small><code>{item.runId}</code></span><em className={`tr-status ${item.status}`}>{runStatusLabel(item.status)}</em></button>)}</div>{!model.reports.length && !model.loading && <p className="tr-empty">暂无 Agent Test Run。</p>}</aside>
-      <div className="tr-report">{!model.report && <section className="tr-section tr-report-empty"><Activity /><h2>选择 Agent Test Run</h2><p>报告只读取 PostgreSQL 正式事实。</p></section>}{model.report && <><section className="tr-report-toolbar"><div><span className={`tr-status ${model.report.run.status}`}>{runStatusLabel(model.report.run.status)}</span><b>{model.report.run.id}</b><small>统计截至 {formatDate(model.report.statisticsAt)} · SHA-256 {model.report.reportSha256}</small></div><div><button className="tr-icon-button" disabled={model.refreshing} onClick={() => void model.openReport(model.report!.run.id, true)}><RefreshCw /></button><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')}><FileJson2 />JSON</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'markdown')}><FileText />Markdown</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')}><Download /></a></div></section><AgentTestReportView report={model.report} /></>}</div>
-    </div></main>
+    <div className="tr-layout">
+      <aside className="tr-section tr-run-list"><header><div><h2>Agent Test 报告</h2><p>选择正式 Run。</p></div><button className="tr-icon-button" disabled={model.loading} onClick={() => void model.loadReports()}><RefreshCw /></button></header><div>{model.reports.map(item => <button key={item.runId} className={model.report?.run.id === item.runId ? 'active' : ''} onClick={() => void open(item.runId)}><Activity /><span><b>{item.agentUnderTest.name} · V{item.agentUnderTest.version}</b><small>{formatDate(item.createdAt)} · {item.totalCases} cases</small><code>{item.runId}</code></span><em className={`tr-status ${item.status}`}>{runStatusLabel(item.status)}</em></button>)}</div>{!model.reports.length && !model.loading && <p className="tr-empty">暂无 Agent Test Run。</p>}</aside>
+      <div className="tr-report">
+        {!model.report && <section className="tr-section tr-report-empty"><Activity /><h2>选择 Agent Test Run</h2><p>报告只读取 PostgreSQL 正式事实。</p></section>}
+        {model.report && <><section className="tr-report-toolbar"><div><span className={`tr-status ${model.report.run.status}`}>{runStatusLabel(model.report.run.status)}</span><b>{model.report.run.id}</b><small>统计截至 {formatDate(model.report.statisticsAt)} · SHA-256 {model.report.reportSha256}</small></div><div><button className="tr-icon-button" disabled={model.refreshing} onClick={() => void model.openReport(model.report!.run.id, true)}><RefreshCw /></button><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')}><FileJson2 />JSON</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'markdown')}><FileText />Markdown</a><a href={reportExportUrl(projectVersion.id, model.report.run.id, 'json')}><Download /></a></div></section><AgentTestReportView report={model.report} /></>}
+      </div>
+    </div>
+  </main>
 }
-function AgentTestReportView({ report }: { report: AgentTestReport }) { const summary = [['Agent Cases', report.overview.totalCases], ['PASS', report.overview.passed], ['FAIL', report.overview.failed], ['NOT_EVALUABLE', report.overview.notEvaluable], ['ERROR', report.overview.error], ['Repeat Runs', report.overview.caseRunCount]] as const; return <><section className="tr-section"><header><div><h2>Agent 执行概览</h2><p>确定性 Assertion 与语义 Evaluation 分开保存。</p></div><strong>{report.overview.successRate.percentage.toFixed(2)}%</strong></header><div className="tr-kpi-grid">{summary.map(([label, value]) => <article key={label} className="tr-kpi"><span>{label}</span><b>{value}</b></article>)}</div></section><section className="tr-section"><header><div><h2>Repeat 与 Evidence</h2><p>单次执行独立保留状态、延迟、Trace、断言和评估。</p></div></header><div className="tr-table-scroll"><table><thead><tr><th>Task / Repeat</th><th>状态</th><th>断言</th><th>Evaluation</th><th>Trace</th><th>延迟</th></tr></thead><tbody>{report.results.flatMap(result => result.caseRuns.map(caseRun => <tr key={caseRun.id}><td><code>{result.taskId}</code> #{caseRun.repeatOrdinal}</td><td>{caseRun.status}</td><td>{caseRun.assertionResults.length}</td><td>{caseRun.evaluationResults.length}</td><td>{caseRun.traceEvents.length}</td><td>{caseRun.latencyMs} ms</td></tr>))}</tbody></table></div></section><section className="tr-section tr-trace"><header><div><h2>完整追溯</h2><p>冻结 AUT、AgentRunner、Handoff 与 FailureAnalysis 配置。</p></div></header><dl className="tr-trace-grid"><div><dt>Agent Under Test</dt><dd>{report.traceability.agentUnderTest.name} v{report.traceability.agentUnderTest.version}</dd></div><div><dt>Protocol</dt><dd>{report.traceability.agentUnderTest.protocol}</dd></div><div><dt>AgentRunner</dt><dd>{report.traceability.runner.runnerVersion}</dd></div><div><dt>AUT Hash</dt><dd>{report.traceability.agentUnderTest.configurationSha256}</dd></div><div><dt>Handoff Hash</dt><dd>{report.traceability.handoff.sha256}</dd></div><div><dt>FailureAnalysis Snapshot</dt><dd>{report.traceability.agents.failureAnalysis.snapshotSha256}</dd></div></dl></section></> }
+
+function AgentTestReportView({ report }: { report: AgentTestReport }) {
+  const summary = [
+    ['Agent Cases', report.overview.totalCases], ['PASS', report.overview.passed], ['FAIL', report.overview.failed],
+    ['NOT_EVALUABLE', report.overview.notEvaluable], ['ERROR', report.overview.error], ['Execution Attempts', report.overview.executionAttemptCount],
+    ['Repeat Runs', report.overview.caseRunCount],
+  ] as const
+  return <>
+    <section className="tr-section"><header><div><h2>Agent 执行概览</h2><p>最新代次决定 Task 状态，历史代次保持不可变。</p></div><strong>{report.overview.successRate.percentage.toFixed(2)}%</strong></header><div className="tr-kpi-grid">{summary.map(([label, value]) => <article key={label} className="tr-kpi"><span>{label}</span><b>{value}</b></article>)}</div></section>
+    <section className="tr-section"><header><div><h2>执行代次、Repeat 与 Evidence</h2><p>人工重试创建新代次；单次 Repeat 独立保留 Trace、断言和评估。</p></div></header><div className="tr-table-scroll"><table><thead><tr><th>Task / Attempt / Repeat</th><th>状态</th><th>断言</th><th>Evaluation</th><th>Trace</th><th>延迟</th></tr></thead><tbody>{report.executionAttempts.flatMap(result => result.caseRuns.map(caseRun => <tr key={caseRun.id}><td><code>{result.taskId}</code> A{result.executionAttemptOrdinal} / R{caseRun.repeatOrdinal}</td><td>{caseRun.status}</td><td>{caseRun.assertionResults.length}</td><td>{caseRun.evaluationResults.length}</td><td>{caseRun.traceEvents.length}</td><td>{caseRun.latencyMs} ms</td></tr>))}</tbody></table></div></section>
+    <section className="tr-section tr-trace"><header><div><h2>完整追溯</h2><p>冻结 AUT、AgentRunner、Handoff 与 FailureAnalysis 配置。</p></div></header><dl className="tr-trace-grid"><div><dt>Agent Under Test</dt><dd>{report.traceability.agentUnderTest.name} v{report.traceability.agentUnderTest.version}</dd></div><div><dt>Protocol</dt><dd>{report.traceability.agentUnderTest.protocol}</dd></div><div><dt>AgentRunner</dt><dd>{report.traceability.runner.runnerVersion}</dd></div><div><dt>AUT Hash</dt><dd>{report.traceability.agentUnderTest.configurationSha256}</dd></div><div><dt>Handoff Hash</dt><dd>{report.traceability.handoff.sha256}</dd></div><div><dt>FailureAnalysis Snapshot</dt><dd>{report.traceability.agents.failureAnalysis.snapshotSha256}</dd></div></dl></section>
+  </>
+}
+
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) }
 function messageOf(cause: unknown) { return cause instanceof Error ? cause.message : String(cause) }

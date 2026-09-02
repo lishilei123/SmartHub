@@ -287,15 +287,22 @@ async function retryFailedTask(claimed: { id: string; attempts: number; maxAttem
 }
 
 async function run() {
+  const executionStore = testExecutionStore
   if (
     !usingPostgres
     || !stateStore.claimTask
     || !stateStore.claimReviewJob
     || !stateStore.claimTestDesignJob
-    || !testExecutionStore
+    || !executionStore
     || !testExecutionService
   ) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
   await service.initialize()
+  await executionStore.registerWorker(workerId, concurrency)
+  const workerHeartbeat = setInterval(() => {
+    void executionStore.heartbeatWorker(workerId)
+      .then(renewed => { if (!renewed) console.error(`SmartHub Worker ${workerId} 心跳记录不存在`) })
+      .catch(error => console.error(`SmartHub Worker ${workerId} 心跳失败：`, error instanceof Error ? error.message : error))
+  }, Math.max(1_000, Math.min(10_000, Math.floor(leaseMs / 3))))
   console.log(`SmartHub Worker ${workerId} 已启动，并发度 ${concurrency}`)
   try {
     while (!stopping) {
@@ -312,9 +319,11 @@ async function run() {
       }
     }
   } finally {
+    clearInterval(workerHeartbeat)
+    await executionStore.unregisterWorker(workerId).catch(error => console.error(`SmartHub Worker ${workerId} 注销失败：`, error instanceof Error ? error.message : error))
     await Promise.all([
       stateStore.close?.(),
-      testExecutionStore.close(),
+      executionStore.close(),
     ])
   }
 }

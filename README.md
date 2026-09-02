@@ -9,7 +9,7 @@ SmartHub 是基于 Pi Agent 的 AI 自动化测试平台。当前测试执行只
 3. 创建 Execution Run 时，Service 冻结 Handoff、正式 Case、Agent Under Test 版本、AgentRunner 与 FailureAnalysis 配置。
 4. AgentRunner 通过冻结的 HTTP 或 SSE 契约真实调用被测 Agent，按 Repeat 保存 Trace、Assertion、Evaluation、延迟、Token 与成本事实。
 5. 确定性规则先给出结果；只有语义或安全标准需要模型判断。失败分析 Agent 只基于已保存证据生成 Root Cause Candidate。
-6. 报告 Service 从 PostgreSQL 正式事实生成 `agent-test-execution-report/v1` canonical JSON 与 Markdown。
+6. 报告 Service 从 PostgreSQL 正式事实生成 `agent-test-execution-report/v2` canonical JSON 与 Markdown，并保留全部人工重试执行代次。
 
 旧的浏览器脚本生成、脚本修复、执行环境配置、脚本 Revision、脚本 Attempt、执行 Artifact、维护建议及相应 API/UI 已删除。Migration 39 会删除对应历史执行数据和表，Migration 40 会清理旧执行 Agent、Skill 与 Browser Tool 配置，不提供读取兼容。
 
@@ -51,7 +51,7 @@ Worker 单独运行：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-npm run worker
+npm run start:worker
 ```
 
 ## 验证

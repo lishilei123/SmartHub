@@ -5,10 +5,11 @@ export type TestReportListItem = {
   createdAt: string; startedAt?: string; finishedAt?: string
 }
 export type AgentTestReport = {
-  schemaVersion: 'agent-test-execution-report/v1'; statisticsAt: string
+  schemaVersion: 'agent-test-execution-report/v2'; statisticsAt: string
   run: { id: string; status: ExecutionRunStatus; stateVersion: number; mode: string; createdAt: string; startedAt?: string; finishedAt?: string }
-  overview: { totalCases: number; passed: number; failed: number; notEvaluable: number; error: number; active: number; successRate: { numerator: number; denominator: number; percentage: number }; caseRunCount: number; averageLatencyMs: number | null; tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }; cost?: number }
+  overview: { totalCases: number; passed: number; failed: number; notEvaluable: number; error: number; active: number; successRate: { numerator: number; denominator: number; percentage: number }; executionAttemptCount: number; caseRunCount: number; averageLatencyMs: number | null; tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }; cost?: number }
   results: AgentExecutionAggregateResult[]
+  executionAttempts: AgentExecutionAggregateResult[]
   traceability: {
     projectId: string; projectVersionId: string; runId: string; runStateVersion: number
     handoff: { id: string; sha256: string; memberSnapshotSha256: string }
