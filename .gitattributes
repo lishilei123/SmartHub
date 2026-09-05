@@ -1,0 +1,6 @@
+# Keep the scoped Prettier targets stable on Windows checkouts.
+.prettierrc.json text eol=lf
+src/App.tsx text eol=lf
+src/app/** text eol=lf
+server/application/test-design-service.ts text eol=lf
+server/application/test-design/** text eol=lf

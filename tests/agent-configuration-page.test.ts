@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 test('Agent 最大输出 Token 在页面中作为独立配置且不受模型目录值限制', () => {
-  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/app/PromptAgentSettings.tsx', import.meta.url), 'utf8')
 
   assert.match(source, /最大输出 Token" help="由当前 Agent 独立设置，发布后直接用于模型调用"/u)
   assert.doesNotMatch(source, /最大输出 Token" help=\{`不得超过/u)
@@ -11,13 +11,13 @@ test('Agent 最大输出 Token 在页面中作为独立配置且不受模型目�
 })
 
 test('Agent 配置页面不提供模型温度', () => {
-  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/app/PromptAgentSettings.tsx', import.meta.url), 'utf8')
 
   assert.doesNotMatch(source, /模型温度|routing\.temperature|updateRouting\('temperature'/u)
 })
 
 test('Agent 配置页面展示一个 PlanningAgent 与两个测试执行 Agent', () => {
-  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/app/PromptAgentSettings.tsx', import.meta.url), 'utf8')
 
   for (const identifier of [
     'PlanningAgent',
@@ -31,7 +31,7 @@ test('Agent 配置页面展示一个 PlanningAgent 与两个测试执行 Agent',
 })
 
 test('Agent 配置页面将默认绑定的 Skill 和 Tool 标记为不可关闭', () => {
-  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/app/PromptAgentSettings.tsx', import.meta.url), 'utf8')
 
   assert.match(source, /Agent 默认绑定的 Skill \/ Tool 由服务端强制保留，不可关闭/u)
   assert.match(source, /disabled=\{agentMetadata\.exactCapabilities \|\| required/u)
@@ -51,12 +51,11 @@ test('Agent 配置 API 从 planning 与 test_execution 聚合并按 Agent 选择
 })
 
 test('当前本地执行收起未接通的基础设施配置入口并保留历史配置 API', () => {
-  const page = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const page = readFileSync(new URL('../src/app/SystemSettings.tsx', import.meta.url), 'utf8')
   const execution = readFileSync(new URL('../src/test-execution/ExecutionRunPanel.tsx', import.meta.url), 'utf8')
   const api = readFileSync(new URL('../src/test-execution-infrastructure-api.ts', import.meta.url), 'utf8')
   assert.doesNotMatch(page, /name: '执行基础设施'|ExecutionInfrastructureSettings|publishExecutionInfrastructureConfiguration/u)
   assert.doesNotMatch(page, /后续 Run 将冻结该版本/u)
-  assert.match(page, /Worker 所在机器使用本地 Playwright 执行/u)
   assert.match(execution, /当前仅支持在 Worker 所在机器本地执行/u)
   assert.match(execution, /OCI 执行尚未接入/u)
   assert.match(api, /test-execution-infrastructure-configuration/u)

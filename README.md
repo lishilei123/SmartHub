@@ -251,6 +251,8 @@ npm run start:worker:dist
 | `npm test` | 运行 TypeScript 单元与服务测试。 |
 | `npm run test:postgres` | 运行 PostgreSQL 集成测试。 |
 | `npm run build` | 构建前端和服务端。 |
+| `npm run format` | 格式化 App、测试设计 Service 及本轮拆出的职责模块。 |
+| `npm run format:check` | 检查上述模块的格式，不改写文件。 |
 | `npm run migrate` | 执行 PostgreSQL 迁移。 |
 
 Worker 将测试执行与需求分析、测试设计、知识库队列分成独立 lane。测试执行默认并发度为 3，其余工作流默认并发度为 1；可分别通过 `SMARTHUB_TEST_EXECUTION_CONCURRENCY` 和 `SMARTHUB_WORKFLOW_CONCURRENCY` 调整，允许范围均为 1–8。旧的 `SMARTHUB_WORKER_CONCURRENCY` 仅作为其余工作流并发度的兼容回退。并发度提升前应同时验证模型服务、Browser Host 和 PostgreSQL 容量。
@@ -296,6 +298,14 @@ SmartHub/
 ├── tests/                  # 单元、服务与 PostgreSQL 集成测试
 └── data/                   # 默认本地运行数据（不要作为正式源码提交）
 ```
+
+## 页面与测试设计代码边界
+
+`src/App.tsx` 负责应用壳、路由、当前项目版本和共享知识库状态；页面内容在 `src/app/`：`Documents` 管理知识库文档，`SystemSettings` 组织系统配置，模型、Agent、AI 资源和知识库配置各有独立模块。公共组件与类型由 `shared.tsx`、`settings-shared.tsx` 和 `types.ts` 提供，页面不反向依赖 App。
+
+`server/application/test-design-service.ts` 保留公开 Service 入口、Store 事务、调度和资产投影。`test-design/` 下的 `workflow.ts` 负责候选生成与修复编排，`case-review.ts` 负责 Revision、审核和 Proposal 规则，`library.ts` 负责发布校验、冻结成员和追溯，`snapshots.ts` 负责需求、历史和检索快照，`suites.ts` 负责套件规则，`state.ts` 提供状态访问和公共校验。这些模块在现有 Service 事务中工作，不独立写入正式状态；已有公共导出仍由 Service 文件提供。
+
+格式化命令暂时只覆盖上述模块，避免一次性改写全仓库。后续可继续按业务边界提取大型页面内的面板和 Service 操作，保持原有审核、发布及不可变版本约束。
 
 ## 扩展能力
 
