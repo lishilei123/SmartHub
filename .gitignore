@@ -6,3 +6,4 @@ dist-server/
 .playwright-cli/
 data/
 .env.local
+/.tmp/

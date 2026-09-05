@@ -1,13 +1,45 @@
 # Worker 停止语义与并发修复验证
 
-日期：2026-09-05。未创建提交，未推送远端。
+本文保留 2026-09-05 修复阶段的历史实现与本地验证事实；下文第 1～9 节的“本轮”、基线、文件列表和测试数量均指当时。原“未创建提交、未推送远端、修订后 CI 尚未运行”仅为当时状态，不是当前结论。
 
-## 1. 代码基线
+## 当前 HEAD 的远端 CI（2026-09-05 查询）
 
-- 已执行 `git fetch origin PI-Agent`，确认远端最新 HEAD 为 `18851665d467b1fac5f7f2520c05895f8621a307`。
-- 当前本地 HEAD 为 `27fa7ee92463860c27302e03ca7e40ca97eaf54d`，是上述远端提交的后继，已有资源分流、配置草稿/发布及 Migration 45。本轮保留并增量补齐该实现。
+- 本地 HEAD 与远端最新 `PI-Agent` 均为 `b3287cb960e2935bd1e7ea091b03b5f70f8152ee`（通过 `git ls-remote` 核对）。
+- 查询时间：2026-09-05 23:48（UTC+08:00）。GitHub Actions API 按完整 `head_sha` 查询，事件为 `push`，未借用其他提交结果。
+- [CI Run 33974681715](https://github.com/lishilei123/SmartHub/actions/runs/33974681715)：`completed / success`；[tests](https://github.com/lishilei123/SmartHub/actions/runs/33974681715/job/101329193317)、[build](https://github.com/lishilei123/SmartHub/actions/runs/33974681715/job/101329193384)、[postgres-integration](https://github.com/lishilei123/SmartHub/actions/runs/33974681715/job/101329429134) 均为 `completed / success`。
+- 该 CI 仅覆盖上述提交，不覆盖本次尚未提交的页面、测试与文档修改。历史本地测试结果见第 7 节，不能替代本次本地验证或当前提交 CI。
+- 生产模型、生产 SSO、真实被测系统全流程及多 Worker 验证尚未进行，CI 通过不构成这些能力的验收。
+
+## 本次语义修订
+
+入口保留“系统设置 → 测试执行配置”，区域改为“AI 与 Runner 资源并发”，字段改为“AI 任务最大并发数”。已按 `runtime.ts` 和实际资源入口核实：AI 配额覆盖生成、受控探索、修复、失败诊断，需求分析、测试设计、评审与会话压缩，知识库 Embedding/Reranker 模型调用与配置测试，以及模型探测；不同 AI 操作可能互相等待。Runner 独立覆盖真实 Playwright 执行与受管认证准备。限制的是受管操作并发，不是模型服务商请求速率。
+
+保留 Runner 默认 3（1～16）、AI 默认 1（1～8）。保存草稿不生效，发布后供调度器读取；页面展示已发布配置或兼容回退值，不代表所有 Worker 已确认应用。Worker 正常情况下约 5 秒轮询，Governor 在资源入口按需刷新，读取间隔至少 5 秒；读取失败保留最近有效值，调低不强制终止已运行任务。数据库明确发布配置优先，旧 `SMARTHUB_TEST_EXECUTION_CONCURRENCY` 只兼容 Runner；不提供新的 Runner/Agent 并发环境变量。
+
+共享仅限当前进程，每个 Worker 拥有独立配额，多 Worker 总容量叠加；API 与 Worker 分进程时也不共享 Governor。集群全局配额与跨进程 Workspace 互斥尚未实现，同一 Workspace 应由一个 Worker 进程管理。详细配置与部署边界统一见 [README](../README.md#ai-与-runner-资源并发)。本次未修改调度、心跳停止语义、Service 状态机、数据库或历史 Hash/Snapshot。
+
+## 本次语义修订的本地验证（2026-09-05）
+
+在 `b3287cb960e2935bd1e7ea091b03b5f70f8152ee` 上应用本次未提交修改后执行：
+
+| 验证 | 结果 |
+| --- | --- |
+| 配置 Service/API、真实 Chromium 页面、Governor、Scheduler、Worker 定向测试 | 30/30 通过，无跳过 |
+| `npm test` | 443/443 通过，无失败、取消、跳过或 todo |
+| `npm run build` | 前端与服务端通过；保留 Vite 大于 500 kB 的 chunk 提示 |
+| `npm run format:check`、`git diff --check` | 通过 |
+
+现有页面行为测试仅更新可访问名称和发布值展示断言；加载失败与恢复、非法值校验、保存草稿不提前生效、发布、保存失败保留数据、持久化重载断言全部保留。没有新增读取 TSX 源码匹配文案的测试，没有删除、跳过或放宽测试。
+
+本次未重跑 `npm run test:postgres`：仅调整页面文案、既有行为测试和文档，没有数据库或调度变更；远端 PostgreSQL 结果仅对应上方提交。本次也未进行生产模型、SSO、真实被测系统完整流程、多 Worker 或页面人工视觉验收；真实 Chromium 页面行为验证不代表这些验收。未创建提交、未推送。
+
+本次日志：`.tmp/resource-semantics-focused.log`、`.tmp/resource-semantics-npm-test.log`、`.tmp/resource-semantics-build.log`。
+
+## 1. 历史代码基线
+
+- 当时执行 `git fetch origin PI-Agent`，远端最新 HEAD 为 `18851665d467b1fac5f7f2520c05895f8621a307`。
+- 当时本地 HEAD 为 `27fa7ee92463860c27302e03ca7e40ca97eaf54d`，是上述远端提交的后继，已有资源分流、配置草稿/发布及 Migration 45。该轮保留并增量补齐此实现。
 - origin 配置为 `lishilei123/-SmartHub`；GitHub API 返回规范仓库链接 `lishilei123/SmartHub`。
-- 保留原有未跟踪 `.tmp/`，未修改用户的运行配置或生产数据库。
 
 ## 2. 已确认的问题与 CI 证据
 
@@ -17,7 +49,7 @@
 - 前端用代码默认值初始化而未完全服从后端有效配置；旧执行并发环境变量被取消读取，缺少迁移兜底。
 - 写队列的原始异常传播与失败后恢复已由基线修复，本轮补异常边界回归；回滚失败必须销毁连接。
 
-已通过 GitHub API 核对 [CI Run 33969896751](https://github.com/lishilei123/SmartHub/actions/runs/33969896751)：最新远端提交的 Run tests 失败，Build 与 PostgreSQL 集成均被跳过。原始日志下载返回 HTTP 403，不能声称已读取该次失败的完整浏览器日志。
+当时通过 GitHub API 核对旧基线 `18851665d467b1fac5f7f2520c05895f8621a307` 的 [CI Run 33969896751](https://github.com/lishilei123/SmartHub/actions/runs/33969896751)：Run tests 失败，Build 与 PostgreSQL 集成均被跳过。原始日志下载返回 HTTP 403，未读取该次失败的完整浏览器日志。这是历史失败证据，当前 HEAD 的 CI 见本文开头。
 
 ## 3. LocalWorkspaceRunner 复现与修复
 
@@ -54,13 +86,13 @@ Runner 测试失败输出 error、summary、关键 events、exitCode 和 Playwri
 ## 6. 配置及兼容
 
 - 后端默认 Runner **3**，范围 **1–16**；Agent **1**，范围 **1–8**。Runner 延续原分支默认执行并发 3，Agent 使用保守默认 1。
-- 入口：系统设置 → 测试执行配置 → 并发控制。保存草稿后发布才生效；历史配置不可变。
+- 当时入口：系统设置 → 测试执行配置 → 并发控制（现改名“AI 与 Runner 资源并发”）。保存草稿后发布才供调度器读取；历史配置不可变。
 - Worker 每 5 秒读取；实际资源入口也最多每 5 秒刷新，读取失败保留最近有效值。调低不打断已有配额，新申请按新上限授予。
 - 优先级：数据库明确发布配置 → 旧 `SMARTHUB_TEST_EXECUTION_CONCURRENCY` → 后端默认。旧变量合法范围 1–8，仅映射 Runner；无效值回默认，Agent 默认 1。
 - 未增加新的必填并发环境变量。本轮复用既有 Migration 45，不新增迁移或不可逆删除。
 - 页面从后端有效值加载，保存失败保留配置并显示真实错误；保存旧客户端省略字段时保留现有效值。
 
-## 7. 验证覆盖与结果
+## 7. 历史本地验证覆盖与结果
 
 - `npm test`：443/443，通过，无 skipped/todo。包含真实 Chromium Runner、真实配置页面、Worker 心跳、Service、资源配额与 Store 异常边界。
 - `npm run build`：通过，含前端 TypeScript/Vite 及服务端构建。保留现有大于 500 kB 的 Vite chunk 提示。
@@ -74,13 +106,12 @@ Runner 测试失败输出 error、summary、关键 events、exitCode 和 Playwri
 
 ## 8. 验证边界
 
-- 未推送，因此修订后的 GitHub Actions 尚未真实运行。Linux CI 使用 pgvector/PostgreSQL 16；本地实际验证为 PostgreSQL 18.4。
+- 当时尚未推送，修订后的 GitHub Actions 尚未运行；此结论已被本文开头的当前 HEAD 查询更新。Linux CI 使用 pgvector/PostgreSQL 16；当时本地实际验证为 PostgreSQL 18.4。
 - 并发是单进程限制，不是集群全局配额；多 Worker 配额叠加，数据库令牌及跨进程 Workspace 文件锁仍为后续工作。
 - 未执行真实外部生成模型、生产 SSO、生产被测系统全流程或多 Worker 压力验收。模型/并发替身只用于状态与异常测试，真实浏览器与数据库测试另行执行。
 - 本地模型原生推理没有强制中断 API；已开始的单次推理保留配额直至返回，停止信号阻止后续批次和正式发布。
 - Workspace 文件和 PostgreSQL 不构成跨介质原子事务；本轮增加租约与锁内检查，未声称实现分布式事务。
 - 未放宽业务断言、未删除/跳过失败测试、未用模拟结果冒充真实 Playwright、未绕过 Service 写正式业务状态、未新增质量指标、未接入 Playwright Generator。
-- 浏览器复现缓存 `.runner-empty-browser-cache/` 的删除被自动审批审查拒绝，返回 `blocked by policy`；目录保留，不提交。原有 `.tmp/` 也保留。
 
 ## 9. 修改文件
 

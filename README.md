@@ -255,11 +255,22 @@ npm run start:worker:dist
 | `npm run format:check` | 检查上述模块的格式，不改写文件。 |
 | `npm run migrate` | 执行 PostgreSQL 迁移。 |
 
-Worker 将测试执行与需求分析、测试设计、知识库队列隔离。Runner 配额限制真实 Playwright 执行；Agent 配额限制模型调用、受控页面探索、生成、修复和失败分析。两类资源独立排队，确定性 Binding、Hash、依赖与环境检查不占 Agent 配额。**Runner 默认 3（1～16），Agent 默认 1（1～8）**，统一定义于 `server/domain/test-execution-infrastructure-configuration.ts`；Runner 延续旧执行并发默认 3，Agent 使用保守默认 1，不自动提高已有资源容量。入口为 **系统设置 → 测试执行配置 → 并发控制**，支持保存服务端草稿、发布配置，并展示后端有效值、来源、版本、发布时间和发布人。草稿不影响调度；没有配置记录时可直接使用后端有效默认值，不需要额外配置或数据库迁移。历史版本缺少并发字段时只在读取时应用兼容值，不改写历史内容或 Hash。
+### AI 与 Runner 资源并发
 
-Worker 启动时读取 PostgreSQL 已发布配置，随后每 5 秒定向查询当前版本；读取失败保留最近有效容量。发布后的配置用于后续调度和实际资源配额申请，无需重启 Worker；调低时已获得配额的工作自然完成，运行中数量低于新上限后才继续授予配额。排队等待配额支持取消、租约丢失、心跳异常和 Worker 关闭，退出后移除等待项并释放持有的配额。并发配置只影响调度速度，不改变测试结果和业务事实。
+入口保留为 **系统设置 → 测试执行配置 → AI 与 Runner 资源并发**，字段显示为“Runner 最大并发数”和“AI 任务最大并发数”。**Runner 默认 3，范围 1～16；AI 默认 1，范围 1～8**，统一定义于 `server/domain/test-execution-infrastructure-configuration.ts`。内部 `agentConcurrency` 字段、API 路径、数据库结构保持兼容，本次名称与说明调整无需迁移。
 
-兼容优先级为：**数据库中明确发布的并发配置 > 旧 `SMARTHUB_TEST_EXECUTION_CONCURRENCY` > 后端默认值**。旧变量仅在没有发布版本或历史版本缺少并发字段时映射 Runner 容量（沿用旧范围 1～8），Agent 仍默认 1；旧变量无效时回退后端默认值，不阻止启动。API 和 Worker 应使用一致的旧环境变量；页面显示并使用后端解析的有效值。保存并发布后以数据库配置为准，旧客户端省略并发字段时保留当前有效值。没有新增必填的 `SMARTHUB_RUNNER_CONCURRENCY` 或 `SMARTHUB_AGENT_CONCURRENCY`。其余工作流仍由 `SMARTHUB_WORKFLOW_CONCURRENCY` 控制（默认 1，范围 1～8），旧 `SMARTHUB_WORKER_CONCURRENCY` 仅作为该工作流的兼容回退。
+`server/runtime.ts` 在每个进程内创建一个 `ExecutionResourceGovernor` 并注入各入口。根据当前调用链，AI 配额实际覆盖：
+
+- 脚本生成、受控页面探索、脚本修复和失败诊断：`TestExecutionService` 的探索入口与 `PiTestExecutionRuntimeAdapter → PiAgentRuntimeAdapter.execute`。
+- 需求分析、测试设计、评审与会话压缩：共享 `PiAgentRuntimeAdapter.execute/review/compact`。
+- 知识库模型调用：`KnowledgeService.embedTexts` 覆盖索引、检索 Embedding 及 Reranker 使用的向量计算；`testEmbeddingConfig` 覆盖配置测试。
+- 模型探测：`ModelService.probe`。
+
+这些 AI 操作在同一进程内共享容量，不同类型任务可能互相等待；同一受管操作内的嵌套模型调用复用配额。配额限制的是**受管操作并发数，不等同于模型服务商的请求速率限制**。Runner 配额独立，覆盖真实 Playwright 执行和受管认证准备浏览器；确定性 Binding、Hash、依赖与环境检查不占 AI 配额。Worker 的工作流队列与测试执行队列隔离，不代表其 AI 调用拥有独立配额。
+
+配置保留数据库持久化、草稿及不可变发布版本。**保存草稿不生效，发布后供调度器读取**；页面上方展示后端解析的已发布配置或兼容回退值、来源、版本、发布时间与发布人，下方输入框编辑草稿，**不代表所有 Worker 已确认应用**。Worker 启动读取，正常情况下约每 5 秒刷新；Governor 在实际资源入口按需读取，读取间隔至少 5 秒，不承诺所有进程同时应用。读取失败保留最近有效值。发布无需重启 Worker；调低配额不强制终止已经运行的任务，运行数量低于新上限后才继续授予配额。排队等待支持取消、租约丢失、心跳异常和 Worker 关闭。配置不改写已有 Run Snapshot、历史配置内容或 Hash，也不改变业务状态机。
+
+兼容优先级为：**数据库中明确发布的并发配置 > 旧 `SMARTHUB_TEST_EXECUTION_CONCURRENCY` > 后端默认值**。旧变量仅在没有发布版本或历史版本缺少并发字段时映射 Runner 容量（沿用旧范围 1～8），AI 仍默认 1；旧变量无效时回退后端默认值，不阻止启动。API 和 Worker 应使用一致的旧环境变量。保存并发布后以数据库配置为准，旧客户端省略并发字段时保留当前有效值。**不提供 `SMARTHUB_RUNNER_CONCURRENCY` 或 `SMARTHUB_AGENT_CONCURRENCY` 环境变量**。其余工作流的 Job 领取并发仍由 `SMARTHUB_WORKFLOW_CONCURRENCY` 控制（默认 1，范围 1～8），旧 `SMARTHUB_WORKER_CONCURRENCY` 仅作为该工作流的兼容回退；实际 AI 操作仍受上述共享配额限制。
 
 任务资源类型由已有持久化 Task 状态投影为 `ExecutionResourceClass`：
 
@@ -272,7 +283,13 @@ Worker 启动时读取 PostgreSQL 已发布配置，随后每 5 秒定向查询�
 
 预检通道只处理元数据和 Workspace 校验，不执行 Playwright 或调用 Agent；即使 Runner 全满，新 Case 仍能被分流到 Agent。阶段资源改变或预检完成时，Service 在有效租约和 Fencing Token 下把原 Job 重新入队，释放当前槽位，下一资源有容量时才领取。交接退还本次领取计数，保留真正异常的重试计数、退避、Repair 上限和取消治理。领取使用 SQL 状态过滤及索引，不加载完整数据库状态，也不持有数据库租约等待另一类容量。Migration 45 增加领取索引、交接约束、并发配置草稿表及数值范围约束。
 
-这是**共享持久化 Job 队列上的两类独立调度容量**，并在实际资源调用处应用进程共享配额，没有新建两张物理队列表。Agent 配额也覆盖同进程需求分析、测试设计与知识库等实际模型调用；治理层与 Runner 只在所属阶段申请资源，生成结束先释放 Agent，再申请 Runner，失败后先释放 Runner，再申请 Agent 诊断或修复。容量目前按单个 Worker 进程生效，多 Worker 总容量会叠加；跨 Worker 全局资源配额（例如数据库令牌）与跨进程 Workspace 文件锁仍需后续实现，目前同一 Workspace 应由一个 Worker 进程管理。运行中 Attempt 使用冻结 Revision 的执行包，后续 Workspace 写入不改变其内容。Workspace 文件与 PostgreSQL 尚非跨介质原子事务，候选文件发布受租约保护并标记 `needs_validation`，真实通过后才在 Workspace 锁内核对入口和依赖 Hash 并升级 Binding；旧 PASS 不覆盖较新候选。本轮没有接入 Playwright Generator，也没有增加执行质量指标。
+这是**共享持久化 Job 队列上的两类独立调度容量**，并在实际资源调用处应用进程共享配额，没有新建两张物理队列表。治理层与 Runner 只在所属阶段申请资源，生成结束先释放 AI 配额，再申请 Runner，失败后先释放 Runner，再申请 AI 配额进行诊断或修复。
+
+**单进程部署边界**：每个 Worker 进程拥有独立配额，多 Worker 总容量会叠加；API 与 Worker 若为不同进程，也不能共享内存中的 Governor。数据库保存同一发布配置不等于提供集群全局限制。跨 Worker 全局资源配额与跨进程 Workspace 互斥仍为后续工作，当前未实现 Redis/数据库全局令牌，**同一 Workspace 应由一个 Worker 进程管理，不应让多个 Worker 并发修改同一 Workspace**。
+
+运行中 Attempt 使用冻结 Revision 的执行包，后续 Workspace 写入不改变其内容。Workspace 文件与 PostgreSQL 尚非跨介质原子事务，候选文件发布受租约保护并标记 `needs_validation`，真实通过后才在 Workspace 锁内核对入口和依赖 Hash 并升级 Binding；旧 PASS 不覆盖较新候选。
+
+并发验收的历史本地结果及当前 HEAD 的远端 CI 证据见 [Worker 修复验证记录](docs/worker-concurrency-fix-verification.md) 与 [并发优化验收记录](docs/test-execution-concurrency-verification.md)。2026-09-05 23:48（UTC+08:00）查询：`b3287cb960e2935bd1e7ea091b03b5f70f8152ee` 的 [CI Run 33974681715](https://github.com/lishilei123/SmartHub/actions/runs/33974681715) 为 `completed / success`，tests、build、postgres-integration 均通过；该结果仅对应此提交，不覆盖本次未提交修改。生产模型、SSO、真实被测系统全流程和多 Worker 验证尚未进行。
 
 FailureAnalysisAgent 只分析结构化 Attempt/Event、脱敏日志和 Screenshot/Trace/HTTP 证据，提出类别、修复建议或人工处理建议。它不能把失败改为通过、覆盖正式 Revision、更新 Binding、删除核心断言或弱化业务预期。明确网络不可达、受管认证/配置错误和数据未就绪由确定性规则优先收口；Runner 基础设施异常保留有限退避重试。裸 401/403、一般超时或证据不足不会被强行归因为认证失败或产品缺陷。Service 拥有最终状态及修复预算；修复保留旧 Revision，创建新候选，通过 Validator 后必须再次由 Runner 真实执行。
 

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   RUNNER_CONCURRENCY_RANGE,
   AGENT_CONCURRENCY_RANGE,
+  DEFAULT_RUNNER_CONCURRENCY,
+  DEFAULT_AGENT_CONCURRENCY,
   type ExecutionConcurrencyConfiguration,
 } from '../../server/domain/test-execution-infrastructure-configuration'
 import {
@@ -69,7 +71,9 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
           expectedActiveVersion: state.activeVersion?.version ?? null,
         })
         addAudit(`发布测试执行配置 V${version.version}`)
-        notify(`测试执行配置 V${version.version} 已发布，Worker 将在下一次配置轮询时生效。`)
+        notify(
+          `测试执行配置 V${version.version} 已发布，供调度器读取；正常情况下约 5 秒刷新，尚不代表所有 Worker 已应用。`,
+        )
       } else {
         const base = state.draft ?? state.activeVersion
         await saveExecutionInfrastructureDraft({
@@ -94,12 +98,12 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
   return (
     <div className="settings-form">
       <FormSection
-        title="当前生效配置"
-        desc="Worker 读取后端有效配置；已发布配置优先，其次兼容旧环境变量，最后使用后端默认值。"
+        title="已发布配置与兼容回退"
+        desc="展示后端解析的已发布配置或兼容回退值，不代表所有 Worker 已确认应用；下方输入框编辑的是草稿。"
       >
-        <FormRow label="当前生效值" help="">
+        <FormRow label="供调度器读取的值" help="">
           <span>
-            Runner {effective.runnerConcurrency} · Agent {effective.agentConcurrency}
+            Runner {effective.runnerConcurrency} · AI 任务 {effective.agentConcurrency}
           </span>
         </FormRow>
         <FormRow label="当前配置来源" help="">
@@ -124,10 +128,13 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
         </FormRow>
       </FormSection>
       <FormSection
-        title="并发控制"
+        title="AI 与 Runner 资源并发"
         desc={`草稿配置${state.draft ? ` · 修订 ${state.draft.revision} · ${state.draft.updatedBy}` : ' · 尚未保存'}${dirty ? ' · 有未保存更改' : ''}`}
       >
-        <FormRow label="Runner 最大并发数" help="控制同时真实执行的 Playwright 任务数。">
+        <FormRow
+          label="Runner 最大并发数"
+          help="控制真实 Playwright 执行及受管认证准备浏览器的并发数，与 AI 配额独立。"
+        >
           <input
             aria-label="Runner 最大并发数"
             type="number"
@@ -139,9 +146,9 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
             onChange={event => setValues(value => ({ ...value!, runnerConcurrency: Number(event.target.value) }))}
           />
         </FormRow>
-        <FormRow label="Agent 最大并发数" help="控制脚本生成、页面探索、脚本修复和失败分析的并发数。">
+        <FormRow label="AI 任务最大并发数" help="同一进程中接入共享配额的 AI 操作共用容量，不同类型任务可能互相等待。">
           <input
-            aria-label="Agent 最大并发数"
+            aria-label="AI 任务最大并发数"
             type="number"
             min={AGENT_CONCURRENCY_RANGE.min}
             max={AGENT_CONCURRENCY_RANGE.max}
@@ -152,9 +159,25 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
           />
         </FormRow>
         <p className="readonly-notice">
-          Runner 范围 {RUNNER_CONCURRENCY_RANGE.min}～{RUNNER_CONCURRENCY_RANGE.max}，Agent 范围{' '}
-          {AGENT_CONCURRENCY_RANGE.min}～{AGENT_CONCURRENCY_RANGE.max}
-          。调低并发不会终止已经开始的任务；调高并发后允许调度更多新任务。并发配置只影响调度速度，不影响测试结果和业务事实。
+          Runner 默认 {DEFAULT_RUNNER_CONCURRENCY}，范围 {RUNNER_CONCURRENCY_RANGE.min}～{RUNNER_CONCURRENCY_RANGE.max}
+          ； AI 默认 {DEFAULT_AGENT_CONCURRENCY}，范围 {AGENT_CONCURRENCY_RANGE.min}～{AGENT_CONCURRENCY_RANGE.max}
+          。AI 配额覆盖脚本生成、受控页面探索、脚本修复、失败诊断，以及需求分析、测试设计、评审与会话压缩、知识库
+          Embedding/Reranker 模型调用与配置测试、模型探测。
+          配额限制受管操作的并发数，不等同于模型服务商的请求速率限制；确定性 Binding、Hash、依赖与环境检查不占 AI 配额。
+        </p>
+        <p className="readonly-notice">
+          保存草稿不生效，发布后供调度器读取。Worker 正常情况下约 5 秒刷新；实际资源入口按需读取，间隔至少 5
+          秒，读取失败保留最近有效值。 调低配额不强制终止已经运行的任务，后续申请按新上限授予。
+        </p>
+        <p className="readonly-notice">
+          数据库明确发布的并发配置优先。没有明确发布值时，旧 SMARTHUB_TEST_EXECUTION_CONCURRENCY 仅兼容映射
+          Runner（1～8），无效时使用后端默认值；AI 默认 1。 不提供 SMARTHUB_RUNNER_CONCURRENCY 或
+          SMARTHUB_AGENT_CONCURRENCY 环境变量。
+        </p>
+        <p className="readonly-notice">
+          单进程配额：只在当前进程内共享，不是整个部署的集群全局限制。每个 Worker 进程拥有独立配额，总容量会叠加；API 与
+          Worker 分进程时也不共享内存配额。 跨 Worker 全局配额及跨进程 Workspace 互斥尚未实现，同一 Workspace 应由一个
+          Worker 进程管理。
         </p>
         {!valid && <p role="alert">并发数必须是范围内的整数。</p>}
         {error && <p role="alert">{error}</p>}
