@@ -12,6 +12,7 @@ import type {
   RunnerExecutionEvent,
 } from '../domain/test-execution-types.js'
 import { canonicalSha256 } from '../application/canonical-json.js'
+import type { ExecutionResourceGovernor } from '../application/execution-resource-governor.js'
 import type { RuntimeApiAuthorization } from '../application/test-execution-auth-session.js'
 import {
   assertExecutionPackageIntegrity,
@@ -32,6 +33,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
     private readonly timeoutMs = 120_000,
     private readonly secretResolver: ExecutionEnvironmentSecretResolver = emptySecretResolver,
     playwright?: LocalPlaywrightInstallation,
+    private readonly resources?: ExecutionResourceGovernor,
   ) {
     this.playwright = playwright ?? localPlaywrightInstallation()
     this.value = {
@@ -61,6 +63,13 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
   }
 
   async execute(input: Parameters<PlaywrightRunner['execute']>[0], signal: AbortSignal): Promise<SandboxExecutionResult> {
+    if (signal.aborted) return cancelled()
+    return this.resources
+      ? this.resources.withResource('runner', signal, () => this.executeWithPermit(input, signal))
+      : this.executeWithPermit(input, signal)
+  }
+
+  private async executeWithPermit(input: Parameters<PlaywrightRunner['execute']>[0], signal: AbortSignal): Promise<SandboxExecutionResult> {
     if (!input.workspace) throw new Error('TEST_EXECUTION_LOCAL_WORKSPACE_REQUIRED')
     if (this.playwright.error) throw new Error(this.playwright.error)
     if (canonicalSha256(input.runner) !== canonicalSha256(this.value)) throw new Error('TEST_EXECUTION_RUNNER_SNAPSHOT_DRIFT')
@@ -155,6 +164,9 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         '--grep',
         `${escapeRegExp(input.workspace.entrySymbol)}$`,
       ]
+      // Auth/workspace preparation awaits I/O. Do not launch after a stop that
+      // arrived during preparation, even when there is no resource governor.
+      if (signal.aborted) return cancelled(Date.now() - started)
       const child = spawn(process.execPath, args, {
         cwd: executionRoot,
         shell: false,
@@ -177,9 +189,18 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
       const terminate = () => child.kill('SIGTERM')
       signal.addEventListener('abort', terminate, { once: true })
       const timeout = setTimeout(() => child.kill('SIGKILL'), this.timeoutMs)
-      const exitCode = await new Promise<number | null>(resolveExit => child.once('close', resolveExit))
-      clearTimeout(timeout)
-      signal.removeEventListener('abort', terminate)
+      let exitCode: number | null
+      try {
+        exitCode = await new Promise<number | null>((resolveExit, rejectExit) => {
+          child.once('close', resolveExit)
+          child.once('error', rejectExit)
+          // Covers a stop between the final check and listener registration.
+          if (signal.aborted) terminate()
+        })
+      } finally {
+        clearTimeout(timeout)
+        signal.removeEventListener('abort', terminate)
+      }
       const sensitiveValues = [
         ...Object.values(secretEnvironment),
         ...(runtimeApiAuthorization

@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { ExecutionResourceGovernor } from './application/execution-resource-governor.js'
 import { resolve } from 'node:path'
 import { KnowledgeService } from './application/knowledge-service.js'
 import { ModelService } from './application/model-service.js'
@@ -55,10 +56,11 @@ const databaseUrl = process.env.SMARTHUB_FORCE_JSON_STORE === 'true' ? undefined
 if (production && !databaseUrl) throw new Error('生产模式必须配置 DATABASE_URL')
 
 export const localModelRuntime = new LocalModelRuntime(modelRoot)
+export const executionResources = new ExecutionResourceGovernor()
 export const stateStore: StateStore = databaseUrl ? new PostgresStore(databaseUrl) : new JsonStore(dataFile)
 export const rawDocumentStore = new RawDocumentStore(documentRoot)
-export const service = new KnowledgeService(stateStore, rawDocumentStore, localModelRuntime)
-export const modelService = new ModelService(stateStore)
+export const service = new KnowledgeService(stateStore, rawDocumentStore, localModelRuntime, undefined, executionResources)
+export const modelService = new ModelService(stateStore, executionResources)
 export const skillPackageStore = new SkillPackageStore(skillRoot)
 export const aiResourceService = new AiResourceService(stateStore, skillPackageStore)
 export const agentConfigurationService = new AgentConfigurationService(stateStore)
@@ -73,6 +75,7 @@ export const piAgentRuntime = new PiAgentRuntimeAdapter(
   service,
   piSessionRuntime,
   contextManager,
+  executionResources,
 )
 export const requirementAnalysisService = new RequirementAnalysisService(stateStore, piAgentRuntime, agentConfigurationService)
 export const testDesignRuntime = new PiTestDesignRuntimeAdapter(stateStore, piAgentRuntime, agentConfigurationService)
@@ -91,6 +94,7 @@ export const usingPostgres = stateStore instanceof PostgresStore
 
 export const testExecutionInfrastructureConfigurationService =
   new TestExecutionInfrastructureConfigurationService(stateStore)
+executionResources.setConfigurationReader(() => testExecutionInfrastructureConfigurationService.resolveConcurrency())
 export const executionEnvironmentCatalog = new LocalBaseUrlExecutionEnvironmentResolver()
 export const executionArtifactStore =
   new LocalExecutionArtifactStore(executionArtifactRoot)
@@ -109,7 +113,7 @@ export const testExecutionWorkspaceProvider = testExecutionStore
       executionArtifactStore,
     )
   : undefined
-export const playwrightRunner: PlaywrightRunner = new LocalWorkspaceRunner(executionArtifactStore)
+export const playwrightRunner: PlaywrightRunner = new LocalWorkspaceRunner(executionArtifactStore, undefined, undefined, undefined, executionResources)
 export const playwrightCliAdapter = new PlaywrightCliAdapter()
 export const uiExecutionAgent = new UIExecutionAgent(playwrightCliAdapter)
 export const playwrightBrowserTools = new PlaywrightBrowserToolGateway(playwrightCliAdapter)
@@ -129,6 +133,7 @@ export const testExecutionService =
         uiExecutionAgent,
         testExecutionKnowledgeResolver,
         playwrightBrowserTools,
+        executionResources,
       )
     : undefined
 export const testReportService = testExecutionStore

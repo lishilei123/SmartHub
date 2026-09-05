@@ -24,14 +24,17 @@ export type TestExecutionInfrastructureConfigurationInput = {
 }
 
 export class TestExecutionInfrastructureConfigurationService {
-  constructor(private readonly store: StateStore) {}
+  constructor(
+    private readonly store: StateStore,
+    private readonly environment: Record<string, string | undefined> = process.env,
+  ) {}
 
   async get() {
     const versions = await this.listVersions()
     return {
       activeVersion: structuredClone(versions.find(item => item.status === 'active') ?? null),
       draft: await this.readDraft(),
-      effectiveConcurrency: resolveConcurrency(versions.find(item => item.status === 'active') ?? null),
+      effectiveConcurrency: resolveConcurrency(versions.find(item => item.status === 'active') ?? null, this.environment),
       versions: versions.map(versionSummary),
     }
   }
@@ -43,16 +46,16 @@ export class TestExecutionInfrastructureConfigurationService {
   }
 
   async resolveConcurrency(): Promise<ResolvedExecutionConcurrency> {
-    return resolveConcurrency(await this.resolveActive())
+    return resolveConcurrency(await this.resolveActive(), this.environment)
   }
 
   async saveDraft(
     input: TestExecutionInfrastructureConfigurationInput & { expectedDraftRevision?: number | null },
     updatedBy: string,
   ) {
-    const normalized = normalizeInput(input)
     return this.write(state => {
       const current = state.testExecutionInfrastructureConfigurationVersions.find(item => item.status === 'active')
+      const normalized = normalizeInput(input, resolveConcurrency(current ?? null, this.environment))
       const previous = state.testExecutionInfrastructureConfigurationDraft
       if ((current?.version ?? null) !== (input.expectedActiveVersion ?? null))
         throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_VERSION_CONFLICT')
@@ -106,9 +109,9 @@ export class TestExecutionInfrastructureConfigurationService {
     input: TestExecutionInfrastructureConfigurationInput,
     publishedBy: string,
   ) {
-    const normalized = normalizeInput(input)
     const current =
       state.testExecutionInfrastructureConfigurationVersions.find(item => item.status === 'active') ?? null
+    const normalized = normalizeInput(input, resolveConcurrency(current, this.environment))
     const expected = input.expectedActiveVersion ?? null
     if ((current?.version ?? null) !== expected) {
       throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_VERSION_CONFLICT')
@@ -159,7 +162,7 @@ export class TestExecutionInfrastructureConfigurationService {
   }
 }
 
-function normalizeInput(input: TestExecutionInfrastructureConfigurationInput) {
+function normalizeInput(input: TestExecutionInfrastructureConfigurationInput, fallback: ExecutionConcurrencyConfiguration) {
   if (!input || typeof input !== 'object' || !Array.isArray(input.environments)) {
     throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_INVALID')
   }
@@ -169,17 +172,23 @@ function normalizeInput(input: TestExecutionInfrastructureConfigurationInput) {
   const environments = catalog.exportProfiles()
   return {
     environments,
-    concurrency: normalizeExecutionConcurrency(input.concurrency),
+    concurrency: normalizeExecutionConcurrency(input.concurrency === undefined ? fallback : input.concurrency),
     ...(input.runner === undefined ? {} : { runner: normalizeRunner(input.runner) }),
   }
 }
 
 function resolveConcurrency(
   active: TestExecutionInfrastructureConfigurationVersion | null,
+  environment: Record<string, string | undefined>,
 ): ResolvedExecutionConcurrency {
+  // The old Worker used a shared execution capacity of 3 (range 1..8).
+  // Migrate that Runner capacity only when no explicit published value exists.
+  const legacy = Number(environment.SMARTHUB_TEST_EXECUTION_CONCURRENCY)
+  const useLegacy = active?.concurrency === undefined && Number.isInteger(legacy) && legacy >= 1 && legacy <= 8
+  const defaults = normalizeExecutionConcurrency()
   return {
-    ...normalizeExecutionConcurrency(active?.concurrency),
-    source: !active ? 'code_defaults' : active.concurrency ? 'published_configuration' : 'historical_defaults',
+    ...normalizeExecutionConcurrency(active?.concurrency === undefined ? (useLegacy ? { ...defaults, runnerConcurrency: legacy } : defaults) : active.concurrency),
+    source: active?.concurrency ? 'published_configuration' : useLegacy ? 'legacy_environment' : active ? 'historical_defaults' : 'code_defaults',
     version: active?.version ?? null,
     publishedAt: active?.createdAt ?? null,
     publishedBy: active?.publishedBy ?? null,

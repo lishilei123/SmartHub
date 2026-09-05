@@ -84,9 +84,10 @@ export class PiSessionRuntime {
     }
   }
 
-  async acquire(scope: PiSessionScope): Promise<PiSessionLease> {
-    const unlock = await this.lock(scope.key)
+  async acquire(scope: PiSessionScope, signal?: AbortSignal): Promise<PiSessionLease> {
+    const unlock = await this.lock(scope.key, signal)
     try {
+      signal?.throwIfAborted()
       if (scope.parentKey) this.manager(parentScope(scope.parentKey))
       return this.lease(scope, unlock)
     } catch (error) {
@@ -209,7 +210,8 @@ export class PiSessionRuntime {
     return manager
   }
 
-  private async lock(key: string) {
+  private async lock(key: string, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const current = this.locks.get(key) ?? { tail: Promise.resolve(), waiting: 0 }
     const previous = current.tail
     let releaseGate!: () => void
@@ -217,14 +219,34 @@ export class PiSessionRuntime {
     current.tail = previous.then(() => gate)
     current.waiting += 1
     this.locks.set(key, current)
-    await previous
     let released = false
-    return () => {
+    const release = () => {
       if (released) return
       released = true
       current.waiting -= 1
       releaseGate()
       if (current.waiting === 0 && this.locks.get(key) === current) this.locks.delete(key)
+    }
+    try {
+      await new Promise<void>((resolveReady, rejectReady) => {
+        const abort = () => { signal?.removeEventListener('abort', abort); rejectReady(signal?.reason) }
+        signal?.addEventListener('abort', abort, { once: true })
+        void previous.then(() => {
+          signal?.removeEventListener('abort', abort)
+          if (signal?.aborted) rejectReady(signal.reason)
+          else resolveReady()
+        }, error => {
+          signal?.removeEventListener('abort', abort)
+          rejectReady(error)
+        })
+        if (signal?.aborted) abort()
+      })
+      return release
+    } catch (error) {
+      // Open only this waiter's gate. Its tail still follows `previous`, so a
+      // cancelled middle waiter cannot let successors overlap the active owner.
+      release()
+      throw error
     }
   }
 }

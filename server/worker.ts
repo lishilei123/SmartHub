@@ -1,5 +1,7 @@
+import { WorkerStoppedError, workerStopReason, throwIfWorkerStopped, type LeaseRenewResult } from './domain/worker-stop.js'
 import { hostname } from 'node:os'
 import {
+  executionResources,
   requirementAnalysisService,
   service,
   stateStore,
@@ -102,12 +104,12 @@ export async function processClaimedTestExecutionJob(input: {
     fencingToken: input.job.fencingToken,
   }
   const controller = new AbortController()
-  const abortForShutdown = () => controller.abort(input.shutdownSignal?.reason ?? new Error('TEST_EXECUTION_WORKER_SHUTDOWN'))
+  const abortForShutdown = () => controller.abort(new WorkerStoppedError('worker_shutdown', { cause: input.shutdownSignal?.reason }))
   input.shutdownSignal?.addEventListener('abort', abortForShutdown, { once: true })
   if (input.shutdownSignal?.aborted) abortForShutdown()
   input.activeControllers?.add(controller)
   const scheduled = startLeaseHeartbeat({
-    renew: () => input.store.heartbeatJob(input.job.id, lease, input.leaseMs),
+    renew: () => (input.store.renewJobLease?.(input.job.id, lease, input.leaseMs) ?? input.store.heartbeatJob(input.job.id, lease, input.leaseMs)),
     controller,
     leaseMs: input.leaseMs,
     label: `测试执行任务 ${input.job.id}`,
@@ -122,6 +124,8 @@ export async function processClaimedTestExecutionJob(input: {
       input.resourceClass,
       input.preparationOnly,
     )
+    throwIfWorkerStopped(controller.signal)
+    await scheduled.clear()
     if (input.resourceClass && processed && !['passed', 'failed', 'blocked', 'unsupported', 'waiting_manual', 'cancelled'].includes(processed.status)) {
       // Service already returned the lease at the durable phase boundary.
       return
@@ -145,7 +149,9 @@ export async function processClaimedTestExecutionJob(input: {
     await bestEffortRunCleanup(input.service, input.job.runId)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (controller.signal.aborted) {
+    const reason = workerStopReason(controller.signal)
+    if (reason === 'lease_lost') return
+    if (reason === 'user_cancelled') {
       const finished = await input.store.finishJob(
         input.job.id,
         lease,
@@ -154,6 +160,8 @@ export async function processClaimedTestExecutionJob(input: {
       )
       if (finished) await bestEffortRunCleanup(input.service, input.job.runId)
     } else {
+      // Exhausted infrastructure stops await recovery; releaseJob would block the Task.
+      if (reason && input.job.attempts >= input.job.maxAttempts) return
       const delay = Math.min(
         60_000,
         1_000 * 2 ** Math.max(0, input.job.attempts - 1),
@@ -169,7 +177,7 @@ export async function processClaimedTestExecutionJob(input: {
       }
     }
   } finally {
-    scheduled.clear()
+    await scheduled.clear()
     input.shutdownSignal?.removeEventListener('abort', abortForShutdown)
     input.activeControllers?.delete(controller)
   }
@@ -197,49 +205,73 @@ function defaultHeartbeatScheduler(
   return { clear: () => clearInterval(timer) }
 }
 
-function startLeaseHeartbeat(input: {
-  renew: () => Promise<boolean> | undefined
+export function startLeaseHeartbeat(input: {
+  renew: () => Promise<boolean | LeaseRenewResult> | undefined
   controller: AbortController
   leaseMs: number
   label: string
-  leaseLostMessage: string
+  leaseLostMessage?: string
   schedule?: (heartbeat: () => Promise<void>, intervalMs: number) => { clear(): void }
 }) {
   let stopped = false
-  let inFlight = false
+  let inFlight: Promise<void> | undefined
   let scheduled: { clear(): void } | undefined
-  const clear = () => {
+  const stop = () => {
     stopped = true
     scheduled?.clear()
-    input.controller.signal.removeEventListener('abort', clear)
+    input.controller.signal.removeEventListener('abort', stop)
   }
-  const heartbeat = async () => {
-    if (stopped || inFlight || input.controller.signal.aborted) return
-    inFlight = true
-    try {
-      const renewed = await input.renew()
-      if (!stopped && !renewed) input.controller.abort(new Error(input.leaseLostMessage))
-    } catch (error) {
-      if (!stopped) {
-        const cause = error instanceof Error ? error : new Error(String(error))
-        console.error(`${input.label} 心跳失败：`, cause.message)
-        // Fail closed: without a successful renewal, stop model/runner work.
-        input.controller.abort(cause)
-      }
-    } finally {
-      inFlight = false
-    }
+  const heartbeat = () => {
+    if (stopped || input.controller.signal.aborted) return Promise.resolve()
+    if (inFlight) return inFlight
+    inFlight = (async () => {
+      try {
+        const result = await input.renew()
+        const status = typeof result === 'object' ? result.status : result ? 'renewed' : 'lease_lost'
+        if (!stopped && status !== 'renewed') {
+          input.controller.abort(new WorkerStoppedError(status === 'cancel_requested' ? 'user_cancelled' : 'lease_lost'))
+        }
+      } catch (cause) {
+        if (!stopped) {
+          console.error(`${input.label} 心跳失败：`, cause instanceof Error ? cause.message : cause)
+          input.controller.abort(new WorkerStoppedError('heartbeat_unavailable', { cause }))
+        }
+      } finally { inFlight = undefined }
+    })()
+    return inFlight
   }
-  input.controller.signal.addEventListener('abort', clear, { once: true })
-  if (input.controller.signal.aborted) clear()
+  input.controller.signal.addEventListener('abort', stop, { once: true })
+  if (input.controller.signal.aborted) stop()
   else {
-    scheduled = (input.schedule ?? defaultHeartbeatScheduler)(
-      heartbeat,
-      Math.max(1_000, Math.floor(input.leaseMs / 3)),
-    )
+    scheduled = (input.schedule ?? defaultHeartbeatScheduler)(heartbeat, Math.max(1_000, Math.floor(input.leaseMs / 3)))
     if (stopped) scheduled.clear()
   }
-  return { clear }
+  return { async clear() { stop(); await inFlight } }
+}
+
+/** Shared finalization boundary for workflow workers. Lease loss never writes. */
+export async function settleStoppedWork(signal: AbortSignal, actions: {
+  cancel(): Promise<unknown> | undefined
+  release(): Promise<unknown> | undefined
+}) {
+  const reason = workerStopReason(signal)
+  if (!reason) return false
+  if (reason === 'lease_lost') return true
+  try {
+    if (reason === 'user_cancelled') await actions.cancel()
+    else await actions.release()
+  } catch (error) {
+    // Ownership cannot be established while infrastructure is unavailable.
+    console.error('Worker 停止后无法安全释放，等待租约恢复：', error instanceof Error ? error.message : error)
+  }
+  return true
+}
+
+function workflowController() {
+  const controller = new AbortController()
+  if (shutdown.signal.aborted) controller.abort(new WorkerStoppedError('worker_shutdown'))
+  activeControllers.add(controller)
+  return controller
 }
 
 async function processKnowledgeOne() {
@@ -252,21 +284,25 @@ async function processKnowledgeOne() {
   }
   if (!task) return false
   const lease: TaskLease = { workerId, runToken: task.runToken! }
-  const controller = new AbortController()
-  activeControllers.add(controller)
+  const controller = workflowController()
   const heartbeat = startLeaseHeartbeat({
-    renew: () => stateStore.heartbeatTask?.(task.id, lease, leaseMs),
+    renew: () => (stateStore.renewTaskLease?.(task.id, lease, leaseMs) ?? stateStore.heartbeatTask?.(task.id, lease, leaseMs)),
     controller, leaseMs,
     label: `知识库任务 ${task.id}`,
     leaseLostMessage: '任务租约已失效',
   })
   try {
     const completed = await service.processTask(task.id, lease, controller.signal)
+    throwIfWorkerStopped(controller.signal)
     if (completed?.status === 'failed' && !controller.signal.aborted) await retryFailedTask(task, lease, completed.error)
   } catch (error) {
-    if (!controller.signal.aborted) await retryFailedTask(task, lease, error instanceof Error ? error.message : String(error))
+    const stopped = await settleStoppedWork(controller.signal, {
+      cancel: () => undefined, // Knowledge cancellation is persisted by its Service.
+      release: () => stateStore.releaseTask?.(task.id, lease, retryDelay(task.attempts)),
+    })
+    if (!stopped) await retryFailedTask(task, lease, error instanceof Error ? error.message : String(error))
   } finally {
-    heartbeat.clear()
+    await heartbeat.clear()
     activeControllers.delete(controller)
   }
   return true
@@ -277,16 +313,29 @@ async function processTestDesignOne() {
   try { job = await stateStore.claimTestDesignJob?.(workerId, leaseMs) }
   catch (error) { console.error('测试设计任务领取失败：', error instanceof Error ? error.message : error); return false }
   if (!job) return false
-  const lease: TaskLease = { workerId, runToken: job.runToken! }; const controller = new AbortController(); activeControllers.add(controller)
+  const lease: TaskLease = { workerId, runToken: job.runToken! }; const controller = workflowController()
   const heartbeat = startLeaseHeartbeat({
-    renew: () => stateStore.heartbeatTestDesignJob?.(job.nodeRunId, lease, leaseMs),
+    renew: () => (stateStore.renewTestDesignJobLease?.(job.nodeRunId, lease, leaseMs) ?? stateStore.heartbeatTestDesignJob?.(job.nodeRunId, lease, leaseMs)),
     controller, leaseMs,
     label: `测试设计节点任务 ${job.nodeRunId}`,
     leaseLostMessage: '测试设计 Worker 租约已失效或运行已取消',
   })
-  try { await testDesignService.processPreparedNode(job.runId, job.nodeRunId, lease, controller.signal); await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'succeeded') }
-  catch (error) { const message = error instanceof Error ? error.message : String(error); if (controller.signal.aborted) await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'cancelled', message); else if (job.attempts < job.maxAttempts && /^(MODEL_|TEST_DESIGN_RUN_FAILED|MODEL_PROVIDER)/u.test(message)) await stateStore.releaseTestDesignJob?.(job.nodeRunId, lease, Math.min(60_000, 1_000 * 2 ** Math.max(0, job.attempts - 1)), message); else await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'failed', message) }
-  finally { heartbeat.clear(); activeControllers.delete(controller) }
+  try {
+    await testDesignService.processPreparedNode(job.runId, job.nodeRunId, lease, controller.signal)
+    throwIfWorkerStopped(controller.signal)
+    await heartbeat.clear()
+    await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'succeeded')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const stopped = await settleStoppedWork(controller.signal, {
+      cancel: () => stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'cancelled', message),
+      release: () => stateStore.releaseTestDesignJob?.(job.nodeRunId, lease, retryDelay(job.attempts), message),
+    })
+    if (!stopped) {
+      if (job.attempts < job.maxAttempts && /^(MODEL_|TEST_DESIGN_RUN_FAILED|MODEL_PROVIDER)/u.test(message)) await stateStore.releaseTestDesignJob?.(job.nodeRunId, lease, retryDelay(job.attempts), message)
+      else await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'failed', message)
+    }
+  } finally { await heartbeat.clear(); activeControllers.delete(controller) }
   return true
 }
 
@@ -301,26 +350,29 @@ async function processReviewOne() {
   }
   if (!job) return false
   const lease: TaskLease = { workerId, runToken: job.runToken! }
-  const controller = new AbortController()
-  activeControllers.add(controller)
+  const controller = workflowController()
   const heartbeat = startLeaseHeartbeat({
-    renew: () => stateStore.heartbeatReviewJob?.(job.runId, lease, leaseMs),
+    renew: () => (stateStore.renewReviewJobLease?.(job.runId, lease, leaseMs) ?? stateStore.heartbeatReviewJob?.(job.runId, lease, leaseMs)),
     controller, leaseMs,
     label: `需求分析任务 ${job.runId}`,
     leaseLostMessage: '需求分析 Worker 租约已失效或运行已取消',
   })
   try {
     await requirementAnalysisService.processPreparedRun(job.runId, lease, controller.signal, job.attempts, job.maxAttempts)
+    throwIfWorkerStopped(controller.signal)
+    await heartbeat.clear()
     await stateStore.finishReviewJob?.(job.runId, lease, 'succeeded')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (controller.signal.aborted) {
-      await stateStore.finishReviewJob?.(job.runId, lease, 'cancelled', message)
-    } else {
+    const stopped = await settleStoppedWork(controller.signal, {
+      cancel: () => stateStore.finishReviewJob?.(job.runId, lease, 'cancelled', message),
+      release: () => stateStore.releaseReviewJob?.(job.runId, lease, retryDelay(job.attempts), message),
+    })
+    if (!stopped) {
       await retryFailedReviewJob(job, lease, message)
     }
   } finally {
-    heartbeat.clear()
+    await heartbeat.clear()
     activeControllers.delete(controller)
   }
   return true
@@ -341,6 +393,8 @@ async function retryFailedReviewJob(claimed: { runId: string; attempts: number; 
   if (!released) console.error(`需求分析任务 ${claimed.runId} 无法重新入队：${error}`)
   else console.error(`需求分析任务 ${claimed.runId} 将在 ${delay}ms 后重试：${error}`)
 }
+
+function retryDelay(attempts: number) { return Math.min(60_000, 1_000 * 2 ** Math.max(0, attempts - 1)) }
 
 function isRetryableReviewJobError(error: string) {
   return /^(?:MODEL_RATE_LIMITED|MODEL_PROVIDER_UNAVAILABLE|MODEL_REQUEST_TIMEOUT):/u.test(error)
@@ -399,6 +453,7 @@ async function runExecutionResources() {
     while (!stopping) {
       if (Date.now() >= nextRefresh) {
         await scheduler.refresh(() => testExecutionInfrastructureConfigurationService.resolveConcurrency())
+        executionResources.configure(scheduler.configuration)
         const configuration = JSON.stringify(scheduler.configuration)
         if (configuration !== lastConfiguration) {
           console.log(`测试执行并发已生效：Runner ${scheduler.configuration.runnerConcurrency}，Agent ${scheduler.configuration.agentConcurrency}（当前 Worker）`)
@@ -485,8 +540,8 @@ async function waitForWork(label: string) {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => {
   stopping = true
-  shutdown.abort()
-  activeControllers.forEach(controller => controller.abort(new Error(`Worker 收到 ${signal}，停止任务执行`)))
+  shutdown.abort(new WorkerStoppedError('worker_shutdown'))
+  activeControllers.forEach(controller => controller.abort(new WorkerStoppedError('worker_shutdown')))
 })
 
 if (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.js')) {

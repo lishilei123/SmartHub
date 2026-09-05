@@ -1,3 +1,4 @@
+import { WorkerStoppedError, workerStopReason, throwIfWorkerStopped } from '../domain/worker-stop.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { AgentDefinitionResolver, AgentExecutionEvent, AgentExecutionInput, AgentExecutionOutput, AgentRuntime, RequirementInputPlan, ReviewRunSnapshot } from '../domain/agent-types.js'
 import type { AgentConfigurationVersion, AgentExecutionRecord, DatabaseState, ReviewRun } from '../domain/types.js'
@@ -252,7 +253,7 @@ export class RequirementAnalysisService {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
       if (current.status === 'running') Object.assign(current, { status: 'cancelled', step: 'cancelled', finishedAt: new Date().toISOString(), error: '用户已取消本次分析' } satisfies Partial<ReviewRun>)
     })
-    this.activeRuns.get(runId)?.abort(new Error('AGENT_CANCELLED_BY_USER'))
+    this.activeRuns.get(runId)?.abort(new WorkerStoppedError('user_cancelled'))
     return this.get(runId)
   }
 
@@ -381,6 +382,7 @@ export class RequirementAnalysisService {
   }
 
   async processPreparedRun(runId: string, lease?: TaskLease, signal = new AbortController().signal, infrastructureAttempt = 1, maxInfrastructureAttempts = 1) {
+    throwIfWorkerStopped(signal)
     await this.beginExecutionAttempt(runId, lease, infrastructureAttempt, maxInfrastructureAttempts)
     const state = await this.store.snapshot()
     const run = required(state.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
@@ -395,6 +397,7 @@ export class RequirementAnalysisService {
       current.step = 'analyzing_requirements'
       current.progress = 10
     })
+    throwIfWorkerStopped(signal)
     return this.executeAnalysis({ run, snapshot: run.snapshot, requirementInputPlan: plan, models, configuration, signal, lease, retryable: infrastructureAttempt < maxInfrastructureAttempts })
   }
 
@@ -470,6 +473,7 @@ export class RequirementAnalysisService {
             },
           },
           onEvent: async event => {
+            throwIfWorkerStopped(input.signal)
             events.push(event)
             if (shouldCheckpointExecution(event)) await this.saveExecutionProgress(input.run.id, events, input.lease)
           },
@@ -483,7 +487,9 @@ export class RequirementAnalysisService {
       const execution = { ...executionRecord(output), workflowStage: 'analysis' as const }
       const finishedAt = new Date().toISOString()
       const pendingBlockingClarifications = result.clarifications.filter(item => item.blocking && item.status === 'pending')
+      throwIfWorkerStopped(input.signal)
       await this.reviewTransaction(input.run.id, input.lease, draft => {
+        throwIfWorkerStopped(input.signal)
         const current = required(draft.reviewRuns.find(item => item.id === input.run.id), '需求分析运行不存在')
         Object.assign(current, {
           status: pendingBlockingClarifications.length ? 'waiting_clarification' : 'succeeded',
@@ -506,6 +512,7 @@ export class RequirementAnalysisService {
       if (!pendingBlockingClarifications.length) await this.notifyRequirementReleaseReady(input.run.id)
       return required((await this.get(input.run.id)).response, '需求分析结果不存在')
     } catch (error) {
+      throwIfWorkerStopped(input.signal)
       const message = await this.failRun(input.run.id, error, input.signal, model, events, input.lease, input.retryable ?? false)
       throw new Error(message)
     }
@@ -540,10 +547,13 @@ export class RequirementAnalysisService {
     })
     input.snapshot.modelRef = modelRef
     try {
+      throwIfWorkerStopped(input.signal)
       const output = await this.runtime.execute(input.createInput(modelRef), input.signal)
+      throwIfWorkerStopped(input.signal)
       await this.finishModelAttempt(input.runId, attemptId, 'succeeded', undefined, input.lease)
       return output
     } catch (error) {
+      throwIfWorkerStopped(input.signal)
       const message = sanitizeRuntimeError(error, input.selection.source.baseUrl, input.selection.source.apiKey)
       await this.finishModelAttempt(input.runId, attemptId, input.signal.aborted ? 'cancelled' : 'failed', message, input.lease)
       throw error
@@ -562,7 +572,8 @@ export class RequirementAnalysisService {
 
   private async failRun(runId: string, error: unknown, signal: AbortSignal, failedModel: AgentModelSelection, events: AgentExecutionEvent[], lease?: TaskLease, retryable = false) {
     const message = sanitizeRuntimeError(error, failedModel.source.baseUrl, failedModel.source.apiKey)
-    const cancelled = /AGENT_CANCELLED_BY_USER|用户已取消|客户端已中断/u.test(message)
+    throwIfWorkerStopped(signal)
+    const cancelled = workerStopReason(signal) === 'user_cancelled'
     await this.reviewTransaction(runId, lease, draft => {
       const current = required(draft.reviewRuns.find(item => item.id === runId), '需求分析运行不存在')
       Object.assign(current, retryable && !cancelled

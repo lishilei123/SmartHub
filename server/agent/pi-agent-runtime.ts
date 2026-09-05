@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import type { ExecutionResourceGovernor } from '../application/execution-resource-governor.js'
 import { createHash } from 'node:crypto'
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from '@earendil-works/pi-agent-core'
 import { createAssistantMessageEventStream, type Api, type AssistantMessage, type Model } from '@earendil-works/pi-ai'
@@ -91,6 +92,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     knowledge?: KnowledgeService,
     private readonly sessions = PiSessionRuntime.inMemory(),
     private readonly contexts = new ContextManager(),
+    private readonly resources?: ExecutionResourceGovernor,
   ) {
     this.knowledge = knowledge ?? new KnowledgeService(store)
   }
@@ -110,7 +112,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     this.contexts.queueCheckpoint(scopeKey, checkpoint)
   }
 
-  async compact(scopeKey: string) {
+  async compact(scopeKey: string, signal = AbortSignal.timeout(60_000)) {
+    return this.resources
+      ? this.resources.withResource('agent', signal, () => this.compactWithPermit(scopeKey, signal))
+      : this.compactWithPermit(scopeKey, signal)
+  }
+
+  private async compactWithPermit(scopeKey: string, signal: AbortSignal) {
+    signal.throwIfAborted()
     if (this.sessions.active(scopeKey)) throw new Error('PI_SESSION_BUSY')
     const binding = this.parentBindings.get(scopeKey)
       ?? await this.restoreParentBinding(scopeKey)
@@ -126,10 +135,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       }
       const model = this.bindings.model ?? createModel(modelInput)
       const providerStreamFn = this.bindings.streamFn ?? createStreamFn(modelInput)
-      const streamFn = configuredStreamFn(
+      const configured = configuredStreamFn(
         binding.model,
         providerStreamFn,
       )
+      const streamFn: StreamFn = (model, context, options) => {
+        signal.throwIfAborted()
+        return configured(model, context, { ...options, signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal })
+      }
       const sessionContext = lease.manager.buildSessionContext()
       const agent = new Agent({
         initialState: {
@@ -155,6 +168,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
         compactionStreamFn: streamFn,
       })
       await this.contexts.compact(session)
+      signal.throwIfAborted()
       const context = this.contexts.describe(session, binding.scope)
       this.sessions.rememberContext(scopeKey, context)
       return context
@@ -288,9 +302,16 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
   }
 
   async review(input: ReviewerExecutionInput, signal: AbortSignal): Promise<ReviewerExecutionOutput> {
+    signal.throwIfAborted()
+    return this.resources
+      ? this.resources.withResource('agent', signal, () => this.reviewWithPermit(input, signal))
+      : this.reviewWithPermit(input, signal)
+  }
+
+  private async reviewWithPermit(input: ReviewerExecutionInput, signal: AbortSignal): Promise<ReviewerExecutionOutput> {
     const parentScope = this.sessions.scopeFor(input)
     const scope = this.sessions.reviewerScope(parentScope, input.reviewerType, input.runId)
-    const lease = await this.sessions.acquire(scope)
+    const lease = await this.sessions.acquire(scope, signal)
     const manager = lease.manager
     const workspace = new RequirementDocumentWorkspace(this.store, input.snapshot)
     const readPaths = new Set<string>()
@@ -346,6 +367,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       signal.reason ?? new Error('REVIEWER_CANCELLED'),
     )
     signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) abort()
     let session: AgentSession | undefined
     let unbind: (() => void) | undefined
     let unsubscribe: (() => void) | undefined
@@ -453,6 +475,13 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
   }
 
   async execute(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
+    signal.throwIfAborted()
+    return this.resources
+      ? this.resources.withResource('agent', signal, () => this.executeWithPermit(input, signal))
+      : this.executeWithPermit(input, signal)
+  }
+
+  private async executeWithPermit(input: AgentExecutionInput, signal: AbortSignal): Promise<AgentExecutionOutput> {
     let candidate: AgentCandidateResult | Record<string, unknown> | undefined
     let lastSubmissionIssues: Array<{ path: string; message: string }> = []
     let activeSessionManager: SessionManager | undefined
@@ -542,6 +571,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     const deadline = setTimeout(() => controller.abort(new Error('AGENT_DEADLINE_EXCEEDED')), limits.deadlineMs)
     const abort = () => controller.abort(signal.reason ?? new Error('AGENT_CANCELLED'))
     signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) abort()
 
     const model = this.bindings.model ?? createModel(input)
     const providerStreamFn = this.bindings.streamFn ?? createStreamFn(input)
@@ -552,6 +582,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
     let resultSubmissionRequiredRecorded = false
     const resultSubmissionTurn = Math.max(1, limits.maxTurns - RESULT_SUBMISSION_TURN_RESERVE + 1)
     const streamFn: StreamFn = (streamModel, context, options) => {
+      controller.signal.throwIfAborted()
       const configuredOptions = {
         ...options,
         maxTokens: input.model.maxOutputTokens,
@@ -588,7 +619,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntime {
       const primaryToolNames = new Set(descriptors.map(descriptor => descriptor.piName))
       const primaryTools = tools.filter(tool => primaryToolNames.has(tool.name))
       let activeToolNames = new Set(primaryToolNames)
-      const lease = await this.sessions.acquire(sessionScope)
+      const lease = await this.sessions.acquire(sessionScope, controller.signal)
       releaseSession = lease.release
       const sessionManager = lease.manager
       activeSessionManager = sessionManager

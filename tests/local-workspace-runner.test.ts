@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
 import JSZip from 'jszip'
@@ -299,8 +299,9 @@ test('读取受保护任务 [TC_API_TASKS_001]', async ({ request }) => {
   }
 })
 
-test('LocalWorkspaceRunner 将同源 localStorage Bearer 分别桥接到 API 与隔离 UI request fixture', async () => {
+test('LocalWorkspaceRunner 将同源 localStorage Bearer 分别桥接到 API 与隔离 UI request fixture', async (t) => {
   const observedRequests: Array<{ path: string; authorization: string }> = []
+  const pageCookies: string[] = []
   const server = createServer((request, response) => {
     observedRequests.push({
       path: request.url ?? '',
@@ -310,12 +311,14 @@ test('LocalWorkspaceRunner 将同源 localStorage Bearer 分别桥接到 API 与
     if (request.url === '/api/tasks') {
       response.statusCode = authenticated ? 200 : 401
       response.setHeader('content-type', 'application/json')
+      response.setHeader('set-cookie', 'api_fixture_only=1; Path=/; HttpOnly')
       response.end(JSON.stringify({ authenticated }))
       return
     }
+    pageCookies.push(String(request.headers.cookie ?? ''))
     response.statusCode = 200
     response.setHeader('content-type', 'text/html; charset=utf-8')
-    response.end('<!doctype html><html lang="zh-CN"><body><main><h1>项目</h1><button>创建</button><p>authenticated</p></main></body></html>')
+    response.end('<!doctype html><html lang="zh-CN"><body><main><h1>项目</h1><button>创建</button><p id="auth"></p></main><script>document.getElementById("auth").textContent = localStorage.getItem("minitask_token") === "runtime-only-token" ? "authenticated" : "anonymous"</script></body></html>')
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -452,7 +455,15 @@ test('任务页面使用隔离 API 准备 [TC_UI_TASKS_001]', async ({ page, req
         apiAuthorizationMode: 'isolated_ui_request_fixture',
       },
     }, new AbortController().signal)
-    assert.equal(uiResult.status, 'passed')
+    const uiDiagnostics = JSON.stringify({
+      error: uiResult.error,
+      summary: uiResult.summary,
+      exitCode: uiResult.exitCode,
+      events: uiResult.events,
+      playwrightVersion: runner.snapshot().playwrightVersion,
+    }, null, 2)
+    if (uiResult.status !== 'passed') t.diagnostic(uiDiagnostics)
+    assert.equal(uiResult.status, 'passed', uiDiagnostics)
     assert.equal(uiResult.artifacts.filter(artifact => artifact.type === 'screenshot').length, 1)
     assert.equal(uiResult.events?.some(event =>
       event.type === 'screenshot'
@@ -501,10 +512,19 @@ test('任务页面终态证据 [TC_UI_TASKS_001]', async ({ page }) => {
       { path: '/', authorization: '' },
       { path: '/projects', authorization: '' },
     ])
+    assert.deepEqual(pageCookies, ['', ''], 'API request fixture cookies must not enter the UI BrowserContext')
+    assert.deepEqual((await readdir(workspaceParent)).filter(name => name.startsWith('.runtime-execution-')), [],
+      'Runner must remove every temporary execution workspace after browser exit')
   } finally {
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
-    await rm(workspaceParent, { recursive: true, force: true })
-    await rm(artifactRoot, { recursive: true, force: true })
+    try {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+      assert.equal(server.address(), null, 'HTTP test server must release its listening port')
+    } finally {
+      await Promise.all([
+        rm(workspaceParent, { recursive: true, force: true }),
+        rm(artifactRoot, { recursive: true, force: true }),
+      ])
+    }
   }
 })
 

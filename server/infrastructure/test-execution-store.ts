@@ -1,3 +1,4 @@
+import type { LeaseRenewResult } from '../domain/worker-stop.js'
 import { randomUUID } from 'node:crypto'
 import { EXECUTION_RESOURCE_TASK_STATUSES } from '../domain/test-execution-types.js'
 import { Pool, type PoolClient } from 'pg'
@@ -61,6 +62,7 @@ export interface CreateExecutionAggregateInput {
 }
 
 export interface TestExecutionTransaction {
+  assertLease?(): Promise<void>
   transitionTask(input: {
     taskId: string
     expectedStatus: ExecutionTaskStatus
@@ -183,6 +185,7 @@ export interface TestExecutionStore {
   getArtifact(artifactId: string): Promise<ExecutionArtifact | null>
   listArtifacts(taskId: string, attemptId?: string): Promise<ExecutionArtifact[]>
   claimJob(workerId: string, leaseMs: number, resourceClass?: ExecutionResourceClass, preparationOnly?: boolean): Promise<ExecutionJob | null>
+  renewJobLease?(jobId: string, lease: ExecutionJobLease, leaseMs: number): Promise<LeaseRenewResult>
   heartbeatJob(jobId: string, lease: ExecutionJobLease, leaseMs: number): Promise<boolean>
   yieldJob(jobId: string, lease: ExecutionJobLease): Promise<boolean>
   releaseJob(jobId: string, lease: ExecutionJobLease, retryDelayMs: number, error: string): Promise<boolean>
@@ -817,6 +820,15 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     }
   }
 
+  async renewJobLease(jobId: string, lease: ExecutionJobLease, leaseMs: number): Promise<LeaseRenewResult> {
+    if (await this.heartbeatJob(jobId, lease, leaseMs)) return { status: 'renewed' }
+    const result = await this.pool.query(`SELECT 1 FROM smarthub.test_execution_jobs
+      WHERE id=$1 AND lease_owner=$2 AND run_token=$3::uuid AND fencing_token=$4
+        AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NOT NULL`,
+    [jobId, lease.workerId, lease.runToken, lease.fencingToken])
+    return { status: result.rowCount === 1 ? 'cancel_requested' : 'lease_lost' }
+  }
+
   async heartbeatJob(jobId: string, lease: ExecutionJobLease, leaseMs: number) {
     const result = await this.pool.query(`
       UPDATE smarthub.test_execution_jobs
@@ -1259,7 +1271,11 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         await client.query('ROLLBACK')
         return null
       }
-      const result = await operation(transactionFor(client, scope, allowCancellation))
+      const transaction = transactionFor(client, scope, allowCancellation)
+      transaction.assertLease = async () => {
+        if (!await lockOwnedJob(client, jobId, lease, allowCancellation)) throw new Error('TEST_EXECUTION_LEASE_LOST')
+      }
+      const result = await operation(transaction)
       await recomputeRun(client, scope.runId)
       if (!await lockOwnedJob(client, jobId, lease, allowCancellation)) {
         await client.query('ROLLBACK')

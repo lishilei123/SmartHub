@@ -1,3 +1,5 @@
+import { throwIfWorkerStopped, throwIfInfrastructureStopped } from '../domain/worker-stop.js'
+import type { ExecutionResourceGovernor } from './execution-resource-governor.js'
 import { createHash } from 'node:crypto'
 import { executionResourceClass, type ExecutionResourceClass } from '../domain/test-execution-types.js'
 import type { InputDeliveryManifest, TestExecutionAgentWorkspaceProjection } from '../domain/agent-types.js'
@@ -148,6 +150,7 @@ export class TestExecutionService {
     private readonly uiExecutionAgent?: UIExecutionAgent,
     private readonly knowledgeResolver?: TestExecutionKnowledgeResolver,
     private readonly browserTools?: BrowserToolGateway,
+    private readonly resources?: ExecutionResourceGovernor,
   ) {}
 
   async readiness() {
@@ -684,7 +687,15 @@ export class TestExecutionService {
       }
       if (terminalTaskStatus(task.status)) {
         if (task.status === 'passed') {
-          await this.validatePassedWorkspaceBinding(run, task)
+          await requiredLeaseTransaction(this.store, job.id, lease, signal, async transaction => {
+            throwIfWorkerStopped(signal)
+            await this.validatePassedWorkspaceBinding(run, task, async () => {
+              throwIfWorkerStopped(signal)
+              await transaction.assertLease?.()
+              throwIfWorkerStopped(signal)
+            })
+            return true
+          })
         }
         return task
       }
@@ -815,7 +826,9 @@ export class TestExecutionService {
             ? await this.currentRevision(task)
             : undefined
           const cacheKey = taskScriptCacheKey(run, task)
+          throwIfWorkerStopped(signal)
           await this.persistScriptRevision({
+      signal,
             job, lease, run, task, expectedStatus: 'pending', executionPackage,
             scriptArtifact: {
               id: stableIdentity('test_execution_script_artifact', { cacheKey }), cacheKey,
@@ -847,10 +860,12 @@ export class TestExecutionService {
         )
       }
     }
+    throwIfWorkerStopped(signal)
     await requiredLeaseTransaction(
       this.store,
       job.id,
       lease,
+      signal,
       transaction => transaction.transitionTask({
         taskId: task.id,
         expectedStatus: 'pending',
@@ -902,6 +917,7 @@ export class TestExecutionService {
         }, task.input.method),
       }, signal),
     )
+    throwIfWorkerStopped(signal)
     assertAgentOutputSchema(output, 'test-script-generation/v1')
     const executionPackage = buildExecutionPackage({
       candidate: governedPackageCandidate(
@@ -914,7 +930,9 @@ export class TestExecutionService {
     })
     const createdAt = this.clock()
     const cacheKey = taskScriptCacheKey(run, task)
+    throwIfWorkerStopped(signal)
     await this.persistScriptRevision({
+      signal,
       job,
       lease,
       run,
@@ -956,10 +974,12 @@ export class TestExecutionService {
       .reverse()
       .find(item => item.scriptRevisionId === parent.id)
     if (!diagnosis || !automaticRepairAllowed(diagnosis, task.repairCount)) {
+      throwIfWorkerStopped(signal)
       await requiredLeaseTransaction(
         this.store,
         job.id,
         lease,
+        signal,
         transaction => transaction.transitionTask({
           taskId: task.id,
           expectedStatus: 'repairing',
@@ -1027,6 +1047,7 @@ export class TestExecutionService {
         validateCandidate: candidateValidator(build),
       }, signal),
     )
+    throwIfWorkerStopped(signal)
     assertAgentOutputSchema(output, 'script-repair/v1')
     const executionPackage = buildExecutionPackage({
       candidate: build(output.candidate),
@@ -1036,10 +1057,12 @@ export class TestExecutionService {
       baselineAssertions: parent.package.assertions,
     })
     if (executionPackage.manifest.packageSha256 === parent.package.packageSha256) {
+      throwIfWorkerStopped(signal)
       await requiredLeaseTransaction(
         this.store,
         job.id,
         lease,
+        signal,
         transaction => transaction.transitionTask({
           taskId: task.id,
           expectedStatus: 'repairing',
@@ -1056,7 +1079,9 @@ export class TestExecutionService {
       'TEST_EXECUTION_SCRIPT_ARTIFACT_NOT_FOUND',
       '当前 ScriptRevision 缺少 ScriptArtifact 身份',
     )
+    throwIfWorkerStopped(signal)
     await this.persistScriptRevision({
+      signal,
       job,
       lease,
       run,
@@ -1074,6 +1099,7 @@ export class TestExecutionService {
   }
 
   private async persistScriptRevision(input: {
+    signal: AbortSignal
     job: ExecutionJob
     lease: ExecutionJobLease
     run: ExecutionRun
@@ -1121,16 +1147,23 @@ export class TestExecutionService {
       path: item.path,
       artifactId: item.artifact.id,
     }))
+    throwIfWorkerStopped(input.signal)
     const revisionNumber = input.parent ? input.parent.revision + 1 : 1
     await requiredLeaseTransaction(
       this.store,
       input.job.id,
       input.lease,
+      input.signal,
       async transaction => {
+        throwIfWorkerStopped(input.signal)
         // Check and lock the lease before publishing provisional Workspace files.
         // Formal revisions remain immutable and only a real PASS validates Binding.
         if (input.workspaceBaselineFiles) {
-          await this.persistWorkspaceImplementation(input.run, input.task, input.executionPackage, 'needs_validation', input.workspaceBaselineFiles)
+          await this.persistWorkspaceImplementation(input.run, input.task, input.executionPackage, 'needs_validation', input.workspaceBaselineFiles, async () => {
+            throwIfWorkerStopped(input.signal)
+            await transaction.assertLease?.()
+            throwIfWorkerStopped(input.signal)
+          })
         }
         for (const artifact of new Map(storedFiles.map(item => [item.artifact.id, item.artifact])).values()) {
           await transaction.appendArtifact(artifact)
@@ -1158,6 +1191,7 @@ export class TestExecutionService {
           protectedAssertionSha256: input.executionPackage.manifest.protectedAssertionSha256,
           createdAt,
         }
+        throwIfWorkerStopped(input.signal)
         await transaction.appendScriptRevision(revision)
         return transaction.transitionTask({
           taskId: input.task.id,
@@ -1228,10 +1262,12 @@ export class TestExecutionService {
     } catch (error) {
       const code = error instanceof Error ? error.message : String(error)
       if (!authenticationPreparationFailure(code)) throw error
+      throwIfWorkerStopped(signal)
       await requiredLeaseTransaction(
         this.store,
         job.id,
         lease,
+        signal,
         transaction => transaction.transitionTask({
           taskId: task.id,
           expectedStatus: task.status as 'ready' | 'retrying',
@@ -1272,10 +1308,12 @@ export class TestExecutionService {
       status: 'running',
       startedAt,
     }
+    throwIfWorkerStopped(signal)
     await requiredLeaseTransaction(
       this.store,
       job.id,
       lease,
+      signal,
       async transaction => {
         await transaction.appendAttempt(attempt)
         return transaction.transitionTask({
@@ -1291,6 +1329,7 @@ export class TestExecutionService {
 
     let result
     try {
+      throwIfWorkerStopped(signal)
       result = await this.runner.execute({
         package: executionPackage,
         task: { ...task.input, taskId: task.id },
@@ -1301,6 +1340,7 @@ export class TestExecutionService {
         ...workspaceRunTarget,
       }, signal)
     } catch (error) {
+      throwIfInfrastructureStopped(signal)
       result = {
         status: signal.aborted ? 'cancelled' as const : 'infrastructure_error' as const,
         durationMs: elapsedMilliseconds(startedAt, this.clock()),
@@ -1310,6 +1350,7 @@ export class TestExecutionService {
       }
     }
 
+    throwIfInfrastructureStopped(signal)
     const finishedAt = this.clock()
     if (result.status === 'cancelled') {
       const cancelled = await this.store.transactionWithLease(
@@ -1343,10 +1384,12 @@ export class TestExecutionService {
     }
 
     if (result.status === 'infrastructure_error') {
+      throwIfWorkerStopped(signal)
       await requiredLeaseTransaction(
         this.store,
         job.id,
         lease,
+        signal,
         async transaction => {
           const artifacts = await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
           await transaction.appendExecutionEvents(normalizeRunnerExecutionEvents({ run, task, attemptId, result, artifacts, finishedAt }))
@@ -1374,10 +1417,12 @@ export class TestExecutionService {
     }
 
     const failedAttempts = revisionAttempts.filter(item => item.status === 'failed')
+    throwIfWorkerStopped(signal)
     await requiredLeaseTransaction(
       this.store,
       job.id,
       lease,
+      signal,
       async transaction => {
         const artifacts = await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
         const events = normalizeRunnerExecutionEvents({ run, task, attemptId, result, artifacts, finishedAt })
@@ -1495,6 +1540,7 @@ export class TestExecutionService {
     const diagnosticLogPaths = workspace.workspaceFiles
       .map(file => workspaceRelativePath(workspace, file.logicalPath))
       .filter(path => path.startsWith(terminalAttemptEvidenceRoot) && path.endsWith('.log'))
+    throwIfWorkerStopped(signal)
     const output = await this.agentRuntime.execute({
       stage: 'failure_diagnosis',
       run,
@@ -1508,6 +1554,7 @@ export class TestExecutionService {
       },
       validateCandidate: failureDiagnosisCandidateValidator(validate, diagnosticLogPaths),
     }, signal)
+    throwIfWorkerStopped(signal)
     assertAgentOutputSchema(output, 'failure-analysis/v1')
     const agentCandidate = validate(output.candidate)
     const candidate = adjudicateFailureDiagnosisCandidate(agentCandidate, task.input, events)
@@ -1543,10 +1590,12 @@ export class TestExecutionService {
       createdAt: this.clock(),
     }
     const next = diagnosisTaskStatus(diagnosis, task.repairCount)
+    throwIfWorkerStopped(signal)
     await requiredLeaseTransaction(
       this.store,
       job.id,
       lease,
+      signal,
       async transaction => {
         await transaction.appendDiagnosis(diagnosis)
         return transaction.transitionTask({
@@ -1707,6 +1756,7 @@ export class TestExecutionService {
     executionPackage: ExecutionPackage,
     bindingStatus: CaseExecutionBinding['bindingStatus'],
     baselineFiles: readonly Pick<ExecutionPackageFile, 'path' | 'contentSha256'>[],
+    beforePublish?: () => Promise<void>,
   ) {
     if (!this.executionWorkspace) return
     const entry = required(executionPackage.files.find(file => file.path === executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
@@ -1729,7 +1779,7 @@ export class TestExecutionService {
       validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
       createdAt: now,
       updatedAt: now,
-    }, executionPackage.files, baselineFiles)
+    }, executionPackage.files, baselineFiles, beforePublish)
   }
 
   private async workspaceRunTarget(
@@ -1760,13 +1810,17 @@ export class TestExecutionService {
       let access = await this.executionWorkspace.runtimeAuthStateAccess(scope, { writable: true })
       if (!access.loadPath) {
         if (!this.browserTools) throw new Error('TEST_EXECUTION_AUTH_STATE_PREPARATION_REQUIRED')
-        await this.browserTools.prepareAuthenticatedState({
+        const prepareAuthentication = () => this.browserTools!.prepareAuthenticatedState({
           run,
           task,
           stage: 'script_generation',
           authPolicy,
           authState: access,
         }, signal)
+        signal.throwIfAborted()
+        if (this.resources) await this.resources.withResource('runner', signal, prepareAuthentication)
+        else await prepareAuthentication()
+        signal.throwIfAborted()
         access = await this.executionWorkspace.runtimeAuthStateAccess(scope, { writable: false })
       }
       if (!access.loadPath) throw new Error('TEST_EXECUTION_AUTH_STATE_REQUIRED')
@@ -1803,8 +1857,9 @@ export class TestExecutionService {
     }
   }
 
-  private async validatePassedWorkspaceBinding(run: ExecutionRun, task: ExecutionTask) {
+  private async validatePassedWorkspaceBinding(run: ExecutionRun, task: ExecutionTask, beforePublish: () => Promise<void>) {
     if (!this.executionWorkspace) return
+    await beforePublish()
     const revision = await this.currentRevision(task)
     // A concurrent Run may already have published a newer candidate. Its Binding
     // must not be changed by this older PASS, and this real PASS stays authoritative.
@@ -1818,7 +1873,7 @@ export class TestExecutionService {
       dependencySha256: executionBindingDependencySha256(revision.package.files),
       caseContentSha256: task.input.caseContentSha256,
       validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
-    })
+    }, beforePublish)
   }
   async cleanupRunRuntimeState(runId: string) {
     if (!this.executionWorkspace) return
@@ -1847,6 +1902,19 @@ export class TestExecutionService {
   }
 
   private async withBrowserSession<T>(
+    run: ExecutionRun,
+    task: ExecutionTask,
+    stage: BrowserToolStage,
+    signal: AbortSignal,
+    operation: (session?: BrowserToolSession) => Promise<T>,
+  ) {
+    signal.throwIfAborted()
+    return this.resources
+      ? this.resources.withResource('agent', signal, () => this.openBrowserSession(run, task, stage, signal, operation))
+      : this.openBrowserSession(run, task, stage, signal, operation)
+  }
+
+  private async openBrowserSession<T>(
     run: ExecutionRun,
     task: ExecutionTask,
     stage: BrowserToolStage,
@@ -1884,7 +1952,7 @@ export class TestExecutionService {
       throw error
     } finally {
       try {
-        await this.persistBrowserObservations(run, task, session.observations())
+        if (!signal.aborted) await this.persistBrowserObservations(run, task, session.observations())
       } catch (error) {
         if (!primaryError) throw error
       } finally {
@@ -1934,12 +2002,17 @@ export class TestExecutionService {
     // Playwright CLI state-load does not reliably restore origin localStorage.
     // Never let a fresh login page contradict the authenticated Runner evidence.
     if (authPolicy.mode === 'reuse_authenticated') return undefined
-    const context = await this.uiExecutionAgent.explore({
+    const explore = () => this.uiExecutionAgent!.explore({
       baseUrl: run.environment.baseUrl,
       run,
       task,
       phase,
     }, signal)
+    signal.throwIfAborted()
+    const context = this.resources
+      ? await this.resources.withResource('agent', signal, explore)
+      : await explore()
+    signal.throwIfAborted()
     if (required && (!context || !context.available || !context.snapshot)) {
       throw new Error(`TEST_EXECUTION_UI_PLAYWRIGHT_CLI_EXPLORATION_REQUIRED: ${context?.error ?? 'snapshot missing'}`)
     }
@@ -2540,9 +2613,30 @@ async function requiredLeaseTransaction<T>(
   store: TestExecutionStore,
   jobId: string,
   lease: ExecutionJobLease,
+  signal: AbortSignal,
   operation: (transaction: TestExecutionTransaction) => Promise<T>,
 ) {
-  const result = await store.transactionWithLease(jobId, lease, operation)
+  throwIfWorkerStopped(signal)
+  const result = await store.transactionWithLease(jobId, lease, async transaction => {
+    throwIfWorkerStopped(signal)
+    // The database may wait on a row lock, and artifact writes can await IO.
+    // Recheck every formal operation as well as the final commit boundary.
+    const guarded = new Proxy(transaction, {
+      get(target, key, receiver) {
+        const value: unknown = Reflect.get(target, key, receiver)
+        if (typeof value !== 'function') return value
+        return async (...args: unknown[]) => {
+          throwIfWorkerStopped(signal)
+          const output: unknown = await Reflect.apply(value, target, args)
+          throwIfWorkerStopped(signal)
+          return output
+        }
+      },
+    })
+    const output = await operation(guarded)
+    throwIfWorkerStopped(signal)
+    return output
+  })
   if (result === null) throw new Error('TEST_EXECUTION_LEASE_LOST')
   return result
 }

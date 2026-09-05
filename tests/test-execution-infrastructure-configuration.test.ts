@@ -98,6 +98,39 @@ test('并发草稿保存不会生效，发布后 Worker 读取新版本且旧版
   assert.equal((await service.resolveConcurrency()).agentConcurrency, 8)
 })
 
+test('旧执行并发仅为迁移兜底，数据库显式配置优先，旧客户端保存不重置有效配置', async () => {
+  const store = new JsonStore(null); await store.load()
+  const environment = { SMARTHUB_TEST_EXECUTION_CONCURRENCY: '2' }
+  const service = new TestExecutionInfrastructureConfigurationService(store, environment)
+  assert.deepEqual(await service.resolveConcurrency(), {
+    runnerConcurrency: 2, agentConcurrency: 1, source: 'legacy_environment', version: null, publishedAt: null, publishedBy: null,
+  })
+  assert.equal((await service.get()).effectiveConcurrency.runnerConcurrency, 2)
+  const first = await service.publish({ environments: [], concurrency: { runnerConcurrency: 5, agentConcurrency: 3 } }, '管理员')
+  environment.SMARTHUB_TEST_EXECUTION_CONCURRENCY = '8'
+  assert.equal((await service.resolveConcurrency()).source, 'published_configuration')
+  const draft = await service.saveDraft({ environments: [], expectedActiveVersion: first.version }, '旧客户端')
+  assert.deepEqual(draft.concurrency, { runnerConcurrency: 5, agentConcurrency: 3 })
+  await service.publishDraft({ revision: draft.revision, expectedActiveVersion: first.version }, '管理员')
+  assert.equal((await service.resolveConcurrency()).runnerConcurrency, 5)
+  assert.deepEqual(await service.resolveVersion(first.id), { ...first, status: 'superseded' })
+})
+
+test('无效旧并发环境变量不阻止默认配置读取，历史版本迁移不改写Hash', async () => {
+  const store = new JsonStore(null); await store.load()
+  for (const legacy of ['', 'bad', '0', '1.5', '9']) {
+    const service = new TestExecutionInfrastructureConfigurationService(store, { SMARTHUB_TEST_EXECUTION_CONCURRENCY: legacy })
+    assert.equal((await service.resolveConcurrency()).runnerConcurrency, 3)
+    assert.equal((await service.resolveConcurrency()).source, 'code_defaults')
+  }
+  const historic = { id: 'legacy', version: 1, status: 'active' as const, environments: [], contentSha256: 'b'.repeat(64), createdAt: '2026-01-01T00:00:00.000Z', publishedBy: '旧管理员' }
+  await store.transaction(state => { state.testExecutionInfrastructureConfigurationVersions.push(historic) })
+  const service = new TestExecutionInfrastructureConfigurationService(store, { SMARTHUB_TEST_EXECUTION_CONCURRENCY: '2' })
+  assert.equal((await service.resolveConcurrency()).source, 'legacy_environment')
+  assert.equal((await service.resolveConcurrency()).runnerConcurrency, 2)
+  assert.deepEqual(await service.resolveVersion(historic.id), historic)
+})
+
 test('并发配置拒绝越界、小数、字符串和陈旧草稿写入', async () => {
   const store = new JsonStore(null); await store.load()
   const service = new TestExecutionInfrastructureConfigurationService(store)

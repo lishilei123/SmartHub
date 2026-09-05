@@ -263,6 +263,7 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.equal(active.attempts, 1)
   assert.equal(active.fencingToken, 1)
   assert.equal(await firstStore.heartbeatJob(active.id, lease(active), 60_000), true)
+  assert.deepEqual(await firstStore.renewJobLease(active.id, lease(active), 60_000), { status: 'renewed' })
 
   const transitioned = await firstStore.transactionWithLease(active.id, lease(active), transaction => transaction.transitionTask({ taskId: ids.task, expectedStatus: 'pending', expectedStateVersion: 0, status: 'script_generating' }))
   assert.equal(transitioned?.status, 'script_generating')
@@ -276,6 +277,7 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.notEqual(reclaimed.runToken, active.runToken)
   assert.equal(await firstStore.transactionWithLease(active.id, lease(active), async () => true), null)
   assert.equal(await firstStore.heartbeatJob(active.id, lease(active), 60_000), false)
+  assert.deepEqual(await firstStore.renewJobLease(active.id, lease(active), 60_000), { status: 'lease_lost' })
 
   await assert.rejects(
     secondStore.transactionWithLease(reclaimed.id, lease(reclaimed), transaction => transaction.transitionTask({ taskId: ids.task, expectedStatus: 'script_generating', expectedStateVersion: 0, status: 'ready' })),
@@ -368,6 +370,19 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.equal(manualRetryClaim.id, manualRetryJob.id)
   assert.equal(await firstStore.releaseJob(manualRetryJob.id, lease(manualRetryClaim), 0, 'provider still unavailable'), true)
   assert.equal((await firstStore.getTask(exhaustedTaskId))?.status, 'blocked')
+})
+
+test('PostgreSQL 结构化续租区分明确取消和旧 Fencing Token', async () => {
+  const aggregate = executionAggregateVariant('structured-renew-cancellation', 2)
+  await firstStore.createAggregate(aggregate)
+  const claimed = required(await firstStore.claimJob('structured-renew-worker', 60_000), '应领取任务')
+  assert.equal(claimed.taskId, aggregate.tasks[0].id)
+  await appendRunningAttempt(claimed, aggregate, 'structured-renew-attempt')
+  assert.deepEqual(await firstStore.renewJobLease(claimed.id, lease(claimed), 60_000), { status: 'renewed' })
+  const run = required(await firstStore.getRun(aggregate.run.id), 'Run 应存在')
+  await firstStore.cancelRun(run.id, run.stateVersion, new Date().toISOString())
+  assert.deepEqual(await firstStore.renewJobLease(claimed.id, lease(claimed), 60_000), { status: 'cancel_requested' })
+  assert.deepEqual(await firstStore.renewJobLease(claimed.id, { ...lease(claimed), fencingToken: claimed.fencingToken + 1 }, 60_000), { status: 'lease_lost' })
 })
 
 test('PostgreSQL 并发同请求只创建一个聚合并返回唯一键赢家', async () => {

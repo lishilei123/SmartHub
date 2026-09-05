@@ -30,7 +30,7 @@ export function normalizeExecutionConcurrency(
 }
 
 export interface ResolvedExecutionConcurrency extends ExecutionConcurrencyConfiguration {
-  source: 'code_defaults' | 'published_configuration' | 'historical_defaults'
+  source: 'code_defaults' | 'published_configuration' | 'historical_defaults' | 'legacy_environment'
   version: number | null
   publishedAt: string | null
   publishedBy: string | null

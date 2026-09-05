@@ -1,3 +1,4 @@
+import type { LeaseRenewResult } from '../domain/worker-stop.js'
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
@@ -112,6 +113,7 @@ export interface StateStore {
   transactionWithTaskLease?<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   searchChunks?(input: ChunkSearchInput): Promise<StoredChunkCandidate[]>
   claimTask?(workerId: string, leaseMs: number): Promise<DatabaseState['tasks'][number] | null>
+  renewTaskLease?(taskId: string, lease: TaskLease, leaseMs: number): Promise<LeaseRenewResult>
   heartbeatTask?(taskId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
   releaseTask?(taskId: string, lease: TaskLease, retryDelayMs?: number): Promise<boolean>
   ownsTask?(taskId: string, lease: TaskLease): Promise<boolean>
@@ -119,6 +121,7 @@ export interface StateStore {
   waitForTaskNotification?(timeoutMs: number): Promise<void>
   enqueueReviewJob?(job: ReviewJob): Promise<void>
   claimReviewJob?(workerId: string, leaseMs: number): Promise<ReviewJob | null>
+  renewReviewJobLease?(runId: string, lease: TaskLease, leaseMs: number): Promise<LeaseRenewResult>
   heartbeatReviewJob?(runId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
   finishReviewJob?(runId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
   releaseReviewJob?(runId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>
@@ -126,6 +129,7 @@ export interface StateStore {
   transactionWithReviewLease?<T>(runId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null>
   enqueueTestDesignJob?(job: TestDesignJob): Promise<void>
   claimTestDesignJob?(workerId: string, leaseMs: number): Promise<TestDesignJob | null>
+  renewTestDesignJobLease?(nodeRunId: string, lease: TaskLease, leaseMs: number): Promise<LeaseRenewResult>
   heartbeatTestDesignJob?(nodeRunId: string, lease: TaskLease, leaseMs: number): Promise<boolean>
   finishTestDesignJob?(nodeRunId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
   releaseTestDesignJob?(nodeRunId: string, lease: TaskLease, retryDelayMs: number, error: string): Promise<boolean>

@@ -1,3 +1,4 @@
+import { WorkerStoppedError } from '../server/domain/worker-stop.js'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -2463,4 +2464,68 @@ test('真实 Reporter failure Event 中的网络错误优先于 Agent 诊断', a
     assert.equal(store.diagnoses[0].category, 'environment_defect')
     assert.deepEqual(runtime.calls.map(call => call.stage), ['script_generation'])
   }, { workspace: true })
+})
+
+
+test('基础设施停止后晚到的 Agent 候选不创建 Revision，也不进入 Runner', async () => {
+  for (const reason of ['lease_lost', 'heartbeat_unavailable', 'worker_shutdown', 'user_cancelled'] as const) {
+    await withService([], async ({ service, store, job, runtime, runner }) => {
+      const controller = new AbortController()
+      const execute = runtime.execute.bind(runtime)
+      runtime.execute = async input => {
+        const output = await execute(input)
+        controller.abort(new WorkerStoppedError(reason))
+        return output
+      }
+      await assert.rejects(service.processPreparedTask(job, lease, controller.signal), error => error instanceof WorkerStoppedError && error.reason === reason)
+      assert.equal(store.revisions.length, 0)
+      assert.equal(store.attempts.length, 0)
+      assert.equal(store.task.status, 'script_generating')
+      assert.equal(runner.calls.length, 0)
+    })
+  }
+})
+
+test('Runner 在失租或心跳异常后返回 PASS 不得写 Attempt 终态或 Binding', async () => {
+  for (const reason of ['lease_lost', 'heartbeat_unavailable', 'worker_shutdown'] as const) {
+    await withService([], async ({ service, store, job, runner }) => {
+      const initialRunStatus = store.run.status
+      const controller = new AbortController()
+      runner.execute = async () => {
+        controller.abort(new WorkerStoppedError(reason))
+        return { status: 'passed', durationMs: 10, summary: 'late runner result', artifacts: [] }
+      }
+      await assert.rejects(service.processPreparedTask(job, lease, controller.signal), error => error instanceof WorkerStoppedError && error.reason === reason)
+      assert.equal(store.task.status, 'running')
+      assert.equal(store.attempts.length, 1)
+      assert.equal(store.attempts[0].status, 'running')
+      assert.equal(store.revisions.length, 1)
+      assert.equal(store.run.status, initialRunStatus)
+    })
+  }
+})
+
+
+test('心跳在事务等待或证据写入期间失败时，Service 不再 finalize Attempt 或迁移 Task', async () => {
+  for (const boundary of ['lock', 'events'] as const) {
+    await withService([{ status: 'passed', durationMs: 1, summary: 'completed runner', artifacts: [] }], async ({ service, store, job }) => {
+      const controller = new AbortController()
+      const transactionWithLease = store.transactionWithLease.bind(store)
+      store.transactionWithLease = async (jobId, leaseValue, operation) => transactionWithLease(jobId, leaseValue, async transaction => {
+        if (store.task.status === 'running' && boundary === 'lock') controller.abort(new WorkerStoppedError('heartbeat_unavailable'))
+        const appendExecutionEvents = transaction.appendExecutionEvents.bind(transaction)
+        transaction.appendExecutionEvents = async events => {
+          const result = await appendExecutionEvents(events)
+          if (boundary === 'events') controller.abort(new WorkerStoppedError('heartbeat_unavailable'))
+          return result
+        }
+        return operation(transaction)
+      })
+      await assert.rejects(service.processPreparedTask(job, lease, controller.signal), error => error instanceof WorkerStoppedError && error.reason === 'heartbeat_unavailable')
+      assert.equal(store.task.status, 'running')
+      assert.equal(store.attempts.length, 1)
+      assert.equal(store.attempts[0].status, 'running')
+      assert.equal(store.revisions.length, 1)
+    })
+  }
 })

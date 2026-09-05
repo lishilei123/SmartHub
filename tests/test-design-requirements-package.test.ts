@@ -1,3 +1,4 @@
+import { WorkerStoppedError } from '../server/domain/worker-stop.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TestDesignService, type PlanningAgentRuntime } from '../server/application/test-design-service.js'
@@ -129,3 +130,30 @@ function runtime(): PlanningAgentRuntime {
 }
 
 function frozenConfiguration() { return { configurationId: 'config-version-1', configurationVersion: 1, configurationSha256: 'c'.repeat(64), agentDefinition: {} as never, routing: {} as never, primaryModel: { sourceId: 'source-1', modelId: 'model-1', modelName: '模型' }, createdAt: '2026-08-12T00:00:00.000Z', snapshotSha256: 'd'.repeat(64) } }
+
+
+test('测试设计 Worker 停止后不发布候选或把 Node/Run 写成业务失败', async () => {
+  for (const reason of ['lease_lost', 'heartbeat_unavailable', 'worker_shutdown'] as const) {
+    const store = new JsonStore(null)
+    await store.load()
+    await store.transaction(state => {
+      state.testDesignState = { runs: [{ id: 'stopped-run', status: 'running', nodeRuns: [{ id: 'node-1', nodeKey: 'test_case_design', status: 'queued', attempt: 0 }], workspaceSnapshot: { snapshotSha256: 'frozen', requirementReleaseId: 'release-1', requirementReleaseContentSha256: 'frozen' } }] } as never
+    })
+    let transactions = 0
+    Object.assign(store, { transactionWithTestDesignLease: async (_id: string, _lease: unknown, operation: Parameters<JsonStore['transaction']>[0]) => {
+      transactions++
+      return store.transaction(operation)
+    } })
+    const controller = new AbortController()
+    const service = new TestDesignService(store, { ...runtime(), async execute() {
+      controller.abort(new WorkerStoppedError(reason))
+      throw new Error('model transport interrupted')
+    } })
+    await assert.rejects(service.processPreparedNode('stopped-run', 'node-1', { workerId: 'worker-1', runToken: 'token-1' }, controller.signal), error => error instanceof WorkerStoppedError && error.reason === reason)
+    const run = (await store.snapshot()).testDesignState!.runs[0]
+    assert.equal(transactions, 1)
+    assert.equal(run.status, 'running')
+    assert.equal(run.nodeRuns[0].status, 'running')
+    assert.equal(run.nodeRuns[0].finishedAt, undefined)
+  }
+})

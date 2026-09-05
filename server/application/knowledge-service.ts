@@ -1,4 +1,5 @@
 import { extname, isAbsolute } from 'node:path'
+import type { ExecutionResourceGovernor } from './execution-resource-governor.js'
 import { defaultConfig, type AssetType, type AssetVersion, type Chunk, type DatabaseState, type EmbeddingSource, type IndexAssetMetadata, type IndexChunk, type KnowledgeConfig, type SourceType, type SyncTask } from '../domain/types.js'
 import type { StateStore, TaskLease } from '../infrastructure/store.js'
 import { RawDocumentStore } from '../infrastructure/raw-document-store.js'
@@ -35,7 +36,7 @@ const compatibilityFingerprint = (config: KnowledgeConfig) => sha256(JSON.string
 const queryFingerprint = (config: KnowledgeConfig) => sha256(JSON.stringify({ keywordRecall: config.keywordRecall, vectorRecall: config.vectorRecall, finalResults: config.finalResults, relevanceThreshold: config.relevanceThreshold, hybridSearch: config.hybridSearch, rerankerEnabled: config.rerankerEnabled, rerankerSourceId: config.rerankerSourceId, rerankerModel: config.rerankerModel, rerankerSource: config.embeddingSources.find(source => source.id === config.rerankerSourceId) }))
 
 export class KnowledgeService {
-  constructor(readonly store: StateStore, private readonly rawDocuments?: RawDocumentStore, private readonly localModels?: LocalModelRuntime, private readonly remoteEmbeddings = new RemoteEmbeddingClient()) {}
+  constructor(readonly store: StateStore, private readonly rawDocuments?: RawDocumentStore, private readonly localModels?: LocalModelRuntime, private readonly remoteEmbeddings = new RemoteEmbeddingClient(), private readonly resources?: ExecutionResourceGovernor) {}
   async initialize() {
     await this.store.load()
     if (this.store.getKnowledgeReadState) return
@@ -261,6 +262,12 @@ export class KnowledgeService {
   }
 
   async testEmbeddingConfig(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
+    return this.resources
+      ? this.resources.withResource('agent', AbortSignal.timeout(300_000), () => this.testEmbeddingConfigWithPermit(knowledgeBaseId, patch))
+      : this.testEmbeddingConfigWithPermit(knowledgeBaseId, patch)
+  }
+
+  private async testEmbeddingConfigWithPermit(knowledgeBaseId: string, patch: Partial<KnowledgeConfig>) {
     const saved = this.store.getActiveKnowledgeConfig
       ? required(await this.store.getActiveKnowledgeConfig(knowledgeBaseId), '知识库不存在')
       : await this.store.snapshot().then(state => {
@@ -408,6 +415,7 @@ export class KnowledgeService {
   async processQueuedSync(taskId: string, lease?: TaskLease, signal?: AbortSignal) {
     try {
       const work = await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         if (!canRunTask(task, lease) || task.type !== 'sync') return null
         const version = required(state.versions.find(item => item.id === task.input.assetVersionId), '资产版本不存在')
@@ -426,6 +434,7 @@ export class KnowledgeService {
       throwIfAborted(signal)
       if (work.simulateFailureAt) throw new Error(`模拟 ${String(work.simulateFailureAt)} 阶段失败`)
       const prepared = await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidate = required(state.indexes.find(item => item.id === work.candidateId), '候选索引不存在')
         if (task.status === 'cancelled' || task.cancelRequestedAt || !ownsLease(task, lease)) { candidate.status = 'failed'; return false }
@@ -448,10 +457,12 @@ export class KnowledgeService {
       await this.ensureCandidateVectorIndex(work.candidateId, work.config)
       throwIfAborted(signal)
       return await this.taskTransaction(taskId, lease, async state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidate = required(state.indexes.find(item => item.id === work.candidateId), '候选索引不存在')
         if (task.status === 'cancelled' || task.cancelRequestedAt || !ownsLease(task, lease)) { candidate.status = 'failed'; return task }
         await this.assertCandidateVectorIndexReady(candidate.id, work.config)
+        throwIfAborted(signal)
         const version = required(state.versions.find(item => item.id === work.versionId), '资产版本不存在')
         const asset = required(state.assets.find(item => item.id === work.assetId), '知识资产不存在')
         const kb = required(state.knowledgeBases.find(item => item.id === task.knowledgeBaseId), '知识库不存在')
@@ -459,6 +470,7 @@ export class KnowledgeService {
         const current = state.indexes.find(item => item.id === kb.activeIndexVersionId)
         validateCandidate(candidate, task, state)
         if (this.rawDocuments) await this.rawDocuments.activateSnapshot(kb.id, String(task.input.logicalPath), version.id)
+        throwIfAborted(signal)
         activateCandidateIndex(state, candidate, current)
         version.chunks = chunks; version.status = 'ready'; version.readyAt = now(); version.error = undefined
         asset.activeVersionId = version.id; asset.updatedAt = now(); asset.displayName = String(task.input.displayName); asset.assetType = String(task.input.assetType); asset.sourceKey = String(task.input.sourceKey); asset.sourceType = task.input.sourceType as SourceType
@@ -468,6 +480,7 @@ export class KnowledgeService {
     } catch (error) {
       if (signal?.aborted) return await this.task(taskId)
       return this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null
         const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null
@@ -551,6 +564,7 @@ export class KnowledgeService {
     if (queued.scope === 'directory_recursive' || queued.input.scope === 'directory_recursive') return this.processQueuedDirectoryDelete(taskId, lease, signal)
     try {
       const work = await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         if (!canRunTask(task, lease) || task.type !== 'delete') return null
         const asset = required(state.assets.find(item => item.id === task.input.assetId), '知识资产不存在')
@@ -573,10 +587,12 @@ export class KnowledgeService {
       await this.ensureCandidateVectorIndex(work.candidateId, work.config)
       throwIfAborted(signal)
       return await this.taskTransaction(taskId, lease, async state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidate = required(state.indexes.find(item => item.id === work.candidateId), '候选索引不存在')
         if (task.status === 'cancelled' || task.cancelRequestedAt || !ownsLease(task, lease)) { candidate.status = 'failed'; return task }
         await this.assertCandidateVectorIndexReady(candidate.id, work.config)
+        throwIfAborted(signal)
         const asset = required(state.assets.find(item => item.id === task.input.assetId), '知识资产不存在')
         const active = required(state.versions.find(item => item.id === task.input.assetVersionId), '活动版本不存在')
         if (asset.activeVersionId !== active.id) { candidate.status = 'failed'; task.status = 'cancelled'; task.step = 'superseded'; task.finishedAt = now(); task.updatedAt = now(); return task }
@@ -591,6 +607,7 @@ export class KnowledgeService {
           await this.rawDocuments.deleteActive(kb.id, asset.logicalPath)
           await this.rawDocuments.deleteVersionSnapshots(kb.id, versionIds)
         }
+        throwIfAborted(signal)
         activateCandidateIndex(state, candidate, current)
         const purged = purgeAssetData(state, assetIds)
         task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.updatedAt = now(); task.metrics = { ...task.metrics, ...purged }
@@ -598,7 +615,8 @@ export class KnowledgeService {
       })
     } catch (error) {
       if (signal?.aborted) return await this.task(taskId)
-      return this.taskTransaction(taskId, lease, state => { const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null; const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null; if (candidate?.status === 'candidate') candidate.status = 'failed'; if (task.status !== 'cancelled') { task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '删除任务失败'; task.finishedAt = now(); task.updatedAt = now() } return task })
+      return this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal); const task = required(state.tasks.find(item => item.id === taskId), '任务不存在'); const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null; const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null; if (candidate?.status === 'candidate') candidate.status = 'failed'; if (task.status !== 'cancelled') { task.status = 'failed'; task.step = 'failed'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '删除任务失败'; task.finishedAt = now(); task.updatedAt = now() } return task })
     }
   }
 
@@ -608,6 +626,7 @@ export class KnowledgeService {
     if (checkpoint.input.fileCleanupOnly === true) return this.completeDirectoryFileCleanup(taskId, lease, signal)
     try {
       const prepared = await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         if (!canRunTask(task, lease) || task.type !== 'delete') return null
         const input = task.input
@@ -638,6 +657,7 @@ export class KnowledgeService {
       await this.ensureCandidateVectorIndex(prepared.candidateId, prepared.config)
       throwIfAborted(signal)
       const committed = await this.taskTransaction(taskId, lease, async state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidate = required(state.indexes.find(item => item.id === prepared.candidateId), '候选索引不存在')
         if (task.status === 'cancelled' || task.cancelRequestedAt || !ownsLease(task, lease)) { candidate.status = 'failed'; return null }
@@ -656,6 +676,7 @@ export class KnowledgeService {
         assertNoRunningAssetReviews(state, targetAssetIds)
         validateCandidate(candidate, task, state)
         task.step = 'committing'; task.progress = 90
+        throwIfAborted(signal)
         activateCandidateIndex(state, candidate, current)
         const deletedAssetVersionIds = state.versions.filter(version => targetAssetIds.has(version.assetId)).map(version => version.id)
         task.input.deletedAssetVersionIds = deletedAssetVersionIds
@@ -670,6 +691,7 @@ export class KnowledgeService {
           await this.rawDocuments.deleteVersionSnapshots(committed.knowledgeBaseId, stringArray(committed.task.input.deletedAssetVersionIds))
         }
         return await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
           const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
           if (task.status === 'running' && task.input.fileCleanupOnly === true) { finalizeDirectoryDeleteScope(state, task); task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.updatedAt = now(); delete task.input.fileCleanupOnly }
           return task
@@ -677,6 +699,7 @@ export class KnowledgeService {
       } catch (error) {
         if (signal?.aborted) return await this.task(taskId)
         return await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
           const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
           task.status = 'failed'; task.step = 'file_cleanup'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '活动文件清理失败'; task.updatedAt = now(); return task
         })
@@ -684,6 +707,7 @@ export class KnowledgeService {
     } catch (error) {
       if (signal?.aborted) return await this.task(taskId)
       return this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidateId = typeof task.input.candidateIndexVersionId === 'string' ? task.input.candidateIndexVersionId : null
         const candidate = candidateId ? state.indexes.find(item => item.id === candidateId) : null
@@ -697,6 +721,7 @@ export class KnowledgeService {
   private async completeDirectoryFileCleanup(taskId: string, lease?: TaskLease, signal?: AbortSignal) {
     throwIfAborted(signal)
     const work = await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
       const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
       if (!canRunTask(task, lease) || task.input.fileCleanupOnly !== true) return null
       task.status = 'running'; task.step = 'file_cleanup'; task.progress = 95; task.startedAt ??= now(); task.updatedAt = now()
@@ -711,6 +736,7 @@ export class KnowledgeService {
       }
       throwIfAborted(signal)
       return await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         if (task.status === 'running' && task.input.fileCleanupOnly === true && ownsLease(task, lease)) { finalizeDirectoryDeleteScope(state, task); task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.updatedAt = now(); delete task.input.fileCleanupOnly }
         return task
@@ -718,6 +744,7 @@ export class KnowledgeService {
     } catch (error) {
       if (signal?.aborted) return await this.task(taskId)
       return this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         if (task.status === 'running') { task.status = 'failed'; task.step = 'file_cleanup'; task.error = error instanceof Error ? safeErrorMessage(error.message) : '活动文件清理失败'; task.updatedAt = now() }
         return task
@@ -840,6 +867,7 @@ export class KnowledgeService {
   async processQueuedRebuild(taskId: string, lease?: TaskLease, signal?: AbortSignal) {
     throwIfAborted(signal)
     const work = await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
       const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
       if (!canRunTask(task, lease) || task.type !== 'rebuild') return null
       const kb = required(state.knowledgeBases.find(item => item.id === task.knowledgeBaseId), '知识库不存在')
@@ -860,6 +888,7 @@ export class KnowledgeService {
       throwIfAborted(signal)
       if (work.simulateFailure) throw new Error('模拟索引校验失败')
       const prepared = await this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidate = required(state.indexes.find(item => item.id === work.candidateId), '候选索引不存在')
         if (task.status === 'cancelled' || task.cancelRequestedAt || !ownsLease(task, lease)) { candidate.status = 'failed'; return false }
@@ -875,14 +904,17 @@ export class KnowledgeService {
       await this.ensureCandidateVectorIndex(work.candidateId, work.config)
       throwIfAborted(signal)
       return await this.taskTransaction(taskId, lease, async state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         const candidate = required(state.indexes.find(item => item.id === work.candidateId), '候选索引不存在')
         if (task.status === 'cancelled' || task.cancelRequestedAt || !ownsLease(task, lease)) { candidate.status = 'failed'; return task }
         await this.assertCandidateVectorIndexReady(candidate.id, work.config)
+        throwIfAborted(signal)
         const kb = required(state.knowledgeBases.find(item => item.id === work.knowledgeBaseId), '知识库不存在')
         if (kb.activeIndexVersionId !== task.input.baseIndexVersionId) throw new Error('活动索引已变化，请重新发起重建')
         validateCandidate(candidate, task, state)
         const current = state.indexes.find(item => item.id === kb.activeIndexVersionId)
+        throwIfAborted(signal)
         activateCandidateIndex(state, candidate, current)
         const config = required(state.configs.find(item => item.id === work.configVersionId), '配置不存在'); config.requiresRebuild = false
         task.status = 'succeeded'; task.step = 'completed'; task.progress = 100; task.finishedAt = now(); task.updatedAt = now(); task.metrics = { chunks: rebuiltChunks.length, embeddedChunks: rebuiltChunks.length }; return task
@@ -890,6 +922,7 @@ export class KnowledgeService {
     } catch (error) {
       if (signal?.aborted) return await this.task(taskId)
       return this.taskTransaction(taskId, lease, state => {
+        throwIfAborted(signal)
         const task = required(state.tasks.find(item => item.id === taskId), '任务不存在')
         if (task.status === 'cancelled') return task
         const candidate = state.indexes.find(item => item.id === work.candidateId)
@@ -964,6 +997,14 @@ export class KnowledgeService {
   }
 
   private async embedTexts(config: KnowledgeConfig, texts: string[], model = config.embeddingModel, signal?: AbortSignal) {
+    throwIfAborted(signal)
+    if (!texts.length) return []
+    return this.resources
+      ? this.resources.withResource('agent', signal ?? AbortSignal.timeout(300_000), () => this.embedTextsWithPermit(config, texts, model, signal))
+      : this.embedTextsWithPermit(config, texts, model, signal)
+  }
+
+  private async embedTextsWithPermit(config: KnowledgeConfig, texts: string[], model: string, signal?: AbortSignal) {
     throwIfAborted(signal)
     if (!texts.length) return []
     if (!model.trim()) throw new Error('知识库当前没有可用模型')

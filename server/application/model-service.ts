@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { GenerativeCapability, GenerativeModel, GenerativeModelSource, GenerativeProviderType, ModelHealth } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
+import type { ExecutionResourceGovernor } from './execution-resource-governor.js'
 
 const providerTypes = new Set<GenerativeProviderType>(['openai', 'anthropic', 'openai_compatible'])
 const capabilities = new Set<GenerativeCapability>(['tool_calling', 'vision', 'reasoning'])
 const retiredCapabilities = new Set(['structured_output'])
 
 export class ModelService {
-  constructor(private readonly store: StateStore) {}
+  constructor(private readonly store: StateStore, private readonly resources?: ExecutionResourceGovernor) {}
 
   async listSources() {
     const sources = this.store.listModelSources
@@ -86,6 +87,12 @@ export class ModelService {
   }
 
   async probe(sourceId: string, modelId: string) {
+    return this.resources
+      ? this.resources.withResource('agent', AbortSignal.timeout(60_000), () => this.probeWithPermit(sourceId, modelId))
+      : this.probeWithPermit(sourceId, modelId)
+  }
+
+  private async probeWithPermit(sourceId: string, modelId: string) {
     const sources = this.store.listModelSources ? await this.store.listModelSources() : (await this.store.snapshot()).modelSources
     const source = sources.find(item => item.id === sourceId)
     if (!source) throw new Error('模型来源不存在')

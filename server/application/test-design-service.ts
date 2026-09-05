@@ -1,3 +1,4 @@
+import { throwIfWorkerStopped } from '../domain/worker-stop.js'
 import { randomUUID } from 'node:crypto'
 import type { Principal } from '../domain/access-control.js'
 import type { AgentExecutionEvent } from '../domain/agent-types.js'
@@ -598,6 +599,7 @@ export class TestDesignService {
   }
 
   async processPreparedNode(runId: string, nodeRunId: string, lease: TaskLease, signal = new AbortController().signal) {
+    throwIfWorkerStopped(signal)
     if (!this.runtime) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', '测试设计 Agent Runtime 未配置', 409)
     const initial = await this.loadRun(runId)
     const claimed = required(
@@ -647,12 +649,14 @@ export class TestDesignService {
       const running = await this.loadRun(runId)
       const upstream = key === 'test_case_design' ? caseDesignInput(running) : repairInput(running)
       const events: AgentExecutionEvent[] = []
+      throwIfWorkerStopped(signal)
       const output = await this.runtime.execute(
         {
           stage: key,
           run: running,
           upstream,
           onExecutionEvent: async event => {
+            throwIfWorkerStopped(signal)
             events.push(event)
             if (shouldCheckpointTestDesignExecution(event))
               await this.saveNodeExecutionProgress(runId, nodeRunId, key, events, lease)
@@ -660,7 +664,9 @@ export class TestDesignService {
         },
         signal,
       )
+      throwIfWorkerStopped(signal)
       const result = await this.fencedNodeTransaction(nodeRunId, lease, state => {
+        throwIfWorkerStopped(signal)
         const run = findRunById(state, runId)
         const target = required(
           run.nodeRuns.find(item => item.id === nodeRunId && item.nodeKey === key),
@@ -677,6 +683,7 @@ export class TestDesignService {
       if (result.repairQueued) await this.schedule(runId)
       return this.loadRun(runId)
     } catch (error) {
+      throwIfWorkerStopped(signal)
       if (!String(error instanceof Error ? error.message : error).includes('WORKFLOW_JOB_LEASE_LOST')) {
         await this.fencedNodeTransaction(nodeRunId, lease, state => {
           const run = readDesignState(state).runs.find(item => item.id === runId)

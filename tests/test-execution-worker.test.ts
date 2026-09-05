@@ -1,3 +1,4 @@
+import { WorkerStoppedError, workerStopReason, type LeaseRenewResult } from '../server/domain/worker-stop.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type {
@@ -9,6 +10,8 @@ import type {
 } from '../server/infrastructure/test-execution-store.js'
 import {
   processClaimedTestExecutionJob,
+  startLeaseHeartbeat,
+  settleStoppedWork,
 } from '../server/worker.js'
 
 const createdAt = '2026-08-13T12:00:00.000Z'
@@ -51,6 +54,7 @@ function executionTask(status: ExecutionTask['status'], error?: string) {
 function workerStore(input: {
   task?: ExecutionTask
   heartbeat?: () => Promise<boolean>
+  renew?: () => Promise<LeaseRenewResult>
 }) {
   const finishes: Array<{
     status: 'succeeded' | 'failed' | 'cancelled'
@@ -58,6 +62,7 @@ function workerStore(input: {
   }> = []
   const releases: Array<{ delay: number; error: string }> = []
   const store = {
+    ...(input.renew ? { renewJobLease: input.renew } : {}),
     async heartbeatJob() {
       return input.heartbeat ? input.heartbeat() : true
     },
@@ -198,9 +203,7 @@ test('测试执行 Worker 续租失败立即 Abort，且不以普通 release 延
   })
   assert.equal(observedAbort, true)
   assert.deepEqual(state.releases, [])
-  assert.equal(state.finishes.length, 1)
-  assert.equal(state.finishes[0].status, 'cancelled')
-  assert.match(state.finishes[0].error ?? '', /租约已失效/u)
+  assert.deepEqual(state.finishes, [])
   assert.equal(heartbeat.cleared(), true)
 })
 
@@ -257,7 +260,96 @@ test('Worker 停止与领取完成竞争时，新任务也收到停止信号', a
       } },
     })
     assert.equal(aborted, true)
-    assert.deepEqual(state.releases, [])
-    assert.equal(state.finishes[0].status, 'cancelled')
+    assert.equal(state.releases.length, 1)
+    assert.match(state.releases[0].error, /worker_shutdown/u)
+    assert.deepEqual(state.finishes, [])
   }
+})
+
+
+test('公共心跳保持单个 inFlight，并在 clear 等待正在续租的 Promise 收口', async () => {
+  let fire!: () => Promise<void>
+  let reject!: (reason: Error) => void
+  let renewals = 0
+  const controller = new AbortController()
+  const heartbeat = startLeaseHeartbeat({
+    renew: () => { renewals++; return new Promise<boolean>((_resolve, fail) => { reject = fail }) },
+    controller, leaseMs: 3_000, label: 'test',
+    schedule: callback => { fire = callback; return { clear() {} } },
+  })
+  const active = fire()
+  void fire()
+  assert.equal(renewals, 1)
+  let drained = false
+  const drain = heartbeat.clear().then(() => { drained = true })
+  await Promise.resolve()
+  assert.equal(drained, false)
+  reject(new Error('database disconnected during drain'))
+  await Promise.all([active, drain])
+  assert.equal(drained, true)
+  assert.equal(controller.signal.aborted, false)
+  await fire()
+  assert.equal(renewals, 1)
+})
+
+test('各类工作流共用停止收口：取消、失租、心跳异常、shutdown 不混淆', async () => {
+  for (const reason of ['user_cancelled', 'lease_lost', 'heartbeat_unavailable', 'worker_shutdown'] as const) {
+    const controller = new AbortController()
+    controller.abort(new WorkerStoppedError(reason))
+    const actions: string[] = []
+    assert.equal(await settleStoppedWork(controller.signal, {
+      cancel: async () => { actions.push('cancelled') },
+      release: async () => { actions.push('queued') },
+    }), true)
+    assert.deepEqual(actions, reason === 'lease_lost' ? [] : [reason === 'user_cancelled' ? 'cancelled' : 'queued'])
+  }
+})
+
+test('心跳数据库异常中止当前资源调用，并安全退避而不发布取消或业务失败', async () => {
+  const state = workerStore({ heartbeat: async () => { throw new Error('DATABASE_TEMPORARY') } })
+  let reason: string | undefined
+  await processClaimedTestExecutionJob({
+    job: executionJob(), store: state.store, workerId: 'worker-1', leaseMs: 3_000,
+    scheduleHeartbeat: heartbeatHarness({ fire: true }).scheduleHeartbeat,
+    service: { async processPreparedTask(_job, _lease, signal) {
+      await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => {
+        reason = workerStopReason(signal)
+        reject(signal.reason)
+      }, { once: true }))
+      throw new Error('no further model or runner calls')
+    } },
+  })
+  assert.equal(reason, 'heartbeat_unavailable')
+  assert.deepEqual(state.finishes, [])
+  assert.equal(state.releases.length, 1)
+  assert.equal(state.releases[0].delay, 1_000)
+})
+
+test('只有数据库结构化 cancel_requested 续租结果允许收口 cancelled', async () => {
+  const state = workerStore({ task: executionTask('cancelled'), renew: async () => ({ status: 'cancel_requested' }) })
+  await processClaimedTestExecutionJob({
+    job: executionJob(), store: state.store, workerId: 'worker-1', leaseMs: 3_000,
+    scheduleHeartbeat: heartbeatHarness({ fire: true }).scheduleHeartbeat,
+    service: { async processPreparedTask(_job, _lease, signal) {
+      await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      return executionTask('cancelled')
+    } },
+  })
+  assert.equal(state.finishes.length, 1)
+  assert.equal(state.finishes[0].status, 'cancelled')
+  assert.deepEqual(state.releases, [])
+})
+
+test('忽略 Abort 的旧 Service 返回成功时，Worker 仍不得发布最终结果', async () => {
+  const state = workerStore({ task: executionTask('passed'), renew: async () => ({ status: 'lease_lost' }) })
+  await processClaimedTestExecutionJob({
+    job: executionJob(), store: state.store, workerId: 'worker-1', leaseMs: 3_000,
+    scheduleHeartbeat: heartbeatHarness({ fire: true }).scheduleHeartbeat,
+    service: { async processPreparedTask(_job, _lease, signal) {
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+      return executionTask('passed')
+    } },
+  })
+  assert.deepEqual(state.finishes, [])
+  assert.deepEqual(state.releases, [])
 })

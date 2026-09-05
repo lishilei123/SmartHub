@@ -1,3 +1,4 @@
+import { WorkerStoppedError } from '../server/domain/worker-stop.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
@@ -528,3 +529,25 @@ async function seededMiniTaskStore() {
   })
   return store
 }
+
+
+test('需求分析基础设施停止不调用 failRun、不取消 Model Attempt，保留租约恢复状态', async () => {
+  for (const reason of ['lease_lost', 'heartbeat_unavailable', 'worker_shutdown'] as const) {
+    const store = await seededStore()
+    const controller = new AbortController()
+    let calls = 0
+    const service = new RequirementAnalysisService(store, { async execute() {
+      calls++
+      controller.abort(new WorkerStoppedError(reason))
+      throw new Error('model transport interrupted')
+    } })
+    await service.analyze({ projectVersionId: 'project-version-1', documentDirectoryPath: requirementDirectory, sourceId: 'source-1', modelId: 'model-1' }, controller.signal, undefined, true)
+    const runId = (await store.snapshot()).reviewRuns[0].id
+    await assert.rejects(service.processPreparedRun(runId, undefined, controller.signal), error => error instanceof WorkerStoppedError && error.reason === reason)
+    const run = (await store.snapshot()).reviewRuns[0]
+    assert.equal(calls, 1)
+    assert.equal(run.status, 'running')
+    assert.equal(run.result, undefined)
+    assert.equal(run.modelRouteAttempts?.at(-1)?.status, 'running')
+  }
+})

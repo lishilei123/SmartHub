@@ -57,3 +57,50 @@ test('Agent Session 按 Task 隔离时仍共享同一个 ProjectVersion Executio
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('取消 Session 排队立即退出，并保留前序锁与后续顺序，结束后无残留等待', async () => {
+  const runtime = PiSessionRuntime.inMemory()
+  const scope = executionScope(runtime, 'task-abort', 'execution-implementation', 'execution:abort')
+  const first = await runtime.acquire(scope)
+  const controller = new AbortController()
+  const reason = new Error('lease lost while waiting for session')
+  const cancelled = runtime.acquire(scope, controller.signal)
+  const rejected = assert.rejects(cancelled, error => error === reason)
+  let thirdStarted = false
+  const third = runtime.acquire(scope).then(lease => { thirdStarted = true; return lease })
+  controller.abort(reason)
+  await rejected
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(thirdStarted, false, 'Cancelling a waiter must not release the active session owner')
+  await assert.rejects(runtime.acquireIdle(scope), /PI_SESSION_BUSY/)
+  first.release()
+  const thirdLease = await third
+  let fourthStarted = false
+  const fourth = runtime.acquire(scope).then(lease => { fourthStarted = true; return lease })
+  first.release()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(fourthStarted, false, 'Repeated release must not unlock a later owner')
+  thirdLease.release()
+  const fourthLease = await fourth
+  fourthLease.release()
+  const idle = await runtime.acquireIdle(scope)
+  idle.release()
+})
+
+test('预先取消与获得 Session 锁期间取消均不创建或遗留锁', async () => {
+  const runtime = PiSessionRuntime.inMemory()
+  const scope = executionScope(runtime, 'task-aborted', 'execution-implementation', 'execution:aborted')
+  const controller = new AbortController()
+  const reason = new Error('worker shutdown')
+  controller.abort(reason)
+  await assert.rejects(runtime.acquire(scope, controller.signal), error => error === reason)
+  const idle = await runtime.acquireIdle(scope)
+  idle.release()
+  const racing = new AbortController()
+  const acquisition = runtime.acquire(scope, racing.signal)
+  const rejected = assert.rejects(acquisition, error => error === reason)
+  racing.abort(reason)
+  await rejected
+  const next = await runtime.acquireIdle(scope)
+  next.release()
+})

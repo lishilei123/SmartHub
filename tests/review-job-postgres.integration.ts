@@ -47,6 +47,7 @@ test.after(async () => {
   await database.query('DELETE FROM smarthub.workflow_task_jobs WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.review_jobs WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.review_runs WHERE id LIKE $1', [`${prefix}%`])
+  await database.query('DELETE FROM smarthub.sync_tasks WHERE id LIKE $1', [`${prefix}%`])
   await database.query('DELETE FROM smarthub.asset_versions WHERE id=$1', [ids.assetVersion])
   await database.query('DELETE FROM smarthub.knowledge_assets WHERE id=$1', [ids.asset])
   await database.query('DELETE FROM smarthub.config_versions WHERE id=$1', [ids.config])
@@ -129,6 +130,7 @@ test('PostgreSQL Review Job 的取消标记阻止重试并在失租约后收敛�
   const lease: TaskLease = { workerId: 'worker-a', runToken: required(claimed.runToken, '任务缺少 fencing token') }
 
   assert.equal(await store.cancelReviewJob?.(run.id), true)
+  assert.deepEqual(await store.renewReviewJobLease(run.id, lease, 60_000), { status: 'cancel_requested' })
   assert.equal(await store.releaseReviewJob?.(run.id, lease, 0, '不应重试'), false)
   assert.equal(await store.transactionWithReviewLease?.(run.id, lease, () => true), null)
   await database.query("UPDATE smarthub.review_jobs SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1", [run.id])
@@ -285,3 +287,37 @@ function required<T>(value: T | null | undefined, message: string): T {
   if (value === null || value === undefined) throw new Error(message)
   return value
 }
+
+
+test('PostgreSQL Knowledge SyncTask 当前租约可提交业务终态，过期终态写入必须回滚', async () => {
+  for (const terminal of ['succeeded', 'failed', 'cancelled', 'expired'] as const) {
+    const expired = terminal === 'expired'
+    const taskId = `${prefix}-sync-fenced-${terminal}`
+    await store.transaction(state => {
+      state.tasks.push({
+        id: taskId, knowledgeBaseId: ids.knowledgeBase, type: 'sync', trigger: 'upload',
+        status: 'queued', step: 'waiting', progress: 0, attempts: 0, maxAttempts: 3,
+        input: {}, configVersionId: ids.config, createdAt: now, availableAt: now,
+      })
+    })
+    const claimed = required(await store.claimTask('knowledge-fence-worker', expired ? 1_000 : 60_000), '必须领取当前知识库任务')
+    assert.equal(claimed.id, taskId)
+    const lease: TaskLease = { workerId: 'knowledge-fence-worker', runToken: required(claimed.runToken, '缺少租约 Token') }
+    assert.deepEqual(await store.renewTaskLease(taskId, lease, expired ? 1_000 : 60_000), { status: 'renewed' })
+    const result = await store.transactionWithTaskLease(taskId, lease, async state => {
+      const current = required(state.tasks.find(item => item.id === taskId), '知识库任务不存在')
+      if (expired) await new Promise(resolve => setTimeout(resolve, 1_100))
+      current.status = expired ? 'succeeded' : terminal
+      current.step = terminal === 'cancelled' ? 'superseded' : terminal === 'failed' ? 'failed' : 'completed'
+      current.progress = 100
+      current.finishedAt = new Date().toISOString()
+      return true
+    })
+    assert.equal(result, expired ? null : true)
+    const persisted = required(await store.getSyncTask(taskId), '应重新读取已保存任务')
+    assert.equal(persisted.status, expired ? 'running' : terminal)
+    assert.equal(persisted.cancelRequestedAt, undefined)
+    assert.equal(persisted.progress, expired ? 1 : 100)
+    assert.deepEqual(await store.renewTaskLease(taskId, { ...lease, runToken: randomUUID() }, 60_000), { status: 'lease_lost' })
+  }
+})

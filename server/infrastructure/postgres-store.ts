@@ -1,3 +1,4 @@
+import type { LeaseRenewResult } from '../domain/worker-stop.js'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { Pool, type PoolClient } from 'pg'
@@ -503,13 +504,22 @@ export class PostgresStore implements StateStore {
     } finally { client.release() }
   }
 
+  async renewTaskLease(taskId: string, lease: TaskLease, leaseMs: number): Promise<LeaseRenewResult> {
+    if (await this.heartbeatTask(taskId, lease, leaseMs)) return { status: 'renewed' }
+    const result = await this.pool.query(`SELECT 1 FROM smarthub.sync_tasks
+      WHERE id=$1 AND lease_owner=$2 AND run_token=$3::uuid
+        AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NOT NULL`,
+    [taskId, lease.workerId, lease.runToken])
+    return { status: result.rowCount === 1 ? 'cancel_requested' : 'lease_lost' }
+  }
+
   async heartbeatTask(taskId: string, lease: TaskLease, leaseMs: number) {
     const result = await this.pool.query(`
       UPDATE smarthub.sync_tasks
       SET lease_expires_at = now() + ($4::text || ' milliseconds')::interval,
           heartbeat_at = now(), updated_at = now()
       WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND run_token = $3::uuid
-        AND lease_expires_at > now()
+        AND lease_expires_at > now() AND cancel_requested_at IS NULL
     `, [taskId, lease.workerId, lease.runToken, Math.max(1_000, leaseMs)])
     return result.rowCount === 1
   }
@@ -517,7 +527,7 @@ export class PostgresStore implements StateStore {
   async ownsTask(taskId: string, lease: TaskLease) {
     const result = await this.pool.query(`
       SELECT 1 FROM smarthub.sync_tasks
-      WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND run_token = $3::uuid AND lease_expires_at > now()
+      WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND run_token = $3::uuid AND lease_expires_at > clock_timestamp()
     `, [taskId, lease.workerId, lease.runToken])
     return result.rowCount === 1
   }
@@ -530,7 +540,7 @@ export class PostgresStore implements StateStore {
           lease_owner = NULL, run_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL, finished_at = NULL,
           data = jsonb_set(jsonb_set(jsonb_set(data - 'error' - 'finishedAt', '{status}', to_jsonb('queued'::text)), '{step}', to_jsonb('waiting'::text)), '{progress}', to_jsonb(0))
       WHERE id = $1 AND status IN ('running', 'failed') AND lease_owner = $2 AND run_token = $3::uuid
-        AND lease_expires_at > now()
+        AND lease_expires_at > clock_timestamp() AND cancel_requested_at IS NULL
     `, [taskId, lease.workerId, lease.runToken, Math.max(0, retryDelayMs)])
     return result.rowCount === 1
   }
@@ -621,6 +631,15 @@ export class PostgresStore implements StateStore {
     finally { client.release() }
   }
 
+  async renewReviewJobLease(runId: string, lease: TaskLease, leaseMs: number): Promise<LeaseRenewResult> {
+    if (await this.heartbeatReviewJob(runId, lease, leaseMs)) return { status: 'renewed' }
+    const result = await this.pool.query(`SELECT 1 FROM smarthub.review_jobs
+      WHERE run_id=$1 AND lease_owner=$2 AND run_token=$3::uuid
+        AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NOT NULL`,
+    [runId, lease.workerId, lease.runToken])
+    return { status: result.rowCount === 1 ? 'cancel_requested' : 'lease_lost' }
+  }
+
   async heartbeatReviewJob(runId: string, lease: TaskLease, leaseMs: number) {
     const result = await this.pool.query(`UPDATE smarthub.review_jobs SET lease_expires_at=now()+($4::text || ' milliseconds')::interval, heartbeat_at=now(), updated_at=now() WHERE run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL`, [runId, lease.workerId, lease.runToken, Math.max(1_000, leaseMs)])
     return result.rowCount === 1
@@ -694,6 +713,15 @@ export class PostgresStore implements StateStore {
     } catch (error) { await client.query('ROLLBACK'); throw error }
     finally { client.release() }
   }
+  async renewTestDesignJobLease(nodeRunId: string, lease: TaskLease, leaseMs: number): Promise<LeaseRenewResult> {
+    if (await this.heartbeatTestDesignJob(nodeRunId, lease, leaseMs)) return { status: 'renewed' }
+    const result = await this.pool.query(`SELECT 1 FROM smarthub.workflow_task_jobs
+      WHERE node_run_id=$1 AND lease_owner=$2 AND run_token=$3::uuid
+        AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NOT NULL`,
+    [nodeRunId, lease.workerId, lease.runToken])
+    return { status: result.rowCount === 1 ? 'cancel_requested' : 'lease_lost' }
+  }
+
   async heartbeatTestDesignJob(nodeRunId: string, lease: TaskLease, leaseMs: number) { const result = await this.pool.query(`UPDATE smarthub.workflow_task_jobs SET lease_expires_at=now()+($4::text||' milliseconds')::interval,updated_at=now() WHERE node_run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL`, [nodeRunId, lease.workerId, lease.runToken, Math.max(1_000, leaseMs)]); return result.rowCount === 1 }
   async finishTestDesignJob(nodeRunId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string) { const result = await this.pool.query(`UPDATE smarthub.workflow_task_jobs SET status=$4,updated_at=now(),error=$5,lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,data=jsonb_set(data,'{status}',to_jsonb($4::text)) WHERE node_run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now()`, [nodeRunId, lease.workerId, lease.runToken, status, error ?? null]); return result.rowCount === 1 }
   async releaseTestDesignJob(nodeRunId: string, lease: TaskLease, retryDelayMs: number, error: string) { const result = await this.pool.query(`UPDATE smarthub.workflow_task_jobs SET status='queued',available_at=now()+($4::text||' milliseconds')::interval,updated_at=now(),error=$5,lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,data=jsonb_set(data,'{status}',to_jsonb('queued'::text)) WHERE node_run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL AND attempt_count<max_attempts`, [nodeRunId, lease.workerId, lease.runToken, Math.max(0, retryDelayMs), error]); return result.rowCount === 1 }
@@ -826,8 +854,8 @@ export class PostgresStore implements StateStore {
           const owned = await client.query(`
             SELECT 1 FROM smarthub.${table}
             WHERE ${key} = $1 AND status = 'running' AND lease_owner = $2
-              AND run_token = $3::uuid AND lease_expires_at > now()
-              ${fencing.kind !== 'sync' ? 'AND cancel_requested_at IS NULL' : ''}
+              AND run_token = $3::uuid AND lease_expires_at > clock_timestamp()
+              AND cancel_requested_at IS NULL
             FOR UPDATE
           `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
           if (owned.rowCount !== 1) { await client.query('ROLLBACK'); return null }
@@ -835,19 +863,21 @@ export class PostgresStore implements StateStore {
         const before = await loadState(client)
         const draft = structuredClone(before)
         const result = await operation(draft)
+        await persistChanges(client, before, draft)
         if (fencing) {
           const table = fencing.kind === 'sync' ? 'sync_tasks' : fencing.kind === 'review' ? 'review_jobs' : 'workflow_task_jobs'
           const key = fencing.kind === 'sync' ? 'id' : fencing.kind === 'test_design' ? 'node_run_id' : 'run_id'
+          // SyncTask is both the lease row and the business row. This Service
+          // transaction may have completed it; token and live lease still fence it.
           const stillOwned = await client.query(`
             SELECT 1 FROM smarthub.${table}
-            WHERE ${key} = $1 AND status = 'running' AND lease_owner = $2
-              AND run_token = $3::uuid AND lease_expires_at > now()
-              ${fencing.kind !== 'sync' ? 'AND cancel_requested_at IS NULL' : ''}
+            WHERE ${key} = $1 AND ${fencing.kind === 'sync' ? "status IN ('running','succeeded','failed','cancelled')" : "status = 'running'"} AND lease_owner = $2
+              AND run_token = $3::uuid AND lease_expires_at > clock_timestamp()
+              AND cancel_requested_at IS NULL
             FOR UPDATE
           `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
           if (stillOwned.rowCount !== 1) { await client.query('ROLLBACK'); return null }
         }
-        await persistChanges(client, before, draft)
         await client.query('COMMIT')
         this.state = draft
         return result

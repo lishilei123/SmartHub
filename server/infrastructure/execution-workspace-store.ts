@@ -185,6 +185,7 @@ export class LocalExecutionWorkspaceStore {
     binding: CaseExecutionBinding,
     files: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[],
     baselineFiles?: readonly Pick<ExecutionPackageFile, 'path' | 'contentSha256'>[],
+    beforePublish?: () => Promise<void>,
   ) {
     return this.withMutation(binding.projectVersionId, async () => {
       const root = await this.ensure(binding.projectVersionId)
@@ -241,6 +242,7 @@ export class LocalExecutionWorkspaceStore {
         }
       }
 
+      await beforePublish?.()
       await this.writeFiles(binding.projectVersionId, files)
       const updatedAt = new Date().toISOString()
       for (const existing of affected) {
@@ -261,6 +263,7 @@ export class LocalExecutionWorkspaceStore {
           updatedAt,
         })
       }
+      await beforePublish?.()
       return this.saveBinding(safeBinding)
     })
   }
@@ -285,7 +288,7 @@ export class LocalExecutionWorkspaceStore {
   async validateBindingAfterPass(expected: Pick<CaseExecutionBinding,
     'projectVersionId' | 'caseId' | 'executionType' | 'entryFile' | 'entrySymbol'
     | 'entrySha256' | 'dependencySha256' | 'caseContentSha256' | 'validationPolicyVersion'
-  >): Promise<boolean> {
+  >, beforePublish?: () => Promise<void>): Promise<boolean> {
     return this.withMutation(expected.projectVersionId, async () => {
       const root = await this.ensure(expected.projectVersionId)
       const resolved = await this.readBinding(root, expected.projectVersionId, expected.caseId, expected.executionType)
@@ -308,6 +311,7 @@ export class LocalExecutionWorkspaceStore {
         // Drift cannot rewrite a newer Binding or promote an unverified package.
         return false
       }
+      await beforePublish?.()
       await this.persistBindingStatus(binding, 'validated')
       return true
     })

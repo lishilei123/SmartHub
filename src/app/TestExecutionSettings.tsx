@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   RUNNER_CONCURRENCY_RANGE,
   AGENT_CONCURRENCY_RANGE,
-  normalizeExecutionConcurrency,
+  type ExecutionConcurrencyConfiguration,
 } from '../../server/domain/test-execution-infrastructure-configuration'
 import {
   loadExecutionInfrastructureConfiguration,
@@ -15,22 +15,20 @@ import type { Notify } from './types'
 
 export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; addAudit: (entry: string) => void }) {
   const [state, setState] = useState<ExecutionInfrastructureState | null>(null)
-  const [values, setValues] = useState(normalizeExecutionConcurrency())
+  const [values, setValues] = useState<ExecutionConcurrencyConfiguration | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const refresh = useCallback(async () => {
     const next = await loadExecutionInfrastructureConfiguration()
     setState(next)
-    setValues(next.draft?.concurrency ?? normalizeExecutionConcurrency(next.activeVersion?.concurrency))
+    setValues(editableConcurrency(next))
     setError(null)
     return next
   }, [])
   useEffect(() => {
     void refresh().catch(reason => setError(String(reason.message ?? reason)))
   }, [refresh])
-  const dirty =
-    JSON.stringify(values) !==
-    JSON.stringify(state?.draft?.concurrency ?? normalizeExecutionConcurrency(state?.activeVersion?.concurrency))
+  const dirty = state !== null && JSON.stringify(values) !== JSON.stringify(editableConcurrency(state))
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (dirty) {
@@ -41,7 +39,7 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
   }, [dirty])
-  if (!state)
+  if (!state || !values)
     return (
       <div className="settings-form">
         <p role={error ? 'alert' : 'status'}>{error ?? '正在读取测试执行配置…'}</p>
@@ -73,7 +71,7 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
         addAudit(`发布测试执行配置 V${version.version}`)
         notify(`测试执行配置 V${version.version} 已发布，Worker 将在下一次配置轮询时生效。`)
       } else {
-        const base = state.activeVersion
+        const base = state.draft ?? state.activeVersion
         await saveExecutionInfrastructureDraft({
           expectedActiveVersion: state.activeVersion?.version ?? null,
           expectedDraftRevision: state.draft?.revision ?? null,
@@ -95,7 +93,10 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
   }
   return (
     <div className="settings-form">
-      <FormSection title="当前生效配置" desc="Worker 读取已发布配置；没有发布配置时使用统一代码默认值。">
+      <FormSection
+        title="当前生效配置"
+        desc="Worker 读取后端有效配置；已发布配置优先，其次兼容旧环境变量，最后使用后端默认值。"
+      >
         <FormRow label="当前生效值" help="">
           <span>
             Runner {effective.runnerConcurrency} · Agent {effective.agentConcurrency}
@@ -105,9 +106,11 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
           <span>
             {effective.source === 'published_configuration'
               ? '已发布配置'
-              : effective.source === 'historical_defaults'
-                ? '历史发布版本缺少并发字段，使用代码默认值'
-                : '代码默认值'}
+              : effective.source === 'legacy_environment'
+                ? '旧环境变量兼容配置'
+                : effective.source === 'historical_defaults'
+                  ? '历史发布版本缺少并发字段，使用代码默认值'
+                  : '代码默认值'}
           </span>
         </FormRow>
         <FormRow label="已发布配置版本" help="">
@@ -133,7 +136,7 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
             step={1}
             value={values.runnerConcurrency}
             disabled={busy}
-            onChange={event => setValues(value => ({ ...value, runnerConcurrency: Number(event.target.value) }))}
+            onChange={event => setValues(value => ({ ...value!, runnerConcurrency: Number(event.target.value) }))}
           />
         </FormRow>
         <FormRow label="Agent 最大并发数" help="控制脚本生成、页面探索、脚本修复和失败分析的并发数。">
@@ -145,7 +148,7 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
             step={1}
             value={values.agentConcurrency}
             disabled={busy}
-            onChange={event => setValues(value => ({ ...value, agentConcurrency: Number(event.target.value) }))}
+            onChange={event => setValues(value => ({ ...value!, agentConcurrency: Number(event.target.value) }))}
           />
         </FormRow>
         <p className="readonly-notice">
@@ -153,6 +156,7 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
           {AGENT_CONCURRENCY_RANGE.min}～{AGENT_CONCURRENCY_RANGE.max}
           。调低并发不会终止已经开始的任务；调高并发后允许调度更多新任务。并发配置只影响调度速度，不影响测试结果和业务事实。
         </p>
+        {!valid && <p role="alert">并发数必须是范围内的整数。</p>}
         {error && <p role="alert">{error}</p>}
         <div className="execution-infrastructure-actions">
           <button
@@ -180,4 +184,9 @@ export function TestExecutionSettings({ notify, addAudit }: { notify: Notify; ad
       </FormSection>
     </div>
   )
+}
+
+function editableConcurrency(state: ExecutionInfrastructureState): ExecutionConcurrencyConfiguration {
+  const { runnerConcurrency, agentConcurrency } = state.draft?.concurrency ?? state.effectiveConcurrency
+  return { runnerConcurrency, agentConcurrency }
 }
