@@ -3190,6 +3190,36 @@ const migrations: Migration[] = [{
       BEFORE UPDATE OR DELETE ON smarthub.test_execution_product_defect_candidate_actions
       FOR EACH ROW EXECUTE FUNCTION smarthub.reject_test_execution_history_update();
   `,
+}, {
+  version: 43,
+  name: 'run-scoped-report-source-indexes',
+  sql: `
+    CREATE INDEX IF NOT EXISTS test_execution_events_run_idx
+      ON smarthub.test_execution_events (run_id);
+    CREATE INDEX IF NOT EXISTS test_execution_diagnoses_run_idx
+      ON smarthub.test_execution_diagnoses (run_id);
+    CREATE INDEX IF NOT EXISTS test_execution_diagnosis_attempts_run_idx
+      ON smarthub.test_execution_diagnosis_attempts (run_id);
+    CREATE INDEX IF NOT EXISTS test_execution_diagnosis_evidence_run_idx
+      ON smarthub.test_execution_diagnosis_evidence (run_id);
+    CREATE INDEX IF NOT EXISTS test_execution_script_revisions_run_idx
+      ON smarthub.test_execution_script_revisions (run_id);
+    CREATE INDEX IF NOT EXISTS test_execution_artifacts_run_idx
+      ON smarthub.test_execution_artifacts (run_id);
+  `,
+}, {
+  version: 44,
+  name: 'test-design-scoped-read-indexes',
+  sql: `
+    CREATE INDEX IF NOT EXISTS workflow_runs_version_domain_created_idx
+      ON smarthub.workflow_runs (project_version_id,domain_type,created_at DESC);
+    CREATE INDEX IF NOT EXISTS workflow_runs_domain_created_idx
+      ON smarthub.workflow_runs (domain_type,domain_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS test_designs_version_created_idx
+      ON smarthub.test_designs (project_version_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS test_case_library_versions_project_published_idx
+      ON smarthub.test_case_library_versions (project_id,published_at DESC);
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

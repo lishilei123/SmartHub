@@ -46,7 +46,7 @@ export function ExecutionRunPanel({
 
   return <div className="te-run-column">
     <section className="te-card te-readiness">
-      <header><div><h2>执行就绪状态</h2><p>生产执行要求正式存储、不可变 Artifact、受控 Agent 与 ProjectVersion Execution Workspace Runner 全部就绪。</p></div><button className="te-icon-button" disabled={loading} onClick={() => void onRefresh()} aria-label="刷新执行就绪状态"><RefreshCw /></button></header>
+      <header><div><h2>执行就绪状态</h2><p>当前仅支持在 Worker 所在机器本地执行；正式存储、Artifact 与执行 Agent 需全部就绪。OCI 执行尚未接入。</p></div><button className="te-icon-button" disabled={loading} onClick={() => void onRefresh()} aria-label="刷新执行就绪状态"><RefreshCw /></button></header>
       <div className="te-readiness-grid">
         <ReadinessItem icon={<Database />} label="PostgreSQL" ready={readiness?.store.ready} reason={readiness?.store.reason} />
         <ReadinessItem icon={<Box />} label="Artifact Store" ready={readiness?.artifactStore.ready} reason={readiness?.artifactStore.reason} />
@@ -58,7 +58,7 @@ export function ExecutionRunPanel({
     </section>
 
     <section className="te-card te-create-card">
-      <header><div><h2>创建测试执行</h2><p>服务端会在创建 Run 时冻结当前项目版本最新正式用例库中的全部可执行用例。</p></div></header>
+      <header><div><h2>创建测试执行</h2><p>当前仅支持全量执行：创建 Run 时冻结最新正式用例库，全部用例均须通过执行就绪校验；未就绪时阻止创建。套件分类执行将在后续接入。</p></div></header>
       <div className="te-handoff-preview"><div><span>执行范围</span><b>全部正式用例</b></div><div><span>冻结时机</span><b>创建 Run</b></div></div>
       <label>被测系统地址<input type="url" list="test-execution-addresses" value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="https://staging.example.com" autoComplete="url" /><small>服务端校验 http/https 地址，并在创建执行时冻结目标环境。</small></label>
       <datalist id="test-execution-addresses">{environments.map(item => <option key={item.environmentId} value={item.baseUrl} label={item.name} />)}</datalist>

@@ -74,6 +74,14 @@ export class TestReportServiceError extends Error {
 }
 
 export class TestReportService {
+  private readonly reportCache = new Map<string, {
+    revision: string
+    report: TestExecutionReport
+    expiresAt: number
+    bytes: number
+  }>()
+  private cacheBytes = 0
+
   constructor(private readonly sourceReader: TestExecutionReportSourceReader) {}
 
   async listReports(projectVersionId: string, limit = 50) {
@@ -104,17 +112,57 @@ export class TestReportService {
   }
 
   async getReport(runId: string): Promise<TestExecutionReport> {
-    const source = await this.sourceReader.getRunReportSource(
-      requiredIdentity(runId, 'runId'),
-    )
+    requiredIdentity(runId, 'runId')
+    const now = Date.now()
+    for (const [id, entry] of this.reportCache) {
+      if (entry.expiresAt <= now) this.evictReport(id)
+    }
+    const cached = this.reportCache.get(runId)
+    const snapshot = this.sourceReader.getRunReportSnapshot
+      ? await this.sourceReader.getRunReportSnapshot(runId, cached?.revision)
+      : undefined
+    if (snapshot?.unchanged) {
+      if (!cached || cached.revision !== snapshot.revision) {
+        throw new Error('TEST_REPORT_CACHE_REVISION_MISMATCH')
+      }
+      return structuredClone(cached.report)
+    }
+    const source = snapshot === undefined
+      ? await this.sourceReader.getRunReportSource(runId)
+      : snapshot?.source
     if (!source) {
+      this.evictReport(runId)
       throw new TestReportServiceError(
         'TEST_REPORT_RUN_NOT_FOUND',
         '测试报告对应的执行 Run 不存在',
         404,
       )
     }
-    return buildTestExecutionReport(source)
+    const report = buildTestExecutionReport(source)
+    if (snapshot) {
+      const bytes = Buffer.byteLength(JSON.stringify(report), 'utf8')
+      const maximumBytes = 16 * 1024 * 1024
+      this.evictReport(runId)
+      if (bytes <= maximumBytes) {
+        while (this.reportCache.size >= 32 || this.cacheBytes + bytes > maximumBytes) {
+          this.evictReport(this.reportCache.keys().next().value!)
+        }
+        this.reportCache.set(runId, {
+          revision: snapshot.revision,
+          report: structuredClone(report),
+          expiresAt: Date.now() + 30_000,
+          bytes,
+        })
+        this.cacheBytes += bytes
+      }
+    }
+    return report
+  }
+
+  private evictReport(runId: string) {
+    const entry = this.reportCache.get(runId)
+    if (entry) this.cacheBytes -= entry.bytes
+    this.reportCache.delete(runId)
   }
 
   async exportJson(runId: string) {

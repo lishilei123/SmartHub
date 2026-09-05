@@ -10,7 +10,7 @@ import type {
   TestCaseTraceability, TestDesignNodeKey, TestDesignRunAgentConfigurationSnapshot, TestDesignState, TestDesignWorkflowRun, TestExecutionHandoff, TestExecutionMethod,
   TestSuiteDraft, TestSuiteVersion, TestSuiteVersionMember, WorkflowArtifact, WorkflowNodeRun,
 } from '../domain/test-design-types.js'
-import type { StateStore, TaskLease } from '../infrastructure/store.js'
+import type { StateStore, TaskLease, TestDesignReadScope } from '../infrastructure/store.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { auditTestDesignCoverage } from './test-design-coverage-auditor.js'
 import { assertEtag, etag, isTestDesignRepairPatch, TestDesignError, validateCaseDependencyGraph, validateCreateTestDesignInput, validateTestCaseContent, validateTestCaseDesignCandidate, type CandidateCase, type TestCaseDesignCandidate, type TestDesignRepairPatch } from './test-design-validation.js'
@@ -49,7 +49,7 @@ export class TestDesignService {
   constructor(private readonly store: StateStore, private readonly runtime?: PlanningAgentRuntime, private readonly projector?: TestCaseAssetProjector) {}
 
   async inputCandidates(projectVersionId: string) {
-    const state = await this.store.snapshot()
+    const state = await this.readState({ projectVersionId, includeInputs: true, collections: ['libraryVersions'] })
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
     const projectBases = state.knowledgeBases.filter(item => item.projectId === projectVersion.projectId)
     const requirementRelease = boundRequirementRelease(state, projectVersionId)
@@ -139,17 +139,17 @@ export class TestDesignService {
   }
 
   async listDesigns(projectVersionId: string) {
-    const state = await this.store.snapshot(); const aggregate = readDesignState(state)
+    const state = await this.readState({ projectVersionId, latestRunsOnly: true, collections: ['designs', 'runs'] }); const aggregate = readDesignState(state)
     return aggregate.designs.filter(item => item.projectVersionId === projectVersionId).sort(newest).map(design => ({ ...design, latestRun: aggregate.runs.filter(run => run.testDesignId === design.id).sort(newest)[0] ?? null }))
   }
 
   async getDesign(projectVersionId: string, designId: string) {
-    const state = await this.store.snapshot(); return structuredClone(findDesign(state, projectVersionId, designId))
+    const state = await this.readState({ projectVersionId, designId, collections: ['designs'] }); return structuredClone(findDesign(state, projectVersionId, designId))
   }
 
   async createRun(projectVersionId: string, designId: string, idempotencyKey: string, principal: Principal) {
     if (!idempotencyKey?.trim()) throw new TestDesignError('IDEMPOTENCY_KEY_REQUIRED', '创建运行必须提供 Idempotency-Key', 400)
-    findDesign(await this.store.snapshot(), projectVersionId, designId)
+    findDesign(await this.readState({ projectVersionId, designId, collections: ['designs'] }), projectVersionId, designId)
     const readiness = this.runtime?.readiness ? await this.runtime.readiness() : { ready: Boolean(this.runtime) }
     if (!readiness.ready) throw new TestDesignError('TEST_DESIGN_AGENT_NOT_READY', 'PlanningAgent 尚未发布或未通过模型门禁', 409, readiness)
     const agentConfigurationSnapshot = this.runtime?.freezeConfiguration ? await this.runtime.freezeConfiguration() : undefined
@@ -183,7 +183,7 @@ export class TestDesignService {
   }
 
   async listRuns(projectVersionId: string, designId: string) {
-    const state = await this.store.snapshot(); findDesign(state, projectVersionId, designId)
+    const state = await this.readState({ projectVersionId, designId, collections: ['designs', 'runs', 'libraryVersions'] }); findDesign(state, projectVersionId, designId)
     const aggregate = readDesignState(state)
     const publishedRunIds = new Set(aggregate.libraryVersions.flatMap(item => item.sourceRunId ? [item.sourceRunId] : []))
     return aggregate.runs.filter(item => item.projectVersionId === projectVersionId && item.testDesignId === designId).sort(newest).map(run => {
@@ -193,7 +193,7 @@ export class TestDesignService {
   }
 
   async getRun(projectVersionId: string, designId: string, runId: string) {
-    const state = await this.store.snapshot(); const run = findRun(state, projectVersionId, designId, runId)
+    const state = await this.readState({ projectVersionId, designId, runId, collections: ['designs', 'runs'] }); const run = findRun(state, projectVersionId, designId, runId)
     return { ...presentRun(run, true), candidateCaseCount: run.testCases.filter(item => !item.tombstonedAt).length, effectiveCaseCount: buildEffectiveCaseSet(run).length, caseChangeProposalSha256: caseChangeProposalSha256(run.caseChangeProposals ?? []) }
   }
 
@@ -307,7 +307,7 @@ export class TestDesignService {
   async fullRerun(projectVersionId: string, designId: string, runId: string, idempotencyKey: string, principal: Principal) { await this.getRun(projectVersionId, designId, runId); return this.createRun(projectVersionId, designId, idempotencyKey, principal) }
 
   async resynthesize(projectVersionId: string, designId: string, runId: string) {
-    const state = await this.store.snapshot()
+    const state = await this.readState({ projectVersionId, designId, runId, collections: ['designs', 'runs'] })
     assertOpenVersion(state, projectVersionId)
     findRun(state, projectVersionId, designId, runId)
     await this.runtime?.appendTask?.({
@@ -404,14 +404,14 @@ export class TestDesignService {
   }
 
   async listLibraryCases(projectId: string, filters: { domain?: string; dimension?: string; executionMethod?: string; priority?: string; status?: string; tag?: string } = {}) {
-    const state = await this.store.snapshot(); const aggregate = readDesignState(state)
+    const state = await this.readState({ projectId, collections: ['libraryCases'] }); const aggregate = readDesignState(state)
     return aggregate.libraryCases.filter(item => item.projectId === projectId).filter(item => {
       const content = currentLibraryRevision(item).content
       return (!filters.dimension || content.dimension === filters.dimension) && (!filters.executionMethod || content.executionMethods.includes(filters.executionMethod as 'ui' | 'api')) && (!filters.priority || content.priority === filters.priority) && (!filters.status || item.status === filters.status)
     }).sort(newest).map(item => presentLibraryCase(item))
   }
 
-  async getLibraryCase(projectId: string, caseId: string) { const state = await this.store.snapshot(); return presentLibraryCase(required(readDesignState(state).libraryCases.find(item => item.id === caseId && item.projectId === projectId), 'LIBRARY_TEST_CASE_NOT_FOUND', '正式测试用例不存在'), true) }
+  async getLibraryCase(projectId: string, caseId: string) { const state = await this.readState({ projectId, collections: ['libraryCases'] }); return presentLibraryCase(required(readDesignState(state).libraryCases.find(item => item.id === caseId && item.projectId === projectId), 'LIBRARY_TEST_CASE_NOT_FOUND', '正式测试用例不存在'), true) }
 
   async createLibraryCase(projectId: string, rawContent: unknown, changeReason: string, principal: Principal) {
     return this.store.transaction(state => { assertProjectExists(state, projectId); const content = validateTestCaseContent(rawContent); const createdAt = now(); const revision = createLibraryRevision(1, content, principal.subjectId, cleanRequired(changeReason, '变更原因', 2_000)); const testCase: LibraryTestCase = { id: `library_test_case_${randomUUID()}`, projectId, currentRevision: 1, status: 'active', createdAt, updatedAt: createdAt, revisions: [revision] }; designState(state).libraryCases.push(testCase); return presentLibraryCase(testCase, true) })
@@ -442,7 +442,7 @@ export class TestDesignService {
     return this.store.transaction(state => { const testCase = findLibraryCase(state, projectId, caseId); const current = currentLibraryRevision(testCase); assertEtag(ifMatch, libraryCaseEtag(testCase, current), 'LIBRARY_TEST_CASE_REVISION_CONFLICT'); testCase.status = 'deprecated'; testCase.updatedAt = now(); const revision = createLibraryRevision(current.revision + 1, current.content, principal.subjectId, cleanRequired(changeReason, '废弃原因', 2_000), undefined, undefined, current.traceability); testCase.revisions.push(revision); testCase.currentRevision = revision.revision; return presentLibraryCase(testCase, true) })
   }
 
-  async libraryCaseDiff(projectId: string, caseId: string, from: number, to: number) { const state = await this.store.snapshot(); const testCase = findLibraryCase(state, projectId, caseId); const left = required(testCase.revisions.find(item => item.revision === from), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '起始 Revision 不存在'); const right = required(testCase.revisions.find(item => item.revision === to), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '目标 Revision 不存在'); return structuralDiff(left.content, right.content) }
+  async libraryCaseDiff(projectId: string, caseId: string, from: number, to: number) { const state = await this.readState({ projectId, collections: ['libraryCases'] }); const testCase = findLibraryCase(state, projectId, caseId); const left = required(testCase.revisions.find(item => item.revision === from), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '起始 Revision 不存在'); const right = required(testCase.revisions.find(item => item.revision === to), 'LIBRARY_TEST_CASE_REVISION_NOT_FOUND', '目标 Revision 不存在'); return structuralDiff(left.content, right.content) }
 
   async publishLibraryVersion(projectVersionId: string, designId: string, runId: string, input: { name: string; expectedAuditId: string; expectedCaseSetSha256: string; expectedProposalSha256: string }, principal: Principal) {
     const published = await this.store.transaction(state => {
@@ -477,10 +477,10 @@ export class TestDesignService {
     return this.getLibraryVersion(published.projectId, published.id)
   }
 
-  async listLibraryVersions(projectId: string, sourceRunId?: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return aggregate.libraryVersions.filter(item => item.projectId === projectId && (!sourceRunId || item.sourceRunId === sourceRunId)).sort((left, right) => right.version - left.version).map(item => presentLibraryVersion(aggregate, item)) }
-  async getLibraryVersion(projectId: string, versionId: string) { const state = await this.store.snapshot(); const aggregate = readDesignState(state); return presentLibraryVersion(aggregate, required(aggregate.libraryVersions.find(item => item.id === versionId && item.projectId === projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在')) }
+  async listLibraryVersions(projectId: string, sourceRunId?: string) { const state = await this.readState({ projectId, collections: ['libraryCases', 'libraryVersions'] }); const aggregate = readDesignState(state); return aggregate.libraryVersions.filter(item => item.projectId === projectId && (!sourceRunId || item.sourceRunId === sourceRunId)).sort((left, right) => right.version - left.version).map(item => presentLibraryVersion(aggregate, item)) }
+  async getLibraryVersion(projectId: string, versionId: string) { const state = await this.readState({ projectId, libraryVersionId: versionId, collections: ['libraryCases', 'libraryVersions'] }); const aggregate = readDesignState(state); return presentLibraryVersion(aggregate, required(aggregate.libraryVersions.find(item => item.id === versionId && item.projectId === projectId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在')) }
   async getCurrentLibraryVersion(projectVersionId: string) {
-    const state = await this.store.snapshot()
+    const state = await this.readState({ projectVersionId, collections: ['libraryCases', 'libraryVersions'] })
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
     const aggregate = readDesignState(state)
     const libraryVersion = latestPublishedLibraryVersion(aggregate.libraryVersions.filter(item => item.projectVersionId === projectVersion.id))
@@ -494,7 +494,7 @@ export class TestDesignService {
     }, { subjectId: createdBy, displayName: createdBy })
   }
   async publishedTestCases(projectVersionId: string) {
-    const state = await this.store.snapshot()
+    const state = await this.readState({ projectVersionId, collections: ['runs', 'libraryCases', 'libraryVersions'] })
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
     const aggregate = readDesignState(state)
     const libraryVersion = latestPublishedLibraryVersion(aggregate.libraryVersions.filter(item => item.projectVersionId === projectVersionId))
@@ -510,11 +510,11 @@ export class TestDesignService {
     }
   }
   async compareLibraryVersions(projectId: string, fromId: string, toId: string) { const left = await this.getLibraryVersion(projectId, fromId); const right = await this.getLibraryVersion(projectId, toId); return versionMemberDiff(left.members, right.members) }
-  async listSuites(projectId: string, suiteType?: string) { const state = await this.store.snapshot(); return structuredClone(readDesignState(state).suiteVersions.filter(item => item.projectId === projectId && (!suiteType || item.suiteType === suiteType)).sort(newest)) }
-  async getSuite(projectId: string, suiteVersionId: string) { const state = await this.store.snapshot(); return structuredClone(required(readDesignState(state).suiteVersions.find(item => item.id === suiteVersionId && item.projectId === projectId), 'TEST_SUITE_VERSION_NOT_FOUND', '测试套件版本不存在')) }
+  async listSuites(projectId: string, suiteType?: string) { const state = await this.readState({ projectId, collections: ['suiteVersions'] }); return structuredClone(readDesignState(state).suiteVersions.filter(item => item.projectId === projectId && (!suiteType || item.suiteType === suiteType)).sort(newest)) }
+  async getSuite(projectId: string, suiteVersionId: string) { const state = await this.readState({ projectId, collections: ['suiteVersions'] }); return structuredClone(required(readDesignState(state).suiteVersions.find(item => item.id === suiteVersionId && item.projectId === projectId), 'TEST_SUITE_VERSION_NOT_FOUND', '测试套件版本不存在')) }
 
-  async listSuiteDrafts(projectId: string) { const state = await this.store.snapshot(); return structuredClone(readDesignState(state).suiteDrafts.filter(item => item.projectId === projectId).sort(newest)) }
-  async getSuiteDraft(projectId: string, draftId: string) { const state = await this.store.snapshot(); const draft = required(readDesignState(state).suiteDrafts.find(item => item.id === draftId && item.projectId === projectId), 'TEST_SUITE_DRAFT_NOT_FOUND', '测试套件草稿不存在'); return { ...structuredClone(draft), etag: suiteDraftEtag(draft) } }
+  async listSuiteDrafts(projectId: string) { const state = await this.readState({ projectId, collections: ['suiteDrafts'] }); return structuredClone(readDesignState(state).suiteDrafts.filter(item => item.projectId === projectId).sort(newest)) }
+  async getSuiteDraft(projectId: string, draftId: string) { const state = await this.readState({ projectId, collections: ['suiteDrafts'] }); const draft = required(readDesignState(state).suiteDrafts.find(item => item.id === draftId && item.projectId === projectId), 'TEST_SUITE_DRAFT_NOT_FOUND', '测试套件草稿不存在'); return { ...structuredClone(draft), etag: suiteDraftEtag(draft) } }
 
   async createSuiteDraft(projectId: string, raw: unknown, principal: Principal) {
     const input = suiteDraftInput(raw)
@@ -587,14 +587,14 @@ export class TestDesignService {
   }
 
   async listLibraryHandoffs(projectVersionId: string, libraryVersionId?: string) {
-    const state = await this.store.snapshot()
+    const state = await this.readState({ projectVersionId, collections: ['executionHandoffs'] })
     const projectVersion = required(state.projectVersions.find(item => item.id === projectVersionId), 'PROJECT_VERSION_NOT_FOUND', '项目版本不存在')
     return structuredClone(readDesignState(state).executionHandoffs
       .filter(item => item.projectId === projectVersion.projectId && item.projectVersionId === projectVersionId && Boolean(item.testCaseLibraryVersionId) && (!libraryVersionId || item.testCaseLibraryVersionId === libraryVersionId))
       .sort(newest))
   }
 
-  async getHandoff(handoffId: string) { const state = await this.store.snapshot(); return structuredClone(required(readDesignState(state).executionHandoffs.find(item => item.id === handoffId), 'TEST_EXECUTION_HANDOFF_NOT_FOUND', '执行交接不存在')) }
+  async getHandoff(handoffId: string) { const state = await this.readState({ handoffId, collections: ['executionHandoffs'] }); return structuredClone(required(readDesignState(state).executionHandoffs.find(item => item.id === handoffId), 'TEST_EXECUTION_HANDOFF_NOT_FOUND', '执行交接不存在')) }
 
   private async executeNode(runId: string, key: 'test_case_design' | 'test_design_repair', signal: AbortSignal, upstream: unknown) {
     await this.store.transaction(state => { const run = findRunById(state, runId); const target = node(run, key); Object.assign(target, { status: 'running', attempt: target.attempt + 1, startedAt: now(), finishedAt: undefined, error: undefined, errorCode: undefined, execution: undefined }); Object.assign(run, { status: 'running', stage: key, startedAt: run.startedAt ?? now(), finishedAt: undefined, error: undefined, errorCode: undefined }); if (key === 'test_design_repair' && run.automaticRepair?.status === 'queued') Object.assign(run.automaticRepair, { status: 'running', startedAt: now(), finishedAt: undefined }) })
@@ -624,11 +624,12 @@ export class TestDesignService {
   private startLocally(runId: string) { if (this.activeRuns.has(runId)) return; const controller = new AbortController(); this.activeRuns.set(runId, controller); void this.processPreparedRun(runId, controller.signal).catch(() => undefined).finally(() => this.activeRuns.delete(runId)) }
   private async schedule(runId: string) { if (!this.store.enqueueTestDesignJob) { this.startLocally(runId); return } const run = await this.loadRun(runId); const targets = run.nodeRuns.filter(item => item.status === 'queued'); await Promise.all(targets.map(async target => { const createdAt = now(); await this.store.enqueueTestDesignJob!({ id: `workflow_job_${randomUUID()}`, runId, nodeRunId: target.id, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: createdAt, createdAt, updatedAt: createdAt }) })) }
   private async fencedNodeTransaction<T>(nodeRunId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>) { if (!this.store.transactionWithTestDesignLease) throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '当前 Store 不支持测试设计节点租约', 503); const result = await this.store.transactionWithTestDesignLease(nodeRunId, lease, operation); if (result === null) throw new TestDesignError('WORKFLOW_JOB_LEASE_LOST', '测试设计节点租约已失效', 409); return result }
-  private async loadRun(runId: string) { const state = await this.store.snapshot(); return structuredClone(findRunById(state, runId)) }
-  private async loadScopedRun(projectVersionId: string, designId: string, runId: string) { const state = await this.store.snapshot(); return structuredClone(findRun(state, projectVersionId, designId, runId)) }
+  private async readState(scope: TestDesignReadScope) { return this.store.getTestDesignReadState ? this.store.getTestDesignReadState(scope) : this.store.snapshot() }
+  private async loadRun(runId: string) { const state = await this.readState({ runId, collections: ['runs'] }); return structuredClone(findRunById(state, runId)) }
+  private async loadScopedRun(projectVersionId: string, designId: string, runId: string) { const state = await this.readState({ projectVersionId, designId, runId, collections: ['designs', 'runs'] }); return structuredClone(findRun(state, projectVersionId, designId, runId)) }
   private async projectLibraryVersion(versionId: string) {
     if (!this.projector) throw new TestDesignError('TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '正式用例库必须投影到 Workspace AssetVersion，但资产服务不可用', 503)
-    const state = await this.store.snapshot(); const aggregate = readDesignState(state); const version = required(aggregate.libraryVersions.find(item => item.id === versionId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); const projectVersion = required(state.projectVersions.find(item => item.id === version.projectVersionId && item.projectId === version.projectId), 'PROJECT_VERSION_NOT_FOUND', '用例库项目版本不存在'); const base = required(state.knowledgeBases.find(item => item.projectId === version.projectId), 'TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '项目知识库不存在'); const files = libraryProjectionFiles(projectVersion.name, version, aggregate.libraryCases)
+    const state = await this.readState({ libraryVersionId: versionId, collections: ['runs', 'libraryCases', 'libraryVersions'] }); const aggregate = readDesignState(state); const version = required(aggregate.libraryVersions.find(item => item.id === versionId), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); const projectVersion = required(state.projectVersions.find(item => item.id === version.projectVersionId && item.projectId === version.projectId), 'PROJECT_VERSION_NOT_FOUND', '用例库项目版本不存在'); const base = required(state.knowledgeBases.find(item => item.projectId === version.projectId), 'TEST_DESIGN_WORKSPACE_PROJECTION_UNAVAILABLE', '项目知识库不存在'); const files = libraryProjectionFiles(projectVersion.name, version, aggregate.libraryCases)
     try {
       const projected = await this.projectWorkspaceFiles(base.id, `test-case-library:${version.id}`, 'test_case_library', files, 'upload')
       await this.store.transaction(draft => { const current = designState(draft); const target = required(current.libraryVersions.find(item => item.id === version.id), 'TEST_CASE_LIBRARY_VERSION_NOT_FOUND', '用例库版本不存在'); target.projection = { status: projected.some(item => item.pending) ? 'pending' : 'succeeded', files: projected.map(item => ({ logicalPath: item.file.logicalPath, contentSha256: item.file.contentSha256, assetVersionId: item.assetVersionId })) }; const run = target.sourceRunId ? current.runs.find(item => item.id === target.sourceRunId) : undefined; if (run) { const paths = new Set(projected.map(item => item.file.logicalPath)); run.formalWorkspaceFiles = [...run.formalWorkspaceFiles.filter(item => !paths.has(item.logicalPath)), ...projected.map(item => ({ ...item.file, sourceType: 'test_case_library_version' as const, sourceId: target.id, assetVersionId: item.assetVersionId }))] } })

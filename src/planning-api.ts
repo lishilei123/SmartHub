@@ -1,6 +1,6 @@
 import type { AgentConfigurationVersion } from './agent-configuration-api'
 
-const apiBase = import.meta.env.VITE_PLANNING_API_BASE ?? 'http://127.0.0.1:8787/api'
+import { apiBase } from './api-base'
 
 export type PlanningReviewerType = 'requirement' | 'coverage'
 export type PlanningWorkflowStage =

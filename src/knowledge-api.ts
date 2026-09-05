@@ -2,7 +2,7 @@ import { parseMarkdownOutline } from './markdown-outline'
 import type { GenerativeSourceDraft } from './prototype-data'
 import type { KnowledgeDirectory, KnowledgeDocument, KnowledgeTask } from './prototype-data'
 
-const base = 'http://127.0.0.1:8787/api'
+import { apiBase as base } from './api-base'
 export type EmbeddingSource = { id: string; name: string; type: 'remote_api' | 'local'; baseUrl: string; apiKey: string; models: { name: string; dimensions: number }[] }
 export type ApiConfig = { id: string; version: number; requiresRebuild: boolean; config: { parserVersion: string; preprocessVersion: string; chunkTargetSize: number; chunkMaxSize: number; chunkOverlap: number; headingDepth: number; embeddingSourceId: string; embeddingSources: EmbeddingSource[]; embeddingMode: 'remote_api' | 'local'; embeddingBaseUrl: string; embeddingApiKey: string; embeddingModel: string; embeddingDimensions: number; embeddingBatchSize: number; embeddingTimeoutMs: number; embeddingRetries: number; keywordRecall: number; vectorRecall: number; finalResults: number; relevanceThreshold: number; hybridSearch: boolean; rerankerEnabled: boolean; rerankerSourceId: string; rerankerModel: string } }
 export type ApiTask = KnowledgeTask & { trigger: 'upload' | 'manual' | 'retry'; attempts: number; createdAt: string; scope?: string; targetId?: string; metrics?: Record<string, number> }

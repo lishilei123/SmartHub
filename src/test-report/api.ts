@@ -1,6 +1,6 @@
 import type { TestReport, TestReportListItem } from './types'
 
-const apiBase = 'http://127.0.0.1:8787/api'
+import { apiBase } from '../api-base'
 
 export class TestReportApiError extends Error {
   constructor(
@@ -13,8 +13,16 @@ export class TestReportApiError extends Error {
   }
 }
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`)
+type CachedReport = { path: string; etag: string; value: TestReport }
+let cachedReport: CachedReport | undefined
+
+async function request<T>(path: string, signal?: AbortSignal, conditional = false): Promise<T> {
+  const cached = conditional && cachedReport?.path === path ? cachedReport : undefined
+  const response = await fetch(`${apiBase}${path}`, {
+    signal,
+    headers: cached ? { 'If-None-Match': cached.etag } : undefined,
+  })
+  if (response.status === 304 && cached) return cached.value as T
   const body = await response.json().catch(() => ({})) as T & {
     code?: string
     message?: string
@@ -29,6 +37,10 @@ async function request<T>(path: string): Promise<T> {
       body.details,
     )
   }
+  if (conditional) {
+    const etag = response.headers.get('etag')
+    if (etag && !signal?.aborted) cachedReport = { path, etag, value: body as unknown as TestReport }
+  }
   return body
 }
 
@@ -41,8 +53,8 @@ export async function loadReports(projectVersionId: string, limit = 50) {
   )).items
 }
 
-export function loadReport(projectVersionId: string, runId: string) {
-  return request<TestReport>(`${scope(projectVersionId)}/${encodeURIComponent(runId)}`)
+export function loadReport(projectVersionId: string, runId: string, signal?: AbortSignal) {
+  return request<TestReport>(`${scope(projectVersionId)}/${encodeURIComponent(runId)}`, signal, true)
 }
 
 export function reportExportUrl(

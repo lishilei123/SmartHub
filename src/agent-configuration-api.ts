@@ -1,4 +1,4 @@
-const apiBase = 'http://127.0.0.1:8787/api'
+import { apiBase } from './api-base'
 
 export type AgentModelReference = { sourceId: string; modelId: string }
 export type AgentConfigurationAgentKey =

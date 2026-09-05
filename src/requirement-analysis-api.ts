@@ -3,7 +3,7 @@ import type { AgentExecutionContext, PlanningSubAgentRunRecord } from './plannin
 
 export type ProjectWorkspaceSourceScope = 'current_input' | 'current_branch' | 'shared' | 'historical_branch' | 'formal_output'
 
-const apiBase = 'http://127.0.0.1:8787/api'
+import { apiBase } from './api-base'
 
 export type OverallAssessment = 'pass' | 'pass_with_notes' | 'needs_revision' | 'blocked'
 

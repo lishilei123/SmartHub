@@ -140,7 +140,12 @@ export interface TestExecutionReportSourceReader {
   listRuns(projectVersionId: string, limit: number): Promise<ExecutionRun[]>
   getRun(runId: string): Promise<ExecutionRun | null>
   getRunReportSource(runId: string): Promise<TestExecutionReportSource | null>
+  getRunReportSnapshot?(runId: string, knownRevision?: string): Promise<TestExecutionReportSnapshot | null>
 }
+
+export type TestExecutionReportSnapshot =
+  | { revision: string; unchanged: true }
+  | { revision: string; unchanged: false; source: TestExecutionReportSource }
 
 export interface TestExecutionStore {
   readiness(): Promise<{ ready: boolean; reason?: string }>
@@ -356,6 +361,11 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
   }
 
   async getRunReportSource(runId: string): Promise<TestExecutionReportSource | null> {
+    const snapshot = await this.getRunReportSnapshot(runId)
+    return snapshot && !snapshot.unchanged ? snapshot.source : null
+  }
+
+  async getRunReportSnapshot(runId: string, knownRevision?: string): Promise<TestExecutionReportSnapshot | null> {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -363,6 +373,11 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       if (!run) {
         await client.query('COMMIT')
         return null
+      }
+      const revision = await reportSourceRevision(client, run)
+      if (knownRevision === revision) {
+        await client.query('COMMIT')
+        return { revision, unchanged: true }
       }
       const tasks = await client.query<{ frozen_input: ExecutionTask['input']; status: ExecutionTaskStatus; state_version: number; runner_attempt_count: number; same_script_retry_count: number; repair_count: number; current_script_revision_id: string | null; unsupported_reason: string | null; error: string | null; created_at: Date | string; updated_at: Date | string; finished_at: Date | string | null }>(`
           SELECT frozen_input,status,state_version,runner_attempt_count,
@@ -460,7 +475,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
       }
       assertReportSourceScope(source)
       await client.query('COMMIT')
-      return source
+      return { revision, unchanged: false, source }
     } catch (error) {
       await client.query('ROLLBACK')
       throw error
@@ -1471,6 +1486,35 @@ async function recomputeRun(client: PoolClient, runId: string) {
     return runFromRow(updated.rows[0])
   }
   return current
+}
+
+async function reportSourceRevision(client: PoolClient, run: ExecutionRun) {
+  // Tuple versions catch inserts, updates and deletes without loading frozen
+  // inputs, script packages or artifact metadata. Scope every scan to this Run.
+  // This is a short-lived internal cache token, never a durable business version.
+  const relations = [
+    ['test_execution_runs', 'id=$1'],
+    ['test_execution_tasks', 'run_id=$1'],
+    ['test_execution_attempts', 'run_id=$1'],
+    ['test_execution_events', 'run_id=$1'],
+    ['test_execution_diagnoses', 'run_id=$1'],
+    ['test_execution_diagnosis_attempts', 'run_id=$1'],
+    ['test_execution_diagnosis_evidence', 'run_id=$1'],
+    ['test_execution_script_revisions', 'run_id=$1'],
+    ['test_execution_artifacts', 'run_id=$1'],
+    ['test_execution_case_maintenance_proposals', 'run_id=$1'],
+    ['test_execution_product_defect_candidate_actions', 'run_id=$1'],
+    ['test_execution_handoffs', 'id=$2'],
+    ['test_case_library_versions', 'id=$3'],
+    ['test_suite_versions', 'id=$4'],
+  ] as const
+  const result = await client.query<{ revisions: string[] }>(`
+    SELECT ARRAY[${relations.map(([table, predicate]) => `
+      (SELECT md5(COALESCE(string_agg(xmin::text || ':' || ctid::text, ',' ORDER BY ctid), ''))
+       FROM smarthub.${table} WHERE ${predicate})
+    `).join(',')}] AS revisions
+  `, [run.id, run.handoff.handoffId, run.handoff.testCaseLibraryVersionId, run.handoff.suiteVersionId ?? null])
+  return canonicalSha256(result.rows[0].revisions)
 }
 
 async function getRun(queryable: Pool | PoolClient, runId: string) {

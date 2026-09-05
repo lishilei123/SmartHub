@@ -224,7 +224,16 @@ test('报告输入乱序不改变 Hash 或导出字节，正式事实变化会�
   const { reportSha256: _reportSha256, ...content } = first
   assert.equal(first.reportSha256, canonicalSha256(content))
 
-  const service = new TestReportService(reportSourceReader(source))
+  let sourceReads = 0
+  const service = new TestReportService({
+    ...reportSourceReader(source),
+    async getRunReportSnapshot(_runId, knownRevision) {
+      const revision = canonicalSha256(source)
+      if (revision === knownRevision) return { revision, unchanged: true }
+      sourceReads += 1
+      return { revision, unchanged: false, source: structuredClone(source) }
+    },
+  })
   const json = await service.exportJson(source.run.id)
   assert.equal(json.body, canonicalJson(first))
   const markdown = await service.exportMarkdown(source.run.id)
@@ -235,6 +244,19 @@ test('报告输入乱序不改变 Hash 或导出字节，正式事实变化会�
   assert.doesNotMatch(markdown.body, /storagePath|private\/objects/u)
   assert.equal(markdown.body.endsWith('\n'), true)
   assert.equal(markdown.body.includes('\r'), false)
+  assert.equal(sourceReads, 1, 'unchanged snapshots reuse the report across representations')
+  json.report.overview.passed = 999
+  assert.equal((await service.getReport(source.run.id)).overview.passed, first.overview.passed,
+    'callers cannot mutate cached reports')
+  const originalStateVersion = source.run.stateVersion
+  source.maintenanceProposals[0].status = 'rejected'
+  source.maintenanceProposals[0].decidedBy = 'reviewer'
+  source.maintenanceProposals[0].decidedAt = '2026-08-14T00:02:00.000Z'
+  const decided = await service.getReport(source.run.id)
+  assert.equal(source.run.stateVersion, originalStateVersion)
+  assert.equal(sourceReads, 2, 'human decisions invalidate even without a Run state change')
+  assert.equal(decided.overview.rejectedMaintenanceCount, 1)
+  assert.notEqual(decided.reportSha256, first.reportSha256)
 
   const changed = reportSourceFixture()
   changed.run.stateVersion += 1

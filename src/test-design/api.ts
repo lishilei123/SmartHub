@@ -1,6 +1,6 @@
 import type { CreateTestDesignInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestDesign, TestDesignCase, TestDesignCoverageAudit, TestDesignInputCandidates, TestDesignWorkflowRun, TestSuiteDraft, TestExecutionMethod } from './types'
 
-const apiBase = 'http://127.0.0.1:8787/api'
+import { apiBase } from '../api-base'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, { ...init, headers: { ...(init?.body ? { 'content-type': 'application/json' } : {}), ...init?.headers } })

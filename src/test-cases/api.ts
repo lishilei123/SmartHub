@@ -1,6 +1,6 @@
 import type { PublishedTestCasesResponse } from './types'
 
-const apiBase = 'http://127.0.0.1:8787/api'
+import { apiBase } from '../api-base'
 
 export async function loadPublishedTestCases(projectVersionId: string): Promise<PublishedTestCasesResponse> {
   const response = await fetch(`${apiBase}/project-versions/${encodeURIComponent(projectVersionId)}/test-cases`)

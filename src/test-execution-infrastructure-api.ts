@@ -1,4 +1,4 @@
-const apiBase = 'http://127.0.0.1:8787/api'
+import { apiBase } from './api-base'
 
 export type ExecutionTarget = { protocol: 'http' | 'https'; host: string; port: number }
 export type ExecutionEnvironmentProfile = {

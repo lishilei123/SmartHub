@@ -1,3 +1,4 @@
+import { apiBase } from './api-base'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ComponentPropsWithoutRef } from 'react'
@@ -31,7 +32,7 @@ export function resolveKnowledgeImage(kbId: string, logicalPath: string, source:
   const normalized: string[] = []
   for (const part of parts) { if (!part || part === '.') continue; if (part === '..') { if (!normalized.length) return null; normalized.pop() } else normalized.push(part) }
   if (!normalized.length) return null
-  return `http://127.0.0.1:8787/api/knowledge-bases/${encodeURIComponent(kbId)}/files/${normalized.map(encodeURIComponent).join('/')}`
+  return `${apiBase}/knowledge-bases/${encodeURIComponent(kbId)}/files/${normalized.map(encodeURIComponent).join('/')}`
 }
 
 export function MarkdownDocument({ source, format, knowledgeBaseId = '', logicalPath = '', outline = emptyMarkdownOutline, activeSectionKey, anchorPrefix = 'document-section', highlightSourceRange, onOpenKnowledgeDocument }: { source: string; format: DocumentFormat; knowledgeBaseId?: string; logicalPath?: string; outline?: MarkdownOutline; activeSectionKey?: string | null; anchorPrefix?: string; highlightSourceRange?: SourceRange; onOpenKnowledgeDocument?: (logicalPath: string) => void }) {

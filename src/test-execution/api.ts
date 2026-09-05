@@ -10,7 +10,7 @@ import type {
   Versioned,
 } from './types'
 
-const apiBase = 'http://127.0.0.1:8787/api'
+import { apiBase } from '../api-base'
 
 export class TestExecutionApiError extends Error {
   constructor(

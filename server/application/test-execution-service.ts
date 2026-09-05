@@ -1805,12 +1805,14 @@ export class TestExecutionService {
     await this.executionWorkspace.cleanupRuntimeAuth(run.projectVersionId, run.id)
   }
 
-  async cleanupTerminalRunRuntimeStates() {
-    if (!this.executionWorkspace) return 0
+  async cleanupTerminalRunRuntimeStates(signal?: AbortSignal) {
+    if (!this.executionWorkspace || signal?.aborted) return 0
     const scopes = await this.executionWorkspace.listRuntimeAuthScopes()
     let cleaned = 0
     for (const scope of scopes) {
+      if (signal?.aborted) break
       const run = await this.store.getRun(scope.runId)
+      if (signal?.aborted) break
       if (
         !run
         || run.projectVersionId !== scope.projectVersionId

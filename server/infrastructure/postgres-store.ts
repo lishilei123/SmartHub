@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { Pool, type PoolClient } from 'pg'
 import type { AgentConfigurationAgentKey, AgentConfigurationDraft, AgentConfigurationScene, AgentConfigurationVersion, AgentExecutionRecord, AiResource, Chunk, ConfigVersion, DatabaseState, GenerativeModelSource, IndexChunk, ProjectVersion, ReviewRun, ReviewRunQueueState, SyncTask, TestExecutionInfrastructureConfigurationVersion } from '../domain/types.js'
 import { normalizeRequirementReleaseBindings } from '../domain/requirement-release-bindings.js'
-import { normalizeReviewSeverities, normalizeTestDesignState, type ChunkSearchInput, type ConfigurationTransactionScope, type DefaultKnowledgeBase, type KnowledgeReadState, type RequirementBindingMetadata, type ReviewJob, type ReviewRunPage, type StateStore, type StoredChunkCandidate, type TaskLease, type TestDesignJob } from './store.js'
+import { recoverTestDesignNode } from '../domain/test-design-job-state.js'
+import { normalizeReviewSeverities, normalizeTestDesignState, type ChunkSearchInput, type ConfigurationTransactionScope, type DefaultKnowledgeBase, type KnowledgeReadState, type RequirementBindingMetadata, type ReviewJob, type ReviewRunPage, type StateStore, type StoredChunkCandidate, type TaskLease, type TestDesignJob, type TestDesignReadScope } from './store.js'
 import { verifyMigrations } from './migrations.js'
 
 const emptyState = (): DatabaseState => ({ projects: [], projectVersions: [], projectVersionRequirementBindings: [], knowledgeBases: [], directories: [], configs: [], assets: [], versions: [], indexes: [], tasks: [], modelSources: [], aiResources: [], agentConfigurationDrafts: [], agentConfigurationVersions: [], testExecutionInfrastructureConfigurationVersions: [], reviewRuns: [], findingActions: [], toolApprovals: [] })
@@ -35,6 +37,19 @@ export class PostgresStore implements StateStore {
       await client.query('COMMIT')
       this.state = state
       return structuredClone(state)
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
+  async getTestDesignReadState(scope: TestDesignReadScope) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const state = await loadTestDesignReadState(client, scope)
+      await client.query('COMMIT')
+      return state
     } catch (error) {
       await client.query('ROLLBACK')
       throw error
@@ -627,8 +642,52 @@ export class PostgresStore implements StateStore {
   }
 
   async claimTestDesignJob(workerId: string, leaseMs: number): Promise<TestDesignJob | null> {
-    const runToken = crypto.randomUUID(); const client = await this.pool.connect()
-    try { await client.query('BEGIN'); await client.query(`UPDATE smarthub.workflow_task_jobs SET status=CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' WHEN attempt_count>=max_attempts THEN 'failed' ELSE 'queued' END,available_at=CASE WHEN cancel_requested_at IS NULL AND attempt_count<max_attempts THEN now() ELSE available_at END,updated_at=now(),lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,error=CASE WHEN attempt_count>=max_attempts THEN 'WORKFLOW_JOB_LEASE_EXHAUSTED' ELSE error END WHERE status='running' AND lease_expires_at<now()`); const result = await client.query<{ data: TestDesignJob; attempt_count: number; node_run_id: string }>(`WITH next_job AS (SELECT id FROM smarthub.workflow_task_jobs WHERE status='queued' AND available_at<=now() AND attempt_count<max_attempts ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE smarthub.workflow_task_jobs job SET status='running',attempt_count=attempt_count+1,lease_owner=$1,run_token=$3::uuid,fencing_token=fencing_token+1,lease_expires_at=now()+($2::text||' milliseconds')::interval,updated_at=now(),data=jsonb_set(job.data,'{status}',to_jsonb('running'::text)) FROM next_job WHERE job.id=next_job.id RETURNING job.data,job.attempt_count,job.node_run_id`, [workerId, Math.max(1_000, leaseMs), runToken]); await client.query('COMMIT'); const claimed = result.rows[0]; return claimed ? { ...claimed.data, nodeRunId: claimed.node_run_id, status: 'running', attempts: Number(claimed.attempt_count), leaseOwner: workerId, runToken } : null } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+    const runToken = crypto.randomUUID()
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('smarthub_state'))")
+      const expired = await client.query<{ id: string; node_run_id: string; attempt_count: number; max_attempts: number; cancel_requested_at: Date | null }>(`
+        SELECT job.id,job.node_run_id,job.attempt_count,job.max_attempts,job.cancel_requested_at
+        FROM smarthub.workflow_task_jobs job
+        JOIN smarthub.workflow_node_runs node ON node.id=job.node_run_id
+        JOIN smarthub.workflow_runs run ON run.id=node.workflow_run_id
+        WHERE (job.status='running' AND job.lease_expires_at<clock_timestamp())
+          OR (job.status='failed' AND job.error='WORKFLOW_JOB_LEASE_EXHAUSTED'
+            AND run.status IN ('queued','running') AND node.status IN ('queued','running')
+            AND run.data->'nodeRuns' @> jsonb_build_array(jsonb_build_object('id',job.node_run_id)))
+        ORDER BY run.id,job.id LIMIT 50 FOR UPDATE OF job SKIP LOCKED`)
+      for (const job of expired.rows) {
+        const before = await loadTestDesignNodeState(client, job.node_run_id)
+        const draft = structuredClone(before)
+        const run = draft.testDesignState?.runs[0]
+        const status = run ? recoverTestDesignNode(run, job.node_run_id, {
+          cancelled: Boolean(job.cancel_requested_at), exhausted: job.attempt_count >= job.max_attempts,
+          at: new Date().toISOString(),
+        }) : 'cancelled'
+        const error = status === 'failed' ? 'WORKFLOW_JOB_LEASE_EXHAUSTED' : status === 'cancelled' ? 'WORKFLOW_CANCELLED' : null
+        if (run) await persistChanges(client, before, draft)
+        await client.query(`UPDATE smarthub.workflow_task_jobs SET status=$2,
+          available_at=CASE WHEN $2='queued' THEN now() ELSE available_at END,
+          updated_at=now(),lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,error=$3,
+          data=jsonb_strip_nulls((data - ARRAY['leaseOwner','runToken','leaseExpiresAt'])
+            || jsonb_build_object('status',$2::text,'error',$3::text)) WHERE id=$1`, [job.id, status, error])
+      }
+      const result = await client.query<{ data: TestDesignJob; attempt_count: number; node_run_id: string }>(`
+        WITH next_job AS (SELECT id FROM smarthub.workflow_task_jobs
+          WHERE status='queued' AND available_at<=now() AND attempt_count<max_attempts
+          ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+        UPDATE smarthub.workflow_task_jobs job SET status='running',attempt_count=attempt_count+1,
+          lease_owner=$1,run_token=$3::uuid,fencing_token=fencing_token+1,
+          lease_expires_at=clock_timestamp()+($2::text||' milliseconds')::interval,updated_at=now(),
+          data=jsonb_set(job.data,'{status}',to_jsonb('running'::text))
+        FROM next_job WHERE job.id=next_job.id RETURNING job.data,job.attempt_count,job.node_run_id`,
+      [workerId, Math.max(1_000, leaseMs), runToken])
+      await client.query('COMMIT')
+      const claimed = result.rows[0]
+      return claimed ? { ...claimed.data, nodeRunId: claimed.node_run_id, status: 'running', attempts: Number(claimed.attempt_count), leaseOwner: workerId, runToken } : null
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
   }
   async heartbeatTestDesignJob(nodeRunId: string, lease: TaskLease, leaseMs: number) { const result = await this.pool.query(`UPDATE smarthub.workflow_task_jobs SET lease_expires_at=now()+($4::text||' milliseconds')::interval,updated_at=now() WHERE node_run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now() AND cancel_requested_at IS NULL`, [nodeRunId, lease.workerId, lease.runToken, Math.max(1_000, leaseMs)]); return result.rowCount === 1 }
   async finishTestDesignJob(nodeRunId: string, lease: TaskLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string) { const result = await this.pool.query(`UPDATE smarthub.workflow_task_jobs SET status=$4,updated_at=now(),error=$5,lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,data=jsonb_set(data,'{status}',to_jsonb($4::text)) WHERE node_run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid AND lease_expires_at>now()`, [nodeRunId, lease.workerId, lease.runToken, status, error ?? null]); return result.rowCount === 1 }
@@ -717,7 +776,34 @@ export class PostgresStore implements StateStore {
   }
 
   async transactionWithTestDesignLease<T>(nodeRunId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
-    return this.runTransaction(operation, { kind: 'test_design', id: nodeRunId, lease })
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      // Full-state writers retain the exclusive lock. Independent Run writers can
+      // share it, preventing stale full snapshots from overwriting their updates.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('smarthub_state'))")
+      const owned = await client.query(`SELECT 1 FROM smarthub.workflow_task_jobs
+        WHERE node_run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid
+          AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NULL FOR UPDATE`,
+      [nodeRunId, lease.workerId, lease.runToken])
+      if (owned.rowCount !== 1) { await client.query('ROLLBACK'); return null }
+      const before = await loadTestDesignNodeState(client, nodeRunId)
+      if (!before.testDesignState?.runs.length) { await client.query('ROLLBACK'); return null }
+      const draft = structuredClone(before)
+      const result = await operation(draft)
+      assertTestDesignRunOnlyMutation(before, draft)
+      await persistChanges(client, before, draft)
+      const stillOwned = await client.query(`SELECT 1 FROM smarthub.workflow_task_jobs
+        WHERE node_run_id=$1 AND status='running' AND lease_owner=$2 AND run_token=$3::uuid
+          AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NULL`,
+      [nodeRunId, lease.workerId, lease.runToken])
+      if (stillOwned.rowCount !== 1) { await client.query('ROLLBACK'); return null }
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
   }
 
   private async runTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>, fencing?: { kind: 'sync' | 'review' | 'test_design'; id: string; lease: TaskLease }): Promise<T | null> {
@@ -914,16 +1000,99 @@ async function persistConfigurationChanges(client: PoolClient, scope: Configurat
   for (const item of changed(before.configs, state.configs)) await client.query('INSERT INTO smarthub.config_versions VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET requires_rebuild=EXCLUDED.requires_rebuild, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.version, item.requiresRebuild, item.createdAt, JSON.stringify(item)])
 }
 
+async function loadTestDesignReadState(client: Queryable, scope: TestDesignReadScope): Promise<DatabaseState> {
+  const state = emptyState()
+  let projectVersionId = scope.projectVersionId
+  let projectId = scope.projectId
+  if (!projectVersionId && scope.runId) {
+    projectVersionId = (await client.query<{ project_version_id: string }>("SELECT project_version_id FROM smarthub.workflow_runs WHERE id=$1 AND domain_type='test_design'", [scope.runId])).rows[0]?.project_version_id
+  }
+  if (!projectVersionId && scope.designId) {
+    projectVersionId = (await client.query<{ project_version_id: string }>('SELECT project_version_id FROM smarthub.test_designs WHERE id=$1', [scope.designId])).rows[0]?.project_version_id
+  }
+  if (!projectVersionId && scope.handoffId) {
+    projectVersionId = (await client.query<{ project_version_id: string }>('SELECT project_version_id FROM smarthub.test_execution_handoffs WHERE id=$1', [scope.handoffId])).rows[0]?.project_version_id
+  }
+  if (!projectId && scope.libraryVersionId) {
+    projectId = (await client.query<{ project_id: string }>('SELECT project_id FROM smarthub.test_case_library_versions WHERE id=$1', [scope.libraryVersionId])).rows[0]?.project_id
+  }
+  if (!projectId && projectVersionId) {
+    projectId = (await client.query<{ project_id: string }>('SELECT project_id FROM smarthub.project_versions WHERE id=$1', [projectVersionId])).rows[0]?.project_id
+  }
+  if (!projectId) return state
+  const rows = async <T>(sql: string, values: unknown[]): Promise<T[]> => (await client.query<{ data: T }>(sql, values)).rows.map(row => row.data)
+  state.projectVersions = await rows('SELECT data FROM smarthub.project_versions WHERE project_id=$1 ORDER BY created_at,id', [projectId])
+  state.projectVersions.forEach(normalizeRequirementReleaseBindings)
+  if (scope.includeInputs || scope.libraryVersionId) state.knowledgeBases = await rows('SELECT data FROM smarthub.knowledge_bases WHERE project_id=$1', [projectId])
+  const aggregate = state.testDesignState = {
+    architectureVersion: 'single-agent-skills/v1' as const,
+    designs: [], runs: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [],
+  } as NonNullable<DatabaseState['testDesignState']>
+  const requested = new Set(scope.collections)
+  if (requested.has('designs')) aggregate.designs = await rows(`SELECT data FROM smarthub.test_designs
+    WHERE project_id=$1 AND ($2::text IS NULL OR project_version_id=$2) AND ($3::text IS NULL OR id=$3)
+    ORDER BY created_at DESC,id`, [projectId, projectVersionId ?? null, scope.designId ?? null])
+  if (requested.has('runs')) aggregate.runs = await rows(`SELECT ${scope.latestRunsOnly ? 'DISTINCT ON (domain_id)' : ''} data FROM smarthub.workflow_runs
+    WHERE domain_type='test_design' AND project_version_id IN (SELECT id FROM smarthub.project_versions WHERE project_id=$1)
+      AND ($2::text IS NULL OR project_version_id=$2) AND ($3::text IS NULL OR domain_id=$3) AND ($4::text IS NULL OR id=$4)
+    ORDER BY ${scope.latestRunsOnly ? 'domain_id,' : ''} created_at DESC,id`, [projectId, projectVersionId ?? null, scope.designId ?? null, scope.runId ?? null])
+  if (requested.has('libraryCases')) aggregate.libraryCases = await rows('SELECT data FROM smarthub.library_test_cases WHERE project_id=$1 ORDER BY updated_at DESC,id', [projectId])
+  if (requested.has('libraryVersions')) {
+    const result = await client.query<{ project_version_id: string; data: typeof aggregate.libraryVersions[number] }>('SELECT project_version_id,data FROM smarthub.test_case_library_versions WHERE project_id=$1 AND ($2::text IS NULL OR id=$2) ORDER BY published_at DESC,id', [projectId, scope.libraryVersionId ?? null])
+    aggregate.libraryVersions = result.rows.map(row => ({ ...row.data, projectVersionId: row.project_version_id }))
+  }
+  if (requested.has('suiteDrafts')) aggregate.suiteDrafts = await rows('SELECT data FROM smarthub.test_suite_drafts WHERE project_id=$1 ORDER BY updated_at DESC,id', [projectId])
+  if (requested.has('suiteVersions')) aggregate.suiteVersions = await rows('SELECT data FROM smarthub.test_suite_versions WHERE project_id=$1 ORDER BY published_at DESC,id', [projectId])
+  if (requested.has('executionHandoffs')) aggregate.executionHandoffs = await rows(`SELECT data FROM smarthub.test_execution_handoffs
+    WHERE project_version_id IN (SELECT id FROM smarthub.project_versions WHERE project_id=$1)
+      AND ($2::text IS NULL OR project_version_id=$2) AND ($3::text IS NULL OR id=$3)
+    ORDER BY created_at DESC,id`, [projectId, projectVersionId ?? null, scope.handoffId ?? null])
+  if (scope.includeInputs) {
+    const baseIds = state.knowledgeBases.map(base => base.id)
+    state.assets = await rows('SELECT data FROM smarthub.knowledge_assets WHERE knowledge_base_id=ANY($1::text[])', [baseIds])
+    state.versions = await rows(`SELECT version.data - 'content' - 'chunks' AS data FROM smarthub.asset_versions version
+      JOIN smarthub.knowledge_assets asset ON asset.id=version.asset_id WHERE asset.knowledge_base_id=ANY($1::text[])`, [baseIds])
+    state.indexes = await rows("SELECT data - 'indexedChunks' AS data FROM smarthub.index_versions WHERE knowledge_base_id=ANY($1::text[])", [baseIds])
+    state.reviewRuns = await rows("SELECT data - 'execution' - 'executions' AS data FROM smarthub.review_runs WHERE project_version_id=$1", [projectVersionId])
+  }
+  normalizeTestDesignState(state)
+  return state
+}
+
+async function loadTestDesignNodeState(client: PoolClient, nodeRunId: string): Promise<DatabaseState> {
+  const state = emptyState()
+  const result = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['runs'][number] }>(`
+    SELECT run.data FROM smarthub.workflow_runs run
+    JOIN smarthub.workflow_node_runs node ON node.workflow_run_id=run.id
+    WHERE node.id=$1 AND run.domain_type='test_design' FOR UPDATE OF run`, [nodeRunId])
+  const run = result.rows[0]?.data
+  if (!run || !run.nodeRuns.some(node => node.id === nodeRunId)) return state
+  const design = await client.query<{ data: NonNullable<DatabaseState['testDesignState']>['designs'][number] }>('SELECT data FROM smarthub.test_designs WHERE id=$1', [run.testDesignId])
+  state.testDesignState = { architectureVersion: 'single-agent-skills/v1', designs: design.rows.map(row => row.data), runs: [run], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] }
+  normalizeTestDesignState(state)
+  return state
+}
+
+function assertTestDesignRunOnlyMutation(before: DatabaseState, draft: DatabaseState) {
+  const original = before.testDesignState!.runs[0]
+  const next = draft.testDesignState?.runs[0]
+  if (!next || draft.testDesignState?.runs.length !== 1 || next.id !== original.id || next.projectVersionId !== original.projectVersionId || next.testDesignId !== original.testDesignId) throw new Error('TEST_DESIGN_TRANSACTION_SCOPE_INVALID')
+  const unchanged = { ...draft, testDesignState: { ...draft.testDesignState, runs: before.testDesignState!.runs } }
+  if (JSON.stringify(unchanged) !== JSON.stringify(before)) throw new Error('TEST_DESIGN_TRANSACTION_SCOPE_INVALID')
+}
+
 async function loadState(client: Queryable): Promise<DatabaseState> {
   const tables = ['projects', 'knowledge_bases', 'knowledge_directories', 'config_versions', 'knowledge_assets', 'asset_versions', 'index_versions'] as const
   const rows = []
   for (const table of tables) rows.push(await client.query<{ data: Extract<DatabaseState[keyof DatabaseState], readonly unknown[]>[number] }>(`SELECT data FROM smarthub.${table} ORDER BY created_at, id`))
   const versions = rows[5].rows.map(row => ({ ...row.data, chunks: [] })) as DatabaseState['versions']
   const chunks = await client.query<{ asset_version_id: string; embedding: string; data: Chunk }>('SELECT asset_version_id, embedding::text AS embedding, data FROM smarthub.asset_chunks ORDER BY asset_version_id, ordinal, id')
-  for (const row of chunks.rows) versions.find(version => version.id === row.asset_version_id)?.chunks.push({ ...row.data, embedding: decodeVector(row.embedding) })
+  const versionById = new Map(versions.map(version => [version.id, version]))
+  for (const row of chunks.rows) versionById.get(row.asset_version_id)?.chunks.push({ ...row.data, embedding: decodeVector(row.embedding) })
   const indexes = rows[6].rows.map(row => ({ ...row.data, indexedChunks: [] })) as DatabaseState['indexes']
   const indexChunks = await client.query<{ index_version_id: string; embedding: string; data: IndexChunk }>('SELECT index_version_id, embedding::text AS embedding, data FROM smarthub.index_chunks ORDER BY index_version_id, ordinal, id')
-  for (const row of indexChunks.rows) indexes.find(index => index.id === row.index_version_id)?.indexedChunks?.push({ ...row.data, embedding: decodeVector(row.embedding) })
+  const indexById = new Map(indexes.map(index => [index.id, index]))
+  for (const row of indexChunks.rows) indexById.get(row.index_version_id)?.indexedChunks?.push({ ...row.data, embedding: decodeVector(row.embedding) })
   const taskRows = await client.query<{
     data: SyncTask; status: SyncTask['status']; step: string; progress: number; created_at: Date | string; available_at: Date | string; attempt_count: number; max_attempts: number; dedupe_key: string | null; target_id: string | null; scope: SyncTask['scope']; lease_owner: string | null; run_token: string | null; lease_expires_at: Date | string | null; heartbeat_at: Date | string | null; cancel_requested_at: Date | string | null; started_at: Date | string | null; finished_at: Date | string | null; updated_at: Date | string
   }>('SELECT data, status, step, progress, created_at, available_at, attempt_count, max_attempts, dedupe_key, target_id, scope, lease_owner, run_token::text AS run_token, lease_expires_at, heartbeat_at, cancel_requested_at, started_at, finished_at, updated_at FROM smarthub.sync_tasks ORDER BY created_at, id')
@@ -1035,14 +1204,14 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   for (const item of changed(before.reviewRuns, state.reviewRuns)) await client.query('INSERT INTO smarthub.review_runs (id, project_version_id, asset_id, asset_version_id, status, created_at, finished_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, finished_at=EXCLUDED.finished_at, data=EXCLUDED.data', [item.id, item.projectVersionId, item.assetId, item.assetVersionId, item.status, item.createdAt, item.finishedAt ?? null, JSON.stringify(item)])
   for (const item of changed(before.findingActions, state.findingActions)) await client.query('INSERT INTO smarthub.finding_actions (id, project_version_id, run_id, finding_id, version, created_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO NOTHING', [item.id, item.projectVersionId, item.runId, item.findingId, item.version, item.createdAt, JSON.stringify(item)])
   for (const item of changed(before.toolApprovals, state.toolApprovals)) await client.query('INSERT INTO smarthub.tool_approvals (id, project_version_id, run_id, tool_id, parameter_hash, status, requested_at, expires_at, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, expires_at=EXCLUDED.expires_at, data=EXCLUDED.data', [item.id, item.projectVersionId, item.runId, item.toolId, item.parameterHash, item.status, item.requestedAt, item.expiresAt, JSON.stringify(item)])
-  for (const item of state.testDesignState?.designs ?? []) await client.query('INSERT INTO smarthub.test_designs (id,project_version_id,project_id,name,objective,basis_mode,logical_input_sha256,created_by,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,objective=EXCLUDED.objective,data=EXCLUDED.data', [item.id,item.projectVersionId,item.projectId,item.name,item.objective,'project_workspace',item.logicalInputSha256,item.createdBy,item.createdAt,JSON.stringify(item)])
-  for (const run of state.testDesignState?.runs ?? []) {
+  for (const item of changed(before.testDesignState?.designs ?? [], state.testDesignState?.designs ?? [])) await client.query('INSERT INTO smarthub.test_designs (id,project_version_id,project_id,name,objective,basis_mode,logical_input_sha256,created_by,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,objective=EXCLUDED.objective,data=EXCLUDED.data', [item.id,item.projectVersionId,item.projectId,item.name,item.objective,'project_workspace',item.logicalInputSha256,item.createdBy,item.createdAt,JSON.stringify(item)])
+  for (const run of changed(before.testDesignState?.runs ?? [], state.testDesignState?.runs ?? [])) {
     const design = state.testDesignState?.designs.find(item => item.id === run.testDesignId)
     await client.query('INSERT INTO smarthub.workflow_runs (id,project_version_id,domain_type,domain_id,definition_key,definition_version,status,stage,progress,idempotency_key,input_sha256,created_by,created_at,started_at,finished_at,error_code,error_summary,base_test_case_library_version_id,base_test_case_library_version_sha256,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,stage=EXCLUDED.stage,progress=EXCLUDED.progress,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,base_test_case_library_version_id=EXCLUDED.base_test_case_library_version_id,base_test_case_library_version_sha256=EXCLUDED.base_test_case_library_version_sha256,data=EXCLUDED.data', [run.id,run.projectVersionId,'test_design',run.testDesignId,'test-design-workflow','2',run.status,run.stage,run.progress,run.idempotencyKey,design?.logicalInputSha256 ?? run.basisSnapshot.snapshotSha256,run.createdBy,run.createdAt,run.startedAt??null,run.finishedAt??null,run.errorCode??null,run.error??null,run.baseTestCaseLibraryVersionId??null,run.baseTestCaseLibraryVersionSha256??null,JSON.stringify(run)])
-    for (const item of run.nodeRuns) await client.query('INSERT INTO smarthub.workflow_node_runs (id,workflow_run_id,node_key,node_kind,generation,attempt,status,started_at,finished_at,error_code,error_summary,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) ON CONFLICT (id) DO UPDATE SET generation=EXCLUDED.generation,attempt=EXCLUDED.attempt,status=EXCLUDED.status,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,data=EXCLUDED.data', [item.id,run.id,item.nodeKey,item.nodeKey==='coverage_audit'?'deterministic':'agent',item.generation,item.attempt,item.status,item.startedAt??null,item.finishedAt??null,item.errorCode??null,item.error??null,JSON.stringify(item)])
+    for (const item of changed(before.testDesignState?.runs.find(previous => previous.id === run.id)?.nodeRuns ?? [], run.nodeRuns)) await client.query('INSERT INTO smarthub.workflow_node_runs (id,workflow_run_id,node_key,node_kind,generation,attempt,status,started_at,finished_at,error_code,error_summary,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) ON CONFLICT (id) DO UPDATE SET generation=EXCLUDED.generation,attempt=EXCLUDED.attempt,status=EXCLUDED.status,started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,error_code=EXCLUDED.error_code,error_summary=EXCLUDED.error_summary,data=EXCLUDED.data', [item.id,run.id,item.nodeKey,item.nodeKey==='coverage_audit'?'deterministic':'agent',item.generation,item.attempt,item.status,item.startedAt??null,item.finishedAt??null,item.errorCode??null,item.error??null,JSON.stringify(item)])
   }
   if (JSON.stringify(before.testDesignState) !== JSON.stringify(state.testDesignState)) {
-    await persistTestDesignNormalizedDetails(client, state)
+    await persistTestDesignNormalizedDetails(client, before, state)
   }
   for (const item of changed(before.indexes, state.indexes)) {
     const previous = before.indexes.find(index => index.id === item.id)
@@ -1066,12 +1235,14 @@ async function persistChanges(client: PoolClient, before: DatabaseState, state: 
   `, [item.id, item.knowledgeBaseId, item.type, item.status, item.step, item.progress, item.createdAt, JSON.stringify(item), item.availableAt ?? item.createdAt, item.attempts, item.maxAttempts ?? 3, item.dedupeKey ?? null, item.targetId ?? null, item.scope ?? 'asset', item.leaseOwner ?? null, item.runToken ?? null, item.leaseExpiresAt ?? null, item.heartbeatAt ?? null, item.cancelRequestedAt ?? null, item.startedAt ?? null, item.finishedAt ?? null, item.updatedAt ?? new Date().toISOString()])
 }
 
-async function persistTestDesignNormalizedDetails(client: PoolClient, state: DatabaseState) {
+async function persistTestDesignNormalizedDetails(client: PoolClient, before: DatabaseState, state: DatabaseState) {
   const aggregate = state.testDesignState
   if (!aggregate) return
-  for (const run of aggregate.runs) {
+  for (const run of changed(before.testDesignState?.runs ?? [], aggregate.runs)) {
+    const previousRun = before.testDesignState?.runs.find(item => item.id === run.id)
     const design = aggregate.designs.find(item => item.id === run.testDesignId)
     if (!design) continue
+    if (!previousRun || JSON.stringify([previousRun.basisSnapshot, previousRun.retrievalSnapshot, previousRun.historicalSnapshot]) !== JSON.stringify([run.basisSnapshot, run.retrievalSnapshot, run.historicalSnapshot])) {
     const snapshots = [
       { kind: 'basis', id: `${run.id}:basis`, value: run.basisSnapshot, hash: run.basisSnapshot.snapshotSha256 },
       { kind: 'retrieval', id: `${run.id}:retrieval`, value: run.retrievalSnapshot, hash: run.retrievalSnapshot.snapshotSha256 },
@@ -1104,12 +1275,13 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
       await client.query('INSERT INTO smarthub.frozen_content_refs (owner_type,owner_id,role,ordinal,content_sha256,locator) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (owner_type,owner_id,role,ordinal) DO UPDATE SET content_sha256=EXCLUDED.content_sha256,locator=EXCLUDED.locator', ['workflow_run',run.id,entry.kind,entry.ordinal,entry.item.contentSha256,JSON.stringify(entry.item.locator ?? {})])
       await client.query('INSERT INTO smarthub.test_design_snapshot_items (id,workflow_run_id,snapshot_kind,source_kind,source_id,content_sha256,ordinal,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET content_sha256=EXCLUDED.content_sha256,data=EXCLUDED.data', [`${run.id}:${entry.kind}:${entry.ordinal}`,run.id,entry.kind,String(entry.item.kind),entry.item.sourceId,entry.item.contentSha256,entry.ordinal,JSON.stringify(entry.item)])
     }
-    for (const artifact of run.artifacts) {
+    }
+    for (const artifact of changed(previousRun?.artifacts ?? [], run.artifacts)) {
       const currentNode = run.nodeRuns.find(item => item.nodeKey === artifact.nodeKey && item.generation === artifact.generation)
       await client.query('INSERT INTO smarthub.workflow_handoff_artifacts (id,workflow_run_id,node_run_id,artifact_type,schema_version,content_sha256,validation_status,created_at,content) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (id) DO UPDATE SET validation_status=EXCLUDED.validation_status,content=EXCLUDED.content', [artifact.id,run.id,currentNode?.id??null,artifact.nodeKey,artifact.schemaVersion,artifact.contentSha256,'valid',artifact.createdAt,JSON.stringify(artifact.content)])
     }
-    for (const decision of run.gateDecisions) await client.query('INSERT INTO smarthub.workflow_gate_decisions (id,workflow_run_id,gate_key,target_artifact_id,target_revision,decision,actor_id,expected_version,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO UPDATE SET decision=EXCLUDED.decision,data=EXCLUDED.data', [decision.id,run.id,decision.gateKey,decision.targetId,decision.targetRevision,decision.decision,decision.actorId,Math.max(0,decision.version-1),decision.createdAt,JSON.stringify(decision)])
-    for (const testCase of run.testCases) {
+    for (const decision of changed(previousRun?.gateDecisions ?? [], run.gateDecisions)) await client.query('INSERT INTO smarthub.workflow_gate_decisions (id,workflow_run_id,gate_key,target_artifact_id,target_revision,decision,actor_id,expected_version,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT (id) DO UPDATE SET decision=EXCLUDED.decision,data=EXCLUDED.data', [decision.id,run.id,decision.gateKey,decision.targetId,decision.targetRevision,decision.decision,decision.actorId,Math.max(0,decision.version-1),decision.createdAt,JSON.stringify(decision)])
+    for (const testCase of changed(previousRun?.testCases ?? [], run.testCases)) {
       await client.query('INSERT INTO smarthub.test_cases (id,workflow_run_id,current_revision,lifecycle_status,data) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (id) DO UPDATE SET current_revision=EXCLUDED.current_revision,lifecycle_status=EXCLUDED.lifecycle_status,data=EXCLUDED.data', [testCase.id,run.id,testCase.currentRevision,testCase.tombstonedAt?'deleted':testCase.reviewState,JSON.stringify(testCase)])
       for (const revision of testCase.revisions) await client.query('INSERT INTO smarthub.test_case_revisions (id,case_id,revision,content_sha256,semantic_sha256,created_at,content,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb) ON CONFLICT (case_id,revision) DO UPDATE SET content_sha256=EXCLUDED.content_sha256,semantic_sha256=EXCLUDED.semantic_sha256,content=EXCLUDED.content,data=EXCLUDED.data', [`${testCase.id}:r${revision.revision}`,testCase.id,revision.revision,revision.contentSha256,revision.semanticSha256,revision.createdAt,JSON.stringify(revision.content),JSON.stringify(revision)])
       for (const action of testCase.reviewActions) await client.query('INSERT INTO smarthub.test_case_review_actions (id,case_id,target_revision,decision,actor_id,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO NOTHING', [action.id,testCase.id,action.targetRevision,action.decision,action.actorId,action.createdAt,JSON.stringify(action)])
@@ -1119,10 +1291,11 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
         if (source && current) await client.query('INSERT INTO smarthub.test_case_reuse_relations (id,case_id,source_type,source_id,mode,source_sha256,current_sha256,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET mode=EXCLUDED.mode,current_sha256=EXCLUDED.current_sha256,data=EXCLUDED.data', [`${testCase.id}:historical`,testCase.id,source.kind,source.id,testCase.origin === 'historical_unchanged'?'unchanged':testCase.origin === 'historical_reference'?'reference':'modified',source.contentSha256,current.semanticSha256,JSON.stringify({ historicalSourceRef:testCase.historicalSourceRef, origin:testCase.origin })])
       }
     }
-    for (const testCase of run.testCases) {
+    for (const testCase of changed(previousRun?.testCases ?? [], run.testCases)) {
       await client.query('DELETE FROM smarthub.test_case_dependencies WHERE case_id=$1', [testCase.id])
       // TestCase v3 has no dependency graph in formal content.
     }
+    if (!previousRun || JSON.stringify(previousRun.coverageAudits) !== JSON.stringify(run.coverageAudits)) {
     await client.query('DELETE FROM smarthub.test_design_basis_relations WHERE workflow_run_id=$1', [run.id])
     const latestCoverageAudit = [...run.coverageAudits].reverse().find(item => item.status === 'valid')
     for (const relation of latestCoverageAudit?.relations ?? []) {
@@ -1130,36 +1303,47 @@ async function persistTestDesignNormalizedDetails(client: PoolClient, state: Dat
       const relationId = `basis_relation_${createHash('sha256').update(`${run.id}:${relation.caseId}:${relation.requirementId}`).digest('hex').slice(0, 24)}`
       await client.query('INSERT INTO smarthub.test_design_basis_relations (id,workflow_run_id,subject_kind,subject_id,basis_type,basis_ref,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data', [relationId,run.id,'test_case',relation.caseId,'requirement_release',relation.requirementId,JSON.stringify({ requirementReleaseId:run.basisSnapshot.requirementReleaseId, requirementId:relation.requirementId, testCaseId:relation.caseId, projection:'effective_current_release', coverageAuditId:latestCoverageAudit!.id })])
     }
-    for (const audit of run.coverageAudits) {
+    }
+    for (const audit of changed(previousRun?.coverageAudits ?? [], run.coverageAudits)) {
       await client.query('INSERT INTO smarthub.test_design_coverage_audits (id,workflow_run_id,input_sha256,case_set_sha256,status,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,data=EXCLUDED.data', [audit.id,run.id,audit.inputSha256,audit.caseSetSha256,audit.status,audit.createdAt,JSON.stringify(audit)])
       for (const [index, relation] of audit.relations.entries()) await client.query('INSERT INTO smarthub.test_design_coverage_relations (id,audit_id,target_type,target_ref,status,data) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,data=EXCLUDED.data', [`${audit.id}:${index}`,audit.id,relation.caseId?'test_case':'requirement',relation.caseId??relation.requirementId,relation.status,JSON.stringify(relation)])
     }
-    for (const proposal of run.caseChangeProposals ?? []) {
+    for (const proposal of changed(previousRun?.caseChangeProposals ?? [], run.caseChangeProposals ?? [])) {
       await client.query('INSERT INTO smarthub.case_change_proposals (id,workflow_run_id,operation,source_case_id,source_revision,decision,created_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT (id) DO UPDATE SET decision=EXCLUDED.decision,data=EXCLUDED.data', [proposal.id,run.id,proposal.operation,proposal.sourceCaseId??null,proposal.sourceRevision??null,proposal.decision,proposal.createdAt,JSON.stringify(proposal)])
       for (const decision of proposal.decisions) await client.query('INSERT INTO smarthub.case_change_proposal_decisions (id,proposal_id,expected_version,decision,decided_by,decided_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO NOTHING', [decision.id,proposal.id,decision.expectedVersion,decision.decision,decision.decidedBy,decision.decidedAt,JSON.stringify(decision)])
     }
   }
-  for (const testCase of aggregate.libraryCases) {
+  for (const testCase of changed(before.testDesignState?.libraryCases ?? [], aggregate.libraryCases)) {
     await client.query('INSERT INTO smarthub.library_test_cases (id,project_id,current_revision,status,created_at,updated_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET current_revision=EXCLUDED.current_revision,status=EXCLUDED.status,updated_at=EXCLUDED.updated_at,data=EXCLUDED.data', [testCase.id,testCase.projectId,testCase.currentRevision,testCase.status,testCase.createdAt,testCase.updatedAt,JSON.stringify(testCase)])
     for (const revision of testCase.revisions) {
       await client.query('INSERT INTO smarthub.library_test_case_revisions (case_id,revision,content_sha256,semantic_sha256,source_run_id,source_proposal_id,created_by,created_at,content,traceability,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb) ON CONFLICT (case_id,revision) DO NOTHING', [testCase.id,revision.revision,revision.contentSha256,revision.semanticSha256,revision.sourceRunId??null,revision.sourceProposalId??null,revision.createdBy,revision.createdAt,JSON.stringify(revision.content),revision.traceability?JSON.stringify(revision.traceability):null,JSON.stringify(revision)])
       for (const reference of revision.traceability?.requirementRefs ?? []) await client.query('INSERT INTO smarthub.library_test_case_revision_requirement_refs (case_id,case_revision,requirement_release_id,requirement_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [testCase.id,revision.revision,reference.requirementReleaseId,reference.requirementId])
     }
   }
-  for (const version of aggregate.libraryVersions) {
+  for (const version of changed(before.testDesignState?.libraryVersions ?? [], aggregate.libraryVersions)) {
+    const previousVersion = before.testDesignState?.libraryVersions.find(item => item.id === version.id)
+    if (previousVersion) {
+      const { projection: previousProjection, ...previousFacts } = previousVersion
+      const { projection, ...facts } = version
+      if (!isDeepStrictEqual(previousFacts, facts)) throw new Error('TEST_CASE_LIBRARY_VERSION_IMMUTABLE')
+      if (!isDeepStrictEqual(previousProjection, projection)) {
+        await client.query("UPDATE smarthub.test_case_library_versions SET data=jsonb_set(data,'{projection}',$2::jsonb) WHERE id=$1", [version.id, JSON.stringify(projection)])
+      }
+      continue
+    }
     await client.query('INSERT INTO smarthub.test_case_library_versions (id,project_id,project_version_id,version,name,source_run_id,legacy_test_case_set_version_id,content_sha256,published_by,published_at,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT (id) DO NOTHING', [version.id,version.projectId,version.projectVersionId,version.version,version.name,version.sourceRunId??null,null,version.contentSha256,version.publishedBy,version.publishedAt,JSON.stringify(version)])
     for (const member of version.members) await client.query('INSERT INTO smarthub.test_case_library_version_members (version_id,case_id,case_revision,ordinal,content_sha256,frozen_content,traceability,execution_readiness) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8) ON CONFLICT (version_id,case_id) DO UPDATE SET case_revision=EXCLUDED.case_revision,ordinal=EXCLUDED.ordinal,content_sha256=EXCLUDED.content_sha256,frozen_content=COALESCE(EXCLUDED.frozen_content,smarthub.test_case_library_version_members.frozen_content),traceability=COALESCE(EXCLUDED.traceability,smarthub.test_case_library_version_members.traceability),execution_readiness=COALESCE(EXCLUDED.execution_readiness,smarthub.test_case_library_version_members.execution_readiness)', [version.id,member.caseId,member.revision,member.ordinal,member.contentSha256,member.frozenContent?JSON.stringify(member.frozenContent):null,member.traceability?JSON.stringify(member.traceability):null,member.executionReadiness??null])
   }
-  for (const draft of aggregate.suiteDrafts) {
+  for (const draft of changed(before.testDesignState?.suiteDrafts ?? [], aggregate.suiteDrafts)) {
     await client.query('INSERT INTO smarthub.test_suite_drafts (id,project_id,suite_key,suite_type,status,content_sha256,created_at,updated_at,test_case_library_version_id,compatibility_status,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,content_sha256=EXCLUDED.content_sha256,updated_at=EXCLUDED.updated_at,test_case_library_version_id=EXCLUDED.test_case_library_version_id,compatibility_status=EXCLUDED.compatibility_status,data=EXCLUDED.data', [draft.id,draft.projectId,draft.suiteKey,draft.suiteType,draft.status,draft.contentSha256,draft.createdAt,draft.updatedAt,draft.testCaseLibraryVersionId??null,draft.compatibilityStatus??null,JSON.stringify(draft)])
     await client.query('DELETE FROM smarthub.test_suite_draft_members WHERE draft_id=$1', [draft.id])
     for (const member of draft.members) await client.query('INSERT INTO smarthub.test_suite_draft_members (draft_id,case_id,case_revision,ordinal,execution_method,data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [draft.id,member.caseId,member.revision,member.ordinal,member.executionMethods[0],JSON.stringify(member)])
   }
-  for (const suite of aggregate.suiteVersions) {
+  for (const suite of changed(before.testDesignState?.suiteVersions ?? [], aggregate.suiteVersions)) {
     await client.query('INSERT INTO smarthub.test_suite_versions (id,project_id,suite_key,suite_type,version,content_sha256,published_at,test_case_library_version_id,compatibility_status,content,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) ON CONFLICT (id) DO UPDATE SET content_sha256=EXCLUDED.content_sha256,test_case_library_version_id=EXCLUDED.test_case_library_version_id,compatibility_status=EXCLUDED.compatibility_status,content=EXCLUDED.content,data=EXCLUDED.data', [suite.id,suite.projectId,suite.suiteKey,suite.suiteType,suite.version,suite.contentSha256,suite.publishedAt,suite.testCaseLibraryVersionId??null,suite.compatibilityStatus??null,JSON.stringify(suite.members),JSON.stringify(suite)])
     for (const member of suite.members) await client.query('INSERT INTO smarthub.test_suite_version_members (suite_version_id,test_case_set_version_id,test_case_library_version_id,case_id,case_revision,ordinal,execution_methods,execution_method,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT (suite_version_id,case_id) DO UPDATE SET case_revision=EXCLUDED.case_revision,ordinal=EXCLUDED.ordinal,execution_methods=EXCLUDED.execution_methods,execution_method=EXCLUDED.execution_method,data=EXCLUDED.data', [suite.id,null,member.testCaseLibraryVersionId,member.caseId,member.revision,member.ordinal,member.executionMethods,member.executionMethods[0],JSON.stringify(member)])
   }
-  for (const handoff of aggregate.executionHandoffs) {
+  for (const handoff of changed(before.testDesignState?.executionHandoffs ?? [], aggregate.executionHandoffs)) {
     await client.query('INSERT INTO smarthub.test_execution_handoffs (id,project_version_id,test_case_set_version_id,test_case_library_version_id,suite_version_id,strategy,execution_mode,content_sha256,created_by,created_at,content,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb) ON CONFLICT (id) DO NOTHING', [handoff.id,handoff.projectVersionId,null,handoff.testCaseLibraryVersionId,handoff.suiteVersionId??null,handoff.mode,handoff.mode,handoff.contentSha256,handoff.createdBy,handoff.createdAt,JSON.stringify(handoff.members),JSON.stringify(handoff)])
     for (const member of handoff.members) await client.query('INSERT INTO smarthub.test_execution_handoff_members (handoff_id,stage,ordinal,source_version_id,case_id,case_revision,method,dedup_key,dimension,execution_spec,traceability,content_sha256,readiness_override,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14::jsonb) ON CONFLICT (handoff_id,stage,ordinal) DO UPDATE SET source_version_id=EXCLUDED.source_version_id,case_id=EXCLUDED.case_id,case_revision=EXCLUDED.case_revision,method=EXCLUDED.method,dedup_key=EXCLUDED.dedup_key,dimension=EXCLUDED.dimension,execution_spec=EXCLUDED.execution_spec,traceability=EXCLUDED.traceability,content_sha256=EXCLUDED.content_sha256,readiness_override=EXCLUDED.readiness_override,data=EXCLUDED.data', [handoff.id,member.stage,member.ordinal,member.sourceVersionId,member.caseId,member.revision,member.method,member.dedupKey,member.dimension??null,member.executionSpec?JSON.stringify(member.executionSpec):null,member.traceability?JSON.stringify(member.traceability):null,member.contentSha256??null,member.readinessOverride?JSON.stringify(member.readinessOverride):null,JSON.stringify(member)])
   }

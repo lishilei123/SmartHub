@@ -208,6 +208,11 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.deepEqual(detail.diagnoses, [])
   assert.deepEqual(detail.scriptRevisions, [])
   assert.deepEqual(detail.artifacts, [])
+  const firstReportSnapshot = required(await firstStore.getRunReportSnapshot(ids.run), '报告应读取真实 PostgreSQL 来源签名')
+  assert.equal(firstReportSnapshot.unchanged, false)
+  const cachedReportSnapshot = required(await firstStore.getRunReportSnapshot(ids.run, firstReportSnapshot.revision), '报告缓存应能校验相同签名')
+  assert.equal(cachedReportSnapshot.unchanged, true)
+  assert.equal('source' in cachedReportSnapshot, false, '缓存命中不再读取完整报告源')
   const replayWithFreshServerFacts = await firstStore.createAggregate({
     run: {
       ...run,
@@ -285,6 +290,9 @@ test('PostgreSQL 执行聚合幂等创建并以 SKIP LOCKED 单次领取任务',
   assert.equal(events[0].type, 'failure')
   assert.equal(events[0].artifactIds?.length, 1)
   assert.deepEqual((await firstStore.getTaskDetail(ids.task))?.events, events)
+  const updatedReportSnapshot = required(await firstStore.getRunReportSnapshot(ids.run, firstReportSnapshot.revision), '执行事实变化后报告必须失效')
+  assert.equal(updatedReportSnapshot.unchanged, false)
+  assert.notEqual(updatedReportSnapshot.revision, firstReportSnapshot.revision)
   await assert.rejects(
     database.query('UPDATE smarthub.test_execution_events SET title=$2 WHERE id=$1', [events[0].id, '不可改写']),
     /TEST_EXECUTION_EVENT_IMMUTABLE/u,

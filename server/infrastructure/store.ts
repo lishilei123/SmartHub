@@ -57,6 +57,19 @@ export type ReviewRunPage = {
 
 export type ConfigurationTransactionScope = 'ai_configuration' | 'knowledge_configuration' | 'test_execution_infrastructure_configuration'
 
+/** Read-only projections; omitted knowledge content must never be persisted as a full state. */
+export interface TestDesignReadScope {
+  projectId?: string
+  projectVersionId?: string
+  designId?: string
+  runId?: string
+  libraryVersionId?: string
+  handoffId?: string
+  includeInputs?: boolean
+  latestRunsOnly?: boolean
+  collections: Array<'designs' | 'runs' | 'libraryCases' | 'libraryVersions' | 'suiteDrafts' | 'suiteVersions' | 'executionHandoffs'>
+}
+
 export type KnowledgeReadState = {
   state: DatabaseState
   indexChunkCounts: Record<string, number>
@@ -73,6 +86,7 @@ export interface StateStore {
   load(): Promise<void>
   read(): DatabaseState
   snapshot(): Promise<DatabaseState>
+  getTestDesignReadState?(scope: TestDesignReadScope): Promise<DatabaseState>
   getDefaultKnowledgeBase?(projectName: string): Promise<DefaultKnowledgeBase | null>
   listProjectVersions?(): Promise<ProjectVersion[]>
   getKnowledgeReadState?(knowledgeBaseId: string, options?: { includeVersionContent?: boolean; includeIndexes?: boolean }): Promise<KnowledgeReadState | null>

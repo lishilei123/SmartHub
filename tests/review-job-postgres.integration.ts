@@ -161,12 +161,20 @@ test('PostgreSQL Phase 4 使用规范化事实表并以 nodeRunId 隔离 fencing
   await store.transaction(state => { const aggregate = state.testDesignState ??= { architectureVersion: 'single-agent-skills/v1', designs: [], runs: [], libraryCases: [], libraryVersions: [], suiteDrafts: [], suiteVersions: [], executionHandoffs: [] }; aggregate.designs.push(design); aggregate.runs.push(run) })
   const normalized = await database.query<{ designs: string; runs: string; snapshots: string; items: string }>('SELECT (SELECT count(*) FROM smarthub.test_designs WHERE id=$1)::text AS designs, (SELECT count(*) FROM smarthub.workflow_runs WHERE id=$2)::text AS runs, (SELECT count(*) FROM smarthub.test_design_basis_snapshots WHERE workflow_run_id=$2)::text AS snapshots, (SELECT count(*) FROM smarthub.test_design_snapshot_items WHERE workflow_run_id=$2)::text AS items', [designId, runId])
   assert.deepEqual(normalized.rows[0], { designs: '1', runs: '1', snapshots: '1', items: '1' })
+  const snapshotVersion = async () => (await database.query('SELECT xmin::text AS version FROM smarthub.test_design_basis_snapshots WHERE workflow_run_id=$1', [runId])).rows[0].version
+  const originalSnapshotVersion = await snapshotVersion()
+  const scoped = await store.getTestDesignReadState({ projectVersionId: ids.projectVersion, designId, runId, collections: ['designs', 'runs'] })
+  assert.equal(scoped.testDesignState?.runs[0]?.id, runId)
+  assert.equal(scoped.versions.length, 0, '运行详情不加载知识分块或资产正文')
+  const wrongScope = await store.getTestDesignReadState({ projectVersionId: `${prefix}-missing`, runId, collections: ['runs'] })
+  assert.equal(wrongScope.testDesignState?.runs.length ?? 0, 0, '跨版本读取不返回其他 Run')
 
   const job: TestDesignJob = { id: `${prefix}-phase4-job`, runId, nodeRunId, status: 'queued', attempts: 0, maxAttempts: 3, availableAt: now, createdAt: now, updatedAt: now }
   await store.enqueueTestDesignJob?.(job)
   const first = required(await store.claimTestDesignJob?.('phase4-worker-a', 60_000), '应领取 Phase 4 节点任务')
   const firstLease: TaskLease = { workerId: 'phase4-worker-a', runToken: required(first.runToken, 'Phase 4 节点缺少 fencing token') }
   assert.equal(await store.transactionWithTestDesignLease?.(nodeRunId, firstLease, state => { const current = required(state.testDesignState?.runs.find(item => item.id === runId), 'Phase 4 Run 不存在'); current.progress = 33; return true }), true)
+  assert.equal(await snapshotVersion(), originalSnapshotVersion, '仅进度变化不重写冻结快照')
   await database.query("UPDATE smarthub.workflow_task_jobs SET lease_expires_at=now()-interval '1 second' WHERE node_run_id=$1", [nodeRunId])
   const second = required(await store.claimTestDesignJob?.('phase4-worker-b', 60_000), '失效的 Phase 4 节点任务应重新领取')
   assert.notEqual(second.runToken, firstLease.runToken)
@@ -174,6 +182,44 @@ test('PostgreSQL Phase 4 使用规范化事实表并以 nodeRunId 隔离 fencing
   assert.equal((await store.snapshot()).testDesignState?.runs.find(item => item.id === runId)?.progress, 33)
   const secondLease: TaskLease = { workerId: 'phase4-worker-b', runToken: required(second.runToken, '第二次 Phase 4 节点缺少 fencing token') }
   assert.equal(await store.finishTestDesignJob?.(nodeRunId, secondLease, 'succeeded'), true)
+  await store.enqueueTestDesignJob({ ...job, maxAttempts: 1 })
+  const last = required(await store.claimTestDesignJob('phase4-worker-last', 60_000), '应领取最后一次尝试')
+  const lastLease = { workerId: 'phase4-worker-last', runToken: last.runToken! }
+  await store.transactionWithTestDesignLease(nodeRunId, lastLease, state => {
+    const current = state.testDesignState!.runs[0]
+    current.status = 'running'; current.nodeRuns[0].status = 'running'
+  })
+  await database.query("UPDATE smarthub.workflow_task_jobs SET lease_expires_at=now()-interval '1 second' WHERE node_run_id=$1", [nodeRunId])
+  assert.equal(await store.claimTestDesignJob('phase4-worker-recovery', 60_000), null)
+  const recovered = (await store.getTestDesignReadState({ runId, collections: ['runs'] })).testDesignState!.runs[0]
+  assert.equal(recovered.status, 'failed')
+  assert.equal(recovered.nodeRuns[0].status, 'failed')
+  assert.equal(recovered.errorCode, 'WORKFLOW_JOB_LEASE_EXHAUSTED')
+  assert.equal(await store.transactionWithTestDesignLease(nodeRunId, lastLease, () => true), null)
+  const recoveredRow = (await database.query('SELECT status,data FROM smarthub.workflow_task_jobs WHERE node_run_id=$1', [nodeRunId])).rows[0]
+  assert.equal(recoveredRow.status, recoveredRow.data.status)
+  assert.equal(await snapshotVersion(), originalSnapshotVersion)
+  // Repair an already-exhausted legacy queue row whose business state was left running.
+  await store.transaction(state => {
+    const current = state.testDesignState!.runs.find(item => item.id === runId)!
+    current.status = 'running'; current.stage = 'test_case_design'; current.nodeRuns[0].status = 'running'
+  })
+  assert.equal(await store.claimTestDesignJob('phase4-worker-legacy-recovery', 60_000), null)
+  assert.equal((await store.getTestDesignReadState({ runId, collections: ['runs'] })).testDesignState!.runs[0].status, 'failed')
+  const libraryVersionId = `${prefix}-projection-library`
+  await store.transaction(state => state.testDesignState!.libraryVersions.push({
+    id: libraryVersionId, projectId: ids.project, projectVersionId: ids.projectVersion, version: 1,
+    name: '投影回写验证', sourceRunId: runId, members: [], contentSha256: '7'.repeat(64),
+    publishedBy: 'integration-test', publishedAt: now, projection: { status: 'pending', files: [] },
+  }))
+  const projectionScope = await store.getTestDesignReadState({ libraryVersionId, collections: ['libraryVersions'] })
+  assert.equal(projectionScope.knowledgeBases[0]?.id, ids.knowledgeBase, '投影读模型保留项目知识库元数据')
+  await store.transaction(state => { state.testDesignState!.libraryVersions.find(item => item.id === libraryVersionId)!.projection.status = 'succeeded' })
+  const projected = (await store.getTestDesignReadState({ libraryVersionId, collections: ['libraryVersions'] })).testDesignState!.libraryVersions[0]
+  assert.equal(projected.projection.status, 'succeeded')
+  assert.equal(projected.contentSha256, '7'.repeat(64), '投影元数据不会改写正式内容 Hash')
+  await assert.rejects(store.transaction(state => { state.testDesignState!.libraryVersions.find(item => item.id === libraryVersionId)!.name = '非法覆盖历史' }), /TEST_CASE_LIBRARY_VERSION_IMMUTABLE/u)
+  await store.transaction(state => { state.testDesignState!.libraryVersions = state.testDesignState!.libraryVersions.filter(item => item.id !== libraryVersionId) })
   await store.transaction(state => { if (!state.testDesignState) return; state.testDesignState.runs = state.testDesignState.runs.filter(item => item.id !== runId); state.testDesignState.designs = state.testDesignState.designs.filter(item => item.id !== designId) })
 })
 

@@ -66,7 +66,7 @@ test('keeps raw HTML inert and suppresses remote Markdown images', () => {
 })
 
 test('resolves ZIP-local Markdown images against the document path', () => {
-  assert.equal(resolveKnowledgeImage('kb 1', 'guide/intro/readme.md', '../images/flow chart.png'), 'http://127.0.0.1:8787/api/knowledge-bases/kb%201/files/guide/images/flow%20chart.png')
+  assert.equal(resolveKnowledgeImage('kb 1', 'guide/intro/readme.md', '../images/flow chart.png'), '/api/knowledge-bases/kb%201/files/guide/images/flow%20chart.png')
   assert.equal(resolveKnowledgeImage('kb-1', 'readme.md', '../../escape.png'), null)
   assert.equal(resolveKnowledgeImage('kb-1', 'readme.md', 'https://example.com/a.png'), null)
   const html = renderToStaticMarkup(createElement(MarkdownDocument, { source: '![流程](../images/flow.png)', format: 'markdown', knowledgeBaseId: 'kb-1', logicalPath: 'docs/readme.md' }))

@@ -165,6 +165,8 @@ npm run dev
 | API | <http://127.0.0.1:8787> |
 | 健康检查 | <http://127.0.0.1:8787/api/health> |
 
+前端 API、文档图片、报告与 Artifact 下载统一默认请求同源 `/api`。Vite 开发和预览服务将其代理到 `http://127.0.0.1:8787`，可用 `SMART_HUB_DEV_API_TARGET` 调整代理目标。部署静态页面时，请由 Web 反向代理将 `/api` 转发到 API 服务；跨域部署可在构建前配置 `VITE_API_BASE=https://api.example.com/api`。旧 `VITE_PLANNING_API_BASE` 仅作为统一地址的兼容回退，建议迁移到 `VITE_API_BASE`。
+
 开发脚本会先检查 `5173` 和 `8787` 端口。若完整实例已经运行，它不会重复启动 Worker；若端口被其他进程占用，则会显示占用信息并退出。
 
 ## 首次使用
@@ -175,6 +177,8 @@ npm run dev
 4. 在“系统管理 → Agent 配置”完成 `PlanningAgent` 与测试执行 Agent 配置并发布。
 5. 在“系统管理 → 知识库配置”选择 Embedding 来源与模型。
 6. 返回项目版本，依次完成需求分析、澄清、测试设计审核、正式用例库发布和测试执行。
+
+测试执行当前仅支持 Worker 所在机器上的本地 Playwright Runner，OCI Runner 尚未接入运行链路，系统管理已收起对应环境、镜像与网络配置入口。当前 Run 冻结最新正式用例库并全量执行，全部用例均须通过执行就绪校验，否则阻止创建 Run；冒烟、回归与自定义套件的维护和发布继续保留，分类执行后续接入。
 
 本地模型由 API 进程直接运行，不要求安装 Ollama；远程 Embedding 同时支持 OpenAI-compatible 接口和 Ollama 原生接口。
 

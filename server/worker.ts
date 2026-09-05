@@ -19,6 +19,7 @@ import type { TestExecutionService } from './application/test-execution-service.
 const workerId = process.env.SMARTHUB_WORKER_ID ?? `${hostname()}-${process.pid}`
 const leaseMs = positiveIntegerEnv('SMARTHUB_TASK_LEASE_MS', 60_000)
 const pollMs = positiveIntegerEnv('SMARTHUB_TASK_POLL_MS', 1_000)
+const runtimeCleanupIntervalMs = 60_000
 const workflowConcurrency = positiveIntegerEnv(
   'SMARTHUB_WORKFLOW_CONCURRENCY',
   positiveIntegerEnv('SMARTHUB_WORKER_CONCURRENCY', 1, 8),
@@ -30,6 +31,7 @@ const testExecutionConcurrency = positiveIntegerEnv(
   8,
 )
 let stopping = false
+const shutdown = new AbortController()
 const activeControllers = new Set<AbortController>()
 let nextQueueIndex = 0
 
@@ -60,12 +62,6 @@ async function processTestExecutionOne() {
     )
     return false
   }
-  await executionService.cleanupTerminalRunRuntimeStates().catch(error => {
-    console.error(
-      '测试执行终态认证状态清理失败，将在下一轮重试：',
-      error instanceof Error ? error.message : error,
-    )
-  })
   if (!job) return false
   if (!job.runToken || job.fencingToken < 1) {
     throw new Error('TEST_EXECUTION_JOB_LEASE_INVALID')
@@ -331,12 +327,37 @@ async function run() {
     await Promise.all([
       runLane('测试执行', testExecutionConcurrency, processTestExecutionOne),
       runLane('工作流', workflowConcurrency, processWorkflowOne),
+      runRuntimeCleanupLane(),
     ])
   } finally {
     await Promise.all([
       stateStore.close?.(),
       testExecutionStore.close(),
     ])
+  }
+}
+
+async function runRuntimeCleanupLane() {
+  // One serial lane per Worker: scans neither delay claimed-job heartbeats nor
+  // multiply with execution concurrency. Await the active scan before closing DBs.
+  while (!stopping) {
+    try {
+      await testExecutionService?.cleanupTerminalRunRuntimeStates(shutdown.signal)
+    } catch (error) {
+      console.error('测试执行终态认证状态清理失败，将在下一轮重试：',
+        error instanceof Error ? error.message : error)
+    }
+    if (stopping) break
+    await new Promise<void>(resolve => {
+      const finish = () => {
+        clearTimeout(timer)
+        shutdown.signal.removeEventListener('abort', finish)
+        resolve()
+      }
+      const timer = setTimeout(finish, runtimeCleanupIntervalMs)
+      shutdown.signal.addEventListener('abort', finish, { once: true })
+      if (shutdown.signal.aborted) finish()
+    })
   }
 }
 
@@ -378,6 +399,7 @@ async function waitForWork(label: string) {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => {
   stopping = true
+  shutdown.abort()
   activeControllers.forEach(controller => controller.abort(new Error(`Worker 收到 ${signal}，停止任务执行`)))
 })
 

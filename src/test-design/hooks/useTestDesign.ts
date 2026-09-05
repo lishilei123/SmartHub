@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import type { CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignRunSummary, TestDesignWorkflowRun, TestExecutionMethod, TestSuiteDraft } from '../types'
+import type { CreateTestDesignInput, ExecutionReadinessOverrideInput, LibraryExecutionHandoff, LibraryTestCase, LibraryTestSuiteVersion, TestCaseContent, TestCaseLibraryVersion, TestCaseTraceability, TestDesign, TestDesignInputCandidates, TestDesignRunSummary, TestDesignWorkflowRun, TestSuiteDraft } from '../types'
 
 type Notify = (message: string, tone?: 'success' | 'error' | 'warning') => void
 const LIVE_RUN_REFRESH_MS = 1_000
+type Entry = 'designs' | 'library' | 'suites' | 'releases'
+type Asset = 'cases' | 'versions' | 'drafts' | 'suites'
+const PANEL_ASSETS: Record<Entry, Asset[]> = {
+  designs: [], library: ['cases', 'versions', 'drafts', 'suites'],
+  suites: ['cases', 'versions', 'drafts', 'suites'], releases: ['cases', 'versions'],
+}
 
 function rawErrorMessage(cause: unknown) { return cause instanceof Error ? cause.message : String(cause) }
 function actionableErrorMessage(raw: string) {
@@ -15,7 +21,7 @@ function actionableErrorMessage(raw: string) {
   return raw
 }
 
-export function useTestDesign(projectVersionId: string | undefined, notify: Notify) {
+export function useTestDesign(projectVersionId: string | undefined, notify: Notify, entry: Entry = 'designs') {
   const [inputs, setInputs] = useState<TestDesignInputCandidates | null>(null)
   const [designs, setDesigns] = useState<TestDesign[]>([])
   const [design, setDesign] = useState<TestDesign | null>(null)
@@ -32,6 +38,22 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   const [auditRetryError, setAuditRetryError] = useState('')
   const auditRequestRef = useRef<Promise<TestDesignWorkflowRun | undefined> | null>(null)
   const resynthesisRunIdRef = useRef<string | null>(null)
+  const projectRef = useRef({ id: projectVersionId })
+  const selectionRef = useRef({})
+  if (projectRef.current.id !== projectVersionId) {
+    projectRef.current = { id: projectVersionId }
+    selectionRef.current = {}
+  }
+  const projectScope = projectRef.current
+  const viewScope = selectionRef.current
+  const entryRef = useRef(entry)
+  entryRef.current = entry
+  const collectionRequestRef = useRef(0)
+  const busyRequestRef = useRef(0)
+  const assetsRef = useRef(new Map<Asset, { project: typeof projectScope; task: Promise<void> }>())
+  const runRequestRef = useRef<{ scope: object; task: Promise<TestDesignWorkflowRun | undefined> } | null>(null)
+  const currentProject = useCallback(() => projectRef.current === projectScope, [projectScope])
+  const currentView = useCallback(() => currentProject() && selectionRef.current === viewScope, [currentProject, viewScope])
 
   const recordError = useCallback((cause: unknown) => {
     const raw = rawErrorMessage(cause)
@@ -40,62 +62,100 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   }, [])
 
   const guarded = useCallback(async <T,>(label: string, action: () => Promise<T>, success?: string) => {
-    setBusy(label); setError(''); setTechnicalError('')
+    const scope = selectionRef.current
+    const requestId = ++busyRequestRef.current
+    const isCurrent = () => currentProject() && selectionRef.current === scope
+    if (isCurrent()) { setBusy(label); setError(''); setTechnicalError('') }
     try {
       const value = await action()
-      if (success) notify(success, 'success')
+      if (isCurrent() && success) notify(success, 'success')
       return value
     } catch (cause) {
-      const raw = recordError(cause)
-      notify(actionableErrorMessage(raw), 'error')
+      if (isCurrent()) {
+        const raw = recordError(cause)
+        notify(actionableErrorMessage(raw), 'error')
+      }
       throw cause
     } finally {
-      setBusy('')
+      if (isCurrent() && busyRequestRef.current === requestId) setBusy('')
     }
-  }, [notify, recordError])
+  }, [currentProject, notify, recordError])
+
+  const loadAssets = useCallback(async (projectId: string, resources: Asset[], force = false) => {
+    if (!currentProject()) return
+    await Promise.all(resources.map(resource => {
+      const cached = assetsRef.current.get(resource)
+      if (!force && cached?.project === projectScope) return cached.task
+      const request = { project: projectScope, task: Promise.resolve() }
+      const isCurrent = () => currentProject() && assetsRef.current.get(resource) === request
+      request.task = (async () => {
+        if (resource === 'cases') { const result = await api.loadLibraryCases(projectId); if (isCurrent()) setLibraryCases(result.items) }
+        if (resource === 'versions') { const result = await api.loadLibraryVersions(projectId); if (isCurrent()) setLibraryVersions(result.items) }
+        if (resource === 'drafts') { const result = await api.loadSuiteDrafts(projectId); if (isCurrent()) setSuiteDrafts(result.items) }
+        if (resource === 'suites') { const result = await api.loadSuiteVersions(projectId); if (isCurrent()) setSuiteVersions(result.items) }
+      })().catch(cause => {
+        if (isCurrent()) assetsRef.current.delete(resource)
+        throw cause
+      })
+      assetsRef.current.set(resource, request)
+      return request.task
+    }))
+  }, [currentProject, projectScope])
 
   const loadCollection = useCallback(async () => {
-    if (!projectVersionId) return
+    if (!projectVersionId || !currentProject()) return
+    const requestId = ++collectionRequestRef.current
     const [nextInputs, nextDesigns] = await Promise.all([api.loadInputs(projectVersionId), api.loadDesigns(projectVersionId)])
-    const projectId = nextInputs.projectVersion.projectId
+    if (!currentProject() || collectionRequestRef.current !== requestId) return
     setInputs(nextInputs); setDesigns(nextDesigns.items)
-    const [cases, versions, drafts, suites, nextHandoffs] = await Promise.all([api.loadLibraryCases(projectId), api.loadLibraryVersions(projectId), api.loadSuiteDrafts(projectId), api.loadSuiteVersions(projectId), api.loadLibraryHandoffs(projectVersionId)])
-    setLibraryCases(cases.items); setLibraryVersions(versions.items); setSuiteDrafts(drafts.items); setSuiteVersions(suites.items); setHandoffs(nextHandoffs.items)
-  }, [projectVersionId])
+    const previouslyLoaded = [...assetsRef.current.entries()].filter(([, value]) => value.project === projectScope).map(([key]) => key)
+    await loadAssets(nextInputs.projectVersion.projectId, [...new Set([...PANEL_ASSETS[entryRef.current], ...previouslyLoaded])], true)
+  }, [currentProject, loadAssets, projectScope, projectVersionId])
 
-  const refreshRun = useCallback(async () => {
-    if (!projectVersionId || !design || !run) return
-    const next = await api.loadRun(projectVersionId, design.id, run.id)
-    setRun(next)
-    setRuns(current => current.map(item => item.id === next.id ? { ...item, status: next.status, stage: next.stage, progress: next.progress, startedAt: next.startedAt, finishedAt: next.finishedAt, errorCode: next.errorCode, error: next.error, baseTestCaseLibraryVersionId: next.baseTestCaseLibraryVersionId, caseCount: next.candidateCaseCount ?? next.testCases.filter(testCase => !testCase.tombstonedAt).length, candidateCaseCount: next.candidateCaseCount, effectiveCaseCount: next.effectiveCaseCount, pendingManualProposalCount: next.pendingManualProposalCount ?? 0 } : item))
-    return next
-  }, [projectVersionId, design, run])
+  const refreshRun = useCallback(async (afterMutation = false) => {
+    if (!projectVersionId || !design || !run || !currentView()) return
+    if (runRequestRef.current?.scope === viewScope) {
+      if (!afterMutation) return runRequestRef.current.task
+      await runRequestRef.current.task.catch(() => undefined)
+      if (!currentView()) return
+      if (runRequestRef.current?.scope === viewScope) return runRequestRef.current.task
+    }
+    const request = { scope: viewScope, task: Promise.resolve<TestDesignWorkflowRun | undefined>(undefined) }
+    request.task = (async () => {
+      const next = await api.loadRun(projectVersionId, design.id, run.id)
+      if (!currentView()) return
+      setRun(next)
+      setRuns(current => current.map(item => item.id === next.id ? { ...item, status: next.status, stage: next.stage, progress: next.progress, startedAt: next.startedAt, finishedAt: next.finishedAt, errorCode: next.errorCode, error: next.error, baseTestCaseLibraryVersionId: next.baseTestCaseLibraryVersionId, caseCount: next.candidateCaseCount ?? next.testCases.filter(testCase => !testCase.tombstonedAt).length, candidateCaseCount: next.candidateCaseCount, effectiveCaseCount: next.effectiveCaseCount, pendingManualProposalCount: next.pendingManualProposalCount ?? 0 } : item))
+      return next
+    })().finally(() => { if (runRequestRef.current === request) runRequestRef.current = null })
+    runRequestRef.current = request
+    return request.task
+  }, [projectVersionId, design?.id, run?.id, currentView, viewScope])
 
   const requestAudit = useCallback(async (designId: string, runId: string, success = '服务端已重新执行覆盖检查。') => {
-    if (!projectVersionId) return
+    if (!projectVersionId || !currentView()) return
     if (auditRequestRef.current) return auditRequestRef.current
-    let task: Promise<TestDesignWorkflowRun | undefined>
-    task = (async () => {
+    const task = (async () => {
       setAuditRetryError('')
       try {
         await guarded('audit', () => api.reAudit(projectVersionId, designId, runId), success)
-        const refreshed = await api.loadRun(projectVersionId, designId, runId)
-        setRun(current => current?.id === runId ? refreshed : current)
-        return refreshed
+        if (!currentView()) return
+        return await refreshRun(true)
       } catch (cause) {
-        recordError(cause)
-        setAuditRetryError('重新覆盖检查未完成。已保存的用例修改仍然有效，请稍后重试。')
+        if (currentView()) {
+          recordError(cause)
+          setAuditRetryError('重新覆盖检查未完成。已保存的用例修改仍然有效，请稍后重试。')
+        }
         return undefined
-      } finally {
-        auditRequestRef.current = null
       }
     })()
     auditRequestRef.current = task
+    void task.finally(() => { if (auditRequestRef.current === task) auditRequestRef.current = null })
     return task
-  }, [guarded, projectVersionId])
+  }, [currentView, guarded, projectVersionId, recordError, refreshRun])
 
   const refreshAndScheduleAudit = useCallback(async () => {
-    const next = await refreshRun()
+    const next = await refreshRun(true)
     if (!next || ['queued', 'running'].includes(next.status) || !next.testCases.some(item => !item.tombstonedAt)) return next
     if (next.coverageAudits.at(-1)?.status === 'valid') { setAuditRetryError(''); return next }
     return (await requestAudit(next.testDesignId, next.id)) ?? next
@@ -103,33 +163,57 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
 
   useEffect(() => {
     setInputs(null); setDesigns([]); setDesign(null); setRun(null); setRuns([]); setLibraryCases([]); setLibraryVersions([]); setSuiteDrafts([]); setSuiteVersions([]); setHandoffs([]); setError(''); setTechnicalError(''); setAuditRetryError(''); resynthesisRunIdRef.current = null
-    if (projectVersionId) void loadCollection().catch(recordError)
-  }, [projectVersionId, loadCollection, recordError])
+    setBusy(''); auditRequestRef.current = null; assetsRef.current.clear()
+    if (projectVersionId) void loadCollection().catch(cause => { if (currentProject()) recordError(cause) })
+  }, [projectVersionId, loadCollection, recordError, currentProject])
   useEffect(() => {
-    if (!run || !['queued', 'running'].includes(run.status)) return
-    const timer = window.setInterval(() => { void refreshRun().catch(recordError) }, LIVE_RUN_REFRESH_MS)
-    return () => window.clearInterval(timer)
-  }, [run, refreshRun, recordError])
+    if (!inputs || inputs.projectVersion.id !== projectVersionId) return
+    const resources = entry === 'designs' && design ? ['versions' as const] : PANEL_ASSETS[entry]
+    void loadAssets(inputs.projectVersion.projectId, resources).catch(cause => { if (currentProject()) recordError(cause) })
+  }, [inputs, projectVersionId, entry, design?.id, loadAssets, currentProject, recordError])
+  useEffect(() => {
+    if (entry !== 'designs' || !run || !['queued', 'running'].includes(run.status)) return
+    let disposed = false
+    let timer: number
+    const poll = async () => {
+      try { await refreshRun() } catch (cause) { if (!disposed && currentView()) recordError(cause) }
+      if (!disposed) timer = window.setTimeout(() => { void poll() }, LIVE_RUN_REFRESH_MS)
+    }
+    timer = window.setTimeout(() => { void poll() }, LIVE_RUN_REFRESH_MS)
+    return () => { disposed = true; window.clearTimeout(timer) }
+  }, [entry, run?.id, run?.status, refreshRun, currentView, recordError])
   useEffect(() => {
     if (!run || resynthesisRunIdRef.current !== run.id || ['queued', 'running'].includes(run.status)) return
     resynthesisRunIdRef.current = null
     if (run.status === 'succeeded') void refreshAndScheduleAudit()
   }, [run, refreshAndScheduleAudit])
 
+  const selectView = useCallback(() => {
+    selectionRef.current = {}
+    auditRequestRef.current = null
+    resynthesisRunIdRef.current = null
+    setBusy(''); setError(''); setTechnicalError(''); setAuditRetryError('')
+    const scope = selectionRef.current
+    return () => currentProject() && selectionRef.current === scope
+  }, [currentProject])
+
   const openDesign = useCallback(async (selected: TestDesign) => {
-    if (!projectVersionId) return
-    setDesign(selected); setHandoffs([]); setAuditRetryError('')
+    if (!projectVersionId || !currentProject()) return
+    const isCurrent = selectView()
+    setDesign(selected); setRun(null); setRuns([])
     const history = await guarded('load-runs', () => api.loadRuns(projectVersionId, selected.id))
+    if (!isCurrent()) return
     setRuns(history.items)
     const selectedRunId = history.items[0]?.id
-    if (!selectedRunId) { setRun(null); return }
+    if (!selectedRunId) return
     const next = await guarded('load-run', () => api.loadRun(projectVersionId, selected.id, selectedRunId))
-    setRun(next)
-  }, [guarded, projectVersionId])
+    if (isCurrent()) setRun(next)
+  }, [guarded, projectVersionId, currentProject, selectView])
 
   const openLinkedRun = useCallback(async (designId: string, runId: string) => {
-    if (!projectVersionId) return
-    setDesign(null); setRun(null); setHandoffs([]); setAuditRetryError('')
+    if (!projectVersionId || !currentProject()) return
+    const isCurrent = selectView()
+    setDesign(null); setRun(null); setRuns([])
     const linked = await guarded('load-linked-run', async () => {
       const [nextDesign, nextRun, history] = await Promise.all([
         api.loadDesign(projectVersionId, designId),
@@ -138,74 +222,97 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
       ])
       return { design: nextDesign, run: nextRun, runs: history.items }
     })
+    if (!isCurrent()) return
     setDesign(linked.design); setRun(linked.run); setRuns(linked.runs)
-  }, [guarded, projectVersionId])
+  }, [guarded, projectVersionId, currentProject, selectView])
 
   const openRun = useCallback(async (runId: string) => {
-    if (!projectVersionId || !design) return
+    if (!projectVersionId || !design || !currentView()) return
+    const isCurrent = selectView()
+    setRun(null)
     const next = await guarded('load-run', () => api.loadRun(projectVersionId, design.id, runId))
-    setRun(next); setHandoffs([]); setAuditRetryError('')
-  }, [design, guarded, projectVersionId])
+    if (isCurrent()) setRun(next)
+  }, [design, guarded, projectVersionId, currentView, selectView])
 
-  const closeDesign = useCallback(() => { setDesign(null); setRun(null); setRuns([]); setHandoffs([]); setAuditRetryError('') }, [])
+  const closeDesign = useCallback(() => { selectView(); setDesign(null); setRun(null); setRuns([]) }, [selectView])
+
+  const loadPublicationAssets = useCallback(async () => {
+    if (!inputs || !currentView()) return
+    await guarded('publication-assets', () => loadAssets(inputs.projectVersion.projectId, ['cases', 'versions'], true))
+    return currentView()
+  }, [inputs, currentView, guarded, loadAssets])
 
   const create = useCallback(async (input: CreateTestDesignInput) => {
-    if (!projectVersionId) return
-    const nextDesign = await guarded('create', () => api.createDesign(projectVersionId, input))
-    const nextRun = await api.createRun(projectVersionId, nextDesign.id)
-    setDesign({ ...nextDesign, latestRun: nextRun }); setRun(nextRun); setRuns((await api.loadRuns(projectVersionId, nextDesign.id)).items)
-    await loadCollection(); notify('测试设计已创建，Requirement Release 与 Workspace 快照已冻结。', 'success')
-  }, [guarded, loadCollection, notify, projectVersionId])
+    if (!projectVersionId || !currentProject()) return
+    const isCurrent = selectView()
+    const created = await guarded('create', async () => {
+      const nextDesign = await api.createDesign(projectVersionId, input)
+      const nextRun = await api.createRun(projectVersionId, nextDesign.id)
+      const history = await api.loadRuns(projectVersionId, nextDesign.id)
+      return { nextDesign, nextRun, history }
+    }, '测试设计已创建，Requirement Release 与 Workspace 快照已冻结。')
+    if (!isCurrent()) return
+    setDesign({ ...created.nextDesign, latestRun: created.nextRun }); setRun(created.nextRun); setRuns(created.history.items)
+    await loadCollection()
+  }, [guarded, loadCollection, projectVersionId, currentProject, selectView])
 
   const startRun = useCallback(async () => {
-    if (!projectVersionId || !design) return
+    if (!projectVersionId || !design || !currentView()) return
+    const isCurrent = selectView()
+    setRun(null)
     const next = await guarded('start-run', () => api.createRun(projectVersionId, design.id), '已启动新的测试设计运行。')
-    setRun(next); setRuns((await api.loadRuns(projectVersionId, design.id)).items); setHandoffs([]); setAuditRetryError('')
-  }, [design, guarded, projectVersionId])
+    if (!isCurrent()) return
+    setRun(next)
+    const history = await api.loadRuns(projectVersionId, design.id)
+    if (isCurrent()) setRuns(history.items)
+  }, [design, guarded, projectVersionId, currentView, selectView])
 
   const resynthesize = useCallback(async () => {
-    if (!projectVersionId || !design || !run) return
+    if (!projectVersionId || !design || !run || !currentView()) return
+    const isCurrent = selectView()
     const next = await guarded('resynthesize', () => api.resynthesizeCases(projectVersionId, design.id, run.id), 'PlanningAgent 已开始重新生成测试用例。')
+    if (!isCurrent()) return
     resynthesisRunIdRef.current = next.id
     setRun(next); setAuditRetryError('')
-  }, [design, guarded, projectVersionId, run])
+  }, [design, guarded, projectVersionId, run, currentView, selectView])
 
   const reviewCases = useCallback(async (requestedTargets?: Array<{ caseId: string; targetRevision: number }>) => {
-    if (!projectVersionId || !design || !run) return
+    if (!projectVersionId || !design || !run || !currentView()) return
     const eligibleTargets = new Map(run.testCases.filter(item => !item.tombstonedAt && item.reviewState === 'in_review').map(item => [item.id, item.currentRevision]))
     const targets = requestedTargets
       ? requestedTargets.filter(target => eligibleTargets.get(target.caseId) === target.targetRevision)
       : [...eligibleTargets].map(([caseId, targetRevision]) => ({ caseId, targetRevision }))
     if (!targets.length) return
     await guarded('case-approve', () => api.batchReviewCases(projectVersionId, design.id, run.id, targets, 'approve'), `${targets.length} 条选中测试用例已审核通过。`)
-    await refreshRun()
-  }, [design, guarded, projectVersionId, refreshRun, run])
+    await refreshRun(true)
+  }, [design, guarded, projectVersionId, refreshRun, run, currentView])
 
   const createCase = useCallback(async (content: TestCaseContent) => {
-    if (!projectVersionId || !design || !run) return
+    if (!projectVersionId || !design || !run || !currentView()) return
     await guarded('case-create', () => api.createCase(projectVersionId, design.id, run.id, content), '测试用例已创建并进入人工审核。')
     await refreshAndScheduleAudit()
-  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run])
+  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run, currentView])
 
   const editCase = useCallback(async (caseId: string, content: TestCaseContent, reason: string) => {
-    if (!projectVersionId || !design || !run) return
+    if (!projectVersionId || !design || !run || !currentView()) return
     const current = await guarded('case-load', () => api.loadCase(projectVersionId, design.id, run.id, caseId))
+    if (!currentView()) return
     await guarded('case-edit', () => api.patchCase(projectVersionId, design.id, run.id, caseId, current.etag, content, reason), '测试用例已生成新的草稿 Revision，请提交审核。')
     await refreshAndScheduleAudit()
-  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run])
+  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run, currentView])
 
   const removeCase = useCallback(async (caseId: string) => {
-    if (!projectVersionId || !design || !run) return
+    if (!projectVersionId || !design || !run || !currentView()) return
     await guarded('case-delete', () => api.deleteCase(projectVersionId, design.id, run.id, caseId), '测试用例已删除。')
     await refreshAndScheduleAudit()
-  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run])
+  }, [design, guarded, projectVersionId, refreshAndScheduleAudit, run, currentView])
 
   const reviewCase = useCallback(async (caseId: string, decision: api.TestCaseReviewDecision, targetRevision: number, comment?: string) => {
-    if (!projectVersionId || !design || !run) return
+    if (!projectVersionId || !design || !run || !currentView()) return
     const message = ({ submit: `Revision ${targetRevision} 已提交人工审核。`, approve: `Revision ${targetRevision} 已审核通过。`, reject: `Revision ${targetRevision} 已拒绝。`, request_revision: `Revision ${targetRevision} 已退回修改。`, withdraw: `Revision ${targetRevision} 已撤回审核并回到草稿。` } as const)[decision]
     await guarded(`case-${decision}`, () => api.reviewCase(projectVersionId, design.id, run.id, caseId, decision, targetRevision, comment), message)
-    await refreshRun()
-  }, [design, guarded, projectVersionId, refreshRun, run])
+    await refreshRun(true)
+  }, [design, guarded, projectVersionId, refreshRun, run, currentView])
 
   const reAudit = useCallback(async () => {
     if (!design || !run) return
@@ -213,7 +320,7 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
   }, [design, requestAudit, run])
 
   const publish = useCallback(async (name: string) => {
-    if (!projectVersionId || !design || !run) return
+    if (!projectVersionId || !design || !run || !currentView()) return
     const audit = [...run.coverageAudits].reverse().find(item => item.status === 'valid')
     if (!audit) {
       const cause = new Error('COVERAGE_AUDIT_STALE: 没有有效覆盖审计')
@@ -221,22 +328,26 @@ export function useTestDesign(projectVersionId: string | undefined, notify: Noti
       throw cause
     }
     const version = await guarded('publish', () => api.publishLibraryVersion(projectVersionId, design.id, run.id, { name, expectedAuditId: audit.id, expectedCaseSetSha256: audit.caseSetSha256, expectedProposalSha256: run.caseChangeProposalSha256 }), '正式测试用例版本已发布并投影到 Workspace。')
-    const [, , history] = await Promise.all([refreshRun(), loadCollection(), api.loadRuns(projectVersionId, design.id)]); setRuns(history.items); return version
-  }, [design, guarded, loadCollection, notify, projectVersionId, recordError, refreshRun, run])
+    if (!currentView()) return
+    const [, , history] = await Promise.all([refreshRun(true), loadCollection(), api.loadRuns(projectVersionId, design.id)])
+    if (!currentView()) return
+    setRuns(history.items); return version
+  }, [design, guarded, loadCollection, notify, projectVersionId, recordError, refreshRun, run, currentView])
 
   const handoff = useCallback(async (version: TestCaseLibraryVersion, mode: 'smoke' | 'regression' | 'full' | 'custom', suiteVersionId?: string, impactedCaseIds?: string[], executionReadinessOverrides?: ExecutionReadinessOverrideInput[]) => {
-    if (!projectVersionId) return
+    if (!projectVersionId || !currentProject()) return
     const created = await guarded('handoff', () => api.createLibraryHandoff(projectVersionId, version.id, { mode, expectedLibrarySha256: version.contentSha256, suiteVersionId, impactedCaseIds, executionReadinessOverrides }), '执行交接已创建并冻结执行输入。')
+    if (!currentProject()) return
     setHandoffs(current => [created, ...current]); return created
-  }, [guarded, projectVersionId])
+  }, [guarded, projectVersionId, currentProject])
 
-  const createLibraryCase = useCallback(async (content: TestCaseContent, reason: string) => { if (!inputs) return; await guarded('library-create', () => api.createLibraryCase(inputs.projectVersion.projectId, content, reason), '正式用例已创建。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const editLibraryCase = useCallback(async (testCase: LibraryTestCase, content: TestCaseContent, reason: string, traceability?: TestCaseTraceability) => { if (!inputs) return; await guarded('library-edit', () => api.editLibraryCase(inputs.projectVersion.projectId, testCase.id, testCase.etag, content, reason, traceability), '正式用例已生成新 Revision。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const copyLibraryCase = useCallback(async (testCase: LibraryTestCase) => { if (!inputs) return; await guarded('library-copy', () => api.copyLibraryCase(inputs.projectVersion.projectId, testCase.id, `复制自 ${testCase.id}`), '正式用例副本已创建。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const deprecateLibraryCase = useCallback(async (testCase: LibraryTestCase, reason: string) => { if (!inputs) return; await guarded('library-deprecate', () => api.deprecateLibraryCase(inputs.projectVersion.projectId, testCase.id, testCase.etag, reason), '正式用例已废弃，历史 Revision 保留。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const saveSuiteDraft = useCallback(async (draft: TestSuiteDraft | undefined, value: api.SuiteDraftInput) => { if (!inputs) return; if (draft) { const loaded = await api.loadSuiteDraft(inputs.projectVersion.projectId, draft.id); await guarded('suite-save', () => api.updateSuiteDraft(inputs.projectVersion.projectId, draft.id, loaded.response.headers.get('etag') ?? draft.etag ?? '', value), '测试套件草稿已保存。') } else await guarded('suite-create', () => api.createSuiteDraft(inputs.projectVersion.projectId, value), '测试套件草稿已创建。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const publishSuite = useCallback(async (draft: TestSuiteDraft) => { if (!inputs) return; const loaded = await api.loadSuiteDraft(inputs.projectVersion.projectId, draft.id); await guarded('suite-publish', () => api.publishSuiteDraft(inputs.projectVersion.projectId, draft.id, loaded.response.headers.get('etag') ?? draft.etag ?? ''), '不可变测试套件版本已发布。'); await loadCollection() }, [guarded, inputs, loadCollection])
-  const deprecateSuite = useCallback(async (version: LibraryTestSuiteVersion) => { if (!inputs) return; await guarded('suite-deprecate', () => api.deprecateSuiteVersion(inputs.projectVersion.projectId, version.id), '测试套件版本已废弃，历史引用保留。'); await loadCollection() }, [guarded, inputs, loadCollection])
+  const createLibraryCase = useCallback(async (content: TestCaseContent, reason: string) => { if (!inputs || !currentProject()) return; await guarded('library-create', () => api.createLibraryCase(inputs.projectVersion.projectId, content, reason), '正式用例已创建。'); await loadCollection() }, [guarded, inputs, loadCollection, currentProject])
+  const editLibraryCase = useCallback(async (testCase: LibraryTestCase, content: TestCaseContent, reason: string, traceability?: TestCaseTraceability) => { if (!inputs || !currentProject()) return; await guarded('library-edit', () => api.editLibraryCase(inputs.projectVersion.projectId, testCase.id, testCase.etag, content, reason, traceability), '正式用例已生成新 Revision。'); await loadCollection() }, [guarded, inputs, loadCollection, currentProject])
+  const copyLibraryCase = useCallback(async (testCase: LibraryTestCase) => { if (!inputs || !currentProject()) return; await guarded('library-copy', () => api.copyLibraryCase(inputs.projectVersion.projectId, testCase.id, `复制自 ${testCase.id}`), '正式用例副本已创建。'); await loadCollection() }, [guarded, inputs, loadCollection, currentProject])
+  const deprecateLibraryCase = useCallback(async (testCase: LibraryTestCase, reason: string) => { if (!inputs || !currentProject()) return; await guarded('library-deprecate', () => api.deprecateLibraryCase(inputs.projectVersion.projectId, testCase.id, testCase.etag, reason), '正式用例已废弃，历史 Revision 保留。'); await loadCollection() }, [guarded, inputs, loadCollection, currentProject])
+  const saveSuiteDraft = useCallback(async (draft: TestSuiteDraft | undefined, value: api.SuiteDraftInput) => { if (!inputs || !currentProject()) return; if (draft) { const loaded = await api.loadSuiteDraft(inputs.projectVersion.projectId, draft.id); if (!currentProject()) return; await guarded('suite-save', () => api.updateSuiteDraft(inputs.projectVersion.projectId, draft.id, loaded.response.headers.get('etag') ?? draft.etag ?? '', value), '测试套件草稿已保存。') } else await guarded('suite-create', () => api.createSuiteDraft(inputs.projectVersion.projectId, value), '测试套件草稿已创建。'); await loadCollection() }, [guarded, inputs, loadCollection, currentProject])
+  const publishSuite = useCallback(async (draft: TestSuiteDraft) => { if (!inputs || !currentProject()) return; const loaded = await api.loadSuiteDraft(inputs.projectVersion.projectId, draft.id); if (!currentProject()) return; await guarded('suite-publish', () => api.publishSuiteDraft(inputs.projectVersion.projectId, draft.id, loaded.response.headers.get('etag') ?? draft.etag ?? ''), '不可变测试套件版本已发布。'); await loadCollection() }, [guarded, inputs, loadCollection, currentProject])
+  const deprecateSuite = useCallback(async (version: LibraryTestSuiteVersion) => { if (!inputs || !currentProject()) return; await guarded('suite-deprecate', () => api.deprecateSuiteVersion(inputs.projectVersion.projectId, version.id), '测试套件版本已废弃，历史引用保留。'); await loadCollection() }, [guarded, inputs, loadCollection, currentProject])
 
-  return { inputs, designs, design, run, runs, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, busy, error, technicalError, auditRetryError, loadCollection, openDesign, openLinkedRun, openRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite }
+  return { inputs, designs, design, run, runs, libraryCases, libraryVersions, suiteDrafts, suiteVersions, handoffs, busy, error, technicalError, auditRetryError, loadCollection, loadPublicationAssets, openDesign, openLinkedRun, openRun, closeDesign, create, startRun, refreshRun, resynthesize, reviewCases, createCase, editCase, removeCase, reviewCase, reAudit, publish, handoff, createLibraryCase, editLibraryCase, copyLibraryCase, deprecateLibraryCase, saveSuiteDraft, publishSuite, deprecateSuite }
 }

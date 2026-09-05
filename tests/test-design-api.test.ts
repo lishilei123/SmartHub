@@ -9,7 +9,7 @@ import { routeTestDesign } from '../server/http/test-design-routes.ts'
 test('测试设计创建表单读取当前绑定 Requirement Release 和单 Agent 就绪状态', async () => {
   const originalFetch = globalThis.fetch
   const paths: string[] = []
-  globalThis.fetch = async input => { paths.push(new URL(String(input)).pathname); return Response.json({
+  globalThis.fetch = async input => { assert.equal(String(input), '/api/project-versions/pv-1/test-designs/inputs'); paths.push(new URL(String(input), 'https://smarthub.example').pathname); return Response.json({
     projectVersion: { id: 'pv-1', projectId: 'project-1', name: 'v1', status: 'open' },
     requirementRelease: { id: 'release-1', reviewRunId: 'verify-1', contentSha256: 'a'.repeat(64), label: '正式需求' },
     knowledgeAssets: [], fixedIndexes: [], historicalCaseSets: [], historicalCaseAssets: [],
@@ -48,7 +48,8 @@ test('测试用例编辑携带 If-Match 并将人工审核通过写入单条 Rev
   const originalFetch = globalThis.fetch
   const requests: Array<{ path: string; method: string; etag: string; body: Record<string, unknown> }> = []
   globalThis.fetch = async (input, init) => {
-    requests.push({ path: new URL(String(input)).pathname, method: init?.method ?? 'GET', etag: new Headers(init?.headers).get('if-match') ?? '', body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+    assert.match(String(input), /^\/api\/project-versions\/pv-1\/test-designs\/design-1\/runs\/run-1\/test-cases\/case-1(?:\/review-actions)?$/u)
+    requests.push({ path: new URL(String(input), 'https://smarthub.example').pathname, method: init?.method ?? 'GET', etag: new Headers(init?.headers).get('if-match') ?? '', body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
     return Response.json({ id: 'case-1', currentRevision: 2, reviewState: 'approved', revisions: [], reviewActions: [] }, { headers: { etag: '"case:case-1:2:new"' } })
   }
   const content = { schemaVersion: 'test-case/v3', title: '编辑后的用例', dimension: 'functional', requirementRefs: ['REQ-1'], priority: 'P1', preconditions: [], executionMethods: ['ui'], steps: ['打开页面'], expectedResults: ['页面可用'] } as const
