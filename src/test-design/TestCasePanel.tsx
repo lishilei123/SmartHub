@@ -84,6 +84,7 @@ export function TestCasePanel(props: Props) {
   const filtersActive = Boolean(query.trim()) || filter !== 'all'
 
   return <section className="td2-case-workbench" id="test-case-list" ref={workbenchRef}>
+    <div className="td2-case-index">
     <header className="td2-workbench-header">
       <div><p>本次测试设计</p><h2>Candidate Delta 审核</h2><small>逐条查看本轮新增或修改的用例；未变化的历史用例由 Service 直接复用。</small></div>
       <div className="td2-workbench-actions">
@@ -130,6 +131,7 @@ export function TestCasePanel(props: Props) {
           </article>
         })}
         {!filteredCases.length && <div className="td2-case-list-empty"><Search /><b>没有匹配的用例</b><small>调整搜索词或审核状态后重试。</small></div>}
+    </div>
     </div>
     {viewing && selected && <div className="tdw-backdrop td2-case-viewer-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setViewing(false) }}><section className="tdw-modal wide td2-case-viewer" id="test-case-detail" role="dialog" aria-modal="true" aria-label="查看测试用例"><header><div><Eye /><span><b>查看测试用例</b><small>在此完成本条 Candidate 的审核或 Revision 编辑。</small></span></div><button aria-label="关闭查看测试用例" onClick={() => setViewing(false)}><X /></button></header><CaseDetail testCase={selected} busy={props.busy} onEdit={() => { setViewing(false); setEditing(selected) }} onDelete={() => { setViewing(false); void props.onDelete(selected.id) }} onReview={props.onReview} /></section></div>}
     {editing && <CaseEditorDialog testCase={editing === 'new' ? undefined : editing} busy={props.busy} onClose={() => setEditing(undefined)} onSave={async (content, reason) => { if (editing === 'new') await props.onCreate(content); else await props.onEdit(editing.id, content, reason); setEditing(undefined) }} />}

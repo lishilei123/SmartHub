@@ -395,19 +395,20 @@
 .rav2-advanced-details > header button {
   min-height: 26px;
   padding: 0 7px;
-  border: 1px solid #e0e4ea;
+  border: 1px solid transparent;
   border-radius: 6px;
-  background: #fff;
+  background: transparent;
   color: #718094;
   font-size: 8px;
   cursor: pointer;
 }
 
+.rav2-advanced-details > header button:hover,
 .rav2-advanced-details > header button.active {
-  border-color: #d9ddff;
-  background: #f0f1ff;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
   color: #5563d8;
-  font-weight: 700;
 }
 
 .rav2-technical-status > summary {
@@ -450,4 +451,9 @@
   .rav2-advanced-details > header { align-items: flex-start; flex-direction: column; }
   .rav2-advanced-details > header > nav { justify-content: flex-start; }
   .rav2-snapshot-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.rav2-advanced-details > header button:focus-visible {
+  outline: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }

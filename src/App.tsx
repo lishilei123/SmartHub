@@ -67,11 +67,11 @@ const menu: { key: PageKey; label: string; icon: typeof LayoutDashboard; hint?: 
 
 const pageMeta: Record<PageKey, { title: string; desc: string }> = {
   dashboard: { title: '工作台', desc: '掌握项目质量状态与 AI 任务进展' },
-  planning: { title: '测试策划', desc: 'PlanningAgent 串联需求理解、自动测试设计、Coverage Audit 与正式发布交接' },
+  planning: { title: '测试策划', desc: '分析需求、确认问题、审核并发布测试用例' },
   'test-cases': { title: '测试用例', desc: '查看当前项目版本已审核通过及继承复用的正式测试用例' },
   documents: { title: '知识库', desc: '管理项目文档、技术方案与知识资产' },
-  execution: { title: '测试执行', desc: '基于当前正式用例库与执行 Agents，在 Worker 所在机器使用本地 Playwright 执行' },
-  reports: { title: '报告与诊断', desc: '基于 PostgreSQL 正式执行事实的确定性单 Run 报告、失败诊断与完整追溯' },
+  execution: { title: '测试执行', desc: '执行正式测试用例，查看运行进度与结果' },
+  reports: { title: '报告与诊断', desc: '查看执行报告、分析失败原因并追溯测试证据' },
   settings: { title: '系统管理', desc: '配置模型、集成、权限与平台策略' },
 }
 
@@ -129,6 +129,7 @@ function App() {
   }, [])
 
   useEffect(() => () => { if (toastTimer.current) window.clearTimeout(toastTimer.current) }, [])
+  useEffect(() => { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }) }, [page, selectedProjectVersionId])
   const updateRoute = useCallback((next: { page?: PageKey; projectVersionId?: string; planningTab?: PlanningTab; resetAnalysisContext?: boolean }, mode: 'push' | 'replace' = 'push') => {
     const url = new URL(window.location.href)
     if (next.page) url.searchParams.set('page', next.page)
