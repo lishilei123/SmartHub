@@ -6,6 +6,7 @@ import {
   testDesignService,
   testExecutionService,
   testExecutionStore,
+  testExecutionInfrastructureConfigurationService,
   usingPostgres,
 } from './runtime.js'
 import type { TaskLease } from './infrastructure/store.js'
@@ -13,7 +14,8 @@ import type {
   ExecutionJobLease,
   TestExecutionStore,
 } from './infrastructure/test-execution-store.js'
-import type { ExecutionJob } from './domain/test-execution-types.js'
+import type { ExecutionJob, ExecutionResourceClass } from './domain/test-execution-types.js'
+import { ExecutionResourceScheduler } from './application/execution-resource-scheduler.js'
 import type { TestExecutionService } from './application/test-execution-service.js'
 
 const workerId = process.env.SMARTHUB_WORKER_ID ?? `${hostname()}-${process.pid}`
@@ -23,11 +25,6 @@ const runtimeCleanupIntervalMs = 60_000
 const workflowConcurrency = positiveIntegerEnv(
   'SMARTHUB_WORKFLOW_CONCURRENCY',
   positiveIntegerEnv('SMARTHUB_WORKER_CONCURRENCY', 1, 8),
-  8,
-)
-const testExecutionConcurrency = positiveIntegerEnv(
-  'SMARTHUB_TEST_EXECUTION_CONCURRENCY',
-  3,
   8,
 )
 let stopping = false
@@ -48,13 +45,13 @@ async function processWorkflowOne() {
   return false
 }
 
-async function processTestExecutionOne() {
+async function processTestExecutionOne(resourceClass: ExecutionResourceClass, preparationOnly = false) {
   const executionStore = testExecutionStore
   const executionService = testExecutionService
   if (!executionStore || !executionService) return false
   let job
   try {
-    job = await executionStore.claimJob(workerId, leaseMs)
+    job = await executionStore.claimJob(workerId, leaseMs, resourceClass, preparationOnly)
   } catch (error) {
     console.error(
       '测试执行任务领取失败：',
@@ -73,6 +70,9 @@ async function processTestExecutionOne() {
     workerId,
     leaseMs,
     activeControllers,
+    resourceClass,
+    preparationOnly,
+    shutdownSignal: shutdown.signal,
   })
   return true
 }
@@ -84,6 +84,9 @@ export async function processClaimedTestExecutionJob(input: {
     & Partial<Pick<TestExecutionService, 'cleanupRunRuntimeState'>>
   workerId: string
   leaseMs: number
+  resourceClass?: ExecutionResourceClass
+  preparationOnly?: boolean
+  shutdownSignal?: AbortSignal
   activeControllers?: Set<AbortController>
   scheduleHeartbeat?: (
     heartbeat: () => Promise<void>,
@@ -99,6 +102,9 @@ export async function processClaimedTestExecutionJob(input: {
     fencingToken: input.job.fencingToken,
   }
   const controller = new AbortController()
+  const abortForShutdown = () => controller.abort(input.shutdownSignal?.reason ?? new Error('TEST_EXECUTION_WORKER_SHUTDOWN'))
+  input.shutdownSignal?.addEventListener('abort', abortForShutdown, { once: true })
+  if (input.shutdownSignal?.aborted) abortForShutdown()
   input.activeControllers?.add(controller)
   const scheduled = startLeaseHeartbeat({
     renew: () => input.store.heartbeatJob(input.job.id, lease, input.leaseMs),
@@ -109,11 +115,17 @@ export async function processClaimedTestExecutionJob(input: {
     schedule: input.scheduleHeartbeat,
   })
   try {
-    await input.service.processPreparedTask(
+    const processed = await input.service.processPreparedTask(
       input.job,
       lease,
       controller.signal,
+      input.resourceClass,
+      input.preparationOnly,
     )
+    if (input.resourceClass && processed && !['passed', 'failed', 'blocked', 'unsupported', 'waiting_manual', 'cancelled'].includes(processed.status)) {
+      // Service already returned the lease at the durable phase boundary.
+      return
+    }
     const task = await input.store.getTask(input.job.taskId)
     if (!task) throw new Error('TEST_EXECUTION_TASK_NOT_FOUND')
     const jobStatus = task.status === 'passed'
@@ -158,6 +170,7 @@ export async function processClaimedTestExecutionJob(input: {
     }
   } finally {
     scheduled.clear()
+    input.shutdownSignal?.removeEventListener('abort', abortForShutdown)
     input.activeControllers?.delete(controller)
   }
 }
@@ -357,11 +370,14 @@ async function run() {
   ) throw new Error('独立 Worker 仅支持配置 DATABASE_URL 且完成任务队列迁移的 PostgreSQL 模式')
   await service.initialize()
   console.log(
-    `SmartHub Worker ${workerId} 已启动，测试执行并发度 ${testExecutionConcurrency}，其余工作流并发度 ${workflowConcurrency}`,
+    `SmartHub Worker ${workerId} 已启动，测试执行容量使用已发布配置，其余工作流并发度 ${workflowConcurrency}`,
   )
   try {
     await Promise.all([
-      runLane('测试执行', testExecutionConcurrency, processTestExecutionOne),
+      runExecutionResources(),
+      // Short deterministic checks must progress even when all real Runner slots
+      // are occupied. This lane never executes Playwright or invokes an Agent.
+      runLane('测试执行预检', 1, () => processTestExecutionOne('runner', true)),
       runLane('工作流', workflowConcurrency, processWorkflowOne),
       runRuntimeCleanupLane(),
     ])
@@ -370,6 +386,40 @@ async function run() {
       stateStore.close?.(),
       testExecutionStore.close(),
     ])
+  }
+}
+
+async function runExecutionResources() {
+  const scheduler = new ExecutionResourceScheduler(processTestExecutionOne, error => {
+    console.error('测试执行调度或配置读取失败，保留最近有效容量：', error instanceof Error ? error.message : error)
+  })
+  let nextRefresh = 0
+  let lastConfiguration: string | undefined
+  try {
+    while (!stopping) {
+      if (Date.now() >= nextRefresh) {
+        await scheduler.refresh(() => testExecutionInfrastructureConfigurationService.resolveConcurrency())
+        const configuration = JSON.stringify(scheduler.configuration)
+        if (configuration !== lastConfiguration) {
+          console.log(`测试执行并发已生效：Runner ${scheduler.configuration.runnerConcurrency}，Agent ${scheduler.configuration.agentConcurrency}（当前 Worker）`)
+          lastConfiguration = configuration
+        }
+        nextRefresh = Date.now() + 5_000
+      }
+      scheduler.tick()
+      await new Promise<void>(resolve => {
+        const finish = () => {
+          clearTimeout(timer)
+          shutdown.signal.removeEventListener('abort', finish)
+          resolve()
+        }
+        const timer = setTimeout(finish, Math.min(pollMs, 1_000))
+        shutdown.signal.addEventListener('abort', finish, { once: true })
+        if (shutdown.signal.aborted) finish()
+      })
+    }
+  } finally {
+    await scheduler.stop()
   }
 }
 

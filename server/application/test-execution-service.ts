@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { executionResourceClass, type ExecutionResourceClass } from '../domain/test-execution-types.js'
 import type { InputDeliveryManifest, TestExecutionAgentWorkspaceProjection } from '../domain/agent-types.js'
 import type {
   ExecutionArtifact,
@@ -57,6 +58,7 @@ import {
   assertExecutionPackageIntegrity,
   adjudicateFailureDiagnosisCandidate,
   automaticRepairAllowed,
+  deterministicFailureDiagnosisCandidate,
   buildExecutionPackage,
   CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
   executionEntrySymbol,
@@ -668,6 +670,8 @@ export class TestExecutionService {
     job: ExecutionJob,
     lease: ExecutionJobLease,
     signal: AbortSignal,
+    resourceClass?: ExecutionResourceClass,
+    preparationOnly = false,
   ) {
     for (;;) {
       if (signal.aborted) throw abortError(signal)
@@ -682,6 +686,12 @@ export class TestExecutionService {
         if (task.status === 'passed') {
           await this.validatePassedWorkspaceBinding(run, task)
         }
+        return task
+      }
+      if (resourceClass && (executionResourceClass(task.status) !== resourceClass || preparationOnly && task.status !== 'pending')) {
+        // A phase handoff is not a retry. Return the lease before another pool
+        // claims this Task, so no resource is held while waiting for capacity.
+        if (!await this.store.yieldJob(job.id, lease)) throw new Error('TEST_EXECUTION_LEASE_LOST')
         return task
       }
       switch (task.status) {
@@ -904,13 +914,13 @@ export class TestExecutionService {
     })
     const createdAt = this.clock()
     const cacheKey = taskScriptCacheKey(run, task)
-    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated', workspaceFiles)
     await this.persistScriptRevision({
       job,
       lease,
       run,
       task,
       expectedStatus: 'script_generating',
+      workspaceBaselineFiles: workspaceFiles,
       scriptArtifact: {
         id: stableIdentity('test_execution_script_artifact', { cacheKey }),
         cacheKey,
@@ -1046,13 +1056,13 @@ export class TestExecutionService {
       'TEST_EXECUTION_SCRIPT_ARTIFACT_NOT_FOUND',
       '当前 ScriptRevision 缺少 ScriptArtifact 身份',
     )
-    await this.persistWorkspaceImplementation(run, task, executionPackage, 'validated', workspaceFiles)
     await this.persistScriptRevision({
       job,
       lease,
       run,
       task,
       expectedStatus: 'repairing',
+      workspaceBaselineFiles: workspaceFiles,
       scriptArtifact,
       executionPackage,
       source: 'repair',
@@ -1076,6 +1086,7 @@ export class TestExecutionService {
     parent?: ScriptRevision
     repairReason?: string
     incrementRepair: boolean
+    workspaceBaselineFiles?: readonly Pick<ExecutionPackageFile, 'path' | 'contentSha256'>[]
   }) {
     const file = required(input.executionPackage.files.find(candidate => candidate.path === input.executionPackage.manifest.entrypoint), 'TEST_EXECUTION_PACKAGE_ENTRYPOINT_MISSING', '执行包缺少入口源码')
     const createdAt = this.clock()
@@ -1116,6 +1127,11 @@ export class TestExecutionService {
       input.job.id,
       input.lease,
       async transaction => {
+        // Check and lock the lease before publishing provisional Workspace files.
+        // Formal revisions remain immutable and only a real PASS validates Binding.
+        if (input.workspaceBaselineFiles) {
+          await this.persistWorkspaceImplementation(input.run, input.task, input.executionPackage, 'needs_validation', input.workspaceBaselineFiles)
+        }
         for (const artifact of new Map(storedFiles.map(item => [item.artifact.id, item.artifact])).values()) {
           await transaction.appendArtifact(artifact)
         }
@@ -1220,7 +1236,7 @@ export class TestExecutionService {
           taskId: task.id,
           expectedStatus: task.status as 'ready' | 'retrying',
           expectedStateVersion: task.stateVersion,
-          status: 'waiting_manual',
+          status: task.status === 'retrying' ? 'blocked' : 'waiting_manual',
           error: code,
           finishedAt: this.clock(),
         }),
@@ -1364,7 +1380,9 @@ export class TestExecutionService {
       lease,
       async transaction => {
         const artifacts = await appendRunnerArtifacts(transaction, run.id, task.id, attemptId, result.artifacts, finishedAt)
-        await transaction.appendExecutionEvents(normalizeRunnerExecutionEvents({ run, task, attemptId, result, artifacts, finishedAt }))
+        const events = normalizeRunnerExecutionEvents({ run, task, attemptId, result, artifacts, finishedAt })
+        await transaction.appendExecutionEvents(events)
+        const deterministicFailure = deterministicFailureDiagnosisCandidate({ ...attempt, status: result.status, error: result.error }, events)
         await transaction.finalizeAttempt({
           attemptId,
           status: result.status,
@@ -1398,6 +1416,30 @@ export class TestExecutionService {
             expectedStatus: 'running',
             expectedStateVersion: task.stateVersion + 1,
             status: 'passed',
+            finishedAt,
+          })
+        }
+        if (deterministicFailure) {
+          await transaction.appendDiagnosis({
+            id: stableIdentity('test_execution_diagnosis', { taskId: task.id, scriptRevisionId: revision.id, attemptIds: [attemptId] }),
+            runId: run.id,
+            taskId: task.id,
+            scriptRevisionId: revision.id,
+            attemptIds: [attemptId],
+            category: deterministicFailure.category,
+            confidence: 1,
+            summary: deterministicFailure.reason,
+            evidence: [{ attemptId, observation: deterministicFailure.evidence }],
+            ...failureDiagnosisPolicy(deterministicFailure.category),
+            source: 'deterministic',
+            createdAt: finishedAt,
+          })
+          return transaction.transitionTask({
+            taskId: task.id,
+            expectedStatus: 'running',
+            expectedStateVersion: task.stateVersion + 1,
+            status: 'blocked',
+            error: deterministicFailure.reason,
             finishedAt,
           })
         }
@@ -1764,40 +1806,20 @@ export class TestExecutionService {
   private async validatePassedWorkspaceBinding(run: ExecutionRun, task: ExecutionTask) {
     if (!this.executionWorkspace) return
     const revision = await this.currentRevision(task)
-    const binding = await this.executionWorkspace.resolveBinding(
-      run.projectVersionId,
-      task.input.caseId,
-      executableMethod(task),
-    )
-    if (
-      !binding
-      || binding.bindingStatus === 'invalid'
-      || binding.executionType !== executableMethod(task)
-      || binding.entrySha256 !== revision.contentSha256
-      || binding.caseContentSha256 !== task.input.caseContentSha256
-      || binding.validationPolicyVersion !== CURRENT_EXECUTION_BINDING_VALIDATION_POLICY
-      || binding.dependencySha256 !== executionBindingDependencySha256(revision.package.files)
-    ) {
-      if (binding && binding.bindingStatus !== 'invalid') {
-        await this.executionWorkspace.setBindingStatus(
-          run.projectVersionId,
-          task.input.caseId,
-          executableMethod(task),
-          'invalid',
-        )
-      }
-      throw new Error('TEST_EXECUTION_WORKSPACE_BINDING_VALIDATION_FAILED')
-    }
-    if (binding.bindingStatus === 'needs_validation' || binding.bindingStatus === 'inherited') {
-      await this.executionWorkspace.setBindingStatus(
-        run.projectVersionId,
-        task.input.caseId,
-        executableMethod(task),
-        'validated',
-      )
-    }
+    // A concurrent Run may already have published a newer candidate. Its Binding
+    // must not be changed by this older PASS, and this real PASS stays authoritative.
+    await this.executionWorkspace.validateBindingAfterPass({
+      projectVersionId: run.projectVersionId,
+      caseId: task.input.caseId,
+      executionType: executableMethod(task),
+      entryFile: revision.package.entrypoint,
+      entrySymbol: executionEntrySymbol(task.input.caseId),
+      entrySha256: revision.contentSha256,
+      dependencySha256: executionBindingDependencySha256(revision.package.files),
+      caseContentSha256: task.input.caseContentSha256,
+      validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
+    })
   }
-
   async cleanupRunRuntimeState(runId: string) {
     if (!this.executionWorkspace) return
     const run = await this.getRun(runId)

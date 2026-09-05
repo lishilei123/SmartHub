@@ -87,6 +87,13 @@ async function route(request: IncomingMessage, response: ServerResponse, control
     if (method === 'GET') return send(response, 200, await testExecutionInfrastructureConfigurationService.get())
     if (method === 'PUT') return send(response, 201, await testExecutionInfrastructureConfigurationService.publish(await json(request) as TestExecutionInfrastructureConfigurationInput, principal.displayName))
   }
+  if (url.pathname === '/api/test-execution-infrastructure-configuration/draft' && method === 'PUT') {
+    return send(response, 200, await testExecutionInfrastructureConfigurationService.saveDraft(await json(request) as TestExecutionInfrastructureConfigurationInput & { expectedDraftRevision?: number | null }, principal.displayName))
+  }
+  if (url.pathname === '/api/test-execution-infrastructure-configuration/publish' && method === 'POST') {
+    const body = await json(request)
+    return send(response, 201, await testExecutionInfrastructureConfigurationService.publishDraft({ revision: Number(body.revision), expectedActiveVersion: body.expectedActiveVersion as number | null }, principal.displayName))
+  }
   if (await routeTestExecution(request, response, {
     method,
     url,

@@ -534,6 +534,12 @@ class InMemoryExecutionStore implements TestExecutionStore {
     return true
   }
 
+  yielded = 0
+  async yieldJob() {
+    this.yielded += 1
+    return true
+  }
+
   async finishJob() {
     return true
   }
@@ -1315,11 +1321,12 @@ test('已有有效 Execution Binding 时直接 Runner，不调用 UIExecutionAge
       createdAt: '2026-08-13T12:00:00.000Z',
       updatedAt: '2026-08-13T12:00:00.000Z',
     })
-    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal, 'runner')
     assert.equal(task.status, 'passed')
     assert.equal(runner.calls.length, 1)
     assert.equal(runner.calls[0].package.manifest.entrypoint, 'tests/ui/status.spec.ts')
     assert.deepEqual(runtime.calls, [])
+    assert.equal(store.yielded, 0)
     assert.deepEqual(playwrightCli.calls, [])
     assert.equal(store.revisions[0].source, 'agent')
   }, { workspace: true })
@@ -2349,4 +2356,111 @@ test('TestExecutionService 基础设施失败使用独立 retry kind 且不消�
     assert.equal(store.diagnoses.length, 0)
     assert.equal(runner.calls.length, 2)
   })
+})
+
+test('缺少或失效 Binding 在资源边界交接，候选通过校验后仍等待真实 Runner 验证', async () => {
+  for (const invalidBinding of [false, true]) {
+    await withService([
+      { status: 'passed', exitCode: 0, durationMs: 8, summary: '真实 Runner 通过', artifacts: [] },
+    ], async ({ service, store, runner, runtime, job, workspace }) => {
+      assert.ok(workspace)
+      if (invalidBinding) {
+        await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
+        await workspace.saveBinding({
+          projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
+          executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: `[${store.task.input.caseId}]`,
+          bindingStatus: 'validated', entrySha256: createHash('sha256').update(source).digest('hex'),
+          ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
+          caseContentSha256: '0'.repeat(64), validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
+          createdAt: store.task.createdAt, updatedAt: store.task.updatedAt,
+        })
+      }
+      const signal = new AbortController().signal
+      const preparation = await service.processPreparedTask(job, lease, signal, 'runner')
+      assert.equal(preparation.status, 'script_generating')
+      assert.equal(store.yielded, 1)
+      assert.equal(runtime.calls.length, 0)
+      assert.equal(runner.calls.length, 0)
+      const candidate = await service.processPreparedTask(job, lease, signal, 'agent')
+      assert.equal(candidate.status, 'ready')
+      assert.equal(store.yielded, 2)
+      assert.deepEqual(runtime.calls.map(call => call.stage), ['script_generation'])
+      assert.equal(runner.calls.length, 0)
+      assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'))?.bindingStatus, 'needs_validation')
+      const completed = await service.processPreparedTask(job, lease, signal, 'runner')
+      assert.equal(completed.status, 'passed')
+      assert.equal(runner.calls.length, 1)
+      assert.equal((await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'))?.bindingStatus, 'validated')
+    }, { workspace: true })
+  }
+})
+
+test('明确网络或数据失败由 Service 收口，既不诊断调用 Agent 也不弱化结果', async () => {
+  for (const error of ['ECONNREFUSED', 'TEST_EXECUTION_TEST_DATA_NOT_READY']) {
+    await withService([
+      { status: 'failed', exitCode: 1, durationMs: 8, summary: '真实执行失败', error, artifacts: [] },
+    ], async ({ service, store, runtime, runner, job }) => {
+      const signal = new AbortController().signal
+      await service.processPreparedTask(job, lease, signal, 'runner')
+      await service.processPreparedTask(job, lease, signal, 'agent')
+      const completed = await service.processPreparedTask(job, lease, signal, 'runner')
+      assert.equal(completed.status, 'blocked')
+      assert.equal(store.attempts[0].status, 'failed')
+      assert.equal(runner.calls.length, 1)
+      assert.equal(store.diagnoses[0].source, 'deterministic')
+      assert.equal(store.diagnoses[0].repairable, false)
+      assert.deepEqual(runtime.calls.map(call => call.stage), ['script_generation'])
+    }, { workspace: true })
+  }
+})
+
+test('模型返回时租约已失效不能写 Workspace Binding 或正式 Revision', async () => {
+  await withService([], async ({ service, store, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    const execute = runtime.execute.bind(runtime)
+    runtime.execute = async (...args) => {
+      const output = await execute(...args)
+      store.transactionWithLease = async () => null as never
+      return output
+    }
+    const signal = new AbortController().signal
+    await service.processPreparedTask(job, lease, signal, 'runner')
+    await assert.rejects(service.processPreparedTask(job, lease, signal, 'agent'), /LEASE_LOST/u)
+    assert.equal(store.revisions.length, 0)
+    assert.equal(await workspace.resolveBinding(store.run.projectVersionId, store.task.input.caseId, 'ui'), null)
+  }, { workspace: true })
+})
+
+test('独立预检只分类并释放租约，成熟 Binding 也不能在预检槽位执行 Runner', async () => {
+  await withService([], async ({ service, store, runner, runtime, job, workspace }) => {
+    assert.ok(workspace)
+    await workspace.writeFiles(store.run.projectVersionId, [{ path: 'tests/ui/status.spec.ts', content: source }])
+    await workspace.saveBinding({
+      projectVersionId: store.run.projectVersionId, caseId: store.task.input.caseId,
+      executionType: 'ui', entryFile: 'tests/ui/status.spec.ts', entrySymbol: `[${store.task.input.caseId}]`,
+      bindingStatus: 'validated', entrySha256: createHash('sha256').update(source).digest('hex'),
+      ...singleFileBindingDependency('tests/ui/status.spec.ts', source),
+      caseContentSha256: store.task.input.caseContentSha256, validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
+      createdAt: store.task.createdAt, updatedAt: store.task.updatedAt,
+    })
+    const prepared = await service.processPreparedTask(job, lease, new AbortController().signal, 'runner', true)
+    assert.equal(prepared.status, 'ready')
+    assert.equal(store.yielded, 1)
+    assert.equal(runner.calls.length, 0)
+    assert.equal(runtime.calls.length, 0)
+  }, { workspace: true })
+})
+
+test('真实 Reporter failure Event 中的网络错误优先于 Agent 诊断', async () => {
+  await withService([{
+    status: 'failed', exitCode: 1, durationMs: 1, summary: 'Playwright failed', error: 'PLAYWRIGHT_EXIT_1', artifacts: [],
+    events: [{ sequence: 1, type: 'failure', status: 'failed', title: '页面导航失败', startedAt: '2026-08-13T12:00:00.000Z',
+      metadata: { source: 'playwright_json_reporter', failureKind: 'execution', message: 'Error: page.goto: net::ERR_CONNECTION_REFUSED at https://example.test/' } }],
+  }], async ({ service, store, runtime, job }) => {
+    const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+    assert.equal(task.status, 'blocked')
+    assert.equal(store.diagnoses[0].source, 'deterministic')
+    assert.equal(store.diagnoses[0].category, 'environment_defect')
+    assert.deepEqual(runtime.calls.map(call => call.stage), ['script_generation'])
+  }, { workspace: true })
 })

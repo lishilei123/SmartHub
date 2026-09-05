@@ -363,7 +363,7 @@ export type ExecutionEventType =
 
 export type ExecutionEventStatus = 'running' | 'passed' | 'failed' | 'skipped'
 
-/** Structured Runner observation. It never drives the execution state machine. */
+/** Structured Runner facts used by Service classification; events cannot assign outcomes themselves. */
 export interface ExecutionEvent {
   id: string
   runId: string
@@ -457,6 +457,18 @@ export interface ProductDefectCandidateAction {
   actorId: string
   actorDisplayName: string
   createdAt: string
+}
+
+export type ExecutionResourceClass = 'runner' | 'agent'
+
+export const EXECUTION_RESOURCE_TASK_STATUSES: Record<ExecutionResourceClass, ExecutionTaskStatus[]> = {
+  runner: ['pending', 'ready', 'retrying', 'running'],
+  agent: ['script_generating', 'diagnosing', 'repairing'],
+}
+
+/** Scheduling is a projection of persisted Task state, never a second business state. */
+export function executionResourceClass(status: ExecutionTaskStatus): ExecutionResourceClass {
+  return EXECUTION_RESOURCE_TASK_STATUSES.agent.includes(status) ? 'agent' : 'runner'
 }
 
 export interface ExecutionJob {

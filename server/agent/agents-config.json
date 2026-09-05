@@ -105,15 +105,15 @@
       "skills": [
         {
           "skillKey": "test-script-generation",
-          "version": "1.10.0",
+          "version": "1.11.0",
           "enabled": true,
-          "configurationHash": "157d45eb14b4fd79279ecb3ccdba259f285b66d749874f5727c59273a49754f9"
+          "configurationHash": "f8ada336e64d526580d11cf8a57eaa026c617c67bccef066781c06b3906f1aa6"
         },
         {
           "skillKey": "script-repair",
-          "version": "1.9.0",
+          "version": "1.10.0",
           "enabled": true,
-          "configurationHash": "036e4039ad0df4685563ac56c46b2fa5ef6fd3a6dd81f9e65af0a58e70e3aa2d"
+          "configurationHash": "63883f9c4249a7d13e67a961cd79be3ad61e21d375e2f37561e9c37e150eeebe"
         }
       ],
       "mcps": []
@@ -148,9 +148,9 @@
       "skills": [
         {
           "skillKey": "failure-analysis",
-          "version": "1.8.0",
+          "version": "1.9.0",
           "enabled": true,
-          "configurationHash": "f764447fb8308dde7ea64a28a8a7d412d460d41c07d8706ddf302a0db6daaa66"
+          "configurationHash": "b09cda7078a35c8d3309d5999a4921eccef113794205cb2b5b6785b6afc66d74"
         }
       ],
       "mcps": []

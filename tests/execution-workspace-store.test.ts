@@ -7,9 +7,80 @@ import { tmpdir } from 'node:os'
 import {
   executionBindingDependencySha256,
   LocalExecutionWorkspaceStore,
+  type CaseExecutionBinding,
 } from '../server/infrastructure/execution-workspace-store.js'
 
 const hash = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex')
+
+test('旧PASS不能覆盖并发发布的新Binding，只有精确匹配的执行包才能升级validated', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-binding-cas-'))
+  try {
+    const store = new LocalExecutionWorkspaceStore(root)
+    const entryFile = 'tests/ui/cas.spec.ts'
+    const original = "import { test } from '@playwright/test'\ntest('CAS [CASE_CAS]', async () => {})\n"
+    const revised = `${original}// new candidate\n`
+    const bindingFor = (source: string): CaseExecutionBinding => {
+      const dependencyFiles = [{ path: entryFile, contentSha256: hash(source) }]
+      return {
+        projectVersionId: 'pv-cas', caseId: 'CASE_CAS', executionType: 'ui',
+        entryFile, entrySymbol: '[CASE_CAS]', bindingStatus: 'needs_validation',
+        entrySha256: hash(source), caseContentSha256: 'a'.repeat(64),
+        dependencyFiles, dependencySha256: executionBindingDependencySha256(dependencyFiles),
+        validationPolicyVersion: 'execution-binding-validation/v10',
+        createdAt: '2026-09-05T00:00:00.000Z', updatedAt: '2026-09-05T00:00:00.000Z',
+      }
+    }
+    const oldBinding = bindingFor(original)
+    const newBinding = bindingFor(revised)
+    await store.saveBindingImplementation(oldBinding, [{ path: entryFile, content: original }])
+    // Publication reserves the mutation lock before the old Runner completion.
+    const publishing = store.saveBindingImplementation(newBinding, [{ path: entryFile, content: revised }])
+    const oldPass = store.validateBindingAfterPass(oldBinding)
+    await publishing
+    assert.equal(await oldPass, false)
+    const current = await store.resolveBinding('pv-cas', 'CASE_CAS', 'ui')
+    assert.equal(current?.entrySha256, newBinding.entrySha256)
+    assert.equal(current?.bindingStatus, 'needs_validation')
+    assert.equal(await store.validateBindingAfterPass(newBinding), true)
+    assert.equal((await store.resolveBinding('pv-cas', 'CASE_CAS', 'ui'))?.bindingStatus, 'validated')
+    assert.equal(await store.validateBindingAfterPass(newBinding), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('PASS校验重新读取依赖，拒绝漂移、错误Case语义和invalid Binding', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-binding-drift-'))
+  try {
+    const store = new LocalExecutionWorkspaceStore(root)
+    const entryFile = 'tests/ui/dependency.spec.ts'
+    const source = "import { test } from '@playwright/test'\ntest('依赖 [CASE_DEP]', async () => {})\n"
+    const helper = 'export const ready = true\n'
+    const dependencyFiles = [
+      { path: 'helpers/state.ts', contentSha256: hash(helper) },
+      { path: entryFile, contentSha256: hash(source) },
+    ]
+    const binding: CaseExecutionBinding = {
+      projectVersionId: 'pv-cas', caseId: 'CASE_DEP', executionType: 'ui',
+      entryFile, entrySymbol: '[CASE_DEP]', bindingStatus: 'needs_validation',
+      entrySha256: hash(source), caseContentSha256: 'b'.repeat(64),
+      dependencyFiles, dependencySha256: executionBindingDependencySha256(dependencyFiles),
+      createdAt: '2026-09-05T00:00:00.000Z', updatedAt: '2026-09-05T00:00:00.000Z',
+    }
+    const files = [{ path: entryFile, content: source }, { path: 'helpers/state.ts', content: helper }]
+    await store.saveBindingImplementation(binding, files)
+    assert.equal(await store.validateBindingAfterPass({ ...binding, caseContentSha256: 'c'.repeat(64) }), false)
+    assert.equal((await store.resolveBinding('pv-cas', 'CASE_DEP', 'ui'))?.bindingStatus, 'needs_validation')
+    await store.writeFiles('pv-cas', [{ path: 'helpers/state.ts', content: 'export const ready = false\n' }])
+    assert.equal(await store.validateBindingAfterPass(binding), false)
+    await store.writeFiles('pv-cas', files)
+    assert.equal((await store.resolveBinding('pv-cas', 'CASE_DEP', 'ui'))?.bindingStatus, 'needs_validation')
+    await store.setBindingStatus('pv-cas', 'CASE_DEP', 'ui', 'invalid')
+    assert.equal(await store.validateBindingAfterPass(binding), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('Execution Workspace 按 ProjectVersion 隔离 Binding，并保留共享自动化文件', async () => {
   const root = await mkdtemp(join(tmpdir(), 'smarthub-execution-workspace-'))

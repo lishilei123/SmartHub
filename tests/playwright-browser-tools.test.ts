@@ -320,6 +320,36 @@ test('Browser Tools 支持受控多轮 Agent Loop，并对测试数据、请求�
   await assert.rejects(() => invoke(session, 'browser.snapshot', {}), /BROWSER_SESSION_CLOSED/u)
 })
 
+test('官方 Locator CLI 不可用时暴露真实失败，不伪造 Locator 或脚本候选', async () => {
+  const cli = new FixtureBrowserCli()
+  let generatorCalls = 0
+  cli.generateLocator = async () => {
+    generatorCalls += 1
+    throw new Error('PLAYWRIGHT_CLI_COMMAND_UNAVAILABLE: generate-locator')
+  }
+  const session = await new PlaywrightBrowserToolGateway(cli).openSession(execution(), new AbortController().signal)
+  try {
+    await assert.rejects(
+      () => invoke(session, 'browser.get_locator', { target: 'e99' }),
+      /BROWSER_ELEMENT_REF_NOT_OBSERVED/u,
+    )
+    assert.equal(generatorCalls, 0)
+    await invoke(session, 'browser.snapshot', {})
+    await assert.rejects(
+      () => invoke(session, 'browser.get_locator', { target: 'e1' }),
+      /PLAYWRIGHT_CLI_COMMAND_UNAVAILABLE/u,
+    )
+    assert.equal(generatorCalls, 1)
+    // Other controlled observations remain usable for the existing Agent path.
+    const snapshot = await invoke(session, 'browser.snapshot', {})
+    assert.match(JSON.stringify(snapshot.data), /ref=e1/u)
+    assert.equal('files' in (snapshot.data as object), false)
+    assert.equal('executionBinding' in (snapshot.data as object), false)
+  } finally {
+    await session.close()
+  }
+})
+
 test('Browser Session 按 Task 隔离，并拒绝错误 scope、跨 Session requestRef 与跨源页面', async () => {
   const cli = new FixtureBrowserCli()
   const gateway = new PlaywrightBrowserToolGateway(cli)

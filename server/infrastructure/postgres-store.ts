@@ -203,6 +203,16 @@ export class PostgresStore implements StateStore {
     return result.rows.map(row => row.data)
   }
 
+  async getActiveTestExecutionInfrastructureConfiguration(): Promise<TestExecutionInfrastructureConfigurationVersion | null> {
+    const result = await this.pool.query<{ data: TestExecutionInfrastructureConfigurationVersion }>("SELECT data FROM smarthub.test_execution_infrastructure_configuration_versions WHERE status='active' ORDER BY version DESC LIMIT 1")
+    return result.rows[0]?.data ?? null
+  }
+
+  async getTestExecutionInfrastructureConfigurationDraft() {
+    const result = await this.pool.query<{ data: DatabaseState['testExecutionInfrastructureConfigurationDraft'] }>("SELECT data FROM smarthub.test_execution_infrastructure_configuration_drafts WHERE id='default'")
+    return result.rows[0]?.data ?? null
+  }
+
   async getProjectVersion(projectVersionId: string): Promise<ProjectVersion | null> {
     const result = await this.pool.query<{ data: ProjectVersion }>('SELECT data FROM smarthub.project_versions WHERE id=$1', [projectVersionId])
     const version = result.rows[0]?.data ?? null
@@ -966,6 +976,8 @@ async function loadConfigurationState(client: Queryable, scope: ConfigurationTra
   if (scope === 'test_execution_infrastructure_configuration') {
     const versions = await client.query<{ data: TestExecutionInfrastructureConfigurationVersion }>('SELECT data FROM smarthub.test_execution_infrastructure_configuration_versions ORDER BY version')
     state.testExecutionInfrastructureConfigurationVersions = versions.rows.map(row => row.data)
+    const draft = await client.query<{ data: DatabaseState['testExecutionInfrastructureConfigurationDraft'] }>("SELECT data FROM smarthub.test_execution_infrastructure_configuration_drafts WHERE id='default'")
+    state.testExecutionInfrastructureConfigurationDraft = draft.rows[0]?.data
     return state
   }
   const knowledgeBases = await client.query<{ data: DatabaseState['knowledgeBases'][number] }>('SELECT data FROM smarthub.knowledge_bases ORDER BY created_at, id')
@@ -994,6 +1006,7 @@ async function persistConfigurationChanges(client: PoolClient, scope: Configurat
     return
   }
   if (scope === 'test_execution_infrastructure_configuration') {
+    await persistExecutionInfrastructureDraft(client, before, state)
     for (const item of changed(before.testExecutionInfrastructureConfigurationVersions, state.testExecutionInfrastructureConfigurationVersions)) {
       await client.query('INSERT INTO smarthub.test_execution_infrastructure_configuration_versions (id, version, status, created_at, data) VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, data=EXCLUDED.data', [item.id, item.version, item.status, item.createdAt, JSON.stringify(item)])
     }
@@ -1002,6 +1015,13 @@ async function persistConfigurationChanges(client: PoolClient, scope: Configurat
   await deleteMissing(client, 'config_versions', before.configs, state.configs)
   for (const item of changed(before.knowledgeBases, state.knowledgeBases)) await client.query('INSERT INTO smarthub.knowledge_bases VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT (id) DO UPDATE SET project_id=EXCLUDED.project_id, name=EXCLUDED.name, active_index_version_id=EXCLUDED.active_index_version_id, active_config_version_id=EXCLUDED.active_config_version_id, created_at=EXCLUDED.created_at, data=EXCLUDED.data', [item.id, item.projectId, item.name, item.activeIndexVersionId, item.activeConfigVersionId, item.createdAt, JSON.stringify(item)])
   for (const item of changed(before.configs, state.configs)) await client.query('INSERT INTO smarthub.config_versions VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (id) DO UPDATE SET requires_rebuild=EXCLUDED.requires_rebuild, data=EXCLUDED.data', [item.id, item.knowledgeBaseId, item.version, item.requiresRebuild, item.createdAt, JSON.stringify(item)])
+}
+
+async function persistExecutionInfrastructureDraft(client: Queryable, before: DatabaseState, state: DatabaseState) {
+  const draft = state.testExecutionInfrastructureConfigurationDraft
+  if (draft && JSON.stringify(draft) !== JSON.stringify(before.testExecutionInfrastructureConfigurationDraft)) {
+    await client.query('INSERT INTO smarthub.test_execution_infrastructure_configuration_drafts (id, revision, updated_at, data) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (id) DO UPDATE SET revision=EXCLUDED.revision, updated_at=EXCLUDED.updated_at, data=EXCLUDED.data', [draft.id, draft.revision, draft.updatedAt, JSON.stringify(draft)])
+  }
 }
 
 async function loadTestDesignReadState(client: Queryable, scope: TestDesignReadScope): Promise<DatabaseState> {
@@ -1126,6 +1146,7 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
   const agentConfigurationDrafts = await client.query<{ data: DatabaseState['agentConfigurationDrafts'][number] }>('SELECT data FROM smarthub.agent_configuration_drafts ORDER BY scene')
   const agentConfigurationVersions = await client.query<{ data: DatabaseState['agentConfigurationVersions'][number] }>('SELECT data FROM smarthub.agent_configuration_versions ORDER BY scene, agent_key, version')
   const testExecutionInfrastructureConfigurationVersions = await client.query<{ data: DatabaseState['testExecutionInfrastructureConfigurationVersions'][number] }>('SELECT data FROM smarthub.test_execution_infrastructure_configuration_versions ORDER BY version')
+  const executionInfrastructureDraft = await client.query<{ data: DatabaseState['testExecutionInfrastructureConfigurationDraft'] }>("SELECT data FROM smarthub.test_execution_infrastructure_configuration_drafts WHERE id='default'")
   const projectVersions = await client.query<{ data: DatabaseState['projectVersions'][number] }>('SELECT data FROM smarthub.project_versions ORDER BY created_at, id')
   const projectVersionRequirementBindings = await client.query<{ data: DatabaseState['projectVersionRequirementBindings'][number] }>('SELECT data FROM smarthub.project_version_requirement_bindings ORDER BY created_at, id')
   const reviewRuns = await client.query<{ data: DatabaseState['reviewRuns'][number] }>('SELECT data FROM smarthub.review_runs ORDER BY created_at DESC, id')
@@ -1149,7 +1170,7 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
     suiteVersions: normalizedSuites.rows.map(row => row.data),
     executionHandoffs: normalizedHandoffs.rows.map(row => row.data),
   } : undefined
-  const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), testExecutionInfrastructureConfigurationVersions: testExecutionInfrastructureConfigurationVersions.rows.map(row => row.data), reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data), testDesignState }
+  const state = { projects: rows[0].rows.map(row => row.data) as DatabaseState['projects'], projectVersions: projectVersions.rows.map(row => row.data), projectVersionRequirementBindings: projectVersionRequirementBindings.rows.map(row => row.data), knowledgeBases: rows[1].rows.map(row => row.data) as DatabaseState['knowledgeBases'], directories: rows[2].rows.map(row => row.data) as DatabaseState['directories'], configs: rows[3].rows.map(row => row.data) as DatabaseState['configs'], assets: rows[4].rows.map(row => row.data) as DatabaseState['assets'], versions, indexes, tasks, modelSources: modelSources.rows.map(row => row.data), aiResources: aiResources.rows.map(row => row.data), agentConfigurationDrafts: agentConfigurationDrafts.rows.map(row => row.data), agentConfigurationVersions: agentConfigurationVersions.rows.map(row => row.data), testExecutionInfrastructureConfigurationVersions: testExecutionInfrastructureConfigurationVersions.rows.map(row => row.data), testExecutionInfrastructureConfigurationDraft: executionInfrastructureDraft.rows[0]?.data, reviewRuns: reviewRuns.rows.map(row => row.data), findingActions: findingActions.rows.map(row => row.data), toolApprovals: toolApprovals.rows.map(row => row.data), testDesignState }
   state.projectVersions.forEach(normalizeRequirementReleaseBindings)
   normalizeTestDesignState(state)
   normalizeReviewSeverities(state)
@@ -1157,6 +1178,7 @@ async function loadState(client: Queryable): Promise<DatabaseState> {
 }
 
 async function persistChanges(client: PoolClient, before: DatabaseState, state: DatabaseState) {
+  await persistExecutionInfrastructureDraft(client, before, state)
   await deleteRemovedTestDesignState(client, before, state)
   await deleteMissing(client, 'finding_actions', before.findingActions, state.findingActions)
   await deleteMissing(client, 'tool_approvals', before.toolApprovals, state.toolApprovals)

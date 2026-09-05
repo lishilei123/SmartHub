@@ -3220,6 +3220,73 @@ const migrations: Migration[] = [{
     CREATE INDEX IF NOT EXISTS test_case_library_versions_project_published_idx
       ON smarthub.test_case_library_versions (project_id,published_at DESC);
   `,
+}, {
+  version: 45,
+  name: 'test-execution-resource-handoff-and-concurrency-drafts',
+  sql: `
+    CREATE INDEX IF NOT EXISTS test_execution_tasks_resource_status_idx
+      ON smarthub.test_execution_tasks (status,id)
+      WHERE status IN ('pending','ready','retrying','running','script_generating','diagnosing','repairing');
+    CREATE INDEX IF NOT EXISTS test_execution_jobs_task_claim_idx
+      ON smarthub.test_execution_jobs (task_id,available_at,created_at,id)
+      WHERE status='queued' AND cancel_requested_at IS NULL;
+
+    DO $migration$
+    DECLARE definition text; updated text;
+    BEGIN
+      SELECT pg_get_functiondef('smarthub.validate_test_execution_job_write()'::regprocedure) INTO definition;
+      updated := replace(
+        definition,
+        $from$ELSIF NEW.attempt_count <> OLD.attempt_count THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_JOB_ATTEMPT_COUNT_INVALID';$from$,
+        $to$ELSIF NEW.attempt_count <> OLD.attempt_count THEN
+        IF NOT (
+          NEW.attempt_count=OLD.attempt_count-1
+          AND OLD.status='running' AND NEW.status='queued'
+          AND OLD.lease_expires_at>clock_timestamp()
+          AND OLD.cancel_requested_at IS NULL AND NEW.cancel_requested_at IS NULL
+          AND NEW.lease_owner IS NULL AND NEW.run_token IS NULL
+          AND NEW.lease_expires_at IS NULL AND NEW.heartbeat_at IS NULL
+          AND task_status NOT IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled')
+          AND NOT EXISTS (
+            SELECT 1 FROM smarthub.test_execution_attempts
+            WHERE task_id=NEW.task_id AND status='running'
+          )
+        ) THEN
+          RAISE EXCEPTION 'TEST_EXECUTION_JOB_ATTEMPT_COUNT_INVALID';
+        END IF;$to$
+      );
+      IF updated=definition THEN
+        RAISE EXCEPTION 'TEST_EXECUTION_RESOURCE_HANDOFF_MIGRATION_FAILED';
+      END IF;
+      EXECUTE updated;
+    END $migration$;
+
+    CREATE OR REPLACE FUNCTION smarthub.valid_test_execution_concurrency(value jsonb)
+    RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+      SELECT CASE
+        WHEN jsonb_typeof(value)='object'
+          AND jsonb_typeof(value->'runnerConcurrency')='number'
+          AND jsonb_typeof(value->'agentConcurrency')='number'
+        THEN (value->>'runnerConcurrency')::numeric BETWEEN 1 AND 16
+          AND mod((value->>'runnerConcurrency')::numeric,1)=0
+          AND (value->>'agentConcurrency')::numeric BETWEEN 1 AND 8
+          AND mod((value->>'agentConcurrency')::numeric,1)=0
+        ELSE false
+      END;
+    $$;
+    ALTER TABLE smarthub.test_execution_infrastructure_configuration_versions
+      ADD CONSTRAINT test_execution_infrastructure_concurrency_ck
+      CHECK (NOT (data ? 'concurrency') OR smarthub.valid_test_execution_concurrency(data->'concurrency'));
+    CREATE TABLE IF NOT EXISTS smarthub.test_execution_infrastructure_configuration_drafts (
+      id text PRIMARY KEY CHECK (id='default'),
+      revision integer NOT NULL CHECK (revision>=1),
+      updated_at timestamptz NOT NULL,
+      data jsonb NOT NULL,
+      CONSTRAINT test_execution_infrastructure_draft_concurrency_ck
+        CHECK (smarthub.valid_test_execution_concurrency(data->'concurrency'))
+    );
+  `,
 }]
 
 export async function runMigrations(connectionString: string) {

@@ -5,6 +5,7 @@ import type { CallExpression, Node } from '@babel/types'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import type {
   ExecutionAssertionContract,
+  ExecutionAttempt,
   ExecutionEvent,
   ExecutionPackage,
   ExecutionPackageCandidate,
@@ -481,6 +482,55 @@ export function validateFailureDiagnosisCandidate(
     reason: text(candidate.reason, 'reason', 4_000),
     evidence: text(candidate.evidence, 'evidence', 4_000),
   }
+}
+
+/** Classify only explicit terminal failure codes, never HTTP statuses or guessed business causes. */
+export function deterministicFailureDiagnosisCandidate(
+  attempt: Pick<ExecutionAttempt, 'status' | 'error'> & Partial<Pick<ExecutionAttempt, 'id'>>,
+  events: readonly ExecutionEvent[] = [],
+): FailureDiagnosisCandidate | undefined {
+  if (attempt.status !== 'failed') return undefined
+  const messages = [
+    ...(attempt.error ? [attempt.error] : []),
+    ...events.filter(event => attempt.id && event.attemptId === attempt.id
+      && event.type === 'failure' && event.status === 'failed'
+      && event.metadata?.source === 'playwright_json_reporter'
+      && event.metadata.failureKind === 'execution')
+      .flatMap(event => typeof event.metadata?.message === 'string' ? [event.metadata.message] : []),
+  ]
+  const rules: Array<{ codes: readonly string[]; category: FailureDiagnosisCategory; reason: string }> = [
+    {
+      codes: ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'ERR_CONNECTION_REFUSED', 'ERR_NAME_NOT_RESOLVED', 'ERR_ADDRESS_UNREACHABLE'],
+      category: 'environment_defect',
+      reason: 'Runner 返回明确的网络不可达错误；先恢复环境连接，再人工重试，不自动生成或修复脚本',
+    },
+    {
+      codes: ['BROWSER_AUTHENTICATION_NOT_ESTABLISHED', 'BROWSER_AUTHENTICATION_CREDENTIALS_REQUIRED', 'BROWSER_AUTHENTICATION_ENTRY_NOT_FOUND', 'BROWSER_AUTHENTICATION_SUBMIT_AMBIGUOUS', 'TEST_EXECUTION_AUTH_STATE_REQUIRED', 'TEST_EXECUTION_AUTH_STATE_FILE_INVALID', 'TEST_EXECUTION_AUTH_STATE_SCOPE_INVALID', 'TEST_EXECUTION_API_AUTHORIZATION_REQUIRED', 'TEST_EXECUTION_API_AUTHORIZATION_STATE_REQUIRED', 'TEST_EXECUTION_API_AUTHORIZATION_INVALID'],
+      category: 'environment_defect',
+      reason: '受管认证状态未就绪或校验失败；先恢复当前 Run 的认证配置，不自动修复业务脚本',
+    },
+    {
+      codes: ['TEST_EXECUTION_ENVIRONMENT_NOT_REGISTERED', 'TEST_EXECUTION_ENVIRONMENT_SIGNATURE_INVALID', 'TEST_EXECUTION_SECRET_UNAVAILABLE', 'TEST_EXECUTION_ENVIRONMENT_SECRETS_UNAVAILABLE', 'TEST_EXECUTION_RUNNER_UNAVAILABLE', 'TEST_EXECUTION_RUNNER_SNAPSHOT_DRIFT', 'TEST_EXECUTION_RUNNER_CONFIGURATION_SNAPSHOT_REQUIRED', 'TEST_EXECUTION_RUNNER_INFRASTRUCTURE_ERROR'],
+      category: 'environment_defect',
+      reason: '执行环境、配置或 Runner 基础设施未就绪；由 Service 保留失败事实并等待环境恢复',
+    },
+    {
+      codes: ['TEST_EXECUTION_TEST_DATA_NOT_READY', 'TEST_EXECUTION_TEST_DATA_MISSING'],
+      category: 'test_data_defect',
+      reason: '执行证据明确报告受管测试数据未准备完成；补齐数据后人工重试，不自动修复脚本',
+    },
+  ]
+  for (const rule of rules) {
+    const code = rule.codes.find(value => messages.some(message =>
+      new RegExp(`^(?:Error:\\s*)?(?:(?:page\\.goto|apiRequestContext\\.[a-z]+):\\s*)?(?:(?:connect|getaddrinfo)\\s+)?(?:net::)?${value}(?![A-Z0-9_])`, 'u').test(message.trim())))
+    if (code) return {
+      category: rule.category,
+      reason: rule.reason,
+      // Do not copy raw errors: they can include URLs, credentials or payloads.
+      evidence: `当前终态失败 Attempt 的 Runner error 或结构化 failure Event 包含明确错误码 ${code}`,
+    }
+  }
+  return undefined
 }
 
 export function adjudicateFailureDiagnosisCandidate(

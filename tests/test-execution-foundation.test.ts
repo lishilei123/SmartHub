@@ -17,6 +17,7 @@ import {
   assertTaskTransition,
   automaticRepairAllowed,
   buildExecutionPackage,
+  deterministicFailureDiagnosisCandidate,
   executionCreateRequestSha256,
   freezeExecutionTaskInput,
   scriptCacheKey,
@@ -25,6 +26,7 @@ import {
   validateFailureDiagnosisCandidate,
 } from '../server/application/test-execution-validation.js'
 import type {
+  ExecutionEvent,
   ExecutionPackageCandidate,
   FrozenExecutionTestDataSnapshot,
   FrozenExecutionTaskInput,
@@ -937,6 +939,8 @@ test('FailureAnalysisAgent 只提交最小分类，自动修复策略由服务�
   assert.equal(automaticRepairAllowed({ category: 'product_defect' }, 0), false)
   assert.equal(automaticRepairAllowed({ category: 'assertion_mismatch' }, 0), false)
   assert.equal(automaticRepairAllowed({ category: 'unknown' }, 0), false)
+  assert.equal(automaticRepairAllowed({ category: 'environment_defect' }, 0), false)
+  assert.equal(automaticRepairAllowed({ category: 'test_data_defect' }, 0), false)
   assert.throws(
     () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, repairable: true }),
     error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_SYSTEM_FIELD_FORBIDDEN'),
@@ -945,6 +949,56 @@ test('FailureAnalysisAgent 只提交最小分类，自动修复策略由服务�
     () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, schemaVersion: 'failure-analysis/v0' }),
     error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_SCHEMA_INVALID'),
   )
+  for (const field of ['status', 'result', 'scriptRevisionId', 'files', 'executionBinding', 'expectedResults']) {
+    assert.throws(
+      () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, [field]: 'passed' }),
+      error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_SYSTEM_FIELD_FORBIDDEN'),
+    )
+  }
+  assert.throws(
+    () => validateFailureDiagnosisCandidate({ ...diagnosisCandidate, category: 'passed' }),
+    error => validationCode(error, 'TEST_EXECUTION_DIAGNOSIS_CATEGORY_INVALID'),
+  )
+})
+
+test('明确网络、受管认证、配置和测试数据错误由确定性规则分类且不复制原始敏感错误', () => {
+  for (const [code, category] of [
+    ['ECONNREFUSED', 'environment_defect'],
+    ['ENOTFOUND', 'environment_defect'],
+    ['net::ERR_CONNECTION_REFUSED', 'environment_defect'],
+    ['BROWSER_AUTHENTICATION_NOT_ESTABLISHED', 'environment_defect'],
+    ['TEST_EXECUTION_API_AUTHORIZATION_REQUIRED', 'environment_defect'],
+    ['TEST_EXECUTION_RUNNER_SNAPSHOT_DRIFT', 'environment_defect'],
+    ['TEST_EXECUTION_TEST_DATA_NOT_READY', 'test_data_defect'],
+  ]) {
+    const result = deterministicFailureDiagnosisCandidate({ status: 'failed', error: `Error: ${code} https://user:password@example.test/?token=private-value` })
+    assert.equal(result?.category, category)
+    assert.equal(automaticRepairAllowed(result!, 0), false)
+    assert.doesNotMatch(JSON.stringify(result), /password|private-value|https:/u)
+  }
+})
+
+test('确定性分类不猜测401/403、超时、脚本前置数据和运行中结果', () => {
+  for (const error of ['HTTP 401 Unauthorized', 'HTTP 403 Forbidden', 'Timeout 30000ms exceeded', 'locator.click: element not found', 'T1 test data missing', 'CUSTOM_ECONNREFUSED_SUFFIX', 'Expected: ECONNREFUSED', 'Error: expect(received).toBe("ECONNREFUSED")']) {
+    assert.equal(deterministicFailureDiagnosisCandidate({ status: 'failed', error }), undefined)
+  }
+  for (const status of ['running', 'passed', 'cancelled', 'infrastructure_error'] as const) {
+    assert.equal(deterministicFailureDiagnosisCandidate({ status, error: 'ECONNREFUSED' }), undefined)
+  }
+})
+
+test('真实Reporter失败事件支持确定性分类，拒绝跨Attempt或断言文本中的错误码', () => {
+  const attempt = { id: 'attempt-current', status: 'failed' as const, error: 'PLAYWRIGHT_EXIT_1' }
+  const failure: ExecutionEvent = {
+    id: 'event-current', runId: 'run-1', taskId: 'task-1', attemptId: attempt.id,
+    sequence: 0, type: 'failure', status: 'failed', title: 'Playwright 执行失败',
+    startedAt: '2026-09-05T00:00:00.000Z', finishedAt: '2026-09-05T00:00:00.000Z', durationMs: 0,
+    metadata: { source: 'playwright_json_reporter', failureKind: 'execution', message: 'Error: page.goto: net::ERR_CONNECTION_REFUSED at https://example.test/' },
+  }
+  assert.equal(deterministicFailureDiagnosisCandidate(attempt, [failure])?.category, 'environment_defect')
+  assert.equal(deterministicFailureDiagnosisCandidate(attempt, [{ ...failure, attemptId: 'older-attempt' }]), undefined)
+  assert.equal(deterministicFailureDiagnosisCandidate(attempt, [{ ...failure, metadata: { ...failure.metadata, failureKind: 'assertion' } }]), undefined)
+  assert.equal(deterministicFailureDiagnosisCandidate(attempt, [{ ...failure, metadata: { ...failure.metadata, source: 'agent' } }]), undefined)
 })
 
 test('执行环境快照不含 secret，且只在签名一致的 Runner 启动边界解析', async () => {

@@ -33,6 +33,7 @@ import {
   SwitchRow,
 } from './settings-shared'
 import { EmbeddingModelPrototype, RetrievalIndexConfig } from './KnowledgeSettings'
+import { TestExecutionSettings } from './TestExecutionSettings'
 
 export function SystemSettings({
   knowledgeBaseId,
@@ -49,6 +50,7 @@ export function SystemSettings({
     { name: '知识库配置', desc: '同步、切分与检索策略', icon: BookOpen, group: '资源与集成' },
     { name: '用户与权限', desc: '成员、角色与审批流程', icon: Users, group: '安全与治理' },
     { name: '环境与安全', desc: '密钥、数据保留与审计', icon: ShieldCheck, group: '安全与治理' },
+    { name: '测试执行配置', desc: 'Runner 与 Agent 并发控制及版本发布', icon: Bot, group: '资源与集成' },
   ]
   const [selected, setSelected] = useState(0)
   const [collapsed, setCollapsed] = useState(false)
@@ -325,7 +327,7 @@ export function SystemSettings({
                 {selected === 2 && configVersion ? ` · 配置 V${configVersion}` : ''}
               </p>
             </div>
-            {selected !== 0 && (
+            {selected !== 0 && selected !== 5 && (
               <>
                 <Badge tone={dirty ? 'orange' : requiresRebuild && selected === 2 ? 'orange' : 'green'}>
                   {dirty ? '有未保存更改' : requiresRebuild && selected === 2 ? '待重建' : '已保存'}
@@ -339,6 +341,7 @@ export function SystemSettings({
           </div>
         )}
         <div className="settings-editor-scroll" ref={editorScrollRef}>
+          {selected === 5 && <TestExecutionSettings notify={notify} addAudit={addAudit} />}
           {selected === 0 && (
             <ModelManagementSettings
               draft={draft}

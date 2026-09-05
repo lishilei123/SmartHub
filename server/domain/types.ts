@@ -197,9 +197,21 @@ export interface TestExecutionInfrastructureConfigurationVersion {
   status: 'active' | 'superseded'
   environments: TestExecutionEnvironmentProfile[]
   runner?: TestExecutionRunnerConfiguration
+  concurrency?: import('./test-execution-infrastructure-configuration.js').ExecutionConcurrencyConfiguration
   contentSha256: string
   createdAt: string
   publishedBy: string
+}
+
+export interface TestExecutionInfrastructureConfigurationDraft {
+  id: 'default'
+  revision: number
+  expectedActiveVersion: number | null
+  environments: TestExecutionEnvironmentProfile[]
+  runner?: TestExecutionRunnerConfiguration
+  concurrency: import('./test-execution-infrastructure-configuration.js').ExecutionConcurrencyConfiguration
+  updatedAt: string
+  updatedBy: string
 }
 
 export interface EmbeddingSourceModel {
@@ -411,7 +423,7 @@ export interface ReviewRun {
   error?: string
 }
 
-export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; testExecutionInfrastructureConfigurationVersions: TestExecutionInfrastructureConfigurationVersion[]; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
+export interface DatabaseState { projects: Project[]; projectVersions: ProjectVersion[]; projectVersionRequirementBindings: ProjectVersionRequirementBinding[]; knowledgeBases: KnowledgeBase[]; directories: KnowledgeDirectory[]; configs: ConfigVersion[]; assets: Asset[]; versions: AssetVersion[]; indexes: IndexVersion[]; tasks: SyncTask[]; modelSources: GenerativeModelSource[]; aiResources: AiResource[]; agentConfigurationDrafts: AgentConfigurationDraft[]; agentConfigurationVersions: AgentConfigurationVersion[]; testExecutionInfrastructureConfigurationVersions: TestExecutionInfrastructureConfigurationVersion[]; testExecutionInfrastructureConfigurationDraft?: TestExecutionInfrastructureConfigurationDraft; reviewRuns: ReviewRun[]; findingActions: FindingAction[]; toolApprovals: ToolApproval[]; testDesignState?: import('./test-design-types.js').TestDesignState }
 
 export const defaultConfig: KnowledgeConfig = {
   encoding: 'utf-8',

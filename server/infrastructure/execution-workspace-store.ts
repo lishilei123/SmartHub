@@ -281,6 +281,38 @@ export class LocalExecutionWorkspaceStore {
     return this.persistBindingStatus(binding, status)
   }
 
+  /** A PASS can validate only the exact implementation it executed. */
+  async validateBindingAfterPass(expected: Pick<CaseExecutionBinding,
+    'projectVersionId' | 'caseId' | 'executionType' | 'entryFile' | 'entrySymbol'
+    | 'entrySha256' | 'dependencySha256' | 'caseContentSha256' | 'validationPolicyVersion'
+  >): Promise<boolean> {
+    return this.withMutation(expected.projectVersionId, async () => {
+      const root = await this.ensure(expected.projectVersionId)
+      const resolved = await this.readBinding(root, expected.projectVersionId, expected.caseId, expected.executionType)
+      if (!resolved) return false
+      let binding: CaseExecutionBinding
+      try {
+        binding = normalizeBinding(resolved.binding)
+        const fields = ['projectVersionId', 'caseId', 'executionType', 'entryFile', 'entrySymbol',
+          'entrySha256', 'dependencySha256', 'caseContentSha256', 'validationPolicyVersion'] as const
+        if (binding.bindingStatus === 'invalid' || fields.some(key => binding[key] !== expected[key])) return false
+        const dependencies = await Promise.all(binding.dependencyFiles.map(async file => ({
+          path: file.path,
+          contentSha256: sha256(await this.readWorkspaceFile(root, file.path)),
+        })))
+        if (!dependencies.some(file => file.path === binding.entryFile && file.contentSha256 === expected.entrySha256)
+          || executionBindingDependencySha256(dependencies) !== expected.dependencySha256) return false
+        const source = await this.readWorkspaceFile(root, binding.entryFile)
+        assertExecutionBindingEntry(source, binding.caseId, binding.entrySymbol)
+      } catch {
+        // Drift cannot rewrite a newer Binding or promote an unverified package.
+        return false
+      }
+      await this.persistBindingStatus(binding, 'validated')
+      return true
+    })
+  }
+
   /** Run-scoped, non-versioned state used only by Playwright fixtures. */
   async runtimeAuthRoot(projectVersionId: string, runId: string) {
     const workspace = await this.ensure(projectVersionId)

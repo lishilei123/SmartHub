@@ -98,6 +98,8 @@ export interface StateStore {
   getAgentConfigurationState?(scene: AgentConfigurationScene): Promise<{ draft: AgentConfigurationDraft | null; versions: AgentConfigurationVersion[] }>
   getActiveAgentConfiguration?(scene: AgentConfigurationScene, agentKey: AgentConfigurationAgentKey): Promise<AgentConfigurationVersion | null>
   listTestExecutionInfrastructureConfigurationVersions?(): Promise<TestExecutionInfrastructureConfigurationVersion[]>
+  getActiveTestExecutionInfrastructureConfiguration?(): Promise<TestExecutionInfrastructureConfigurationVersion | null>
+  getTestExecutionInfrastructureConfigurationDraft?(): Promise<DatabaseState['testExecutionInfrastructureConfigurationDraft'] | null>
   getProjectVersion?(projectVersionId: string): Promise<ProjectVersion | null>
   listRequirementBindings?(projectVersionId: string): Promise<RequirementBindingMetadata[]>
   listReviewRuns?(projectVersionId: string, options: { limit: number; cursor?: string; runningOnly?: boolean }): Promise<ReviewRunPage>
@@ -181,6 +183,8 @@ export class JsonStore implements StateStore {
   }
   async getActiveAgentConfiguration(scene: AgentConfigurationScene, agentKey: AgentConfigurationAgentKey) { return structuredClone(this.state.agentConfigurationVersions.find(item => item.scene === scene && item.agentKey === agentKey && item.status === 'active') ?? null) }
   async listTestExecutionInfrastructureConfigurationVersions() { return structuredClone(this.state.testExecutionInfrastructureConfigurationVersions) }
+  async getActiveTestExecutionInfrastructureConfiguration() { return structuredClone(this.state.testExecutionInfrastructureConfigurationVersions.find(item => item.status === 'active') ?? null) }
+  async getTestExecutionInfrastructureConfigurationDraft() { return structuredClone(this.state.testExecutionInfrastructureConfigurationDraft ?? null) }
   async getToolApproval(approvalId: string) { return structuredClone(this.state.toolApprovals.find(item => item.id === approvalId) ?? null) }
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
     await this.transaction(state => {

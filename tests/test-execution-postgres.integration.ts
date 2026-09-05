@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import { Pool } from 'pg'
 import { canonicalJson, canonicalSha256 } from '../server/application/canonical-json.js'
+import { TestExecutionInfrastructureConfigurationService } from '../server/application/test-execution-infrastructure-configuration-service.js'
 import {
   executionCreateRequestCanonical,
   executionCreateRequestSha256,
@@ -28,6 +29,7 @@ import type {
   TestExecutionHandoffMember,
 } from '../server/domain/test-design-types.js'
 import { runMigrations } from '../server/infrastructure/migrations.js'
+import { PostgresStore } from '../server/infrastructure/postgres-store.js'
 import {
   PostgresTestExecutionStore,
   type ExecutionJobLease,
@@ -412,6 +414,155 @@ test('PostgreSQL 对 canonical text 的原始 UTF-8 字节求 Hash', async () =>
   )
 })
 
+test('PostgreSQL 按任务阶段领取资源并保持交接前的失败预算和 fencing', async () => {
+  const aggregate = executionAggregateVariant('resource-handoff', 2)
+  await firstStore.createAggregate(aggregate)
+  assert.equal(await firstStore.claimJob('agent-no-pending', 60_000, 'agent'), null)
+  const runnerJob = required(await firstStore.claimJob('runner-binding', 60_000, 'runner'), 'pending 由 Runner 检查 Binding')
+  assert.equal(runnerJob.id, aggregate.jobs[0].id)
+  await firstStore.transactionWithLease(runnerJob.id, lease(runnerJob), transaction => transaction.transitionTask({
+    taskId: runnerJob.taskId, expectedStatus: 'pending', expectedStateVersion: 0, status: 'script_generating',
+  }))
+  assert.equal(await firstStore.yieldJob(runnerJob.id, { ...lease(runnerJob), fencingToken: runnerJob.fencingToken + 1 }), false)
+  assert.equal(await firstStore.yieldJob(runnerJob.id, lease(runnerJob)), true)
+  assert.equal(await firstStore.yieldJob(runnerJob.id, lease(runnerJob)), false)
+  assert.equal(await firstStore.claimJob('runner-no-generating', 60_000, 'runner'), null)
+  const agentJob = required(await secondStore.claimJob('agent-generate', 60_000, 'agent'), 'Agent 应领取生成阶段')
+  assert.equal(agentJob.id, runnerJob.id)
+  assert.equal(agentJob.attempts, 1)
+  assert.equal(agentJob.fencingToken, runnerJob.fencingToken + 1)
+  assert.notEqual(agentJob.runToken, runnerJob.runToken)
+  assert.equal(await firstStore.transactionWithLease(runnerJob.id, lease(runnerJob), async () => true), null)
+  assert.equal(await firstStore.heartbeatJob(runnerJob.id, lease(runnerJob), 60_000), false)
+  await assert.rejects(database.query('UPDATE smarthub.test_execution_jobs SET attempt_count=0 WHERE id=$1', [agentJob.id]), /TEST_EXECUTION_JOB_ATTEMPT_COUNT_INVALID/u)
+  assert.equal(await secondStore.releaseJob(agentJob.id, lease(agentJob), 0, 'provider unavailable'), true)
+  const retry = required(await firstStore.claimJob('agent-retry', 60_000, 'agent'), '真实失败应消耗一次预算')
+  assert.equal(retry.attempts, 2)
+  assert.equal(await firstStore.yieldJob(retry.id, lease(retry)), true)
+  const continued = required(await secondStore.claimJob('agent-continue', 60_000, 'agent'), '交接后保留真实失败预算')
+  assert.equal(continued.attempts, 2)
+  assert.equal(await secondStore.releaseJob(continued.id, lease(continued), 0, 'provider still unavailable'), true)
+  assert.equal((await firstStore.getTask(continued.taskId))?.status, 'blocked')
+})
+
+test('PostgreSQL 拒绝交接运行中的 Attempt 并将诊断阶段交给 Agent', async () => {
+  const aggregate = executionAggregateVariant('resource-running-attempt', 2)
+  await firstStore.createAggregate(aggregate)
+  const runnerJob = required(await firstStore.claimJob('runner-attempt', 60_000, 'runner'), 'Runner 应领取任务')
+  const attempt = await appendRunningAttempt(runnerJob, aggregate, 'resource-running-attempt')
+  assert.equal(await firstStore.yieldJob(runnerJob.id, lease(runnerJob)), false)
+  const taskBefore = required(await firstStore.getTask(runnerJob.taskId), '运行任务应存在')
+  await firstStore.transactionWithLease(runnerJob.id, lease(runnerJob), async transaction => {
+    await transaction.finalizeAttempt({ attemptId: attempt.id, status: 'failed', durationMs: 1, finishedAt: new Date().toISOString(), exitCode: 1 })
+    return transaction.transitionTask({ taskId: runnerJob.taskId, expectedStatus: 'running', expectedStateVersion: taskBefore.stateVersion, status: 'diagnosing' })
+  })
+  assert.equal(await firstStore.yieldJob(runnerJob.id, lease(runnerJob)), true)
+  assert.equal(await secondStore.claimJob('runner-no-diagnosis', 60_000, 'runner'), null)
+  const agentJob = required(await secondStore.claimJob('agent-diagnosis', 60_000, 'agent'), 'Agent 应领取诊断阶段')
+  assert.equal(agentJob.taskId, runnerJob.taskId)
+  const currentRun = required(await firstStore.getRun(aggregate.run.id), 'Run 应存在')
+  await firstStore.cancelRun(currentRun.id, currentRun.stateVersion, new Date().toISOString())
+  assert.equal(await secondStore.yieldJob(agentJob.id, lease(agentJob)), false)
+  assert.equal(await firstStore.claimJob('agent-no-cancelled', 60_000, 'agent'), null)
+  assert.equal((await firstStore.getTask(agentJob.taskId))?.status, 'cancelled')
+  assert.equal((await firstStore.getRun(aggregate.run.id))?.status, 'cancelled')
+})
+
+test('PostgreSQL Runner 占用期间独立预检仍可领取 pending 并分流到 Agent', async () => {
+  const runningAggregate = executionAggregateVariant('preparation-occupied-runner', 2)
+  await firstStore.createAggregate(runningAggregate)
+  const runnerJob = required(await firstStore.claimJob('occupied-runner', 60_000, 'runner'), 'Runner 应领取现有任务')
+  const attempt = await appendRunningAttempt(runnerJob, runningAggregate, 'preparation-occupied-runner')
+  const pendingAggregate = executionAggregateVariant('preparation-pending', 2)
+  await firstStore.createAggregate(pendingAggregate)
+  assert.equal(await secondStore.claimJob('runner-excludes-pending', 60_000, 'runner', false), null)
+  const preparationJob = required(await secondStore.claimJob('independent-preparation', 60_000, 'runner', true), '预检不受运行中 Runner 影响')
+  assert.equal(preparationJob.id, pendingAggregate.jobs[0].id)
+  assert.equal((await firstStore.listAttempts(runnerJob.taskId))[0]?.status, 'running')
+  assert.equal(await firstStore.heartbeatJob(runnerJob.id, lease(runnerJob), 60_000), true)
+  await secondStore.transactionWithLease(preparationJob.id, lease(preparationJob), transaction => transaction.transitionTask({
+    taskId: preparationJob.taskId, expectedStatus: 'pending', expectedStateVersion: 0, status: 'script_generating',
+  }))
+  assert.equal(await secondStore.yieldJob(preparationJob.id, lease(preparationJob)), true)
+  assert.equal(await firstStore.claimJob('preparation-excludes-generation', 60_000, 'runner', true), null)
+  const agentJob = required(await secondStore.claimJob('agent-during-runner-occupation', 60_000, 'agent', false), '缺脚本任务在 Runner 占用期间进入 Agent')
+  assert.equal(agentJob.taskId, preparationJob.taskId)
+  assert.equal(agentJob.attempts, 1)
+  assert.equal((await firstStore.listAttempts(runnerJob.taskId))[0]?.status, 'running')
+  await secondStore.transactionWithLease(agentJob.id, lease(agentJob), transaction => transaction.transitionTask({
+    taskId: agentJob.taskId, expectedStatus: 'script_generating', expectedStateVersion: 1, status: 'blocked', error: 'integration cleanup', finishedAt: new Date().toISOString(),
+  }))
+  assert.equal(await secondStore.finishJob(agentJob.id, lease(agentJob), 'failed'), true)
+  const runningTask = required(await firstStore.getTask(runnerJob.taskId), '运行中的任务应存在')
+  await firstStore.transactionWithLease(runnerJob.id, lease(runnerJob), async transaction => {
+    await transaction.finalizeAttempt({ attemptId: attempt.id, status: 'infrastructure_error', durationMs: 1, finishedAt: new Date().toISOString(), error: 'integration cleanup' })
+    await transaction.transitionTask({ taskId: runnerJob.taskId, expectedStatus: 'running', expectedStateVersion: runningTask.stateVersion, status: 'blocked', error: 'integration cleanup', finishedAt: new Date().toISOString() })
+  })
+  assert.equal(await firstStore.finishJob(runnerJob.id, lease(runnerJob), 'failed'), true)
+})
+
+test('PostgreSQL 配置草稿跨连接保存发布、拒绝并发覆盖并兼容历史默认值', async () => {
+  const configurationStore = new PostgresStore(connectionString)
+  const otherConfigurationStore = new PostgresStore(connectionString)
+  const configurationService = new TestExecutionInfrastructureConfigurationService(configurationStore)
+  const otherConfigurationService = new TestExecutionInfrastructureConfigurationService(otherConfigurationStore)
+  const createdIds: string[] = []
+  try {
+    await configurationStore.load()
+    await otherConfigurationStore.load()
+    assert.deepEqual(await configurationStore.listTestExecutionInfrastructureConfigurationVersions(), [])
+    const historical = {
+      id: `${prefix}-historical-configuration`, version: 1, status: 'active', environments: [],
+      contentSha256: 'a'.repeat(64), createdAt: now, publishedBy: '历史管理员',
+    }
+    await database.query('INSERT INTO smarthub.test_execution_infrastructure_configuration_versions (id,version,status,created_at,data) VALUES ($1,1,$2,$3,$4::jsonb)', [historical.id, historical.status, now, JSON.stringify(historical)])
+    createdIds.push(historical.id)
+    configurationStore.snapshot = async () => { throw new Error('Configuration polling must not load the full database') }
+    assert.equal((await configurationService.resolveConcurrency()).source, 'historical_defaults')
+    assert.equal((await configurationService.resolveConcurrency()).runnerConcurrency, 3)
+    assert.equal((await configurationService.resolveConcurrency()).agentConcurrency, 1)
+    const draft = await configurationService.saveDraft({ expectedActiveVersion: 1, environments: [], concurrency: { runnerConcurrency: 8, agentConcurrency: 2 } }, '保存人')
+    assert.deepEqual(await otherConfigurationStore.getTestExecutionInfrastructureConfigurationDraft(), draft)
+    assert.equal((await otherConfigurationService.resolveConcurrency()).source, 'historical_defaults')
+    assert.deepEqual(await configurationStore.getActiveTestExecutionInfrastructureConfiguration(), historical)
+    const saves = await Promise.allSettled([
+      configurationService.saveDraft({ expectedActiveVersion: 1, expectedDraftRevision: draft.revision, environments: [], concurrency: { runnerConcurrency: 16, agentConcurrency: 8 } }, '并发保存人甲'),
+      otherConfigurationService.saveDraft({ expectedActiveVersion: 1, expectedDraftRevision: draft.revision, environments: [], concurrency: { runnerConcurrency: 16, agentConcurrency: 8 } }, '并发保存人乙'),
+    ])
+    assert.equal(saves.filter(result => result.status === 'fulfilled').length, 1)
+    const rejectedSave = saves.find(result => result.status === 'rejected')
+    assert.equal(rejectedSave?.status, 'rejected')
+    if (rejectedSave?.status === 'rejected') assert.match(String(rejectedSave.reason), /DRAFT_CONFLICT/u)
+    await assert.rejects(configurationService.publishDraft({ revision: draft.revision, expectedActiveVersion: 1 }, '过期发布人'), /DRAFT_CONFLICT/u)
+    const currentDraft = required(await configurationStore.getTestExecutionInfrastructureConfigurationDraft(), '草稿应持久化')
+    const published = await otherConfigurationService.publishDraft({ revision: currentDraft.revision, expectedActiveVersion: 1 }, '发布人')
+    createdIds.push(published.id)
+    assert.equal(published.version, 2)
+    assert.deepEqual(await configurationService.resolveConcurrency(), {
+      runnerConcurrency: 16, agentConcurrency: 8, source: 'published_configuration',
+      version: 2, publishedAt: published.createdAt, publishedBy: '发布人',
+    })
+    assert.deepEqual(await configurationService.resolveVersion(historical.id), { ...historical, status: 'superseded' })
+    const retainedDraft = required(await configurationStore.getTestExecutionInfrastructureConfigurationDraft(), '发布后草稿版本应单调增长')
+    assert.equal(retainedDraft.revision, currentDraft.revision + 1)
+    assert.equal(retainedDraft.expectedActiveVersion, 2)
+    for (const concurrency of [
+      { runnerConcurrency: 0, agentConcurrency: 1 }, { runnerConcurrency: 17, agentConcurrency: 1 },
+      { runnerConcurrency: 1, agentConcurrency: 0 }, { runnerConcurrency: 1, agentConcurrency: 9 },
+      { runnerConcurrency: 1.5, agentConcurrency: 1 }, { runnerConcurrency: '3', agentConcurrency: 1 }, null,
+    ]) {
+      await assert.rejects(database.query("UPDATE smarthub.test_execution_infrastructure_configuration_drafts SET data=jsonb_set(data,'{concurrency}',$1::jsonb) WHERE id='default'", [JSON.stringify(concurrency)]), /test_execution_infrastructure_draft_concurrency_ck/u)
+      await assert.rejects(database.query("UPDATE smarthub.test_execution_infrastructure_configuration_versions SET data=jsonb_set(data,'{concurrency}',$1::jsonb) WHERE id=$2", [JSON.stringify(concurrency), published.id]), /test_execution_infrastructure_concurrency_ck/u)
+    }
+    assert.deepEqual(await otherConfigurationStore.getTestExecutionInfrastructureConfigurationDraft(), retainedDraft)
+    assert.deepEqual(await otherConfigurationStore.getActiveTestExecutionInfrastructureConfiguration(), published)
+  } finally {
+    await database.query("DELETE FROM smarthub.test_execution_infrastructure_configuration_drafts WHERE id='default'")
+    await database.query('DELETE FROM smarthub.test_execution_infrastructure_configuration_versions WHERE id=ANY($1::text[])', [createdIds])
+    await Promise.all([configurationStore.close(), otherConfigurationStore.close()])
+  }
+})
+
 test('PostgreSQL 使用实时 lease 截止时间回滚过期事务', async () => {
   const aggregate = executionAggregateVariant('lease-clock', 2)
   await firstStore.createAggregate(aggregate)
@@ -429,6 +580,7 @@ test('PostgreSQL 使用实时 lease 截止时间回滚过期事务', async () =>
   })
   assert.equal(result, null)
   assert.equal((await firstStore.getTask(aggregate.tasks[0].id))?.status, 'pending')
+  assert.equal(await firstStore.yieldJob(claimed.id, lease(claimed)), false)
 
   const reclaimed = required(await secondStore.claimJob('execution-worker-lease-clock-reclaim', 60_000), '过期任务应被重新领取')
   assert.equal(reclaimed.id, aggregate.jobs[0].id)

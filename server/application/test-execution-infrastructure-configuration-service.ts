@@ -9,11 +9,18 @@ import type {
   TestExecutionRunnerConfiguration,
 } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
+import {
+  normalizeExecutionConcurrency,
+  type ExecutionConcurrencyConfiguration,
+  type ResolvedExecutionConcurrency,
+} from '../domain/test-execution-infrastructure-configuration.js'
+import type { DatabaseState, TestExecutionInfrastructureConfigurationDraft } from '../domain/types.js'
 
 export type TestExecutionInfrastructureConfigurationInput = {
   expectedActiveVersion?: number | null
   environments: ExecutionEnvironmentProfile[]
   runner?: TestExecutionRunnerConfiguration
+  concurrency?: ExecutionConcurrencyConfiguration
 }
 
 export class TestExecutionInfrastructureConfigurationService {
@@ -23,12 +30,65 @@ export class TestExecutionInfrastructureConfigurationService {
     const versions = await this.listVersions()
     return {
       activeVersion: structuredClone(versions.find(item => item.status === 'active') ?? null),
+      draft: await this.readDraft(),
+      effectiveConcurrency: resolveConcurrency(versions.find(item => item.status === 'active') ?? null),
       versions: versions.map(versionSummary),
     }
   }
 
   async resolveActive() {
-    return (await this.get()).activeVersion
+    if (this.store.getActiveTestExecutionInfrastructureConfiguration)
+      return this.store.getActiveTestExecutionInfrastructureConfiguration()
+    return (await this.listVersions()).find(item => item.status === 'active') ?? null
+  }
+
+  async resolveConcurrency(): Promise<ResolvedExecutionConcurrency> {
+    return resolveConcurrency(await this.resolveActive())
+  }
+
+  async saveDraft(
+    input: TestExecutionInfrastructureConfigurationInput & { expectedDraftRevision?: number | null },
+    updatedBy: string,
+  ) {
+    const normalized = normalizeInput(input)
+    return this.write(state => {
+      const current = state.testExecutionInfrastructureConfigurationVersions.find(item => item.status === 'active')
+      const previous = state.testExecutionInfrastructureConfigurationDraft
+      if ((current?.version ?? null) !== (input.expectedActiveVersion ?? null))
+        throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_VERSION_CONFLICT')
+      if ((previous?.revision ?? null) !== (input.expectedDraftRevision ?? null))
+        throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_DRAFT_CONFLICT')
+      const value: TestExecutionInfrastructureConfigurationDraft = {
+        id: 'default',
+        revision: (previous?.revision ?? 0) + 1,
+        expectedActiveVersion: current?.version ?? null,
+        ...normalized,
+        updatedAt: new Date().toISOString(),
+        updatedBy: cleanText(updatedBy, 80) || '系统管理员',
+      }
+      state.testExecutionInfrastructureConfigurationDraft = value
+      return structuredClone(value)
+    })
+  }
+
+  async publishDraft(input: { revision: number; expectedActiveVersion?: number | null }, publishedBy: string) {
+    return this.write(async state => {
+      const draft = state.testExecutionInfrastructureConfigurationDraft
+      if (!draft || draft.revision !== input.revision)
+        throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_DRAFT_CONFLICT')
+      if (draft.expectedActiveVersion !== (input.expectedActiveVersion ?? null))
+        throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_VERSION_CONFLICT')
+      const value = this.publishInState(state, draft, publishedBy)
+      // Keep the saved draft revision monotonic to reject stale browser tabs.
+      state.testExecutionInfrastructureConfigurationDraft = {
+        ...draft,
+        revision: draft.revision + 1,
+        expectedActiveVersion: value.version,
+        updatedAt: value.createdAt,
+        updatedBy: value.publishedBy,
+      }
+      return value
+    })
   }
 
   async resolveVersion(id: string) {
@@ -38,40 +98,57 @@ export class TestExecutionInfrastructureConfigurationService {
   }
 
   async publish(input: TestExecutionInfrastructureConfigurationInput, publishedBy: string) {
+    return this.write(state => this.publishInState(state, input, publishedBy))
+  }
+
+  private publishInState(
+    state: DatabaseState,
+    input: TestExecutionInfrastructureConfigurationInput,
+    publishedBy: string,
+  ) {
     const normalized = normalizeInput(input)
-    const write = async (state: import('../domain/types.js').DatabaseState) => {
-      const current = state.testExecutionInfrastructureConfigurationVersions
-        .find(item => item.status === 'active') ?? null
-      const expected = input.expectedActiveVersion ?? null
-      if ((current?.version ?? null) !== expected) {
-        throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_VERSION_CONFLICT')
-      }
-      for (const item of state.testExecutionInfrastructureConfigurationVersions) {
-        if (item.status === 'active') item.status = 'superseded'
-      }
-      const version = Math.max(0, ...state.testExecutionInfrastructureConfigurationVersions.map(item => item.version)) + 1
-      const createdAt = new Date().toISOString()
-      const base = {
-        schemaVersion: 'test-execution-infrastructure/v1',
-        environments: normalized.environments,
-        ...(normalized.runner ? { runner: normalized.runner } : {}),
-      }
-      const value: TestExecutionInfrastructureConfigurationVersion = {
-        id: `test_execution_infrastructure_${randomUUID()}`,
-        version,
-        status: 'active',
-        environments: structuredClone(normalized.environments),
-        ...(normalized.runner ? { runner: structuredClone(normalized.runner) } : {}),
-        contentSha256: canonicalSha256(base),
-        createdAt,
-        publishedBy: cleanText(publishedBy, 80) || '系统管理员',
-      }
-      state.testExecutionInfrastructureConfigurationVersions.push(value)
-      return structuredClone(value)
+    const current =
+      state.testExecutionInfrastructureConfigurationVersions.find(item => item.status === 'active') ?? null
+    const expected = input.expectedActiveVersion ?? null
+    if ((current?.version ?? null) !== expected) {
+      throw new Error('TEST_EXECUTION_INFRASTRUCTURE_CONFIGURATION_VERSION_CONFLICT')
     }
+    for (const item of state.testExecutionInfrastructureConfigurationVersions) {
+      if (item.status === 'active') item.status = 'superseded'
+    }
+    const version = Math.max(0, ...state.testExecutionInfrastructureConfigurationVersions.map(item => item.version)) + 1
+    const createdAt = new Date().toISOString()
+    const base = {
+      schemaVersion: 'test-execution-infrastructure/v1',
+      environments: normalized.environments,
+      concurrency: normalized.concurrency,
+      ...(normalized.runner ? { runner: normalized.runner } : {}),
+    }
+    const value: TestExecutionInfrastructureConfigurationVersion = {
+      id: `test_execution_infrastructure_${randomUUID()}`,
+      version,
+      status: 'active',
+      environments: structuredClone(normalized.environments),
+      concurrency: structuredClone(normalized.concurrency),
+      ...(normalized.runner ? { runner: structuredClone(normalized.runner) } : {}),
+      contentSha256: canonicalSha256(base),
+      createdAt,
+      publishedBy: cleanText(publishedBy, 80) || '系统管理员',
+    }
+    state.testExecutionInfrastructureConfigurationVersions.push(value)
+    return structuredClone(value)
+  }
+
+  private async write<T>(write: (state: DatabaseState) => T | Promise<T>): Promise<T> {
     return this.store.transactionScope
       ? await this.store.transactionScope('test_execution_infrastructure_configuration', write)
       : await this.store.transaction(write)
+  }
+
+  private async readDraft() {
+    if (this.store.getTestExecutionInfrastructureConfigurationDraft)
+      return this.store.getTestExecutionInfrastructureConfigurationDraft()
+    return (await this.store.snapshot()).testExecutionInfrastructureConfigurationDraft ?? null
   }
 
   private async listVersions() {
@@ -92,7 +169,20 @@ function normalizeInput(input: TestExecutionInfrastructureConfigurationInput) {
   const environments = catalog.exportProfiles()
   return {
     environments,
+    concurrency: normalizeExecutionConcurrency(input.concurrency),
     ...(input.runner === undefined ? {} : { runner: normalizeRunner(input.runner) }),
+  }
+}
+
+function resolveConcurrency(
+  active: TestExecutionInfrastructureConfigurationVersion | null,
+): ResolvedExecutionConcurrency {
+  return {
+    ...normalizeExecutionConcurrency(active?.concurrency),
+    source: !active ? 'code_defaults' : active.concurrency ? 'published_configuration' : 'historical_defaults',
+    version: active?.version ?? null,
+    publishedAt: active?.createdAt ?? null,
+    publishedBy: active?.publishedBy ?? null,
   }
 }
 
@@ -107,23 +197,37 @@ function normalizeRunner(value: TestExecutionRunnerConfiguration) {
     ...(value.entrypoint ? { entrypoint: text(value.entrypoint, 'ENTRYPOINT', 500) } : {}),
     ...(value.workingRoot ? { workingRoot: text(value.workingRoot, 'WORK_ROOT', 500) } : {}),
   }
-  if (!['docker', 'podman'].includes(runner.containerRuntime)) throw new Error('TEST_EXECUTION_CONTAINER_RUNTIME_INVALID')
+  if (!['docker', 'podman'].includes(runner.containerRuntime))
+    throw new Error('TEST_EXECUTION_CONTAINER_RUNTIME_INVALID')
   if (!/^sha256:[a-f0-9]{64}$/u.test(runner.imageDigest)) throw new Error('TEST_EXECUTION_RUNNER_IMAGE_DIGEST_INVALID')
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/:=-]{0,499}$/u.test(runner.imageReference) || runner.imageReference.includes('@')) throw new Error('TEST_EXECUTION_RUNNER_IMAGE_REFERENCE_INVALID')
-  if (runner.entrypoint && !/^\/[A-Za-z0-9][A-Za-z0-9/._-]{0,499}$/u.test(runner.entrypoint)) throw new Error('TEST_EXECUTION_RUNNER_ENTRYPOINT_INVALID')
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/:=-]{0,499}$/u.test(runner.imageReference) || runner.imageReference.includes('@'))
+    throw new Error('TEST_EXECUTION_RUNNER_IMAGE_REFERENCE_INVALID')
+  if (runner.entrypoint && !/^\/[A-Za-z0-9][A-Za-z0-9/._-]{0,499}$/u.test(runner.entrypoint))
+    throw new Error('TEST_EXECUTION_RUNNER_ENTRYPOINT_INVALID')
   return runner
 }
 
 function text(value: unknown, field: string, max: number) {
   const normalized = String(value ?? '').trim()
-  if (!normalized || normalized.length > max || /[\u0000-\u001F\u007F]/u.test(normalized)) throw new Error(`TEST_EXECUTION_RUNNER_${field}_INVALID`)
+  if (!normalized || normalized.length > max || /[\u0000-\u001F\u007F]/u.test(normalized))
+    throw new Error(`TEST_EXECUTION_RUNNER_${field}_INVALID`)
   return normalized
 }
 
 function cleanText(value: string, max: number) {
-  return String(value ?? '').trim().replace(/[\u0000-\u001F\u007F]/gu, '').slice(0, max)
+  return String(value ?? '')
+    .trim()
+    .replace(/[\u0000-\u001F\u007F]/gu, '')
+    .slice(0, max)
 }
 
 function versionSummary(value: TestExecutionInfrastructureConfigurationVersion) {
-  return { id: value.id, version: value.version, status: value.status, contentSha256: value.contentSha256, createdAt: value.createdAt, publishedBy: value.publishedBy }
+  return {
+    id: value.id,
+    version: value.version,
+    status: value.status,
+    contentSha256: value.contentSha256,
+    createdAt: value.createdAt,
+    publishedBy: value.publishedBy,
+  }
 }

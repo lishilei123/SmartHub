@@ -352,6 +352,7 @@ function stageInstructions(
   if (stage === 'failure_diagnosis') return [
     ...common,
     '只根据当前失败 Attempt、Execution Event 与 Artifact 证据分类；不得修改脚本或决定是否修复。',
+    '不得设置 PASS/FAIL、覆盖正式 ScriptRevision 或更新 Execution Binding。认证、配置、网络与 Runner 基础设施问题使用 environment_defect 并说明具体原因；单个 401/403、超时或缺失 Locator 不足以强行归因，证据不足或矛盾时提交 unknown 供 Service 转人工。product_defect 仅为疑似产品缺陷，需要人工确认。',
     'Workspace 工具的当前目录就是本任务的冻结根目录；先读取 attempts.json、events.json，若存在 evidence/ 则必须读取其中与终态 Attempt 对应的 Runner 日志摘录。',
     '若 HTTP 证据为 404/405，且冻结 TestCase 未明确要求该状态码，必须判定为 API 契约/脚本实现问题 script_defect；Validator 要求通用 4xx 断言排除 404/405 是为了暴露错误路径/方法，绝不能将该保护性断言诊断为 assertion_mismatch。只有 400/401/403/409/422 等非路由失败状态被脚本自行收窄、且冻结 Expected Result 未固定时，才属于 assertion_mismatch。',
     '若 events.json 的 failure phase=load，且证据指向脚本导入、测试发现或入口实现（包括 No tests found），应归类 script_defect；只有独立 Runner readiness 或依赖安装证据才能支持 environment_defect。',
@@ -374,6 +375,7 @@ function stageInstructions(
     '优先复用 execution/ 下已有 tests、pages、api、helpers 和 fixtures；API 使用 request/APIRequestContext，UI 必须完成真实 UI 操作与页面断言；已登录 UI 如用 request 辅助准备，入口 test/expect 必须来自 @smarthub/playwright-test。',
     '先复用 Workspace 和已有 Observation；只有实现所需信息不足时才按需、多轮调用 Browser Tools。Browser Observation 是运行时观察事实，不是 Requirement Truth。',
     'Browser Tools 只用于受控探索，不是 Runner；不得把工具观察解释为 PASS/FAIL，也不得据此改变 Expected Result 或弱化断言。',
+    '基于真实观察按 getByRole、getByLabel、getByPlaceholder、getByTestId、稳定文本、稳定 CSS、最后 XPath 的顺序选择 Locator；用实体范围和已观察名称消除歧义，禁止仅用 first()/nth() 掩盖 strictness 错误。browser.get_locator 复用官方 CLI 建议，不等于完整 Generator 接入，禁止交互式 codegen、内部 API 或其他生成工作流。',
     '每条前置条件都必须由冻结 Test Data、受管 Fixture、可追溯的 setup/cleanup 或运行时可观察验证来落实；T1、T2、K 等用例符号不是环境中已存在数据的证明，无法落实时不得提交可执行候选。',
     '仅检查前置数据并在缺失时失败，不算落实前置条件；已有可信 setup API、Fixture 或合法 UI 流程时必须创建所需状态并在清理阶段隔离回收。状态机数据必须按已知合法边创建，禁止直接写入或猜测捷径。',
     '不得从全局列表选择 first/find 任意现有记录来满足可能被并发任务修改的前置条件。每个 Case 必须创建带本次唯一标识的实体并只操作自己的记录；状态型前置必须通过已知合法流转准备，最后清理。',

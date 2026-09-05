@@ -255,8 +255,30 @@ npm run start:worker:dist
 | `npm run format:check` | 检查上述模块的格式，不改写文件。 |
 | `npm run migrate` | 执行 PostgreSQL 迁移。 |
 
-Worker 将测试执行与需求分析、测试设计、知识库队列分成独立 lane。测试执行默认并发度为 3，其余工作流默认并发度为 1；可分别通过 `SMARTHUB_TEST_EXECUTION_CONCURRENCY` 和 `SMARTHUB_WORKFLOW_CONCURRENCY` 调整，允许范围均为 1–8。旧的 `SMARTHUB_WORKER_CONCURRENCY` 仅作为其余工作流并发度的兼容回退。并发度提升前应同时验证模型服务、Browser Host 和 PostgreSQL 容量。
+Worker 将测试执行与需求分析、测试设计、知识库队列隔离。测试执行的 Runner 和 Agent 使用独立容量：**Runner 默认 3（1～16），Agent 默认 1（1～8）**，统一定义于 `server/domain/test-execution-infrastructure-configuration.ts`。入口为 **系统设置 → 测试执行配置 → 并发控制**，支持保存服务端草稿、发布配置，并展示当前生效值、来源、版本、发布时间和发布人。草稿不影响调度；历史发布版本缺少并发字段时读取代码默认值，不改写历史内容或 Hash。
 
+Worker 启动时读取 PostgreSQL 已发布配置，随后每 5 秒定向查询当前版本；读取失败保留最近有效容量。调高容量允许新领取任务；调低时已开始任务自然完成，不取消或重启 Worker，运行中数量低于新上限后才继续领取。并发配置只影响调度速度，不改变测试结果和业务事实。测试执行不再读取旧 `SMARTHUB_TEST_EXECUTION_CONCURRENCY`，也不使用 Runner/Agent 并发环境变量。其余工作流仍由 `SMARTHUB_WORKFLOW_CONCURRENCY` 控制（默认 1，范围 1～8），旧 `SMARTHUB_WORKER_CONCURRENCY` 仅作为该工作流的兼容回退。
+
+任务资源类型由已有持久化 Task 状态投影为 `ExecutionResourceClass`：
+
+| 阶段 | 资源与处理 |
+| --- | --- |
+| `pending` | 独立单槽预检执行确定性 Binding / Workspace 校验；有效入口及依赖闭包形成不可变执行包后交给 Runner，无 Agent 调用。 |
+| `ready` / `retrying` | Runner 槽位准备受管 Run 认证状态，并真实执行 Playwright。 |
+| `script_generating` | Agent 槽位处理缺失或失效 Binding、受控页面探索和候选生成。 |
+| `diagnosing` / `repairing` | Agent 槽位业务诊断或预算内脚本修复；Validator 校验后交回 Runner。 |
+
+预检通道只处理元数据和 Workspace 校验，不执行 Playwright 或调用 Agent；即使 Runner 全满，新 Case 仍能被分流到 Agent。阶段资源改变或预检完成时，Service 在有效租约和 Fencing Token 下把原 Job 重新入队，释放当前槽位，下一资源有容量时才领取。交接退还本次领取计数，保留真正异常的重试计数、退避、Repair 上限和取消治理。领取使用 SQL 状态过滤及索引，不加载完整数据库状态，也不持有数据库租约等待另一类容量。Migration 45 增加领取索引、交接约束、并发配置草稿表及数值范围约束。
+
+这是**共享持久化 Job 队列上的两类独立调度容量**，没有新建两张物理队列表。容量目前按单个 Worker 进程生效，多 Worker 总容量会叠加；跨 Worker 全局资源配额与跨进程 Workspace 文件锁仍需后续实现，目前同一 Workspace 应由一个 Worker 进程管理。运行中 Attempt 使用冻结 Revision 的执行包，后续 Workspace 写入不改变其内容。Workspace 文件与 PostgreSQL 尚非跨介质原子事务，候选文件发布受租约保护并标记 `needs_validation`，真实通过后才在 Workspace 锁内核对入口和依赖 Hash 并升级 Binding；旧 PASS 不覆盖较新候选。
+
+FailureAnalysisAgent 只分析结构化 Attempt/Event、脱敏日志和 Screenshot/Trace/HTTP 证据，提出类别、修复建议或人工处理建议。它不能把失败改为通过、覆盖正式 Revision、更新 Binding、删除核心断言或弱化业务预期。明确网络不可达、受管认证/配置错误和数据未就绪由确定性规则优先收口；Runner 基础设施异常保留有限退避重试。裸 401/403、一般超时或证据不足不会被强行归因为认证失败或产品缺陷。Service 拥有最终状态及修复预算；修复保留旧 Revision，创建新候选，通过 Validator 后必须再次由 Runner 真实执行。
+
+### Playwright Generator 可行性
+
+当前锁定 `@playwright/test` / Playwright 1.58.2 和 `@playwright/cli` 0.1.18。官方 [codegen](https://playwright.dev/docs/codegen) 主要提供交互式录制；[Test Agents](https://playwright.dev/docs/test-agents) 提供 Agent 定义及工具工作流，未提供适合当前 CLI-first 服务端直接嵌入的稳定 Generator SDK。因此本轮**未接入完整官方 Generator**，未调用内部模块、创建空 Adapter 或增加不可用页面按钮，正式 Generator 集成留待公开接口和运行模式匹配后再评估。
+
+现有受控 Browser Exploration 已使用[官方 CLI](https://github.com/microsoft/playwright-cli) 的 `snapshot`、`generate-locator`、点击、填写及截图等能力；本轮强化生成和 Repair 的 Locator 顺序：`getByRole → getByLabel → getByPlaceholder → getByTestId → 稳定文本 → 稳定 CSS → XPath`，所有 Locator 必须来自真实页面证据，CLI 不可用时明确失败。候选仍走 Agent → Validator（路径、依赖、敏感信息和断言校验）→ 新 Revision → Runner → Service 验证 Binding 的现有闭环。真实模型、生产浏览器/SSO及多 Worker 负载仍需独立环境验收。
 PostgreSQL 集成测试必须使用独立测试库，且数据库名称需要包含 `test`：
 
 ```powershell

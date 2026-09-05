@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { EXECUTION_RESOURCE_TASK_STATUSES } from '../domain/test-execution-types.js'
 import { Pool, type PoolClient } from 'pg'
 import { canonicalJson, canonicalSha256 } from '../application/canonical-json.js'
 import {
@@ -17,6 +18,7 @@ import type {
   ExecutionAttempt,
   ExecutionEvent,
   ExecutionJob,
+  ExecutionResourceClass,
   ExecutionRun,
   ExecutionRunStatus,
   ExecutionTask,
@@ -180,8 +182,9 @@ export interface TestExecutionStore {
   listScriptRevisions(taskId: string): Promise<ScriptRevision[]>
   getArtifact(artifactId: string): Promise<ExecutionArtifact | null>
   listArtifacts(taskId: string, attemptId?: string): Promise<ExecutionArtifact[]>
-  claimJob(workerId: string, leaseMs: number): Promise<ExecutionJob | null>
+  claimJob(workerId: string, leaseMs: number, resourceClass?: ExecutionResourceClass, preparationOnly?: boolean): Promise<ExecutionJob | null>
   heartbeatJob(jobId: string, lease: ExecutionJobLease, leaseMs: number): Promise<boolean>
+  yieldJob(jobId: string, lease: ExecutionJobLease): Promise<boolean>
   releaseJob(jobId: string, lease: ExecutionJobLease, retryDelayMs: number, error: string): Promise<boolean>
   finishJob(jobId: string, lease: ExecutionJobLease, status: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<boolean>
   cancelRun(runId: string, expectedStateVersion: number, requestedAt: string): Promise<ExecutionRun>
@@ -742,7 +745,12 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
     return result.rows.map(artifactFromRow)
   }
 
-  async claimJob(workerId: string, leaseMs: number): Promise<ExecutionJob | null> {
+  async claimJob(workerId: string, leaseMs: number, resourceClass?: ExecutionResourceClass, preparationOnly?: boolean): Promise<ExecutionJob | null> {
+    const taskStatuses = preparationOnly === true
+      ? EXECUTION_RESOURCE_TASK_STATUSES.runner.filter(status => status === 'pending')
+      : resourceClass === 'runner' && preparationOnly === false
+        ? EXECUTION_RESOURCE_TASK_STATUSES.runner.filter(status => status !== 'pending')
+        : resourceClass ? EXECUTION_RESOURCE_TASK_STATUSES[resourceClass] : null
     const client = await this.pool.connect()
     try {
       let preferredJobId: string | null = null
@@ -768,6 +776,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
                   SELECT 1 FROM smarthub.test_execution_tasks task
                   WHERE task.id=test_execution_jobs.task_id
                     AND task.status NOT IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled')
+                    AND ($5::text[] IS NULL OR task.status=ANY($5::text[]))
                 )
               ) OR (
                 status='running'
@@ -783,6 +792,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
                   SELECT 1 FROM smarthub.test_execution_tasks task
                   WHERE task.id=test_execution_jobs.task_id
                     AND task.status NOT IN ('passed','failed','blocked','unsupported','waiting_manual','cancelled')
+                    AND ($5::text[] IS NULL OR task.status=ANY($5::text[]))
                 )
               )
             ORDER BY CASE WHEN id=$4 THEN 0 ELSE 1 END,available_at,created_at,id
@@ -795,7 +805,7 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
               heartbeat_at=clock_timestamp(),started_at=COALESCE(started_at,clock_timestamp()),finished_at=NULL,updated_at=clock_timestamp(),
               error=CASE WHEN next_job.reclaimed THEN 'TEST_EXECUTION_JOB_RECLAIMED' ELSE error END
           FROM next_job WHERE job.id=next_job.id RETURNING job.*
-        `, [workerId, Math.max(1_000, leaseMs), runToken, preferredJobId])
+        `, [workerId, Math.max(1_000, leaseMs), runToken, preferredJobId, taskStatuses])
         await client.query('COMMIT')
         return result.rows[0] ? jobFromRow(result.rows[0]) : null
       }
@@ -820,6 +830,51 @@ export class PostgresTestExecutionStore implements TestExecutionStore {
         )
     `, [jobId, lease.workerId, lease.runToken, lease.fencingToken, Math.max(1_000, leaseMs)])
     return result.rowCount === 1
+  }
+
+  async yieldJob(jobId: string, lease: ExecutionJobLease): Promise<boolean> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const owned = await lockOwnedJob(client, jobId, lease, false)
+      if (!owned) {
+        await client.query('ROLLBACK')
+        return false
+      }
+      const runningAttempt = await client.query("SELECT 1 FROM smarthub.test_execution_attempts WHERE task_id=$1 AND status='running' LIMIT 1", [owned.taskId])
+      if (runningAttempt.rows[0]) {
+        await client.query('ROLLBACK')
+        return false
+      }
+      const taskResult = await client.query<{ status: ExecutionTaskStatus }>(
+        'SELECT status FROM smarthub.test_execution_tasks WHERE id=$1 FOR UPDATE', [owned.taskId],
+      )
+      const task = taskResult.rows[0]
+      if (!task || ['passed', 'failed', 'blocked', 'unsupported', 'waiting_manual', 'cancelled'].includes(task.status)) {
+        await client.query('ROLLBACK')
+        return false
+      }
+      // A resource handoff refunds only this claim; real release/reclaim failures retain their budget.
+      const result = await client.query(`
+        UPDATE smarthub.test_execution_jobs
+        SET status='queued',available_at=clock_timestamp(),updated_at=clock_timestamp(),
+            attempt_count=attempt_count-1,
+            lease_owner=NULL,run_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL
+        WHERE id=$1 AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NULL
+      `, [jobId])
+      if (result.rowCount !== 1) {
+        await client.query('ROLLBACK')
+        return false
+      }
+      await notifyExecutionTask(client)
+      await client.query('COMMIT')
+      return true
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async releaseJob(jobId: string, lease: ExecutionJobLease, retryDelayMs: number, error: string) {

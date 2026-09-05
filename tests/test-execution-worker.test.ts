@@ -221,3 +221,43 @@ test('测试执行 Worker 拒绝缺少 runToken 或 fencingToken 的 Job', async
     /TEST_EXECUTION_JOB_LEASE_INVALID/u,
   )
 })
+
+test('资源交接后 Worker 不读取下一租约的 Task，也不把交接伪装为完成或失败', async () => {
+  for (const resourceClass of ['runner', 'agent'] as const) {
+    const state = workerStore({ task: executionTask('passed') })
+    state.store.getTask = async () => { throw new Error('handoff must not read next owner state') }
+    const heartbeat = heartbeatHarness()
+    await processClaimedTestExecutionJob({
+      job: executionJob(), store: state.store,
+      service: { async processPreparedTask(_job, _lease, _signal, resource) {
+        assert.equal(resource, resourceClass)
+        return executionTask(resourceClass === 'runner' ? 'script_generating' : 'ready')
+      } },
+      workerId: 'worker-1', leaseMs: 60_000, resourceClass,
+      scheduleHeartbeat: heartbeat.scheduleHeartbeat,
+    })
+    assert.deepEqual(state.finishes, [])
+    assert.deepEqual(state.releases, [])
+    assert.equal(heartbeat.cleared(), true)
+  }
+})
+
+test('Worker 停止与领取完成竞争时，新任务也收到停止信号', async () => {
+  for (const resourceClass of ['runner', 'agent'] as const) {
+    const shutdown = new AbortController()
+    shutdown.abort(new Error('shutdown while claiming'))
+    const state = workerStore({ task: executionTask('cancelled') })
+    let aborted = false
+    await processClaimedTestExecutionJob({
+      job: executionJob(), store: state.store, workerId: 'worker-1', leaseMs: 60_000,
+      resourceClass, shutdownSignal: shutdown.signal,
+      service: { async processPreparedTask(_job, _lease, signal) {
+        aborted = signal.aborted
+        throw signal.reason
+      } },
+    })
+    assert.equal(aborted, true)
+    assert.deepEqual(state.releases, [])
+    assert.equal(state.finishes[0].status, 'cancelled')
+  }
+})
