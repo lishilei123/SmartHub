@@ -327,22 +327,17 @@ export class PostgresStore implements StateStore {
   }
 
   async saveReviewRunExecution(runId: string, execution: AgentExecutionRecord) {
-    let failure: unknown
-    this.queue = this.queue.then(async () => {
-      try {
-        const result = await this.pool.query<{ data: ReviewRun }>(`
-          UPDATE smarthub.review_runs
-          SET data = jsonb_set(data, '{execution}', $2::jsonb, true)
-          WHERE id = $1
-          RETURNING data
-        `, [runId, JSON.stringify(execution)])
-        if (!result.rows[0]) throw new Error('需求分析运行不存在')
-        const index = this.state.reviewRuns.findIndex(item => item.id === runId)
-        if (index >= 0) this.state.reviewRuns[index] = result.rows[0].data
-      } catch (error) { failure = error }
+    await this.enqueueWrite(async () => {
+      const result = await this.pool.query<{ data: ReviewRun }>(`
+        UPDATE smarthub.review_runs
+        SET data = jsonb_set(data, '{execution}', $2::jsonb, true)
+        WHERE id = $1
+        RETURNING data
+      `, [runId, JSON.stringify(execution)])
+      if (!result.rows[0]) throw new Error('需求分析运行不存在')
+      const index = this.state.reviewRuns.findIndex(item => item.id === runId)
+      if (index >= 0) this.state.reviewRuns[index] = result.rows[0].data
     })
-    await this.queue
-    if (failure) throw failure
   }
 
   async close() {
@@ -745,26 +740,27 @@ export class PostgresStore implements StateStore {
   }
 
   async transactionScope<T>(scope: ConfigurationTransactionScope, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T> {
-    let result!: T
-    let failure: unknown
-    this.queue = this.queue.then(async () => {
-      const client = await this.pool.connect()
+    return this.enqueueWrite(async () => {
+      let client: PoolClient | undefined
+      let discardClient = false
       try {
+        client = await this.pool.connect()
         await client.query('BEGIN')
         await client.query("SELECT pg_advisory_xact_lock(hashtext('smarthub_state'))")
         const before = await loadConfigurationState(client, scope)
         const draft = structuredClone(before)
-        result = await operation(draft)
+        const result = await operation(draft)
         await persistConfigurationChanges(client, scope, before, draft)
         await client.query('COMMIT')
+        return result
       } catch (error) {
-        failure = error
-        await client.query('ROLLBACK')
-      } finally { client.release() }
+        if (client) {
+          try { await client.query('ROLLBACK') }
+          catch { discardClient = true }
+        }
+        throw error
+      } finally { client?.release(discardClient) }
     })
-    await this.queue
-    if (failure) throw failure
-    return result
   }
 
   async transactionWithTaskLease<T>(taskId: string, lease: TaskLease, operation: (draft: DatabaseState) => T | Promise<T>): Promise<T | null> {
@@ -807,11 +803,11 @@ export class PostgresStore implements StateStore {
   }
 
   private async runTransaction<T>(operation: (draft: DatabaseState) => T | Promise<T>, fencing?: { kind: 'sync' | 'review' | 'test_design'; id: string; lease: TaskLease }): Promise<T | null> {
-    let result: T | null = null
-    let failure: unknown
-    this.queue = this.queue.then(async () => {
-      const client = await this.pool.connect()
+    return this.enqueueWrite(async () => {
+      let client: PoolClient | undefined
+      let discardClient = false
       try {
+        client = await this.pool.connect()
         await client.query('BEGIN')
         await client.query("SELECT pg_advisory_xact_lock(hashtext('smarthub_state'))")
         if (fencing) {
@@ -824,11 +820,11 @@ export class PostgresStore implements StateStore {
               ${fencing.kind !== 'sync' ? 'AND cancel_requested_at IS NULL' : ''}
             FOR UPDATE
           `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
-          if (owned.rowCount !== 1) { await client.query('ROLLBACK'); return }
+          if (owned.rowCount !== 1) { await client.query('ROLLBACK'); return null }
         }
         const before = await loadState(client)
         const draft = structuredClone(before)
-        result = await operation(draft)
+        const result = await operation(draft)
         if (fencing) {
           const table = fencing.kind === 'sync' ? 'sync_tasks' : fencing.kind === 'review' ? 'review_jobs' : 'workflow_task_jobs'
           const key = fencing.kind === 'sync' ? 'id' : fencing.kind === 'test_design' ? 'node_run_id' : 'run_id'
@@ -839,18 +835,26 @@ export class PostgresStore implements StateStore {
               ${fencing.kind !== 'sync' ? 'AND cancel_requested_at IS NULL' : ''}
             FOR UPDATE
           `, [fencing.id, fencing.lease.workerId, fencing.lease.runToken])
-          if (stillOwned.rowCount !== 1) { result = null; await client.query('ROLLBACK'); return }
+          if (stillOwned.rowCount !== 1) { await client.query('ROLLBACK'); return null }
         }
         await persistChanges(client, before, draft)
         await client.query('COMMIT')
         this.state = draft
+        return result
       } catch (error) {
-        failure = error
-        await client.query('ROLLBACK')
-      } finally { client.release() }
+        if (client) {
+          try { await client.query('ROLLBACK') }
+          catch { discardClient = true }
+        }
+        throw error
+      } finally { client?.release(discardClient) }
     })
-    await this.queue
-    if (failure) throw failure
+  }
+
+  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(operation)
+    // The caller observes this write's error; later writes always get a settled queue.
+    this.queue = result.then(() => undefined, () => undefined)
     return result
   }
 }

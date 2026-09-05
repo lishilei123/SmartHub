@@ -141,8 +141,9 @@ export function Documents({
             : null,
         )
         const active = tasks.some(task => task.status === 'queued' || task.status === 'running')
+        // Also fetch final document/task states before stopping the poll.
+        await refreshKnowledge()
         if (active) {
-          await refreshKnowledge()
           if (!cancelled) timer = window.setTimeout(() => void refreshTaskState(), 1_000)
         }
       } catch {

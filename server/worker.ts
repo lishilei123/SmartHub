@@ -100,30 +100,14 @@ export async function processClaimedTestExecutionJob(input: {
   }
   const controller = new AbortController()
   input.activeControllers?.add(controller)
-  const heartbeat = async () => {
-    try {
-      const renewed = await input.store.heartbeatJob(
-        input.job.id,
-        lease,
-        input.leaseMs,
-      )
-      if (!renewed) {
-        controller.abort(
-          new Error('测试执行 Worker 租约已失效或运行已取消'),
-        )
-      }
-    } catch (error) {
-      const cause = error instanceof Error
-        ? error
-        : new Error(String(error))
-      console.error(`测试执行任务 ${input.job.id} 心跳失败：`, cause.message)
-      controller.abort(cause)
-    }
-  }
-  const intervalMs = Math.max(1_000, Math.floor(input.leaseMs / 3))
-  const scheduled = input.scheduleHeartbeat
-    ? input.scheduleHeartbeat(heartbeat, intervalMs)
-    : defaultHeartbeatScheduler(heartbeat, intervalMs)
+  const scheduled = startLeaseHeartbeat({
+    renew: () => input.store.heartbeatJob(input.job.id, lease, input.leaseMs),
+    controller,
+    leaseMs: input.leaseMs,
+    label: `测试执行任务 ${input.job.id}`,
+    leaseLostMessage: '测试执行 Worker 租约已失效或运行已取消',
+    schedule: input.scheduleHeartbeat,
+  })
   try {
     await input.service.processPreparedTask(
       input.job,
@@ -200,6 +184,51 @@ function defaultHeartbeatScheduler(
   return { clear: () => clearInterval(timer) }
 }
 
+function startLeaseHeartbeat(input: {
+  renew: () => Promise<boolean> | undefined
+  controller: AbortController
+  leaseMs: number
+  label: string
+  leaseLostMessage: string
+  schedule?: (heartbeat: () => Promise<void>, intervalMs: number) => { clear(): void }
+}) {
+  let stopped = false
+  let inFlight = false
+  let scheduled: { clear(): void } | undefined
+  const clear = () => {
+    stopped = true
+    scheduled?.clear()
+    input.controller.signal.removeEventListener('abort', clear)
+  }
+  const heartbeat = async () => {
+    if (stopped || inFlight || input.controller.signal.aborted) return
+    inFlight = true
+    try {
+      const renewed = await input.renew()
+      if (!stopped && !renewed) input.controller.abort(new Error(input.leaseLostMessage))
+    } catch (error) {
+      if (!stopped) {
+        const cause = error instanceof Error ? error : new Error(String(error))
+        console.error(`${input.label} 心跳失败：`, cause.message)
+        // Fail closed: without a successful renewal, stop model/runner work.
+        input.controller.abort(cause)
+      }
+    } finally {
+      inFlight = false
+    }
+  }
+  input.controller.signal.addEventListener('abort', clear, { once: true })
+  if (input.controller.signal.aborted) clear()
+  else {
+    scheduled = (input.schedule ?? defaultHeartbeatScheduler)(
+      heartbeat,
+      Math.max(1_000, Math.floor(input.leaseMs / 3)),
+    )
+    if (stopped) scheduled.clear()
+  }
+  return { clear }
+}
+
 async function processKnowledgeOne() {
   let task
   try {
@@ -212,18 +241,19 @@ async function processKnowledgeOne() {
   const lease: TaskLease = { workerId, runToken: task.runToken! }
   const controller = new AbortController()
   activeControllers.add(controller)
-  const heartbeat = setInterval(() => {
-    void stateStore.heartbeatTask?.(task.id, lease, leaseMs)
-      .then(renewed => { if (!renewed) controller.abort(new Error('任务租约已失效')) })
-      .catch(error => console.error(`知识库任务 ${task.id} 心跳失败：`, error instanceof Error ? error.message : error))
-  }, Math.max(1_000, Math.floor(leaseMs / 3)))
+  const heartbeat = startLeaseHeartbeat({
+    renew: () => stateStore.heartbeatTask?.(task.id, lease, leaseMs),
+    controller, leaseMs,
+    label: `知识库任务 ${task.id}`,
+    leaseLostMessage: '任务租约已失效',
+  })
   try {
     const completed = await service.processTask(task.id, lease, controller.signal)
     if (completed?.status === 'failed' && !controller.signal.aborted) await retryFailedTask(task, lease, completed.error)
   } catch (error) {
     if (!controller.signal.aborted) await retryFailedTask(task, lease, error instanceof Error ? error.message : String(error))
   } finally {
-    clearInterval(heartbeat)
+    heartbeat.clear()
     activeControllers.delete(controller)
   }
   return true
@@ -235,10 +265,15 @@ async function processTestDesignOne() {
   catch (error) { console.error('测试设计任务领取失败：', error instanceof Error ? error.message : error); return false }
   if (!job) return false
   const lease: TaskLease = { workerId, runToken: job.runToken! }; const controller = new AbortController(); activeControllers.add(controller)
-  const heartbeat = setInterval(() => { void stateStore.heartbeatTestDesignJob?.(job.nodeRunId, lease, leaseMs).then(renewed => { if (!renewed) controller.abort(new Error('测试设计 Worker 租约已失效或运行已取消')) }).catch(error => console.error(`测试设计节点任务 ${job.nodeRunId} 心跳失败：`, error instanceof Error ? error.message : error)) }, Math.max(1_000, Math.floor(leaseMs / 3)))
+  const heartbeat = startLeaseHeartbeat({
+    renew: () => stateStore.heartbeatTestDesignJob?.(job.nodeRunId, lease, leaseMs),
+    controller, leaseMs,
+    label: `测试设计节点任务 ${job.nodeRunId}`,
+    leaseLostMessage: '测试设计 Worker 租约已失效或运行已取消',
+  })
   try { await testDesignService.processPreparedNode(job.runId, job.nodeRunId, lease, controller.signal); await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'succeeded') }
   catch (error) { const message = error instanceof Error ? error.message : String(error); if (controller.signal.aborted) await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'cancelled', message); else if (job.attempts < job.maxAttempts && /^(MODEL_|TEST_DESIGN_RUN_FAILED|MODEL_PROVIDER)/u.test(message)) await stateStore.releaseTestDesignJob?.(job.nodeRunId, lease, Math.min(60_000, 1_000 * 2 ** Math.max(0, job.attempts - 1)), message); else await stateStore.finishTestDesignJob?.(job.nodeRunId, lease, 'failed', message) }
-  finally { clearInterval(heartbeat); activeControllers.delete(controller) }
+  finally { heartbeat.clear(); activeControllers.delete(controller) }
   return true
 }
 
@@ -255,11 +290,12 @@ async function processReviewOne() {
   const lease: TaskLease = { workerId, runToken: job.runToken! }
   const controller = new AbortController()
   activeControllers.add(controller)
-  const heartbeat = setInterval(() => {
-    void stateStore.heartbeatReviewJob?.(job.runId, lease, leaseMs)
-      .then(renewed => { if (!renewed) controller.abort(new Error('需求分析 Worker 租约已失效或运行已取消')) })
-      .catch(error => console.error(`需求分析任务 ${job.runId} 心跳失败：`, error instanceof Error ? error.message : error))
-  }, Math.max(1_000, Math.floor(leaseMs / 3)))
+  const heartbeat = startLeaseHeartbeat({
+    renew: () => stateStore.heartbeatReviewJob?.(job.runId, lease, leaseMs),
+    controller, leaseMs,
+    label: `需求分析任务 ${job.runId}`,
+    leaseLostMessage: '需求分析 Worker 租约已失效或运行已取消',
+  })
   try {
     await requirementAnalysisService.processPreparedRun(job.runId, lease, controller.signal, job.attempts, job.maxAttempts)
     await stateStore.finishReviewJob?.(job.runId, lease, 'succeeded')
@@ -271,7 +307,7 @@ async function processReviewOne() {
       await retryFailedReviewJob(job, lease, message)
     }
   } finally {
-    clearInterval(heartbeat)
+    heartbeat.clear()
     activeControllers.delete(controller)
   }
   return true
