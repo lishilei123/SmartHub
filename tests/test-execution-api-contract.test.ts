@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { apiContractEvidenceIssues, resolveApiContractEvidence } from '../server/application/test-execution-api-contract.js'
+import { apiContractEvidenceIssues, dynamicApiRequestPathGuards, resolveApiContractEvidence } from '../server/application/test-execution-api-contract.js'
 import type { InputDeliveryManifest, TestExecutionAgentSnapshot } from '../server/domain/agent-types.js'
 import type { ExecutionRun } from '../server/domain/test-execution-types.js'
 import type { StateStore } from '../server/infrastructure/store.js'
@@ -135,4 +135,108 @@ test('真实探索证据只保留运行观察等级，环境不符或过期不�
     const other = fixture('observations.json', replacement, 'observation'); await readFixture(other)
     assert.deepEqual(resolveApiContractEvidence(other.manifest, other.workspace, other.run), [])
   }
+})
+
+test('动态路径按已读契约完整参数段匹配模板、拼接、const 和编码包装', async () => {
+  const value = fixture('contract.json', JSON.stringify({ openapi: '3.0.3', paths: {
+    '/api/tasks': { post: {} }, '/api/tasks/{id}': { get: {}, patch: {}, delete: {} },
+    '/api/teams/{team}/tasks/{task}': { get: {} },
+  } }))
+  await readFixture(value)
+  const evidence = resolveApiContractEvidence(value.manifest, value.workspace, value.run)
+  for (const source of [
+    'await request.get(`/api/tasks/${created.id}`)',
+    "await request.get('/api/tasks/' + created.id)",
+    "const prefix = '/api/tasks/'; const id = created.id; const path = prefix + id; const alias = path; await request.get(alias)",
+    'await request.get(`/api/tasks/${encodeURIComponent(created.id)}`)',
+    "const id = encodeURIComponent(created.id); await request.get('/api/tasks/' + id)",
+    'await request.get(`/api/teams/${team.id}/tasks/${created.id}`)',
+    "const method = 'GET'; await request.fetch(`/api/tasks/${created.id}`, { method })",
+    "await request.fetch(`/api/tasks/${created.id}`, { 'method': 'PATCH' })",
+    'const context = await factory.newContext({ baseURL: "https://example.test" }); await context.get(`/api/tasks/${created.id}`); await context.dispose()',
+    'const response = await request.post("/api/tasks"); const created = await response.json(); const path = `/api/tasks/${created.id}`; await request.get(path); await request.patch(path, { data: { title: "updated" } }); await request.delete(path)',
+  ]) {
+    const input = candidate(source)
+    assert.deepEqual(apiContractEvidenceIssues(input, evidence), [], source)
+    assert.ok(dynamicApiRequestPathGuards(input.files[0].content).length > 0, source)
+  }
+})
+
+test('动态参数不能匹配固定路径或错误方法，仍需有效真实读取与作用域证据', async () => {
+  const value = fixture('contract.json', JSON.stringify({ openapi: '3.0.3', paths: {
+    '/api/tasks/{id}': { get: {} }, '/api/tasks/current': { delete: {} },
+  } }))
+  const dynamic = candidate('await request.get(`/api/tasks/${created.id}`)')
+  assert.notDeepEqual(apiContractEvidenceIssues(dynamic, resolveApiContractEvidence(value.manifest, value.workspace, value.run)), [])
+  await readFixture(value)
+  const evidence = resolveApiContractEvidence(value.manifest, value.workspace, value.run)
+  for (const source of [
+    'await request.post(`/api/tasks/${created.id}`)',
+    'await request.get(`/api/accounts/${created.id}`)',
+    'await request.delete(`/api/tasks/${created.id}`)',
+    'await request.get(`/api/tasks/${created.id}/extra`)',
+  ]) assert.match(apiContractEvidenceIssues(candidate(source), evidence).join(' '), /缺少/u, source)
+  for (const mutate of [
+    (copy: typeof value) => { copy.manifest.toolReads![0].executionEvidence!.runId = 'other' },
+    (copy: typeof value) => { copy.manifest.toolReads![0].executionEvidence!.projectVersionId = 'other' },
+    (copy: typeof value) => { copy.workspace.workspaceFiles[0].content += ' ' },
+    (copy: typeof value) => { delete copy.manifest.toolReads![0].executionEvidence },
+  ]) {
+    const copy = structuredClone(value); mutate(copy)
+    assert.match(apiContractEvidenceIssues(dynamic, resolveApiContractEvidence(copy.manifest, copy.workspace, copy.run)).join(' '), /缺少/u)
+  }
+  const implementation = fixture('client.ts', candidate('await request.get(`/api/tasks/${created.id}`)').files[0].content, 'implementation')
+  await readFixture(implementation)
+  assert.deepEqual(resolveApiContractEvidence(implementation.manifest, implementation.workspace, implementation.run), [], '受管实现中的参数槽本身不能扩大为新契约')
+})
+
+test('动态 Host、完整路径、复杂分派和路径段结构改变均返回受支持写法', async () => {
+  const value = fixture(); await readFixture(value)
+  const evidence = resolveApiContractEvidence(value.manifest, value.workspace, value.run)
+  for (const source of [
+    'await request.get(`https://${host}/api/tasks`)',
+    'await request.get(`${host}/api/tasks`)',
+    'await request.get(`//${host}/api/tasks`)',
+    'await request.get(`${path}`)',
+    'await request.get(`/${path}`)',
+    'await request.get(`/api/tasks/prefix-${created.id}`)',
+    'await request.get(`/api/tasks/${created.id}.json`)',
+    'await request.get(`/api/tasks/${created.id}?search=${query}`)',
+    'await request.get(`/api/tasks/${resolveId()}`)',
+    'await request.get(new URL("/api/tasks", host))',
+    'await request.fetch(`/api/tasks/${created.id}`, { method: method })',
+    'await request.fetch(`/api/tasks/${created.id}`, { "method": method })',
+    'await request.fetch(`/api/tasks/${created.id}`, { method: "GET", method: method })',
+    'await request.trace(`/api/tasks/${created.id}`)',
+    'await request[method](`/api/tasks/${created.id}`)',
+    'await request?.get(`/api/tasks/${created.id}`)',
+    'await request.get?.(`/api/tasks/${created.id}`)',
+    'await request?.[method](`/api/tasks/${created.id}`)',
+    'await request?.get(`https://${host}/api/tasks`)',
+    'const get = request.get.bind(request); await get(`/api/tasks/${created.id}`)',
+    'Reflect.apply(request.get, request, [`/api/tasks/${created.id}`])',
+    'request.get = request.delete.bind(request); await request.get(`/api/tasks/${created.id}`)',
+    'const context = await factory.newContext({ baseURL: host }); await context.get(`/api/tasks/${created.id}`)',
+    'const context = await factory.newContext(options); await context.get(`/api/tasks/${created.id}`)',
+    'const context = await factory.newContext({ baseURL: "https://example.test", ...options }); await context.get(`/api/tasks/${created.id}`)',
+    'test.use({ baseURL: host }); await request.get(`/api/tasks/${created.id}`)',
+    'test.use({ "baseURL": host }); await request.get(`/api/tasks/${created.id}`)',
+    "const path = '/api/tasks/'; async function helper(path) { await request.get(path + created.id) }",
+  ]) {
+    assert.match(apiContractEvidenceIssues(candidate(`${source}; await request.get('/api/tasks')`), evidence).join(' '), /动态 Endpoint\/Method.*支持/u, source)
+  }
+})
+
+test('TSX 依赖中的动态请求同样关联契约并产生 Runner 参数检查，解析失败不能静默忽略', async () => {
+  const value = fixture(); await readFixture(value)
+  const evidence = resolveApiContractEvidence(value.manifest, value.workspace, value.run)
+  const helper = { path: 'helpers/client.tsx', content: 'const view = () => <div />; export function update(request: APIRequestContext, id: string) { return request.patch(`/api/tasks/${id}`) }' }
+  const input = candidate()
+  input.files.push(helper)
+  assert.deepEqual(apiContractEvidenceIssues(input, evidence), [])
+  assert.equal(dynamicApiRequestPathGuards(helper.content).length, 1)
+  helper.content = helper.content.replace('/api/tasks/', '/api/accounts/')
+  assert.match(apiContractEvidenceIssues(input, evidence).join(' '), /缺少 PATCH \/api\/accounts/u)
+  helper.content = 'not valid typescript {'
+  assert.match(apiContractEvidenceIssues(input, evidence).join(' '), /动态 Endpoint\/Method/u)
 })

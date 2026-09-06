@@ -39,7 +39,7 @@ export interface CaseExecutionBinding {
   dependencySha256: string
   caseContentSha256: string
   /** Validator policy that admitted this implementation. Missing means legacy. */
-  validationPolicyVersion?: 'execution-binding-validation/v2' | 'execution-binding-validation/v3' | 'execution-binding-validation/v4' | 'execution-binding-validation/v5' | 'execution-binding-validation/v6' | 'execution-binding-validation/v7' | 'execution-binding-validation/v8' | 'execution-binding-validation/v9' | 'execution-binding-validation/v10' | 'execution-binding-validation/v11'
+  validationPolicyVersion?: 'execution-binding-validation/v2' | 'execution-binding-validation/v3' | 'execution-binding-validation/v4' | 'execution-binding-validation/v5' | 'execution-binding-validation/v6' | 'execution-binding-validation/v7' | 'execution-binding-validation/v8' | 'execution-binding-validation/v9' | 'execution-binding-validation/v10' | 'execution-binding-validation/v11' | 'execution-binding-validation/v12'
   createdAt: string
   updatedAt: string
   inheritedFromProjectVersionId?: string
@@ -743,6 +743,7 @@ function normalizeBinding(binding: CaseExecutionBinding): CaseExecutionBinding {
         'execution-binding-validation/v9',
         'execution-binding-validation/v10',
         'execution-binding-validation/v11',
+        'execution-binding-validation/v12',
       ].includes(binding.validationPolicyVersion)
     || !dependencyFiles.length
     || new Set(dependencyFiles.map(file => file.path.toLocaleLowerCase())).size !== dependencyFiles.length

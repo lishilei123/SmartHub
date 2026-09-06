@@ -24,6 +24,7 @@ import type { RunnerArtifactObject, SandboxExecutionResult } from './execution-s
 import type { ExecutionArtifactStore } from '../infrastructure/execution-artifact-store.js'
 import { withWindowsHiddenNodeChildren } from './windows-child-process.js'
 import { createExecutionNetworkProxy } from './execution-network-proxy.js'
+import { dynamicApiRequestPathGuards } from '../application/test-execution-api-contract.js'
 
 /** Local runner for the ProjectVersion-owned automation workspace. */
 export class LocalWorkspaceRunner implements PlaywrightRunner {
@@ -39,7 +40,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
   ) {
     this.playwright = playwright ?? localPlaywrightInstallation()
     this.value = {
-      runnerVersion: 'local-workspace/v11',
+      runnerVersion: 'local-workspace/v12',
       playwrightVersion: this.playwright.version,
       imageReference: 'local-workspace',
       imageDigest: `sha256:${'0'.repeat(64)}`,
@@ -133,8 +134,9 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
       const executionRoot = join(runtimeRoot, 'workspace')
       const configPath = join(runtimeRoot, 'playwright.config.mjs')
       const reporterPath = join(runtimeRoot, 'playwright-report.json')
+      const pathViolationFile = join(runtimeRoot, 'api-path-violation')
       await mkdir(executionRoot, { recursive: true })
-      await writeNetworkGovernedPlaywright(runtimeRoot, this.playwright.packagePath, network.server)
+      await writeNetworkGovernedPlaywright(runtimeRoot, this.playwright.packagePath, network.server, pathViolationFile)
       if (runtimeApiAuthorization && apiAuthorizationMode === 'isolated_ui_request_fixture') {
         await writeGovernedUiApiFixture(runtimeRoot)
       }
@@ -142,7 +144,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         const target = resolve(executionRoot, ...file.path.split('/'))
         if (!inside(executionRoot, target)) throw new Error('TEST_EXECUTION_WORKSPACE_DEPENDENCY_INVALID')
         await mkdir(dirname(target), { recursive: true })
-        await writeFile(target, file.content, { encoding: 'utf8' })
+        await writeFile(target, withDynamicApiPathGuards(file.content), { encoding: 'utf8' })
       }
       const entry = resolve(executionRoot, ...input.workspace.entryFile.split('/'))
       if (!inside(executionRoot, entry)) throw new Error('TEST_EXECUTION_WORKSPACE_ENTRY_INVALID')
@@ -243,8 +245,18 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         ...(artifact ? [{ ...artifact, type: 'log' as const }] : []),
         ...attachmentArtifacts,
       ]
-      const passed = exitCode === 0 && network.violations.length === 0
+      const pathViolation = await access(pathViolationFile).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return false
+        throw error
+      })
+      const passed = exitCode === 0 && network.violations.length === 0 && !pathViolation
       const events = report.events.slice()
+      if (pathViolation) events.push({
+        sequence: events.length + 1, type: 'failure', status: 'failed',
+        title: '动态 API 参数改变路径结构，请使用单个有效资源标识',
+        startedAt: new Date().toISOString(), durationMs: 0,
+        metadata: { source: 'runner_api_path_policy', error: 'TEST_EXECUTION_API_PATH_PARAMETER_REJECTED' },
+      })
       if (network.violations.length) events.push({
         sequence: events.length + 1, type: 'failure', status: 'failed',
         title: '冻结环境网络边界拒绝了请求',
@@ -277,7 +289,8 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         durationMs: Date.now() - started,
         summary: passed ? 'Local Playwright 通过' : 'Local Playwright 失败',
         ...(passed ? {} : { error: network.violations.length
-          ? 'TEST_EXECUTION_NETWORK_TARGET_REJECTED' : `PLAYWRIGHT_EXIT_${exitCode ?? 'UNKNOWN'}` }),
+          ? 'TEST_EXECUTION_NETWORK_TARGET_REJECTED' : pathViolation
+            ? 'TEST_EXECUTION_API_PATH_PARAMETER_REJECTED' : `PLAYWRIGHT_EXIT_${exitCode ?? 'UNKNOWN'}` }),
         artifacts,
         events,
       }
@@ -1399,11 +1412,43 @@ async function writeGovernedUiApiFixture(runtimeRoot: string) {
 
 /** Resolve every immutable package import through the same runner-owned facade.
  * Package file contents and hashes remain untouched. */
-async function writeNetworkGovernedPlaywright(runtimeRoot: string, packagePath: string, proxyServer: string) {
+function withDynamicApiPathGuards(source: string) {
+  const guards = dynamicApiRequestPathGuards(source)
+  if (!guards.length) return source
+  let name = '__smarthubApiPath'
+  while (source.includes(name)) name += '_'
+  for (const guard of guards.sort((left, right) => right.start - left.start)) {
+    source = source.slice(0, guard.start) + `${name}(${source.slice(guard.start, guard.end)}, ${JSON.stringify(guard.segments)})` + source.slice(guard.end)
+  }
+  return `import { __smarthubValidateApiPath as ${name} } from '@playwright/test'\n${source}`
+}
+
+async function writeNetworkGovernedPlaywright(runtimeRoot: string, packagePath: string, proxyServer: string, pathViolationFile: string) {
   const packageRoot = join(runtimeRoot, 'node_modules', '@playwright', 'test')
   await mkdir(packageRoot, { recursive: true })
   const source = `
 const networkProxy = { server: ${JSON.stringify(proxyServer)}, bypass: '<-loopback>' }
+// Validate the raw target before Playwright/WHATWG URL normalization can erase
+// traversal or turn a parameter into query/fragment/path syntax. The persistent
+// marker makes a caught rejection fail the Attempt as well.
+function __smarthubValidateApiPath(target, expected) {
+  const actualSegments = typeof target === 'string' ? target.split('/') : []
+  const valid = actualSegments.length === expected.length && expected.every((part, index) => {
+    const raw = actualSegments[index]
+    if (part !== null && part !== raw) return false
+    if (part === '' && raw === '') return true
+    if (!raw || /[\\\\?#\\u0000-\\u0020\\u007f]/u.test(raw)) return false
+    try {
+      const decoded = decodeURIComponent(raw)
+      return decoded !== '.' && decoded !== '..' && !/[\\/\\\\?#%\\u0000-\\u001f\\u007f]/u.test(decoded)
+    } catch { return false }
+  })
+  if (!valid) {
+    appendFileSync(${JSON.stringify(pathViolationFile)}, 'rejected\\n', { encoding: 'utf8' })
+    throw new Error('TEST_EXECUTION_API_PATH_PARAMETER_REJECTED')
+  }
+  return target
+}
 const unsupportedBrowser = new Proxy({}, { get() { throw new Error('TEST_EXECUTION_UNMANAGED_BROWSER_UNSUPPORTED') } })
 const chromium = unsupportedBrowser, firefox = unsupportedBrowser, webkit = unsupportedBrowser
 const _electron = unsupportedBrowser, _android = unsupportedBrowser
@@ -1439,12 +1484,12 @@ const test = actual.test.extend({
       exports: { import: './index.mjs', require: './index.cjs' },
     }), { encoding: 'utf8' }),
     writeFile(join(packageRoot, 'index.mjs'),
-      `import * as actual from ${JSON.stringify(pathToFileURL(join(dirname(packagePath), 'index.mjs')).href)}\n`
-      + source + `\nexport * from ${JSON.stringify(pathToFileURL(join(dirname(packagePath), 'index.mjs')).href)}\nexport { test, request, chromium, firefox, webkit, _electron, _android }\nexport default test\n`,
+      `import { appendFileSync } from 'node:fs'\nimport * as actual from ${JSON.stringify(pathToFileURL(join(dirname(packagePath), 'index.mjs')).href)}\n`
+      + source + `\nexport * from ${JSON.stringify(pathToFileURL(join(dirname(packagePath), 'index.mjs')).href)}\nexport { test, request, chromium, firefox, webkit, _electron, _android, __smarthubValidateApiPath }\nexport default test\n`,
       { encoding: 'utf8' }),
     writeFile(join(packageRoot, 'index.cjs'),
-      `const actual = require(${JSON.stringify(join(dirname(packagePath), 'index.js'))})\n`
-      + source + '\nmodule.exports = { ...actual, default: test, test, request, chromium, firefox, webkit, _electron, _android }\n', { encoding: 'utf8' }),
+      `const { appendFileSync } = require('node:fs')\nconst actual = require(${JSON.stringify(join(dirname(packagePath), 'index.js'))})\n`
+      + source + '\nmodule.exports = { ...actual, default: test, test, request, chromium, firefox, webkit, _electron, _android, __smarthubValidateApiPath }\n', { encoding: 'utf8' }),
   ])
 }
 

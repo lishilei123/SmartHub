@@ -96,7 +96,7 @@ const allowedExternalStaticImports = new Set([
   GOVERNED_UI_API_TEST_MODULE,
 ])
 const allowedWorkspaceSourceRoots = new Set(['tests', 'api', 'pages', 'helpers', 'fixtures'])
-export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v11' as const
+export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v12' as const
 const forbiddenHttpClientModules = new Set([
   'axios',
   'superagent',

@@ -597,6 +597,96 @@ test('API 404/405 只有可信完整契约证明方法错误才进入脚本修�
   assert.equal(adjudicateFailureDiagnosisCandidate(candidate, explicitCase, [event]), candidate)
 })
 
+for (const status of [404, 405]) {
+  test(`Validator 与 Service HTTP ${status} 诊断裁决共用冻结条件预期，不借用标题和步骤`, () => {
+    const base = apiTaskInput()
+    const diagnosis = { category: 'assertion_mismatch' as const, reason: '业务响应断言失败', evidence: 'Runner 终态失败事件' }
+    const event: ExecutionEvent = {
+      id: `event-conditional-${status}`, runId: 'run-1', taskId: base.taskId, attemptId: 'attempt-1',
+      sequence: 1, type: 'http', status: 'failed', title: `GET /api/tasks · ${status}`,
+      startedAt: '2026-09-06T00:00:00.000Z', metadata: { httpStatus: status, method: 'GET', path: '/api/tasks' },
+    }
+    const entryFile = 'tests/api/login.spec.ts'
+    const source = `import { test, expect } from '@playwright/test'
+test('条件状态校验 [TC_API_LOGIN_001]', async ({ request }) => {
+  const response = await test.step('GET /api/tasks', () => request.get('/api/tasks'))
+  // smarthub:assert expected-1
+  expect(response.status()).toBe(${status})
+})
+`
+    for (const [description, required] of [
+      [`当资源不存在时，接口返回 HTTP ${status}`, true],
+      [`当资源不存在时接口返回 HTTP ${status}`, true],
+      [`如果请求的方法不受支持，则响应状态码应为 ${status}`, true],
+      [`资源不存在时应返回${status}`, true],
+      [`When the resource does not exist, the response status must be ${status}.`, true],
+      [`接口返回 HTTP ${status} 且不得泄露信息`, true],
+      [`如果返回 HTTP ${status}，则显示错误提示`, false],
+      [`当接口返回${status}时页面展示错误`, false],
+      [`接口不得返回${status}`, false],
+      [`排除 HTTP 404/405`, false],
+      [`编号${status}的资源正常显示`, false],
+      [`接口返回${status}条记录`, false],
+    ] as const) {
+      const testCase = {
+        ...base.caseContent,
+        title: `接口返回 HTTP ${status}`,
+        steps: [`接口返回 HTTP ${status}`],
+        expectedResults: [description],
+      }
+      const task = { ...base, caseContent: testCase, executionSpec: { ...base.executionSpec, testCase } }
+      const build = (content = source) => buildExecutionPackage({
+        candidate: { entryFile, files: [{ path: entryFile, content }] }, task, environmentSignature: 'env',
+      })
+      const rangeSource = source.replace('  // smarthub:assert expected-1', `
+  expect(response.status()).toBeGreaterThanOrEqual(400)
+  expect(response.status()).toBeLessThan(500)
+  expect(response.status()).not.toBe(${status === 404 ? 405 : 404})
+  // smarthub:assert expected-1`)
+      if (required) {
+        assert.doesNotThrow(build, description)
+        assert.doesNotThrow(() => build(rangeSource), description)
+        assert.equal(adjudicateFailureDiagnosisCandidate(diagnosis, task, [event]), diagnosis, description)
+      } else {
+        assert.throws(build, error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'), description)
+        assert.throws(() => build(rangeSource), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE')
+          && error instanceof Error && /通用 4xx 拒绝断言必须显式排除/u.test(error.message), description)
+        assert.equal(adjudicateFailureDiagnosisCandidate(diagnosis, task, [event]).category, 'unknown', description)
+      }
+    }
+  })
+}
+
+test('条件式 HTTP 预期不绕过符号测试数据和独立业务断言门禁', () => {
+  const base = apiTaskInput()
+  const testCase = {
+    ...base.caseContent,
+    preconditions: ['存在标题为 T1 的任务'],
+    expectedResults: ['当资源不可见时接口返回 HTTP 404', '响应不泄露任务信息'],
+  }
+  const task = { ...base, caseContent: testCase, executionSpec: { ...base.executionSpec, testCase } }
+  const source = (setup: string, businessAssertion: string) => `import { test, expect } from '@playwright/test'
+test('条件状态校验 [TC_API_LOGIN_001]', async ({ request }) => {
+  ${setup}
+  const response = await test.step('GET /api/tasks', () => request.get('/api/tasks', { params: { keyword: 'T1' } }))
+  const body = await response.json()
+  // smarthub:assert expected-1
+  expect(response.status()).toBe(404)
+  ${businessAssertion}
+})
+`
+  const build = (content: string) => buildExecutionPackage({
+    candidate: { entryFile: 'tests/api/login.spec.ts', files: [{ path: 'tests/api/login.spec.ts', content }] },
+    task, environmentSignature: 'env',
+  })
+  const setup = "await request.post('/api/tasks', { data: { title: 'T1' } })"
+  const businessAssertion = '// smarthub:assert expected-2\n  expect(body).not.toHaveProperty("title")'
+  assert.throws(() => build(source('', businessAssertion)), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE'))
+  assert.throws(() => build(source(setup, '')), error => validationCode(error, 'TEST_EXECUTION_SCRIPT_UNSAFE')
+    && error instanceof Error && /expected-2/u.test(error.message))
+  assert.doesNotThrow(() => build(source(setup, businessAssertion)))
+})
+
 test('符号测试数据必须由冻结 Binding、setup 或显式前置守卫落实', () => {
   const base = apiTaskInput()
   const testCase: TestCaseContent = {

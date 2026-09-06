@@ -16,6 +16,13 @@ export interface ApiContractEvidence {
 }
 
 type Endpoint = Pick<ApiContractEvidence, 'method' | 'path' | 'methodsComplete'>
+export interface DynamicApiPathGuard {
+  start: number
+  end: number
+  /** null is exactly one contract parameter segment, never a path wildcard. */
+  segments: Array<string | null>
+}
+type RequestEndpoint = Endpoint & { guard?: DynamicApiPathGuard }
 const methods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
 const hash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex')
 
@@ -55,7 +62,7 @@ export function resolveApiContractEvidence(
     const endpoints = kind === 'observation'
       ? observationEndpoints(content, run)
       : kind === 'implementation'
-        ? requestEndpoints(content).endpoints
+        ? requestEndpoints(content).endpoints.filter(endpoint => !endpoint.guard)
         : contractEndpoints(content)
     for (const endpoint of endpoints) result.push({ ...endpoint, kind, sourceRef: `workspace:${path}:${read.startLine}-${read.endLine}`, contentSha256: file.contentSha256, toolCallId: read.toolCallId })
   }
@@ -73,12 +80,20 @@ export function apiContractEvidenceIssues(candidate: ExecutionPackageCandidate, 
   const extracted = candidate.files.map(file => requestEndpoints(file.content))
   const endpoints = extracted.flatMap(result => result.endpoints)
   const issues: string[] = []
-  if (extracted.some(result => result.unresolved)) issues.push('动态 Endpoint/Method 无法与已读契约关联；请提供可解析的受管实现，或交人工补充契约后重新验证')
+  if (extracted.some(result => result.unresolved)) issues.push('动态 Endpoint/Method 无法与已读契约关联；支持固定相对路径中完整参数段的模板字符串、简单字符串拼接、简单 const 引用及 encodeURIComponent(id)。不支持动态 Host、完整动态路径、部分路径段插值、复杂表达式或动态方法；请提供固定契约和受支持写法后重新验证')
   if (!endpoints.length) issues.push('未找到可与契约关联的 API 请求；请读取依赖闭包中的受管 API 实现并提供可解析 Endpoint/Method')
-  for (const endpoint of endpoints) if (!evidence.some(item => item.method === endpoint.method && apiPathMatches(item.path, endpoint.path))) {
+  for (const endpoint of endpoints) if (!evidence.some(item => item.method === endpoint.method
+    && apiPathMatches(item.path, endpoint.path)
+    && (!endpoint.guard || endpoint.guard.segments.every((segment, index) => segment !== null || /^\{[^/{}]+\}$/u.test(item.path.split('/')[index] ?? ''))))) {
     issues.push(`缺少 ${endpoint.method} ${endpoint.path} 的已读取、Hash 匹配且属于本 Run/ProjectVersion 的接口证据；请读取冻结 OpenAPI/接口说明、固定 Knowledge Chunk、受管 API 实现或本环境有效探索结果。旧读取记录缺少来源元数据时必须重读`)
   }
   return [...new Set(issues)]
+}
+
+/** Runner applies these guards only to its temporary copy, preserving frozen source hashes.
+ * Matching a contract structure never proves the value of a runtime parameter. */
+export function dynamicApiRequestPathGuards(content: string): DynamicApiPathGuard[] {
+  return requestEndpoints(content).endpoints.flatMap(endpoint => endpoint.guard ? [endpoint.guard] : [])
 }
 
 export function apiPathMatches(contractPath: string, actualPath: string) {
@@ -128,15 +143,16 @@ function observationEndpoints(content: string, run: Pick<ExecutionRun, 'projectV
 }
 
 /** Small expression reader; this is evidence correlation, not the network security boundary. */
-function requestEndpoints(content: string): { endpoints: Endpoint[]; unresolved: boolean } {
-  const endpoints: Endpoint[] = []
+function requestEndpoints(content: string): { endpoints: RequestEndpoint[]; unresolved: boolean } {
+  const endpoints: RequestEndpoint[] = []
   let unresolved = false
   let ast: unknown
-  try { ast = parse(content, { sourceType: 'module', plugins: ['typescript'] }) } catch { return { endpoints, unresolved: false } }
+  try { ast = parse(content, { sourceType: 'module', plugins: ['typescript', 'jsx'] }) } catch { return { endpoints, unresolved: true } }
   const constants = new Map<string, unknown>()
   const declared = new Set<string>()
   const requestNames = new Set<string>()
   const requestProperties = new Set<string>()
+  const testNames = new Set(['test'])
   const dataNames = new Set<string>()
   const detachedRequestMethods = new Set<string>()
   const walk = (node: unknown, visit: (node: Record<string, unknown>) => void) => {
@@ -148,6 +164,7 @@ function requestEndpoints(content: string): { endpoints: Endpoint[]; unresolved:
   }
   const typedRequest = (node: Record<string, unknown>) => JSON.stringify(node.typeAnnotation ?? {}).includes('"name":"APIRequestContext"')
   walk(ast, node => {
+    if (node.type === 'ImportSpecifier' && (node.imported as { name?: string })?.name === 'test') testNames.add(String((node.local as { name?: string }).name))
     if (node.type === 'Identifier' && typedRequest(node)) { requestNames.add(String(node.name)); requestProperties.add(String(node.name)) }
     if (node.type === 'ObjectPattern') for (const property of node.properties as Array<{ key?: { name?: string }; value?: { type?: string; name?: string } }>) {
       if (property.key?.name === 'request' && property.value?.type === 'Identifier' && property.value.name) requestNames.add(property.value.name)
@@ -187,7 +204,9 @@ function requestEndpoints(content: string): { endpoints: Endpoint[]; unresolved:
     }
     if (!changed) break
   }
+  const directCallees = new Set<unknown>()
   walk(ast, node => {
+    if (node.type === 'CallExpression') directCallees.add(node.callee)
     if (node.type !== 'VariableDeclarator' || !isRequest(node.init)) return
     const id = node.id as { type?: string; properties?: Array<{ value?: { type?: string; name?: string } }> }
     if (id?.type === 'ObjectPattern') for (const property of id.properties ?? []) if (property.value?.type === 'Identifier') detachedRequestMethods.add(String(property.value.name))
@@ -197,36 +216,138 @@ function requestEndpoints(content: string): { endpoints: Endpoint[]; unresolved:
     const node = value as Record<string, unknown>
     if (node.type === 'StringLiteral') return String(node.value)
     if (node.type === 'Identifier') return literal(constants.get(String(node.name)), depth + 1)
-    if (node.type === 'NewExpression' && (node.callee as { name?: string })?.name === 'URL') return literal((node.arguments as unknown[])[0], depth + 1)
+    if (node.type === 'NewExpression' && (node.callee as { name?: string })?.name === 'URL') {
+      const args = node.arguments as unknown[]
+      const target = literal(args[0], depth + 1), base = literal(args[1], depth + 1)
+      if (!target || args.length > 1 && !base) return undefined
+      try { return new URL(target, base).href } catch { return undefined }
+    }
     return undefined
   }
+  // Bounded structural reader, deliberately not a JavaScript evaluator. Unknown
+  // identifiers/member values can occupy a segment; arbitrary calls cannot.
+  const parts = (value: unknown, depth = 0): Array<string | null> | undefined => {
+    if (!value || typeof value !== 'object' || depth > 8) return undefined
+    const node = value as Record<string, unknown>
+    if (node.type === 'StringLiteral') return [String(node.value)]
+    if (node.type === 'Identifier') return constants.has(String(node.name))
+      ? parts(constants.get(String(node.name)), depth + 1) : [null]
+    if (node.type === 'NumericLiteral') return [null]
+    if (node.type === 'MemberExpression' && !node.computed) {
+      const object = node.object as Record<string, unknown>
+      if (object?.type === 'Identifier' || object?.type === 'ThisExpression'
+        || object?.type === 'MemberExpression' && parts(object, depth + 1)) return [null]
+      return undefined
+    }
+    if (node.type === 'CallExpression' && (node.callee as { type?: string; name?: string })?.type === 'Identifier'
+      && (node.callee as { name: string }).name === 'encodeURIComponent' && !declared.has('encodeURIComponent')) {
+      const args = node.arguments as unknown[]
+      return args.length === 1 && parts(args[0], depth + 1) ? [null] : undefined
+    }
+    if (node.type === 'TemplateLiteral') {
+      const quasis = node.quasis as Array<{ value: { cooked: string | null } }>
+      const expressions = node.expressions as unknown[]
+      const result: Array<string | null> = []
+      for (let index = 0; index < quasis.length; index++) {
+        if (quasis[index].value.cooked === null) return undefined
+        result.push(quasis[index].value.cooked!)
+        if (index < expressions.length) {
+          const expression = parts(expressions[index], depth + 1)
+          if (!expression) return undefined
+          result.push(...expression)
+        }
+      }
+      return result
+    }
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      const left = parts(node.left, depth + 1), right = parts(node.right, depth + 1)
+      return left && right ? [...left, ...right] : undefined
+    }
+    return undefined
+  }
+  const pathSegments = (values: Array<string | null>): Array<string | null> | undefined => {
+    const segments: Array<string | null> = ['']
+    for (const value of values) {
+      if (value === null) {
+        if (segments.at(-1) !== '') return undefined
+        segments[segments.length - 1] = null
+      } else {
+        const fixed = value.split('/')
+        if (segments.at(-1) === null && fixed[0]) return undefined
+        if (segments.at(-1) !== null) segments[segments.length - 1] += fixed[0]
+        segments.push(...fixed.slice(1))
+      }
+    }
+    // At least one fixed leading route segment; no authority, query or fragment
+    // interpolation. Query options remain available via Playwright's params.
+    if (segments.length < 3 || segments[0] !== '' || !segments[1]
+      || segments.some(segment => segment !== null && /[?#\\\u0000-\u0020]/u.test(segment))) return undefined
+    return segments
+  }
+  const composed = (value: unknown, depth = 0): boolean => {
+    if (!value || typeof value !== 'object' || depth > 8) return false
+    const node = value as Record<string, unknown>
+    return node.type === 'TemplateLiteral' || node.type === 'BinaryExpression'
+      || node.type === 'Identifier' && composed(constants.get(String(node.name)), depth + 1)
+  }
   walk(ast, node => {
-    if (node.type !== 'CallExpression') return
+    if (node.type === 'MemberExpression' && isRequest(node.object) && !directCallees.has(node)) {
+      const property = node.property as { name?: string; value?: string }
+      const method = (property.name ?? property.value ?? '').toUpperCase()
+      if (node.computed || methods.has(method) || method === 'FETCH') unresolved = true
+    }
+    if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return
     const callee = node.callee as { type?: string; name?: string; computed?: boolean; property?: { name?: string }; object?: unknown }
     if (callee?.type === 'Identifier' && detachedRequestMethods.has(String(callee.name))) { unresolved = true; return }
-    if (callee?.type !== 'MemberExpression') return
+    if (callee?.type !== 'MemberExpression' && callee?.type !== 'OptionalMemberExpression') return
     const receiver = callee.object as { type?: string; name?: string; object?: { type?: string }; property?: { name?: string } } | undefined
     if (receiver?.type === 'Identifier' && dataNames.has(String(receiver.name)) && !requestNames.has(String(receiver.name))) return
     const managedReceiver = isRequest(receiver)
+    if (node.type === 'OptionalCallExpression') {
+      if (managedReceiver || methods.has(callee.property?.name?.toUpperCase() ?? '') || callee.property?.name === 'fetch') unresolved = true
+      return
+    }
     if (callee.computed) { unresolved = true; return }
     let method = callee.property?.name?.toUpperCase()
+    if (method === 'NEWCONTEXT' || method === 'USE' && receiver?.type === 'Identifier' && testNames.has(String(receiver.name))) {
+      const options = (node.arguments as Array<{ type?: string; properties?: Array<{ type?: string; computed?: boolean; key?: { name?: string; value?: string }; value?: unknown }> }>)[0]
+      if (options && (options.type !== 'ObjectExpression'
+        || options.properties?.some(property => property.type !== 'ObjectProperty' || property.computed
+          || (property.key?.name ?? property.key?.value) === 'baseURL' && literal(property.value) === undefined))) unresolved = true
+      return
+    }
     if (!managedReceiver) {
       if (method && (methods.has(method) || method === 'FETCH')) unresolved = true
       return
     }
     if (method === 'FETCH') {
-      const options = (node.arguments as Array<{ type?: string; properties?: Array<{ type?: string; computed?: boolean; key?: { name?: string }; value?: unknown }> }>)[1]
-      const methodProperty = options?.properties?.find(property => property.key?.name === 'method')
+      const options = (node.arguments as Array<{ type?: string; properties?: Array<{ type?: string; computed?: boolean; key?: { name?: string; value?: string }; value?: unknown }> }>)[1]
+      const methodProperties = options?.properties?.filter(property => (property.key?.name ?? property.key?.value) === 'method') ?? []
+      const methodProperty = methodProperties[0]
       if (!options) method = 'GET'
-      else if (options.type !== 'ObjectExpression' || options.properties?.some(property => property.type === 'SpreadElement' || property.computed)) { unresolved = true; return }
+      else if (options.type !== 'ObjectExpression' || methodProperties.length > 1 || options.properties?.some(property => property.type !== 'ObjectProperty' || property.computed)) { unresolved = true; return }
       else method = methodProperty ? literal(methodProperty.value)?.toUpperCase() : 'GET'
       if (!method || !methods.has(method)) { unresolved = true; return }
     }
-    if (!method || !methods.has(method)) return
+    if (!method || !methods.has(method)) {
+      // Context lifecycle methods are not HTTP requests. Unknown dispatch must
+      // not disappear when another recognized request exists in the candidate.
+      if (!['NEWCONTEXT', 'DISPOSE', 'STORAGESTATE'].includes(method ?? '')) unresolved = true
+      return
+    }
     // request/APIRequestContext aliases are validated separately by the package Validator.
     const args = node.arguments as unknown[]
-    const target = literal(args[0])
-    if (!target) { unresolved = true; return }
+    const values = parts(args[0])
+    if (values && (values.includes(null) || composed(args[0]))) {
+      const segments = pathSegments(values)
+      const argument = args[0] as { start: number; end: number }
+      if (!segments) { unresolved = true; return }
+      endpoints.push({ method, path: segments.map(segment => segment ?? '{parameter}').join('/'), methodsComplete: false,
+        guard: { start: argument.start, end: argument.end, segments } })
+      return
+    }
+    const target = values?.join('') ?? literal(args[0])
+    if (!target || target.startsWith('//')) { unresolved = true; return }
     let path = target
     try { if (/^https?:\/\//u.test(target)) path = new URL(target).pathname } catch { unresolved = true; return }
     if (!path.startsWith('/')) { unresolved = true; return }

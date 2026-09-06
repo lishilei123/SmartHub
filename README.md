@@ -297,9 +297,11 @@ FailureAnalysisAgent 只分析结构化 Attempt/Event、脱敏日志和 Screensh
 
 UI 导航支持入口直接调用及依赖闭包内可证明实际执行的 helper、Page Object 调用。未调用、不可达或未等待的导航不能建立证明；无法证明的动态分派和仅在 fixture 中导航仍返回明确的不支持诊断。持久化校验依据冻结 Verification Check 的明确要求，检查写操作后回读/刷新的结果是否被对应受保护断言使用；“仍然”“不存在”等孤立词不会让只读查询被要求写入。通用 JavaScript 控制流和任意 fixture 的运行时语义证明尚未实现。
 
-HTTP 404/405 不再直接触发脚本修复。只有冻结 Verification Check 明确要求该 HTTP 状态才作为业务预期；标题、步骤或普通数字不算。完整且已读取的固定 OpenAPI 契约证明同一路径的方法错误时，Service 可以确定性归为 `script_defect`，并记录契约、Hash、读取及执行证据。契约符合时交由 FailureAnalysisAgent 结合环境、数据和终态证据分析，产品缺陷仍待人工确认；契约缺失、冲突或根因不足时进入 `unknown`/人工处理。不根据文档中未出现某个路径就认定路径错误。
+HTTP 404/405 不再直接触发脚本修复。只有冻结 Verification Check/Expected Result 明确要求该 HTTP 状态才作为业务预期；标题、步骤或普通数字不算。支持“当资源不存在时接口返回 HTTP 404”等业务条件后的状态要求，有无逗号结果一致；“如果返回 HTTP 404，则显示错误”、否定、编号、记录数量和含糊备选状态不算明确预期。否定仅作用于相关状态描述，后续“不得泄露信息”不覆盖前面的 404 要求。Validator 与 404/405 诊断裁决共用该逻辑，条件被识别仍需满足原有数据准备及业务断言检查。完整且已读取的固定 OpenAPI 契约证明同一路径的方法错误时，Service 可以确定性归为 `script_defect`，并记录契约、Hash、读取及执行证据。契约符合时交由 FailureAnalysisAgent 结合环境、数据和终态证据分析，产品缺陷仍待人工确认；契约缺失、冲突或根因不足时进入 `unknown`/人工处理。不根据文档中未出现某个路径就认定路径错误。
 
-API 生成门禁按真实服务端读取记录、项目/版本/Run/Workspace 作用域、内容 Hash 和 Endpoint/Method 相关性认可证据，目录不再决定可信。支持固定 OpenAPI JSON、受限块式 OpenAPI YAML、显式 `METHOD /path` 接口说明、受管 API 实现、固定 Knowledge Chunk，以及当前环境中有效的探索结果；探索保留运行时观察等级，不升级为需求事实。未读部分、无关文件、Hash 或作用域漂移不构成证据。历史读取记录缺少新增的可选来源元数据时必须重新读取，不回写历史 Snapshot/Hash；旧 Binding 按新校验策略重新验证。无法解析的动态 Endpoint、复杂 YAML/外部 `$ref` 或缺少接口关联时，需提供可解析的固定契约或人工补充后重试。
+API 生成门禁按真实服务端读取记录、项目/版本/Run/Workspace 作用域、内容 Hash 和 Endpoint/Method 相关性认可证据，目录不再决定可信。支持固定 OpenAPI JSON、受限块式 OpenAPI YAML、显式 `METHOD /path` 接口说明、受管 API 实现、固定 Knowledge Chunk，以及当前环境中有效的探索结果；探索保留运行时观察等级，不升级为需求事实。未读部分、无关文件、Hash 或作用域漂移不构成证据。历史读取记录缺少新增的可选来源元数据时必须重新读取，不回写历史 Snapshot/Hash；旧 Binding 按新校验策略重新验证。
+
+固定契约的 `GET /api/tasks/{id}` 可关联 ``request.get(`/api/tasks/${created.id}`)``、`request.get('/api/tasks/' + created.id)`、简单 `const` 路径引用及 `encodeURIComponent(id)`，支持创建资源后使用实际返回 ID 查询、修改和删除。动态值只占据契约声明的一个完整参数段，Method 和固定路径段仍须匹配；动态实现或单次观察不会自行生成参数通配契约。静态匹配只证明契约关联，Runner 在临时执行副本中校验实际参数，保留冻结源码 Hash 和网络目标限制；空值、斜杠/反斜杠、`.`/`..`、查询/片段符号、控制字符及编码后的结构字符均拒绝，捕获错误也不能使 Attempt 通过。普通空格、中文 ID 可用 `encodeURIComponent` 编码。动态 Host、完整动态路径、部分路径段插值、动态 Method、复杂表达式及动态查询串尚不支持（查询参数使用 Playwright `params`）；复杂 YAML/外部 `$ref` 或缺少接口关联仍需固定契约或人工补充。
 
 ### Playwright Generator 可行性
 
