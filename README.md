@@ -293,6 +293,14 @@ npm run start:worker:dist
 
 FailureAnalysisAgent 只分析结构化 Attempt/Event、脱敏日志和 Screenshot/Trace/HTTP 证据，提出类别、修复建议或人工处理建议。它不能把失败改为通过、覆盖正式 Revision、更新 Binding、删除核心断言或弱化业务预期。明确网络不可达、受管认证/配置错误和数据未就绪由确定性规则优先收口；Runner 基础设施异常保留有限退避重试。裸 401/403、一般超时或证据不足不会被强行归因为认证失败或产品缺陷。Service 拥有最终状态及修复预算；修复保留旧 Revision，创建新候选，通过 Validator 后必须再次由 Runner 真实执行。
 
+测试执行 Validator 允许 URL 作为业务输入、响应字段和断言值。真实请求仍由 Runner 按 Run 冻结的 `environment.targets` 限制目标，包含动态拼接地址、浏览器请求、API 请求和重定向；被拒绝的请求即使被脚本捕获，也不能使 Attempt 通过。入口与依赖的内容 Hash 保持不变，Runner 在临时执行目录提供受管 Playwright 模块。WebSocket Upgrade 和 HTTPS CONNECT 同样限制在冻结目标内；HTTPS/WSS 的真实 TLS 环境仍需独立验收。
+
+UI 导航支持入口直接调用及依赖闭包内可证明实际执行的 helper、Page Object 调用。未调用、不可达或未等待的导航不能建立证明；无法证明的动态分派和仅在 fixture 中导航仍返回明确的不支持诊断。持久化校验依据冻结 Verification Check 的明确要求，检查写操作后回读/刷新的结果是否被对应受保护断言使用；“仍然”“不存在”等孤立词不会让只读查询被要求写入。通用 JavaScript 控制流和任意 fixture 的运行时语义证明尚未实现。
+
+HTTP 404/405 不再直接触发脚本修复。只有冻结 Verification Check 明确要求该 HTTP 状态才作为业务预期；标题、步骤或普通数字不算。完整且已读取的固定 OpenAPI 契约证明同一路径的方法错误时，Service 可以确定性归为 `script_defect`，并记录契约、Hash、读取及执行证据。契约符合时交由 FailureAnalysisAgent 结合环境、数据和终态证据分析，产品缺陷仍待人工确认；契约缺失、冲突或根因不足时进入 `unknown`/人工处理。不根据文档中未出现某个路径就认定路径错误。
+
+API 生成门禁按真实服务端读取记录、项目/版本/Run/Workspace 作用域、内容 Hash 和 Endpoint/Method 相关性认可证据，目录不再决定可信。支持固定 OpenAPI JSON、受限块式 OpenAPI YAML、显式 `METHOD /path` 接口说明、受管 API 实现、固定 Knowledge Chunk，以及当前环境中有效的探索结果；探索保留运行时观察等级，不升级为需求事实。未读部分、无关文件、Hash 或作用域漂移不构成证据。历史读取记录缺少新增的可选来源元数据时必须重新读取，不回写历史 Snapshot/Hash；旧 Binding 按新校验策略重新验证。无法解析的动态 Endpoint、复杂 YAML/外部 `$ref` 或缺少接口关联时，需提供可解析的固定契约或人工补充后重试。
+
 ### Playwright Generator 可行性
 
 当前锁定 `@playwright/test` / Playwright 1.58.2 和 `@playwright/cli` 0.1.18。官方 [codegen](https://playwright.dev/docs/codegen) 主要提供交互式录制；[Test Agents](https://playwright.dev/docs/test-agents) 提供 Agent 定义及工具工作流，未提供适合当前 CLI-first 服务端直接嵌入的稳定 Generator SDK。因此本轮**未接入完整官方 Generator**，未调用内部模块、创建空 Adapter 或增加不可用页面按钮，正式 Generator 集成留待公开接口和运行模式匹配后再评估。

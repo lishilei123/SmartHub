@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { access, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { CURRENT_EXECUTION_BINDING_VALIDATION_POLICY } from '../server/application/test-execution-validation.js'
 import {
   executionBindingDependencySha256,
   LocalExecutionWorkspaceStore,
@@ -26,7 +27,7 @@ test('旧PASS不能覆盖并发发布的新Binding，只有精确匹配的执行
         entryFile, entrySymbol: '[CASE_CAS]', bindingStatus: 'needs_validation',
         entrySha256: hash(source), caseContentSha256: 'a'.repeat(64),
         dependencyFiles, dependencySha256: executionBindingDependencySha256(dependencyFiles),
-        validationPolicyVersion: 'execution-binding-validation/v10',
+        validationPolicyVersion: CURRENT_EXECUTION_BINDING_VALIDATION_POLICY,
         createdAt: '2026-09-05T00:00:00.000Z', updatedAt: '2026-09-05T00:00:00.000Z',
       }
     }

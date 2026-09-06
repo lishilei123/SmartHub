@@ -556,7 +556,7 @@ test('API 登录 [TC_API_LOGIN_001]', async ({ request }) => {
   }))
 })
 
-test('API 404/405 路由失败由 Service 确定性裁决为可修复脚本缺陷', () => {
+test('API 404/405 只有可信完整契约证明方法错误才进入脚本修复', () => {
   const task = apiTaskInput()
   const candidate = {
     category: 'assertion_mismatch' as const,
@@ -576,8 +576,19 @@ test('API 404/405 路由失败由 Service 确定性裁决为可修复脚本缺�
     metadata: { httpStatus: 405, method: 'PATCH', path: '/api/tasks/:id' },
   }
   const adjudicated = adjudicateFailureDiagnosisCandidate(candidate, task, [event])
-  assert.equal(adjudicated.category, 'script_defect')
-  assert.match(adjudicated.reason, /PATCH \/api\/tasks\/:id.*405/u)
+  assert.equal(adjudicated.category, 'unknown')
+  const contracts = [{ method: 'PUT', path: '/api/tasks/:id', sourceRef: 'docs/openapi.json#sha256', kind: 'contract' as const, methodsComplete: true }]
+  const proven = adjudicateFailureDiagnosisCandidate(candidate, task, [event], contracts)
+  assert.equal(proven.category, 'script_defect')
+  assert.match(proven.evidence, /docs\/openapi.json#sha256/u)
+  const conforms = [{ ...contracts[0], method: 'PATCH' }]
+  const product = { category: 'product_defect' as const, reason: '独立终态证据违反冻结业务预期', evidence: '固定契约及终态响应' }
+  assert.equal(adjudicateFailureDiagnosisCandidate(product, task, [event], conforms), product)
+  assert.equal(adjudicateFailureDiagnosisCandidate(product, task, [event]).category, 'unknown')
+  assert.equal(adjudicateFailureDiagnosisCandidate(candidate, task, [event], [{ ...contracts[0], methodsComplete: false }]).category, 'unknown')
+  assert.match(proven.reason, /PATCH.*405/u)
+  const incidental = { ...task, caseContent: { ...task.caseContent, title: '资源 405', expectedResults: ['编号405的资源正常返回', '响应状态码不得为405'] } }
+  assert.equal(adjudicateFailureDiagnosisCandidate(candidate, incidental, [event]).category, 'unknown')
 
   const explicitCase = {
     ...task,

@@ -56,6 +56,7 @@ import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import { resolveAuthSessionPolicy } from './test-execution-auth-session.js'
 import { governedExecutionEntryFile } from './test-execution-entry.js'
 import { createProjectVersionExplorationResult } from './test-execution-exploration.js'
+import { apiContractEvidenceIssues, resolveApiContractEvidence } from './test-execution-api-contract.js'
 import {
   assertExecutionPackageIntegrity,
   adjudicateFailureDiagnosisCandidate,
@@ -891,6 +892,7 @@ export class TestExecutionService {
       ? (await this.executionWorkspace.snapshot(run.projectVersionId)).files
       : []
     const entryFile = governedExecutionEntryFile(task.input)
+    let acceptedCandidateSha256: string | undefined
     const output = await this.withBrowserSession(
       run,
       task,
@@ -914,11 +916,14 @@ export class TestExecutionService {
             workspaceFiles,
           })
           return normalized
-        }, task.input.method),
+        }, task, workspace, run, workspaceFiles, candidate => { acceptedCandidateSha256 = canonicalSha256(candidate) }),
       }, signal),
     )
     throwIfWorkerStopped(signal)
     assertAgentOutputSchema(output, 'test-script-generation/v1')
+    if (!acceptedCandidateSha256 || acceptedCandidateSha256 !== canonicalSha256(packageCandidate(output.candidate, 'test-script-generation/v1'))) {
+      throw new Error('TEST_EXECUTION_GENERATION_VALIDATED_CANDIDATE_REQUIRED')
+    }
     const executionPackage = buildExecutionPackage({
       candidate: governedPackageCandidate(
         packageCandidate(output.candidate, 'test-script-generation/v1'),
@@ -1540,6 +1545,8 @@ export class TestExecutionService {
     const diagnosticLogPaths = workspace.workspaceFiles
       .map(file => workspaceRelativePath(workspace, file.logicalPath))
       .filter(path => path.startsWith(terminalAttemptEvidenceRoot) && path.endsWith('.log'))
+    let contractEvidence: ReturnType<typeof resolveApiContractEvidence> = []
+    const validateDiagnosis = failureDiagnosisCandidateValidator(validate, diagnosticLogPaths)
     throwIfWorkerStopped(signal)
     const output = await this.agentRuntime.execute({
       stage: 'failure_diagnosis',
@@ -1552,12 +1559,16 @@ export class TestExecutionService {
         attemptIds,
         artifactIds,
       },
-      validateCandidate: failureDiagnosisCandidateValidator(validate, diagnosticLogPaths),
+      validateCandidate: async (candidate, manifest) => {
+        const result = await validateDiagnosis(candidate, manifest)
+        if (result.valid) contractEvidence = resolveApiContractEvidence(manifest, workspace, run)
+        return result
+      },
     }, signal)
     throwIfWorkerStopped(signal)
     assertAgentOutputSchema(output, 'failure-analysis/v1')
     const agentCandidate = validate(output.candidate)
-    const candidate = adjudicateFailureDiagnosisCandidate(agentCandidate, task.input, events)
+    const candidate = adjudicateFailureDiagnosisCandidate(agentCandidate, task.input, events, contractEvidence)
     const deterministicallyAdjudicated = candidate !== agentCandidate
     const policy = failureDiagnosisPolicy(candidate.category)
     const evidenceAttempt = attempts.at(-1)!
@@ -1720,6 +1731,7 @@ export class TestExecutionService {
         displayName: `Execution Workspace · ${file.path}`,
         content: file.content,
         contentSha256: file.contentSha256,
+        evidenceKind: /\.(?:[cm]?[jt]s)$/iu.test(file.path) ? 'implementation' as const : 'contract' as const,
       })))
       const explorationResults = await this.executionWorkspace.listExplorationResults(run.projectVersionId)
       if (explorationResults.length) {
@@ -1736,6 +1748,7 @@ export class TestExecutionService {
           displayName: 'ProjectVersion Exploration Context · Runtime Observed Knowledge',
           content,
           contentSha256: sha256(content),
+          evidenceKind: 'observation',
         })
       }
       projection.workspaceFiles.sort((left, right) => left.logicalPath.localeCompare(right.logicalPath, 'en'))
@@ -2506,30 +2519,31 @@ function candidateValidator<T>(validate: (candidate: Record<string, unknown>) =>
 
 function scriptGenerationCandidateValidator<T>(
   validate: (candidate: Record<string, unknown>) => T,
-  method: FrozenExecutionTaskInput['method'],
+  task: ExecutionTask,
+  workspace: TestExecutionAgentWorkspaceProjection,
+  run: ExecutionRun,
+  workspaceFiles: readonly ExecutionPackageFile[],
+  onAccepted: (candidate: Record<string, unknown>) => void,
 ) {
   return async (candidate: Record<string, unknown>, manifest: InputDeliveryManifest) => {
-    if (method === 'api' && !hasTrustedApiContractRead(manifest)) {
+    if (task.input.method === 'api') {
+      let issues: string[]
+      try {
+        const normalized = governedPackageCandidate(packageCandidate(candidate, 'test-script-generation/v1'), governedExecutionEntryFile(task.input))
+        const closure = buildExecutionPackage({ candidate: normalized, task: { ...task.input, taskId: task.id }, environmentSignature: run.environment.signature, workspaceFiles })
+        issues = apiContractEvidenceIssues({ ...normalized, files: closure.files }, resolveApiContractEvidence(manifest, workspace, run))
+      } catch (error) { issues = [error instanceof Error ? error.message : String(error)] }
+      if (issues.length) {
       return {
         valid: false,
-        issues: [{
-          path: '/contractEvidence',
-          message: 'API 脚本提交前必须读取可信契约证据：/exploration/context.json、execution/api|helpers|fixtures、已有 execution/tests/api，或 Run 固定 Knowledge Chunk；禁止凭经验猜测 Endpoint、HTTP Method、Payload 或认证流程',
-        }],
+        issues: issues.map(message => ({ path: '/contractEvidence', message })),
+      }
       }
     }
-    return candidateValidator(validate)(candidate, manifest)
+    const validated = await candidateValidator(validate)(candidate, manifest)
+    if (validated.valid) onAccepted(validated.result as Record<string, unknown>)
+    return validated
   }
-}
-
-function hasTrustedApiContractRead(manifest: InputDeliveryManifest) {
-  if (manifest.knowledgeReads?.some(read => read.toolId === 'knowledge.read_chunk')) return true
-  return (manifest.toolReads ?? []).some(read => {
-    const path = read.relativePath.replaceAll('\\', '/').replace(/^\.\//u, '')
-    return path === 'exploration/context.json'
-      || /^execution\/(?:api|helpers|fixtures)\//u.test(path)
-      || /^execution\/tests\/api\//u.test(path)
-  })
 }
 
 function failureDiagnosisCandidateValidator<T>(

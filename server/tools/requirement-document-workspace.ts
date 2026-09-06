@@ -11,6 +11,7 @@ import type { AssetVersion } from '../domain/types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
 import { ToolRegistry } from './registry.js'
+import { executionReadEvidence } from '../application/test-execution-api-contract.js'
 
 export const REQUIREMENT_WORKSPACE_TOOL_IDS = [
   'workspace.read_file',
@@ -115,6 +116,7 @@ export class RequirementDocumentWorkspace {
         ...(file.sourceScope ? { sourceScope: file.sourceScope } : {}),
         ...range,
         ...(replay ? { replayed: true, replayedFromToolCallId: replay.toolCallId } : {}),
+        ...('executionSessionKey' in this.snapshot ? { executionEvidence: executionReadEvidence(this.snapshot, file.contentHash) } : {}),
       })
       return {
         data: {

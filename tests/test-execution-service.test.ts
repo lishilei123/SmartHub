@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { canonicalSha256 } from '../server/application/canonical-json.js'
+import { executionReadEvidence } from '../server/application/test-execution-api-contract.js'
 import { governedExecutionEntryFile } from '../server/application/test-execution-entry.js'
 import {
   TestExecutionInfrastructureError,
@@ -819,34 +820,18 @@ class ScriptAgentRuntime implements TestExecutionAgentRuntime {
               assetVersionIds: [],
               chunkIds: [],
             }))
-        : input.stage === 'script_generation'
-          && input.task.input.method === 'api'
-          && input.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/exploration/context.json'))
-          ? [{
-              toolCallId: 'fixture-api-contract-read',
+        : input.stage === 'script_generation' && input.task.input.method === 'api'
+          ? input.workspace.workspaceFiles.filter(file => file.evidenceKind === 'contract').map((file, index) => ({
+              toolCallId: `fixture-api-contract-read-${index}`,
               toolId: 'workspace.read_file' as const,
-              relativePath: 'exploration/context.json',
-              contentHash: 'fixture-contract',
+              relativePath: workspaceRelativePath(input.workspace, file.logicalPath),
+              executionEvidence: executionReadEvidence(input.workspace, file.contentSha256),
               startLine: 1,
-              endLine: 1,
+              endLine: file.content.split('\n').length,
               assetVersionIds: [],
               chunkIds: [],
-            }]
+            }))
           : [],
-      knowledgeReads: input.stage === 'script_generation'
-        && input.task.input.method === 'api'
-        && !input.workspace.workspaceFiles.some(file => file.logicalPath.endsWith('/exploration/context.json'))
-        ? [{
-            toolCallId: 'fixture-knowledge-contract-read',
-            toolId: 'knowledge.read_chunk' as const,
-            chunkId: 'fixture-api-contract',
-            assetVersionId: 'fixture-api-contract-version',
-            logicalPath: 'api/openapi.json',
-            sourceScope: 'knowledge_reference' as const,
-            contentHash: 'fixture-contract',
-            indexVersionId: 'fixture-index',
-          }]
-        : [],
     })
     assert.equal(validated.valid, true, JSON.stringify(validated.issues))
     return {
@@ -1091,7 +1076,15 @@ async function withService(
       store,
       runtime,
       artifactStore,
-      new FrozenTestExecutionWorkspaceProvider(store, artifactStore),
+      {
+        async project(input) {
+          const projection = await new FrozenTestExecutionWorkspaceProvider(store, artifactStore).project(input)
+          // State-machine fixture: explicit frozen contract plus a matching server read record.
+          const content = JSON.stringify({ openapi: '3.0.3', paths: { '/api/login': { post: {} }, '/api/tasks': { get: {} } } })
+          projection.workspaceFiles.push({ logicalPath: `${projection.documentWorkspace.logicalPath}/docs/interface.json`, displayName: 'Frozen fixture API contract', content, contentSha256: createHash('sha256').update(content).digest('hex'), evidenceKind: 'contract' })
+          return projection
+        },
+      },
       {
         async readiness() {
           return options.environmentReadiness ?? { ready: true }
@@ -1133,6 +1126,24 @@ test('TestExecutionService 将环境配置和 secret 来源纳入总 readiness',
     },
   })
 })
+
+for (const status of [404, 405]) {
+  test(`Service HTTP ${status} 缺少接口根因证据进入人工处理且不修复（状态机替身）`, async () => {
+    const failure: SandboxExecutionResult = {
+      status: 'failed', exitCode: 1, durationMs: 5, summary: 'HTTP assertion failed', artifacts: [],
+      events: [{ sequence: 1, type: 'http', status: 'failed', title: `POST /api/login · ${status}`, startedAt: '2026-08-13T12:00:00.000Z', metadata: { method: 'POST', path: '/api/login', httpStatus: status } }],
+    }
+    await withService([failure], async ({ service, store, runtime, runner, job }) => {
+      store.task = { ...store.task, input: frozenApiInput() }
+      const task = await service.processPreparedTask(job, lease, new AbortController().signal)
+      assert.equal(task.status, 'waiting_manual')
+      assert.equal(store.diagnoses.at(-1)?.category, 'unknown')
+      assert.equal(runtime.calls.some(call => call.stage === 'script_repair'), false)
+      assert.equal(runner.calls.length, 1)
+      assert.equal(store.revisions.length, 1)
+    }, { workspace: true, diagnosisCategory: 'script_defect' })
+  })
+}
 
 test('已有有效 API Execution Binding 时 Execute First 直接运行 request fixture 依赖闭包', async () => {
   await withService([

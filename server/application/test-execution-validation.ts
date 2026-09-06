@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
 import { parse } from '@babel/parser'
 import type { CallExpression, Node } from '@babel/types'
+import { verificationCheckRequiresHttpStatus } from './test-execution-http-expectation.js'
+import { apiPathMatches } from './test-execution-api-contract.js'
 import { canonicalJson, canonicalSha256 } from './canonical-json.js'
 import type {
   ExecutionAssertionContract,
@@ -27,6 +29,7 @@ import type {
   TestExecutionHandoffMember,
 } from '../domain/test-design-types.js'
 import { resolveAuthSessionPolicy } from './test-execution-auth-session.js'
+import { proveExecutionSource, type ExecutionSourceProof } from './execution-source-proof.js'
 
 export const EXECUTION_PACKAGE_LIMITS = {
   maximumCandidateFiles: 16,
@@ -93,7 +96,7 @@ const allowedExternalStaticImports = new Set([
   GOVERNED_UI_API_TEST_MODULE,
 ])
 const allowedWorkspaceSourceRoots = new Set(['tests', 'api', 'pages', 'helpers', 'fixtures'])
-export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v10' as const
+export const CURRENT_EXECUTION_BINDING_VALIDATION_POLICY = 'execution-binding-validation/v11' as const
 const forbiddenHttpClientModules = new Set([
   'axios',
   'superagent',
@@ -360,6 +363,8 @@ function buildExecutionPackageWithPolicy(
     enforceInitialUiNavigation,
     resolveAuthSessionPolicy(input.task).mode,
     Boolean(input.task.testDataBindings?.length),
+    files,
+    entrypoint,
   )
   if (input.baselineAssertions) assertProtectedAssertions(input.baselineAssertions, assertions)
   const protectedAssertionSha256 = canonicalSha256(assertions)
@@ -533,35 +538,51 @@ export function deterministicFailureDiagnosisCandidate(
   return undefined
 }
 
+export interface VerifiedApiFailureContract {
+  method: string
+  path: string
+  sourceRef: string
+  kind: 'contract' | 'implementation' | 'observation'
+  methodsComplete?: boolean
+  contentSha256?: string
+  toolCallId?: string
+}
+
 export function adjudicateFailureDiagnosisCandidate(
   candidate: FailureDiagnosisCandidate,
   task: Pick<FrozenExecutionTaskInput, 'method' | 'caseContent'>,
   events: readonly ExecutionEvent[],
+  contracts: readonly VerifiedApiFailureContract[] = [],
 ): FailureDiagnosisCandidate {
   if (task.method !== 'api') return candidate
-  const routeFailure = events.find(event => (
-    event.type === 'http'
+  const routeFailures = events.filter(event => event.type === 'http'
     && event.status === 'failed'
-    && (event.metadata?.httpStatus === 404 || event.metadata?.httpStatus === 405)
-  ))
-  if (!routeFailure) return candidate
-  const status = Number(routeFailure.metadata?.httpStatus)
-  const frozenSemantics = [
-    task.caseContent.title,
-    ...task.caseContent.preconditions,
-    ...task.caseContent.steps,
-    ...task.caseContent.expectedResults,
-  ].join('\n')
-  if (new RegExp(`(?:^|\\D)${status}(?:$|\\D)`, 'u').test(frozenSemantics)) return candidate
-  const method = typeof routeFailure.metadata?.method === 'string' ? routeFailure.metadata.method : 'HTTP'
-  const path = typeof routeFailure.metadata?.path === 'string' ? routeFailure.metadata.path : '未知路径'
-  return {
-    category: 'script_defect',
-    reason: `Runner 观察到 ${method} ${path} 返回 HTTP ${status}，冻结 TestCase 未要求该路由失败；这说明脚本使用的 API 路径或方法契约不成立`,
-    evidence: `结构化 HTTP Event ${routeFailure.id} 在 Attempt ${routeFailure.attemptId} 中记录 ${method} ${path} · ${status}`,
+    && (event.metadata?.httpStatus === 404 || event.metadata?.httpStatus === 405))
+  if (!routeFailures.length) return candidate
+  for (const event of routeFailures) {
+    const status = Number(event.metadata?.httpStatus)
+    if (task.caseContent.expectedResults.some(check => verificationCheckRequiresHttpStatus(check, status))) continue
+    const method = typeof event.metadata?.method === 'string' ? event.metadata.method.toUpperCase() : ''
+    const path = typeof event.metadata?.path === 'string' ? event.metadata.path : ''
+    const relevant = contracts.filter(contract => apiPathMatches(contract.path, path))
+    const matching = relevant.some(contract => contract.method === method)
+    const formal = relevant.filter(contract => contract.kind === 'contract' && contract.methodsComplete === true)
+    // A document's silence about a path is not proof of an invalid route.
+    if (!matching && formal.length && method) return {
+      category: 'script_defect',
+      reason: `可信固定契约明确列出 ${path} 的方法 ${formal.map(item => item.method).join('/')}，实际请求使用 ${method} 并返回 HTTP ${status}；需依据契约修复方法后重新执行`,
+      evidence: `HTTP Event ${event.id} / Attempt ${event.attemptId}: ${method} ${path} · ${status}; 契约 ${formal.map(item => `${item.sourceRef} sha256=${item.contentSha256 ?? 'unavailable'} read=${item.toolCallId ?? 'unavailable'}`).join(', ')}`,
+    }
+    if (!matching || ['script_defect', 'selector_changed', 'assertion_mismatch'].includes(candidate.category)) return {
+      category: 'unknown',
+      reason: matching
+        ? `请求符合已读取的固定接口证据；HTTP ${status} 本身不能证明脚本缺陷，需要补充环境、数据或独立实现错误证据后人工处理`
+        : `HTTP ${status} 的根因证据不足；需读取当前版本中与实际 Endpoint/Method 相关的固定契约并核对环境和测试数据，不自动修复`,
+      evidence: `HTTP Event ${event.id} / Attempt ${event.attemptId}: ${method || 'HTTP'} ${path || '未知路径'} · ${status}${matching ? `; 接口证据 ${relevant.map(item => item.sourceRef).join(', ')}` : ''}`,
+    }
   }
+  return candidate
 }
-
 export function automaticRepairAllowed(diagnosis: Pick<FailureDiagnosis, 'category'>, repairCount: number) {
   if (!Number.isInteger(repairCount) || repairCount < 0) {
     throw new TestExecutionValidationError('TEST_EXECUTION_REPAIR_COUNT_INVALID', '修复次数无效')
@@ -723,9 +744,33 @@ function inspectWorkspaceSource(path: string, source: string) {
       && node.callee.name === 'expect'
     ) rejectSource('API Client 只负责请求与复用操作，业务断言必须保留在 Case Entry')
     if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && forbiddenIdentifiers.has(node.callee.name)) rejectSource(`不允许构造 ${node.callee.name}`)
-    const literal = staticTextLiteral(node)
-    if (literal && /^https?:\/\//iu.test(literal)) {
-      rejectSource('Playwright page/request 必须使用当前 ExecutionRun baseUrl，禁止硬编码绝对 Host')
+    // URLs used as field values or expected response data are not requests.
+    // Dynamic targets are checked again by the Runner's frozen-target network
+    // boundary; package validation alone never verifies a Binding.
+    if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
+      const method = propertyName(node.callee.property)
+      if (method === 'extend' || method === 'use'
+        && node.callee.object.type === 'Identifier' && node.callee.object.name === 'test') {
+        const fixtures = node.arguments[0]
+        if (fixtures?.type !== 'ObjectExpression' || fixtures.properties.some(property =>
+          property.type === 'SpreadElement'
+          || property.computed
+          || ['page', 'request', 'browser', 'context'].includes(propertyName(property.key) ?? ''))) {
+          rejectSource('当前不支持覆盖 page/request/browser/context 或无法解析的 fixture；不能用自定义假 page 或未执行的 fixture 导航证明真实 UI/API 执行')
+        }
+      }
+      if (method && /^(?:browserType|launch|launchPersistentContext|launchServer|connect|connectOverCDP)$/u.test(method)) {
+        rejectSource('不支持绕过受管 Playwright fixture 创建或连接 Browser；实际执行必须保留冻结目标网络边界')
+      }
+      const target = node.arguments[0] && staticTextLiteral(node.arguments[0])
+      const receiver = node.callee.object
+      const directNetworkReceiver = receiver.type === 'Identifier' && ['page', 'request'].includes(receiver.name)
+        || receiver.type === 'MemberExpression' && ['page', 'request'].includes(propertyName(receiver.property) ?? '')
+      if (method && /^(?:goto|get|post|put|patch|delete|head|options|fetch)$/u.test(method)
+        && directNetworkReceiver
+        && target && /^(?:https?:)?\/\//iu.test(target)) {
+        rejectSource('实际网络请求必须使用当前 ExecutionRun BaseURL 下的相对地址；绝对请求目标需要冻结目标策略验证，不能由业务 URL 字面量推定授权')
+      }
     }
     if (
       node.type === 'ObjectProperty'
@@ -745,11 +790,14 @@ function validateEntrypointSource(
   enforceInitialUiNavigation: boolean,
   authSessionMode: ReturnType<typeof resolveAuthSessionPolicy>['mode'],
   hasFrozenTestDataBindings: boolean,
+  files: readonly Pick<ExecutionPackageFile, 'path' | 'content'>[],
+  entrypoint: string,
 ): ExecutionAssertionContract[] {
   const ast = parseWorkspaceSource(source)
   const callback = entryTestCallback(ast, caseId)
   assertAuthIsolation(ast, executionSpec)
-  assertBusinessClosure(ast, executionSpec)
+  const sourceProof = proveExecutionSource({ files, entrypoint, callback, method: executionSpec.method })
+  assertBusinessClosure(sourceProof, executionSpec)
   assertSymbolicTestDataRealization(source, callback, executionSpec, hasFrozenTestDataBindings)
   const fixtures = callbackFixtureNames(callback)
   const governedUiApiImport = importsModule(ast, GOVERNED_UI_API_TEST_MODULE)
@@ -780,7 +828,7 @@ function validateEntrypointSource(
   ) {
     rejectSource(`已登录 UI Case 使用 request 辅助准备时，入口 test 必须从 ${GOVERNED_UI_API_TEST_MODULE} 导入`)
   }
-  if (executionSpec.method === 'ui' && enforceInitialUiNavigation) assertInitialUiNavigation(callback)
+  if (executionSpec.method === 'ui' && enforceInitialUiNavigation) assertInitialUiNavigation(sourceProof)
   if (executionSpec.method === 'api') assertStructuredApiResponseEvidence(callback)
   const anchors = new Map<string, { matcher: string; modifiers: string[]; expected: Node | null; received: Node }>()
   walkAst(callback, (node) => {
@@ -879,9 +927,8 @@ function assertGenericClientErrorExcludesRouteFailures(
     ) excludedStatuses.add(expected.value)
   })
   if (!lowerBound || !upperBound) return
-  const frozenSemantics = checks.map(check => check.description).join('\n')
   const missing = [404, 405].filter(status => (
-    !new RegExp(`(?:^|\\D)${status}(?:$|\\D)`, 'u').test(frozenSemantics)
+    !checks.some(check => verificationCheckRequiresHttpStatus(check.description, status))
     && !excludedStatuses.has(status)
   ))
   if (!missing.length) return
@@ -918,7 +965,7 @@ function assertFrozenApiStatusSemantics(
     || !statusExpression
   ) return
   const status = assertion.expected.value
-  if (new RegExp(`(?:^|\\D)${status}(?:$|\\D)`, 'u').test(verificationCheck)) return
+  if (verificationCheckRequiresHttpStatus(verificationCheck, status)) return
   rejectSource(
     `Verification Check 未固定 HTTP ${status}，API 异常场景不能把通用拒绝结果收窄成单一状态码；应校验冻结的业务错误语义，并只对 4xx 范围或明确允许的状态集合做保护性检查`,
   )
@@ -992,32 +1039,9 @@ function symbolicTestDataRoles(testCase: TestCaseContent) {
   return [...result].sort((left, right) => left.localeCompare(right, 'en'))
 }
 
-function assertInitialUiNavigation(callback: Node) {
-  const pageBinding = callbackFixtureBinding(callback, 'page')
-  if (!pageBinding) rejectSource('UI Case 必须使用 Playwright page 完成真实 UI 测试目标')
-  let navigationPosition: number | undefined
-  let firstPageInteractionPosition: number | undefined
-  walkAst(callback, node => {
-    if (
-      node.type !== 'CallExpression'
-      || node.callee.type !== 'MemberExpression'
-      || node.callee.computed
-      || node.callee.object.type !== 'Identifier'
-      || node.callee.object.name !== pageBinding
-      || node.callee.property.type !== 'Identifier'
-    ) return
-    const method = node.callee.property.name
-    const position = node.start ?? Number.MAX_SAFE_INTEGER
-    if (method === 'goto') navigationPosition = Math.min(navigationPosition ?? position, position)
-    if (uiPageInteractionMethod(method)) {
-      firstPageInteractionPosition = Math.min(firstPageInteractionPosition ?? position, position)
-    }
-  })
-  if (navigationPosition === undefined || (
-    firstPageInteractionPosition !== undefined
-    && navigationPosition > firstPageInteractionPosition
-  )) {
-    rejectSource('UI Case 必须在读取 Locator 或执行页面交互前通过 page.goto(relativeUrl) 导航到当前 ExecutionRun BaseURL 下的页面')
+function assertInitialUiNavigation(proof: ExecutionSourceProof) {
+  if (!proof.navigation || proof.interactionBeforeNavigation || !proof.uiAssertionKeys.size) {
+    rejectSource('UI Case 必须通过 page.goto(relativeUrl) 或依赖闭包内可证明实际调用的受管 helper/Page Object 完成导航，并执行真实页面断言；当前不支持无法证明的动态封装或 fixture 导航，请改用可验证封装，不能仅凭存在 goto 代码验证 Binding')
   }
 }
 
@@ -1043,10 +1067,6 @@ function importsModule(ast: ReturnType<typeof parse>, moduleName: string) {
     imported ||= node.type === 'ImportDeclaration' && String(node.source.value) === moduleName
   })
   return imported
-}
-
-function uiPageInteractionMethod(method: string) {
-  return /^(?:locator|frameLocator|getByAltText|getByLabel|getByPlaceholder|getByRole|getByTestId|getByText|getByTitle|click|dblclick|fill|press|pressSequentially|check|uncheck|selectOption|setChecked|setInputFiles|dragAndDrop|hover|focus|type|waitForSelector|waitForURL|reload|goBack|goForward)$/u.test(method)
 }
 
 function assertAuthIsolation(
@@ -1096,37 +1116,20 @@ function authIsolationRequired(testCase: TestCaseContent) {
 }
 
 function assertBusinessClosure(
-  ast: ReturnType<typeof parse>,
+  proof: ExecutionSourceProof,
   executionSpec: TestCaseExecutionSpec,
 ) {
-  const expected = executionSpec.testCase.expectedResults.join('\n').toLocaleLowerCase()
-  const requiresReadBack = /(?:查询确认|查询成功|再次查询|重新查询|刷新后|重新进入|重新打开|仍为|仍然|持久化|最终状态|不存在|删除后|read\s*back|re-?query|reload|refresh|re-?enter|persisted|eventual\s+state|no\s+longer\s+exists)/iu.test(expected)
-  if (!requiresReadBack) return
-  const mutationPositions: number[] = []
-  const readBackPositions: number[] = []
-  walkAst(ast, node => {
-    if (
-      node.type !== 'CallExpression'
-      || node.callee.type !== 'MemberExpression'
-      || node.callee.computed
-      || node.callee.property.type !== 'Identifier'
-    ) return
-    const method = node.callee.property.name.toLocaleLowerCase()
-    const position = node.start ?? -1
-    if (executionSpec.method === 'api') {
-      if (/^(?:post|put|patch|delete|create|update|remove|save|submit|transition|complete|cancel|approve|reject|publish|archive|restore|assign|set[a-z0-9_]*)$/u.test(method)) mutationPositions.push(position)
-      if (/^(?:get|read|find|detail|query|list|fetch|reload|refresh)$/u.test(method)) readBackPositions.push(position)
-    } else {
-      if (/^(?:click|dblclick|fill|press|presssequentially|check|uncheck|selectoption|setchecked|dragto)$/u.test(method)) mutationPositions.push(position)
-      if (/^(?:reload|goto|waitforurl)$/u.test(method)) readBackPositions.push(position)
-    }
-  })
-  const readBackObserved = mutationPositions.some(mutation =>
-    readBackPositions.some(readBack => readBack > mutation))
-  if (!readBackObserved) {
-    rejectSource(executionSpec.method === 'api'
-      ? 'Expected Result 要求持久化业务闭环，API 脚本必须包含后续读取/查询并通过受保护断言验证最终状态'
-      : 'Expected Result 要求持久化业务闭环，UI 脚本必须刷新、重新进入或重新导航并通过受保护断言验证最终状态')
+  // Historical v1 inputs contain unchanged v3 cases, not structured persistence
+  // metadata. Require both frozen mutation intent and an explicit persistence
+  // expectation. Words such as "不存在" / "仍然" alone impose no write operation.
+  const mutationIntent = /(?:修改|更新|保存|提交|删除|新增|创建|完成|取消|审批|发布|归档|恢复|分配|\b(?:update|modify|save|submit|delete|create|publish|archive|restore|assign)\b)/iu.test(executionSpec.testCase.steps.join('\n'))
+    || verificationChecks(executionSpec).some(check => /(?:修改|更新|保存|提交|删除|新增|创建)后|after\s+(?:updating|modifying|saving|deleting|creating)/iu.test(check.description))
+  if (!mutationIntent) return
+  const persistenceChecks = verificationChecks(executionSpec).filter(check =>
+    /(?:持久化|(?:刷新|重新(?:查询|进入|打开)|再次查询|回读).{0,30}(?:后|仍|保持|确认)|(?:修改|更新|保存|删除)后.{0,30}(?:仍|保持|不存在)|persist(?:ed|ence)|read\s*back|(?:after\s+(?:reload|refresh|re-?query)).{0,30}(?:remain|still|persist))/iu.test(check.description))
+  const missing = persistenceChecks.filter(check => !proof.persistedAssertionKeys.has(check.key))
+  if (missing.length) {
+    rejectSource(`冻结 Verification Check ${missing.map(check => check.key).join('、')} 明确要求持久化业务闭环；必须在真实写操作后的回读/刷新结果上执行对应受保护断言。支持依赖闭包内可证明的 helper/Page Object；无法证明的动态封装或 fixture 需人工处理，不能按方法名或源码位置推定闭环`)
   }
 }
 

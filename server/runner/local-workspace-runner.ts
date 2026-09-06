@@ -4,6 +4,7 @@ import { createReadStream } from 'node:fs'
 import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import JSZip, { type JSZipObject } from 'jszip'
 import type {
   ExecutionEventStatus,
@@ -22,6 +23,7 @@ import type { ExecutionEnvironmentSecretResolver, PlaywrightRunner } from './pla
 import type { RunnerArtifactObject, SandboxExecutionResult } from './execution-sandbox.js'
 import type { ExecutionArtifactStore } from '../infrastructure/execution-artifact-store.js'
 import { withWindowsHiddenNodeChildren } from './windows-child-process.js'
+import { createExecutionNetworkProxy } from './execution-network-proxy.js'
 
 /** Local runner for the ProjectVersion-owned automation workspace. */
 export class LocalWorkspaceRunner implements PlaywrightRunner {
@@ -37,7 +39,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
   ) {
     this.playwright = playwright ?? localPlaywrightInstallation()
     this.value = {
-      runnerVersion: 'local-workspace/v10',
+      runnerVersion: 'local-workspace/v11',
       playwrightVersion: this.playwright.version,
       imageReference: 'local-workspace',
       imageDigest: `sha256:${'0'.repeat(64)}`,
@@ -125,11 +127,14 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
     // ProjectVersion workspace. Keeping the temporary root beside ProjectVersion
     // workspaces preserves normal Node module resolution up to the repository.
     const runtimeRoot = await mkdtemp(join(dirname(workspaceRoot), '.runtime-execution-'))
+    let network: Awaited<ReturnType<typeof createExecutionNetworkProxy>> | undefined
     try {
+      network = await createExecutionNetworkProxy(input.environment)
       const executionRoot = join(runtimeRoot, 'workspace')
       const configPath = join(runtimeRoot, 'playwright.config.mjs')
       const reporterPath = join(runtimeRoot, 'playwright-report.json')
       await mkdir(executionRoot, { recursive: true })
+      await writeNetworkGovernedPlaywright(runtimeRoot, this.playwright.packagePath, network.server)
       if (runtimeApiAuthorization && apiAuthorizationMode === 'isolated_ui_request_fixture') {
         await writeGovernedUiApiFixture(runtimeRoot)
       }
@@ -152,6 +157,7 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
           authStateRoot,
           authStateFile,
           Boolean(runtimeApiAuthorization && apiAuthorizationMode === 'default_request_context'),
+          network.server,
         ),
         { encoding: 'utf8' },
       )
@@ -237,8 +243,14 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         ...(artifact ? [{ ...artifact, type: 'log' as const }] : []),
         ...attachmentArtifacts,
       ]
-      const passed = exitCode === 0
+      const passed = exitCode === 0 && network.violations.length === 0
       const events = report.events.slice()
+      if (network.violations.length) events.push({
+        sequence: events.length + 1, type: 'failure', status: 'failed',
+        title: '冻结环境网络边界拒绝了请求',
+        startedAt: new Date().toISOString(), durationMs: 0,
+        metadata: { source: 'runner_network_policy', error: 'TEST_EXECUTION_NETWORK_TARGET_REJECTED' },
+      })
       if (traceEvidence.terminalPage) {
         const traceArtifacts = attachmentArtifacts.filter(item => item.type === 'trace')
         events.push(terminalPageEvent(
@@ -264,12 +276,13 @@ export class LocalWorkspaceRunner implements PlaywrightRunner {
         exitCode: exitCode ?? undefined,
         durationMs: Date.now() - started,
         summary: passed ? 'Local Playwright 通过' : 'Local Playwright 失败',
-        ...(passed ? {} : { error: `PLAYWRIGHT_EXIT_${exitCode ?? 'UNKNOWN'}` }),
+        ...(passed ? {} : { error: network.violations.length
+          ? 'TEST_EXECUTION_NETWORK_TARGET_REJECTED' : `PLAYWRIGHT_EXIT_${exitCode ?? 'UNKNOWN'}` }),
         artifacts,
         events,
       }
     } finally {
-      await rm(runtimeRoot, { recursive: true, force: true })
+      try { await network?.close() } finally { await rm(runtimeRoot, { recursive: true, force: true }) }
     }
   }
 }
@@ -311,6 +324,7 @@ export function localPlaywrightConfig(
   authStateRoot = join(outputRoot, '.runtime-auth'),
   authStatePath?: string,
   apiAuthorization = false,
+  networkProxy?: string,
 ) {
   const storageState = authStatePath ? `, storageState: ${JSON.stringify(authStatePath)}` : ''
   const runtimeAuthorization = apiAuthorization
@@ -322,11 +336,12 @@ export function localPlaywrightConfig(
   const extraHttpHeaders = apiAuthorization
     ? ', extraHTTPHeaders: { Authorization: runtimeAuthorization }'
     : ''
+  const proxy = networkProxy ? `, proxy: { server: ${JSON.stringify(networkProxy)}, bypass: '<-loopback>' }, serviceWorkers: 'block'` : ''
   return [
     "const baseURL = process.env.SMARTHUB_BASE_URL",
     "if (!baseURL) throw new Error('TEST_EXECUTION_BASE_URL_REQUIRED')",
     ...runtimeAuthorization,
-    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, headless: true, trace: 'on', screenshot: 'on'${storageState}${extraHttpHeaders} } }`,
+    `export default { testDir: ${JSON.stringify(workspaceRoot)}, outputDir: ${JSON.stringify(outputRoot)}, reporter: [['json', { outputFile: ${JSON.stringify(reporterPath)} }]], metadata: { smarthubAuthState: { directory: ${JSON.stringify(authStateRoot)}, scope: 'run', ephemeral: true } }, use: { baseURL, headless: true, trace: 'on', screenshot: 'on'${storageState}${extraHttpHeaders}${proxy} } }`,
     '',
   ].join('\n')
 }
@@ -1379,6 +1394,57 @@ async function writeGovernedUiApiFixture(runtimeRoot: string) {
       exports: './index.mjs',
     }), { encoding: 'utf8' }),
     writeFile(join(packageRoot, 'index.mjs'), governedUiApiFixtureSource(), { encoding: 'utf8' }),
+  ])
+}
+
+/** Resolve every immutable package import through the same runner-owned facade.
+ * Package file contents and hashes remain untouched. */
+async function writeNetworkGovernedPlaywright(runtimeRoot: string, packagePath: string, proxyServer: string) {
+  const packageRoot = join(runtimeRoot, 'node_modules', '@playwright', 'test')
+  await mkdir(packageRoot, { recursive: true })
+  const source = `
+const networkProxy = { server: ${JSON.stringify(proxyServer)}, bypass: '<-loopback>' }
+const unsupportedBrowser = new Proxy({}, { get() { throw new Error('TEST_EXECUTION_UNMANAGED_BROWSER_UNSUPPORTED') } })
+const chromium = unsupportedBrowser, firefox = unsupportedBrowser, webkit = unsupportedBrowser
+const _electron = unsupportedBrowser, _android = unsupportedBrowser
+const originalNewContext = actual.request.newContext.bind(actual.request)
+if (Object.getOwnPropertyDescriptor(actual.request, 'newContext')?.writable !== false) {
+  Object.defineProperty(actual.request, 'newContext', {
+    value: options => originalNewContext({ ...options, proxy: networkProxy }),
+    writable: false, configurable: false,
+  })
+}
+const request = actual.request
+const test = actual.test.extend({
+  browser: async ({ browser }, use) => {
+    Object.defineProperty(browser, 'browserType', {
+      value: () => unsupportedBrowser, writable: false, configurable: false,
+    })
+    for (const property of ['newContext', 'newPage']) {
+      if (Object.getOwnPropertyDescriptor(browser, property)?.writable !== false) {
+        const original = browser[property].bind(browser)
+        Object.defineProperty(browser, property, {
+          value: options => original({ ...options, proxy: networkProxy, serviceWorkers: 'block' }),
+          writable: false, configurable: false,
+        })
+      }
+    }
+    await use(browser)
+  },
+})
+`
+  await Promise.all([
+    writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+      name: '@playwright/test', private: true, type: 'module',
+      exports: { import: './index.mjs', require: './index.cjs' },
+    }), { encoding: 'utf8' }),
+    writeFile(join(packageRoot, 'index.mjs'),
+      `import * as actual from ${JSON.stringify(pathToFileURL(join(dirname(packagePath), 'index.mjs')).href)}\n`
+      + source + `\nexport * from ${JSON.stringify(pathToFileURL(join(dirname(packagePath), 'index.mjs')).href)}\nexport { test, request, chromium, firefox, webkit, _electron, _android }\nexport default test\n`,
+      { encoding: 'utf8' }),
+    writeFile(join(packageRoot, 'index.cjs'),
+      `const actual = require(${JSON.stringify(join(dirname(packagePath), 'index.js'))})\n`
+      + source + '\nmodule.exports = { ...actual, default: test, test, request, chromium, firefox, webkit, _electron, _android }\n', { encoding: 'utf8' }),
   ])
 }
 

@@ -169,6 +169,8 @@ export interface InputDeliveryManifest {
     sourceScope?: ProjectWorkspaceSourceScope
     replayed?: boolean
     replayedFromToolCallId?: string
+    /** Server recorded execution read; absent on historical/Planning manifests. */
+    executionEvidence?: ExecutionReadEvidence
   }>
   knowledgeReads?: Array<{
     toolCallId: string
@@ -179,8 +181,18 @@ export interface InputDeliveryManifest {
     sourceScope: 'current_requirement' | 'knowledge_reference'
     contentHash: string
     indexVersionId: string
+    executionEvidence?: ExecutionReadEvidence & { content: string; sourceSha256: string }
   }>
   finalMergeCompleted: boolean
+}
+
+export interface ExecutionReadEvidence {
+  projectId: string
+  projectVersionId: string
+  runId: string
+  taskId: string
+  workspaceSha256: string
+  contentSha256: string
 }
 
 export interface AgentModelConnection {
@@ -436,6 +448,8 @@ export interface TestExecutionAgentWorkspaceFile {
   assetId?: string
   assetVersionId?: string
   displayName: string
+  /** Service provenance, never inferred from the directory name. */
+  evidenceKind?: 'contract' | 'implementation' | 'observation'
 }
 
 export interface TestExecutionAgentWorkspaceProjection {

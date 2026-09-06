@@ -2,6 +2,8 @@ import type { InputDeliveryManifest } from '../domain/agent-types.js'
 import type { StateStore } from '../infrastructure/store.js'
 import type { ToolRegistry } from './registry.js'
 import { defaultBuiltInToolConfigResolver } from './built-in-tool-config.js'
+import { executionReadEvidence } from '../application/test-execution-api-contract.js'
+import { canonicalSha256 } from '../application/canonical-json.js'
 
 export type KnowledgeReadObservation = NonNullable<InputDeliveryManifest['knowledgeReads']>[number]
 
@@ -15,6 +17,11 @@ export function registerKnowledgeReadChunkTool(
     const state = await store.snapshot()
     const index = required(state.indexes.find(item => item.id === request.context.snapshot.indexVersionId && item.knowledgeBaseId === request.context.snapshot.knowledgeBaseId), '固定索引不存在')
     const chunk = required(index.indexedChunks?.find(item => item.id === args.chunkId), 'Chunk 不属于本次固定索引')
+    const snapshot = request.context.snapshot
+    if ('executionSessionKey' in snapshot) {
+      required(state.knowledgeBases.find(item => item.id === index.knowledgeBaseId && item.projectId === snapshot.projectId), '固定索引不属于执行项目')
+      if (!index.assetVersionIds.includes(chunk.assetVersionId)) throw new Error('Chunk 版本不属于本次固定索引')
+    }
     const logicalPath = chunk.assetMetadata?.logicalPath
     const currentRequirementPath = 'documentWorkspace' in request.context.snapshot ? request.context.snapshot.documentWorkspace?.logicalPath : undefined
     const sourceScope = logicalPath && currentRequirementPath && logicalPath.startsWith(`${currentRequirementPath}/`) ? 'current_requirement' : 'knowledge_reference'
@@ -27,6 +34,10 @@ export function registerKnowledgeReadChunkTool(
       sourceScope,
       contentHash: chunk.contentHash,
       indexVersionId: index.id,
+      ...('executionSessionKey' in snapshot ? { executionEvidence: {
+        ...executionReadEvidence(snapshot, chunk.contentHash), content: chunk.content,
+        sourceSha256: canonicalSha256({ chunkId: chunk.id, assetVersionId: chunk.assetVersionId, indexVersionId: index.id, contentHash: chunk.contentHash }),
+      } } : {}),
     })
     return { data: { chunkId: chunk.id, assetVersionId: chunk.assetVersionId, logicalPath, sourceScope, contentHash: chunk.contentHash, headingPath: chunk.headingPath, startLine: chunk.startLine, endLine: chunk.endLine, startChar: chunk.startChar, endChar: chunk.endChar, content: chunk.content } }
   })
